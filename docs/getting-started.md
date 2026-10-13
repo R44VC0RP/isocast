@@ -7,23 +7,20 @@ command and AI agents over MCP all drive the same engine, `isocastd`.
 
 macOS on Apple silicon only, for now.
 
-## Build and open the app
+## Install
 
-```sh
-cargo build --release
-scripts/sign-dev.sh target/release/isocastd   # the engine, signed so permissions stick
-scripts/app-dev.sh --release                  # the app, as ~/Applications/Isocast.app
-open ~/Applications/Isocast.app
-```
+Download the latest `Isocast.dmg` from
+[Releases](https://github.com/R44VC0RP/isocast/releases), open it and drag
+Isocast to Applications. You need macOS 14 or later on Apple silicon.
 
-`scripts/sign-dev.sh` puts the engine in
-`~/Library/Application Support/Isocast/Isocast Dev.app`. macOS asks once
-for screen recording, camera and microphone access for "Isocast Dev"; the
-grants survive rebuilds as long as you sign again after each build. After
-granting screen recording, restart the engine: `isocast restart`.
+The first time you record, macOS asks for screen recording, camera and
+microphone access. Allow them in System Settings → Privacy & Security; after
+granting screen recording, quit and reopen Isocast (or run
+`isocast restart`). `isocast permissions` shows what is granted and what to
+do about the rest.
 
-`scripts/app-dev.sh` takes `ISOCAST_APP=/some/where/Isocast.app` to put
-the app elsewhere.
+Building from source instead? See
+[CONTRIBUTING.md](../.github/CONTRIBUTING.md).
 
 ## The first setup
 
@@ -41,7 +38,6 @@ With no setup yet, the app offers three starts:
 The same from the command line:
 
 ```sh
-alias isocast=target/release/isocast
 isocast permissions                       # what's granted, and what to do if not
 isocast devices                           # displays, windows, cameras, mics, outputs
 isocast setup init --apply                # or --camera NAME --microphone NAME --layout side_by_side ...
@@ -127,11 +123,20 @@ position, fit, crop, blending, filters and settings.
 Every command takes `--json`. For an agent over MCP:
 
 ```sh
-claude mcp add isocast -- "$PWD/target/release/isocast" mcp
+claude mcp add isocast -- isocast mcp
 ```
 
 The tools (`get_setup`, `plan_change`, `apply_change`, `start_recording`,
-`live_frame`, `start_stream`, …) are the same methods the app uses.
+`live_frame`, `start_stream`, …) are the same methods the app uses. See
+[mcp-tools.md](mcp-tools.md) for all of them.
+
+## Going further
+
+- [Setup reference](setup-reference.md): every field of a setup file.
+- [CLI reference](cli.md): every command and option.
+- [Scenes as code](scenes.md): layout, live data and keyframe animations.
+- [Timelines](timelines.md): record takes in order and export one video.
+- [Plugins](plugins.md): process and WebAssembly plugins.
 
 ## When something is wrong
 
@@ -140,5 +145,5 @@ The tools (`get_setup`, `plan_change`, `apply_change`, `start_recording`,
   error; `isocast watch` prints events as they happen.
 - The engine's log is `~/Library/Application Support/Isocast/isocastd.log`.
 - Reading pictures or videos in Downloads, Documents or Desktop makes macOS
-  ask "Isocast Dev" for access to that folder; allow it, or keep media
+  ask Isocast for access to that folder; allow it, or keep media
   elsewhere.

@@ -204,6 +204,12 @@ each section. Delete entries that stop being true.
 
 ## Ready for Ryan
 
+- 2026-10-13 — Repo docs and release files (8.1, 8.3, branch
+  agent/docs-release): read README.md as a visitor would (the screenshots
+  are real, from the Console redesign), then `git diff main --stat`. To
+  retake the screenshots from main once the redesign merges:
+  `export ISOCAST_TESTMAC=isocast-m2-b; scripts/testmac.sh build &&
+  scripts/screenshots/take.sh`.
 - 2026-10-13 — Create timeline MVP (C.1, branch engine/timeline-mvp):
   once merged and built, `isocast timeline new "My video"`, then record
   takes as usual (`isocast start` … `isocast stop`, or `isocast split`
@@ -995,6 +1001,51 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-13: **Contribution policy (Ryan).** Agent-written contributions
+  are encouraged (latest state-of-the-art models at their highest reasoning
+  setting, AGENTS.md as the rulebook, the evidence is the agent's job, no
+  AI attribution). Small fixes and docs PR directly; bigger changes need an
+  issue with the `accepted` label first (.github/SAVED_REPLIES.md has the
+  kind closing reply). Enforced by .github/workflows/pr-checks.yml: on
+  `pull_request` with a read-only token, it runs the base branch's
+  .github/scripts/pr_checks.py and fails a PR that changes
+  crates/isocast-ui/** or crates/isocast-app/ui/** with no image in its
+  description, or whose "How it was verified" section is empty
+  (pr_checks_test.py, 15 cases, runs in CI). No labelling step: with a
+  read-only token it can't, and pull_request_target isn't worth the risk.
+  scripts/ui-screenshots.sh draws main, Studio Mode, Properties, Settings
+  and the mixer menu offscreen at 1440x900@2x against a throwaway engine
+  (~9 s after the build). CI runs on push to main and pull requests,
+  GitHub-hosted runners only, rust-cache saved from main only.
+- 2026-10-13: The benchmark card's OBS numbers on the M2 4K run (Ryan):
+  3,904 is OBS's own skipped-frames count; 1,645 of its 6,292 frames were
+  distinct pictures. The README caption and docs/benchmarks.md say both.
+  Repository URL is https://github.com/R44VC0RP/isocast (Cargo.toml fixed);
+  private vulnerability reporting is on, and SECURITY.md and the code of
+  conduct link to it.
+- 2026-10-13 (docs-release): I answered isocast-m2-b's "Isocast Dev is
+  requesting to bypass the system private window picker" prompt (Allow)
+  for ~/isocast-scratch/docs-release-shots/Isocast Dev.app. Ryan: fine,
+  it's our test Mac.
+- 2026-10-13: **README is for people downloading the app** (Ryan). Pitch,
+  screenshots, benchmark card, download, first steps, FAQ, doc links;
+  building, architecture and contributing live in .github/CONTRIBUTING.md
+  and docs/architecture.md, linked once at the bottom. docs/benchmarks.md
+  carries the measured table and conditions (S.3 round 2: app-only CPU and
+  footprint, both Macs); the card in docs/images/benchmark.png is Ryan's.
+  For its OBS M2 numbers see the benchmark-card entry above.
+- 2026-10-13: **Reference docs are generated** from the release binary by
+  scripts/reference-docs.py (CLI help, `setup schema`, MCP tools/list
+  against a throwaway socket), and THIRD_PARTY_NOTICES by
+  scripts/third-party-notices.sh (cargo metadata, normal and build deps
+  for aarch64-apple-darwin); both have --check, CI runs the notices one.
+  Rerun them when the CLI, schema, tools or dependencies change.
+- 2026-10-13: **The README screenshots' Screen scene is a window capture of
+  Terminal**, not a display capture: on a test Mac the display capture
+  shows the app inside itself and whatever dialogs other jobs left on the
+  desktop (a Gatekeeper "IsocastReleaseCheck" prompt and a python3.14
+  screen-recording prompt sat on isocast-m2-b's screen). The window keeps
+  the shot clean and still records a TERMINAL ISO file.
 - 2026-10-13: **Themes design revised after two critiques
   (docs/themes.md section 14).** A built-in theme is a *preview* until
   every signature piece in Ryan's pitch draws (a per-theme checklist,
@@ -2499,6 +2550,18 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-13: Screenshots on the test Macs: the bridge can't run
+  `screencapture` ("could not create image from display": no Screen
+  Recording grant); cua-driver's `get_window_state` with
+  `include_accessibility_tree:false, max_image_dimension:0,
+  screenshot_out_file` gives the window at native scale, but with
+  transparent margins and sometimes the pointer in them, so
+  scripts/screenshots/take.sh trims to the mostly-opaque rows and columns.
+  isocast-m2-b's display is 1024x768 at 1x; its largest 2x mode is 960x720
+  (mode 2; 1x is mode 3), which scripts/screenshots/display-mode.swift
+  switches for the session. Terminal's `.command` files don't get the
+  caller's environment (pass it in a file), and zsh's PROMPT shows the
+  host, so the demo prints its own prompt.
 - 2026-10-13: **Unset look-ahead is not an explicit zero.** On the M4 Max,
   `SuggestedLookAheadFrameCount` reads back as zero even when automatic
   mode stalls simultaneous HEVC sessions. Four deterministically ordered

@@ -1,0 +1,108 @@
+# The setup the README screenshots are taken with (scripts/screenshots/take.sh).
+# Pictures are generated for Isocast (no third-party images); the "Mic" is a
+# tone so the meters move on a Mac with no microphone.
+
+version = 1
+name = "Weekly Stream"
+
+[canvas]
+width = 1920
+height = 1080
+fps = 60
+
+[recording]
+folder = "/Users/Shared/Recordings"
+program = { encoder = { codec = "hevc" }, audio = ["mic"] }
+iso = { enabled = true, sources = ["terminal", "slides"], audio = ["mic"] }
+
+# The Terminal window running cli.command (a window capture, so the shots
+# don't show the app inside itself).
+[[sources]]
+id = "terminal"
+name = "Terminal"
+kind = "window"
+app = "Terminal"
+title = "cli.command"
+cursor = false
+
+[[sources]]
+id = "slides"
+name = "Slides"
+kind = "image"
+path = "landscape.jpg"
+
+[[sources]]
+id = "brb-art"
+name = "BRB Art"
+kind = "image"
+path = "brb.jpg"
+
+[[sources]]
+id = "mic"
+name = "Mic"
+kind = "tone"
+frequency = 440
+
+[[scenes]]
+id = "screen"
+name = "Screen"
+
+[[scenes.items]]
+source = "terminal"
+rect = { x = 0, y = 0, width = 1920, height = 1080 }
+fit = "cover"
+
+[[scenes.items]]
+id = "slides-inset"
+source = "slides"
+rect = { x = 1392, y = 704, width = 480, height = 270 }
+fit = "cover"
+style = { radius = 18, shadow = { color = "#00000080", blur = 32, y = 8 } }
+
+[[scenes.items]]
+id = "lower-third"
+rect = { x = 48, y = 900, width = 760, height = 104 }
+style = { background = "#101418e6", radius = 14 }
+
+[[scenes.items.children]]
+id = "lower-third-name"
+rect = { x = 28, y = 14, width = 700, height = 44 }
+content = { kind = "text", text = "Building a recorder in Rust", size = 36, weight = 600, font = "Helvetica Neue" }
+
+[[scenes.items.children]]
+id = "lower-third-sub"
+rect = { x = 28, y = 60, width = 700, height = 30 }
+content = { kind = "text", text = "Episode 12 · scenes, ISO files and agents", size = 24, color = "#f2b84b", font = "Helvetica Neue" }
+
+[[scenes]]
+id = "intro"
+name = "Intro"
+
+[[scenes.items]]
+source = "slides"
+rect = { x = 0, y = 0, width = 1920, height = 1080 }
+fit = "cover"
+
+[[scenes.items]]
+id = "intro-title"
+rect = { x = 120, y = 380, width = 900, height = 120 }
+content = { kind = "text", text = "Starting soon", size = 96, weight = 700, font = "Helvetica Neue", shadow = { color = "#00000080", x = 0, y = 4 } }
+
+[[scenes.items]]
+id = "intro-sub"
+rect = { x = 124, y = 510, width = 900, height = 60 }
+content = { kind = "text", text = "Building a recorder in Rust", size = 40, color = "#f6e7c8", font = "Helvetica Neue" }
+
+[[scenes]]
+id = "brb"
+name = "Be Right Back"
+
+[[scenes.items]]
+source = "brb-art"
+rect = { x = 0, y = 0, width = 1920, height = 1080 }
+fit = "cover"
+
+[[scenes.items]]
+id = "brb-title"
+rect = { x = 120, y = 440, width = 900, height = 120 }
+content = { kind = "text", text = "Be right back", size = 96, weight = 700, font = "Helvetica Neue" }

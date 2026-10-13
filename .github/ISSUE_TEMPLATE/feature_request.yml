@@ -1,0 +1,28 @@
+name: Feature request
+description: Something Isocast should do, or do better.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The task or workflow, and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would help?
+      description: How you'd like it to work, in the app, the CLI or for agents over MCP.
+    validations:
+      required: true
+  - type: textarea
+    id: obs
+    attributes:
+      label: How does OBS (or another app) handle it?
+      description: If another recorder does this, describe what it does (please don't paste its source code).
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything else?
+      description: Workarounds you use now, screenshots, links.

@@ -1,0 +1,49 @@
+name: PR checks
+
+# Checks the pull request's description against CONTRIBUTING.md: a change to
+# the app's interface needs screenshots, and "How it was verified" can't be
+# empty. Runs on `pull_request` (not pull_request_target) with a read-only
+# token, so it is safe for forks: it runs the check script from the base
+# branch, reads the description from the event, and changes nothing. Editing
+# the description re-runs it.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  description:
+    name: description has the evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the base branch's check script
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Changed files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api --paginate "repos/$REPO/pulls/$NUMBER/files" --jq '.[].filename' > "$RUNNER_TEMP/files.txt"
+          wc -l < "$RUNNER_TEMP/files.txt"
+
+      - name: Description
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s' "$BODY" > "$RUNNER_TEMP/body.md"
+
+      - name: Check
+        run: python3 .github/scripts/pr_checks.py "$RUNNER_TEMP/body.md" "$RUNNER_TEMP/files.txt"

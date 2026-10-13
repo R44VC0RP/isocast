@@ -1,0 +1,80 @@
+name: Bug report
+description: Something doesn't work, crashed, or lost or damaged a recording.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The quickest way to a fix is the report zip:
+        run `isocast report --describe "what happened"` (or use the app's bug reporter).
+        It is made on your Mac and never uploaded. Its `ISSUE.md` has a summary
+        and a triage block to paste below. Keys, tokens and stream URLs are
+        redacted, but please look through it before attaching.
+
+        Security problem? Don't file it here: see SECURITY.md.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong, in a sentence or two.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What you did, step by step. Include the scene, sources and outputs (recording, ISO files, streaming) if they matter.
+      placeholder: |
+        1. Open Isocast with the "Screen + Camera" scene
+        2. Press Record
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: What happened instead. Error messages, dropped frames, a file that won't play.
+    validations:
+      required: true
+  - type: textarea
+    id: triage
+    attributes:
+      label: Triage block
+      description: Paste the "Agent triage" JSON block from the report's ISSUE.md (versions, Mac, macOS, what was running, recent metrics).
+      render: json
+  - type: input
+    id: version
+    attributes:
+      label: Isocast version
+      description: From About Isocast, or `isocast --version`.
+      placeholder: "0.0.1"
+    validations:
+      required: true
+  - type: input
+    id: mac
+    attributes:
+      label: Mac and macOS
+      placeholder: "MacBook Air M2, macOS 26.1"
+    validations:
+      required: true
+  - type: textarea
+    id: attachments
+    attributes:
+      label: Report zip
+      description: Attach the report zip here (drag it into this box). Screenshots or a short screen recording help too.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched the existing issues for this problem.
+          required: true
+        - label: I looked through the report zip before attaching it.

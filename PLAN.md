@@ -829,12 +829,14 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
 
 ### 8. Open-source release prep (parked by Ryan, 2026-10-13: later)
 
-- [ ] **8.1** CI on GitHub Actions (macOS on Apple silicon) with formatting,
+- [x] **8.1** CI on GitHub Actions (macOS on Apple silicon) with formatting,
   lint and test gates.
   Write the workflow; don't create the GitHub repo or push.
 - [ ] **8.2** Release build script for signed, notarized Apple silicon
   (arm64) builds and a Homebrew formula. **Needs Ryan** for signing credentials.
-- [ ] **8.3** Docs: getting started, setup reference, MCP tools, plugins.
+- [x] **8.3** Docs: getting started, setup reference, MCP tools, plugins.
+  (With the user-facing README and its screenshots, licences and
+  THIRD_PARTY_NOTICES, and the .github templates.)
 
 ### 9. Later (pull into the queue once the above is done)
 
@@ -2181,3 +2183,24 @@ One line per finished task, newest last.
   3x20 s per configuration, timebase-correct): main 0.00302%, empty 0.00306%,
   35 keys 0.00277% of one core, all 1 interrupt wakeup/s and 0 idle wakeups.
   fmt, release all-target clippy and 165 existing tests pass.
+- 8.1 (2026-10-13): .github/workflows/ci.yml runs fmt --check, clippy
+  -D warnings, test (--locked) and the notices check on macos-15 arm64,
+  workflow_dispatch only while the repo is private; actionlint clean, the
+  same commands pass locally (agent/docs-release).
+- 8.3 (2026-10-13): README for people downloading the app (hero + four
+  screenshots from ui/console-integrate on a test Mac at 2x, benchmark
+  card, download, first steps, FAQ); docs/ references generated from the
+  binary (scripts/reference-docs.py: CLI, setup schema, 53 MCP tools),
+  scenes, timelines, plugins, coming, architecture, benchmarks;
+  THIRD_PARTY_NOTICES from cargo metadata (496 crates) plus Slint, fonts,
+  Wasmtime; issue/PR templates, SECURITY, CONTRIBUTING, CODE_OF_CONDUCT.
+  Verified: --check modes pass, links resolve, setup examples pass
+  `setup check`, publish-snapshot.sh passes on the branch.
+- 8.1, 8.3 follow-up (2026-10-13): the repo is public, so CI runs on push
+  to main and pull requests (GitHub-hosted, rust-cache, concurrency);
+  contribution policy: CONTRIBUTING (agents encouraged, evidence required,
+  issue-first with `accepted`), PR template with evidence sections,
+  pr-checks.yml (screenshots for UI changes, non-empty verification;
+  pr_checks_test.py 15/15), scripts/ui-screenshots.sh (5 views at
+  2880x1800 in ~9 s), CODEOWNERS, SAVED_REPLIES; repository URL, private
+  reporting links and the benchmark caption fixed. actionlint clean.

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security problem
+    url: https://github.com/R44VC0RP/isocast/security/advisories/new
+    about: Report vulnerabilities privately, not as a public issue.
+  - name: Documentation
+    url: https://github.com/R44VC0RP/isocast/tree/main/docs
+    about: Getting started, the setup, CLI and MCP references, plugins.
