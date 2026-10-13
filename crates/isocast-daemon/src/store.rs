@@ -251,7 +251,7 @@ impl Store {
                 return None;
             }
         };
-        let profile = match read_document::<Profile>(&profile_path) {
+        let profile = match read_profile(&profile_path) {
             Ok(profile) => profile,
             Err((message, unreadable)) => {
                 self.fail(&profile_path, message, unreadable);
@@ -259,6 +259,13 @@ impl Store {
             }
         };
         self.names = (collection.name.clone(), profile.name.clone());
+        let (_, hotkey_issues) = profile.hotkeys.usable();
+        if !hotkey_issues.is_empty() {
+            self.notes.push(format!(
+                "some hotkeys are disabled; recording settings still loaded: {}",
+                isocast_protocol::hotkeys::describe(&hotkey_issues)
+            ));
+        }
         let setup = Setup::from_parts(collection, profile);
         let issues = setup.validate();
         if !issues.is_empty() {
@@ -466,11 +473,7 @@ impl Store {
             &collection,
             COLLECTION_HEADER,
         )?;
-        write_document(
-            &self.path(LibraryKind::Profile, &ids.1),
-            &profile,
-            PROFILE_HEADER,
-        )?;
+        write_profile(&self.path(LibraryKind::Profile, &ids.1), &profile)?;
         let current = CurrentFile {
             version: 1,
             collection: ids.0,
@@ -627,9 +630,7 @@ pub fn entry(root: &Path, kind: LibraryKind, id: &str, current: bool) -> Library
         LibraryKind::Collection => {
             read_document::<Collection>(&path).map(|c| (c.name.clone(), c.summary()))
         }
-        LibraryKind::Profile => {
-            read_document::<Profile>(&path).map(|p| (p.name.clone(), p.summary()))
-        }
+        LibraryKind::Profile => read_profile(&path).map(|p| (p.name.clone(), p.summary())),
     };
     let (name, summary, problem) = match read {
         Ok((name, summary)) => (name, Some(summary), None),
@@ -710,7 +711,7 @@ impl Versioned for Profile {
 /// only if its text changed. The profile keeps the name its file has (a
 /// rename may have come after the change).
 pub fn write(target: &Target, setup: &Setup, parts: Parts) -> Result<()> {
-    let profile_name = read_document::<Profile>(&target.profile)
+    let profile_name = read_profile(&target.profile)
         .map(|profile| profile.name)
         .unwrap_or_else(|_| target.profile_name.clone());
     let (collection, profile) = setup.clone().into_parts(&profile_name);
@@ -718,7 +719,7 @@ pub fn write(target: &Target, setup: &Setup, parts: Parts) -> Result<()> {
         write_document(&target.collection, &collection, COLLECTION_HEADER)?;
     }
     if parts.profile {
-        write_document(&target.profile, &profile, PROFILE_HEADER)?;
+        write_profile(&target.profile, &profile)?;
     }
     let (root, current) = &target.current;
     if !root.join("current.toml").exists() {
@@ -732,6 +733,65 @@ pub fn write(target: &Target, setup: &Setup, parts: Parts) -> Result<()> {
 pub struct Parts {
     pub collection: bool,
     pub profile: bool,
+}
+
+/// Kept beside the profile, outside its v1 document. Old binaries ignore this
+/// extension rather than parking the entire profile for an unknown field.
+pub fn hotkeys_path(profile: &Path) -> PathBuf {
+    profile.with_extension("hotkeys.json")
+}
+
+pub fn read_profile(path: &Path) -> Result<Profile, (String, bool)> {
+    let mut profile = read_document::<Profile>(path)?;
+    if !profile.hotkeys.is_absent() {
+        // Upgrade the original G.5 inline format without discarding unknown
+        // bindings. The sidecar is durable before removing the inline field;
+        // write_document retains the original profile as .bak.
+        if let Err(error) = write_profile(path, &profile) {
+            profile.hotkeys.load_warning = Some(format!(
+                "could not migrate inline hotkeys to a downgrade-safe sidecar: {error:#}; recording settings still loaded"
+            ));
+        }
+    } else {
+        let sidecar = hotkeys_path(path);
+        match fs::read(&sidecar) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(value) => profile.hotkeys.value = Some(value),
+                Err(error) => {
+                    profile.hotkeys.load_warning = Some(format!(
+                        "{}: invalid JSON ({error}); bindings disabled; file preserved",
+                        sidecar.display()
+                    ))
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                profile.hotkeys.load_warning = Some(format!(
+                    "{}: {error}; bindings disabled; file preserved",
+                    sidecar.display()
+                ))
+            }
+        }
+    }
+    Ok(profile)
+}
+
+pub fn write_profile(path: &Path, profile: &Profile) -> Result<bool> {
+    let mut disk = profile.clone();
+    let config = std::mem::take(&mut disk.hotkeys);
+    // Unreadable sidecars have no parsed value and survive unrelated saves.
+    // Failed inline migrations DO retain a value: retry it and require a
+    // durable sidecar before stripping the field, even on a profile rename.
+    if let Some(value) = config.value {
+        let sidecar = hotkeys_path(path);
+        if !value.as_object().is_some_and(|v| v.is_empty()) || sidecar.exists() {
+            let text = format!("{}\n", serde_json::to_string_pretty(&value)?);
+            if !fs::read_to_string(&sidecar).is_ok_and(|old| old == text) {
+                write_atomically(&sidecar, text.as_bytes())?;
+            }
+        }
+    }
+    write_document(path, &disk, PROFILE_HEADER)
 }
 
 /// Write a collection or profile to `path` atomically, keeping the previous
@@ -827,6 +887,18 @@ pub fn delete(root: &Path, kind: LibraryKind, id: &str) -> Result<PathBuf> {
             sibling(&data, ".bak"),
             sibling(&crate::data::data_path(&kept), ".bak"),
         );
+    }
+    if kind == LibraryKind::Profile {
+        let hotkeys = hotkeys_path(&path);
+        if hotkeys.exists() {
+            fs::rename(&hotkeys, hotkeys_path(&kept))?;
+            if sibling(&hotkeys, ".bak").exists() {
+                fs::rename(
+                    sibling(&hotkeys, ".bak"),
+                    sibling(&hotkeys_path(&kept), ".bak"),
+                )?;
+            }
+        }
     }
     Ok(kept)
 }

@@ -580,8 +580,15 @@ native app; each verified against OBS's behaviour on a test Mac.
   A/V stay in sync; the manifest records the pauses.
 - [ ] **G.4 Projectors and multiview.** Fullscreen or windowed preview,
   program, scene or source on any display; a multiview grid.
-- [ ] **G.5 Custom hotkeys.** Every action bindable, stored per profile,
-  global (while the app isn't focused) where macOS allows.
+- [x] **G.5 Custom hotkeys (engine side).** Bindable action catalogue,
+  per-profile bindings, CLI/MCP, and global press/release registration where
+  macOS allows. Pause/timeline ids reserved. Native Settings > Hotkeys and
+  focused-key/Studio Mode presentation integration follow the app redesign.
+  - [x] **G.5 review-quit.** Route AppKit quit events through graceful
+    recording finalization, like signals and API shutdown; verify t_quit.py.
+  - [x] **G.5 review-hardening.** Lenient/lossless hotkey loading with
+    downgrade-safe profile storage, preserve bindings on setup replacement,
+    protect typing/system shortcuts, bound diagnostics and complete CLI input.
 - [ ] **G.6 Small parity items.** Item flip (horizontal/vertical), stinger
   audio, media source play/pause/seek/restart on the API, floating docks
   in the native app.
@@ -2147,3 +2154,30 @@ One line per finished task, newest last.
   unchanged; isocast-m2-b: an export at 965 MiB free beside a recording
   keeping 1 GB refused, the recording ran its full 30.0 s; with room, an
   export to the same disk while recording, 0 drops.
+- G.5 engine (2026-10-13): 35 typed actions, per-profile hotkeys, Carbon
+  global press/release and permission-aware media fallback, CLI/MCP and
+  events. Test Mac: recording/split (60+5 frames), PTT audio (110 frames;
+  silent → −16.18 dBFS → silent), profile/collection switches, two local
+  RTMP streams, no drops in the tested recordings; 680 focus samples stayed
+  on System Settings. Initial idle numbers missed the Mach timebase conversion
+  and are superseded by review-hardening's measurements. Pre-change profile byte identity,
+  field-path/duplicate/native-conflict errors, MCP and disconnect recovery
+  verified; fmt, clippy and 165 existing tests pass. docs/hotkeys.md;
+  `/Volumes/IsocastBuild/g5-hotkeys/scratch/REPORT.md` records limitations.
+- G.5 review-quit (2026-10-13): quit Apple Events now defer until the shared
+  graceful stop finishes. Reviewer's t_quit.py on exonbook: before 60 frames
+  / 2 s with manifest still recording; after 117 frames / 3.9 s, complete,
+  fully decodable, disk probe removed. SIGTERM control complete too;
+  fmt/release clippy and 165 existing tests pass.
+- G.5 review-hardening (2026-10-13): invalid/future/duplicate hotkeys warn and
+  stay preserved while setups load and record. Sidecars let d6c8aec read/write
+  profiles without parking them; omitted setup fields preserve bindings.
+  Bare typing/navigation and common Command shortcuts refused; TextEdit gets
+  `jjj` after rejection (before: 3 hotkey fires, no `j`). CLI input with timed
+  holds, merge-by-default defaults, missing-unset errors, bounded/pathful
+  diagnostics (300 bindings: 525 KB -> 68 bytes), cancelled late registration,
+  transactional holds, removed-source pruning and typed preview clearing.
+  Reviewer store/validate/hold/global/quit repros rerun; idle (exonbook,
+  3x20 s per configuration, timebase-correct): main 0.00302%, empty 0.00306%,
+  35 keys 0.00277% of one core, all 1 interrupt wakeup/s and 0 idle wakeups.
+  fmt, release all-target clippy and 165 existing tests pass.

@@ -52,6 +52,19 @@ impl DaemonError {
 }
 
 impl Client {
+    /// Forward a focused fallback key edge. Reuse this connection for both
+    /// edges; disconnecting releases its push keys. Globally registered keys
+    /// are ignored to avoid double-firing when a window is focused.
+    pub fn hotkey_input(
+        &mut self,
+        keys: String,
+        phase: isocast_protocol::hotkeys::Phase,
+    ) -> Result<Value> {
+        self.call(Method::HotkeysInput(
+            isocast_protocol::hotkeys::InputParams { keys, phase },
+        ))
+    }
+
     /// Connect to a running daemon, or `None` if none is running. A daemon
     /// that runs (holds its lock) but refuses connections, because it is
     /// starting, exiting or too busy to accept (its queue is full), is

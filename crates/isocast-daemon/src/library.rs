@@ -53,7 +53,7 @@ impl Document {
         let header = store::header(self.kind());
         match self {
             Self::Collection(collection) => store::write_document(path, collection, header),
-            Self::Profile(profile) => store::write_document(path, profile, header),
+            Self::Profile(profile) => store::write_profile(path, profile),
         }
         .map(|_| ())
     }
@@ -289,7 +289,7 @@ impl Daemon {
         let path = store::document_path(&root, kind, id);
         let read = match kind {
             LibraryKind::Collection => store::read_document(&path).map(Document::Collection),
-            LibraryKind::Profile => store::read_document(&path).map(Document::Profile),
+            LibraryKind::Profile => store::read_profile(&path).map(Document::Profile),
         };
         read.map_err(|(message, _)| failed(format!("{field}: {message}")))
     }
@@ -487,7 +487,7 @@ impl Daemon {
             let path = store::document_path(&root, kind, &id);
             let mut document = match kind {
                 LibraryKind::Collection => store::read_document(&path).map(Document::Collection),
-                LibraryKind::Profile => store::read_document(&path).map(Document::Profile),
+                LibraryKind::Profile => store::read_profile(&path).map(Document::Profile),
             }
             .map_err(|(message, _)| failed(format!("id: {message}")))?;
             document.set_name(&name);
@@ -654,6 +654,7 @@ impl Daemon {
         }
         let scene_ids: Vec<String> = setup.scenes.iter().map(|s| s.id.clone()).collect();
         state.setup = Some(setup);
+        state.hotkey_holds.clear();
         state.revision += 1;
         let revision = state.revision;
         let written = state

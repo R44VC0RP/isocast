@@ -12,6 +12,9 @@ use isocast_protocol::api::{
 use isocast_protocol::change::Change;
 use isocast_protocol::data::{DataGetParams, DataRevision, DataSetParams, DataValues};
 use isocast_protocol::devices::{Devices, PermissionsReport};
+use isocast_protocol::hotkeys::{
+    Catalogue, Hotkeys, InputParams as HotkeyInput, SetParams as HotkeysSet,
+};
 use isocast_protocol::library::{
     Library, LibraryChange, LibraryCreateParams, LibraryDocument, LibraryImportObsParams,
     LibraryImportParams, LibraryRenameParams, LibrarySwitchParams, LibraryTarget,
@@ -308,6 +311,47 @@ struct StreamKeyTargetParams {
 
 #[tool_router]
 impl Isocast {
+    #[tool(
+        description = "Get current profile hotkeys, global registration warnings, held audio overrides and Studio Mode state.",
+        annotations(read_only_hint = true)
+    )]
+    async fn hotkeys_get(&self) -> Result<Json<Hotkeys>, String> {
+        self.call(Method::HotkeysGet).await
+    }
+
+    #[tool(
+        description = "Replace all profile bindings with bindings, or patch by binding id (null removes). Keys use ctrl+alt+shift+cmd+key syntax. hotkeys_actions lists typed arguments, key names and defaults. Invalid/conflicting chords change nothing.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn hotkeys_set(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<HotkeysSet>>,
+    ) -> Result<Json<Hotkeys>, String> {
+        self.call(Method::HotkeysSet(Box::new(params))).await
+    }
+
+    #[tool(
+        description = "List bindable action ids, labels, groups, strict argument schemas, reserved actions, key names and opt-in defaults.",
+        annotations(read_only_hint = true)
+    )]
+    async fn hotkeys_actions(&self) -> Result<Json<Catalogue>, String> {
+        self.call(Method::HotkeysActions).await
+    }
+
+    #[tool(
+        description = "Forward focused fallback key input: keys and phase (press or release). Globally registered chords are ignored to avoid duplicates. Send releases on blur. Intended for focused clients when global registration is unavailable.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn hotkeys_input(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<HotkeyInput>>,
+    ) -> Result<Json<serde_json::Value>, String> {
+        self.call(Method::HotkeysInput(params)).await
+    }
     #[tool(
         description = "The scene collections (scenes, sources, transitions and the canvas \
                        size) and profiles (frame rate, recording, stream and audio settings) \

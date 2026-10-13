@@ -82,6 +82,7 @@ use isocast_platform_macos::MacPlatform;
 
 mod data;
 mod export;
+mod hotkeys;
 mod library;
 mod plugins;
 mod store;
@@ -103,12 +104,7 @@ fn main() -> ExitCode {
             // On Ctrl-C, SIGTERM or SIGHUP, finish the files before exiting.
             let on_signal = daemon.clone();
             let handler = ctrlc::set_handler(move || {
-                let _ = on_signal.stop();
-                on_signal.stop_engine();
-                on_signal.flush_live_save();
-                on_signal.data.flush();
-                on_signal.plugins.stop_all();
-                let _ = std::fs::remove_file(socket_path());
+                on_signal.graceful_shutdown();
                 std::process::exit(0);
             });
             let idle = daemon.clone();
@@ -118,8 +114,15 @@ fn main() -> ExitCode {
             }
             #[cfg(target_os = "macos")]
             isocast_platform_macos::will_run_main_queue();
-            thread::spawn(move || serve(listener, daemon));
-            run_main_queue()
+            daemon.start_hotkeys();
+            let on_quit = daemon.clone();
+            thread::spawn(move || {
+                // The first client's focused edge must not race initial native
+                // registration. Main continues pumping while this waits.
+                daemon.refresh_hotkeys();
+                serve(listener, daemon)
+            });
+            run_main_queue(on_quit)
         }
         Err(err) => {
             eprintln!("isocastd: {err:#}");
@@ -192,12 +195,12 @@ fn listen(socket: &Path) -> Result<UnixListener> {
 /// Keep the main thread serving the main queue, which macOS needs for
 /// AppKit calls (display names). Never returns.
 #[cfg(target_os = "macos")]
-fn run_main_queue() -> ExitCode {
-    isocast_platform_macos::run_main_queue()
+fn run_main_queue(daemon: Arc<Daemon>) -> ExitCode {
+    isocast_platform_macos::run_main_queue(move || daemon.graceful_shutdown())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run_main_queue() -> ExitCode {
+fn run_main_queue(_daemon: Arc<Daemon>) -> ExitCode {
     loop {
         thread::park();
     }
@@ -244,6 +247,7 @@ fn handle(
     scope: Option<Arc<plugins::Scope>>,
 ) -> std::io::Result<()> {
     let _tracked = scope.as_ref().and_then(|scope| scope.track(&connection));
+    let mut focused = None;
     let mut writer = connection.try_clone()?;
     let mut reader = BufReader::new(connection);
     let mut line = String::new();
@@ -291,6 +295,19 @@ fn handle(
         let response = match request {
             Ok(Request {
                 id,
+                method: Method::HotkeysInput(params),
+                ..
+            }) => {
+                let owner = focused
+                    .get_or_insert_with(|| daemon.focused_connection())
+                    .id;
+                match daemon.hotkeys_input(params, owner) {
+                    Ok(value) => Response::ok(id, value),
+                    Err(error) => Response::err(Some(id), error),
+                }
+            }
+            Ok(Request {
+                id,
                 method: Method::Watch(params),
                 ..
             }) => {
@@ -328,14 +345,8 @@ fn handle(
                 let shutdown = request.method == Method::Shutdown;
                 let response = daemon.call(request);
                 if shutdown {
-                    daemon
-                        .stop_export("isocastd was stopped (restarted or quit) during the export");
-                    daemon.stop_engine();
-                    daemon.flush_live_save();
-                    daemon.data.flush();
-                    daemon.plugins.stop_all();
+                    daemon.graceful_shutdown();
                     writeln!(writer, "{}", serde_json::to_string(&response)?)?;
-                    let _ = std::fs::remove_file(socket_path());
                     std::process::exit(0);
                 }
                 response
@@ -344,8 +355,11 @@ fn handle(
                 id_of(&line),
                 RpcError {
                     code: request_error_code(&line),
-                    message: Request::located_error(&line)
-                        .map_or_else(|| err.to_string(), |located| located.to_string()),
+                    message: isocast_protocol::hotkeys::bounded(
+                        &Request::located_error(&line)
+                            .map_or_else(|| err.to_string(), |located| located.to_string()),
+                        8192,
+                    ),
                 },
             ),
         };
@@ -666,6 +680,9 @@ struct Daemon {
     retaking: Mutex<()>,
     /// The export running, if one is.
     export: Mutex<Option<export::Running>>,
+    hotkeys: hotkeys::HotkeyRuntime,
+    shutting_down: AtomicBool,
+    shutdown_lock: Mutex<()>,
 }
 
 /// isocastd's processor use, as `status` reports it: the share of all the
@@ -761,6 +778,8 @@ struct State {
     stream_drops_reported: u64,
     stream_audio_drops_reported: u64,
     stream_bitrate_warned: bool,
+    /// Temporary push-key overrides, never persisted.
+    hotkey_holds: HashMap<String, (String, bool)>,
 }
 
 impl State {
@@ -976,8 +995,48 @@ fn start_engine(
 }
 
 impl Daemon {
+    /// Signals, quit Apple Events and the shutdown API share this path. A
+    /// timeout is diagnostic, never permission to exit during an active take.
+    fn graceful_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        let _shutdown = self.shutdown_lock.lock().unwrap();
+        loop {
+            let result = self.stop();
+            if self.state.lock().unwrap().session.is_none() {
+                break;
+            }
+            if let Err(error) = result {
+                eprintln!(
+                    "isocastd: shutdown waiting for recording: {}",
+                    error.message
+                );
+            }
+        }
+        let _ = self.stream_stop();
+        self.stop_export("isocastd was stopped (restarted or quit) during the export");
+        self.stop_engine();
+        self.flush_live_save();
+        self.data.flush();
+        self.plugins.stop_all();
+        let _ = std::fs::remove_file(socket_path());
+    }
+
     fn call(self: &Arc<Self>, request: Request) -> Response {
         let id = request.id;
+        if self.shutting_down.load(Ordering::SeqCst)
+            && !matches!(
+                request.method,
+                Method::Status | Method::Get(_) | Method::Stop | Method::Shutdown
+            )
+        {
+            return Response::err(
+                Some(id),
+                RpcError {
+                    code: RpcError::WRONG_STATE,
+                    message: "the daemon is shutting down; wait for it to finish".into(),
+                },
+            );
+        }
         let shutdown = request.method == Method::Shutdown;
         let result = match request.method {
             Method::Status => to_json(self.status()),
@@ -1100,6 +1159,13 @@ impl Daemon {
             Method::TimelineExport(params) => self
                 .timeline_export(params.unwrap_or_default())
                 .and_then(to_json),
+            Method::HotkeysGet => to_json(self.hotkeys_get()),
+            Method::HotkeysSet(params) => self.hotkeys_set(*params).and_then(to_json),
+            Method::HotkeysActions => to_json(isocast_protocol::hotkeys::catalogue()),
+            Method::HotkeysInput(_) => Err(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: "hotkeys_input needs a client connection".into(),
+            }),
             Method::Stop | Method::Shutdown => match self.stop() {
                 // Shutting down while idle is fine.
                 Err(err) if shutdown && err.code == RpcError::WRONG_STATE => {
@@ -1115,6 +1181,9 @@ impl Daemon {
     }
 
     fn publish(&self, event: Event) {
+        if matches!(event, Event::SetupChanged { .. }) {
+            self.refresh_hotkeys();
+        }
         let mut watchers = self.watchers.lock().unwrap();
         // Nobody wants it (no one watches, or every watcher left its kind
         // out): not even serialized.
@@ -1298,13 +1367,14 @@ impl Daemon {
         // canvas change while recording).
         if let (Some(engine), Some(setup)) = (&state.engine, &plan.setup) {
             engine
-                .update(setup, state.revision + 1)
+                .update(&state.with_hotkey_holds(setup), state.revision + 1)
                 .map_err(|message| RpcError {
                     code: RpcError::WRONG_STATE,
                     message,
                 })?;
         }
         state.setup = plan.setup;
+        state.prune_hotkey_holds();
         state.revision += 1;
         let mut notes = plan.notes;
         // Saved after the lock is released: writing (two fsyncs) can take
@@ -2216,6 +2286,12 @@ impl Daemon {
                 message: "already recording; stop the current session first".into(),
             });
         }
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: "the daemon is shutting down; recording cannot start".into(),
+            });
+        }
         if state.tuning {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
@@ -2380,7 +2456,11 @@ impl Daemon {
             }
             state = self.engine_ready.wait(state).unwrap();
         }
-        let Some(setup) = state.setup.clone() else {
+        let Some(setup) = state
+            .setup
+            .as_ref()
+            .map(|s| state.with_hotkey_holds(s).into_owned())
+        else {
             return Err(state.no_setup("nothing for the live engine to run"));
         };
         // The program starts on the scene on air, or the setup's first.
@@ -2423,7 +2503,7 @@ impl Daemon {
         // Its frames say which revision they show; and changes made while
         // it started.
         if let Some(setup) = &state.setup
-            && let Err(message) = engine.update(setup, state.revision)
+            && let Err(message) = engine.update(&state.with_hotkey_holds(setup), state.revision)
         {
             eprintln!("isocastd: {message}");
         }
@@ -2757,23 +2837,45 @@ fn key_label(service: StreamService, account: &str) -> String {
 /// What a change would do to the live setup (with its uses of plugins'
 /// kinds checked against the installed plugins).
 fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Plan, RpcError> {
+    let mut notes = Vec::new();
     let current = match &state.setup {
         Some(setup) => to_json(setup)?,
         None => serde_json::Value::Object(Default::default()),
     };
     let (proposed, missing) = match change {
-        Change::Setup(setup) => (to_json(setup)?, Vec::new()),
+        Change::Setup(mut setup) => {
+            if setup.hotkeys.is_absent()
+                && let Some(current) = &state.setup
+            {
+                setup.hotkeys = current.hotkeys.clone();
+                if !current.hotkeys.is_absent() {
+                    notes.push("hotkeys omitted: kept the current profile's bindings; use hotkeys_set to change or clear them".into());
+                }
+            }
+            (to_json(setup)?, Vec::new())
+        }
         Change::Patch(_) if state.setup.is_none() => {
             return Err(state.no_setup("nothing to patch (or give a whole setup)"));
         }
-        Change::Patch(patch) => (
-            merge_patch(&current, &patch),
-            missing_removals(&current, &patch),
-        ),
+        Change::Patch(patch) => {
+            let mut proposed = merge_patch(&current, &patch);
+            if patch.get("hotkeys").is_some_and(serde_json::Value::is_null) {
+                // An explicit merge-patch deletion clears the sidecar too;
+                // omission elsewhere means preserve the profile setting.
+                proposed["hotkeys"] = serde_json::json!({});
+            }
+            (proposed, missing_removals(&current, &patch))
+        }
     };
     let mut changes = diff(&current, &proposed);
     let (mut setup, mut problems) = match Setup::from_value(proposed) {
-        Ok(setup) => {
+        Ok(mut setup) => {
+            if setup.hotkeys.is_absent()
+                && let Some(current) = &state.setup
+                && current.hotkeys.load_warning.is_some()
+            {
+                setup.hotkeys = current.hotkeys.clone();
+            }
             let mut problems = setup.validate();
             if let Some(message) = relative_folder(&setup.recording.folder) {
                 problems.push(Issue {
@@ -2804,8 +2906,14 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
         ),
     };
     problems.splice(0..0, missing);
-    let mut notes = Vec::new();
     if let Some(setup) = &setup {
+        let (_, issues) = setup.hotkeys.usable();
+        if !issues.is_empty() {
+            notes.push(format!(
+                "invalid hotkeys are disabled; recording is unaffected: {}",
+                isocast_protocol::hotkeys::describe(&issues)
+            ));
+        }
         let (plugin_problems, plugin_notes) = plugins.check_kinds(setup);
         problems.extend(plugin_problems);
         notes.extend(plugin_notes);

@@ -366,6 +366,7 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
         audio: AudioSetup::default(),
         // Streaming is set up when wanted (a service and its key).
         stream: None,
+        hotkeys: Default::default(),
         recording: Recording {
             folder,
             program: ProgramRecording {

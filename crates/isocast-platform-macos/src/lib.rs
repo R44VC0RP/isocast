@@ -25,6 +25,7 @@ mod capture;
 mod devices;
 mod frames;
 mod gpu;
+pub mod hotkeys;
 mod join;
 mod jpeg;
 mod keychain;
@@ -34,6 +35,7 @@ mod permissions;
 pub mod plugin;
 mod stream;
 mod system;
+mod termination;
 mod writer;
 
 use isocast_engine::{
@@ -366,19 +368,18 @@ pub fn will_run_main_queue() {
 /// arrive on the main dispatch queue, which the run loop drains.
 /// (`dispatch_main` won't do: main-queue blocks then run on other threads,
 /// and there is no run loop.)
-pub fn run_main_queue() -> ! {
+pub fn run_main_queue(on_quit: impl Fn() + Send + Sync + 'static) -> ! {
     will_run_main_queue();
     let mtm = objc2::MainThreadMarker::new().expect("run_main_queue runs on the main thread");
     // A background app: no Dock icon or menu bar, but AppKit is set up.
     let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Prohibited);
-    let run_loop = objc2_foundation::NSRunLoop::mainRunLoop();
-    // A port keeps the run loop running when nothing else is scheduled.
-    let port = objc2_foundation::NSPort::port();
-    unsafe { run_loop.addPort_forMode(&port, objc2_foundation::NSDefaultRunLoopMode) };
-    loop {
-        run_loop.run();
-    }
+    // NSApplication's delegate is weak; retain it for the entire event loop.
+    let _termination = termination::install(&app, on_quit);
+    // AppKit's event pump dispatches Carbon hotkey edges too. NSRunLoop::run
+    // alone drains dispatch work but does not dispatch application events.
+    app.run();
+    unreachable!("the background application's event loop does not stop")
 }
 
 /// Run `job` on the main thread and wait for its result, if this process

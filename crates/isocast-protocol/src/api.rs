@@ -286,6 +286,15 @@ pub enum Method {
     /// events report it. Its params are optional. Returns
     /// [`ExportStarted`](crate::timeline::ExportStarted).
     TimelineExport(Option<TimelineExportParams>),
+    /// Current profile bindings and global registration warnings.
+    HotkeysGet,
+    /// Replace or patch profile bindings. Returns hotkeys::Hotkeys.
+    HotkeysSet(Box<crate::hotkeys::SetParams>),
+    /// Bindable actions, labels, groups, argument schemas and suggested defaults.
+    HotkeysActions,
+    /// Focused client's fallback key input (press AND release). A globally
+    /// registered chord is ignored here to avoid firing twice.
+    HotkeysInput(crate::hotkeys::InputParams),
     /// Stop recording if needed, then exit the daemon.
     Shutdown,
 }
@@ -840,6 +849,16 @@ pub enum Event {
         files: Vec<ExportFile>,
         error: Option<String>,
     },
+    HotkeyFired {
+        binding: String,
+        action: String,
+        source: crate::hotkeys::InputSource,
+        phase: crate::hotkeys::Phase,
+        /// None on success; failure also emits a warning.
+        error: Option<String>,
+    },
+    /// Studio preview was cleared; absence is not an empty scene id.
+    PreviewCleared,
 }
 
 /// The kind of an [`Event`], as its `type` says it.
@@ -864,11 +883,13 @@ pub enum EventKind {
     TimelineChanged,
     ExportProgress,
     ExportFinished,
+    HotkeyFired,
+    PreviewCleared,
 }
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 18] = [
+    pub const NAMES: [&str; 20] = [
         "setup_changed",
         "started",
         "status",
@@ -887,6 +908,8 @@ impl EventKind {
         "timeline_changed",
         "export_progress",
         "export_finished",
+        "hotkey_fired",
+        "preview_cleared",
     ];
 
     /// The kind's name, as events and `watch` spell it.
@@ -916,6 +939,8 @@ impl Event {
             Self::TimelineChanged { .. } => EventKind::TimelineChanged,
             Self::ExportProgress { .. } => EventKind::ExportProgress,
             Self::ExportFinished { .. } => EventKind::ExportFinished,
+            Self::HotkeyFired { .. } => EventKind::HotkeyFired,
+            Self::PreviewCleared => EventKind::PreviewCleared,
         }
     }
 }

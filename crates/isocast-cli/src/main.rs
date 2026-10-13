@@ -24,6 +24,7 @@ use crate::client::Client;
 
 mod client;
 mod data;
+mod hotkeys;
 mod library;
 mod mcp;
 mod plugin;
@@ -75,6 +76,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Customize profile hotkeys, including global keys and push-to-talk.
+    Hotkeys {
+        #[command(subcommand)]
+        command: hotkeys::HotkeysCommand,
+    },
     /// Work with setup files.
     Setup {
         #[command(subcommand)]
@@ -709,6 +715,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             seconds,
             json,
         } => timeline::retake(folder, seconds, json),
+        Command::Hotkeys { command } => hotkeys::run(command),
         Command::Devices { json } => devices(json),
         Command::Record {
             setup,
@@ -2643,6 +2650,7 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                 }
             }
             Event::PreviewChanged { scene } => println!("scene {scene:?} in preview"),
+            Event::PreviewCleared => println!("preview cleared"),
             Event::Marker {
                 label,
                 take,
@@ -2740,6 +2748,18 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                 None => println!("export {export} finished: {}", manifest.display()),
                 Some(error) => println!("export {export} failed: {error}"),
             },
+            Event::HotkeyFired {
+                binding,
+                action,
+                source,
+                phase,
+                error,
+            } => {
+                println!(
+                    "hotkey {binding}: {action} ({source:?}, {phase:?}){}",
+                    error.map(|e| format!(": {e}")).unwrap_or_default()
+                );
+            }
         }
     }
     // Events end only when isocastd hangs up; a watcher must not mistake

@@ -314,6 +314,10 @@ impl App {
                 self.session.borrow_mut().preview = Some(scene.clone());
                 self.changed(Changed::SCENES);
             }
+            Event::PreviewCleared => {
+                self.session.borrow_mut().preview = None;
+                self.changed(Changed::SCENES);
+            }
             // A scene collection or profile was created, switched, renamed or
             // removed: a switch changes the live setup, so read it again (the
             // Profile and Scene Collection menus read the library, area F).
@@ -326,6 +330,7 @@ impl App {
             Event::TimelineChanged { .. }
             | Event::ExportProgress { .. }
             | Event::ExportFinished { .. } => {}
+            Event::HotkeyFired { .. } => {}
             Event::Started { .. } => self.refresh_status(true),
             Event::Status { live } => {
                 {

@@ -152,6 +152,19 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-13 (G.5): Ordinary global keys and push-to-talk need no new
+  permissions and are verified. Global **media** keys need Input Monitoring
+  for the signed daemon; it is absent on isocast-m2-b, so only their warning
+  and focused API fallback were verified. No prompt was requested/answered.
+  To qualify the passive media tap, grant the test app in System Settings >
+  Privacy & Security > Input Monitoring, then restart an isolated daemon
+  and bind a media key. Retry (desktop session):
+  `ISOCAST_TESTMAC=isocast-m2-b scripts/testmac.sh gui 'export ISOCAST_SOCKET="$ISOCAST_SCRATCH/g5-hotkeys/qualification/d.sock" ISOCAST_SETUP="$ISOCAST_SCRATCH/g5-hotkeys/qualification/setup.toml"; "$ISOCAST_SCRATCH/g5-hotkeys/bin/isocast" hotkeys set media media_play_pause studio.toggle --json'`.
+  The global registration should become true; press the real media key
+  while another app is frontmost. Cua Driver 0.34 cannot synthesize media
+  keys or F13–F20: F13–F20 and numpad were registration-checked, ordinary
+  modifier chords were physically dispatched through Cua's desktop route.
+
 - 2026-10-12: isocast-m2-b shows several "Isocast Dev is requesting to
   bypass the system private window picker" prompts (macOS 26 direct
   capture consent) for the N.2.D worktree's dev app
@@ -203,6 +216,13 @@ each section. Delete entries that stop being true.
   plus one file per ISO source next to the takes. Agents: new_timeline,
   retake, export_timeline and friends over MCP. The app has no view yet
   (C.2).
+- 2026-10-13 — Engine hotkeys (G.5, `agent/g5-hotkeys`): after merging,
+  `isocast hotkeys defaults` installs the opt-in Control–Option–Command
+  shortcuts (R record, S split, M marker, D studio, Return take), global
+  even with no Isocast window. `docs/hotkeys.md` covers bindings and the
+  client integration. The native Settings page/focused-input bridge and
+  consuming the daemon's Studio Mode state belong to the app-redesign
+  follow-up; no native UI behavior was replaced in this branch.
 
 - 2026-10-13 — Profile and Scene Collection menus (P.2, branch
   app/p2-menus): once merged and built, both apps have them, as in OBS.
@@ -1161,6 +1181,75 @@ each section. Delete entries that stop being true.
     restoring a removed take or deleting its files; joining clips whose
     sizes, rates or audio tracks differ (skipped, said why); an export to
     another container than the takes'.
+- 2026-10-13 (G.5 review hardening): hotkey metadata is now lossless raw data
+  on API Setup/Profile, interpreted into usable bindings plus warnings. Bad
+  fields/actions/shapes/chords cannot invalidate recording settings; strict
+  hotkeys_set validates the resulting map. Stored bindings moved to
+  `profiles/<id>.hotkeys.json`: immutable old binaries reject a hotkeys field
+  in v1 TOML, so merely making the new reader tolerant would not fix downgrade.
+  Inline a4e3945 profiles migrate on read, writing the sidecar before removing
+  the field and retaining the original TOML .bak. Older daemons ignore and
+  preserve the sidecar; unknown future entries also survive an old-daemon
+  save and new-daemon restart. Corrupt JSON sidecars remain untouched on
+  unrelated saves. Exports/imports still carry inline metadata through the API.
+  Omitted hotkeys on whole-setup apply preserve the profile's configuration
+  with a note; explicit {} or merge-patch null clears it durably.
+  A sidecar-path obstruction is also checked: a failed migration cannot strip
+  inline data during profile rename; original bytes remain and recording
+  still works, while the failed rename reports the filesystem error.
+- 2026-10-13 (G.5 review input): require modifiers except F13–F20/keypad/media;
+  refuse common Command and Shift–Command clipboard/window/application keys.
+  Defaults merge by id/chord unless --replace. CLI input can hold a focused
+  connection with --hold-ms; missing unset ids fail. Diagnostics cap at 8 KiB
+  and conflict groups are linear/bounded (300-binding repro: 68 bytes).
+  Native timeout cancels queued registration, and the registered-state lock
+  is not held while waiting on main; pending focused calls fail promptly.
+  Startup finishes registration before serving clients (found on the hold
+  rerun). Failed hold updates roll back; removed sources lose overrides;
+  Studio-off emits preview_cleared. Distinct press/release pairs deliberately
+  remain distinct recording toggles; repeat presses without release are
+  suppressed. No arbitrary time debounce was added.
+
+- 2026-10-13 (G.5 review, quit): AppKit's default quit handler bypassed
+  SIGTERM cleanup. Reproduced with the reviewer's t_quit.py on exonbook:
+  quit left 60 frames/2 s and an in-progress manifest, versus SIGTERM's
+  complete 114-frame take. The daemon now installs an NSApplicationDelegate
+  returning TerminateLater, runs the shared graceful shutdown on a worker,
+  and replies only after files/engine/persistence finish. Signals and RPC
+  use the same routine; shutdown rejects new recording starts and waits
+  beyond a stop timeout rather than exiting mid-take. Same repro now yields
+  117 frames/3.9 s, complete manifest, no disk probe, fully decoded; SIGTERM
+  remains complete. No recording implementation changed; 165 tests and
+  release all-target clippy/fmt passed.
+
+- 2026-10-13 (G.5, storage revised above): Optional Setup/Profile hotkey
+  metadata uses the P.1 library's lifecycle, now with a compatible sidecar,
+  strict update validation and optimistic revisions. Existing d6c8aec
+  profile bytes were identical after loading/saving with this branch.
+  Defaults are opt-in to avoid silently grabbing keys on existing rigs.
+  Thirty-five stable action ids include explicitly unavailable G.3/timeline
+  reserves; scene/source/library references resolve at firing time because
+  one profile can accompany different collections. Duplicate chords reject
+  the whole edit; OS registration conflicts persist with focused-fallback
+  warnings. Push keys overlay the live setup without saving or incrementing
+  its revision; release restores the latest configured mute, push-to-mute
+  wins overlapping holds. Rebinding/library switches clear holds; focused
+  holds are owned by their socket and released on disconnect. Native input
+  only enqueues into a bounded worker; overflow cancels holds. No work is
+  added to media ticks and no new dependency was needed.
+- 2026-10-13 (G.5/macOS): Carbon exclusive RegisterEventHotKey handles both
+  press and release without Accessibility/Input Monitoring. NSRunLoop::run
+  alone doesn't dispatch its application events, so run_main_queue now uses
+  NSApplication::run with activation still Prohibited (no window/Dock icon).
+  Media keys use a passive session event tap only when Input Monitoring is
+  already granted; no prompt, no suppression of macOS media behavior.
+  Test Mac isocast-m2-b (26.7/25G229): all global recording, streaming,
+  scene/mute/push/profile/collection tests retained frontmost System Settings;
+  final run sampled its pid 680 times at ~10 ms intervals. Initial idle
+  numbers omitted Mach timebase conversion and must not be used. Corrected
+  review rerun on exonbook (three 20 s windows each): d6c8aec 0.00302%, new
+  empty 0.00306%, new 35-key 0.00277% of one core; all 1 interrupt wakeup/s,
+  0 idle wakeups. No measurable regression or CPU-improvement claim.
 
 - 2026-10-13: **S.2 scale repairs ported onto main after 5.0
   (stress/scale-port).** Ported: c1e3d40 + 9f40df8 (ISO frames that

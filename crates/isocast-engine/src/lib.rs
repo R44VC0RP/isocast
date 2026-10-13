@@ -14,6 +14,7 @@ pub mod doctor;
 pub(crate) mod draw_list;
 pub mod filter;
 pub mod gpu;
+pub mod hotkeys;
 pub mod layout;
 mod picture;
 pub mod record;

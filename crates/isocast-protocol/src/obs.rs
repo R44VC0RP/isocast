@@ -583,6 +583,7 @@ fn profile_from(
         obs.name.clone()
     };
     let profile = crate::library::Profile {
+        hotkeys: Default::default(),
         version: SETUP_VERSION,
         name,
         canvas: ProfileCanvas { fps },
@@ -2971,6 +2972,7 @@ impl<'a, 'v> Importer<'a, 'v> {
             audio,
             recording,
             stream,
+            hotkeys: Default::default(),
         };
         self.counts.scenes = setup.scenes.len();
         let imported = Imported {

@@ -176,6 +176,8 @@ pub struct Profile {
     /// Keychain).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<StreamSettings>,
+    #[serde(default, skip_serializing_if = "crate::hotkeys::Config::is_absent")]
+    pub hotkeys: crate::hotkeys::Config,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -300,6 +302,7 @@ impl Setup {
                     keep_free_gb,
                 },
             stream,
+            hotkeys,
         } = profile;
         Setup {
             version,
@@ -331,6 +334,7 @@ impl Setup {
                 keep_free_gb,
             },
             stream,
+            hotkeys,
         }
     }
 
@@ -371,6 +375,7 @@ impl Setup {
                     keep_free_gb,
                 },
             stream,
+            hotkeys,
         } = self;
         let collection = Collection {
             version,
@@ -413,6 +418,7 @@ impl Setup {
                 keep_free_gb,
             },
             stream,
+            hotkeys,
         };
         (collection, profile)
     }
@@ -421,6 +427,7 @@ impl Setup {
 /// The setup fields a profile holds; everything else (but `version`) is
 /// the scene collection's.
 const PROFILE_FIELDS: &[&str] = &[
+    "hotkeys",
     "canvas.fps",
     "audio",
     "stream",
@@ -504,6 +511,7 @@ impl Profile {
                 keep_free_gb: default_keep_free_gb(),
             },
             stream: None,
+            hotkeys: Default::default(),
         }
     }
 }

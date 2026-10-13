@@ -14,6 +14,7 @@ pub mod data;
 pub mod devices;
 mod fields;
 mod filter;
+pub mod hotkeys;
 pub mod init;
 pub mod layout;
 pub mod library;
@@ -75,6 +76,9 @@ pub struct Setup {
     /// part of a setup: `isocast stream key set` keeps it in the Keychain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<stream::StreamSettings>,
+    /// Profile hotkeys. Absent/empty keeps legacy profiles unchanged.
+    #[serde(default, skip_serializing_if = "hotkeys::Config::is_absent")]
+    pub hotkeys: hotkeys::Config,
 }
 
 /// Audio settings for the whole setup.
@@ -1256,6 +1260,7 @@ impl Setup {
                 keep_free_gb: default_keep_free_gb(),
             },
             stream: None,
+            hotkeys: Default::default(),
         })
     }
 
