@@ -1,0 +1,382 @@
+// Edit Transform (⌘E; the web app's transform.js), as in OBS: the
+// selected item's position, rotation, size, alignment, bounding box and
+// crop, with Reset at the bottom left. It follows the selection and
+// changes show at once. Isocast's item style (opacity, corners, border,
+// shadow, background) is under Appearance.
+
+import { Theme } from "../../theme.slint";
+import { Icons } from "../../icons.slint";
+import { Ui } from "../../state.slint";
+import {
+    Button, Callout, CalloutKind, ColorField, Dialog, Dropdown, Form, FormRow, FormSection,
+    FormSeparator, IconButton, NumberField, Slider,
+} from "../../kit.slint";
+import { SourcesArea } from "state.slint";
+
+// A number of the transform: scrubbing sends live changes.
+component TransformNumber inherits NumberField {
+    in property <string> field;
+    // Two to a line, or one beside the rest of its line: equal halves.
+    preferred-width: 0px;
+    max-width: 100000px;
+    horizontal-stretch: 1;
+    scrubbing(v) => { SourcesArea.transform-number(root.field, v, true); }
+    changed(v) => { SourcesArea.transform-number(root.field, v, false); }
+}
+
+// What's left of a line beside a half-width field.
+// It takes NumberField's least width too, so the two halves grow alike and
+// a lone field ends where the X and W fields above it do.
+component Rest inherits Rectangle {
+    min-width: 56px;
+    preferred-width: 0px;
+    max-width: 100000px;
+    horizontal-stretch: 1;
+}
+
+component RemoveButton inherits VerticalLayout {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+    alignment: center;
+    IconButton {
+        small: true;
+        icon: Icons.x;
+        icon-size: Theme.icon-sm;
+        label: root.label;
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component AddButton inherits VerticalLayout {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    alignment: center;
+    HorizontalLayout {
+        alignment: start;
+        Button {
+            text: root.text;
+            enabled: root.enabled;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+export component TransformDialog inherits Dialog {
+    property <bool> locked: SourcesArea.transform-locked;
+    property <float> rows-opacity: root.locked ? Theme.disabled-opacity : 1;
+
+    title: SourcesArea.transform-title;
+    dialog-width: SourcesArea.transform-item ? 560px : 520px;
+    ok-text: "Close";
+    cancel-text: "";
+    extra-text: SourcesArea.transform-item ? "Reset" : "";
+    extra-enabled: !root.locked;
+    accepted => { Ui.close-dialog(); }
+    cancelled => { Ui.close-dialog(); }
+    extra => { SourcesArea.transform-action("reset"); }
+
+    if !SourcesArea.transform-item: Form {
+        Text {
+            text: "Select a source to change its transform.";
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+        }
+    }
+    if SourcesArea.transform-item && root.locked: Callout {
+        kind: CalloutKind.info;
+        message: "This source is locked. Unlock it in the Sources list to move it.";
+    }
+    if SourcesArea.transform-item: Form {
+        // Every row is dimmed and takes no input while the item is locked.
+        VerticalLayout {
+            spacing: Theme.space-2;
+            opacity: root.rows-opacity;
+
+            FormRow {
+                label: "Position";
+                TransformNumber {
+                    field: "x";
+                    prefix: "X";
+                    label: "X";
+                    value: SourcesArea.transform-x;
+                    enabled: !root.locked;
+                }
+                TransformNumber {
+                    field: "y";
+                    prefix: "Y";
+                    label: "Y";
+                    value: SourcesArea.transform-y;
+                    enabled: !root.locked;
+                }
+            }
+            FormRow {
+                label: "Rotation";
+                TransformNumber {
+                    field: "rotate";
+                    label: "Rotation";
+                    unit: "°";
+                    step: 0.1;
+                    minimum: -360;
+                    maximum: 360;
+                    value: SourcesArea.transform-rotate;
+                    enabled: !root.locked;
+                }
+                Rest { }
+            }
+            FormRow {
+                label: "Size";
+                TransformNumber {
+                    field: "w";
+                    prefix: "W";
+                    label: "Width";
+                    minimum: 1;
+                    value: SourcesArea.transform-w;
+                    enabled: !root.locked;
+                }
+                TransformNumber {
+                    field: "h";
+                    prefix: "H";
+                    label: "Height";
+                    minimum: 1;
+                    value: SourcesArea.transform-h;
+                    enabled: !root.locked;
+                }
+            }
+            FormRow {
+                label: "Scale";
+                TransformNumber {
+                    field: "scale";
+                    label: "Scale";
+                    unit: "%";
+                    step: 0.1;
+                    minimum: 1;
+                    maximum: 1000;
+                    value: SourcesArea.transform-scale;
+                    enabled: !root.locked;
+                }
+                Rest { }
+            }
+            FormRow {
+                label: "Positional Alignment";
+                Dropdown {
+                    horizontal-stretch: 1;
+                    options: SourcesArea.align-options;
+                    value: SourcesArea.transform-anchor;
+                    label: "Positional Alignment";
+                    tooltip: "Which point of the source the position is measured to";
+                    enabled: !root.locked;
+                    selected(v) => { SourcesArea.transform-choose("anchor", v); }
+                }
+            }
+            FormSeparator { }
+            FormRow {
+                label: "Bounding Box Type";
+                Dropdown {
+                    horizontal-stretch: 1;
+                    options: SourcesArea.fit-options;
+                    value: SourcesArea.transform-fit;
+                    label: "Bounding Box Type";
+                    enabled: !root.locked;
+                    selected(v) => { SourcesArea.transform-choose("fit", v); }
+                }
+            }
+            FormRow {
+                label: "Alignment in Bounding Box";
+                Dropdown {
+                    horizontal-stretch: 1;
+                    options: SourcesArea.align-options;
+                    value: SourcesArea.transform-align;
+                    label: "Alignment in Bounding Box";
+                    enabled: !root.locked && SourcesArea.transform-fit != "stretch";
+                    selected(v) => { SourcesArea.transform-choose("align", v); }
+                }
+            }
+            FormSeparator { }
+            FormRow {
+                label: "Crop";
+                label-centered: true;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: Theme.space-2;
+                    HorizontalLayout {
+                        spacing: Theme.space-2;
+                        TransformNumber {
+                            field: "crop-left";
+                            prefix: "Left";
+                            prefix-min-width: 56px;
+                            label: "Crop left";
+                            unit: "px";
+                            minimum: 0;
+                            value: SourcesArea.crop-left;
+                            enabled: !root.locked;
+                        }
+                        TransformNumber {
+                            field: "crop-right";
+                            prefix: "Right";
+                            prefix-min-width: 56px;
+                            label: "Crop right";
+                            unit: "px";
+                            minimum: 0;
+                            value: SourcesArea.crop-right;
+                            enabled: !root.locked;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: Theme.space-2;
+                        TransformNumber {
+                            field: "crop-top";
+                            prefix: "Top";
+                            prefix-min-width: 56px;
+                            label: "Crop top";
+                            unit: "px";
+                            minimum: 0;
+                            value: SourcesArea.crop-top;
+                            enabled: !root.locked;
+                        }
+                        TransformNumber {
+                            field: "crop-bottom";
+                            prefix: "Bottom";
+                            prefix-min-width: 56px;
+                            label: "Crop bottom";
+                            unit: "px";
+                            minimum: 0;
+                            value: SourcesArea.crop-bottom;
+                            enabled: !root.locked;
+                        }
+                    }
+                }
+            }
+            FormSection {
+                title: "Appearance";
+            }
+            FormRow {
+                label: "Opacity";
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Slider {
+                        value: SourcesArea.transform-opacity;
+                        minimum: 0;
+                        maximum: 1;
+                        label: "Opacity";
+                        value-text: round(SourcesArea.transform-opacity * 100) + "%";
+                        enabled: !root.locked;
+                        moved(v) => { SourcesArea.transform-number("opacity", v, true); }
+                        changed(v) => { SourcesArea.transform-number("opacity", v, false); }
+                    }
+                }
+                Text {
+                    width: 40px;
+                    text: round(SourcesArea.transform-opacity * 100) + "%";
+                    color: Theme.text-2;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+            }
+            FormRow {
+                label: "Corner Radius";
+                TransformNumber {
+                    field: "radius";
+                    label: "Corner Radius";
+                    unit: "px";
+                    minimum: 0;
+                    maximum: 2000;
+                    value: SourcesArea.transform-radius;
+                    enabled: !root.locked;
+                }
+                Rest { }
+            }
+            FormRow {
+                label: "Border";
+                if SourcesArea.has-border: TransformNumber {
+                    field: "border-width";
+                    label: "Border width";
+                    unit: "px";
+                    minimum: 0;
+                    maximum: 200;
+                    value: SourcesArea.border-width;
+                    enabled: !root.locked;
+                }
+                if SourcesArea.has-border: ColorField {
+                    horizontal-stretch: 1;
+                    value: SourcesArea.border-color;
+                    swatch: SourcesArea.border-swatch;
+                    label: "Border colour";
+                    enabled: !root.locked;
+                    changed(text) => { SourcesArea.transform-color("border-color", text); }
+                    pick => { SourcesArea.transform-pick-color("border-color", SourcesArea.border-color); }
+                }
+                if SourcesArea.has-border: RemoveButton {
+                    enabled: !root.locked;
+                    label: "No border";
+                    clicked => { SourcesArea.transform-action("remove-border"); }
+                }
+                if !SourcesArea.has-border: AddButton {
+                    enabled: !root.locked;
+                    text: "Add a border";
+                    clicked => { SourcesArea.transform-action("add-border"); }
+                }
+            }
+            FormRow {
+                label: "Shadow";
+                if SourcesArea.has-shadow: TransformNumber {
+                    field: "shadow-blur";
+                    prefix: "Blur";
+                    label: "Shadow blur";
+                    unit: "px";
+                    minimum: 0;
+                    maximum: 500;
+                    value: SourcesArea.shadow-blur;
+                    enabled: !root.locked;
+                }
+                if SourcesArea.has-shadow: ColorField {
+                    horizontal-stretch: 1;
+                    value: SourcesArea.shadow-color;
+                    swatch: SourcesArea.shadow-swatch;
+                    label: "Shadow colour";
+                    enabled: !root.locked;
+                    changed(text) => { SourcesArea.transform-color("shadow-color", text); }
+                    pick => { SourcesArea.transform-pick-color("shadow-color", SourcesArea.shadow-color); }
+                }
+                if SourcesArea.has-shadow: RemoveButton {
+                    enabled: !root.locked;
+                    label: "No shadow";
+                    clicked => { SourcesArea.transform-action("remove-shadow"); }
+                }
+                if !SourcesArea.has-shadow: AddButton {
+                    enabled: !root.locked;
+                    text: "Add a shadow";
+                    clicked => { SourcesArea.transform-action("add-shadow"); }
+                }
+            }
+            FormRow {
+                label: "Background";
+                if SourcesArea.has-background: ColorField {
+                    horizontal-stretch: 1;
+                    value: SourcesArea.background-color;
+                    swatch: SourcesArea.background-swatch;
+                    label: "Background colour";
+                    enabled: !root.locked;
+                    changed(text) => { SourcesArea.transform-color("background-color", text); }
+                    pick => { SourcesArea.transform-pick-color("background-color", SourcesArea.background-color); }
+                }
+                if SourcesArea.has-background: RemoveButton {
+                    enabled: !root.locked;
+                    label: "No background";
+                    clicked => { SourcesArea.transform-action("remove-background"); }
+                }
+                if !SourcesArea.has-background: AddButton {
+                    enabled: !root.locked;
+                    text: "Add a background";
+                    clicked => { SourcesArea.transform-action("add-background"); }
+                }
+            }
+        }
+    }
+}

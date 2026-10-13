@@ -1,0 +1,345 @@
+// A form drawn from the setup schema (the web app's fields.js), shared by
+// Properties, Filters and Transition Properties: one row per setting, its
+// control chosen by the field's kind (see FormField), with dropdowns where
+// the choices are known (devices, apps, a camera's formats), files chosen
+// or typed, and an object's own settings in a sub-form under its switch.
+// Every change goes to `SettingsForms` with the form's id and the row's
+// key; src/form/ builds the rows and routes the changes to the view that
+// shows the form.
+
+import { Theme } from "../theme.slint";
+import { Icon, Icons } from "../icons.slint";
+import { Button, ButtonVariant, ControlSize, IconButton } from "buttons.slint";
+import { ColorField, NumberField, TextArea, TextField } from "fields.slint";
+import { Dropdown, DropdownOption } from "dropdown.slint";
+import { Switch } from "choices.slint";
+import { FormRow } from "forms.slint";
+
+// One setting in a form drawn from the setup schema.
+// `kind` says which control it takes: number, text, textarea, path (a
+// file, typed or chosen), files (a list of files), switch, color, choice
+// (a dropdown), object (a switch for settings of its own, shown under it
+// when on), add (an optional setting that is off: "+ Add"), json.
+export struct FormField {
+    // Its name, or "outer.inner" inside an object's settings.
+    key: string,
+    label: string,
+    kind: string,
+    text: string,
+    number: float,
+    // A number left out (it shows `placeholder`, like "Auto").
+    empty: bool,
+    on: bool,
+    unit: string,
+    step: float,
+    minimum: float,
+    maximum: float,
+    placeholder: string,
+    options: [DropdownOption],
+    value: string,
+    mono: bool,
+    swatch: color,
+    // A files field's files (their names).
+    files: [string],
+    // Ends in ✕ (an optional setting that is set), or in a button that
+    // looks for devices again; `lane` keeps that place empty otherwise, so
+    // the form's fields share one right edge.
+    removable: bool,
+    refresh: bool,
+    refreshing: bool,
+    lane: bool,
+    // A caption under it (what a camera sends now), amber when it warns.
+    hint: string,
+    hint-warn: bool,
+    // A second, typed value beside a choice (part of a window's title, a
+    // custom shape).
+    extra: bool,
+    extra-text: string,
+    extra-placeholder: string,
+    // The field's description, for its tooltip.
+    tooltip: string,
+}
+
+// A setting and, for an object that is on, its own settings.
+export struct FormGroup {
+    field: FormField,
+    children: [FormField],
+}
+
+// Where every form's controls report (`form`: the form's id, "props",
+// "filter" or "transition"; `key`: the setting).
+export global SettingsForms {
+    callback text(string, string, string);
+    // While scrubbed (`live`), then once more when let go.
+    callback number(string, string, float, bool);
+    callback switch(string, string, bool);
+    callback choose(string, string, string);
+    callback extra(string, string, string);
+    callback remove(string, string);
+    callback add(string, string);
+    callback browse(string, string);
+    callback remove-file(string, string, int);
+    callback refresh(string);
+    // A colour field's swatch: the system colour panel, with its colour.
+    callback pick-color(string, string, string);
+}
+
+// A list of files (a media source's playlist): one bordered list of
+// 28px rows split by soft lines, each with ✕, then "Add files".
+component FilesField inherits VerticalLayout {
+    in property <FormField> f;
+    in property <string> form;
+    spacing: Theme.space-2;
+    alignment: start;
+    horizontal-stretch: 1;
+
+    if root.f.files.length > 0: Rectangle {
+        height: min(168px, root.f.files.length * Theme.control-h + 2px);
+        background: Theme.surface-inset;
+        border-width: 1px;
+        border-color: Theme.field-border;
+        border-radius: Theme.r;
+        clip: true;
+        accessible-role: list;
+        accessible-label: root.f.label;
+        Flickable {
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: parent.height - 2px;
+            content-height: root.f.files.length * Theme.control-h;
+            for file[i] in root.f.files: Rectangle {
+                y: i * Theme.control-h;
+                height: Theme.control-h;
+                accessible-role: list-item;
+                accessible-label: file;
+                if i > 0: Rectangle {
+                    y: 0;
+                    height: 1px;
+                    background: Theme.line-soft;
+                }
+                HorizontalLayout {
+                    padding-left: Theme.space-2;
+                    padding-right: Theme.space-1;
+                    spacing: Theme.space-2;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: file;
+                        color: Theme.text;
+                        font-size: Theme.fs-sm;
+                        letter-spacing: Theme.tracking-sm;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        accessible-role: none;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        IconButton {
+                            small: true;
+                            icon: Icons.x;
+                            icon-size: Theme.icon-sm;
+                            label: "Remove";
+                            clicked => { SettingsForms.remove-file(root.form, root.f.key, i); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    HorizontalLayout {
+        alignment: start;
+        Button {
+            text: "Add files";
+            icon: Icons.plus;
+            size: ControlSize.small;
+            clicked => { SettingsForms.browse(root.form, root.f.key); }
+        }
+    }
+}
+
+// One setting's row: its label, its control, and the lane at the end.
+export component FieldRow inherits FormRow {
+    in property <FormField> f;
+    in property <string> form;
+
+    label: root.f.label;
+    hint: root.f.hint;
+    hint-live: !root.f.hint-warn;
+    hint-warn: root.f.hint-warn;
+
+    if root.f.kind == "number": NumberField {
+        value: root.f.number;
+        empty: root.f.empty;
+        placeholder: root.f.placeholder;
+        unit: root.f.unit;
+        step: root.f.step;
+        minimum: root.f.minimum;
+        maximum: root.f.maximum;
+        label: root.f.label;
+        scrubbing(v) => { SettingsForms.number(root.form, root.f.key, v, true); }
+        changed(v) => { SettingsForms.number(root.form, root.f.key, v, false); }
+    }
+    if root.f.kind == "text": TextField {
+        horizontal-stretch: 1;
+        text: root.f.text;
+        placeholder: root.f.placeholder;
+        mono: root.f.mono;
+        label: root.f.label;
+        committed(text) => { SettingsForms.text(root.form, root.f.key, text); }
+    }
+    if root.f.kind == "textarea": TextArea {
+        horizontal-stretch: 1;
+        text: root.f.text;
+        placeholder: root.f.placeholder;
+        mono: root.f.mono;
+        label: root.f.label;
+        committed(text) => { SettingsForms.text(root.form, root.f.key, text); }
+    }
+    if root.f.kind == "path": TextField {
+        horizontal-stretch: 1;
+        text: root.f.text;
+        placeholder: root.f.placeholder;
+        label: root.f.label;
+        committed(text) => { SettingsForms.text(root.form, root.f.key, text); }
+    }
+    if root.f.kind == "path": VerticalLayout {
+        alignment: center;
+        IconButton {
+            small: true;
+            icon: Icons.folder-open;
+            label: "Choose a file…";
+            clicked => { SettingsForms.browse(root.form, root.f.key); }
+        }
+    }
+    if root.f.kind == "files": FilesField {
+        f: root.f;
+        form: root.form;
+    }
+    if root.f.kind == "switch" || root.f.kind == "object": VerticalLayout {
+        alignment: center;
+        HorizontalLayout {
+            alignment: start;
+            Switch {
+                on: root.f.on;
+                label: root.f.label;
+                tooltip: root.f.tooltip;
+                toggled(on) => { SettingsForms.switch(root.form, root.f.key, on); }
+            }
+        }
+    }
+    if root.f.kind == "color": ColorField {
+        horizontal-stretch: 1;
+        value: root.f.text;
+        swatch: root.f.swatch;
+        label: root.f.label;
+        changed(text) => { SettingsForms.text(root.form, root.f.key, text); }
+        pick => { SettingsForms.pick-color(root.form, root.f.key, root.f.text); }
+    }
+    if root.f.kind == "choice": Dropdown {
+        horizontal-stretch: 1;
+        options: root.f.options;
+        value: root.f.value;
+        label: root.f.label;
+        tooltip: root.f.tooltip;
+        placeholder: root.f.placeholder;
+        selected(v) => { SettingsForms.choose(root.form, root.f.key, v); }
+    }
+    if root.f.kind == "choice" && root.f.extra: TextField {
+        horizontal-stretch: 1;
+        text: root.f.extra-text;
+        placeholder: root.f.extra-placeholder;
+        label: root.f.extra-placeholder;
+        committed(text) => { SettingsForms.extra(root.form, root.f.key, text); }
+    }
+    if root.f.kind == "add": VerticalLayout {
+        alignment: center;
+        HorizontalLayout {
+            alignment: start;
+            Button {
+                text: "Add";
+                icon: Icons.plus;
+                variant: ButtonVariant.quiet;
+                size: ControlSize.small;
+                tooltip: root.f.tooltip;
+                clicked => { SettingsForms.add(root.form, root.f.key); }
+            }
+        }
+    }
+    if root.f.kind == "json": Text {
+        horizontal-stretch: 1;
+        text: root.f.text;
+        color: Theme.text-3;
+        font-family: Theme.font-mono;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    // Numbers, switches and "Add" don't fill the line: what's left of it.
+    if root.f.kind == "number" || root.f.kind == "switch" || root.f.kind == "object" || root.f.kind == "add": Rectangle {
+        horizontal-stretch: 1;
+    }
+    if root.f.removable: VerticalLayout {
+        alignment: center;
+        IconButton {
+            small: true;
+            icon: Icons.x;
+            icon-size: Theme.icon-sm;
+            label: "Remove";
+            clicked => { SettingsForms.remove(root.form, root.f.key); }
+        }
+    }
+    if root.f.refresh: VerticalLayout {
+        alignment: center;
+        IconButton {
+            small: true;
+            icon: Icons.refresh;
+            icon-size: Theme.icon-sm;
+            label: "Look for devices again";
+            spinning: root.f.refreshing;
+            enabled: !root.f.refreshing;
+            clicked => { SettingsForms.refresh(root.form); }
+        }
+    }
+    if root.f.lane && !root.f.removable && !root.f.refresh && root.f.kind != "path": Rectangle {
+        width: Theme.icon-button-sm;
+    }
+}
+
+// The whole form: its rows 8px apart, an object's settings in a sub-form
+// (180px in, a hairline on its left, a 120px label column).
+export component SettingsForm inherits VerticalLayout {
+    in property <[FormGroup]> groups;
+    in property <string> form;
+
+    spacing: Theme.space-2;
+    alignment: start;
+
+    for group in root.groups: VerticalLayout {
+        spacing: 0;
+        FieldRow {
+            f: group.field;
+            form: root.form;
+        }
+        if group.children.length > 0: VerticalLayout {
+            padding-top: Theme.space-2;
+            HorizontalLayout {
+                padding-left: Theme.hint-indent;
+                Rectangle {
+                    width: 1px;
+                    background: Theme.line;
+                }
+                VerticalLayout {
+                    padding-left: Theme.space-3;
+                    spacing: Theme.space-2;
+                    horizontal-stretch: 1;
+                    for child in group.children: FieldRow {
+                        f: child;
+                        form: root.form;
+                        label-width: 120px;
+                    }
+                }
+            }
+        }
+    }
+}

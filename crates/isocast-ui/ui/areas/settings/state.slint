@@ -1,0 +1,239 @@
+// Area D: Settings (every tab), the first run, Welcome, the connecting and
+// failed states, and About. src/areas/settings.rs fills this.
+//
+// Settings edits a draft of the live setup's name, canvas, recording,
+// audio and stream (and this viewer's snapping and preview rate); every
+// control shows the draft and changes it through `set-text`,
+// `set-number` or `set-flag` with the field's name (settings.rs maps the
+// names to the setup). Apply (or OK) sends what changed as one patch.
+
+import { DropdownOption, NavTab } from "../../kit.slint";
+
+// A streaming service to choose (Stream, before streaming is set up).
+export struct ServiceChoice {
+    id: string,
+    label: string,
+    hint: string,
+}
+
+// A video source the ISO files can record (Output → ISO Recording).
+export struct IsoChoice {
+    id: string,
+    name: string,
+    on: bool,
+}
+
+// An Audio Input Capture source and its device (Audio → Audio Devices).
+export struct MicRow {
+    id: string,
+    name: string,
+    value: string,
+    options: [DropdownOption],
+}
+
+// Hotkeys: what a key does and its keys ("–" between two is a range).
+export struct HotkeyRow {
+    what: string,
+    keys: [string],
+}
+
+export struct HotkeyGroup {
+    title: string,
+    rows: [HotkeyRow],
+}
+
+// First run: a permission and where it stands.
+export struct PermissionRow {
+    id: string,
+    icon: string,
+    title: string,
+    hint: string,
+    // What to do, if it isn't allowed ("" when nothing).
+    todo: string,
+    // The engine restarts to pick it up (a link after `todo`).
+    restart: bool,
+    state: string,
+    granted: bool,
+    denied: bool,
+    // "Open Settings" is the way to allow it.
+    open-settings: bool,
+}
+
+// First run: one choice of a device column.
+export struct DeviceChoice {
+    value: string,
+    title: string,
+    meta: string,
+    disabled: bool,
+}
+
+export global SettingsArea {
+    // ---- The Settings dialog
+    // Settings' pages, and the one showing.
+    in-out property <[NavTab]> tabs;
+    in-out property <string> tab: "general";
+    // A note at the top of Stream (why it opened: "Add your stream key
+    // first."), until the stream is ready.
+    in-out property <string> notice;
+    // There is a live setup to change (else the page says to make one).
+    in-out property <bool> has-draft;
+    // The draft differs from the live setup (or the viewer's settings
+    // changed): Apply is enabled.
+    in-out property <bool> dirty;
+    // Apply is under way.
+    in-out property <bool> applying;
+    callback apply();
+    callback ok();
+    callback cancel();
+    callback tab-chosen(string);
+
+    // A field of the draft changed, by its name (settings.rs: FIELDS).
+    callback set-text(string, string);
+    callback set-number(string, float);
+    callback set-flag(string, bool);
+
+    // ---- General
+    in-out property <string> name;
+    // The file the daemon keeps the live setup in ("" if it says none).
+    in-out property <string> setup-file;
+    in-out property <bool> snapping;
+    in-out property <float> snap-distance;
+    in-out property <string> preview-rate;
+
+    // ---- Stream
+    in-out property <bool> has-stream;
+    in-out property <[ServiceChoice]> services;
+    // Custom and Kick need a server first: which one is asking ("" for
+    // none).
+    in-out property <string> needs-server;
+    // Streaming now (changes apply next time; it can't be turned off).
+    in-out property <bool> stream-live;
+    in-out property <string> service;
+    in-out property <string> server;
+    in-out property <string> server-placeholder;
+    in-out property <string> server-hint;
+    // A key is kept in the Keychain for this service.
+    in-out property <bool> key-saved;
+    in-out property <bool> key-busy;
+    in-out property <float> video-bitrate;
+    in-out property <string> rate-control;
+    in-out property <string> audio-bitrate;
+    in-out property <float> keyframe-interval;
+    // The stream has its own size (else the canvas, scaled to fit 1080p).
+    in-out property <bool> stream-custom-size;
+    in-out property <float> stream-width;
+    in-out property <float> stream-height;
+    callback choose-service(string);
+    callback server-chosen(string);
+    // A server address the setup can use (rtmp:// or rtmps://, host and
+    // app).
+    pure callback server-valid(string) -> bool;
+    callback server-back();
+    callback save-key(string);
+    callback clear-key();
+
+    // ---- Output
+    in-out property <string> folder;
+    // Recording Quality: the stop it is exactly (-1: Custom), where the
+    // thumb is, and what it says under the slider.
+    in-out property <int> quality-stop: 2;
+    in-out property <int> quality-at: 2;
+    in-out property <bool> quality-disabled;
+    // Output's Advanced disclosure (each one's quality number) is open.
+    in-out property <bool> quality-advanced;
+    in-out property <string> quality-status;
+    in-out property <float> program-quality;
+    in-out property <float> iso-quality;
+    in-out property <float> keep-free;
+    in-out property <bool> program-on;
+    in-out property <string> program-codec;
+    in-out property <string> program-container;
+    in-out property <string> program-depth;
+    in-out property <bool> program-shows-depth;
+    in-out property <bool> iso-on;
+    in-out property <[IsoChoice]> iso-sources;
+    in-out property <string> iso-codec;
+    in-out property <string> iso-container;
+    in-out property <string> iso-depth;
+    in-out property <bool> iso-shows-depth;
+    in-out property <bool> iso-filtered;
+    in-out property <[DropdownOption]> codecs;
+    callback browse-folder();
+    callback choose-quality(int);
+    callback set-iso-source(string, bool);
+
+    // ---- Audio
+    in-out property <[MicRow]> mics;
+    in-out property <string> monitoring-device;
+    in-out property <[DropdownOption]> outputs;
+    in-out property <string> pan-law;
+    in-out property <[DropdownOption]> pan-laws;
+    // Looking for devices again.
+    in-out property <bool> looking;
+    callback set-mic(string, string);
+    callback refresh-devices();
+
+    // ---- Video
+    in-out property <string> canvas-size;
+    in-out property <[DropdownOption]> canvas-sizes;
+    in-out property <float> canvas-width;
+    in-out property <float> canvas-height;
+    in-out property <string> fps;
+    in-out property <[DropdownOption]> fps-options;
+
+    // ---- Hotkeys
+    in-out property <[HotkeyGroup]> hotkeys;
+
+    // ---- Advanced
+    in-out property <bool> reconnect-on;
+    in-out property <float> reconnect-delay;
+    in-out property <float> reconnect-retries;
+
+    // ---- Welcome (no setup yet) and the failed state
+    // Which choice is working ("obs", "file"; "" for none).
+    in-out property <string> welcome-busy;
+    callback start-with-this-mac();
+    callback open-setup-file();
+    callback import-obs();
+    callback retry();
+
+    // ---- The first run (Ui.onboarding shows it)
+    in-out property <int> step;
+    // A live setup exists: the first run can be closed.
+    in-out property <bool> can-close;
+    in-out property <bool> creating;
+    // Permissions: read at least once, and asking now.
+    in-out property <bool> checked;
+    in-out property <bool> asking;
+    in-out property <bool> any-to-ask;
+    in-out property <[PermissionRow]> permissions;
+    // Devices: listed at least once.
+    in-out property <bool> devices-listed;
+    in-out property <[DeviceChoice]> displays;
+    in-out property <string> displays-empty;
+    in-out property <[DeviceChoice]> cameras;
+    in-out property <[DeviceChoice]> microphones;
+    in-out property <string> display;
+    in-out property <string> camera;
+    in-out property <string> microphone;
+    in-out property <bool> system-audio: true;
+    // Layout.
+    in-out property <string> layout: "bottom_right";
+    in-out property <string> ob-canvas: "1920x1080";
+    in-out property <string> ob-fps: "60";
+    in-out property <string> ob-folder: "~/Movies/Isocast";
+    in-out property <string> ob-name: "My setup";
+    callback ob-close();
+    callback ob-back();
+    callback ob-next();
+    callback ob-create();
+    callback ob-ask();
+    callback ob-check();
+    callback ob-restart-engine();
+    callback ob-open-settings(string);
+    // A choice: the field ("display", "camera", "microphone",
+    // "system_audio", "layout", "canvas", "fps", "folder", "name") and
+    // its value.
+    callback ob-set(string, string);
+    callback ob-browse();
+}

@@ -1,0 +1,43 @@
+// Tooltips (docs/design.md 3.14): short, sentence case, saying what the
+// control does. Slint's own `Tooltip` element shows them (after half a
+// second of hover, near the pointer, never taking input); `Tip` is how
+// they look. Controls of the kit take a `tooltip` string; for anything
+// else:
+//
+//     Rectangle {
+//         Tooltip { Tip { text: "Put the preview on air"; } }
+//     }
+//
+// (A `Tooltip` can't be the direct child of a layout, and an element can
+// have only one.)
+
+import { Theme } from "../theme.slint";
+
+export component Tip inherits Rectangle {
+    in property <string> text;
+    background: Theme.surface-overlay;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    border-radius: Theme.r-panel;
+    drop-shadow-color: Theme.shadow-color;
+    drop-shadow-blur: 12px;
+    drop-shadow-offset-y: 4px;
+    accessible-role: none;
+
+    HorizontalLayout {
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-2;
+        padding-top: Theme.space-1;
+        padding-bottom: Theme.space-1;
+        Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: Theme.fs-xs;
+            letter-spacing: Theme.tracking-xs;
+            line-height-factor: Theme.leading-xs;
+            wrap: word-wrap;
+            max-width: 280px;
+            accessible-role: none;
+        }
+    }
+}

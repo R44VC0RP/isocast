@@ -1,0 +1,727 @@
+//! The window drawn offscreen, by the same Skia renderer on the same GPU
+//! API as on screen, into a texture: for screenshots (`--snapshot`),
+//! scripted states (`--state`), the accessibility tree (`--a11y`) and a
+//! long run that checks every frame (`--soak`). Nothing appears on screen.
+//! Time is the snapshot's own, so the same state draws the same picture.
+
+use std::cell::Cell;
+use std::path::Path;
+use std::rc::{Rc, Weak};
+use std::sync::mpsc::{Receiver, channel};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail};
+use slint::platform::skia_renderer::SkiaWGPU30Renderer;
+use slint::platform::{Platform, PointerEventButton, Renderer, WindowAdapter, WindowEvent};
+use slint::wgpu_30::wgpu;
+use slint::{ComponentHandle, LogicalPosition, LogicalSize, PhysicalSize};
+
+use crate::app::{App, Mode};
+use crate::areas;
+use crate::daemon::{self, Link, Update};
+use crate::gpu::Gpu;
+use crate::picture::ITEM_RGB;
+use crate::usage::{self, Meter};
+use crate::{AppWindow, Menus, Options, ToastKind, Ui};
+
+struct OffscreenWindow {
+    window: slint::Window,
+    renderer: SkiaWGPU30Renderer,
+    size: Cell<PhysicalSize>,
+}
+
+impl WindowAdapter for OffscreenWindow {
+    fn window(&self) -> &slint::Window {
+        &self.window
+    }
+
+    fn size(&self) -> PhysicalSize {
+        self.size.get()
+    }
+
+    fn set_size(&self, size: slint::WindowSize) {
+        let scale = self.window.scale_factor();
+        self.size.set(size.to_physical(scale));
+        self.window.dispatch_event(WindowEvent::Resized {
+            size: size.to_logical(scale),
+        });
+    }
+
+    fn renderer(&self) -> &dyn Renderer {
+        &self.renderer
+    }
+}
+
+/// The snapshot's platform: one offscreen window, and a clock that only
+/// moves when the snapshot says so.
+struct OffscreenPlatform {
+    window: Rc<OffscreenWindow>,
+    now: Rc<Cell<Duration>>,
+}
+
+impl Platform for OffscreenPlatform {
+    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+        Ok(self.window.clone())
+    }
+
+    fn duration_since_start(&self) -> Duration {
+        self.now.get()
+    }
+}
+
+struct Offscreen {
+    gpu: Gpu,
+    window: Rc<OffscreenWindow>,
+    app: AppWindow,
+    hub: Rc<App>,
+    updates: Receiver<Update>,
+    now: Rc<Cell<Duration>>,
+    target: Option<wgpu::Texture>,
+    scale: f32,
+}
+
+pub fn run(options: &Options) -> Result<()> {
+    let gpu = Gpu::new()?;
+    let (width, height) = options.size;
+    let scale = options.scale;
+    let renderer = SkiaWGPU30Renderer::new(
+        gpu.instance.clone(),
+        gpu.adapter.clone(),
+        gpu.device.clone(),
+        gpu.queue.clone(),
+    )
+    .map_err(|e| anyhow::anyhow!("Skia could not use the GPU: {e}"))?;
+    let window = Rc::new_cyclic(|weak: &Weak<OffscreenWindow>| OffscreenWindow {
+        window: slint::Window::new(weak.clone()),
+        renderer,
+        size: Cell::new(PhysicalSize::new(
+            (width as f32 * scale).round() as u32,
+            (height as f32 * scale).round() as u32,
+        )),
+    });
+    let now = Rc::new(Cell::new(Duration::ZERO));
+    slint::platform::set_platform(Box::new(OffscreenPlatform {
+        window: window.clone(),
+        now: now.clone(),
+    }))
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    window
+        .window
+        .dispatch_event(WindowEvent::ScaleFactorChanged {
+            scale_factor: scale,
+        });
+    let app = AppWindow::new()?;
+    app.set_native_menu(false);
+    window.window.dispatch_event(WindowEvent::Resized {
+        size: LogicalSize::new(width as f32, height as f32),
+    });
+    app.show()?;
+
+    let (tx, updates) = channel();
+    let commands = daemon::start(move |update| {
+        let _ = tx.send(update);
+    });
+    let clock_now = now.clone();
+    let clock: Box<dyn Fn() -> f32> = Box::new(move || clock_now.get().as_secs_f32());
+    let canvas = areas::canvas::Canvas::new(&gpu, clock, true);
+    let hub = App::new(&app, commands, Mode { offscreen: true }, canvas);
+    hub.sources.set_device(gpu.device.clone());
+
+    let mut offscreen = Offscreen {
+        gpu,
+        window,
+        app,
+        hub,
+        updates,
+        now,
+        target: None,
+        scale,
+    };
+    offscreen.wait_for_daemon(Duration::from_millis(options.wait_ms))?;
+    for state in &options.states {
+        offscreen
+            .state(state)
+            .with_context(|| format!("--state {state}"))?;
+    }
+    offscreen.settle();
+
+    if options.a11y {
+        // Drawn once first: dialogs' and menus' popups open as their
+        // conditional elements are made, which drawing does.
+        offscreen.render()?;
+        offscreen.settle();
+        crate::a11y::print(&offscreen.app)?;
+    }
+    if let Some(path) = &options.snapshot {
+        offscreen.snapshot(path)?;
+        eprintln!(
+            "saved {} ({}x{} at {}x)",
+            path.display(),
+            width,
+            height,
+            scale
+        );
+    }
+    if let Some(seconds) = options.soak {
+        offscreen.soak(seconds, options.check, options.still)?;
+    }
+    Ok(())
+}
+
+impl Offscreen {
+    /// Apply what the daemon sent until it has answered (or said it can't
+    /// be reached), then a moment longer for anything that follows.
+    fn wait_for_daemon(&mut self, extra: Duration) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (ready, link) = {
+                let s = self.hub.session.borrow();
+                (s.loaded && s.status.is_some(), s.link)
+            };
+            if ready || link == Some(Link::Failed) {
+                break;
+            }
+            if Instant::now() > deadline {
+                if link.is_some() {
+                    break;
+                }
+                bail!("isocastd did not answer within 10 s");
+            }
+            self.pump(Duration::from_millis(20));
+        }
+        let until = Instant::now() + extra;
+        while Instant::now() < until {
+            self.pump(Duration::from_millis(20));
+        }
+        Ok(())
+    }
+
+    /// Apply the daemon's updates that arrive within `wait`.
+    fn pump(&mut self, wait: Duration) {
+        if let Ok(update) = self.updates.recv_timeout(wait) {
+            self.hub.apply(update);
+            while let Ok(update) = self.updates.try_recv() {
+                self.hub.apply(update);
+            }
+        }
+        slint::platform::update_timers_and_animations();
+        self.hub.flush();
+    }
+
+    /// Run timers and animations to the end, a frame at a time.
+    fn settle(&mut self) {
+        for _ in 0..30 {
+            self.advance(Duration::from_millis(16));
+        }
+    }
+
+    fn advance(&mut self, by: Duration) {
+        self.now.set(self.now.get() + by);
+        slint::platform::update_timers_and_animations();
+    }
+
+    /// A scripted state (`--state NAME[:ARG]`), run in order. The
+    /// window-wide ones are here; each area answers its own (see
+    /// src/areas/mod.rs):
+    /// `dialog:KIND[:ARG]` (open a dialog), `menu:OWNER` (ask for a menu,
+    /// in the middle of the window), `menu-bar:ID` (a menu bar command),
+    /// `menu-bar-open:TITLE` (the menu bar drawn in the window, as where
+    /// there is no native one, with menu TITLE open),
+    /// `toast:KIND:TITLE` (info, success, warning, error), `kit`,
+    /// `kit-dialog`, `kit-menu`, `kit-dropdown` (the widget gallery),
+    /// `type:TEXT` (into the focused field), `key:NAME` (escape, return,
+    /// tab, up, down, left, right, f2, delete, or a character),
+    /// `drag:X1,Y1,X2,Y2` (a pointer drag in window points), `hover:X,Y`
+    /// (the pointer moved there, not pressed), `hide:DOCK`
+    /// (scenes, sources, mixer, transitions, controls, toolbar, status),
+    /// `wait:MS` (for the daemon).
+    fn state(&mut self, state: &str) -> Result<()> {
+        let (name, arg) = state.split_once(':').unwrap_or((state, ""));
+        let app = &self.app;
+        let ui = app.global::<Ui>();
+        match name {
+            "dialog" => {
+                let (kind, arg) = arg.split_once(':').unwrap_or((arg, ""));
+                self.hub.open_dialog(kind, arg);
+            }
+            "menu" => {
+                let (w, h) = (app.get_preview_width(), app.get_preview_height());
+                app.global::<Menus>()
+                    .invoke_request(arg.into(), w / 2.0, h / 2.0, 0.0, 0.0);
+            }
+            "menu-bar" => self.hub.menu(arg),
+            "menu-bar-open" => self.open_menu_bar(arg)?,
+            "toast" => {
+                let (kind, title) = arg.split_once(':').unwrap_or((arg, "A toast"));
+                let kind = match kind {
+                    "success" => ToastKind::Success,
+                    "warning" => ToastKind::Warning,
+                    "error" => ToastKind::Error,
+                    _ => ToastKind::Info,
+                };
+                self.hub.toast(kind, title, "");
+            }
+            "kit" => app.set_kit_gallery(true),
+            "kit-dialog" => {
+                app.set_kit_gallery(true);
+                app.set_kit_dialog(true);
+            }
+            "kit-menu" => {
+                app.set_kit_gallery(true);
+                self.hub
+                    .show_menu("kit", crate::kit::sample_menu(), [380.0, 120.0, 0.0, 0.0]);
+            }
+            "kit-dropdown" => {
+                app.set_kit_gallery(true);
+                app.set_kit_dropdown(app.get_kit_dropdown() + 1);
+            }
+            "type" => {
+                for c in arg.chars() {
+                    let text = slint::SharedString::from(c.to_string());
+                    self.key(text);
+                }
+            }
+            "key" => {
+                let text: slint::SharedString = match arg {
+                    "escape" => slint::platform::Key::Escape.into(),
+                    "return" => slint::platform::Key::Return.into(),
+                    "tab" => slint::platform::Key::Tab.into(),
+                    "up" => slint::platform::Key::UpArrow.into(),
+                    "down" => slint::platform::Key::DownArrow.into(),
+                    "left" => slint::platform::Key::LeftArrow.into(),
+                    "right" => slint::platform::Key::RightArrow.into(),
+                    "f2" => slint::platform::Key::F2.into(),
+                    "delete" => slint::platform::Key::Delete.into(),
+                    other => other.into(),
+                };
+                self.key(text);
+            }
+            "drag" => {
+                let [x1, y1, x2, y2] = numbers::<4>(arg)?;
+                self.drag((x1, y1), (x2, y2), 12);
+            }
+            "hover" => {
+                let [x, y] = numbers::<2>(arg)?;
+                self.pointer(WindowEvent::PointerMoved {
+                    position: LogicalPosition::new(x, y),
+                });
+                self.advance(Duration::from_millis(16));
+            }
+            // What a screen reader's press does: the accessible default
+            // action of the first element named `arg`.
+            "press" => {
+                let found = i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+                    &self.app, arg,
+                )
+                .next();
+                let Some(element) = found else {
+                    bail!("no element named {arg:?} (see --a11y)");
+                };
+                element.invoke_accessible_default_action();
+                self.advance(Duration::from_millis(16));
+            }
+            "hide" => match arg {
+                "scenes" => ui.set_show_scenes(false),
+                "sources" => ui.set_show_sources(false),
+                "mixer" => ui.set_show_mixer(false),
+                "transitions" => ui.set_show_transitions(false),
+                "controls" => ui.set_show_controls(false),
+                "toolbar" => ui.set_show_source_toolbar(false),
+                "status" => ui.set_show_status_bar(false),
+                other => bail!(
+                    "no dock {other:?}; one of scenes, sources, mixer, transitions, controls, toolbar, status"
+                ),
+            },
+            "wait" => {
+                let ms: u64 = arg.parse().context("wait:MS takes milliseconds")?;
+                let until = Instant::now() + Duration::from_millis(ms);
+                while Instant::now() < until {
+                    self.pump(Duration::from_millis(20));
+                }
+            }
+            other => {
+                let answer = self
+                    .hub
+                    .areas()
+                    .iter()
+                    .find_map(|area| area.state(&self.hub, app, other, arg));
+                match answer {
+                    Some(result) => result?,
+                    None => {
+                        let areas: Vec<&str> = areas::STATES
+                            .iter()
+                            .flat_map(|s| s.iter().copied())
+                            .collect();
+                        bail!(
+                            "unknown state {other:?}; one of dialog:KIND[:ARG], menu:OWNER, menu-bar:ID, menu-bar-open:TITLE, toast:KIND:TITLE, kit, kit-dialog, kit-menu, kit-dropdown, type:TEXT, key:NAME, drag:X1,Y1,X2,Y2, hover:X,Y, press:LABEL, hide:DOCK, wait:MS, {}",
+                            areas.join(", ")
+                        )
+                    }
+                }
+            }
+        }
+        // Let what the state changed show (and the daemon answer).
+        self.pump(Duration::from_millis(20));
+        self.hub.flush();
+        self.advance(Duration::from_millis(16));
+        Ok(())
+    }
+
+    /// Show the menu bar in the window (Slint draws its own where there is
+    /// no native one) and click menu `title` open: its items as the menu
+    /// bar has them, for a snapshot.
+    fn open_menu_bar(&mut self, title: &str) -> Result<()> {
+        self.app.set_native_menu(true);
+        self.advance(Duration::from_millis(16));
+        self.render()?;
+        // The menu's title, in the bar along the top of the window.
+        let found =
+            i_slint_backend_testing::ElementHandle::find_by_accessible_label(&self.app, title)
+                .find(|e| e.absolute_position().y < 40.0 && e.size().height > 0.0);
+        let Some(element) = found else {
+            bail!(
+                "no menu {title:?} in the menu bar (File, Edit, View, Docks, Profile, Scene \
+                 Collection, Tools, Window, Help)"
+            );
+        };
+        let (at, size) = (element.absolute_position(), element.size());
+        let position = LogicalPosition::new(at.x + size.width / 2.0, at.y + size.height / 2.0);
+        self.pointer(WindowEvent::PointerMoved { position });
+        self.pointer(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        self.advance(Duration::from_millis(16));
+        self.pointer(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+        self.advance(Duration::from_millis(16));
+        Ok(())
+    }
+
+    fn key(&mut self, text: slint::SharedString) {
+        let window = &self.window.window;
+        window.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        window.dispatch_event(WindowEvent::KeyReleased { text });
+        self.advance(Duration::from_millis(16));
+    }
+
+    fn pointer(&self, event: WindowEvent) {
+        self.window.window.dispatch_event(event);
+    }
+
+    /// Press, move in `steps`, release.
+    fn drag(&mut self, from: (f32, f32), to: (f32, f32), steps: u32) {
+        let at = |t: f32| {
+            LogicalPosition::new(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
+        };
+        self.pointer(WindowEvent::PointerMoved { position: at(0.0) });
+        self.pointer(WindowEvent::PointerPressed {
+            position: at(0.0),
+            button: PointerEventButton::Left,
+        });
+        for step in 1..=steps {
+            self.advance(Duration::from_millis(16));
+            self.pointer(WindowEvent::PointerMoved {
+                position: at(step as f32 / steps as f32),
+            });
+        }
+        self.pointer(WindowEvent::PointerReleased {
+            position: at(1.0),
+            button: PointerEventButton::Left,
+        });
+        self.advance(Duration::from_millis(16));
+    }
+
+    /// Draw the window into the target texture.
+    fn render(&mut self) -> Result<wgpu::Texture> {
+        let size = self.window.size.get();
+        let stale = self
+            .target
+            .as_ref()
+            .is_none_or(|t| t.width() != size.width || t.height() != size.height);
+        if stale {
+            self.target = Some(self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("offscreen window"),
+                size: wgpu::Extent3d {
+                    width: size.width,
+                    height: size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            }));
+        }
+        let target = self.target.clone().expect("made above");
+        // wgpu doesn't see Skia's drawing (it goes to Metal directly) and
+        // would zero a texture it thinks was never written before copying
+        // from it: clearing it through wgpu first marks it written.
+        let view = target.create_view(&Default::default());
+        let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("offscreen window"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        self.gpu.queue.submit([encoder.finish()]);
+        self.window
+            .renderer
+            .render_to_texture(&target)
+            .map_err(|e| anyhow::anyhow!("could not draw the window: {e}"))?;
+        Ok(target)
+    }
+
+    fn snapshot(&mut self, path: &Path) -> Result<()> {
+        // Two passes: the first lays out and makes the preview texture at
+        // its final size.
+        self.render()?;
+        let target = self.render()?;
+        let (w, h) = (target.width(), target.height());
+        let rgba = read_pixels(&self.gpu, &target, 0, 0, w, h)?;
+        let mut file = std::io::BufWriter::new(
+            std::fs::File::create(path)
+                .with_context(|| format!("can't write {}", path.display()))?,
+        );
+        let mut encoder = png::Encoder::new(&mut file, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&rgba)?;
+        writer.finish()?;
+        Ok(())
+    }
+
+    /// Draw at 60 fps for `seconds` while dragging the selection box back
+    /// and forth, as a person would (or holding it still, with `still`). With `check`, read back each frame
+    /// and count frames whose preview is black, and frames where the box
+    /// and the item it outlines in the picture are not in the same place.
+    fn soak(&mut self, seconds: f64, check: bool, still: bool) -> Result<()> {
+        let frame = Duration::from_secs_f64(1.0 / 60.0);
+        if self.app.global::<Ui>().get_selected_item().is_empty() {
+            bail!("--soak needs a selected item (the scene on air has none)");
+        }
+        // Grab the box away from its handles.
+        self.render()?;
+        let s = self.scale;
+        let grab = |app: &AppWindow| {
+            LogicalPosition::new(
+                app.get_box_left() + app.get_box_width() * 0.3,
+                app.get_box_top() + app.get_box_height() * 0.3,
+            )
+        };
+        let mut position = grab(&self.app);
+        let start = position;
+        self.pointer(WindowEvent::PointerMoved { position });
+        self.pointer(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+
+        let mut meter = Meter::start();
+        let started = Instant::now();
+        let mut next = started;
+        let (mut frames, mut black, mut drift, mut late) = (0u64, 0u64, 0u64, 0u64);
+        let mut first_drift: Option<String> = None;
+        let mut step = if still { 0.0 } else { 9.0f32 };
+        while started.elapsed().as_secs_f64() < seconds {
+            // The pointer moves 9 points a frame, turning before the box
+            // leaves the picture.
+            let left = self.app.get_box_left();
+            if left + step < self.app.get_picture_left() + 20.0 {
+                step = step.abs();
+            } else if left + self.app.get_box_width() + step > self.app.get_picture_right() - 20.0 {
+                step = -step.abs();
+            }
+            position.x += step;
+            self.pointer(WindowEvent::PointerMoved { position });
+            self.advance(frame);
+            let target = self.render()?;
+            frames += 1;
+
+            if check {
+                let (bx, by) = (self.app.get_box_left(), self.app.get_box_top());
+                let (bw, bh) = (self.app.get_box_width(), self.app.get_box_height());
+                // A row across the box's left edge, a quarter of the way
+                // down (clear of the handles), 8 points each side.
+                let y = ((by + bh * 0.25) * s).round() as u32;
+                let x0 = ((bx - 8.0) * s).round().max(0.0) as u32;
+                let row = read_pixels(&self.gpu, &target, x0, y, (16.0 * s) as u32, 1)?;
+                let at = |points: f32| {
+                    let i = ((points * s).round() as usize).min(row.len() / 4 - 1) * 4;
+                    [row[i], row[i + 1], row[i + 2]]
+                };
+                let inside = at(8.0 + 4.0);
+                let outside = at(8.0 - 4.0);
+                if !is_item(inside) || is_item(outside) {
+                    drift += 1;
+                    first_drift.get_or_insert_with(|| {
+                        format!(
+                            "frame {frames}: box at x={bx:.1} w={bw:.1}; inside {inside:?}, outside {outside:?}"
+                        )
+                    });
+                }
+                // The middle of the box and the preview's corner area.
+                let mid = read_pixels(
+                    &self.gpu,
+                    &target,
+                    ((bx + bw * 0.5) * s) as u32,
+                    ((by + bh * 0.5) * s) as u32,
+                    1,
+                    1,
+                )?;
+                if mid[..3] == [0, 0, 0] {
+                    black += 1;
+                }
+            }
+
+            next += frame;
+            let now = Instant::now();
+            if now < next {
+                std::thread::sleep(next - now);
+            } else if now - next > frame {
+                late += 1;
+                next = now;
+            }
+            // Keep up with the daemon without waiting for it.
+            while let Ok(update) = self.updates.try_recv() {
+                self.hub.apply(update);
+            }
+        }
+        // Drop the box where it started, so the run leaves the setup as
+        // it found it.
+        self.pointer(WindowEvent::PointerMoved { position: start });
+        self.pointer(WindowEvent::PointerReleased {
+            position: start,
+            button: PointerEventButton::Left,
+        });
+        let seconds = meter.seconds();
+        let cpu = meter.lap();
+        let applies = crate::app::applies_json(&self.hub);
+        println!(
+            "{}",
+            serde_json::json!({
+                "mode": "offscreen",
+                "applies": applies,
+                "checked": check,
+                "dragging": !still,
+                "seconds": (seconds * 10.0).round() / 10.0,
+                "frames": frames,
+                "fps": (frames as f64 / seconds * 10.0).round() / 10.0,
+                "late_frames": late,
+                "black_frames": black,
+                "drift_frames": drift,
+                "first_drift": first_drift,
+                "cpu_percent_of_one_core": (cpu * 10.0).round() / 10.0,
+                "peak_memory_mb": usage::peak_memory() / (1 << 20),
+                "size": [self.window.size.get().width, self.window.size.get().height],
+            })
+        );
+        if check && (black > 0 || drift > 0) {
+            bail!("{black} black frames and {drift} frames where the box and picture differ");
+        }
+        Ok(())
+    }
+}
+
+/// The item's verdigris, or its lighter checker squares.
+fn is_item(rgb: [u8; 3]) -> bool {
+    let near = |a: [u8; 3], b: [u8; 3]| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= 6);
+    near(rgb, ITEM_RGB) || near(rgb, [86, 169, 150])
+}
+
+fn numbers<const N: usize>(text: &str) -> Result<[f32; N]> {
+    let values: Vec<f32> = text
+        .split(',')
+        .map(|v| v.trim().parse::<f32>())
+        .collect::<Result<_, _>>()
+        .with_context(|| format!("expected {N} numbers separated by commas, got {text:?}"))?;
+    values
+        .try_into()
+        .map_err(|v: Vec<f32>| anyhow::anyhow!("expected {N} numbers, got {}", v.len()))
+}
+
+/// Read a rectangle of an RGBA8 texture back from the GPU.
+fn read_pixels(
+    gpu: &Gpu,
+    texture: &wgpu::Texture,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) -> Result<Vec<u8>> {
+    let x = x.min(texture.width() - 1);
+    let y = y.min(texture.height() - 1);
+    let w = w.clamp(1, texture.width() - x);
+    let h = h.clamp(1, texture.height() - y);
+    let row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: row as u64 * h as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x, y, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    let submission = gpu.queue.submit([encoder.finish()]);
+    let slice = buffer.slice(..);
+    let (tx, rx) = channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    gpu.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(Duration::from_secs(5)),
+        })
+        .context("the GPU did not finish drawing")?;
+    rx.recv()
+        .context("the GPU did not return the picture")?
+        .context("could not read the picture back")?;
+    let mapped = slice
+        .get_mapped_range()
+        .context("could not read the picture back")?;
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for line in 0..h as usize {
+        let start = line * row as usize;
+        out.extend_from_slice(&mapped[start..start + w as usize * 4]);
+    }
+    drop(mapped);
+    buffer.unmap();
+    Ok(out)
+}

@@ -1,0 +1,92 @@
+// Area E, the canvas: the monitors' pictures and the canvas editor over
+// the edited one (selection, move/resize/crop, snapping, locked items).
+// src/areas/canvas.rs and the preview modules (preview.rs, layers.rs,
+// frames.rs, picture.rs) fill this.
+//
+// Positions are in canvas pixels. An item's box is its placement before
+// rotation (top-left and size) and its rotation in degrees, clockwise
+// about its centre (the web app's `placement`).
+
+// An item of the edited scene the pointer can be over.
+export struct CanvasBox {
+    path: string,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    rotate: float,
+}
+
+// A snapping guide: a vertical line at x = `at`, or a horizontal one at
+// y = `at`.
+export struct CanvasGuide {
+    vertical: bool,
+    at: float,
+}
+
+export global CanvasArea {
+    // The pictures as Slint images (`--preview image`, and the offscreen
+    // test picture): the edited monitor's, and in Studio Mode the
+    // program's. With `native-picture` (macOS layers) the pictures are
+    // Core Animation layers under the window and these stay empty.
+    in property <image> picture;
+    in property <image> program-picture;
+    in property <bool> native-picture;
+    // Test runs (drag-lag): the shown box as a 3px pure green outline.
+    in property <bool> test-outline;
+    // Where the shown picture has the selected item (the layout of the
+    // setup revision that frame was drawn from).
+    in property <bool> shown-box-visible;
+    in property <float> shown-box-x;
+    in property <float> shown-box-y;
+    in property <float> shown-box-w;
+    in property <float> shown-box-h;
+    in property <float> shown-box-rotate;
+    // The selected item in the newest setup (where a gesture has put it).
+    in property <float> box-x;
+    in property <float> box-y;
+    in property <float> box-w;
+    in property <float> box-h;
+    in property <float> box-rotate;
+    // The selected item can't be moved (it is locked, or the preview is):
+    // a bone outline, no handles.
+    in property <bool> box-locked;
+    // An Option-drag is cropping: the handles turn bone.
+    in property <bool> cropping;
+    // The edited scene's items the pointer can be over, and the one it is
+    // over (or whose row in the Sources dock is: set it from there too).
+    in property <[CanvasBox]> boxes;
+    in-out property <string> hover-item;
+    // While dragging: the lines snapped to and the readout ("640, 360",
+    // "1280 × 720", "Crop 0 0 120 0") at the item's top-left corner.
+    in property <[CanvasGuide]> guides;
+    in property <string> readout;
+    in property <float> readout-x;
+    in property <float> readout-y;
+    // The pointer's shape over the editor: "", "move", "nwse", "nesw",
+    // "ns", "ew".
+    in property <string> cursor;
+    // The edited scene has no items: "Nothing in this scene yet" and an
+    // Add button.
+    in property <bool> scene-empty;
+    // What a monitor says instead of a picture ("" when there is one):
+    // the edited one, and Studio Mode's program.
+    in property <string> empty-text;
+    in property <string> program-empty-text;
+    // No picture yet (a spinner), or why there is none.
+    in property <bool> waiting;
+    in property <string> picture-error;
+    in property <bool> program-waiting;
+    // Studio Mode's monitor heads: the scenes in preview and on air.
+    in property <string> preview-name;
+    in property <string> program-name;
+
+    // The pointer over the editor, in canvas pixels: pressed (left
+    // button), moved (pressed or not), released; and a right click. The
+    // flags are the keys held: Option, Shift, Command.
+    callback pointer-down(float, float, bool, bool, bool);
+    callback pointer-moved(float, float, bool, bool, bool);
+    callback pointer-up(float, float);
+    // A right click at canvas (x, y), window point (wx, wy).
+    callback context-menu(float, float, length, length);
+}

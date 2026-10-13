@@ -1,0 +1,165 @@
+// The Scenes dock (the web app's scenes.js): the setup's scenes; a click
+// puts one on air (in Studio Mode, into preview, and the one on air shows
+// the program dot), 1–9 switch, double-click or F2 renames inline (Return
+// doesn't: in Studio Mode it takes the preview to air), a drag
+// reorders. The toolbar adds, removes and moves scenes; right-click opens
+// the scene's menu (or, away from the scenes, Add).
+
+import { Theme } from "../../theme.slint";
+import { Icons } from "../../icons.slint";
+import { Ui } from "../../state.slint";
+import {
+    Dock, DockToolbar, Dot, DropLine, IconButton, List, ListEmpty, ListRow, Menus, TextField,
+    Tip, ToolbarGap,
+} from "../../kit.slint";
+import { SourcesArea } from "state.slint";
+
+export component ScenesDock inherits Dock {
+    property <int> current: -1;
+    // The row being dragged, and the row it would land before (the count:
+    // after the last; -1: none).
+    property <int> drag-from: -1;
+    property <int> drop-at: -1;
+
+    title: "Scenes";
+
+    list := List {
+        label: "Scenes";
+        count: SourcesArea.scenes.length;
+        current: root.current;
+        navigate(index) => { SourcesArea.choose-scene(SourcesArea.scenes[index].id); }
+        unhandled-key(event) => {
+            if event.text == Key.F2 && root.current >= 0 {
+                SourcesArea.renaming-scene = SourcesArea.scenes[root.current].id;
+                return true;
+            }
+            false
+        }
+        background-menu(x, y) => { Menus.request("scenes:", x, y, 0, 0); }
+
+        for scene[i] in SourcesArea.scenes: Rectangle {
+            property <bool> chosen: Ui.studio ? scene.in-preview : scene.on-air;
+            changed chosen => {
+                if self.chosen {
+                    root.current = i;
+                }
+            }
+            init => {
+                if self.chosen {
+                    root.current = i;
+                }
+            }
+            height: Theme.row;
+
+            ListRow {
+                text: scene.name;
+                selected: parent.chosen;
+                description: scene.on-air ? "On air" : scene.in-preview ? "In preview" : "";
+                index: i;
+                count: SourcesArea.scenes.length;
+                focus-shown: list.keyboard-focus && i == root.current;
+                draggable: SourcesArea.renaming-scene == "";
+                dragging: root.drag-from == i;
+                // The web app's: only another scene switches (a click on
+                // the current one would switch again and end a double-click).
+                clicked => {
+                    if !parent.chosen {
+                        SourcesArea.choose-scene(scene.id);
+                    }
+                }
+                double-clicked => { SourcesArea.renaming-scene = scene.id; }
+                context-menu(x, y) => { Menus.request("scenes:" + scene.id, x, y, 0, 0); }
+                drag-moved(y) => {
+                    root.drag-from = i;
+                    root.drop-at = max(0, min(SourcesArea.scenes.length, floor((i * Theme.row + y + Theme.row / 2) / Theme.row)));
+                }
+                drag-ended => {
+                    if root.drop-at >= 0 && root.drop-at != root.drag-from && root.drop-at != root.drag-from + 1 {
+                        SourcesArea.move-scene(root.drag-from, root.drop-at);
+                    }
+                    root.drag-from = -1;
+                    root.drop-at = -1;
+                }
+
+                if Ui.studio && scene.on-air: VerticalLayout {
+                    alignment: center;
+                    padding-right: Theme.space-2;
+                    Dot {
+                        dot-color: Theme.onair-text;
+                    }
+                }
+            }
+
+            if root.drag-from < 0 && SourcesArea.renaming-scene != scene.id: Tooltip {
+                Tip {
+                    text: scene.tooltip;
+                }
+            }
+
+            if root.drop-at == i: DropLine {
+                y: -1px;
+            }
+            if root.drop-at == SourcesArea.scenes.length && i == SourcesArea.scenes.length - 1: DropLine {
+                y: parent.height - 1px;
+            }
+
+            if SourcesArea.renaming-scene == scene.id: TextField {
+                x: Theme.pane-x - 5px;
+                y: (parent.height - self.height) / 2;
+                width: parent.width - Theme.pane-x + 5px - Theme.space-1;
+                small: true;
+                font-size: Theme.fs;
+                text: scene.name;
+                label: "Scene name";
+                submits: false;
+                auto-focus: true;
+                accepted(name) => {
+                    SourcesArea.renaming-scene = "";
+                    SourcesArea.rename-scene(scene.id, name);
+                }
+                committed(name) => {
+                    if SourcesArea.renaming-scene == scene.id {
+                        SourcesArea.renaming-scene = "";
+                        SourcesArea.rename-scene(scene.id, name);
+                    }
+                }
+                cancelled => { SourcesArea.renaming-scene = ""; }
+            }
+        }
+        if SourcesArea.scenes.length == 0: ListEmpty {
+            text: "No scenes. Click + below to add one.";
+        }
+    }
+
+    DockToolbar {
+        IconButton {
+            small: true;
+            icon: Icons.plus;
+            label: "Add a scene";
+            enabled: Ui.has-setup;
+            clicked => { Ui.menu("new_scene_rename"); }
+        }
+        IconButton {
+            small: true;
+            icon: Icons.minus;
+            label: "Remove the scene";
+            enabled: root.current >= 0;
+            clicked => { Ui.menu("remove_scene"); }
+        }
+        ToolbarGap { }
+        IconButton {
+            small: true;
+            icon: Icons.chevron-up;
+            label: "Move up";
+            enabled: root.current > 0;
+            clicked => { Ui.menu("scene_up"); }
+        }
+        IconButton {
+            small: true;
+            icon: Icons.chevron-down;
+            label: "Move down";
+            enabled: root.current >= 0 && root.current < SourcesArea.scenes.length - 1;
+            clicked => { Ui.menu("scene_down"); }
+        }
+    }
+}

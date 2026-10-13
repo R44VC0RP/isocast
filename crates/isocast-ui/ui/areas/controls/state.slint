@@ -1,0 +1,94 @@
+// Area C: the Controls dock, the Scene Transitions dock, Studio Mode's
+// column, the status bar, and the recording and streaming states (their
+// details popovers, drop toasts). src/areas/controls.rs fills this.
+
+import { DropdownOption, FormGroup, ToastRow } from "../../kit.slint";
+
+// One file of the take, in the REC details.
+export struct FileRow {
+    name: string,
+    frames: string,
+    dropped: string,
+    dropped-bad: bool,
+    gaps: string,
+    gaps-warn: bool,
+}
+
+export global ControlsArea {
+    // ---- Recording and streaming
+    // idle, starting, recording, stopping
+    in property <string> record-state: "idle";
+    // offline, connecting, live, reconnecting, failed
+    in property <string> stream-state: "offline";
+    in property <bool> busy-record;
+    in property <bool> busy-stream;
+
+    // ---- Scene Transitions
+    in property <[DropdownOption]> transitions;
+    in property <string> transition: "cut";
+    in property <int> duration-ms: 300;
+    // Cut and Stinger have no duration of their own.
+    in property <bool> has-duration;
+    in property <string> duration-tooltip: "How long the transition takes";
+    // Cut and Fade have no properties.
+    in property <bool> has-properties;
+    // Studio Mode's quick transitions ("Cut", "Fade (300 ms)"…).
+    in property <[string]> quick-transitions;
+    // Something is in preview to take.
+    in property <bool> can-take;
+
+    // ---- Transition properties (dialog "transition"): the settings of
+    // the setup's transition, or of a kind that needs them before it can
+    // be chosen (a stinger's video, kept as a draft until OK).
+    in property <string> dialog-title: "Properties";
+    in property <[FormGroup]> form-groups;
+    in property <bool> dialog-draft;
+    // Nothing to set and no draft (Cut, Fade): just Close.
+    in property <bool> dialog-empty;
+    in property <bool> dialog-has-fields;
+
+    // ---- The status bar
+    in property <string> rec-time: "00:00:00";
+    in property <string> live-time: "00:00:00";
+    in property <string> rec-tooltip: "Not recording";
+    // "2.6%" or "—".
+    in property <string> cpu-text: "—";
+    in property <string> fps-text: "— / — FPS";
+    in property <string> fps-tooltip: "The engine isn’t running";
+    in property <bool> fps-lagging;
+    // Frames dropped in this take ("" for none; red in the status bar).
+    in property <string> dropped;
+    // While streaming: dropped frames ("14 (0.1%)"), the rate sent
+    // ("6.1 Mb/s"), and the connection's health: "off", "ok", "warn",
+    // "bad", with a word when it isn't fine ("Reconnecting").
+    in property <string> stream-dropped: "0 (0.0%)";
+    in property <bool> stream-dropped-bad;
+    in property <string> stream-kbps: "0 kb/s";
+    in property <string> stream-health: "off";
+    in property <string> stream-health-word;
+
+    // ---- The details popovers over REC and LIVE
+    in property <[FileRow]> files;
+    // The stream's: label, value, and "", "bad" or "warn".
+    in property <[ToastRow]> stream-rows;
+    // Opens a details popover from Rust ("rec" or "live"): the status bar
+    // opens it when `details-serial` changes.
+    in property <string> details-which;
+    in property <int> details-serial;
+
+    callback toggle-stream();
+    callback toggle-record();
+    // A marker with this label ("" for "Marker").
+    callback marker(string);
+    callback split();
+    callback choose-transition(string);
+    callback set-duration(int);
+    // Studio Mode: put the preview on air, with quick transition `index`,
+    // or the setup's transition (-1).
+    callback take(int);
+    // Transition properties: OK (applies a draft), Cancel (puts the
+    // transition back as it was), Defaults.
+    callback dialog-accept();
+    callback dialog-cancel();
+    callback dialog-defaults();
+}

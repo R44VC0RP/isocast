@@ -1,0 +1,757 @@
+// The first run (the web app's onboarding.js, docs/design.md 3.22):
+// permissions, then the devices to use, then the layout; Create setup
+// makes it with `init_setup` and the window opens on it. A card over the
+// window (Welcome's "Start with this Mac", or Tools → Auto-Configuration
+// Wizard), one height for every step so the header and Continue don't
+// jump.
+
+import { Theme } from "../../theme.slint";
+import { BrandMark, Icon, Icons } from "../../icons.slint";
+import { Ui } from "../../state.slint";
+import {
+    Button, ButtonVariant, ControlSize, FocusRing, IconButton, LinkButton, ScrollArea, Segmented,
+    Spinner, Switch, TextField,
+} from "../../kit.slint";
+import { SettingsArea } from "state.slint";
+
+// A step in the header: its dot (the number, or a check once done) and
+// its name.
+component StepItem inherits HorizontalLayout {
+    in property <int> index;
+    in property <string> label;
+    property <bool> on: SettingsArea.step == root.index;
+    property <bool> done: SettingsArea.step > root.index;
+    spacing: Theme.space-2;
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            background: root.on ? Theme.accent-fill : root.done ? Theme.onair-soft : transparent;
+            border-width: root.on || root.done ? 0 : 1px;
+            border-color: Theme.outline;
+            if root.done: Icon {
+                path: Icons.check;
+                size: Theme.icon-xs;
+                color: Theme.onair-text;
+            }
+            if !root.done: Text {
+                text: root.index + 1;
+                color: root.on ? Theme.on-accent : Theme.text-3;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-xs;
+                font-weight: Theme.weight-semibold;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    Text {
+        text: root.label;
+        color: root.on ? Theme.text : root.done ? Theme.text-2 : Theme.text-3;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        font-weight: Theme.weight-medium;
+        vertical-alignment: center;
+    }
+}
+
+// A display, camera or microphone to choose: a radio, its name and a dim
+// line about it.
+component DeviceItem inherits Rectangle {
+    in property <string> title;
+    in property <string> meta;
+    in property <bool> on;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    forward-focus: fs;
+    property <bool> keyboard;
+
+    height: max(36px, row.preferred-height);
+    background: root.on ? Theme.selected : ta.has-hover && root.enabled ? Theme.hover : transparent;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    accessible-role: radio-button;
+    accessible-label: root.title;
+    accessible-description: root.meta;
+    accessible-checkable: true;
+    accessible-checked: root.on;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    row := HorizontalLayout {
+        padding-top: 6px;
+        padding-bottom: 6px;
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: Theme.check;
+                height: Theme.check;
+                border-radius: self.width / 2;
+                border-width: root.on ? 4px : 1px;
+                border-color: root.on ? Theme.accent : Theme.outline;
+                background: root.on ? Theme.bone : transparent;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                overflow: elide;
+                accessible-role: none;
+            }
+            if root.meta != "": Text {
+                text: root.meta;
+                color: root.on ? Theme.text-2 : Theme.text-3;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-xs;
+                overflow: elide;
+                accessible-role: none;
+            }
+        }
+    }
+    FocusRing {
+        inset: true;
+        radius: 0;
+        shown: fs.has-focus && root.keyboard;
+    }
+}
+
+// A column of devices: its label, then its choices.
+component DeviceGroup inherits VerticalLayout {
+    in property <string> label;
+    // Three equal columns, however long their names.
+    preferred-width: 0px;
+    min-width: 0px;
+    spacing: Theme.space-1;
+    alignment: start;
+    horizontal-stretch: 1;
+    Text {
+        text: root.label;
+        color: Theme.text-2;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        font-weight: Theme.weight-semibold;
+        height: self.preferred-height + Theme.space-1;
+        vertical-alignment: top;
+    }
+    @children
+}
+
+// "Looking…" while the devices come.
+component Looking inherits HorizontalLayout {
+    min-height: 36px;
+    padding-left: Theme.space-3;
+    padding-right: Theme.space-3;
+    spacing: Theme.space-2;
+    alignment: start;
+    VerticalLayout {
+        alignment: center;
+        Spinner {
+            small: true;
+        }
+    }
+    Text {
+        text: "Looking…";
+        color: Theme.text-3;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        vertical-alignment: center;
+    }
+}
+
+// A tiny picture of a layout: the screen in grey, the camera in copper.
+component LayoutPicture inherits Rectangle {
+    in property <string> layout;
+    property <bool> side: root.layout == "side_by_side";
+    property <bool> right: root.layout == "bottom_right" || root.layout == "top_right";
+    property <bool> top: root.layout == "top_right" || root.layout == "top_left";
+    width: 72px;
+    height: 41px;
+    background: Theme.control;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    Rectangle {
+        x: 4px;
+        y: 4px;
+        width: root.side ? 44px : 64px;
+        height: 33px;
+        background: Theme.text-3;
+    }
+    if root.side: Rectangle {
+        x: 51px;
+        y: 4px;
+        width: 17px;
+        height: 33px;
+        background: Theme.accent;
+    }
+    if !root.side: Rectangle {
+        x: root.right ? 46px : 4px;
+        y: root.top ? 4px : 25px;
+        width: 22px;
+        height: 12px;
+        background: Theme.accent;
+        border-width: 1px;
+        border-color: Theme.surface-panel;
+    }
+}
+
+component LayoutTile inherits Rectangle {
+    in property <string> layout;
+    in property <string> label;
+    property <bool> on: SettingsArea.layout == root.layout;
+
+    forward-focus: fs;
+    property <bool> keyboard;
+
+    horizontal-stretch: 1;
+    height: column.preferred-height;
+    background: root.on ? Theme.selected : ta.has-hover ? Theme.hover : transparent;
+    accessible-role: radio-button;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.on;
+    accessible-action-default => { SettingsArea.ob-set("layout", root.layout); }
+
+    ta := TouchArea {
+        clicked => { SettingsArea.ob-set("layout", root.layout); }
+    }
+    fs := FocusScope {
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                SettingsArea.ob-set("layout", root.layout);
+                return accept;
+            }
+            reject
+        }
+    }
+    column := VerticalLayout {
+        padding-top: Theme.space-3;
+        padding-bottom: Theme.space-2;
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-2;
+        spacing: Theme.space-2;
+        HorizontalLayout {
+            alignment: center;
+            LayoutPicture {
+                layout: root.layout;
+            }
+        }
+        Text {
+            text: root.label;
+            color: root.on || ta.has-hover ? Theme.text : Theme.text-2;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            horizontal-alignment: center;
+            accessible-role: none;
+        }
+    }
+    if root.on: Rectangle {
+        border-width: 1px;
+        border-color: Theme.accent;
+    }
+    FocusRing {
+        inset: true;
+        radius: 0;
+        shown: fs.has-focus && root.keyboard;
+    }
+}
+
+// A form row of the Layout step: a 96px label, then its controls.
+component ObRow inherits HorizontalLayout {
+    in property <string> label;
+    spacing: Theme.space-3;
+    Text {
+        width: 96px;
+        text: root.label;
+        color: Theme.text-2;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+    @children
+}
+
+// The step's title (the brand face) and what it is about.
+component StepTitle inherits VerticalLayout {
+    in property <string> title;
+    in property <string> lead;
+    spacing: Theme.space-2;
+    padding-bottom: Theme.space-5;
+    Text {
+        text: root.title;
+        font-family: Theme.font-brand;
+        font-size: Theme.fs-display;
+        font-weight: Theme.weight-semibold;
+        letter-spacing: Theme.tracking-display;
+        color: Theme.text;
+        accessible-role: AccessibleRole.text;
+    }
+    Text {
+        max-width: 600px;
+        text: root.lead;
+        color: Theme.text-2;
+        font-size: Theme.fs-lead;
+        letter-spacing: Theme.tracking-lead;
+        line-height-factor: Theme.leading-lead;
+        wrap: word-wrap;
+    }
+}
+
+component PermissionsStep inherits VerticalLayout {
+    spacing: 0;
+    alignment: start;
+    StepTitle {
+        title: "Let Isocast see and hear";
+        lead: "macOS asks you once for each. You can skip any of them now; your setup leaves out what it can’t use, and you can allow it later.";
+    }
+    Rectangle {
+        height: 1px;
+        background: Theme.line;
+    }
+    if !SettingsArea.checked: HorizontalLayout {
+        min-height: 64px;
+        spacing: Theme.space-3;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Spinner { }
+        }
+        Text {
+            text: "Checking…";
+            color: Theme.text-2;
+            vertical-alignment: center;
+        }
+    }
+    for permission[i] in SettingsArea.permissions: VerticalLayout {
+        spacing: 0;
+        if i > 0: Rectangle {
+            height: 1px;
+            background: Theme.line;
+        }
+        HorizontalLayout {
+            min-height: 64px;
+            padding-top: Theme.space-3;
+            padding-bottom: Theme.space-3;
+            spacing: Theme.space-3;
+            VerticalLayout {
+                alignment: center;
+                Icon {
+                    path: Icons.named(permission.icon);
+                    size: Theme.icon-lg;
+                    color: Theme.accent-text;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                spacing: 2px;
+                Text {
+                    text: permission.title;
+                    color: Theme.text;
+                    font-weight: Theme.weight-semibold;
+                }
+                Text {
+                    text: permission.hint;
+                    color: Theme.text-3;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    line-height-factor: Theme.leading-sm;
+                    wrap: word-wrap;
+                }
+                if permission.todo != "": HorizontalLayout {
+                    padding-top: 2px;
+                    spacing: Theme.space-1;
+                    alignment: start;
+                    Text {
+                        text: permission.todo;
+                        color: Theme.text-2;
+                        font-size: Theme.fs-sm;
+                        letter-spacing: Theme.tracking-sm;
+                        line-height-factor: Theme.leading-sm;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                    if permission.restart: LinkButton {
+                        text: "restart the engine.";
+                        clicked => { SettingsArea.ob-restart-engine(); }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: end;
+                if permission.granted: VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        path: Icons.check;
+                        size: Theme.icon-sm;
+                        color: Theme.onair-text;
+                    }
+                }
+                Text {
+                    text: permission.state;
+                    color: permission.granted ? Theme.onair-text : permission.denied ? Theme.danger-text : Theme.text-2;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    vertical-alignment: center;
+                }
+            }
+            if permission.open-settings: VerticalLayout {
+                alignment: center;
+                Button {
+                    text: "Open Settings";
+                    clicked => { SettingsArea.ob-open-settings(permission.id); }
+                }
+            }
+        }
+    }
+    Rectangle {
+        height: 1px;
+        background: Theme.line;
+    }
+    HorizontalLayout {
+        padding-top: Theme.space-4;
+        padding-left: Theme.space-8;
+        spacing: Theme.space-2;
+        alignment: start;
+        if SettingsArea.any-to-ask: Button {
+            text: SettingsArea.asking ? "Waiting for your answers…" : "Allow access…";
+            variant: ButtonVariant.primary;
+            enabled: !SettingsArea.asking;
+            clicked => { SettingsArea.ob-ask(); }
+        }
+        Button {
+            text: "Check again";
+            clicked => { SettingsArea.ob-check(); }
+        }
+    }
+}
+
+component DevicesStep inherits VerticalLayout {
+    spacing: 0;
+    alignment: start;
+    StepTitle {
+        title: "Choose your devices";
+        lead: "What to capture. You can add more sources, and change these, once you’re in.";
+    }
+    HorizontalLayout {
+        spacing: Theme.space-5;
+        DeviceGroup {
+            label: "Screen";
+            if !SettingsArea.devices-listed: Looking { }
+            for display in SettingsArea.displays: DeviceItem {
+                title: display.title;
+                meta: display.meta;
+                on: SettingsArea.display == display.value;
+                clicked => { SettingsArea.ob-set("display", display.value); }
+            }
+            if SettingsArea.displays-empty != "": Text {
+                text: SettingsArea.displays-empty;
+                color: Theme.text-3;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading-sm;
+                wrap: word-wrap;
+            }
+        }
+        DeviceGroup {
+            label: "Camera";
+            if !SettingsArea.devices-listed: Looking { }
+            for camera in SettingsArea.cameras: DeviceItem {
+                title: camera.title;
+                meta: camera.meta;
+                enabled: !camera.disabled;
+                on: SettingsArea.camera == camera.value;
+                clicked => { SettingsArea.ob-set("camera", camera.value); }
+            }
+        }
+        DeviceGroup {
+            label: "Microphone";
+            if !SettingsArea.devices-listed: Looking { }
+            for microphone in SettingsArea.microphones: DeviceItem {
+                title: microphone.title;
+                meta: microphone.meta;
+                on: SettingsArea.microphone == microphone.value;
+                clicked => { SettingsArea.ob-set("microphone", microphone.value); }
+            }
+            if SettingsArea.devices-listed: HorizontalLayout {
+                padding-top: Theme.space-2;
+                padding-left: Theme.space-3;
+                padding-right: Theme.space-3;
+                spacing: Theme.space-2;
+                VerticalLayout {
+                    alignment: center;
+                    Switch {
+                        on: SettingsArea.system-audio;
+                        label: "Include what this Mac plays";
+                        toggled(on) => { SettingsArea.ob-set("system_audio", on ? "true" : "false"); }
+                    }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: "Include what this Mac plays";
+                    color: Theme.text-2;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    line-height-factor: Theme.leading-sm;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
+component LayoutStep inherits VerticalLayout {
+    spacing: 0;
+    alignment: start;
+    StepTitle {
+        title: "Lay it out";
+        lead: "Where the camera goes over your screen. You get three scenes to switch between: Screen + Camera, Camera, and Screen.";
+    }
+    HorizontalLayout {
+        spacing: Theme.space-2;
+        LayoutTile {
+            layout: "bottom_right";
+            label: "Bottom right";
+        }
+        LayoutTile {
+            layout: "bottom_left";
+            label: "Bottom left";
+        }
+        LayoutTile {
+            layout: "top_right";
+            label: "Top right";
+        }
+        LayoutTile {
+            layout: "top_left";
+            label: "Top left";
+        }
+        LayoutTile {
+            layout: "side_by_side";
+            label: "Side by side";
+        }
+    }
+    VerticalLayout {
+        padding-top: Theme.space-6;
+        spacing: Theme.space-3;
+        ObRow {
+            label: "Canvas";
+            Segmented {
+                horizontal-stretch: 0;
+                options: [
+                    { value: "1920x1080", label: "1080p" },
+                    { value: "2560x1440", label: "1440p" },
+                    { value: "3840x2160", label: "4K" },
+                    { value: "1080x1920", label: "Vertical" },
+                ];
+                value: SettingsArea.ob-canvas;
+                label: "Canvas";
+                selected(value) => { SettingsArea.ob-set("canvas", value); }
+            }
+            Segmented {
+                horizontal-stretch: 0;
+                options: [{ value: "30", label: "30 fps" }, { value: "60", label: "60 fps" }];
+                value: SettingsArea.ob-fps;
+                label: "Frame rate";
+                selected(value) => { SettingsArea.ob-set("fps", value); }
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+        }
+        ObRow {
+            label: "Recordings";
+            TextField {
+                text: SettingsArea.ob-folder;
+                mono: true;
+                label: "Recordings";
+                committed(text) => { SettingsArea.ob-set("folder", text); }
+            }
+            Button {
+                text: "Choose…";
+                clicked => { SettingsArea.ob-browse(); }
+            }
+        }
+        ObRow {
+            label: "Name";
+            TextField {
+                text: SettingsArea.ob-name;
+                label: "Name";
+                committed(text) => { SettingsArea.ob-set("name", text); }
+            }
+        }
+    }
+}
+
+export component Onboarding inherits Rectangle {
+    background: Theme.scrim;
+    TouchArea { }
+
+    keys := FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.Escape && SettingsArea.can-close {
+                SettingsArea.ob-close();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    card := Rectangle {
+        width: min(760px, root.width - 40px);
+        height: min(560px, root.height - 40px);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: Theme.surface-panel;
+        border-width: 1px;
+        border-color: Theme.line-strong;
+        border-radius: Theme.r-panel;
+        drop-shadow-color: Theme.shadow-color;
+        drop-shadow-blur: Theme.shadow-blur;
+        drop-shadow-offset-y: Theme.shadow-y;
+        accessible-role: groupbox;
+        accessible-label: "Set up Isocast";
+
+        VerticalLayout {
+            padding: 1px;
+            spacing: 0;
+
+            // The header: the mark, the steps, Close.
+            HorizontalLayout {
+                height: 64px - 1px;
+                padding-left: Theme.space-8 - 1px;
+                padding-right: Theme.space-4 - 1px;
+                spacing: Theme.space-4;
+                VerticalLayout {
+                    alignment: center;
+                    BrandMark {
+                        size: 28px;
+                    }
+                }
+                HorizontalLayout {
+                    horizontal-stretch: 1;
+                    spacing: Theme.space-5;
+                    alignment: start;
+                    StepItem {
+                        index: 0;
+                        label: "Permissions";
+                    }
+                    StepItem {
+                        index: 1;
+                        label: "Devices";
+                    }
+                    StepItem {
+                        index: 2;
+                        label: "Layout";
+                    }
+                }
+                if SettingsArea.can-close: VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        icon: Icons.x;
+                        label: "Close";
+                        clicked => { SettingsArea.ob-close(); }
+                    }
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.line;
+            }
+
+            ScrollArea {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding-top: Theme.space-6;
+                    padding-bottom: Theme.space-6;
+                    padding-left: Theme.space-8 - 1px;
+                    padding-right: Theme.space-8 - 1px;
+                    if SettingsArea.step == 0: PermissionsStep { }
+                    if SettingsArea.step == 1: DevicesStep { }
+                    if SettingsArea.step == 2: LayoutStep { }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Theme.line;
+            }
+            // The footer: Back (or Cancel) on the 32px edge, Continue or
+            // Create setup on the right.
+            HorizontalLayout {
+                padding-top: Theme.space-4;
+                padding-bottom: Theme.space-4;
+                padding-left: Theme.space-8 - 1px - Theme.space-3;
+                padding-right: Theme.space-8 - 1px;
+                spacing: Theme.space-2;
+                Button {
+                    text: SettingsArea.step > 0 ? "Back" : SettingsArea.can-close ? "Cancel" : "Back";
+                    variant: ButtonVariant.quiet;
+                    size: ControlSize.large;
+                    clicked => { SettingsArea.ob-back(); }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                if SettingsArea.step < 2: Button {
+                    horizontal-stretch: 0;
+                    text: "Continue";
+                    variant: ButtonVariant.primary;
+                    size: ControlSize.large;
+                    clicked => { SettingsArea.ob-next(); }
+                }
+                if SettingsArea.step == 2: HorizontalLayout {
+                    horizontal-stretch: 0;
+                    spacing: Theme.space-2;
+                    if SettingsArea.creating: VerticalLayout {
+                        alignment: center;
+                        Spinner {
+                            small: true;
+                        }
+                    }
+                    Button {
+                        text: "Create setup";
+                        variant: ButtonVariant.primary;
+                        size: ControlSize.large;
+                        enabled: !SettingsArea.creating;
+                        clicked => { SettingsArea.ob-create(); }
+                    }
+                }
+            }
+        }
+    }
+}

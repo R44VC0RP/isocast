@@ -1,0 +1,263 @@
+// The widget kit on one page, for snapshots only (`--state kit`, with
+// `kit-menu`, `kit-dialog` and `kit-dropdown` to open those): every control
+// in its states, so a change to the kit can be checked against
+// docs/design.md at a glance. Not reachable from the app's interface.
+
+import { Theme } from "theme.slint";
+import { Icons, BrandMark } from "icons.slint";
+import {
+    Button, IconButton, LinkButton, ButtonVariant, ControlSize,
+    TextField, TextArea, NumberField, ColorField,
+    Dropdown, DropdownOption,
+    Checkbox, Radio, Switch, Segmented, Segment,
+    Slider, Meter,
+    List, ListRow, ListEmpty, PickList,
+    Dock, DockToolbar, ToolbarGap, ToolbarSeparator,
+    Form, FormRow, FormSection, FormSeparator, SubForm, Hint, Callout, CalloutKind,
+    Dialog, NavList, NavTab, Toast, ToastKind,
+    Kbd, Spinner, Dot,
+} from "kit.slint";
+
+component Caption inherits Text {
+    color: Theme.text-3;
+    font-size: Theme.fs-xs;
+    font-weight: Theme.weight-semibold;
+}
+
+export component KitGallery inherits Rectangle {
+    in property <bool> show-dialog;
+    in-out property <int> open-dropdown;
+
+    property <[DropdownOption]> cameras: [
+        { value: "a", label: "Studio Video", detail: "" },
+        { value: "b", label: "FaceTime HD Camera", detail: "Built-in" },
+        { value: "c", label: "USB Capture HDMI", detail: "1 of 2" },
+        { value: "d", label: "USB Capture HDMI", detail: "2 of 2" },
+        { value: "e", label: "Desk View Camera", detail: "", disabled: true },
+    ];
+
+    // Opened when asked, or when the gallery appears already asked. (The
+    // gallery's menu, `kit-menu`, comes from Rust: src/kit.rs
+    // `sample_menu`.)
+    init => {
+        if root.open-dropdown > 0 {
+            dropdown.show-list();
+        }
+    }
+    changed open-dropdown => { dropdown.show-list(); }
+
+    background: Theme.surface-stage;
+
+    HorizontalLayout {
+        padding: Theme.space-4;
+        spacing: Theme.space-4;
+
+        // Column 1: buttons, choices, sliders
+        VerticalLayout {
+            spacing: Theme.space-2;
+            alignment: start;
+            width: 330px;
+
+            Caption { text: "BUTTONS"; }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                Button { text: "Secondary"; }
+                Button { text: "Primary"; variant: ButtonVariant.primary; }
+                Button { text: "Quiet"; variant: ButtonVariant.quiet; icon: Icons.settings; }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                Button { text: "Remove"; variant: ButtonVariant.danger; }
+                Button { text: "Stop Recording"; variant: ButtonVariant.live; }
+                Button { text: "Reconnecting…"; variant: ButtonVariant.live-warn; }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                Button { text: "Studio Mode"; checked: true; toggle: true; }
+                Button { text: "Disabled"; enabled: false; }
+                Button { text: "Small"; size: ControlSize.small; }
+                Button { text: "Large"; size: ControlSize.large; variant: ButtonVariant.primary; }
+            }
+            HorizontalLayout {
+                spacing: 2px;
+                alignment: start;
+                IconButton { icon: Icons.plus; label: "Add"; }
+                IconButton { icon: Icons.settings; label: "Settings"; menu-open: true; }
+                IconButton { icon: Icons.eye; label: "On"; on: true; small: true; }
+                IconButton { icon: Icons.speaker; label: "Muted"; danger: true; small: true; }
+                IconButton { icon: Icons.refresh; label: "Busy"; small: true; }
+                IconButton { icon: Icons.minus; label: "Disabled"; enabled: false; small: true; }
+                LinkButton { text: "Open System Settings"; }
+            }
+
+            Caption { text: "CHOICES"; }
+            HorizontalLayout {
+                spacing: Theme.space-4;
+                alignment: start;
+                Checkbox { text: "Visible"; checked: true; }
+                Checkbox { text: "Off"; }
+                Checkbox { text: "Disabled"; enabled: false; }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-4;
+                alignment: start;
+                Radio { text: "Create new"; checked: true; }
+                Radio { text: "Add existing"; }
+                Switch { on: true; label: "On"; }
+                Switch { label: "Off"; }
+            }
+            Segmented {
+                options: [{ value: "mov", label: "MOV" }, { value: "mp4", label: "MP4" }, { value: "mkv", label: "MKV" }];
+                value: "mov";
+                label: "Format";
+            }
+
+            Caption { text: "SLIDERS AND METERS"; }
+            Slider { value: 0.7; label: "Volume"; }
+            Slider { value: 0.25; minimum: -1; maximum: 1; origin: 0; label: "Balance"; }
+            Meter { rms: -24; peak: -14; hold: -9; label: "Quiet"; }
+            Meter { rms: -12; peak: -4; hold: -2; label: "Loud"; }
+            Meter { rms: -30; peak: -20; hold: -18; muted: true; label: "Muted"; }
+
+            Caption { text: "SMALL THINGS"; }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: start;
+                Kbd { text: "⌘"; }
+                Kbd { text: "S"; }
+                Spinner { }
+                VerticalLayout { alignment: center; Dot { dot-color: Theme.danger; } }
+                VerticalLayout { alignment: center; Dot { dot-color: Theme.onair-text; square: true; } }
+                BrandMark { size: 24px; }
+            }
+        }
+
+        // Column 2: a dock, fields, a dropdown
+        VerticalLayout {
+            spacing: Theme.space-2;
+            alignment: start;
+            width: 300px;
+
+            Caption { text: "DOCK, LIST, ROWS"; }
+            Dock {
+                title: "Sources";
+                height: 200px;
+                List {
+                    label: "Sources";
+                    count: 4;
+                    current: 1;
+                    ListRow { text: "Lower Third"; icon: Icons.text; index: 0; count: 4;
+                        IconButton { small: true; icon: Icons.eye; label: "Hide"; }
+                        IconButton { small: true; icon: Icons.unlock; label: "Lock"; }
+                    }
+                    ListRow { text: "Intro Clip"; icon: Icons.media; selected: true; index: 1; count: 4;
+                        IconButton { small: true; icon: Icons.record; label: "ISO"; on: true; on-color: Theme.accent-hover; }
+                        IconButton { small: true; icon: Icons.eye; label: "Hide"; }
+                        IconButton { small: true; icon: Icons.lock; label: "Unlock"; }
+                    }
+                    ListRow { text: "Hidden Title"; icon: Icons.text; dim: true; index: 2; count: 4; }
+                    ListRow { text: "Grouped"; icon: Icons.color; depth: 1; index: 3; count: 4; focus-shown: true; }
+                }
+                DockToolbar {
+                    IconButton { small: true; icon: Icons.plus; label: "Add Source"; }
+                    IconButton { small: true; icon: Icons.minus; label: "Remove Source"; }
+                    IconButton { small: true; icon: Icons.settings; label: "Properties"; }
+                    ToolbarGap { }
+                    IconButton { small: true; icon: Icons.chevron-up; label: "Move Up"; }
+                    IconButton { small: true; icon: Icons.chevron-down; label: "Move Down"; }
+                }
+            }
+            ListEmpty { text: "No sources yet. Add one with +."; }
+
+            Caption { text: "FIELDS"; }
+            TextField { text: "Intro Clip"; label: "Name"; }
+            TextField { placeholder: "Type a name"; label: "Empty"; }
+            TextField { text: "Bad value"; invalid: true; label: "Invalid"; }
+            TextField { text: "~/Movies/Isocast"; mono: true; small: true; label: "Path"; }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                NumberField { value: 1920; prefix: "W"; unit: "px"; label: "Width"; }
+                NumberField { value: 300; unit: "ms"; label: "Duration"; enabled: false; }
+            }
+            ColorField { value: "#1f3a4a"; swatch: #1f3a4a; label: "Colour"; }
+            dropdown := Dropdown {
+                options: root.cameras;
+                value: "c";
+                label: "Camera";
+                show-detail: true;
+            }
+            TextArea { text: "Isocast design review\nSecond line"; label: "Text"; }
+        }
+
+        // Column 3: forms, nav, toast
+        VerticalLayout {
+            spacing: Theme.space-2;
+            alignment: start;
+            horizontal-stretch: 1;
+
+            Caption { text: "FORM"; }
+            Rectangle {
+                background: Theme.surface-panel;
+                border-width: 1px;
+                border-color: Theme.line-strong;
+                height: form-body.preferred-height;
+                form-body := VerticalLayout {
+                    Callout { title: "The file can't be read"; message: "/Volumes/IsocastBuild/clip.mp4 is missing."; }
+                    Form {
+                        FormSection { title: "Recording"; }
+                        FormRow { label: "Recording Path"; TextField { text: "~/Movies/Isocast"; mono: true; } Button { text: "Browse"; } }
+                        FormRow { label: "Keep Free"; hint: "A recording won’t start without room for it plus this."; NumberField { value: 1; unit: "GB"; } }
+                        FormRow { label: "Encoder"; Dropdown { options: [{ value: "h264", label: "H.264" }, { value: "hevc", label: "HEVC", detail: "smaller files" }]; value: "hevc"; show-detail: true; } }
+                        FormRow { label: "Record Program"; Switch { on: true; } }
+                        SubForm {
+                            FormRow { label: "Format"; label-width: 120px; Segmented { options: [{ value: "mov", label: "MOV" }, { value: "mp4", label: "MP4" }]; value: "mp4"; } }
+                        }
+                        FormSeparator { }
+                        FormRow { label: "Opacity"; Slider { value: 0.8; } }
+                    }
+                    Callout { kind: CalloutKind.info; title: "Streaming"; message: "Add your stream key first."; }
+                }
+            }
+
+            Caption { text: "NAV, TOAST"; }
+            HorizontalLayout {
+                spacing: Theme.space-4;
+                alignment: start;
+                NavList {
+                    height: 140px;
+                    tabs: [
+                        { id: "general", label: "General", icon: "settings" },
+                        { id: "stream", label: "Stream", icon: "live" },
+                        { id: "output", label: "Output", icon: "disk" },
+                        { id: "hotkeys", label: "Hotkeys", icon: "keyboard" },
+                    ];
+                    current: "output";
+                }
+                VerticalLayout {
+                    spacing: Theme.space-2;
+                    Toast { toast: { id: 1, kind: ToastKind.info, title: "Removed “Intro Clip”", action: "Undo" }; }
+                    Toast { toast: { id: 2, kind: ToastKind.warning, title: "Dropping frames", message: "The recording carries on.", action: "Details", rows: [{ label: "Program", value: "12 dropped", tone: "bad" }, { label: "Camera audio", value: "2 gaps", tone: "warn" }] }; }
+                }
+            }
+        }
+    }
+
+    if root.show-dialog: Dialog {
+        title: "Create/Select Source";
+        dialog-width: 440px;
+        Form {
+            Text { text: "Colour Source · Main"; color: Theme.text; font-weight: Theme.weight-semibold; }
+            Radio { text: "Create new"; checked: true; }
+            TextField { text: "Colour Source"; auto-focus: true; }
+            Radio { text: "Add Existing"; }
+            PickList {
+                enabled: false;
+                ListRow { text: "Backdrop"; selected: true; }
+            }
+            Checkbox { text: "Make source visible"; checked: true; }
+        }
+    }
+}

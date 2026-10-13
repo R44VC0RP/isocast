@@ -1,0 +1,551 @@
+// Fields (docs/design.md 3.6): text, multi-line text, numbers with a unit
+// and a scrub label, and colours. 28px (24px `small`, in the source
+// toolbar), inset surface, 1px border; copper edge while editing.
+//
+// Values are committed, not streamed: `committed` fires on Return or when
+// the field loses focus, if the text changed; Escape puts the text back
+// (and, inside a dialog, cancels the dialog). Return also submits the
+// open dialog (see DialogKeys) unless `submits` is false.
+
+import { Theme, Motion } from "../theme.slint";
+import { EditCommands, DialogKeys } from "globals.slint";
+
+// The field's box: the border and the editing ring.
+export component FieldFrame inherits Rectangle {
+    in property <bool> editing;
+    in property <bool> hovered;
+    in property <bool> invalid;
+    in property <bool> enabled: true;
+    // No box of its own (inside another field's frame).
+    in property <bool> bare;
+
+    border-radius: Theme.r;
+    background: root.bare ? transparent : Theme.surface-inset;
+    border-width: root.bare ? 0 : 1px;
+    border-color: root.invalid ? Theme.danger : root.editing ? Theme.accent : root.hovered && root.enabled ? Theme.field-border-hover : Theme.field-border;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    animate border-color { duration: Theme.fast; easing: Motion.ease; }
+
+    // box-shadow: 0 0 0 1px accent, outside the border.
+    if root.editing && !root.invalid && !root.bare: Rectangle {
+        x: -1px;
+        y: -1px;
+        width: parent.width + 2px;
+        height: parent.height + 2px;
+        border-width: 1px;
+        border-color: Theme.accent;
+        border-radius: Theme.r + 1px;
+    }
+    @children
+}
+
+export component TextField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    // What screen readers call it (the form label beside it).
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> read-only;
+    in property <bool> invalid;
+    in property <bool> mono;
+    // 24px, as in the source toolbar.
+    in property <bool> small;
+    in property <length> font-size: Theme.fs-sm;
+    // No box of its own (inside another field, like ColorField).
+    in property <bool> bare;
+    in property <InputType> input-type: InputType.text;
+    in property <bool> select-on-focus;
+    // Focus and select everything when it appears.
+    in property <bool> auto-focus;
+    // Return submits the open dialog after committing.
+    in property <bool> submits: true;
+    out property <bool> has-focus: input.has-focus;
+    callback edited(string);
+    callback accepted(string);
+    callback committed(string);
+    callback cancelled();
+
+
+    public function select-all() {
+        input.select-all();
+    }
+
+    public function focus-and-select() {
+        input.focus();
+        input.select-all();
+    }
+
+    // Commit what was typed (Return or focus loss do this).
+    public function commit() {
+        if root.text != root.original {
+            root.original = root.text;
+            root.committed(root.text);
+        }
+    }
+
+    forward-focus: input;
+    property <string> original;
+    property <bool> focused: input.has-focus;
+    property <int> edit-serial: EditCommands.serial;
+
+    changed focused => {
+        if root.focused {
+            root.original = root.text;
+            if root.select-on-focus {
+                input.select-all();
+            }
+        } else if !DialogKeys.cancelling {
+            root.commit();
+        }
+    }
+
+    changed edit-serial => {
+        if input.has-focus {
+            if EditCommands.command == "cut" { input.cut(); }
+            if EditCommands.command == "copy" { input.copy(); }
+            if EditCommands.command == "paste" { input.paste(); }
+            if EditCommands.command == "select-all" { input.select-all(); }
+            if EditCommands.command == "undo" { input.undo(); }
+            if EditCommands.command == "redo" { input.redo(); }
+            EditCommands.handled = EditCommands.serial;
+        }
+    }
+
+    init => {
+        if root.auto-focus {
+            root.focus-and-select();
+            refocus.running = true;
+        }
+    }
+
+    // Again once the event loop turns: a dialog's popup takes the focus
+    // away from what had it when it is shown (to give back on close), and
+    // its fields' `init` runs before that.
+    refocus := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.focus-and-select();
+        }
+    }
+
+    height: root.small ? Theme.control-h-sm : Theme.control-h;
+    min-width: 40px;
+    preferred-width: Theme.field-m;
+    accessible-role: none;
+
+    frame := FieldFrame {
+        editing: input.has-focus;
+        hovered: ta.has-hover;
+        invalid: root.invalid;
+        enabled: root.enabled;
+        bare: root.bare;
+
+        ta := TouchArea {
+            mouse-cursor: MouseCursor.text;
+            clicked => { input.focus(); }
+        }
+
+        Text {
+            x: Theme.space-2;
+            width: parent.width - 2 * Theme.space-2;
+            visible: input.text == "" && root.placeholder != "";
+            text: root.placeholder;
+            color: Theme.text-3;
+            font-size: root.font-size;
+            letter-spacing: Theme.tracking-for(root.font-size);
+            font-family: root.mono ? Theme.font-mono : "";
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+
+        input := TextInput {
+            x: Theme.space-2;
+            width: parent.width - 2 * Theme.space-2;
+            height: parent.height;
+            text <=> root.text;
+            enabled: root.enabled;
+            read-only: root.read-only;
+            input-type: root.input-type;
+            single-line: true;
+            vertical-alignment: center;
+            color: Theme.text;
+            font-size: root.font-size;
+            letter-spacing: Theme.tracking-for(root.font-size);
+            font-family: root.mono ? Theme.font-mono : "";
+            selection-background-color: Theme.text-selection;
+            selection-foreground-color: Theme.text;
+            accessible-label: root.label;
+            accessible-placeholder-text: root.placeholder;
+            edited => { root.edited(self.text); }
+            accepted => {
+                root.commit();
+                root.accepted(self.text);
+                if root.submits {
+                    DialogKeys.submit += 1;
+                }
+            }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.text = root.original;
+                    root.cancelled();
+                    self.clear-focus();
+                    return accept;
+                }
+                reject
+            }
+        }
+    }
+}
+
+// Several lines of text (a text source's words): grows with its text from
+// 64px. Return makes a new line; ⌘Return commits.
+export component TextArea inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> mono;
+    in property <length> empty-height: 64px;
+    out property <bool> has-focus: input.has-focus;
+    callback edited(string);
+    callback committed(string);
+
+
+    public function commit() {
+        if root.text != root.original {
+            root.original = root.text;
+            root.committed(root.text);
+        }
+    }
+
+    forward-focus: input;
+    property <string> original;
+    property <bool> focused: input.has-focus;
+    property <int> edit-serial: EditCommands.serial;
+
+    changed focused => {
+        if root.focused {
+            root.original = root.text;
+        } else if !DialogKeys.cancelling {
+            root.commit();
+        }
+    }
+
+    changed edit-serial => {
+        if input.has-focus {
+            if EditCommands.command == "cut" { input.cut(); }
+            if EditCommands.command == "copy" { input.copy(); }
+            if EditCommands.command == "paste" { input.paste(); }
+            if EditCommands.command == "select-all" { input.select-all(); }
+            if EditCommands.command == "undo" { input.undo(); }
+            if EditCommands.command == "redo" { input.redo(); }
+            EditCommands.handled = EditCommands.serial;
+        }
+    }
+
+    height: max(root.empty-height, input.preferred-height + 12px);
+    preferred-width: Theme.field-l;
+    accessible-role: none;
+
+    FieldFrame {
+        editing: input.has-focus;
+        hovered: ta.has-hover;
+        enabled: root.enabled;
+
+        ta := TouchArea {
+            mouse-cursor: MouseCursor.text;
+            clicked => { input.focus(); }
+        }
+
+        Text {
+            x: Theme.space-2;
+            y: 6px;
+            width: parent.width - 2 * Theme.space-2;
+            visible: input.text == "" && root.placeholder != "";
+            text: root.placeholder;
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            accessible-role: none;
+        }
+
+        input := TextInput {
+            x: Theme.space-2;
+            y: 6px;
+            width: parent.width - 2 * Theme.space-2;
+            height: parent.height - 12px;
+            text <=> root.text;
+            enabled: root.enabled;
+            single-line: false;
+            wrap: word-wrap;
+            color: Theme.text;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            line-height-factor: Theme.leading-sm;
+            font-family: root.mono ? Theme.font-mono : "";
+            selection-background-color: Theme.text-selection;
+            selection-foreground-color: Theme.text;
+            accessible-label: root.label;
+            edited => { root.edited(self.text); }
+            key-pressed(event) => {
+                if event.text == "\n" && event.modifiers.meta {
+                    root.commit();
+                    return accept;
+                }
+                reject
+            }
+        }
+    }
+}
+
+// A number with an optional scrub label before it (drag it sideways, like
+// a design tool: ⇧ ×10, ⌥ ×0.1) and a unit after it. ↑ and ↓ step it (⇧
+// ×10). `scrubbing` fires while dragging; `changed` once a value is final.
+export component NumberField inherits Rectangle {
+    in property <float> value;
+    in property <float> minimum: -1000000000;
+    in property <float> maximum: 1000000000;
+    in property <float> step: 1;
+    // Before the value, dim; drag it to scrub (like "X", "W", "Left").
+    in property <string> prefix;
+    // The scrub label's least width (a 2×2 grid of crop sides lines up).
+    in property <length> prefix-min-width: 20px;
+    // After the value, dim ("px", "ms", "dB", "%").
+    in property <string> unit;
+    in property <string> label;
+    in property <string> placeholder;
+    in property <bool> enabled: true;
+    in property <bool> invalid;
+    in property <bool> small;
+    in property <bool> submits: true;
+    // Shown when there is no value (a mixed or unset number).
+    in property <bool> empty;
+    out property <bool> has-focus: input.has-focus;
+    callback scrubbing(float);
+    callback changed(float);
+
+
+    forward-focus: input;
+    property <int> decimals: root.step >= 1 ? 0 : root.step >= 0.1 ? 1 : root.step >= 0.01 ? 2 : 3;
+    // As few decimals as the value needs, up to the step's ("0.1", not
+    // "0.10"; "1", not "1.00"), as the web app rounds.
+    property <int> needed: abs(root.value - round(root.value)) < 0.00005 ? 0 : abs(root.value * 10 - round(root.value * 10)) < 0.0005 ? 1 : abs(root.value * 100 - round(root.value * 100)) < 0.005 ? 2 : 3;
+    property <string> shown: root.empty ? "" : root.value.to-fixed(min(root.decimals, root.needed));
+    property <string> draft;
+    property <bool> drafting;
+    property <bool> focused: input.has-focus;
+    property <float> scrub-from;
+    property <float> scrub-value;
+    property <length> scrub-start;
+    property <bool> scrubbed;
+
+    function clamp-step(v: float) -> float {
+        return max(root.minimum, min(root.maximum, round(v / root.step) * root.step));
+    }
+
+    function commit() {
+        if root.drafting {
+            root.drafting = false;
+            if !DialogKeys.cancelling && root.draft.is-float() && root.draft.to-float() != root.value {
+                root.changed(root.clamp-step(root.draft.to-float()));
+            }
+        }
+    }
+
+    changed focused => {
+        if root.focused {
+            input.select-all();
+        } else {
+            root.commit();
+        }
+    }
+
+    height: root.small ? Theme.control-h-sm : Theme.control-h;
+    min-width: 56px;
+    preferred-width: Theme.field-m;
+    // Numbers needn't fill a value column (set another to let them).
+    max-width: Theme.field-m;
+    accessible-role: none;
+
+    FieldFrame {
+        editing: input.has-focus;
+        hovered: ta.has-hover;
+        invalid: root.invalid;
+        enabled: root.enabled;
+
+        ta := TouchArea {
+            mouse-cursor: MouseCursor.text;
+            clicked => { input.focus(); }
+        }
+
+        HorizontalLayout {
+            padding-left: root.prefix != "" ? 0 : Theme.space-2;
+            padding-right: Theme.space-2;
+            spacing: 0;
+
+            // The scrub label: 8px in, then 6px to the value.
+            if root.prefix != "": Rectangle {
+                width: max(root.prefix-min-width, prefix-text.preferred-width + Theme.space-2 + 6px);
+                prefix-text := Text {
+                    x: Theme.space-2;
+                    text: root.prefix;
+                    color: Theme.text-3;
+                    font-size: Theme.fs-xs;
+                    letter-spacing: Theme.tracking-xs;
+                    font-weight: Theme.weight-semibold;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+                TouchArea {
+                    enabled: root.enabled;
+                    mouse-cursor: MouseCursor.ew-resize;
+                    pointer-event(event) => {
+                        if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                            root.scrub-from = root.value;
+                            root.scrub-value = root.value;
+                            root.scrub-start = self.mouse-x;
+                            root.scrubbed = false;
+                        } else if event.kind == PointerEventKind.move && self.pressed {
+                            root.scrubbed = true;
+                            root.scrub-value = root.clamp-step(root.scrub-from + round((self.mouse-x - root.scrub-start) / 2px) * root.step * (event.modifiers.shift ? 10 : event.modifiers.alt ? 0.1 : 1));
+                            root.scrubbing(root.scrub-value);
+                        } else if event.kind == PointerEventKind.up && root.scrubbed {
+                            root.scrubbed = false;
+                            if root.scrub-value != root.scrub-from {
+                                root.changed(root.scrub-value);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // "Auto" or "None" where there is no value.
+            Rectangle {
+                horizontal-stretch: 1;
+                if input.text == "" && root.placeholder != "": Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.placeholder;
+                    color: Theme.text-3;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+                input := TextInput {
+                    width: parent.width;
+                    height: parent.height;
+                    text: root.drafting ? root.draft : root.shown;
+                    enabled: root.enabled;
+                    single-line: true;
+                    input-type: InputType.decimal;
+                    vertical-alignment: center;
+                    color: Theme.text;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    selection-background-color: Theme.text-selection;
+                    selection-foreground-color: Theme.text;
+                    accessible-label: root.unit != "" ? root.label + " (" + root.unit + ")" : root.label;
+                    accessible-placeholder-text: root.placeholder;
+                    edited => {
+                        root.draft = self.text;
+                        root.drafting = true;
+                    }
+                    accepted => {
+                        root.commit();
+                        if root.submits {
+                            DialogKeys.submit += 1;
+                        }
+                    }
+                    key-pressed(event) => {
+                        if event.text == Key.Escape {
+                            root.drafting = false;
+                            self.clear-focus();
+                            return accept;
+                        }
+                        if event.text == Key.UpArrow || event.text == Key.DownArrow {
+                            root.drafting = false;
+                            root.changed(root.clamp-step(root.value + (event.text == Key.UpArrow ? 1 : -1) * root.step * (event.modifiers.shift ? 10 : 1)));
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+            }
+
+            if root.unit != "": Text {
+                text: root.unit;
+                color: Theme.text-3;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-xs;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+        }
+    }
+}
+
+// A colour as #rrggbb (or #rrggbbaa): a swatch that asks for a picker
+// (`pick`) and the hex value, committed on Return or focus loss. Slint
+// can't read a colour from text, so the caller passes `swatch` too.
+export component ColorField inherits Rectangle {
+    in property <string> value;
+    in property <color> swatch;
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback changed(string);
+    callback pick();
+
+    forward-focus: hex;
+    height: Theme.control-h;
+    preferred-width: Theme.field-m;
+    accessible-role: none;
+
+    FieldFrame {
+        editing: hex.has-focus;
+        hovered: ta.has-hover;
+        enabled: root.enabled;
+
+        ta := TouchArea {
+            clicked => { hex.focus(); }
+        }
+
+        HorizontalLayout {
+            padding-left: 6px;
+            spacing: 0;
+            alignment: stretch;
+
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 16px;
+                    height: 16px;
+                    border-radius: Theme.r;
+                    background: root.swatch;
+                    border-width: 1px;
+                    border-color: Theme.swatch-ring;
+                    accessible-role: button;
+                    accessible-label: "Choose a colour";
+                    accessible-action-default => { root.pick(); }
+                    TouchArea {
+                        enabled: root.enabled;
+                        clicked => { root.pick(); }
+                    }
+                }
+            }
+            hex := TextField {
+                horizontal-stretch: 1;
+                bare: true;
+                text: root.value;
+                label: root.label;
+                mono: true;
+                enabled: root.enabled;
+                committed(text) => { root.changed(text); }
+            }
+        }
+    }
+}

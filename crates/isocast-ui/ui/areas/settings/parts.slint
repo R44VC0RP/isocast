@@ -1,0 +1,397 @@
+// Pieces only Settings uses (docs/design.md 3.12): a group of rows under a
+// title with a hairline, the Recording Quality slider's five stops, the
+// Advanced disclosure, a streaming service to choose, a shortcut's row.
+
+import { Theme } from "../../theme.slint";
+import { Icon, Icons } from "../../icons.slint";
+import { FocusRing, Kbd } from "../../kit.slint";
+
+// Settings' page column: 16px above, 24px at the sides and below, 24px
+// between groups.
+export component SetPage inherits VerticalLayout {
+    padding-top: Theme.space-4;
+    padding-left: Theme.space-6;
+    padding-right: Theme.space-6;
+    padding-bottom: Theme.space-6;
+    spacing: Theme.space-6;
+    alignment: start;
+}
+
+// A group: its title breaks a hairline above it (no box around it); rows
+// 8px apart, 12px under the title.
+export component SetGroup inherits VerticalLayout {
+    in property <string> title;
+    spacing: 0;
+
+    if root.title != "": HorizontalLayout {
+        spacing: Theme.space-2;
+        Text {
+            text: root.title;
+            color: Theme.text-2;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+            accessible-role: AccessibleRole.text;
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Rectangle {
+                height: 1px;
+                background: Theme.line;
+            }
+        }
+    }
+    VerticalLayout {
+        padding-top: root.title != "" ? Theme.space-3 : Theme.space-1;
+        padding-bottom: Theme.space-1;
+        spacing: Theme.space-2;
+        @children
+    }
+}
+
+// What takes the rest of a row's width after fixed-width fields.
+export component Fill inherits Rectangle {
+    horizontal-stretch: 1;
+    min-width: 0;
+}
+
+// A dim line of text in a page (Hotkeys' intro, "Set up streaming…").
+export component PageNote inherits Text {
+    color: Theme.text-3;
+    font-size: Theme.fs-sm;
+    letter-spacing: Theme.tracking-sm;
+    line-height-factor: Theme.leading-sm;
+    wrap: word-wrap;
+}
+
+// Recording Quality: five stops from Low to Incredible, their labels under
+// them. `stop` is the one the value is exactly (-1: Custom, a hollow
+// thumb at the nearest one, `at`). Click, drag or the arrow keys choose a
+// stop. The rail is inset by the thumb's radius; the end labels sit on
+// the column's edges.
+export component QualitySlider inherits Rectangle {
+    in property <[string]> labels;
+    in property <int> stop;
+    in property <int> at;
+    in property <bool> enabled: true;
+    callback chosen(int);
+
+    forward-focus: fs;
+    property <bool> keyboard;
+    property <length> inset: Theme.space-2;
+    property <length> rail: root.width - 2 * root.inset;
+    property <int> last: max(1, root.labels.length - 1);
+    property <bool> custom: root.stop < 0;
+
+    function pick(x: length) {
+        if root.enabled {
+            let i = round(max(0, min(1, (x - root.inset) / root.rail)) * root.last);
+            if i != root.stop {
+                root.chosen(i);
+            }
+        }
+    }
+
+    height: 20px + 18px;
+    min-width: 200px;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    accessible-role: slider;
+    accessible-label: "Recording Quality";
+    accessible-value: root.custom ? "Custom" : root.labels[root.stop];
+    accessible-value-minimum: 0;
+    accessible-value-maximum: root.last;
+    accessible-value-step: 1;
+    accessible-enabled: root.enabled;
+    accessible-action-increment => { root.chosen(min(root.last, root.at + 1)); }
+    accessible-action-decrement => { root.chosen(max(0, root.at - 1)); }
+
+    // The rail and the fill up to the thumb.
+    Rectangle {
+        x: root.inset;
+        y: 9px;
+        width: root.rail;
+        height: Theme.track;
+        border-radius: 1px;
+        background: Theme.line-strong;
+    }
+    Rectangle {
+        x: root.inset;
+        y: 9px;
+        width: root.rail * root.at / root.last;
+        height: Theme.track;
+        border-radius: 1px;
+        background: Theme.text-3;
+    }
+    // Ticks: 8px, ringed in the panel's colour; at or below the thumb in
+    // text-2 (unless Custom).
+    for label[i] in root.labels: Rectangle {
+        x: root.inset + root.rail * i / root.last - 6px;
+        y: 4px;
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: Theme.surface-panel;
+        Rectangle {
+            x: 2px;
+            y: 2px;
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: i <= root.at && !root.custom ? Theme.text-2 : i <= root.at ? Theme.text-3 : Theme.outline;
+        }
+    }
+    // The thumb: bone with a dark ring, or hollow for Custom.
+    Rectangle {
+        x: root.inset + root.rail * root.at / root.last - 8px;
+        y: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: Theme.surface-monitor;
+        Rectangle {
+            x: 1px;
+            y: 1px;
+            width: 14px;
+            height: 14px;
+            border-radius: 7px;
+            background: root.custom ? Theme.surface-panel : Theme.bone;
+            border-width: root.custom ? 2px : 0;
+            border-color: Theme.bone;
+        }
+        FocusRing {
+            shown: fs.has-focus && root.keyboard;
+            radius: 8px;
+        }
+    }
+    // Labels: centred on their stops, the first and last on the edges.
+    for label[i] in root.labels: label-text := Text {
+        property <length> centre: root.inset + root.rail * i / root.last;
+        x: i == 0 ? 0 : i == root.last ? root.width - self.width : self.centre - self.width / 2;
+        y: 20px;
+        width: self.preferred-width;
+        height: 18px;
+        text: label;
+        color: i == root.stop || label-ta.has-hover ? Theme.text : Theme.text-3;
+        font-size: Theme.fs-xs;
+        font-weight: i == root.stop ? Theme.weight-semibold : Theme.weight-regular;
+        vertical-alignment: top;
+        accessible-role: none;
+        label-ta := TouchArea {
+            enabled: root.enabled;
+            clicked => {
+                if i != root.stop {
+                    root.chosen(i);
+                }
+            }
+        }
+    }
+    TouchArea {
+        y: 0;
+        height: 20px;
+        enabled: root.enabled;
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.pick(self.mouse-x);
+            }
+        }
+        moved => {
+            if self.pressed {
+                root.pick(self.mouse-x);
+            }
+        }
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == Key.LeftArrow || event.text == Key.DownArrow {
+                let i = max(0, root.at - 1);
+                if i != root.stop {
+                    root.chosen(i);
+                }
+                return accept;
+            }
+            if event.text == Key.RightArrow || event.text == Key.UpArrow {
+                let i = min(root.last, root.at + 1);
+                if i != root.stop {
+                    root.chosen(i);
+                }
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+// "› Advanced": shows or hides the rows after it.
+export component Disclosure inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> open;
+
+    forward-focus: fs;
+    property <bool> keyboard;
+
+    height: Theme.control-h-sm;
+    width: row.preferred-width;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-expandable: true;
+    accessible-expanded: root.open;
+    accessible-action-default => { root.open = !root.open; }
+    accessible-action-expand => { root.open = !root.open; }
+
+    ta := TouchArea {
+        clicked => { root.open = !root.open; }
+    }
+    fs := FocusScope {
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.open = !root.open;
+                return accept;
+            }
+            reject
+        }
+    }
+    row := HorizontalLayout {
+        // The chevron's glyph sits inside its box: pull it onto the edge.
+        x: -Theme.space-1;
+        padding-right: Theme.space-1;
+        spacing: Theme.space-1;
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                path: root.open ? Icons.chevron-down : Icons.chevron-right;
+                size: Theme.icon-sm;
+                color: ta.has-hover ? Theme.text : Theme.text-2;
+            }
+        }
+        Text {
+            text: root.text;
+            color: ta.has-hover ? Theme.text : Theme.text-2;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+    FocusRing {
+        shown: fs.has-focus && root.keyboard;
+    }
+}
+
+// A streaming service: its name and where its key comes from, a hairline
+// under it.
+export component ServiceRow inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    callback clicked();
+
+    forward-focus: fs;
+    property <bool> keyboard;
+
+    height: column.preferred-height;
+    background: ta.has-hover ? Theme.hover : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-description: root.hint;
+    accessible-action-default => { root.clicked(); }
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    fs := FocusScope {
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    column := VerticalLayout {
+        padding: Theme.space-3;
+        spacing: Theme.space-1;
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-weight: Theme.weight-semibold;
+            accessible-role: none;
+        }
+        Text {
+            text: root.hint;
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            accessible-role: none;
+        }
+    }
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.line;
+    }
+    FocusRing {
+        inset: true;
+        radius: 0;
+        shown: fs.has-focus && root.keyboard;
+    }
+}
+
+// Hotkeys: what a key does, its keys on the right; a soft line under it
+// unless it is the last of its group.
+export component ShortcutRow inherits Rectangle {
+    in property <string> what;
+    in property <[string]> keys;
+    in property <bool> last;
+
+    min-height: Theme.control-h-lg;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.what;
+
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        Text {
+            horizontal-stretch: 1;
+            text: root.what;
+            color: Theme.text;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            line-height-factor: Theme.leading-sm;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            accessible-role: none;
+        }
+        HorizontalLayout {
+            spacing: Theme.space-1;
+            alignment: end;
+            for key in root.keys: VerticalLayout {
+                alignment: center;
+                if key == "–": Text {
+                    text: "–";
+                    color: Theme.text-3;
+                    font-size: Theme.fs-xs;
+                    letter-spacing: Theme.tracking-xs;
+                    accessible-role: none;
+                }
+                if key != "–": Kbd {
+                    text: key;
+                }
+            }
+        }
+    }
+    if !root.last: Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.line-soft;
+    }
+}

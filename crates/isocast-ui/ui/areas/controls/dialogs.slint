@@ -1,0 +1,35 @@
+// Area C's dialogs: the transition's properties ("transition", arg: the
+// kind to switch to, if it needs settings first). Put on the window by
+// app.slint. As the web app's transitions.js: the settings drawn from the
+// setup's schema; changes show at once and Cancel puts them back; a
+// transition with nothing to set shows only Close.
+
+import { Theme } from "../../theme.slint";
+import { Ui } from "../../state.slint";
+import { Dialog, Form, SettingsForm } from "../../kit.slint";
+import { ControlsArea } from "state.slint";
+
+export component ControlsDialogs inherits Rectangle {
+    if Ui.dialog == "transition": Dialog {
+        title: ControlsArea.dialog-title;
+        dialog-width: 520px;
+        ok-text: ControlsArea.dialog-empty ? "Close" : "OK";
+        cancel-text: ControlsArea.dialog-empty ? "" : "Cancel";
+        extra-text: ControlsArea.dialog-has-fields ? "Defaults" : "";
+        accepted => { ControlsArea.dialog-accept(); }
+        cancelled => { ControlsArea.dialog-cancel(); }
+        extra => { ControlsArea.dialog-defaults(); }
+        Form {
+            if ControlsArea.form-groups.length == 0: Text {
+                text: "No settings.";
+                color: Theme.text-3;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+            }
+            SettingsForm {
+                form: "transition";
+                groups: ControlsArea.form-groups;
+            }
+        }
+    }
+}

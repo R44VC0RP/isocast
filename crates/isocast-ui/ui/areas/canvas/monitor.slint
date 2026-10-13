@@ -1,0 +1,360 @@
+// A monitor: the canvas letterboxed in its area, the picture (a GPU
+// texture, or a native layer under the window), and over the edited one
+// the canvas editor (docs/design.md 3.17; the web app's monitor.js and
+// canvas.js).
+//
+// The selected item's box is drawn where the item is in the picture shown
+// (`shown-box-*`, the layout of the setup revision that frame was drawn
+// from), so box and picture move together. The pointer goes to the Rust
+// side (src/areas/canvas.rs), which finds what is under it, selects,
+// moves, resizes and crops, and says what to draw while it does
+// (guides, the readout, the hovered item, the pointer's shape).
+//
+// With `native-picture` (macOS) the pictures and the shown box are Core
+// Animation layers under the window, changed together for each frame;
+// this then only lets them show through, draws the rest over them and
+// takes the pointer.
+
+import { Theme } from "../../theme.slint";
+import { Ui } from "../../state.slint";
+import { Button, Spinner, Menus } from "../../kit.slint";
+import { Icons } from "../../icons.slint";
+import { CanvasArea, CanvasBox } from "state.slint";
+
+// An item's box: the placement before rotation, turned about its centre.
+component ItemFrame inherits Rectangle {
+    in property <float> k;
+    in property <float> bx;
+    in property <float> by;
+    in property <float> bw;
+    in property <float> bh;
+    in property <float> rotate;
+    // An outline inside the box (the hovered item's).
+    in property <length> edge-width;
+    in property <color> edge-color;
+    x: root.bx * root.k * 1px;
+    y: root.by * root.k * 1px;
+    width: root.bw * root.k * 1px;
+    height: root.bh * root.k * 1px;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        transform-rotation: root.rotate * 1deg;
+        border-width: root.edge-width;
+        border-color: root.edge-color;
+        @children
+    }
+}
+
+export component Monitor inherits Rectangle {
+    // Draws a picture: `picture` (image mode).
+    in property <bool> shows-picture: true;
+    in property <image> picture;
+    // The canvas editor goes over this one.
+    in property <bool> editor: true;
+    // The program while recording or streaming: a 2px teal frame.
+    in property <bool> program-live;
+    // Instead of a picture.
+    in property <string> empty-text;
+    // No frame yet (a spinner), or why there is none.
+    in property <bool> waiting;
+    in property <string> error-text;
+    in property <length> pad: 0px;
+    // One canvas pixel to a screen pixel (Preview Scaling → Canvas).
+    in property <bool> actual-size;
+
+    // The picture's size on screen, in physical pixels: the texture is
+    // drawn at this size so it is shown 1:1.
+    out property <int> picture-pixel-width: round(pic-w / 1phx);
+    out property <int> picture-pixel-height: round(pic-h / 1phx);
+    out property <bool> dragging: ta.pressed;
+    // Where things are, in window coordinates: the area and the picture
+    // (where the native layers go) and the selected item's box (scripted
+    // drags, checks).
+    out property <length> area-x: root.absolute-position.x;
+    out property <length> area-y: root.absolute-position.y;
+    out property <length> area-width: root.width;
+    out property <length> area-height: root.height;
+    out property <length> picture-left: root.absolute-position.x + pic-x;
+    out property <length> picture-top: root.absolute-position.y + pic-y;
+    out property <length> picture-right: root.absolute-position.x + pic-x + pic-w;
+    out property <length> picture-width: pic-w;
+    out property <length> picture-height: pic-h;
+    out property <length> box-left: root.absolute-position.x + pic-x + CanvasArea.box-x * k * 1px;
+    out property <length> box-top: root.absolute-position.y + pic-y + CanvasArea.box-y * k * 1px;
+    out property <length> box-width: CanvasArea.box-w * k * 1px;
+    out property <length> box-height: CanvasArea.box-h * k * 1px;
+    // Points per canvas pixel.
+    out property <float> scale: k;
+
+    property <int> canvas-width: max(1, Ui.canvas-width);
+    property <int> canvas-height: max(1, Ui.canvas-height);
+    property <bool> has-selection: root.editor && Ui.selected-item != "";
+    property <float> fit: max(0.0001, min((root.width - 2 * root.pad) / 1px / root.canvas-width, (root.height - 2 * root.pad) / 1px / root.canvas-height));
+    property <float> k: root.actual-size ? 1phx / 1px : root.fit;
+    property <length> pic-w: max(0px, root.canvas-width * k * 1px);
+    property <length> pic-h: max(0px, root.canvas-height * k * 1px);
+    // Centred; a picture larger than the room (one canvas pixel to a
+    // screen pixel) starts at the top left and scrolls.
+    property <length> room-w: root.width - 2 * root.pad;
+    property <length> room-h: root.height - 2 * root.pad;
+    property <length> max-pan-x: max(0px, pic-w - root.room-w);
+    property <length> max-pan-y: max(0px, pic-h - root.room-h);
+    property <length> pan-x;
+    property <length> pan-y;
+    property <length> pic-x: pic-w > root.room-w ? root.pad - min(root.pan-x, root.max-pan-x) : (root.width - pic-w) / 2;
+    property <length> pic-y: pic-h > root.room-h ? root.pad - min(root.pan-y, root.max-pan-y) : (root.height - pic-h) / 2;
+    property <bool> blank: root.empty-text != "" || (root.editor && CanvasArea.scene-empty);
+    // Boxes may reach past the canvas (handles on its edges stay whole),
+    // but not far over the rest of the window.
+    property <length> reach: 10px;
+
+    background: transparent;
+    accessible-role: image;
+    accessible-label: root.editor ? "Preview" : "Program";
+    accessible-description: root.has-selection ? "Selected: " + Ui.selected-name : "";
+
+    // The monitor's ring: 1px, or 2px teal while the program is live. A
+    // frame only, so a native picture under it shows through. None before
+    // there is a setup (Welcome shows the bare stage, as the web app).
+    if Ui.has-setup: Rectangle {
+        x: pic-x - (root.program-live ? 2px : 1px);
+        y: pic-y - (root.program-live ? 2px : 1px);
+        width: pic-w + (root.program-live ? 4px : 2px);
+        height: pic-h + (root.program-live ? 4px : 2px);
+        border-width: root.program-live ? 2px : 1px;
+        border-color: root.program-live ? Theme.onair : Theme.line;
+    }
+    if !CanvasArea.native-picture && Ui.has-setup: Rectangle {
+        x: pic-x;
+        y: pic-y;
+        width: pic-w;
+        height: pic-h;
+        background: Theme.surface-monitor;
+        if root.shows-picture: Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.picture;
+            image-fit: fill;
+            accessible-role: none;
+        }
+    }
+
+    // The pointer, in canvas pixels, to the editor.
+    ta := TouchArea {
+        enabled: root.editor && !root.blank;
+        x: pic-x - root.reach;
+        y: pic-y - root.reach;
+        width: pic-w + 2 * root.reach;
+        height: pic-h + 2 * root.reach;
+        mouse-cursor: CanvasArea.cursor == "move" ? MouseCursor.move
+            : CanvasArea.cursor == "nwse" ? MouseCursor.nwse-resize
+            : CanvasArea.cursor == "nesw" ? MouseCursor.nesw-resize
+            : CanvasArea.cursor == "ns" ? MouseCursor.ns-resize
+            : CanvasArea.cursor == "ew" ? MouseCursor.ew-resize
+            : MouseCursor.default;
+        property <float> cx: (self.mouse-x - root.reach) / 1px / k;
+        property <float> cy: (self.mouse-y - root.reach) / 1px / k;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                CanvasArea.pointer-down(self.cx, self.cy, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta || event.modifiers.control);
+            } else if event.kind == PointerEventKind.up && event.button == PointerEventButton.right {
+                CanvasArea.context-menu(self.cx, self.cy, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            } else if event.kind == PointerEventKind.move {
+                CanvasArea.pointer-moved(self.cx, self.cy, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta || event.modifiers.control);
+            } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) || event.kind == PointerEventKind.cancel {
+                CanvasArea.pointer-up(self.cx, self.cy);
+            }
+        }
+        scroll-event(event) => {
+            if root.max-pan-x == 0 && root.max-pan-y == 0 {
+                return reject;
+            }
+            root.pan-x = clamp(min(root.pan-x, root.max-pan-x) - event.delta-x, 0px, root.max-pan-x);
+            root.pan-y = clamp(min(root.pan-y, root.max-pan-y) - event.delta-y, 0px, root.max-pan-y);
+            accept
+        }
+        changed has-hover => {
+            if !self.has-hover && !self.pressed {
+                CanvasArea.pointer-moved(-1000000, -1000000, false, false, false);
+            }
+        }
+    }
+
+    if root.editor && !root.blank: Rectangle {
+        x: pic-x - root.reach;
+        y: pic-y - root.reach;
+        width: pic-w + 2 * root.reach;
+        height: pic-h + 2 * root.reach;
+        clip: true;
+
+        Rectangle {
+            x: root.reach;
+            y: root.reach;
+            width: pic-w;
+            height: pic-h;
+
+            // The item under the pointer (or whose row is hovered).
+            for b in CanvasArea.boxes: ItemFrame {
+                visible: b.path == CanvasArea.hover-item && b.path != Ui.selected-item;
+                k: root.k;
+                bx: b.x;
+                by: b.y;
+                bw: b.w;
+                bh: b.h;
+                rotate: b.rotate;
+                edge-width: 1px;
+                edge-color: Theme.hover-outline;
+            }
+
+            // The selected item as the picture shows it (the native layers
+            // draw their own).
+            if !CanvasArea.native-picture && root.has-selection && CanvasArea.shown-box-visible: ItemFrame {
+                k: root.k;
+                bx: CanvasArea.shown-box-x;
+                by: CanvasArea.shown-box-y;
+                bw: CanvasArea.shown-box-w;
+                bh: CanvasArea.shown-box-h;
+                rotate: CanvasArea.shown-box-rotate;
+
+                // The dark outer ring keeps the copper edge visible on
+                // bright pictures.
+                if !CanvasArea.test-outline: Rectangle {
+                    x: -2px;
+                    y: -2px;
+                    width: parent.width + 4px;
+                    height: parent.height + 4px;
+                    border-width: 1px;
+                    border-color: Theme.box-ring;
+                }
+                Rectangle {
+                    x: CanvasArea.test-outline ? -3px : -1px;
+                    y: CanvasArea.test-outline ? -3px : -1px;
+                    width: parent.width + (CanvasArea.test-outline ? 6px : 2px);
+                    height: parent.height + (CanvasArea.test-outline ? 6px : 2px);
+                    border-width: CanvasArea.test-outline ? 3px : 1px;
+                    border-color: CanvasArea.test-outline ? #00ff00 : CanvasArea.box-locked ? Theme.text-2 : Theme.accent;
+                }
+
+                // Handles at the corners and edge midpoints.
+                for handle in [
+                    { x: 0, y: 0 }, { x: 0.5, y: 0 }, { x: 1, y: 0 },
+                    { x: 0, y: 0.5 }, { x: 1, y: 0.5 },
+                    { x: 0, y: 1 }, { x: 0.5, y: 1 }, { x: 1, y: 1 },
+                ]: Rectangle {
+                    visible: !CanvasArea.test-outline && !CanvasArea.box-locked;
+                    x: parent.width * handle.x - Theme.handle / 2;
+                    y: parent.height * handle.y - Theme.handle / 2;
+                    width: Theme.handle;
+                    height: Theme.handle;
+                    border-radius: Theme.r-handle;
+                    background: CanvasArea.cropping ? Theme.bone : Theme.accent;
+                    border-width: 1px;
+                    border-color: Theme.surface-monitor;
+                }
+            }
+
+            // Snapping guides across the canvas.
+            for g in CanvasArea.guides: Rectangle {
+                x: g.vertical ? round(g.at * root.k) * 1px : 0;
+                y: g.vertical ? 0 : round(g.at * root.k) * 1px;
+                width: g.vertical ? 1px : parent.width;
+                height: g.vertical ? parent.height : 1px;
+                background: Theme.accent;
+                opacity: 0.9;
+            }
+
+            // Where the dragged item is, or its size or crop.
+            if CanvasArea.readout != "": Rectangle {
+                x: max(4px, CanvasArea.readout-x * root.k * 1px);
+                y: max(4px, CanvasArea.readout-y * root.k * 1px - 24px);
+                width: readout-text.preferred-width + 12px;
+                height: readout-text.preferred-height + 4px;
+                border-radius: Theme.r;
+                background: Theme.readout;
+                readout-text := Text {
+                    text: CanvasArea.readout;
+                    color: Theme.text;
+                    font-size: Theme.fs-xs;
+                    letter-spacing: Theme.tracking-xs;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+
+    // Nothing to show: opaque, so the words never sit on a stale frame.
+    if root.empty-text != "" && Ui.has-setup: Rectangle {
+        x: pic-x;
+        y: pic-y;
+        width: pic-w;
+        height: pic-h;
+        background: Theme.surface-monitor;
+        Text {
+            x: 24px;
+            width: parent.width - 48px;
+            text: root.empty-text;
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            line-height-factor: Theme.leading-sm;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+
+    // The edited scene has nothing in it yet.
+    if root.empty-text == "" && root.editor && CanvasArea.scene-empty && Ui.has-setup: Rectangle {
+        x: pic-x;
+        y: pic-y;
+        width: pic-w;
+        height: pic-h;
+        background: Theme.surface-monitor;
+        VerticalLayout {
+            alignment: center;
+            spacing: Theme.space-3;
+            HorizontalLayout {
+                alignment: center;
+                Text {
+                    text: "Nothing in this scene yet";
+                    color: Theme.text-2;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                }
+            }
+            HorizontalLayout {
+                alignment: center;
+                add := Button {
+                    text: "Add a source";
+                    icon: Icons.plus;
+                    clicked => {
+                        Menus.request("sources:add", self.absolute-position.x, self.absolute-position.y, self.width, self.height);
+                    }
+                }
+            }
+        }
+    }
+
+    // No frame yet: a spinner, or why not.
+    if !root.blank && root.shows-picture && (root.waiting || root.error-text != ""): Rectangle {
+        x: pic-x;
+        y: pic-y;
+        width: pic-w;
+        height: pic-h;
+        if root.error-text == "": Spinner { }
+        if root.error-text != "": Text {
+            x: 24px;
+            width: parent.width - 48px;
+            text: root.error-text;
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            line-height-factor: Theme.leading-sm;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+}

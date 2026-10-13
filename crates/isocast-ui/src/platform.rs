@@ -1,0 +1,218 @@
+//! The system's own settings and panels, put on the window: on macOS,
+//! Reduce motion (menus, dialogs and toasts then appear without
+//! animating), the open and save panels (choosing files and folders, and
+//! where to write one, which Slint has no widget for) and showing a folder
+//! in the Finder. These are the web app's native commands `open_file`,
+//! `save_file` and `reveal`.
+
+use slint::ComponentHandle;
+
+use crate::{AppWindow, Theme};
+
+pub fn apply_system_settings(window: &AppWindow) {
+    window.global::<Theme>().set_reduce_motion(reduce_motion());
+}
+
+#[cfg(target_os = "macos")]
+fn reduce_motion() -> bool {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    // SAFETY: NSWorkspace is AppKit's shared object; the property is a
+    // plain BOOL read on the main thread.
+    unsafe {
+        let workspace: Retained<AnyObject> = msg_send![class!(NSWorkspace), sharedWorkspace];
+        msg_send![&*workspace, accessibilityDisplayShouldReduceMotion]
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reduce_motion() -> bool {
+    false
+}
+
+/// What to ask for in the open panel.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Choose<'a> {
+    /// A folder instead of files.
+    pub folders: bool,
+    pub multiple: bool,
+    /// The panel's button ("Choose", "Open", "Import").
+    pub prompt: &'a str,
+    /// File extensions to allow (all if empty).
+    pub types: &'a [&'a str],
+}
+
+/// `path` with a leading `~` made this user's home folder.
+pub fn expand_home(path: &str) -> String {
+    match (path.strip_prefix('~'), std::env::var("HOME")) {
+        (Some(rest), Ok(home)) if rest.is_empty() || rest.starts_with('/') => {
+            format!("{home}{rest}")
+        }
+        _ => path.to_string(),
+    }
+}
+
+/// Ask for files (or a folder) with the system's open panel: their paths,
+/// or none if cancelled. `None` where there is no open panel.
+#[cfg(target_os = "macos")]
+pub fn choose(options: Choose) -> Option<Vec<String>> {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    // SAFETY: AppKit on the main thread (Slint's event loop runs there);
+    // every object is retained for as long as it is used, and strings are
+    // copied out before their objects go.
+    unsafe {
+        let panel: Retained<AnyObject> = msg_send![class!(NSOpenPanel), openPanel];
+        let _: () = msg_send![&*panel, setCanChooseDirectories: options.folders];
+        let _: () = msg_send![&*panel, setCanChooseFiles: !options.folders];
+        let _: () = msg_send![&*panel, setAllowsMultipleSelection: options.multiple];
+        if !options.prompt.is_empty() {
+            let prompt = ns_string(options.prompt);
+            let _: () = msg_send![&*panel, setPrompt: &*prompt];
+        }
+        if !options.types.is_empty() {
+            let types: Retained<AnyObject> = msg_send![class!(NSMutableArray), array];
+            for extension in options.types {
+                let extension = ns_string(extension);
+                let _: () = msg_send![&*types, addObject: &*extension];
+            }
+            let _: () = msg_send![&*panel, setAllowedFileTypes: &*types];
+        }
+        // NSModalResponseOK.
+        let response: isize = msg_send![&*panel, runModal];
+        if response != 1 {
+            return Some(Vec::new());
+        }
+        let urls: Retained<AnyObject> = msg_send![&*panel, URLs];
+        let count: usize = msg_send![&*urls, count];
+        let mut paths = Vec::with_capacity(count);
+        for i in 0..count {
+            let url: Retained<AnyObject> = msg_send![&*urls, objectAtIndex: i];
+            let path: Option<Retained<AnyObject>> = msg_send![&*url, path];
+            if let Some(path) = path {
+                paths.push(rust_string(&path));
+            }
+        }
+        Some(paths)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn choose(_options: Choose) -> Option<Vec<String>> {
+    None
+}
+
+/// Ask where to save a file with the system's save panel (`name`
+/// suggested, `types` its extensions, the first added when none is
+/// typed): the path, `Some(None)` if cancelled, `None` where there is no
+/// save panel. The panel asks before replacing a file.
+#[cfg(target_os = "macos")]
+pub fn save(name: &str, types: &[&str], prompt: &str) -> Option<Option<String>> {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    // SAFETY: as in `choose`.
+    unsafe {
+        let panel: Retained<AnyObject> = msg_send![class!(NSSavePanel), savePanel];
+        let name = ns_string(name);
+        let _: () = msg_send![&*panel, setNameFieldStringValue: &*name];
+        if !prompt.is_empty() {
+            let prompt = ns_string(prompt);
+            let _: () = msg_send![&*panel, setPrompt: &*prompt];
+        }
+        if !types.is_empty() {
+            let list: Retained<AnyObject> = msg_send![class!(NSMutableArray), array];
+            for extension in types {
+                let extension = ns_string(extension);
+                let _: () = msg_send![&*list, addObject: &*extension];
+            }
+            let _: () = msg_send![&*panel, setAllowedFileTypes: &*list];
+        }
+        // NSModalResponseOK.
+        let response: isize = msg_send![&*panel, runModal];
+        if response != 1 {
+            return Some(None);
+        }
+        let url: Option<Retained<AnyObject>> = msg_send![&*panel, URL];
+        let Some(url) = url else {
+            return Some(None);
+        };
+        let path: Option<Retained<AnyObject>> = msg_send![&*url, path];
+        Some(path.map(|path| rust_string(&path)))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn save(_name: &str, _types: &[&str], _prompt: &str) -> Option<Option<String>> {
+    None
+}
+
+/// Show `path` (a file or folder, `~` allowed) in the Finder.
+#[cfg(target_os = "macos")]
+pub fn reveal(path: &str) {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    // SAFETY: as in `choose`.
+    unsafe {
+        let path = ns_string(&expand_home(path));
+        let url: Retained<AnyObject> = msg_send![class!(NSURL), fileURLWithPath: &*path];
+        let urls: Retained<AnyObject> = msg_send![class!(NSMutableArray), array];
+        let _: () = msg_send![&*urls, addObject: &*url];
+        let workspace: Retained<AnyObject> = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let _: () = msg_send![&*workspace, activateFileViewerSelectingURLs: &*urls];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reveal(_path: &str) {}
+
+/// Window → Bring All to Front: the app's windows in front of others.
+#[cfg(target_os = "macos")]
+pub fn bring_all_to_front() {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    // SAFETY: NSApplication's shared object, on the main thread (menu
+    // commands run there); `arrangeInFront:` takes any sender.
+    unsafe {
+        let app: Retained<AnyObject> = msg_send![class!(NSApplication), sharedApplication];
+        let none: *const AnyObject = std::ptr::null();
+        let _: () = msg_send![&*app, arrangeInFront: none];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn bring_all_to_front() {}
+
+/// An NSString with `text`.
+#[cfg(target_os = "macos")]
+unsafe fn ns_string(text: &str) -> objc2::rc::Retained<objc2::runtime::AnyObject> {
+    use objc2::{class, msg_send};
+    let text = std::ffi::CString::new(text.replace('\0', "")).expect("no NULs left");
+    // SAFETY: a valid C string, copied by NSString.
+    unsafe { msg_send![class!(NSString), stringWithUTF8String: text.as_ptr()] }
+}
+
+/// An NSString's text.
+#[cfg(target_os = "macos")]
+unsafe fn rust_string(string: &objc2::runtime::AnyObject) -> String {
+    use objc2::msg_send;
+    // SAFETY: UTF8String lives as long as the string, which outlives this.
+    unsafe {
+        let utf8: *const std::ffi::c_char = msg_send![string, UTF8String];
+        if utf8.is_null() {
+            return String::new();
+        }
+        std::ffi::CStr::from_ptr(utf8)
+            .to_string_lossy()
+            .into_owned()
+    }
+}

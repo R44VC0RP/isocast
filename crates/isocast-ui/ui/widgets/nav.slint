@@ -1,0 +1,131 @@
+// A sidebar list of pages (Settings' General, Stream, Output…; 3.12): 32px
+// tabs with an icon, on the chrome surface; the chosen one is g9 with the
+// copper marker and a copper icon. ↑ ↓ move between tabs.
+
+import { Theme, Motion } from "../theme.slint";
+import { Icon, Icons } from "../icons.slint";
+import { FocusRing } from "focus.slint";
+
+export struct NavTab {
+    id: string,
+    label: string,
+    // Its icon, by name (`Icons.named`).
+    icon: string,
+}
+
+export component NavList inherits Rectangle {
+    in property <[NavTab]> tabs;
+    in-out property <string> current;
+    in property <string> label;
+    callback selected(string);
+
+    forward-focus: fs;
+    property <bool> keyboard;
+    property <int> index: -1;
+
+    function choose(id: string) {
+        if id != root.current {
+            root.current = id;
+            root.selected(id);
+        }
+    }
+
+    function go(by: int) {
+        if root.tabs.length > 0 {
+            root.keyboard = true;
+            root.choose(root.tabs[max(0, min(root.tabs.length - 1, root.index + by))].id);
+        }
+    }
+
+    width: 180px;
+    background: Theme.surface-chrome;
+    accessible-role: tab-list;
+    accessible-label: root.label;
+
+    fs := FocusScope {
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == Key.UpArrow {
+                root.go(-1);
+                return accept;
+            }
+            if event.text == Key.DownArrow {
+                root.go(1);
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            padding-top: Theme.space-1;
+            padding-bottom: Theme.space-1;
+            alignment: start;
+            for tab[i] in root.tabs: tab-row := Rectangle {
+                property <bool> on: tab.id == root.current;
+                changed on => {
+                    if self.on {
+                        root.index = i;
+                    }
+                }
+                init => {
+                    if self.on {
+                        root.index = i;
+                    }
+                }
+                height: Theme.nav-row;
+                background: self.on ? Theme.selected : tab-ta.has-hover ? Theme.hover : transparent;
+                accessible-role: AccessibleRole.tab;
+                accessible-label: tab.label;
+                accessible-item-selectable: true;
+                accessible-item-selected: self.on;
+                accessible-item-index: i;
+                accessible-item-count: root.tabs.length;
+                accessible-action-default => { root.choose(tab.id); }
+
+                tab-ta := TouchArea {
+                    clicked => { root.choose(tab.id); }
+                }
+                HorizontalLayout {
+                    padding-left: Theme.space-4;
+                    padding-right: Theme.space-4;
+                    spacing: Theme.space-2;
+                    if tab.icon != "": VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            path: Icons.named(tab.icon);
+                            color: tab-row.on ? Theme.accent-text : tab-ta.has-hover ? Theme.text : Theme.text-2;
+                        }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: tab.label;
+                        color: tab-row.on || tab-ta.has-hover ? Theme.text : Theme.text-2;
+                        font-size: Theme.fs;
+                        letter-spacing: Theme.tracking;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        accessible-role: none;
+                    }
+                }
+                if tab-row.on: Rectangle {
+                    x: 0;
+                    width: 3px;
+                    background: Theme.accent-hover;
+                }
+                FocusRing {
+                    inset: true;
+                    radius: 0;
+                    shown: fs.has-focus && root.keyboard && tab-row.on;
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.line;
+    }
+}

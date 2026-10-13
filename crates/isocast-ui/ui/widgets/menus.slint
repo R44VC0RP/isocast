@@ -1,0 +1,457 @@
+// Menus and context menus (docs/design.md 3.10), one at a time, drawn by
+// one MenuHost in the window. A menu is data: a list of entries (items,
+// separators, headings), and items may open a submenu (one level).
+// Hover is a grey row, never copper; a check mark is copper; danger items
+// are red. Keyboard: ↑ ↓ move, → opens a submenu, ← closes it, Return or
+// Space chooses, Escape closes.
+//
+// To show one, either ask the app to build it (most menus: what's in them
+// depends on the setup), naming who asks and where:
+//
+//     Menus.request("sources:item:" + id, x, y, 0, 0);       // at the pointer
+//     Menus.request("sources:add", self.absolute-position.x,
+//                   self.absolute-position.y, self.width, self.height);  // under a button
+//
+// and the app answers with `Menus.show(...)` (src/kit.rs `MenuBuilder`);
+// or call `Menus.show` from Slint with entries of your own. A chosen item
+// comes back as `Menus.activated(owner, id)`.
+
+import { Theme, Motion } from "../theme.slint";
+import { Icon, Icons } from "../icons.slint";
+import { Viewport } from "globals.slint";
+
+export enum MenuEntryKind { item, separator, heading }
+
+export struct MenuEntry {
+    // What `activated` reports (the owner's own names: "copy", "order:up").
+    id: string,
+    label: string,
+    // A shortcut shown on the right ("⌘C").
+    hint: string,
+    // An icon in the mark lane, by name ("camera": see `Icons.named`),
+    // or "".
+    icon: string,
+    checked: bool,
+    disabled: bool,
+    danger: bool,
+    kind: MenuEntryKind,
+    // Opens `Menus.submenus[submenu]`.
+    has-submenu: bool,
+    submenu: int,
+}
+
+export struct MenuList {
+    entries: [MenuEntry],
+    // Keep a 16px lane before the labels (some entry has a mark).
+    lane: bool,
+}
+
+export global Menus {
+    // Whether a menu is showing, and who opened it.
+    in-out property <bool> open;
+    in-out property <string> owner;
+    in-out property <MenuList> menu;
+    in-out property <[MenuList]> submenus;
+    // The anchor, in window coordinates: a button the menu hangs under, or
+    // a point (zero size) for a context menu.
+    in-out property <length> anchor-x;
+    in-out property <length> anchor-y;
+    in-out property <length> anchor-width;
+    in-out property <length> anchor-height;
+    // Hang from the anchor's right edge instead of its left.
+    in-out property <bool> align-right;
+    // Bumped by `show` (MenuHost opens on it).
+    in-out property <int> serial;
+
+    // Ask the app for `owner`'s menu at this anchor.
+    callback request(owner: string, x: length, y: length, width: length, height: length);
+    // An item was chosen.
+    callback activated(owner: string, id: string);
+    // The menu closed (chosen or dismissed).
+    callback closed(owner: string);
+    // The next item at or after `from` going `by` (1 or -1) that can be
+    // chosen, wrapping; -1 if none. (The app implements it: Slint has no
+    // loops.)
+    pure callback step(entries: [MenuEntry], from: int, by: int) -> int;
+
+    public function show(owner: string, menu: MenuList, submenus: [MenuList], x: length, y: length, width: length, height: length) {
+        root.owner = owner;
+        root.menu = menu;
+        root.submenus = submenus;
+        root.anchor-x = x;
+        root.anchor-y = y;
+        root.anchor-width = width;
+        root.anchor-height = height;
+        root.open = true;
+        root.serial += 1;
+    }
+
+    public function close() {
+        if root.open {
+            root.open = false;
+            root.closed(root.owner);
+        }
+    }
+}
+
+// The floating panel: overlay surface, line-strong edge, 3px corners, 4px
+// padding, a shadow.
+export component MenuPanel inherits Rectangle {
+    background: Theme.surface-overlay;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    border-radius: Theme.r-panel;
+    drop-shadow-color: Theme.shadow-color;
+    drop-shadow-blur: Theme.shadow-blur;
+    drop-shadow-offset-y: Theme.shadow-y;
+    @children
+}
+
+// The entries of one list, laid out; `active` is the highlighted one.
+component MenuEntries inherits VerticalLayout {
+    in property <MenuList> list;
+    in property <int> active: -1;
+    // The item whose submenu is open.
+    in property <int> opened: -1;
+    // Where the active entry is (its top, in this list).
+    out property <length> active-top;
+    callback hovered(int, length);
+    callback chosen(int, length);
+
+    padding: Theme.space-1;
+    spacing: 0;
+
+    for entry[i] in root.list.entries: entry-box := Rectangle {
+        property <bool> item: entry.kind == MenuEntryKind.item;
+        property <bool> lit: self.item && !entry.disabled && (i == root.active || i == root.opened);
+        property <bool> is-active: i == root.active;
+        changed is-active => {
+            if self.is-active {
+                root.active-top = self.y;
+            }
+        }
+        height: entry.kind == MenuEntryKind.separator ? 9px : entry.kind == MenuEntryKind.heading ? 26px : Theme.menu-item;
+        min-width: self.item ? row.preferred-width : heading.preferred-width + 2 * Theme.space-2;
+        border-radius: Theme.r;
+        background: !self.lit ? transparent : entry.danger ? Theme.danger-soft : Theme.overlay-hover;
+        accessible-role: none;
+
+        if entry.kind == MenuEntryKind.separator: Rectangle {
+            y: 4px;
+            height: 1px;
+            background: Theme.line;
+        }
+
+        heading := Text {
+            visible: entry.kind == MenuEntryKind.heading;
+            x: Theme.space-2;
+            y: Theme.space-2;
+            text: entry.kind == MenuEntryKind.heading ? entry.label : "";
+            color: Theme.text-3;
+            font-size: Theme.fs-xs;
+            letter-spacing: Theme.tracking-xs;
+            font-weight: Theme.weight-semibold;
+            accessible-role: none;
+        }
+
+        // Only items are exposed and take the pointer.
+        if entry-box.item: Rectangle {
+            accessible-role: button;
+            accessible-label: entry.label;
+            accessible-enabled: !entry.disabled;
+            accessible-checkable: entry.checked;
+            accessible-checked: entry.checked;
+            accessible-expandable: entry.has-submenu;
+            accessible-expanded: i == root.opened;
+            accessible-action-default => {
+                if !entry.disabled {
+                    root.chosen(i, entry-box.y);
+                }
+            }
+            TouchArea {
+                enabled: !entry.disabled;
+                changed has-hover => {
+                    if self.has-hover {
+                        root.hovered(i, entry-box.y);
+                    }
+                }
+                clicked => { root.chosen(i, entry-box.y); }
+            }
+        }
+
+        row := HorizontalLayout {
+            visible: entry-box.item;
+            padding-left: Theme.space-2;
+            padding-right: Theme.space-3;
+            spacing: Theme.space-2;
+
+            property <color> ink: entry.disabled ? Theme.text-disabled : entry.danger ? Theme.danger-text : Theme.text;
+            property <color> dim: entry.disabled ? Theme.text-disabled : entry.danger ? Theme.danger-text : entry-box.lit ? Theme.text : Theme.text-2;
+
+            if root.list.lane || entry.checked || entry.icon != "": Rectangle {
+                width: Theme.icon;
+                if entry.checked: Icon {
+                    y: (parent.height - self.height) / 2;
+                    path: Icons.check;
+                    color: entry.disabled ? Theme.text-disabled : Theme.accent-text;
+                }
+                if !entry.checked && entry.icon != "": Icon {
+                    y: (parent.height - self.height) / 2;
+                    path: Icons.named(entry.icon);
+                    color: row.dim;
+                }
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: entry.label;
+                color: row.ink;
+                font-size: Theme.fs;
+                letter-spacing: Theme.tracking;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
+            // At least 24px between a label and its shortcut.
+            if entry.hint != "": Rectangle {
+                width: Theme.space-6 - Theme.space-2;
+            }
+            if entry.hint != "": Text {
+                text: entry.hint;
+                color: entry.disabled ? Theme.text-disabled : entry-box.lit ? Theme.text : Theme.text-3;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-xs;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+            if entry.has-submenu: VerticalLayout {
+                alignment: center;
+                Icon {
+                    path: Icons.chevron-right;
+                    size: Theme.icon-sm;
+                    color: entry.disabled ? Theme.text-disabled : entry-box.lit ? Theme.text : Theme.text-3;
+                }
+            }
+        }
+    }
+}
+
+// The window's menu: put one in AppWindow, over everything else. It covers
+// the window while a menu shows, so a click anywhere else closes it.
+export component MenuHost inherits Rectangle {
+    property <int> serial: Menus.serial;
+    property <bool> open: Menus.open;
+    property <int> active: -1;
+    // The open submenu: which root entry, which list, where.
+    property <int> opened: -1;
+    property <int> sub-list: -1;
+    property <length> sub-top;
+    property <int> sub-active: -1;
+    // Keyboard is in the submenu.
+    property <bool> in-sub;
+
+    changed serial => {
+        root.active = -1;
+        root.opened = -1;
+        root.sub-list = -1;
+        root.sub-active = -1;
+        root.in-sub = false;
+        popup.show();
+    }
+    changed open => {
+        if !root.open {
+            popup.close();
+        }
+    }
+
+    function open-sub(index: int, top: length) {
+        if index >= 0 && Menus.menu.entries[index].has-submenu && !Menus.menu.entries[index].disabled {
+            root.opened = index;
+            root.sub-list = Menus.menu.entries[index].submenu;
+            root.sub-top = top;
+            root.sub-active = -1;
+        } else {
+            root.opened = -1;
+            root.sub-list = -1;
+            root.in-sub = false;
+        }
+    }
+
+    function choose(entry: MenuEntry) {
+        if entry.kind == MenuEntryKind.item && !entry.disabled && !entry.has-submenu {
+            // Close the popup now, not in `changed open` (which runs
+            // later): closing gives focus back to what had it before the
+            // menu, which would take it from a dialog the item opens.
+            popup.close();
+            Menus.close();
+            Menus.activated(Menus.owner, entry.id);
+        }
+    }
+
+    // 1px, not 0: an empty item counts as hidden, and the accessibility
+    // tree (and `--a11y`) leaves out the popups of hidden items.
+    width: 1px;
+    height: 1px;
+    accessible-role: none;
+
+    popup := PopupWindow {
+        x: -root.absolute-position.x;
+        y: -root.absolute-position.y;
+        width: Viewport.width;
+        height: Viewport.height;
+        close-policy: no-auto-close;
+
+        // A press anywhere outside the menu closes it.
+        TouchArea {
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down {
+                    Menus.close();
+                }
+            }
+        }
+
+        property <length> margin: Theme.space-2;
+        property <length> menu-w: max(Theme.menu-min, entries.preferred-width);
+        property <length> menu-h: entries.preferred-height;
+        property <bool> at-point: Menus.anchor-width == 0 && Menus.anchor-height == 0;
+        property <length> below: self.at-point ? Menus.anchor-y : Menus.anchor-y + Menus.anchor-height + 6px;
+        property <length> above: self.at-point ? Menus.anchor-y - self.menu-h : Menus.anchor-y - self.menu-h - 6px;
+        property <length> left: Menus.align-right ? Menus.anchor-x + Menus.anchor-width - self.menu-w : Menus.anchor-x;
+
+        panel := MenuPanel {
+            x: max(parent.margin, min(parent.left, parent.width - parent.menu-w - parent.margin));
+            y: parent.below + parent.menu-h > parent.height - parent.margin ? max(parent.margin, parent.above) : parent.below;
+            width: parent.menu-w;
+            height: parent.menu-h;
+            accessible-role: list;
+            accessible-label: "Menu";
+
+            TouchArea { }
+            entries := MenuEntries {
+                list: Menus.menu;
+                active: root.in-sub ? -1 : root.active;
+                opened: root.opened;
+                hovered(index, top) => {
+                    root.in-sub = false;
+                    root.active = index;
+                    if Menus.menu.entries[index].has-submenu {
+                        close-timer.running = false;
+                        root.open-sub(index, top);
+                    } else if root.opened >= 0 {
+                        close-timer.running = true;
+                    }
+                }
+                chosen(index, top) => {
+                    if Menus.menu.entries[index].has-submenu {
+                        root.open-sub(index, top);
+                    } else {
+                        root.choose(Menus.menu.entries[index]);
+                    }
+                }
+            }
+        }
+
+        // The submenu, beside its item (or on the other side if it doesn't
+        // fit), its first item level with it.
+        if root.sub-list >= 0 && root.sub-list < Menus.submenus.length: MenuPanel {
+            property <length> sub-w: max(Theme.menu-min, sub-entries.preferred-width);
+            property <length> sub-h: sub-entries.preferred-height;
+            x: panel.x + panel.width + 2px + self.sub-w > parent.width - parent.margin ? max(parent.margin, panel.x - self.sub-w - 2px) : panel.x + panel.width + 2px;
+            y: max(parent.margin, min(panel.y + root.sub-top - Theme.space-1, parent.height - self.sub-h - parent.margin));
+            width: self.sub-w;
+            height: self.sub-h;
+            accessible-role: list;
+            accessible-label: Menus.menu.entries[root.opened].label;
+
+            TouchArea {
+                changed has-hover => {
+                    if self.has-hover {
+                        close-timer.running = false;
+                    }
+                }
+            }
+            sub-entries := MenuEntries {
+                list: Menus.submenus[root.sub-list];
+                active: root.sub-active;
+                hovered(index, top) => {
+                    close-timer.running = false;
+                    root.in-sub = true;
+                    root.sub-active = index;
+                }
+                chosen(index, top) => {
+                    root.choose(Menus.submenus[root.sub-list].entries[index]);
+                }
+            }
+        }
+
+        // Hovering a plain item closes an open submenu after a moment, so
+        // the pointer can cross other items on its way into it.
+        close-timer := Timer {
+            interval: 150ms;
+            running: false;
+            triggered => {
+                self.running = false;
+                if !root.in-sub {
+                    root.opened = -1;
+                    root.sub-list = -1;
+                }
+            }
+        }
+
+        keys := FocusScope {
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    if root.in-sub || root.sub-list >= 0 {
+                        root.in-sub = false;
+                        root.sub-list = -1;
+                        root.opened = -1;
+                    } else {
+                        Menus.close();
+                    }
+                    return accept;
+                }
+                if event.text == Key.DownArrow || event.text == Key.UpArrow {
+                    if root.in-sub {
+                        root.sub-active = Menus.step(Menus.submenus[root.sub-list].entries, root.sub-active, event.text == Key.DownArrow ? 1 : -1);
+                    } else {
+                        root.active = Menus.step(Menus.menu.entries, root.active, event.text == Key.DownArrow ? 1 : -1);
+                        root.opened = -1;
+                        root.sub-list = -1;
+                    }
+                    return accept;
+                }
+                if event.text == Key.RightArrow {
+                    if !root.in-sub && root.active >= 0 && Menus.menu.entries[root.active].has-submenu {
+                        root.open-sub(root.active, entries.active-top);
+                        root.in-sub = true;
+                        root.sub-active = Menus.step(Menus.submenus[root.sub-list].entries, -1, 1);
+                    }
+                    return accept;
+                }
+                if event.text == Key.LeftArrow {
+                    if root.in-sub {
+                        root.in-sub = false;
+                        root.sub-list = -1;
+                        root.opened = -1;
+                    }
+                    return accept;
+                }
+                if event.text == "\n" || event.text == " " {
+                    if root.in-sub && root.sub-active >= 0 {
+                        root.choose(Menus.submenus[root.sub-list].entries[root.sub-active]);
+                    } else if root.active >= 0 {
+                        if Menus.menu.entries[root.active].has-submenu {
+                            root.open-sub(root.active, entries.active-top);
+                            root.in-sub = true;
+                            root.sub-active = Menus.step(Menus.submenus[root.sub-list].entries, -1, 1);
+                        } else {
+                            root.choose(Menus.menu.entries[root.active]);
+                        }
+                    }
+                    return accept;
+                }
+                reject
+            }
+        }
+    }
+}

@@ -1,0 +1,70 @@
+// Small pieces: keycaps, the spinner, status dots.
+
+import { Theme } from "../theme.slint";
+
+// A flat keycap (3.12): 20px, 6px padding, meta type, a 1px edge.
+export component Kbd inherits Rectangle {
+    in property <string> text;
+    height: Theme.kbd;
+    min-width: max(Theme.kbd, label.preferred-width + 12px);
+    border-radius: Theme.r;
+    background: Theme.control;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+    label := Text {
+        text: root.text;
+        color: Theme.text;
+        font-size: Theme.fs-xs;
+        letter-spacing: Theme.tracking-xs;
+        font-weight: Theme.weight-medium;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+}
+
+// A turning ring: work under way (18px, or 14px `small`). It keeps
+// turning under Reduce motion, as progress should.
+export component Spinner inherits Rectangle {
+    in property <bool> small;
+    width: root.small ? 14px : 18px;
+    height: self.width;
+    accessible-role: progress-indicator;
+    accessible-label: "Working";
+
+    Rectangle {
+        border-radius: self.width / 2;
+        border-width: 2px;
+        border-color: Theme.line-strong;
+    }
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        // The top quarter of the ring.
+        commands: "M1.5 12A10.5 10.5 0 0 1 12 1.5";
+        stroke: Theme.accent;
+        stroke-width: 2px;
+        stroke-line-cap: butt;
+        fill: transparent;
+        transform-rotation: (animation-tick() / 900ms) * 360deg;
+    }
+}
+
+// An 8px round light: REC, a scene on air, a source's state.
+export component Dot inherits Rectangle {
+    in property <color> dot-color: Theme.text-3;
+    // Square (1px corners) instead: stream health, so it never looks like REC.
+    in property <bool> square;
+    // Pulse (opening, starting).
+    in property <bool> pulse;
+    width: Theme.dot;
+    height: Theme.dot;
+    border-radius: root.square ? 1px : self.width / 2;
+    background: root.dot-color;
+    opacity: root.pulse ? 0.675 + 0.325 * cos((animation-tick() / 1200ms) * 360deg) : 1;
+    accessible-role: none;
+}

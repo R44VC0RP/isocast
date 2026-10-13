@@ -1,0 +1,55 @@
+[package]
+name = "isocast-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Isocast app rebuilt in Slint (spike): a portable native window, a thin client of isocastd."
+# Slint is used under its royalty-free licence, which asks for the
+# "About Slint" notice the app shows in Help → About Isocast.
+
+[[bin]]
+name = "isocast-ui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+# `wgpu`: the daemon's shared frames as wgpu textures (the portable preview).
+isocast-client = { path = "../isocast-client", features = ["wgpu"] }
+isocast-protocol = { path = "../isocast-protocol" }
+# The test-only element search API (accessible roles and names), used by
+# `--a11y` to print what screen readers are given.
+i-slint-backend-testing = "=1.18.1"
+png = "0.18.1"
+serde = "1.0.229"
+serde_json = "1.0.154"
+slint = { version = "=1.18.1", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "accessibility",
+    "backend-winit",
+    "renderer-skia",
+    "unstable-wgpu-30",
+    "unstable-winit-030",
+] }
+# The engine's wgpu, pinned the same (its frame import uses wgpu-hal), so
+# the preview can share GPU textures with it. Slint's Skia renderer adds
+# the platform's backend (Metal on macOS, DX12 on Windows).
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# macOS: the preview's picture and selection box as Core Animation layers
+# under the window's interface (see src/layers.rs), so the interface isn't
+# redrawn for every video frame.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGColor", "CGColorSpace"] }
+objc2-io-surface = { version = "0.3.2", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "libc", "objc2-core-foundation"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics"] }
+raw-window-handle = "0.6.2"
+
+[build-dependencies]
+slint-build = "=1.18.1"

@@ -1,0 +1,27 @@
+[package]
+name = "isocast-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "isocastd: the headless Isocast engine behind a local control socket."
+
+[[bin]]
+name = "isocastd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.22.1"
+# Already in the build through isocast-engine: timelines' local times.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ctrlc = { version = "3", features = ["termination"] }
+isocast-engine = { path = "../isocast-engine" }
+isocast-protocol = { path = "../isocast-protocol" }
+isocast-surfaces = { path = "../isocast-surfaces" }
+libc = "0.2"
+serde = "1.0.229"
+serde_json = "1.0.154"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+isocast-platform-macos = { path = "../isocast-platform-macos" }

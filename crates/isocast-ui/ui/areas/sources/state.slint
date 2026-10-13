@@ -1,0 +1,216 @@
+// Area A, scenes and sources: the Scenes and Sources docks, the source
+// toolbar, adding sources, Properties, Filters, Edit Transform, Rename and
+// their menus. src/areas/sources/ fills this.
+
+import { DropdownOption, FormGroup } from "../../kit.slint";
+
+export struct SceneRow {
+    id: string,
+    name: string,
+    // On air (in Studio Mode its row shows the program dot).
+    on-air: bool,
+    // In Studio Mode's preview.
+    in-preview: bool,
+    // Its tooltip ("Main (1)": the key that switches to it).
+    tooltip: string,
+}
+
+// An item of the scene being edited, top first, groups' children under
+// them.
+export struct ItemRow {
+    // Its key path ("group/clip"): what `Ui.select` takes.
+    path: string,
+    // The source it shows ("" for a nested scene, a box or a group).
+    source: string,
+    name: string,
+    // Its kind's icon, by name (`Icons.named`).
+    icon: string,
+    visible: bool,
+    locked: bool,
+    // Recorded as its own file (the ISO toggle), and whether it can be.
+    iso: bool,
+    can-iso: bool,
+    depth: int,
+    group: bool,
+    expanded: bool,
+    // Its source in the live engine: "", "opening" or "failed" (and why).
+    state: string,
+    error: string,
+    // It names a source the setup doesn't have.
+    missing: bool,
+    // The row it moves among: its parent's path ("" at the top level).
+    parent: string,
+}
+
+// A filter in the Filters dialog's lists.
+export struct FilterRow {
+    key: string,
+    name: string,
+    enabled: bool,
+}
+
+// A choice in Create/Select Source's list of existing sources or scenes.
+export struct PickRow {
+    id: string,
+    label: string,
+}
+
+export global SourcesArea {
+    in property <[SceneRow]> scenes;
+    in property <[ItemRow]> items;
+    // The scene whose name is being edited in the list ("" for none), and
+    // the item (by path).
+    in-out property <string> renaming-scene;
+    in-out property <string> renaming-item;
+    // Bumped to open the Add menu under the Sources dock's + (⇧⌘A).
+    in-out property <int> add-menu-serial;
+
+    // ---- The source toolbar's quick setting for the selected source:
+    // its label ("Device", "Text"…, "" for none) and what it is: "choice"
+    // (`quick-options`, `quick-value`), "text" (`quick-text`), "color"
+    // (`quick-text`, `quick-swatch`) or "path" (`quick-text`, a file's name
+    // or a URL), with an optional button (`quick-button`: "Browse",
+    // "Refresh").
+    in property <string> quick-label;
+    in property <string> quick-kind;
+    in property <[DropdownOption]> quick-options;
+    in property <string> quick-value;
+    in property <string> quick-text;
+    in property <string> quick-tooltip;
+    in property <color> quick-swatch;
+    in property <string> quick-button;
+    in property <string> quick-button-tooltip;
+    // Bump to open the quick setting's list (scripts, the keyboard).
+    in-out property <int> open-quick;
+
+    // ---- Create/Select Source ("create-source")
+    // "Colour Source · Main", or "Scene".
+    in property <string> create-heading;
+    in property <bool> create-is-scene;
+    in property <bool> create-audio-only;
+    // "new" or "existing".
+    in-out property <string> create-mode: "new";
+    in-out property <string> create-name;
+    // The name is another source's already.
+    in property <bool> create-taken;
+    in property <[PickRow]> create-existing;
+    in-out property <string> create-pick;
+    in-out property <bool> create-visible: true;
+    in property <string> create-empty;
+
+    // ---- Properties ("properties")
+    in property <string> props-title;
+    in property <[FormGroup]> props-form;
+    // A picture of the source on top (video sources).
+    in property <bool> props-video;
+    // What still has to be set before OK can add a new source.
+    in property <string> props-need;
+    // Why the engine couldn't start the source, if it couldn't.
+    in property <string> props-problem;
+    // It was added just now (Cancel keeps it).
+    in property <bool> props-created;
+
+    // ---- Filters ("filters")
+    in property <string> filters-title;
+    in property <bool> filters-audio;
+    in property <bool> filters-video;
+    in property <[FilterRow]> audio-filters;
+    in property <[FilterRow]> video-filters;
+    // The selected filter: its list ("audio_filters" or "filters") and key.
+    in property <string> filter-list;
+    in property <string> filter-key;
+    in property <string> filter-heading;
+    in property <bool> filter-off;
+    in property <[FormGroup]> filter-form;
+
+    // ---- A source's picture in Properties and Filters
+    in property <image> preview;
+    in property <bool> preview-shown;
+    in property <string> preview-note;
+    // Its width over its height.
+    in property <float> preview-aspect: 16 / 9;
+
+    // ---- Edit Transform ("transform")
+    in property <string> transform-title;
+    // An item is selected.
+    in property <bool> transform-item;
+    in property <bool> transform-locked;
+    // Position (at the positional alignment's point), size, rotation (°),
+    // scale (%), crop, opacity (0–1), corner radius.
+    in property <float> transform-x;
+    in property <float> transform-y;
+    in property <float> transform-w;
+    in property <float> transform-h;
+    in property <float> transform-rotate;
+    in property <float> transform-scale;
+    in-out property <string> transform-anchor: "top_left";
+    in property <string> transform-fit;
+    in property <string> transform-align;
+    in property <float> crop-left;
+    in property <float> crop-right;
+    in property <float> crop-top;
+    in property <float> crop-bottom;
+    in property <float> transform-opacity: 1;
+    in property <float> transform-radius;
+    in property <bool> has-border;
+    in property <float> border-width;
+    in property <string> border-color;
+    in property <color> border-swatch;
+    in property <bool> has-shadow;
+    in property <float> shadow-blur;
+    in property <string> shadow-color;
+    in property <color> shadow-swatch;
+    in property <bool> has-background;
+    in property <string> background-color;
+    in property <color> background-swatch;
+    in property <[DropdownOption]> align-options;
+    in property <[DropdownOption]> fit-options;
+
+    // ---- Rename ("rename")
+    in property <string> rename-heading;
+    in-out property <string> rename-name;
+
+    // ---- Docks
+    callback choose-scene(string);
+    callback rename-scene(string, string);
+    // A row dragged from one place to land before another (0..count).
+    callback move-scene(int, int);
+    callback move-item(int, int);
+    callback rename-item(string, string);
+    callback toggle-visible(string);
+    callback toggle-locked(string);
+    callback toggle-iso(string);
+    callback toggle-group(string);
+    // The source toolbar.
+    callback quick-choose(string);
+    callback quick-text-changed(string);
+    callback quick-button-clicked();
+    callback quick-pick-color();
+
+    // ---- Dialogs
+    callback create-accept();
+    callback create-changed();
+    callback props-accept();
+    callback props-cancel();
+    callback props-defaults();
+    callback filter-select(string, string);
+    callback filter-toggle(string, string);
+    // + under a list (with where the button is), −, ⌃ ⌄.
+    callback filter-add(string, length, length, length, length);
+    callback filter-remove(string);
+    callback filter-move(string, int);
+    callback filter-defaults();
+    // A number of the transform (x, y, w, h, rotate, scale, crop-left…,
+    // opacity, radius, border-width, shadow-blur): `live` while dragging.
+    callback transform-number(string, float, bool);
+    // fit, align
+    callback transform-choose(string, string);
+    // border-color, shadow-color, background-color
+    callback transform-color(string, string);
+    // reset, add-border, remove-border, add-shadow, remove-shadow,
+    // add-background, remove-background
+    callback transform-action(string);
+    callback rename-accept();
+
+    callback transform-pick-color(string, string);
+}

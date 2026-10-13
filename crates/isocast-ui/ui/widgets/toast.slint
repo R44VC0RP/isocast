@@ -1,0 +1,173 @@
+// Toasts (docs/design.md 3.13): messages that stack at the top right,
+// newest first, 360px wide. Errors stay until dismissed; the rest fade
+// after a few seconds (the app's src/toasts.rs keeps the list and the
+// timers). A toast can carry an action ("Undo", "Details") and a small
+// table of rows (dropped frames per file).
+
+import { Theme, Motion } from "../theme.slint";
+import { Icon, Icons } from "../icons.slint";
+import { Button, ButtonVariant, ControlSize, IconButton } from "buttons.slint";
+
+export enum ToastKind { info, success, warning, error }
+
+export struct ToastRow {
+    label: string,
+    value: string,
+    // "", "bad" (red) or "warn" (amber) for the value.
+    tone: string,
+}
+
+export struct ToastData {
+    id: int,
+    kind: ToastKind,
+    title: string,
+    message: string,
+    // An action button's label, or "".
+    action: string,
+    rows: [ToastRow],
+}
+
+export global Toasts {
+    // Newest first.
+    in-out property <[ToastData]> items;
+    callback dismiss(int);
+    callback action(int);
+    // Keep the toasts with this key out of sight ("" for none): the drops
+    // toast while the REC or LIVE details show the same.
+    callback hide-key(string);
+}
+
+export component Toast inherits Rectangle {
+    in property <ToastData> toast;
+
+    property <bool> shown;
+    init => { root.shown = true; }
+
+    width: Theme.toast-w;
+    height: row.preferred-height;
+    background: Theme.surface-overlay;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    border-radius: Theme.r-panel;
+    drop-shadow-color: Theme.shadow-color;
+    drop-shadow-blur: Theme.shadow-blur;
+    drop-shadow-offset-y: Theme.shadow-y;
+    opacity: root.shown ? 1 : 0;
+    animate opacity { duration: Theme.med; easing: Motion.ease; }
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.toast.title;
+    accessible-description: root.toast.message;
+
+    TouchArea { }
+
+    row := HorizontalLayout {
+        padding: Theme.space-3;
+        spacing: Theme.space-2;
+
+        VerticalLayout {
+            padding-top: 1px;
+            alignment: start;
+            Icon {
+                path: root.toast.kind == ToastKind.error ? Icons.alert : root.toast.kind == ToastKind.warning ? Icons.warning : root.toast.kind == ToastKind.success ? Icons.check : Icons.info;
+                color: root.toast.kind == ToastKind.error ? Theme.danger-text : root.toast.kind == ToastKind.warning ? Theme.warning : root.toast.kind == ToastKind.success ? Theme.onair-text : Theme.text-2;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 0;
+            alignment: start;
+            Text {
+                min-height: Theme.lh;
+                vertical-alignment: center;
+                text: root.toast.title;
+                color: Theme.text;
+                font-size: Theme.fs;
+                letter-spacing: Theme.tracking;
+                line-height-factor: Theme.leading;
+                font-weight: Theme.weight-semibold;
+                wrap: word-wrap;
+            }
+            if root.toast.message != "": Text {
+                min-height: Theme.lh-sm;
+                vertical-alignment: center;
+                text: root.toast.message;
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading-sm;
+                wrap: word-wrap;
+            }
+            if root.toast.rows.length > 0: VerticalLayout {
+                padding-top: Theme.space-1;
+                spacing: 2px;
+                for r in root.toast.rows: HorizontalLayout {
+                    spacing: Theme.space-3;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: r.label;
+                        color: Theme.text-2;
+                        font-size: Theme.fs-sm;
+                        letter-spacing: Theme.tracking-sm;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: r.value;
+                        color: r.tone == "bad" ? Theme.danger-text : r.tone == "warn" ? Theme.warning : Theme.text-2;
+                        font-size: Theme.fs-sm;
+                        letter-spacing: Theme.tracking-sm;
+                        horizontal-alignment: right;
+                    }
+                }
+            }
+        }
+        // The buttons (24px) sit on the title's 18px line, 3px over it
+        // above and below, and the ✕ 4px into the padding (as the web
+        // app's `.toast .actions` margins put them).
+        VerticalLayout {
+            horizontal-stretch: 0;
+            alignment: start;
+            Rectangle {
+                width: actions.preferred-width - 4px;
+                height: Theme.lh;
+                actions := HorizontalLayout {
+                    x: 0;
+                    y: -3px;
+                    width: self.preferred-width;
+                    height: Theme.control-h-sm;
+                    spacing: Theme.space-1;
+                    if root.toast.action != "": Button {
+                        text: root.toast.action;
+                        variant: ButtonVariant.quiet;
+                        size: ControlSize.small;
+                        clicked => { Toasts.action(root.toast.id); }
+                    }
+                    IconButton {
+                        small: true;
+                        icon: Icons.x;
+                        label: "Dismiss";
+                        show-tooltip: false;
+                        clicked => { Toasts.dismiss(root.toast.id); }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The stack, top right with a 12px margin, 8px apart. Put it last in the
+// window (and in a modal, so toasts show over dialogs too).
+export component ToastStack inherits Rectangle {
+    in property <length> area-width;
+    x: root.area-width - Theme.toast-w - Theme.space-3;
+    y: Theme.space-3;
+    width: Theme.toast-w;
+    height: stack.preferred-height;
+    accessible-role: none;
+
+    stack := VerticalLayout {
+        spacing: Theme.space-2;
+        for toast in Toasts.items: Toast {
+            toast: toast;
+        }
+    }
+}

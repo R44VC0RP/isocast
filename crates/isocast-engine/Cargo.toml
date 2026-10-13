@@ -1,0 +1,32 @@
+[package]
+name = "isocast-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Isocast engine: sessions, the shared clock, recording and the GPU renderer."
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+isocast-protocol = { path = "../isocast-protocol" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+png = "0.18.1"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tga"] }
+cosmic-text = "0.19.0"
+# CSS flexbox, grid and block layout for scene items (MIT; already in the
+# lock file through Slint). Without its `parse` feature (cssparser is
+# MPL-2.0): grid track lists are read by our own parser.
+taffy = "0.10.1"
+# RNNoise for the noise suppression audio filter (pure Rust, BSD-3-Clause).
+nnnoiseless = { version = "0.5.2", default-features = false }
+resvg = { version = "0.48.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+# TLS for RTMPS streaming, using the OS's own TLS and trust store
+# (Security.framework on macOS, SChannel on Windows, OpenSSL on Linux).
+native-tls = "0.2.18"
+# Plugins' audio filters: WebAssembly components (Apache-2.0 WITH
+# LLVM-exception), compiled with Cranelift; no WASI, async, GC or cache.
+wasmtime = { version = "=49.0.2", default-features = false, features = ["cranelift", "component-model", "runtime", "std"] }
+# Pinned: the frame import uses wgpu-hal APIs, which change between releases.
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }

@@ -1,0 +1,75 @@
+# Ryan's YouTube recording rig, ported from the OBS "Recording" scene
+# collection: screen + facecam + iPhone screen, with every camera and the
+# screen also saved as its own ISO file (what OBS Source Record did). The
+# facecam is "Studio Video" and the mic "Studio Audio" (Ryan's network
+# camera and XLR mic over NDI).
+
+version = 1
+name = "Recording"
+
+[canvas]
+width = 3840
+height = 2160
+fps = 60
+
+[[sources]]
+id = "screen"
+name = "Screen"
+kind = "display"
+display = "main"
+
+[[sources]]
+id = "facecam"
+name = "Facecam"
+kind = "camera"
+device = "Studio Video"
+
+# The iPhone's screen over USB (what OBS "iPhone Record" captured), not its
+# camera. Named exactly, so a missing cable fails instead of falling back to
+# the iPhone's Continuity camera.
+[[sources]]
+id = "iphone"
+name = "iPhone"
+kind = "camera"
+device = "Ryan iPhone"
+
+[[sources]]
+id = "mic"
+name = "Mic"
+kind = "microphone"
+device = "Studio Audio"
+
+[[sources]]
+id = "desktop-audio"
+name = "Desktop Audio"
+kind = "system_audio"
+
+[[scenes]]
+id = "desktop"
+name = "Desktop"
+items = [
+  { source = "screen", rect = { x = 0, y = 0, width = 3840, height = 2160 } },
+  { source = "facecam", rect = { x = 2978, y = 1676, width = 862, height = 484 }, visible = false },
+]
+
+[[scenes]]
+id = "closeup"
+name = "Closeup"
+items = [
+  { source = "facecam", rect = { x = 0, y = 0, width = 3840, height = 2160 } },
+]
+
+[recording]
+folder = "~/dev/obs-recordings"
+
+[recording.program]
+filename = "{date} {time}"
+encoder = { codec = "hevc", quality = 70 }
+audio = ["mic", "desktop-audio"]
+
+[recording.iso]
+enabled = true
+sources = ["screen", "facecam", "iphone"]
+filename = "{SOURCE}-{date} {time}"
+encoder = { codec = "hevc", quality = 70 }
+audio = ["mic"]

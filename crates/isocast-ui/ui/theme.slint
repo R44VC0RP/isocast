@@ -1,0 +1,233 @@
+// The design tokens of docs/design.md section 2, with the same names and
+// values as the `:root` block in crates/isocast-app/ui/app.css: a dark,
+// flat interface whose panes meet at 1px hairlines, controls barely
+// softened (2px) and floating surfaces 3px. Use these names, never hex
+// values or sizes of your own; a value the design lacks goes here first.
+//
+// rgba() values are written #rrggbbaa (alpha × 255, rounded).
+
+// Instrument Sans (SIL OFL 1.1, fonts/LICENSE-instrument-sans), the brand's
+// secondary face, built into the app: static 400 and 600 cuts of the
+// upstream variable font (google/fonts ofl/instrumentsans) at normal width.
+// Used only for the brand titles (Welcome, first run, About).
+import "fonts/InstrumentSans-Regular.ttf";
+import "fonts/InstrumentSans-SemiBold.ttf";
+
+export global Theme {
+    // Set by the app from the system's "Reduce motion": menus, dialogs and
+    // toasts then appear without animating (spinners keep turning).
+    in-out property <bool> reduce-motion;
+
+    // ---- Brand constants (the mineral palette): the mark, onboarding
+    // pictures, slider thumbs.
+    out property <color> copper: #b4683f;
+    out property <color> slate: #2e3338;
+    out property <color> limestone: #c9c2b6;
+    out property <color> bone: #eeeae2;
+    // The mark's outer bars (verdigris).
+    out property <color> verdigris: #3e8e7e;
+
+    // ---- 2.1 Neutral ramp, slate-tinted, darkest at the back (g0–g10)
+    out property <color> surface-monitor: #0b0c0d; // g0: behind the picture, handle borders
+    out property <color> surface-stage: #111315; // g1: the preview's surround, full-window states
+    out property <color> surface-chrome: #141619; // g2: status bar, title bars, settings nav
+    out property <color> surface-inset: #141619; // g2: fields, pick lists
+    out property <color> surface-header: #17191d; // g3: dock header band
+    out property <color> surface-panel: #1b1e22; // g4: docks, source toolbar, dialog bodies
+    out property <color> surface-overlay: #22262b; // g5: menus, popovers, toasts
+    out property <color> hover: #262a30; // g6: row hover, quiet-button hover
+    out property <color> control: #262a30; // g6: secondary button at rest
+    out property <color> line: #2b3035; // g7: every structural hairline
+    out property <color> control-hover: #30353b; // g8: button hover
+    out property <color> overlay-hover: #30353b; // g8: menu item hover
+    out property <color> line-strong: #383e45; // g9: control borders
+    out property <color> control-active: #383e45; // g9: pressed buttons
+    out property <color> selected: #383e45; // g9: a selected row
+    out property <color> selected-hover: #383e45; // g9: the same on hover
+    out property <color> field-border: #383e45; // g9
+    out property <color> field-border-hover: #4a5058; // g10
+    // Only between items of one list (audio rows, hotkeys, mixer strips),
+    // never a pane's edge: rgba(238, 234, 226, 0.06).
+    out property <color> line-soft: #eeeae20f;
+
+    // ---- 2.2 Text (warm, on the slate surfaces)
+    out property <color> text: #eeeae2; // names, values, titles
+    out property <color> text-2: #b0aba3; // labels, panel titles, idle icons
+    out property <color> text-3: #928e87; // hints, units, placeholders (use text-2 on selected/hover)
+    out property <color> text-disabled: #66625c; // disabled labels only
+    out property <color> outline: #807c75; // checkbox/radio outlines, quality ticks
+
+    // ---- 2.3 Accent: copper
+    out property <color> accent: #b4683f; // strokes and fills without text
+    out property <color> accent-hover: #c4774c; // their hover; the ISO toggle when on; the row marker
+    out property <color> accent-text: #d38d63; // copper text and icons ("on", "chosen")
+    out property <color> accent-fill: #a65c35; // primary buttons, under white text
+    out property <color> accent-fill-hover: #ae623a;
+    out property <color> accent-fill-active: #9a5430;
+    out property <color> on-accent: #ffffff;
+    out property <color> accent-soft: #b4683f29; // rgba(180, 104, 63, 0.16): checked toggle, info callout
+
+    // ---- 2.4 Status
+    out property <color> onair: #3e8e7e; // on air / program / success: strokes and dots
+    out property <color> onair-text: #56a996;
+    out property <color> onair-fill: #2f7365;
+    out property <color> onair-soft: #3e8e7e29; // rgba(62, 142, 126, 0.16)
+    out property <color> danger: #e5484d; // recording / live / error: strokes and dots
+    out property <color> danger-text: #f27a7d; // 4.6:1 on control-hover (revised after review)
+    out property <color> danger-fill: #cf3a3f;
+    out property <color> danger-fill-hover: #d63d42;
+    out property <color> danger-fill-active: #c4363b;
+    out property <color> danger-soft: #e5484d24; // rgba(229, 72, 77, 0.14)
+    out property <color> warning: #d6a03f;
+    out property <color> warning-soft: #d6a03f24; // rgba(214, 160, 63, 0.14)
+    out property <color> on-warning: #1b1408;
+
+    // ---- Meters (3.16)
+    out property <color> meter-ok: #3e8e7e; // below −18 dB
+    out property <color> meter-warn: #d6a03f; // −18 to −6 dB
+    out property <color> meter-clip: #e5484d; // above −6 dB
+    out property <color> meter-track: #22262b; // the unlit bar
+
+    // ---- Over the picture and behind floating surfaces
+    out property <color> scrim: #08090a80; // rgba(8, 9, 10, 0.5): behind dialogs
+    out property <color> readout: #0b0c0dd9; // rgba(11, 12, 13, 0.85): the drag readout
+    out property <color> hover-outline: #eeeae28c; // rgba(238, 234, 226, 0.55): an item under the pointer
+    out property <color> box-ring: #00000080; // rgba(0, 0, 0, 0.5): outside the selection box
+    out property <color> swatch-ring: #ffffff1f; // rgba(255, 255, 255, 0.12): around colour swatches
+    out property <color> scroll-thumb: #eeeae224; // rgba(238, 234, 226, 0.14)
+    out property <color> scroll-thumb-hover: #4a5058;
+    // Selected text in fields: a neutral grey (g10, as the web app shows;
+    // copper here read as the brown fill design.md P1.4 removed).
+    out property <color> text-selection: #4a5058;
+
+    // ---- 2.5 Type. The system font everywhere; Instrument Sans only for
+    // the brand titles. Weights 400, 500 and 600 only.
+    // The system's UI face (SF on macOS; Slint's default would be
+    // Helvetica). Windows falls back to its own sans-serif.
+    out property <string> font-ui: "System Font";
+    out property <string> font-brand: "Instrument Sans";
+    out property <string> font-mono: "Menlo";
+    out property <length> fs: 13px; // body: rows, menu items, prose
+    out property <length> lh: 18px;
+    out property <length> fs-sm: 12px; // controls, labels, panel titles, captions
+    out property <length> lh-sm: 16px;
+    out property <length> fs-xs: 11px; // meta: status bar, units, kbd, tags
+    out property <length> lh-xs: 14px;
+    out property <length> fs-micro: 10px; // the meter scale only
+    out property <length> fs-lead: 14px;
+    out property <length> lh-lead: 21px;
+    out property <length> fs-display: 24px; // brand titles
+    out property <length> lh-display: 30px;
+    out property <int> weight-regular: 400;
+    out property <int> weight-medium: 500; // buttons
+    out property <int> weight-semibold: 600; // headings, panel titles, tags
+    out property <length> tracking-tag: 0.66px; // 0.06em at 11px, uppercase tags
+    out property <length> tracking-display: -0.24px; // -0.01em at 24px
+    // Skia draws the system face narrower than WebKit does (SF at its
+    // display optical size, no variation coordinates): these widen it back
+    // to the web app's word widths ("Shown in the title bar." 120.5pt at
+    // 12px; "Empty Scene" 79pt at 13px), measured against its references.
+    out property <length> tracking: 0.5px; // 13px
+    out property <length> tracking-sm: 0.55px; // 12px
+    out property <length> tracking-xs: 0.5px; // 11px
+    out property <length> tracking-lead: 0.5px; // 14px
+    // Wrapped lines at the type scale's line heights (lh, lh-sm…): Slint's
+    // factor multiplies the face's natural height (about 14px at 12px).
+    out property <float> leading: 1.16; // 13/18
+    out property <float> leading-sm: 1.12; // 12/16
+    out property <float> leading-xs: 1.08; // 11/14
+    out property <float> leading-lead: 1.26; // 14/21
+
+    // The tracking for a size that is one of fs, fs-sm, fs-xs, fs-lead.
+    public pure function tracking-for(size: length) -> length {
+        if size == root.fs { return root.tracking; }
+        if size == root.fs-xs { return root.tracking-xs; }
+        if size == root.fs-lead { return root.tracking-lead; }
+        if size == root.fs-sm { return root.tracking-sm; }
+        return 0px;
+    }
+
+    // ---- 2.6 Spacing (4px grid)
+    out property <length> space-1: 4px;
+    out property <length> space-2: 8px;
+    out property <length> space-3: 12px;
+    out property <length> space-4: 16px;
+    out property <length> space-5: 20px;
+    out property <length> space-6: 24px;
+    out property <length> space-8: 32px;
+    out property <length> pane-x: 12px; // inset of everything inside a dock, the source toolbar, the status bar
+    out property <length> label-col: 168px; // form label column
+    out property <length> label-gap: 12px;
+    out property <length> hint-indent: 180px; // label-col + label-gap: a hint under its control
+
+    // ---- 2.7 Sizes
+    out property <length> control-h: 28px; // default button, field, select, segmented
+    out property <length> control-h-sm: 24px; // toolbar buttons and fields, toast actions
+    out property <length> control-h-lg: 32px; // onboarding, Welcome, the Transition button
+    out property <length> row: 28px; // dock lists, filter lists, pick lists
+    out property <length> nav-row: 32px; // settings tabs
+    out property <length> menu-item: 24px;
+    out property <length> header: 28px; // dock title band; dialog title bar
+    out property <length> toolbar: 32px; // dock toolbars
+    out property <length> source-toolbar: 40px;
+    out property <length> statusbar: 24px;
+    out property <length> dialog-foot: 52px;
+    out property <length> icon: 16px;
+    out property <length> icon-sm: 14px; // in buttons, chevrons, status bar
+    out property <length> icon-xs: 12px; // checks in step dots and checkboxes
+    out property <length> icon-lg: 20px; // Welcome and onboarding glyphs
+    out property <length> icon-button: 28px;
+    out property <length> icon-button-sm: 24px;
+    out property <length> dot: 8px; // REC, stream health, program dot, source state
+    out property <length> field-xs: 96px;
+    out property <length> field-s: 120px;
+    out property <length> field-m: 240px;
+    out property <length> field-l: 320px;
+    out property <length> check: 14px; // checkbox and radio
+    out property <length> switch-w: 28px;
+    out property <length> switch-h: 16px;
+    out property <length> knob: 12px;
+    out property <length> slider-h: 20px;
+    out property <length> track: 2px;
+    out property <length> thumb: 12px;
+    out property <length> kbd: 20px;
+    out property <length> meter: 22px; // the meter with its scale
+    out property <length> meter-bar: 8px;
+    out property <length> scrollbar: 8px;
+    out property <length> handle: 8px; // canvas handles
+    out property <length> popover-min: 200px;
+    out property <length> menu-min: 180px;
+    out property <length> toast-w: 360px;
+
+    // ---- 2.8 Radius, lines, elevation
+    out property <length> r: 2px; // controls
+    out property <length> r-handle: 1px;
+    out property <length> r-panel: 3px; // menus, popovers, dialogs, toasts, cards
+    out property <length> hairline: 1px;
+    // --shadow-pop's main layer (0 12px 32px rgba(0, 0, 0, 0.45)); only on
+    // menus, popovers, dialogs, toasts and the welcome/onboarding cards.
+    out property <color> shadow-color: #00000073;
+    out property <length> shadow-blur: 32px;
+    out property <length> shadow-y: 12px;
+
+    // ---- 2.9 States
+    out property <float> disabled-opacity: 0.4;
+    out property <float> muted-meter-opacity: 0.35;
+    out property <float> dragging-opacity: 0.4;
+
+    // ---- 2.10 Focus: a bone ring 2px wide after a 1px gap (outer), or a
+    // 2px inset ring for things as wide as their pane.
+    out property <color> focus-ring: #eeeae2;
+    out property <length> focus-gap: 1px;
+    out property <length> focus-width: 2px;
+
+    // ---- 2.11 Motion (the easing is Motion.ease)
+    out property <duration> fast: root.reduce-motion ? 1ms : 120ms; // hover colour
+    out property <duration> med: root.reduce-motion ? 1ms : 160ms; // menus, dialogs, a switch's knob, toasts
+}
+
+// The easing curve, kept out of `Theme` because Slint can't hand an easing
+// to Rust (and warns when an exported global has one).
+export global Motion {
+    out property <easing> ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+}

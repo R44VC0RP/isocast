@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Embedded in the isocastd binary (see build.rs) and used as the
+     Info.plist of the development app bundle (scripts/sign-dev.sh), so macOS
+     knows what it is and why it records: privacy permissions belong to
+     Isocast itself, whichever terminal or agent starts it. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>dev.isocast.isocastd</string>
+	<key>CFBundleName</key>
+	<string>Isocast</string>
+	<key>CFBundleDisplayName</key>
+	<string>Isocast</string>
+	<key>CFBundleExecutable</key>
+	<string>isocastd</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>LSBackgroundOnly</key>
+	<true/>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.0.1</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Isocast records your cameras, capture cards and iPhone to files.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Isocast records your microphones to files.</string>
+	<key>CFBundleIconFile</key>
+	<string>Isocast</string>
+	<key>CFBundleIconName</key>
+	<string>Isocast</string>
+</dict>
+</plist>

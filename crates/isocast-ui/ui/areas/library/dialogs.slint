@@ -1,0 +1,67 @@
+// Area F's dialogs, in the window's dialog style (as Rename's): a name for
+// a new, duplicated or renamed scene collection or profile
+// ("library-name", arg: KIND:MODE), and Remove's confirmation
+// ("library-remove", arg: KIND). Put on the window by app.slint.
+
+import { Theme } from "../../theme.slint";
+import { Ui } from "../../state.slint";
+import { Dialog, Form, TextField } from "../../kit.slint";
+import { LibraryArea } from "state.slint";
+
+component LibraryNameDialog inherits Dialog {
+    title: LibraryArea.name-title;
+    dialog-width: 380px;
+    ok-enabled: LibraryArea.name != "";
+    accepted => { LibraryArea.name-accept(); }
+    cancelled => { Ui.close-dialog(); }
+
+    Form {
+        Text {
+            text: LibraryArea.name-heading;
+            color: Theme.text;
+            font-size: Theme.fs;
+            letter-spacing: Theme.tracking;
+            font-weight: Theme.weight-semibold;
+            overflow: elide;
+        }
+        // Made after the dialog takes focus, so the field keeps it.
+        if true: TextField {
+            text: LibraryArea.name;
+            label: "Name";
+            auto-focus: true;
+            edited(text) => { LibraryArea.name = text; }
+        }
+    }
+}
+
+component LibraryRemoveDialog inherits Dialog {
+    title: LibraryArea.remove-title;
+    dialog-width: 420px;
+    ok-text: "Remove";
+    accepted => { LibraryArea.remove-accept(); }
+    cancelled => { Ui.close-dialog(); }
+
+    Form {
+        Text {
+            text: LibraryArea.remove-heading;
+            color: Theme.text;
+            font-size: Theme.fs;
+            letter-spacing: Theme.tracking;
+            font-weight: Theme.weight-semibold;
+            overflow: elide;
+        }
+        Text {
+            text: LibraryArea.remove-note;
+            color: Theme.text-2;
+            font-size: Theme.fs;
+            letter-spacing: Theme.tracking;
+            line-height-factor: Theme.leading;
+            wrap: word-wrap;
+        }
+    }
+}
+
+export component LibraryDialogs inherits Rectangle {
+    if Ui.dialog == "library-name": LibraryNameDialog { }
+    if Ui.dialog == "library-remove": LibraryRemoveDialog { }
+}

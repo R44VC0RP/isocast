@@ -1,0 +1,1440 @@
+//! `isocast mcp`: the MCP server. A thin client of the daemon: every tool
+//! is one call on the same method table the CLI uses.
+
+use std::sync::Arc;
+
+use anyhow::Result;
+use isocast_protocol::api::{
+    Applied, ApplyParams, Doctor, DoctorParams, EngineInfo, Frame, FrameParams, ImportObsParams,
+    Live, Marked, Method, Plan, Refreshed, Report, Snapshot, SnapshotParams, StartParams, Started,
+    Status, StreamKey, StreamKeyParams, StreamKeyTarget, Switched, TuneParams, Tuning,
+};
+use isocast_protocol::change::Change;
+use isocast_protocol::data::{DataGetParams, DataRevision, DataSetParams, DataValues};
+use isocast_protocol::devices::{Devices, PermissionsReport};
+use isocast_protocol::library::{
+    Library, LibraryChange, LibraryCreateParams, LibraryDocument, LibraryImportObsParams,
+    LibraryImportParams, LibraryRenameParams, LibrarySwitchParams, LibraryTarget,
+};
+use isocast_protocol::obs::Imported;
+use isocast_protocol::plugin::{PluginAddParams, PluginChange, PluginTarget, Plugins};
+use isocast_protocol::stream::{StreamService, StreamStatus};
+use isocast_protocol::timeline::{
+    ExportStarted, RetakeParams, Retaken, TimelineClosed, TimelineExportParams, TimelineInfo,
+    TimelineList, TimelineMoveParams, TimelineNewParams, TimelineOpenParams, TimelineRemoveParams,
+    TimelineTarget,
+};
+use isocast_protocol::{Setup, Transition};
+use rmcp::handler::server::wrapper::{Json, Parameters};
+use rmcp::model::{CallToolResult, ContentBlock};
+use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
+use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
+use crate::client::Client;
+
+mod events;
+
+use events::{Events, EventsRead, GetEventsParams};
+
+/// Run the MCP server on stdin and stdout until the client disconnects.
+pub fn run() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let isocast = Isocast {
+            events: Events::start(),
+        };
+        let service = isocast.serve(rmcp::transport::stdio()).await?;
+        service.waiting().await?;
+        Ok(())
+    })
+}
+
+#[derive(Clone)]
+struct Isocast {
+    /// isocastd's events, kept for get_events.
+    events: Arc<Events>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ChangeParams {
+    /// A whole new setup to replace the live one (the shape get_setup
+    /// returns; get_setup_schema has its JSON Schema).
+    #[serde(default)]
+    #[schemars(schema_with = "setup_schema")]
+    setup: Option<serde_json::Value>,
+    /// Or a JSON merge patch on the live setup. Lists of items with ids
+    /// (sources and scenes by "id", scene items by "id" or else "source") merge by id:
+    /// {"sources":[{"id":"facecam","device":"Capture Card"}]} changes one
+    /// field, {"sources":[{"id":"iphone","remove":true}]} removes a source.
+    patch: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct GetSetupParams {
+    /// Also return where every item is drawn, as laid out (`resolved`).
+    #[serde(default)]
+    resolved: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ApplyChangeParams {
+    /// The revision from plan_change or get_setup (0 when there is no live
+    /// setup yet). The change is refused if the live setup has moved on.
+    revision: u64,
+    #[serde(flatten)]
+    change: ChangeParams,
+    /// One step of a gesture (many changes a second, e.g. moving a source
+    /// smoothly): applied at once and saved to disk a moment after the last
+    /// step instead of before replying.
+    #[serde(default)]
+    live: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct StartRecordingParams {
+    /// The setup to record; the live setup if absent (the shape get_setup
+    /// returns; get_setup_schema has its JSON Schema).
+    #[serde(default)]
+    #[schemars(schema_with = "setup_schema")]
+    setup: Option<serde_json::Value>,
+    /// Absolute folder for the files instead of the setup's
+    /// recording.folder.
+    folder: Option<String>,
+    /// Stop on its own after this many seconds.
+    seconds: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CheckSetupParams {
+    /// The setup to check; the live setup if absent (the shape get_setup
+    /// returns; get_setup_schema has its JSON Schema).
+    #[serde(default)]
+    #[schemars(schema_with = "setup_schema")]
+    setup: Option<serde_json::Value>,
+    /// Check this folder instead of the setup's recording.folder.
+    folder: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PreviewFrameParams {
+    /// A source id in the live setup, or a quick source like "screen",
+    /// "display:NAME", "camera:NAME" or "test-pattern".
+    source: Option<String>,
+    /// Or a scene id. With neither, the program (while recording, exactly
+    /// the frame it recorded last).
+    scene: Option<String>,
+    /// Or, with neither, the scene in preview.
+    #[serde(default)]
+    preview: bool,
+    /// Scale the picture down to at most this many pixels wide (default
+    /// 1280).
+    width: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct LiveFrameParams {
+    /// "program" (the default), "preview" (studio mode's preview scene) or
+    /// a video source id of the live setup.
+    target: Option<String>,
+    /// Scale the picture down to at most this many pixels wide (default
+    /// 1280).
+    width: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EngineParams {
+    /// true keeps the live engine running; false lets it stop once nothing
+    /// (a recording, a stream, a client showing frames) needs it.
+    running: bool,
+}
+
+/// live_engine's reply. MCP needs a tool's result to be an object, so the
+/// engine (absent once stopped) is a field rather than the whole reply.
+#[derive(Debug, Serialize, JsonSchema)]
+struct LiveEngine {
+    /// The live engine's sources and how each is doing; null once it has
+    /// stopped.
+    engine: Option<EngineInfo>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SetAudioParams {
+    /// The id of an audio source in the live setup.
+    source: String,
+    /// Volume change in the program mix, in dB (-60 to 24; 0 is as
+    /// captured).
+    gain_db: Option<f64>,
+    /// Leave it out of the program mix (true) or put it back (false).
+    muted: Option<bool>,
+    /// Shift its audio later (positive) or earlier, in ms, in every file;
+    /// applies from the next recording.
+    offset_ms: Option<i32>,
+    /// Where it sits between left (-1) and right (1) in the program mix;
+    /// 0 is the centre.
+    balance: Option<f64>,
+    /// Hear it through the setup's monitoring device: "monitor_only"
+    /// (heard, but left out of the program mix), "monitor_and_output", or
+    /// "off".
+    monitor: Option<isocast_protocol::Monitoring>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SwitchSceneParams {
+    /// The id of a scene in the setup.
+    scene: String,
+    /// How it comes on air, like {"kind":"fade","duration_ms":500},
+    /// {"kind":"swipe","direction":"up"} or {"kind":"cut"}; the scene's
+    /// transition (else the setup's) if absent.
+    transition: Option<Transition>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PreviewSceneParams {
+    /// The id of a scene in the setup.
+    scene: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TakeParams {
+    /// How the preview scene comes on air; its transition (else the
+    /// setup's) if absent.
+    transition: Option<Transition>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RefreshBrowserParams {
+    /// The browser source's id.
+    source: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ImportObsCollectionParams {
+    /// The collection: an absolute path to its .json file, or its name in
+    /// OBS's scenes folder, like "Recording".
+    collection: String,
+    /// The OBS profile with the frame rate and recording settings (a name
+    /// or a basic.ini path); found automatically if absent.
+    profile: Option<String>,
+    /// Import onto a canvas this wide and high, scaling positions and
+    /// sizes; the collection's own canvas if absent.
+    width: Option<u32>,
+    height: Option<u32>,
+    /// The canvas frame rate; the profile's if absent.
+    fps: Option<u32>,
+}
+
+#[derive(Debug, JsonSchema)]
+struct InitSetupParams {
+    #[serde(flatten)]
+    options: isocast_protocol::init::InitOptions,
+    /// Make it the live setup, replacing any (the old one stays in the
+    /// setup file's .bak). Otherwise it is only returned, for plan_change.
+    #[serde(default)]
+    apply: bool,
+}
+
+/// Read as the API's `init_setup` params, whose errors name the option
+/// even though it is flattened.
+impl<'de> Deserialize<'de> for InitSetupParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // The trait's, not the inherent one serde derives for `remote`.
+        let isocast_protocol::api::InitParams { options, apply } =
+            <isocast_protocol::api::InitParams as Deserialize>::deserialize(deserializer)?;
+        Ok(Self { options, apply })
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ImportDocumentsParams {
+    /// A whole setup (as get_setup returns one): its collection part and
+    /// its profile part are both imported.
+    #[serde(default)]
+    #[schemars(schema_with = "setup_schema")]
+    setup: Option<serde_json::Value>,
+    /// Or a scene collection, as get_collection_or_profile returns one: the
+    /// setup's version, name, canvas.width/height, sources, scenes,
+    /// transition and recording.program.audio / recording.iso.sources /
+    /// recording.iso.audio.
+    #[serde(default)]
+    #[schemars(schema_with = "setup_schema")]
+    collection: Option<serde_json::Value>,
+    /// And/or a profile: version, name, canvas.fps, audio, stream and the
+    /// rest of recording (folder, keep_free_gb, program and iso settings).
+    #[serde(default)]
+    #[schemars(schema_with = "setup_schema")]
+    profile: Option<serde_json::Value>,
+    /// The name to give them; their own if absent.
+    name: Option<String>,
+    /// Switch to what was imported (refused while recording or streaming).
+    #[serde(default)]
+    switch: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct OpenPermissionSettingsParams {
+    /// screen_recording, camera or microphone.
+    permission: isocast_protocol::devices::PermissionKind,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AddMarkerParams {
+    /// What happens at this moment, like "intro" or "retake".
+    label: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct StreamKeyToolParams {
+    /// The stream key from the service's dashboard. It goes into the
+    /// Keychain and is never shown again; prefer `isocast stream key set`
+    /// in a terminal, which keeps it out of this conversation.
+    key: String,
+    /// The service it is for; the live setup's [stream] service if absent.
+    service: Option<StreamService>,
+    /// For "custom": the server it belongs to (rtmp://host/app).
+    server: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct StreamKeyTargetParams {
+    /// The service; the live setup's [stream] service if absent.
+    service: Option<StreamService>,
+    /// For "custom": the server the key belongs to.
+    server: Option<String>,
+}
+
+#[tool_router]
+impl Isocast {
+    #[tool(
+        description = "The scene collections (scenes, sources, transitions and the canvas \
+                       size) and profiles (frame rate, recording, stream and audio settings) \
+                       the live setup can be made of, as in OBS, and which of each is in use \
+                       (`collection`, `profile`). The live setup is the pair in use: \
+                       apply_change edits it, and the change is saved into the right one.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_collections_and_profiles(&self) -> Result<Json<Library>, String> {
+        self.call(Method::Library).await
+    }
+
+    #[tool(
+        description = "One scene collection or profile (kind: collection or profile, and its \
+                       id) as a document, to export it or read one that isn't in use.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_collection_or_profile(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<LibraryTarget>>,
+    ) -> Result<Json<LibraryDocument>, String> {
+        self.call(Method::LibraryGet(params)).await
+    }
+
+    #[tool(
+        description = "Make a scene collection (one empty scene on the canvas in use) or a \
+                       profile (60 fps, HEVC program and ISO files to ~/Movies/Isocast), or a \
+                       copy of one (copy_of: its id, OBS's Duplicate); with switch, start using \
+                       it.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn create_collection_or_profile(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<LibraryCreateParams>>,
+    ) -> Result<Json<LibraryChange>, String> {
+        self.call(Method::LibraryCreate(Box::new(params))).await
+    }
+
+    #[tool(
+        description = "Rename a scene collection or profile; its id stays. Renaming the \
+                       collection in use renames the live setup.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn rename_collection_or_profile(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<LibraryRenameParams>>,
+    ) -> Result<Json<LibraryChange>, String> {
+        self.call(Method::LibraryRename(Box::new(params))).await
+    }
+
+    #[tool(
+        description = "Delete a scene collection or profile that isn't in use (switch away \
+                       first); its file is kept in the library's deleted folder.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    async fn delete_collection_or_profile(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<LibraryTarget>>,
+    ) -> Result<Json<LibraryChange>, String> {
+        self.call(Method::LibraryDelete(params)).await
+    }
+
+    #[tool(
+        description = "Start using another scene collection, profile or both (by id): the live \
+                       setup becomes that pair at once and the live engine follows (a new \
+                       collection goes on air from its first scene). Refused while recording \
+                       or streaming, and when the pair would have problems (each named by \
+                       field and part).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn switch_collection_or_profile(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<LibrarySwitchParams>>,
+    ) -> Result<Json<LibraryChange>, String> {
+        self.call(Method::LibrarySwitch(params)).await
+    }
+
+    #[tool(
+        description = "Add a scene collection and/or profile from documents (as \
+                       get_collection_or_profile returns them), or both from a whole setup. \
+                       Refused if one has problems of its own; problems with the other half in \
+                       use are reported. With switch, start using them.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn import_collection_or_profile(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ImportDocumentsParams>>,
+    ) -> Result<Json<LibraryChange>, String> {
+        fn read<T: serde::de::DeserializeOwned>(
+            field: &str,
+            value: Option<serde_json::Value>,
+        ) -> Result<Option<T>, String> {
+            value
+                .map(|value| {
+                    isocast_protocol::located::from_value(&value)
+                        .map_err(|err| err.within(field).to_string())
+                })
+                .transpose()
+        }
+        let collection = read("collection", params.collection)?;
+        let profile = read("profile", params.profile)?;
+        self.call(Method::LibraryImport(Box::new(LibraryImportParams {
+            setup: parse_setup(params.setup)?,
+            collection,
+            profile,
+            name: params.name,
+            switch: params.switch,
+        })))
+        .await
+    }
+
+    #[tool(
+        description = "Add an OBS Studio scene collection (its name in OBS's scenes folder, or \
+                       an absolute .json path) as a scene collection, and/or an OBS profile \
+                       (its name, folder or basic.ini) as a profile, with devices matched \
+                       against this Mac. Returns what was made and what couldn't come over. \
+                       Give both to bring Source Record's ISO settings into the profile.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn import_obs_collection_or_profile(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<LibraryImportObsParams>>,
+    ) -> Result<Json<LibraryChange>, String> {
+        self.call(Method::LibraryImportObs(Box::new(params))).await
+    }
+
+    #[tool(
+        description = "The installed plugins: id, version, what they provide (a process, and \
+                       kinds like twitch-chat/glow), state (ok, disabled, incompatible or \
+                       failed, and why), their process (running or restarting, restarts, how it \
+                       last ended, its log) and the permissions they were granted.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_plugins(&self) -> Result<Json<Plugins>, String> {
+        self.call(Method::PluginList).await
+    }
+
+    #[tool(
+        description = "Install a plugin from a local folder with an isocast-plugin.toml (path: \
+                       absolute). `grant` must be exactly the permissions its manifest asks \
+                       for: without it nothing is installed and the error lists them, so the \
+                       user can see them before you grant them. A newer version replaces the \
+                       installed one (needing a grant only if it asks for more); force \
+                       reinstalls the same or an older version; link runs it from the folder \
+                       instead of a copy. Its process, if any, starts at once, sandboxed, and \
+                       may call only the methods it was granted.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn add_plugin(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<PluginAddParams>>,
+    ) -> Result<Json<PluginChange>, String> {
+        self.call(Method::PluginAdd(Box::new(params))).await
+    }
+
+    #[tool(
+        description = "Stop a plugin's process and remove the plugin (by id); its data folder \
+                       is kept if it wrote anything there. Refused while the live setup uses \
+                       its kinds (the error lists where) unless `force`: the setup then keeps \
+                       them, bypassed, until the plugin is added again.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    async fn remove_plugin(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<PluginTarget>>,
+    ) -> Result<Json<PluginChange>, String> {
+        self.call(Method::PluginRemove(params)).await
+    }
+
+    #[tool(
+        description = "Read the data store: values by key (dotted ids like score.home) that \
+                       text in scenes shows (a text source's or text content's `data = \
+                       \"score.home\"`). Every key, the `keys` given, or those under `prefix` \
+                       (`score` covers score and score.home); with the store's revision, which \
+                       keys are kept across restarts (persisted), and asked keys that aren't \
+                       set (missing).",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_data(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<DataGetParams>>,
+    ) -> Result<Json<DataValues>, String> {
+        self.call(Method::DataGet(Some(params))).await
+    }
+
+    #[tool(
+        description = "Set data keys to JSON values, several at once (all of them, or none if \
+                       one is refused): `values` like {\"title\": \"Hello\", \"score.home\": 3}. \
+                       Text showing a key (`data = \"title\"` on a text source or text content) \
+                       changes in the program within a frame or two, with no setup change, so \
+                       use this for anything that changes while recording: titles, scores, \
+                       counters. Keys: lowercase letters, digits, dashes and underscores \
+                       between dots, at most 128 characters; values at most 64 KB as JSON. \
+                       `persist: true` keeps them with the scene collection across restarts \
+                       (false stops keeping them; absent leaves that as it was). Returns the \
+                       revision and the keys that changed.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn set_data(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<DataSetParams>>,
+    ) -> Result<Json<DataRevision>, String> {
+        self.call(Method::DataSet(Box::new(params))).await
+    }
+
+    #[tool(
+        description = "Make a timeline (optional `name`) and make it current: from now on every \
+                       take that finishes (stop_recording, or split_take) is added to its end as \
+                       a clip. A timeline is takes in order, like a clip bar: retake records the \
+                       last one again, remove_clip and move_clip edit the order, and \
+                       export_timeline joins them into one file. Returns the timeline.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn new_timeline(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<TimelineNewParams>>,
+    ) -> Result<Json<TimelineInfo>, String> {
+        self.call(Method::TimelineNew(Some(params))).await
+    }
+
+    #[tool(
+        description = "A timeline (the current one unless `timeline` gives an id): its clips in \
+                       order, each with its id (c1, c2…), place and length on the timeline, \
+                       take (session manifest), status and files (program and ISO files), and \
+                       the takes taken off it (their files are kept where they are).",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_timeline(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<TimelineTarget>>,
+    ) -> Result<Json<TimelineInfo>, String> {
+        self.call(Method::TimelineGet(Some(params))).await
+    }
+
+    #[tool(
+        description = "Every timeline (id, name, clips, length) and which is current (the one \
+                       finished takes are added to).",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_timelines(&self) -> Result<Json<TimelineList>, String> {
+        self.call(Method::TimelineList).await
+    }
+
+    #[tool(
+        description = "Make a timeline current (by id), so finished takes are added to it.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn open_timeline(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<TimelineOpenParams>>,
+    ) -> Result<Json<TimelineInfo>, String> {
+        self.call(Method::TimelineOpen(params)).await
+    }
+
+    #[tool(
+        description = "Make no timeline current: takes are only recorded, as without \
+                       timelines. Returns the id of the timeline that was current.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn close_timeline(&self) -> Result<Json<TimelineClosed>, String> {
+        self.call(Method::TimelineClose).await
+    }
+
+    #[tool(
+        description = "Take a clip (by id, like c2) off a timeline (the current one unless \
+                       `timeline` is given). Only the timeline changes: the take's files stay \
+                       where they were recorded, listed under the timeline's `removed`. Returns \
+                       the timeline.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn remove_clip(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<TimelineRemoveParams>>,
+    ) -> Result<Json<TimelineInfo>, String> {
+        self.call(Method::TimelineRemove(params)).await
+    }
+
+    #[tool(
+        description = "Move a clip (by id) to another place on a timeline: `index` counts from \
+                       0 (the first). Returns the timeline.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn move_clip(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<TimelineMoveParams>>,
+    ) -> Result<Json<TimelineInfo>, String> {
+        self.call(Method::TimelineMove(params)).await
+    }
+
+    #[tool(
+        description = "Record the last take again, on the current timeline. Not recording: take \
+                       the last clip off (its files stay) and start recording in the same folder \
+                       (or `folder`; `seconds` stops it on its own); while a stop is \
+                       finishing, the same once it has. Recording: drop the take being recorded \
+                       from the timeline (its files stay) and begin a new take about a quarter \
+                       second later without stopping any device; `begins_at` and \
+                       `begins_in_seconds` say when (what is said before then is in the dropped \
+                       take). Returns the new take's files and what was taken off. Program \
+                       export needs every clip's program file.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn retake(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<RetakeParams>>,
+    ) -> Result<Json<Retaken>, String> {
+        self.call(Method::Retake(Some(params))).await
+    }
+
+    #[tool(
+        description = "Join a timeline's clips (the current one unless `timeline` is given), in \
+                       order, into one program file and one file per ISO source every clip has \
+                       (video copied as recorded, audio re-encoded once so it stays in sync at \
+                       every join), plus an .export.json manifest, next to the first take (or in \
+                       `folder`). Sources some clips lack are skipped, saying why. It runs in \
+                       the background: returns at once with the files it will write; \
+                       get_events shows export_progress and export_finished.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn export_timeline(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<TimelineExportParams>>,
+    ) -> Result<Json<ExportStarted>, String> {
+        self.call(Method::TimelineExport(Some(params))).await
+    }
+
+    #[tool(
+        description = "Go live: stream the program (canvas and program mix) as H.264/AAC over \
+                       RTMP or RTMPS to the live setup's [stream] service (twitch, youtube, \
+                       kick, facebook or a custom server), starting the live engine if needed; \
+                       recordings start and stop independently. Needs a stream key set. Returns \
+                       the stream's status once live, or an error saying what to do. get_status \
+                       shows the stream's health.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn start_stream(&self) -> Result<Json<StreamStatus>, String> {
+        self.call(Method::StreamStart).await
+    }
+
+    #[tool(
+        description = "Stop streaming. Returns the stream's final status: frames sent and \
+                       dropped, reconnects and the last error.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn stop_stream(&self) -> Result<Json<StreamStatus>, String> {
+        self.call(Method::StreamStop).await
+    }
+
+    #[tool(
+        description = "Keep a stream key in the macOS Keychain for a streaming service (the live \
+                       setup's by default). It is never written to setups, logs or status. \
+                       Returns where it is kept, not the key.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn set_stream_key(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<StreamKeyToolParams>>,
+    ) -> Result<Json<StreamKey>, String> {
+        self.call(Method::StreamKeySet(Box::new(StreamKeyParams {
+            key: params.key,
+            target: StreamKeyTarget {
+                service: params.service,
+                server: params.server,
+            },
+        })))
+        .await
+    }
+
+    #[tool(
+        description = "Remove the stored stream key for a streaming service (the live setup's by \
+                       default).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    async fn clear_stream_key(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<StreamKeyTargetParams>>,
+    ) -> Result<Json<StreamKey>, String> {
+        self.call(Method::StreamKeyClear(Box::new(StreamKeyTarget {
+            service: params.service,
+            server: params.server,
+        })))
+        .await
+    }
+
+    #[tool(
+        description = "Whether Isocast is idle or recording, with live frame and drop counters, \
+                       the files being written, the scene on air, the last session's report, \
+                       the stream (state, bitrates, dropped frames, congestion, reconnects, \
+                       whether a key is set), the live engine's frame rate (engine.fps of \
+                       canvas.fps), each live source's size and frame rate (engine.sources: \
+                       fps opened at, received_fps measured) and isocastd's CPU use \
+                       (cpu_percent, of all cores).",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_status(&self) -> Result<Json<Status>, String> {
+        self.call(Method::Status).await
+    }
+
+    #[tool(
+        description = "What happened since you last looked: warnings (like a file dropping \
+                       frames), recordings starting and stopping (with the report), scene \
+                       switches, markers, stream and source state, the newest setup_changed and \
+                       live status, and `connection` events when isocastd goes away or comes \
+                       back. The server keeps the newest 500 whether or not anyone reads. Pass \
+                       the reply's `next` as `after` to get only newer events; `kinds` filters, \
+                       `wait_seconds` waits for one to arrive.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_events(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<GetEventsParams>>,
+    ) -> Result<Json<EventsRead>, String> {
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            events.ensure_watching();
+            events.read(params)
+        })
+        .await
+        .map_err(|err| format!("{err}"))?
+        .map(Json)
+    }
+
+    #[tool(
+        description = "Displays, windows, cameras (capture cards, Continuity Camera, iPhone \
+                       screens over USB), microphones with their ids and formats, audio \
+                       outputs (for audio.monitoring_device), and the screen/camera/microphone \
+                       permissions.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_devices(&self) -> Result<Json<Devices>, String> {
+        self.call(Method::Devices).await
+    }
+
+    #[tool(
+        description = "The live setup document (sources, scenes, recording settings) and its \
+                       revision, with the scene collection and profile it is kept in. Revision \
+                       0 means no setup has been applied yet. With resolved: true, also where \
+                       every item is drawn as laid out (items with a `layout`): each item's \
+                       rect in its parent, its box on the canvas and its transform, with the \
+                       layout's generation (frames carry the one they show).",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_setup(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<GetSetupParams>>,
+    ) -> Result<Json<Live>, String> {
+        let params = params
+            .resolved
+            .then_some(isocast_protocol::api::GetParams { resolved: true });
+        self.call(Method::Get(params)).await
+    }
+
+    #[tool(
+        description = "The JSON Schema of a setup document (what get_setup returns and \
+                       plan_change, apply_change, start_recording and check_setup take): every \
+                       source kind, scene item field, filter, transition and recording setting, \
+                       with descriptions. Large; read it before writing a setup or a patch by \
+                       hand.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_setup_schema(&self) -> Result<CallToolResult, String> {
+        let schema = serde_json::to_string(&Setup::json_schema()).map_err(|err| err.to_string())?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(schema)]))
+    }
+
+    #[tool(
+        description = "Check this Mac against a setup (the live setup if none is given): \
+                       permissions, hardware encoders, whether each source's device is \
+                       connected and what format it would record, and the recording disk's \
+                       free space and speed. Each check has a status and, if needed, a fix.",
+        annotations(read_only_hint = true)
+    )]
+    async fn check_setup(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<CheckSetupParams>>,
+    ) -> Result<Json<Doctor>, String> {
+        self.call(Method::Doctor(Box::new(DoctorParams {
+            setup: parse_setup(params.setup)?,
+            folder: params.folder.map(Into::into),
+        })))
+        .await
+    }
+
+    #[tool(
+        description = "Benchmark the hardware encoders on a setup's video files (the live \
+                       setup if none is given), all at once as in a recording, and say whether \
+                       this Mac keeps up: `capacity` is fits, no_margin (keeps up, nothing to \
+                       spare) or cannot_keep_up (frames will drop). If it doesn't fit, it \
+                       benchmarks changes closest first (a smaller program file, a lower \
+                       quality preset, half the frame rate, one ISO file fewer) and recommends \
+                       the closest that fits as `change`, a patch for plan_change. start_recording \
+                       warns when a setup exceeds what this measured. Takes up to a minute or \
+                       two; refused while recording.",
+        annotations(read_only_hint = true)
+    )]
+    async fn tune_encoders(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<CheckSetupParams>>,
+    ) -> Result<Json<Tuning>, String> {
+        self.call(Method::Tune(Box::new(TuneParams {
+            setup: parse_setup(params.setup)?,
+            folder: params.folder.map(Into::into),
+        })))
+        .await
+    }
+
+    #[tool(
+        description = "See what is happening, as a PNG image: the program by default (while \
+                       recording, exactly the frame it recorded last), the preview scene, a \
+                       scene by id, a source of the live setup (of the recording, while \
+                       recording), or a quick source like \"screen\" or \"camera:NAME\".",
+        annotations(read_only_hint = true)
+    )]
+    async fn preview_frame(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<PreviewFrameParams>>,
+    ) -> Result<CallToolResult, String> {
+        let Json(snapshot): Json<Snapshot> = self
+            .call(Method::Snapshot(SnapshotParams {
+                source: params.source,
+                scene: params.scene,
+                preview: params.preview,
+                width: Some(params.width.unwrap_or(1280)),
+            }))
+            .await?;
+        let of = match (&snapshot.source, &snapshot.scene) {
+            (Some(source), _) => format!("source {source}"),
+            (None, Some(scene)) => format!("scene {scene}"),
+            (None, None) => String::new(),
+        };
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text(format!("{of} at {}×{}", snapshot.width, snapshot.height)),
+            ContentBlock::image(snapshot.png_base64, "image/png"),
+        ]))
+    }
+
+    #[tool(
+        description = "See the live engine's newest frame as a JPEG: the program (exactly what \
+                       records and streams), studio mode's preview scene, or a running video \
+                       source. Starts the live engine if it isn't running, which opens the live \
+                       setup's devices.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn live_frame(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<LiveFrameParams>>,
+    ) -> Result<CallToolResult, String> {
+        let Json(frame): Json<Frame> = self
+            .call(Method::Frame(FrameParams {
+                target: params.target.unwrap_or_else(|| "program".into()),
+                max_width: Some(params.width.unwrap_or(1280)),
+                after: None,
+                timeout_ms: Some(5000),
+                quality: Some(0.85),
+                fps: None,
+            }))
+            .await?;
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text(format!(
+                "{} at {}×{}",
+                frame.target, frame.width, frame.height
+            )),
+            ContentBlock::image(frame.jpeg_base64, "image/jpeg"),
+        ]))
+    }
+
+    #[tool(
+        description = "Keep the live engine running (running: true), as OBS does, so the live \
+                       setup's sources, program and mix run all the time and recording starts \
+                       at once; or let it stop once nothing needs it (running: false). Returns \
+                       {engine}: the engine's sources and how each is doing, or null once \
+                       stopped.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn live_engine(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<EngineParams>>,
+    ) -> Result<Json<LiveEngine>, String> {
+        let Json(engine) = self
+            .call(Method::Engine {
+                running: params.running,
+            })
+            .await?;
+        Ok(Json(LiveEngine { engine }))
+    }
+
+    #[tool(
+        description = "Read an OBS Studio scene collection into an Isocast setup: sources (ids \
+                       made from their names), scenes and items, filters and the transition, \
+                       devices matched against this Mac. Returns the setup, what couldn't come \
+                       over and why, notes to check, and counts. Doesn't change the live setup: \
+                       pass the setup to plan_change and apply_change.",
+        annotations(read_only_hint = true)
+    )]
+    async fn import_obs_collection(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ImportObsCollectionParams>>,
+    ) -> Result<Json<Imported>, String> {
+        self.call(Method::ImportObs(Box::new(ImportObsParams {
+            collection: params.collection,
+            profile: params.profile,
+            width: params.width,
+            height: params.height,
+            fps: params.fps,
+        })))
+        .await
+    }
+
+    #[tool(
+        description = "Make a good starting setup from this Mac's devices: the main display, the \
+                       best real camera (USB, then Continuity, then built-in; virtual cameras \
+                       only if nothing else), the default microphone and desktop audio, in \
+                       scenes screen-and-camera (camera as a corner picture-in-picture), camera \
+                       and screen, recording the 1080p60 program plus ISO files of the screen \
+                       and camera to ~/Movies/Isocast. Every choice can be overridden. Devices \
+                       without permission become placeholders, and the notes say what to do. \
+                       With apply, it becomes the live setup.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    async fn init_setup(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<InitSetupParams>>,
+    ) -> Result<Json<isocast_protocol::init::Initialized>, String> {
+        self.call(Method::InitSetup(Box::new(
+            isocast_protocol::api::InitParams {
+                options: params.options,
+                apply: params.apply,
+            },
+        )))
+        .await
+    }
+
+    #[tool(
+        description = "The screen recording, camera and microphone permissions, without asking, \
+                       with the next step for each that isn't granted: request it, or turn it \
+                       on in System Settings (which app, which pane, and whether isocastd must \
+                       restart afterwards).",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_permissions(&self) -> Result<Json<PermissionsReport>, String> {
+        self.call(Method::Permissions).await
+    }
+
+    #[tool(
+        description = "Restart isocastd, which only sees a permission granted in System \
+                       Settings (screen recording, above all) once restarted; the live setup \
+                       is kept. Refused while recording.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn restart_isocastd(&self) -> Result<String, String> {
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::client::restart()?;
+            events.ensure_watching();
+            Ok(())
+        })
+        .await
+        .map_err(|err| format!("{err}"))?
+        .map(|()| "isocastd restarted".to_string())
+        .map_err(|err: anyhow::Error| format!("{err:#}"))
+    }
+
+    #[tool(
+        description = "Ask macOS for screen recording, camera and microphone access where it \
+                       hasn't been decided yet. Its prompts appear on the user's screen; waits up \
+                       to a minute for answers and returns the permissions with next steps.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn request_permissions(&self) -> Result<Json<PermissionsReport>, String> {
+        self.call(Method::RequestPermissions).await
+    }
+
+    #[tool(
+        description = "Open System Settings on the user's screen at the pane where a \
+                       permission (screen_recording, camera or microphone) is turned on by \
+                       hand, for one that was refused.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn open_permission_settings(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<OpenPermissionSettingsParams>>,
+    ) -> Result<Json<isocast_protocol::api::Opened>, String> {
+        self.call(Method::OpenPermissionSettings {
+            permission: params.permission,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Work out what a change to the live setup would do, without making it: \
+                       the differences (paths use ids) and any problems. Give either a whole \
+                       setup or a patch.",
+        annotations(read_only_hint = true)
+    )]
+    async fn plan_change(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ChangeParams>>,
+    ) -> Result<Json<Plan>, String> {
+        let change = to_change(params)?;
+        self.call(Method::Plan(Box::new(change))).await
+    }
+
+    #[tool(
+        description = "Make a change to the live setup, atomically, if it is still at \
+                       `revision` and the result has no problems. It takes effect at once, in a \
+                       recording or stream too, except that sources being recorded keep their \
+                       devices until the recording stops and the canvas can't change while \
+                       recording or streaming.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    async fn apply_change(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ApplyChangeParams>>,
+    ) -> Result<Json<Applied>, String> {
+        let change = to_change(params.change)?;
+        self.call(Method::Apply(Box::new(ApplyParams {
+            revision: params.revision,
+            change,
+            live: params.live,
+        })))
+        .await
+    }
+
+    #[tool(
+        description = "Start recording the live setup (or the given setup, which then replaces \
+                       the live setup): the program and every ISO source, each to its own file. \
+                       Returns once every file is created.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    async fn start_recording(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<StartRecordingParams>>,
+    ) -> Result<Json<Started>, String> {
+        self.call(Method::Start(Box::new(StartParams {
+            setup: parse_setup(params.setup)?,
+            folder: params.folder.map(Into::into),
+            seconds: params.seconds,
+        })))
+        .await
+    }
+
+    #[tool(
+        description = "Stop recording and finish every file. Returns the report: each file, \
+                       its frames, dropped frames, audio dropouts and the manifest path.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn stop_recording(&self) -> Result<Json<Report>, String> {
+        self.call(Method::Stop).await
+    }
+
+    #[tool(
+        description = "Split the recording into a new take at the next whole second without \
+                       stopping any device: the current files end there and new files, with \
+                       their own manifest, begin. Returns the new take's files.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn split_take(&self) -> Result<Json<Started>, String> {
+        self.call(Method::Split).await
+    }
+
+    #[tool(
+        description = "Change an audio source's program mix in the live setup: gain, mute, \
+                       sync offset, balance and monitoring (hearing it through the setup's \
+                       audio.monitoring_device). A running recording follows all but the \
+                       offset at once. Each source's level, and the monitor's, is in \
+                       get_status while recording.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn set_audio(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<SetAudioParams>>,
+    ) -> Result<Json<Applied>, String> {
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            events.ensure_watching();
+            let mut client = Client::connect_or_launch()?;
+            let change = crate::client::AudioChange {
+                gain_db: params.gain_db,
+                muted: params.muted,
+                offset_ms: params.offset_ms,
+                balance: params.balance,
+                monitor: params.monitor,
+            };
+            crate::client::set_audio(&mut client, &params.source, &change)
+        })
+        .await
+        .map_err(|err| format!("{err}"))?
+        .map(Json)
+        .map_err(|err| format!("{err:#}"))
+    }
+
+    #[tool(
+        description = "Put a scene on air, by id, with a transition: cut, fade, swipe, slide, \
+                       fade_to_color, luma_wipe, stinger or move (the scene's transition, else \
+                       the setup's, by default). While recording, the switch is written to the \
+                       manifest's scene timeline.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn switch_scene(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<SwitchSceneParams>>,
+    ) -> Result<Json<Switched>, String> {
+        self.call(Method::SwitchScene {
+            scene: params.scene,
+            transition: params.transition,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Stage a scene in preview, by id, without changing what is on air; \
+                       take_preview then puts it on air.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn preview_scene(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<PreviewSceneParams>>,
+    ) -> Result<Json<Switched>, String> {
+        self.call(Method::Preview {
+            scene: params.scene,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Put the preview scene on air with a transition (the scene's, else the \
+                       setup's, by default); the scene that was on air moves to preview.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn take_preview(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<TakeParams>>,
+    ) -> Result<Json<Switched>, String> {
+        self.call(Method::Take {
+            transition: params.transition,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Mark this moment in the recording with a label; it is written to the \
+                       manifest with its time.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn add_marker(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<AddMarkerParams>>,
+    ) -> Result<Json<Marked>, String> {
+        self.call(Method::Marker {
+            label: params.label,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Reload a browser source's page in the running recording, bypassing the \
+                       cache, for example after changing the page or when it stopped updating.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn refresh_browser(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<RefreshBrowserParams>>,
+    ) -> Result<Json<Refreshed>, String> {
+        self.call(Method::RefreshBrowser {
+            source: params.source,
+        })
+        .await
+    }
+}
+
+#[tool_handler(
+    name = "isocast",
+    instructions = "Isocast records every source (screens, cameras, iPhone \
+screens, microphones, system audio) to its own file on one clock, plus a session.json \
+manifest that lines the files up. Typical flow: get_status and list_devices to see what \
+exists; get_setup for the live setup (init_setup makes a first one from this Mac's devices; \
+get_setup_schema describes every field); plan_change then apply_change (with the plan's \
+revision) to edit it; start_recording; switch_scene and add_marker while recording; \
+get_events for warnings like dropped frames; stop_recording returns the report with every file. To go live, add a stream to the setup \
+(a patch like {\"stream\":{\"service\":\"twitch\"}}), set_stream_key, then start_stream. \
+The live setup is a scene collection (scenes, sources, canvas size) plus a profile \
+(frame rate, recording, stream, audio), as in OBS: list_collections_and_profiles, \
+switch_collection_or_profile and import_obs_collection_or_profile swap and add them. \
+Plugins (local folders with an isocast-plugin.toml) are installed with add_plugin, granting \
+exactly the permissions they ask for, and listed with list_plugins. \
+Text in scenes can show a data key (`data = \"score.home\"`); set_data changes it live \
+(get_data reads it), with no setup change. \
+Timelines line takes up like a clip bar: new_timeline makes one current, and every take that \
+finishes is added to it; retake records the last one again, remove_clip and move_clip edit \
+it (takes' files are never deleted), export_timeline joins it into one file. \
+Sources and scenes are addressed by id. Errors name the field and list valid options."
+)]
+impl ServerHandler for Isocast {}
+
+fn to_change(params: ChangeParams) -> Result<Change, String> {
+    match (parse_setup(params.setup)?, params.patch) {
+        (Some(setup), None) => Ok(Change::Setup(Box::new(setup))),
+        (None, Some(patch)) => Ok(Change::Patch(patch)),
+        _ => Err("give either `setup` (a whole setup) or `patch`, not both or neither".into()),
+    }
+}
+
+/// A setup parameter. The setup's full JSON Schema is large (tens of
+/// kilobytes), so tools that take one describe it briefly and
+/// get_setup_schema returns it: repeating it in every tool's input schema
+/// cost agents hundreds of kilobytes of context.
+fn setup_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": ["object", "null"] })
+}
+
+/// Read a setup parameter, naming the path of anything wrong
+/// ("setup.canvas.fsp: unknown field ...").
+fn parse_setup(setup: Option<serde_json::Value>) -> Result<Option<Setup>, String> {
+    setup
+        .map(|value| {
+            Setup::from_value(value).map_err(|err| match err.path() {
+                "" => format!("setup: {}", err.message()),
+                path => format!("setup.{path}: {}", err.message()),
+            })
+        })
+        .transpose()
+}
+
+/// Tool parameters that refuse names the tool doesn't have, listing the
+/// ones it does, so a typo fails instead of being ignored (a
+/// start_recording with "duration" for "seconds" recorded until stopped).
+/// serde's deny_unknown_fields can't be used: two of them flatten.
+struct Strict<T>(T);
+
+impl<'de, T: DeserializeOwned + JsonSchema> Deserialize<'de> for Strict<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(object) = value.as_object() {
+            let schema = schemars::SchemaGenerator::default().into_root_schema_for::<T>();
+            let known: Vec<&str> = schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .map(|properties| properties.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            if let Some(unknown) = object.keys().find(|key| !known.contains(&key.as_str())) {
+                return Err(D::Error::custom(format!(
+                    "unknown parameter `{unknown}`; this tool takes: {}",
+                    known.join(", ")
+                )));
+            }
+        }
+        // Errors name the path: "transition.direction: unknown variant …".
+        isocast_protocol::located::from_value(&value)
+            .map(Strict)
+            .map_err(D::Error::custom)
+    }
+}
+
+impl<T: JsonSchema> JsonSchema for Strict<T> {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        T::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        T::json_schema(generator)
+    }
+
+    fn inline_schema() -> bool {
+        T::inline_schema()
+    }
+}
+
+impl Isocast {
+    /// Call the daemon (launching it if needed) off the async runtime,
+    /// watching its events first so get_events has what the call causes.
+    async fn call<T: DeserializeOwned + Send + 'static>(
+        &self,
+        method: Method,
+    ) -> Result<Json<T>, String> {
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            events.ensure_watching();
+            Client::connect_or_launch()?.call(method)
+        })
+        .await
+        .map_err(|err| format!("{err}"))?
+        .map(Json)
+        .map_err(|err: anyhow::Error| format!("{err:#}"))
+    }
+}

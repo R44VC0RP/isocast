@@ -1,0 +1,72 @@
+// Isocast's widget kit: our own controls, drawn to docs/design.md (no
+// std-widgets except AboutSlint). Import everything from here:
+//
+//     import { Button, ButtonVariant, ListRow, Dock, … } from "../../kit.slint";
+//
+// Each file in widgets/ says how its parts look and behave. In short:
+//
+// buttons    Button (variants secondary, primary, quiet, danger, live,
+//            live-warn; sizes small 24, regular 28, large 32; `checked` for
+//            a toggle that is on; `icon`; `footer` for dialog footers;
+//            `menu-open`), IconButton (28, or 24 `small`; `on`, `danger`,
+//            `spinning`, `menu-open`; its `label` is the tooltip),
+//            LinkButton
+// fields     TextField (`committed` on Return or focus loss, Escape
+//            restores; `small`, `mono`, `invalid`, `auto-focus`, `bare`),
+//            TextArea, NumberField (`prefix` scrub label, `unit`, step,
+//            ↑ ↓, `scrubbing` then `changed`), ColorField (swatch + hex,
+//            `pick`), FieldFrame
+// dropdown   Dropdown (options with label + dim `detail`, keyboard,
+//            `show-detail`), DropdownOption
+// choices    Checkbox, Radio (`step` for arrow keys in a group), Switch,
+//            Segmented (Segment options, ← →)
+// slider     Slider (neutral; `origin` for a bipolar fill; `moved` while
+//            dragging, `changed` when final; arrows, Home, End) — also the
+//            mixer's fader
+// meter      Meter (rms, peak, hold in dB; zones; the scale)
+// lists      List (keyboard ↑ ↓ Home End → `navigate`, other keys →
+//            `unhandled-key`), ListRow (selected marker, `dim`, depth,
+//            trailing children, `context-menu(x, y)`), ScrollArea (thin
+//            scroll bar), PickList, ListEmpty, DropLine
+// panels     Dock (header band + content + DockToolbar), PanelHeader,
+//            DockToolbar, ToolbarGap, ToolbarSeparator, ColumnSplitter,
+//            RowSplitter, Hairline
+// forms      Form, FormRow (label column 168 + hint), FormSection,
+//            FormSeparator, SubForm, Hint, Callout (error, info)
+// settings-form  SettingsForm (a source's, filter's or transition's
+//            settings from the setup's schema: rows built and edits
+//            routed by src/form/), SettingsForms (global: every form's
+//            edits, by form id), FormField, FormGroup
+// menus      Menus (global: request/show/activated), MenuHost (one per
+//            window), MenuPanel, MenuEntry, MenuList, MenuEntryKind
+// popover    Popover (anchored floating panel; PopoverPlacement)
+// dialog     Dialog (modal; title bar; footer OK/Cancel/Apply/extra;
+//            Escape cancels, Return accepts), DialogFooter
+// nav        NavList (Settings' sidebar tabs), NavTab
+// toast      Toasts (global), ToastStack, Toast, ToastData, ToastRow,
+//            ToastKind
+// tooltip    Tip (the look; widgets take a `tooltip` string)
+// misc       Kbd, Spinner, Dot
+// focus      FocusRing (keyboard focus, outer or inset)
+// globals    EditCommands (Edit menu → focused field), DialogKeys,
+//            Viewport (the window's size)
+
+export { Button, IconButton, LinkButton, ButtonVariant, ControlSize } from "widgets/buttons.slint";
+export { TextField, TextArea, NumberField, ColorField, FieldFrame } from "widgets/fields.slint";
+export { Dropdown, DropdownOption } from "widgets/dropdown.slint";
+export { Checkbox, Radio, Switch, Segmented, Segment } from "widgets/choices.slint";
+export { Slider } from "widgets/slider.slint";
+export { Meter } from "widgets/meter.slint";
+export { List, ListRow, ListEmpty, ScrollArea, PickList, DropLine } from "widgets/lists.slint";
+export { Dock, PanelHeader, DockToolbar, ToolbarGap, ToolbarSeparator, ColumnSplitter, RowSplitter, Hairline } from "widgets/panels.slint";
+export { Form, FormRow, FormSection, FormSeparator, SubForm, Hint, Callout, CalloutKind } from "widgets/forms.slint";
+export { SettingsForm, SettingsForms, FormField, FormGroup } from "widgets/settings-form.slint";
+export { Menus, MenuHost, MenuPanel, MenuEntry, MenuList, MenuEntryKind } from "widgets/menus.slint";
+export { Popover, PopoverPlacement } from "widgets/popover.slint";
+export { Dialog, DialogFooter } from "widgets/dialog.slint";
+export { NavList, NavTab } from "widgets/nav.slint";
+export { Toasts, ToastStack, Toast, ToastData, ToastRow, ToastKind } from "widgets/toast.slint";
+export { Tip } from "widgets/tooltip.slint";
+export { Kbd, Spinner, Dot } from "widgets/misc.slint";
+export { FocusRing } from "widgets/focus.slint";
+export { EditCommands, DialogKeys, Viewport } from "widgets/globals.slint";

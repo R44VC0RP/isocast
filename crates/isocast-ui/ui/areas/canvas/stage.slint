@@ -1,0 +1,155 @@
+// The preview area at the top of the window (docs/design.md 3.17): the
+// canvas letterboxed on the stage with 8px around it. In Studio Mode it
+// splits into Preview (left, edited) and Program (right), each with its
+// tag and scene name above it, and the studio column (area C) between
+// them, as in OBS.
+
+import { Theme } from "../../theme.slint";
+import { Ui } from "../../state.slint";
+import { Menus } from "../../kit.slint";
+import { CanvasArea } from "state.slint";
+import { Monitor } from "monitor.slint";
+import { StudioColumn } from "../controls/studio.slint";
+
+// A monitor's head: its tag (PREVIEW in copper, PROGRAM in teal) and the
+// scene's name.
+component MonitorHead inherits Rectangle {
+    in property <string> tag;
+    in property <color> tag-color;
+    in property <string> name;
+    height: 26px;
+    HorizontalLayout {
+        padding-bottom: 6px;
+        spacing: Theme.space-2;
+        alignment: center;
+        Text {
+            text: root.tag;
+            color: root.tag-color;
+            font-size: Theme.fs-xs;
+            font-weight: Theme.weight-semibold;
+            letter-spacing: Theme.tracking-tag;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.name;
+            color: Theme.text;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+export component Stage inherits Rectangle {
+    // The edited monitor (the only one, or Studio Mode's preview), in
+    // window coordinates (see Monitor).
+    out property <length> area-x: editor.area-x;
+    out property <length> area-y: editor.area-y;
+    out property <length> area-width: editor.area-width;
+    out property <length> area-height: editor.area-height;
+    out property <length> picture-left: editor.picture-left;
+    out property <length> picture-top: editor.picture-top;
+    out property <length> picture-right: editor.picture-right;
+    out property <length> picture-width: editor.picture-width;
+    out property <length> picture-height: editor.picture-height;
+    out property <int> picture-pixel-width: editor.picture-pixel-width;
+    out property <int> picture-pixel-height: editor.picture-pixel-height;
+    out property <float> scale: editor.scale;
+    out property <bool> dragging: editor.dragging;
+    out property <length> box-left: editor.box-left;
+    out property <length> box-top: editor.box-top;
+    out property <length> box-width: editor.box-width;
+    out property <length> box-height: editor.box-height;
+    // Studio Mode's program picture.
+    out property <length> program-x: program.picture-left;
+    out property <length> program-y: program.picture-top;
+    out property <length> program-width: Ui.studio ? program.picture-width : 0;
+    out property <length> program-height: Ui.studio ? program.picture-height : 0;
+    out property <int> program-pixel-width: program.picture-pixel-width;
+    out property <int> program-pixel-height: program.picture-pixel-height;
+    // The whole stage (the native layers' area).
+    out property <length> stage-x: root.absolute-position.x;
+    out property <length> stage-y: root.absolute-position.y;
+    out property <length> stage-width: root.width;
+    out property <length> stage-height: root.height;
+
+    property <length> pad: Theme.space-2;
+    property <length> column: 160px;
+    property <length> head: 26px;
+    property <bool> actual: Ui.preview-scale == "canvas";
+    property <float> aspect: max(1, Ui.canvas-width) / max(1, Ui.canvas-height);
+    // Studio Mode: each side's picture, as large as fits (or one canvas
+    // pixel to a screen pixel).
+    property <length> side: max(0px, (root.width - 2 * root.pad - root.column - 2 * Theme.space-2) / 2);
+    property <length> pic-w: root.actual ? max(1, Ui.canvas-width) * 1phx : min(root.side, max(0px, root.height - 2 * root.pad - root.head) * root.aspect);
+    property <length> pic-h: root.pic-w / root.aspect;
+    property <length> slot-y: (root.height - root.head - root.pic-h) / 2;
+
+    // Under native pictures the layers paint the stage (src/layers.rs).
+    background: CanvasArea.native-picture ? transparent : Theme.surface-stage;
+    clip: true;
+
+    // A right click anywhere on the stage off the items: the preview's
+    // menu (Preview Scaling, Add, Paste; area A builds it).
+    TouchArea {
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.up && event.button == PointerEventButton.right {
+                Menus.request("canvas", self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, 0, 0);
+            }
+        }
+    }
+
+    // The edited monitor: the whole stage, or Studio Mode's left side.
+    editor := Monitor {
+        x: Ui.studio ? root.pad + (root.side - root.pic-w) : 0;
+        y: Ui.studio ? root.slot-y + root.head : 0;
+        width: Ui.studio ? root.pic-w : root.width;
+        height: Ui.studio ? root.pic-h : root.height;
+        pad: Ui.studio ? 0 : root.pad;
+        actual-size: root.actual;
+        editor: true;
+        picture: CanvasArea.picture;
+        program-live: !Ui.studio && Ui.live;
+        empty-text: CanvasArea.empty-text;
+        waiting: CanvasArea.waiting;
+        error-text: CanvasArea.picture-error;
+    }
+
+    program := Monitor {
+        visible: Ui.studio;
+        x: root.width - root.pad - root.side;
+        y: root.slot-y + root.head;
+        width: Ui.studio ? root.pic-w : 0;
+        height: Ui.studio ? root.pic-h : 0;
+        actual-size: root.actual;
+        editor: false;
+        picture: CanvasArea.program-picture;
+        program-live: Ui.live;
+        empty-text: CanvasArea.program-empty-text;
+        waiting: CanvasArea.program-waiting;
+    }
+
+    if Ui.studio: MonitorHead {
+        x: editor.x;
+        y: root.slot-y;
+        width: root.pic-w;
+        tag: "PREVIEW";
+        tag-color: Theme.accent-text;
+        name: CanvasArea.preview-name;
+    }
+    if Ui.studio: MonitorHead {
+        x: program.x;
+        y: root.slot-y;
+        width: root.pic-w;
+        tag: "PROGRAM";
+        tag-color: Theme.onair-text;
+        name: CanvasArea.program-name;
+    }
+    if Ui.studio: StudioColumn {
+        x: root.pad + root.side + Theme.space-2;
+        y: (root.height - self.height) / 2;
+        width: root.column;
+    }
+}

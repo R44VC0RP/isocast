@@ -1,0 +1,289 @@
+// Area D's full-window states (the web app's states.js, docs/design.md
+// 3.22): starting or reaching isocastd, couldn't reach it, and Welcome
+// (no setup yet) over the empty window. Brand moments: Instrument Sans
+// titles and the mark.
+
+import { Theme } from "../../theme.slint";
+import { BrandMark, Icon, Icons } from "../../icons.slint";
+import { Ui, ConnectionState } from "../../state.slint";
+import { Button, ButtonVariant, ControlSize, FocusRing, Spinner } from "../../kit.slint";
+import { SettingsArea } from "state.slint";
+
+// A brand title (24px Instrument Sans).
+component Display inherits Text {
+    font-family: Theme.font-brand;
+    font-size: Theme.fs-display;
+    font-weight: Theme.weight-semibold;
+    letter-spacing: Theme.tracking-display;
+    color: Theme.text;
+    horizontal-alignment: center;
+    wrap: word-wrap;
+    accessible-role: AccessibleRole.text;
+}
+
+// A lead paragraph under a brand title.
+component Lead inherits Text {
+    color: Theme.text-2;
+    font-size: Theme.fs-lead;
+    letter-spacing: Theme.tracking-lead;
+    line-height-factor: Theme.leading-lead;
+    horizontal-alignment: center;
+    wrap: word-wrap;
+}
+
+// The connecting and failed states: the whole area, the stage's colour.
+export component ConnectingState inherits Rectangle {
+    property <bool> failed: Ui.connection == ConnectionState.failed;
+    background: Theme.surface-stage;
+    TouchArea { }
+
+    VerticalLayout {
+        alignment: center;
+        padding: Theme.space-8;
+        HorizontalLayout {
+            alignment: center;
+            VerticalLayout {
+                width: min(520px, root.width - 2 * Theme.space-8);
+                spacing: Theme.space-3;
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    padding-bottom: Theme.space-3;
+                    BrandMark {
+                        size: 56px;
+                    }
+                }
+                Display {
+                    text: root.failed ? "Isocast can’t reach its engine"
+                        : Ui.connection == ConnectionState.disconnected ? "Reconnecting to the engine…"
+                        : "Starting the engine…";
+                }
+                if !root.failed: HorizontalLayout {
+                    alignment: center;
+                    padding-top: Theme.space-2;
+                    Spinner { }
+                }
+                if root.failed: Lead {
+                    text: "The app talks to isocastd, which does the capturing and recording. It didn’t start or answer.";
+                }
+                if root.failed && Ui.connection-error != "": HorizontalLayout {
+                    alignment: center;
+                    padding-top: Theme.space-1;
+                    Rectangle {
+                        max-width: 520px;
+                        preferred-width: detail.preferred-width + 2 * Theme.space-3;
+                        height: detail.preferred-height + 2 * Theme.space-2;
+                        background: Theme.surface-panel;
+                        border-width: 1px;
+                        border-color: Theme.line;
+                        border-radius: Theme.r;
+                        detail := Text {
+                            x: Theme.space-3;
+                            width: parent.width - 2 * Theme.space-3;
+                            text: Ui.connection-error;
+                            color: Theme.text-2;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.fs-xs;
+                            letter-spacing: Theme.tracking-xs;
+                            line-height-factor: Theme.leading-xs;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                if root.failed: HorizontalLayout {
+                    alignment: center;
+                    padding-top: Theme.space-3;
+                    Button {
+                        text: "Try again";
+                        variant: ButtonVariant.primary;
+                        size: ControlSize.large;
+                        clicked => { SettingsArea.retry(); }
+                    }
+                }
+                if root.failed: Text {
+                    text: "It keeps trying on its own, too.";
+                    color: Theme.text-3;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+// A way to start, in Welcome's row of three.
+component Choice inherits Rectangle {
+    in property <string> icon;
+    in property <string> title;
+    in property <string> hint;
+    in property <bool> primary;
+    // Its work is under way (a spinner for the glyph).
+    in property <bool> busy;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    forward-focus: fs;
+    property <bool> keyboard;
+
+    horizontal-stretch: 1;
+    // Three equal columns, however long their words.
+    preferred-width: 0px;
+    min-width: 0px;
+    min-height: 132px;
+    background: ta.has-hover && root.enabled ? Theme.hover : transparent;
+    opacity: root.enabled || root.busy ? 1 : Theme.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.title;
+    accessible-description: root.hint;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    VerticalLayout {
+        padding: Theme.space-4;
+        spacing: Theme.space-1;
+        alignment: start;
+        HorizontalLayout {
+            alignment: start;
+            padding-bottom: Theme.space-2;
+            if !root.busy: Icon {
+                path: root.icon;
+                size: Theme.icon-lg;
+                color: Theme.accent-text;
+            }
+            if root.busy: Spinner { }
+        }
+        Text {
+            text: root.title;
+            color: root.primary ? Theme.accent-text : Theme.text;
+            font-weight: Theme.weight-semibold;
+            accessible-role: none;
+        }
+        Text {
+            text: root.hint;
+            color: Theme.text-2;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            line-height-factor: Theme.leading-sm;
+            wrap: word-wrap;
+            accessible-role: none;
+        }
+    }
+    FocusRing {
+        inset: true;
+        radius: 0;
+        shown: fs.has-focus && root.keyboard;
+    }
+}
+
+// Welcome: no setup yet. A card over the empty window (as OBS opens its
+// Auto-Configuration Wizard) with the ways to start.
+export component Welcome inherits Rectangle {
+    property <bool> busy: SettingsArea.welcome-busy != "";
+    background: Theme.scrim;
+    TouchArea { }
+
+    Rectangle {
+        width: min(680px, root.width - 40px);
+        height: card.preferred-height + 2px;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        background: Theme.surface-panel;
+        border-width: 1px;
+        border-color: Theme.line-strong;
+        border-radius: Theme.r-panel;
+        drop-shadow-color: Theme.shadow-color;
+        drop-shadow-blur: Theme.shadow-blur;
+        drop-shadow-offset-y: Theme.shadow-y;
+        accessible-role: groupbox;
+        accessible-label: "Set up your first scene";
+
+        card := VerticalLayout {
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            spacing: 0;
+            VerticalLayout {
+                padding-top: Theme.space-8 - 1px;
+                padding-left: Theme.space-8 - 1px;
+                padding-right: Theme.space-8 - 1px;
+                // The column gap and 20px more above the choices.
+                padding-bottom: Theme.space-3 + Theme.space-5;
+                spacing: Theme.space-3;
+                HorizontalLayout {
+                    alignment: center;
+                    padding-bottom: Theme.space-3;
+                    BrandMark {
+                        size: 56px;
+                    }
+                }
+                Display {
+                    text: "Set up your first scene";
+                }
+                Lead {
+                    text: "Isocast records the program and every source to its own file, all on one clock. Start from this Mac, or bring what you have.";
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.line;
+            }
+            HorizontalLayout {
+                spacing: 0;
+                Choice {
+                    icon: Icons.sparkles;
+                    title: "Start with this Mac";
+                    hint: "Pick your screen, camera and mic; get three scenes, ready to record.";
+                    primary: true;
+                    enabled: !root.busy;
+                    clicked => { SettingsArea.start-with-this-mac(); }
+                }
+                Rectangle {
+                    width: 1px;
+                    background: Theme.line;
+                }
+                Choice {
+                    icon: Icons.file-up;
+                    title: "Import from OBS";
+                    hint: "A scene collection (.json) from OBS Studio.";
+                    busy: SettingsArea.welcome-busy == "obs";
+                    enabled: !root.busy;
+                    clicked => { SettingsArea.import-obs(); }
+                }
+                Rectangle {
+                    width: 1px;
+                    background: Theme.line;
+                }
+                Choice {
+                    icon: Icons.folder-open;
+                    title: "Open a setup";
+                    hint: "An Isocast setup file (.toml or .json).";
+                    busy: SettingsArea.welcome-busy == "file";
+                    enabled: !root.busy;
+                    clicked => { SettingsArea.open-setup-file(); }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,49 @@
+// Studio Mode's column between Preview and Program (docs/design.md 3.17):
+// the Transition button (primary, 32px), the quick transitions (small,
+// 4px apart) and the transition properties gear. The Stage (area E)
+// places it.
+
+import { Theme } from "../../theme.slint";
+import { Icons } from "../../icons.slint";
+import { Ui } from "../../state.slint";
+import { Button, ButtonVariant, ControlSize, IconButton } from "../../kit.slint";
+import { ControlsArea } from "state.slint";
+
+export component StudioColumn inherits Rectangle {
+    height: column.preferred-height;
+
+    column := VerticalLayout {
+        // In line with the monitors under their heads.
+        padding-top: 26px;
+        spacing: Theme.space-2;
+        alignment: start;
+
+        Button {
+            height: Theme.control-h-lg;
+            text: "Transition";
+            variant: ButtonVariant.primary;
+            font-weight: Theme.weight-semibold;
+            enabled: ControlsArea.can-take;
+            tooltip: "Put the preview on air with the current transition (Return)";
+            clicked => { ControlsArea.take(-1); }
+        }
+        VerticalLayout {
+            spacing: Theme.space-1;
+            for label[i] in ControlsArea.quick-transitions: Button {
+                text: label;
+                size: ControlSize.small;
+                enabled: ControlsArea.can-take;
+                tooltip: "Put the preview on air: " + label;
+                clicked => { ControlsArea.take(i); }
+            }
+        }
+        HorizontalLayout {
+            alignment: center;
+            IconButton {
+                icon: Icons.settings;
+                label: "Transition properties";
+                clicked => { Ui.open-dialog("transition", ControlsArea.transition); }
+            }
+        }
+    }
+}

@@ -1,0 +1,2149 @@
+# Isocast plan
+
+The task queue for an open-source, Rust, OBS-style recorder built for one
+job first: Ryan's YouTube recording rig (screen + capture-card facecam +
+iPhone, two scenes, every source also saved as its own ISO file), fully
+controllable from a CLI and by agents over MCP.
+
+Agents work through this queue continuously, task after task, until it is
+empty or every remaining task is blocked. See `AGENTS.md` for the loop.
+
+Research behind this plan: [docs/prior-art.md](docs/prior-art.md).
+
+## Goals
+
+1. **Record reliably.** Start and stop instantly, never lose a take, and
+   produce high-quality files.
+2. **ISO recording is built in.** Every source can be written to its own file
+   at native resolution, alongside the program recording. All files share one
+   clock, so they line up in the editor without audio syncing.
+3. **Scenes and sources like OBS**, with a clean, flat interface.
+4. **Agent-native.** Everything the app can do, the CLI and MCP can do. Setups
+   are plain files an agent can read, check, change and tune for the machine.
+5. **Extensible** through a plugin system.
+6. **Open source** under MIT or Apache-2.0.
+
+## Ground rules
+
+- **Clean-room.** Never read or copy OBS source code, including its shader
+  files. Use public docs, protocol specs and our own testing. OBS is GPL;
+  copying it would make Isocast GPL.
+- **Every task ends verified and committed**, then the next one starts.
+- **Mac first, portable core.** macOS on Apple silicon only (no Intel
+  builds). macOS code lives in `isocast-platform-macos` behind traits, so
+  Windows and Linux can follow.
+- **One method table.** The GUI, CLI and MCP are thin clients of the same
+  engine API. No feature is GUI-only.
+- **Never lose a recording.** Crash-safe files, disk-space checks before
+  start, and loud warnings for dropped frames.
+
+## Architecture
+
+```text
+            ┌────────── clients ──────────┐
+            │  GUI    CLI    MCP   plugins │
+            └──────────────┬──────────────┘
+                 JSON-RPC over a local socket
+            ┌──────────────┴──────────────┐
+            │        isocast engine        │
+            │  setup document (revisioned) │
+            │  master clock · scene graph  │
+            │  wgpu compositor · audio mix │
+            └──────┬───────────────┬──────┘
+          capture (per OS)    encode + write
+   ScreenCaptureKit, AVFoundation, VideoToolbox, AVAssetWriter
+   Core Audio                      (FFmpeg/GStreamer later for streaming)
+```
+
+Planned crates:
+
+| Crate | Job | Tasks |
+|---|---|---|
+| `isocast-protocol` | Setup document, validation, JSON Schema, API types | 0.1 |
+| `isocast-cli` | The `isocast` command | 0.1 |
+| `isocast-platform-macos` | Device listing, capture, encode, file writing | 1.x |
+| `isocast-engine` | Sessions, clock, recording, scenes, compositor, mixer | 1.x–3.x |
+| `isocast-daemon` | Headless engine process with the control socket | 2.x |
+| `isocast-mcp` | MCP server over the same API (`rmcp`) | 2.x |
+| `isocast-app` | Desktop app | 6.x |
+| `isocast-plugin` | Plugin host and SDK | 7.x |
+
+Key decisions so far (details and later decisions in `docs/notes.md`):
+
+- **Apple-native media path on Mac.** ScreenCaptureKit for screens and system
+  audio, AVFoundation for cameras (capture cards and Continuity Camera are
+  both camera devices), VideoToolbox for HEVC/H.264/ProRes, and AVAssetWriter
+  for .mov/.mp4. Bindings: the `objc2-*` framework crates, or the
+  `screencapturekit` crate if it is faster to work with (decided in 1.2).
+- **Setups are TOML for people and JSON for the API.** Same types, same
+  validation, one JSON Schema (`isocast setup schema`).
+- **Stable ids, not names.** Sources and scenes are addressed by ids like
+  `facecam`; names are only labels.
+- **Every recording session writes a manifest** (`session.json`) with each
+  file, its device, its start time on the shared clock and any markers, so
+  editors (FilmCraft included) can line files up exactly.
+- **Synthetic sources come first** (test pattern, tone, clock overlay), so
+  the pipeline can be built and verified without a person granting
+  permissions or plugging in devices.
+
+## Task queue
+
+Each task lists what "done" means. Tasks marked **needs Ryan** require a
+permission prompt, a device or a judgement only Ryan can give; if he isn't
+available, record it under "Waiting on Ryan" in `docs/notes.md` and move to
+the next task that doesn't depend on it.
+
+### 0. Foundation
+
+- [x] **0.1 Project skeleton.** Cargo workspace, licences, setup document
+  types with validation, `isocast setup check` and `isocast setup schema`,
+  and `examples/recording.toml` ported from the OBS "Recording" collection.
+
+### 1. Capture and ISO recording (replaces Source Record)
+
+- [x] **1.1 Synthetic sources.** `test_pattern` (moving bars, frame counter,
+  burnt-in timestamp) and `tone` (beeps at known times) source kinds in the
+  setup format. Done when `isocast record` can write a test-pattern + tone
+  .mov that `ffprobe` shows as the right length, size, fps and codecs.
+  This builds the encode/write path (VideoToolbox → AVAssetWriter) without
+  any capture permission.
+- [x] **1.2 List devices.** `isocast devices [--json]` lists displays,
+  windows, cameras (capture card, iPhone) and microphones with stable ids
+  and supported formats. Record the binding-crate decision in notes.
+- [x] **1.3 Record a display.** `isocast record --source screen --seconds 10`
+  writes a playable HEVC .mov from ScreenCaptureKit. **Needs Ryan** once,
+  for screen-recording permission.
+- [x] **1.4 Record a camera.** Same for the capture card and iPhone at their
+  native resolution and frame rate. **Needs Ryan** for camera permission
+  and devices connected.
+  - [x] 1.4a Camera capture through AVFoundation (cameras, capture cards,
+    Continuity Camera, iPhone/iPad screens over USB), verified on a UVC
+    webcam.
+  - [x] 1.4b Verify Ryan's facecam and the iPhone screen over USB (what
+    OBS's "iPhone Record" captured).
+- [x] **1.5 Record audio.** Microphone and system audio into the file (AAC
+  or PCM). **Needs Ryan** for microphone permission.
+- [x] **1.6 One clock.** Every frame and audio buffer is stamped on the host
+  clock. Each session writes `session.json` with file start offsets.
+  Verify with two synthetic sources whose beeps and flashes line up.
+- [x] **1.7 ISO recording from a setup.** `isocast record <setup>` writes one
+  file per ISO source (`SCREEN-…`, `FACECAM-…`, `IPHONE-…`) with the
+  configured audio in each, all aligned. Files survive a killed process
+  (fragmented writing): verify with `kill -9` mid-recording.
+- [x] **1.8 Recording quality and safety.** ProRes 422/HQ options, 10-bit,
+  correct colour tags, free-space and disk-speed checks before start,
+  dropped-frame counters. Verify a 10-minute take whose files line up
+  within one frame.
+  - [x] 1.8a Free-space check before start, and stop cleanly before the
+    disk fills.
+  - [x] 1.8b Disk-speed check before start (catches slow and network
+    volumes).
+  - [x] 1.8c Loud live warnings when frames or audio drop.
+  - [x] 1.8d ProRes 422/HQ, 10-bit HEVC, correct colour tags.
+  - [x] 1.8e A 10-minute take whose files line up within one frame.
+
+### 2. Engine, CLI and MCP control
+
+- [x] **2.1 Headless engine.** `isocastd` runs in the background and owns the
+  session. `isocast start`, `stop` and `status` talk to it over a local
+  socket.
+- [x] **2.2 Live state.** The engine holds a revisioned setup document.
+  `isocast get`, `isocast plan <change>` (diff plus problems) and
+  `isocast apply` (atomic, with a revision check). `isocast watch` streams
+  events.
+- [x] **2.3 MCP server.** `isocast mcp` exposes intent-level tools: status,
+  list devices, get state, plan and apply changes, start and stop
+  recording, switch scene, add marker. Verify by connecting an MCP client
+  and running a full start → switch → marker → stop session.
+  - [x] 2.3a Markers and scene switching in the engine API and CLI
+    (`isocast marker`, `isocast scene`), recorded in the manifest. Until
+    the compositor exists, a scene switch is a timeline entry.
+  - [x] 2.3b The MCP server.
+- [x] **2.4 Markers and takes.** `isocast marker "intro"` writes markers to
+  the manifest; split into a new take without stopping the devices.
+- [x] **2.5 Tune to the machine.** `isocast doctor` checks permissions, chip,
+  media engines, disk speed and space. `isocast tune` benchmarks encoders
+  and proposes the best settings for this Mac as a setup change.
+  - [x] 2.5a `isocast doctor`: permissions, chip and hardware encoders, the
+    recording disk, and whether the setup's devices are connected.
+  - [x] 2.5b `isocast tune`: benchmark encoders on the setup's streams and
+    propose settings as a setup change.
+
+### 3. Compositor and scenes
+
+- [x] **3.1 GPU renderer.** wgpu on Metal, importing frames without copying
+  (IOSurface). `isocast snapshot` saves a PNG.
+  - [x] 3.1a The renderer, zero-copy import of BGRA, 8- and 10-bit 4:2:0
+    frames, and `isocast snapshot` (MCP `preview_frame`) of any video
+    source while idle, opening it briefly.
+  - [x] 3.1b Snapshots while recording, from the session's own frames.
+- [x] **3.2 Scene rendering.** Items with position, size, crop, visibility
+  and order.
+- [x] **3.3 Program recording.** The composited canvas is encoded at a steady
+  canvas frame rate next to the ISO files.
+- [x] **3.4 Audio mixer.** Per-source gain, mute, sync offset and level
+  meters; the program mix.
+- [x] **3.5 Live switching.** Cut and fade transitions, Preview and Program,
+  and an explicit `take`.
+- [x] **3.6 Agents can see.** The MCP `preview_frame` tool returns an image of
+  the program, the preview or any source.
+- [x] **3.7 Soak test.** A one-hour recording with CPU, GPU, thermal and sync
+  numbers; fix what breaks. Use synthetic sources if real devices aren't
+  available, and note which were used.
+
+**Milestone: Isocast replaces OBS for Ryan's recordings.** When reached,
+add a "Ready for Ryan" entry to `docs/notes.md` with the command to try,
+then keep going.
+
+### 4. Sources, filters and transitions (OBS parity)
+
+Everything a first-time user expects from OBS on a Mac, under familiar
+names: see `docs/obs-parity.md` for the full map. Each source kind and
+filter is its own small module, so adding one is easy.
+
+- [x] **4.1 Scene trees and styles.** Nested items (groups) and boxes with
+  ids; opacity, rounded corners, borders, shadows and transforms
+  (translate, scale, rotate). Flat items stay valid.
+- [x] **4.2 Source modules.** Each source kind is a module behind a small
+  trait (settings with a JSON Schema; open it to get video and/or audio),
+  registered in one list; the existing kinds move over; `docs/obs-parity.md`
+  explains adding one.
+- [x] **4.3 Color, image and slide show sources.** PNG, JPEG, GIF and SVG
+  images; slide shows with timing and transitions.
+- [x] **4.4 Text source.** System and bundled fonts, size, colour, outline,
+  background, alignment, word wrap, text from a file.
+- [x] **4.5 Media source.** Video and audio files (and playlists) with loop,
+  restart when shown, speed, hardware decoding; audio into the mixer.
+  - [x] 4.5a Files and playlists with loop and speed, hardware-decoded,
+    video and audio in step on the timeline.
+  - [x] 4.5b Restart when shown (and stop when off air), as OBS offers.
+- [x] **4.6 Window and application capture.** ScreenCaptureKit window and
+  application modes (with cursor option), and application audio capture.
+- [x] **4.7 Browser source.** An offscreen WKWebView rendering a URL or
+  local file at a set size, with custom CSS, transparency and its audio.
+  - [x] 4.7a The page's picture: URL or file, size, frame rate, custom CSS,
+    transparent where the page is.
+  - [x] 4.7b The page's audio into the mixer (OBS's "control audio via
+    OBS"), not played aloud.
+  - [x] 4.7c OBS's page options: shut down when not visible, refresh when
+    the scene comes on air, and a refresh method in the API.
+- [x] **4.8 Nested scenes.** A scene used as a source in another scene.
+- [x] **4.9 Video filters.** A per-source GPU filter chain: Color
+  Correction, Chroma Key, Color Key, Luma Key, Crop/Pad, Scaling/Aspect
+  Ratio, Sharpen, Scroll, Image Mask/Blend, Apply LUT, Render Delay.
+  - [x] 4.9a Filter chains: `filters` on sources (a registry like source
+    kinds), run on the GPU before the program and snapshots draw the
+    source; Color Correction.
+  - [x] 4.9b Keys: Chroma Key, Color Key, Luma Key.
+  - [x] 4.9c Geometry: Crop/Pad, Scaling/Aspect Ratio, Scroll.
+  - [x] 4.9d Sharpen, Image Mask/Blend, Apply LUT.
+  - [x] 4.9e Render Delay.
+  - [x] 4.9f `recording.iso.filtered`: ISO files of filtered sources.
+- [x] **4.10 Audio filters.** Per-source chains: Gain, Noise Gate, Noise
+  Suppression, Compressor (with sidechain ducking), Limiter, Expander,
+  Upward Compressor, 3-Band EQ, Invert Polarity.
+  - [x] 4.10a Chains in the program mix: `audio_filters` (a registry like
+    video filters); changes apply live.
+  - [x] 4.10b `recording.iso.filtered` also records audio through its
+    filters (no sidechain in ISO files).
+- [x] **4.11 Transitions.** Swipe, Slide, Fade to Color, Luma Wipe, Stinger
+  (with track matte), Move (items matched between scenes), and per-scene
+  transition overrides.
+  - [x] 4.11a Swipe, Slide, Fade to Color, Luma Wipe, Move; per-scene
+    overrides (`scenes[].transition`); CLI `--transition`/`--duration`.
+  - [x] 4.11b Stinger (cut point, track matte); media decoding keeps alpha.
+- [x] **4.12 Item controls.** Bounding box types and alignment, scale
+  filtering, blending modes, show/hide transitions.
+  - [x] 4.12a Bounding boxes and alignment (`fit`, `align`).
+  - [x] 4.12b Scale filtering (`scale_filter`).
+  - [x] 4.12c Blending modes (`blend`).
+  - [x] 4.12d Show/hide transitions.
+- [x] **4.13 Audio monitoring and balance.** Hear a source through an
+  output device; pan.
+  - [x] 4.13a Balance with a setup-wide pan law (sine, square, linear).
+  - [x] 4.13b Monitoring (Monitor Off / Monitor Only / Monitor and
+    Output) through a chosen output device; outputs in `isocast devices`.
+- [x] **4.14 Import OBS scene collections.** Read an OBS scene collection
+  (JSON) into a setup, mapping sources, filters and transitions, and list
+  anything not supported.
+- [x] **4.15 Unknown fields.** Setup validation reports fields a source,
+  filter, audio filter or transition kind doesn't have (serde's flatten
+  ignores them, so `db = -6` on a gain filter was silently dropped),
+  naming the field path and listing the kind's fields.
+
+### V1. Version one (Ryan, 2026-10-11)
+
+Ryan's direction: a very good, workable first version that can be set up
+just like OBS (with a better interface if possible), with streaming that
+works out of the box, recording, and a really good first experience;
+polished, well spaced and fast. Then tested hard. These come before
+phase 5; they replace phase 6's tasks.
+
+- [x] **V1.1 Live engine.** While the daemon is live (the app is open, or a
+  client asked), sources, the program and the mix run all the time, as in
+  OBS. Recording and streaming attach and detach without restarting
+  sources; layout, scene and source changes apply at once; clients get
+  preview frames (`frame`) and audio levels many times a second
+  (`levels` events). `isocast record` still works on its own.
+- [x] **V1.2 Streaming.** RTMP and RTMPS output of the program: VideoToolbox
+  H.264 and AAC in FLV over Isocast's own RTMP client; presets for Twitch,
+  YouTube, Kick, Facebook and custom servers; the stream key kept in the
+  Keychain, never in setups or logs; reconnects; bitrate, dropped frames
+  and congestion in status; `isocast stream start|stop|status` and MCP.
+  Tested only against a local server, never a real service.
+- [x] **V1.3 Setup persistence and first run.** The daemon keeps the live
+  setup in `~/Library/Application Support/Isocast/setup.toml` across
+  restarts; `isocast setup init` makes a good starting setup from this
+  Mac's displays, cameras and microphones; permissions are checked and
+  requested with clear next steps.
+- [x] **V1.4 App shell (was 6.1).** A native macOS window hosting the web
+  interface, a thin client of isocastd over the socket; a signed dev
+  bundle; a snapshot option so agents can see the interface.
+- [x] **V1.5 App: preview and editing (was 6.2–6.4).** Live program (and
+  studio-mode preview) monitors; scene and source lists; an inspector;
+  drag, resize and crop on the canvas.
+- [x] **V1.6 App: mixer and outputs (was 6.5–6.6).** Audio mixer with
+  meters; record and go-live controls with timers, per-ISO status, disk
+  space, stream health.
+- [x] **V1.7 App: settings and first run (was 6.7).** Stream, recording,
+  video and audio settings; onboarding that walks through permissions and
+  builds the first setup.
+- [ ] **V1.8 Hard testing.** Subagents run real scenarios through the app,
+  CLI and MCP (setup from scratch, OBS import, record, stream to a local
+  server, long runs, device loss) and the bugs they find are fixed.
+  - [x] **V1.8 perf-audio/events.** Bound slow watcher queues and share
+    serialized event bytes; verify memory under stalled readers, healthy
+    event delivery, real-rig recording and synthetic A/V sync.
+  - [x] **V1.8 setup-obs.** Fix the setup and OBS-import findings: canvas
+    limits, a crashed engine start, off-air audio-only media, recording
+    tracks, output size, the on-air scene and missing-file errors.
+  - [x] **V1.8 m4-bridge.** Give desktop benchmark jobs Interactive launchd
+    policy instead of inherited daemon scheduling; verify timer wakeups on
+    exonbook before comparing recording builds.
+  - [x] **V1.8 m4-iso.** Remove synchronous direct-HEVC ISO completion that
+    blocks a file's audio; qualify the fallback and retain quality presets.
+  - [x] **V1.8 m4-throughput.** Explicit zero HEVC look-ahead on the M4 Max
+    removes the intermittent video-input back-pressure. Eight final
+    interleaved pairs: all 35,040 candidate frames stored, zero program/ISO
+    drops, matched A/V durations and clean decodes; main dropped 2,354.
+    The hint is scoped to the qualified M4 Max: it regressed the base M2.
+  - [ ] **V1.8 m5-retention (needs Ryan).** Requalify real capture-buffer
+    retention on an approved M5 after the encoder changes. The M4 hint
+    remains off on other chips; synthetic test-Mac results are not an M5
+    real-device qualification. See Waiting on Ryan in notes.
+  - [x] **V1.8 throughput-diagnostics.** Trace the simultaneous writers and
+    compare CPU on both M2 OS versions. The 50% daemon CPU gap did not
+    reproduce with matched clips (51.0% vs 49.95%); VT services retain a
+    ~16% gap. No unqualified encoder replacement retained.
+  - [x] **V1.8 agent-surface.** MCP/CLI/socket fixes from the hard test
+    (12 of 14 findings).
+  - [x] **V1.8 robustness.** "Never lose a recording" fixes from the hard
+    test (all 11 findings).
+  - [x] **V1.8 streaming.** Streaming fixes from the hard test (all 9
+    findings).
+  - [x] **V1.8 encoder-capacity.** Astra's traces show the flagship (4K60
+    desktop + 1080p60 camera ISOs + 4K60 program, HEVC "high") exceeds the
+    hardware encoders' real-time throughput on a base M2 (always) and an
+    M4 Max (sometimes): even raw VideoToolbox took 20.3 s for 16 s of it.
+    So degrade predictably and say so up front. `isocast tune` measures it
+    accurately (isocast-m2-b, 2026-10-12: HEVC 0.7x real time for the 4K
+    program flagship, matching the ~1045/1440 frames recorded; 1.0x with a
+    1080p program, which recorded 0 drops in 18/18 files) but its verdict
+    is too blunt: both get "nothing fits" (it wants 1.25x headroom) with
+    generic advice. Make tune tell "can't keep up" from "keeps up, no
+    margin", search concrete variants that fit (program at 1080p, lower
+    preset, fewer ISOs, 30 fps) and recommend the closest one as a patch;
+    use it at first run, and warn at start when a setup exceeds what tune
+    last measured, as OBS's "encoding overloaded" does mid-take.
+  - [x] **V1.8 stream-start-keyframe.** A stream starts with two keyframes
+    one frame apart (0.000 and 0.017 s), then a clean 2 s grid: start the
+    grid on the first frame.
+  - [ ] **V1.8 soak.** A one-hour recording (synthetic flagship on a test
+    Mac, then the real devices) with memory, CPU, drops and file integrity
+    checked; device loss and return mid-recording.
+    - [x] **Synthetic soak.** One hour of the synthetic flagship with a
+      scene switch every 30 s on the M5 (4K program) and isocast-m2-b
+      (1080p program): no drops, every file decodes fully.
+    - [x] **Media-loop memory growth.** The live engine's memory grows
+      ~22–30 MB/hour with looping media sources (objects autoreleased on
+      long-lived engine threads, freed only when the engine stops); see
+      Gotchas. Drain them per loop and per imported frame.
+    - [ ] **Real devices.** The same hour with the approved devices, and
+      device loss and return mid-recording.
+  - [x] **V1.8 mcp-events.** MCP has no way to receive events (warnings
+    that only go to the event stream): a bounded watch buffer in the MCP
+    server and a `get_events` tool with a cursor, or MCP notifications.
+  - [x] **V1.8 mcp-field-paths.** Some MCP parameter errors don't name
+    the field path (serde `flatten` in InitSetupParams and the internally
+    tagged Transition/TransitionKind buffer the error away).
+
+### Priorities (Ryan, 2026-10-13)
+
+C (Create timeline, below) was added later the same day: an editing MVP,
+"fast and working", the editing itself later.
+
+"Don't worry about release prep like CI distribution or docs ... We want to
+work on scenes as code, plugins. We'll deal with Windows later. We need to
+then do extreme stress testing on it to try to make it as performant as
+possible ... so insanely optimized that if we were to put it up against OBS
+... it would absolutely blow it out of the water ... And we need full
+profile and scenes and all that stuff being able to be swapped and
+customized too ... I just need to get it working locally." Order of work:
+the design direction (Paper) and N.2/N.3, then P (profiles and scene
+collections), 5 (scenes as code), 7 (plugins) and S (stress testing and
+performance against OBS) in parallel where they don't collide. Section 8
+and N.4 are parked under 9.
+
+### P. Profiles and scene collections (Ryan, 2026-10-13)
+
+- [x] **P.1 Model and API.** Named scene collections (scenes, sources,
+  transitions) and named profiles (recording, stream, video, audio and
+  hotkey settings), stored side by side, swappable and editable without
+  restarting: list, create, duplicate, rename, delete, switch, import and
+  export on the one method table (API, CLI with --json, MCP). The OBS
+  import brings OBS's collections and profiles in as such. A switch while
+  recording or streaming is refused or deferred with a clear reason.
+- [x] **P.2 App.** Profile and Scene Collection menus as in OBS, in the
+  Slint app (after N.2) and the web app until N.3.
+
+### C. Create timeline (Ryan, 2026-10-13)
+
+Ryan: "a simple MVP of the sort of editing workflow ... fast and working,
+and then we can add the editing stuff later." Like TikTok's clip bar or
+Audition: take 1, then take 2 lands after it; a bad take is retaken (the
+last one thrown off and recorded again); takes can be removed or moved; at
+the end, one joined file. Splitting a take, trimming and removing silence
+come later (clips already carry in/out points on their take).
+
+- [x] **C.1 Timeline MVP (engine).** Timelines: ordered clips, one whole
+  take each (its manifest, program file and every ISO file), addressed by
+  id. `timeline_new` (current from then on: every take that finishes, by
+  `stop` or a split, is added), `timeline_get`/`list`/`open`/`close`,
+  `retake`, `timeline_remove`/`move`, and `timeline_export` (one program
+  file and one file per ISO source every clip has, video not re-encoded,
+  A/V in sync at every join, in the background with `export_progress` and
+  `export_finished` events) on the one method table: API, CLI
+  (`isocast timeline new|list|open|close|show|remove|move|export`,
+  `isocast retake`, `--json`), MCP tools, `timeline_changed` events.
+  Taking a clip off never touches its take's files; timelines persist
+  across restarts and crashes (docs/notes.md, Decisions, 2026-10-13).
+- [ ] **C.2 Create view in the Slint app.** The clip bar: takes in order
+  (thumbnails, lengths), record and retake, remove, drag to reorder,
+  export with progress; on the same methods and events. After the console
+  redesign of crates/isocast-ui lands.
+
+### S. Stress testing and performance (Ryan, 2026-10-13)
+
+- [ ] **S.1 Head-to-head with OBS.** A repeatable benchmark that runs the
+  same scenarios in OBS (installed on a test Mac, driven through
+  obs-websocket) and in Isocast on the same machine: CPU, GPU, memory,
+  energy, dropped/late frames, encode latency, preview latency, start/stop
+  time, with OBS's nearest equivalent settings. Results per Mac.
+  - [x] S.1a `scripts/obs-bench.py`: program-1080, program-4k, flagship
+    (OBS: its program) and a local stream in Isocast, OBS (OpenGL) and
+    OBS (Metal), interleaved on exonbook and isocast-m2-a: CPU (app + its
+    VT services), GPU time, footprint, power, distinct/decoded frames,
+    the apps' own drop counters, launch/start/stop, file sizes and
+    encoder checks. Results in docs/notes.md (Benchmarks).
+  - [ ] S.1b Encode latency (frame drawn to packet out) and preview
+    latency (frame drawn to on screen, Isocast's app vs OBS's preview),
+    and a real-device run (display + camera) once a test Mac has them.
+- [ ] **S.2 Extreme stress suite.** Many sources and scenes, many ISOs,
+  4K/60 and higher rates, long runs, rapid scene switching and live
+  edits, device churn, slow disks, stalled clients; find every limit and
+  failure, and fix what breaks.
+  - [x] S.2a Chaos-test repairs (findings 1-5, 8, 11, 6's wording): one
+    daemon per socket, a stream stop that never waits on a frozen
+    server, retries per outage, drop warnings that name a slow disk,
+    honest split-vs-stop error, 16 MB request cap.
+  - [x] S.2 repair-scale (ported onto main after 5.0 as
+    stress/scale-port): the scale run's findings: BGRA ISO deadlock,
+    failed files' loss report, filter pass cost, ISO memory under encoder
+    overload (compositor re-imports: already fixed by 5.0).
+  - [ ] S.2b Chaos-test leftovers (low): program file loses one more 2 s
+    fragment than ISOs on a crash, `last_error` empty after a restart
+    (6); doctor's disk estimate leaves out media/colour/text ISO files
+    (7); `start` replies ~0.2 s before the take (9); every text edit
+    reopens the source (10); f32 setup values come back with float noise
+    through `serde_json::to_value` (12); a disk-bound take keeps writing
+    its backlog ~7-15 s past its end (5).
+  - [x] S.2c Overloaded ISO tails. Repeat the last accepted picture at the
+    final slot when needed, retaining all audio. `repeated_frames` is
+    explicit in reports/manifests; drops remain expected minus stored plus
+    repeated frames. Round 3: all 72 candidate MOVs duration-matched,
+    count-matched and decoded cleanly; main mismatched in 10/72. Disable
+    recording B-frame reordering so overloaded crash fragments also retain
+    presentation order; six final-byte killed files decoded cleanly.
+- [ ] **S.3 Astra optimization rounds.** GPT-6 Astra (opencode, xhigh)
+  sessions with S.1/S.2 as their measuring stick, one hot path at a time,
+  until Isocast beats OBS on every measure we can control.
+  - [x] **S.3a Recording-stop latency.** Finalize when the last video frame
+    and all audio arrive, retaining the late-input allowance. Four paired
+    rounds against main and OBS on M4 Max and M2; normal files complete,
+    zero drops, equal A/V durations, crash fragments verified.
+  - [x] **S.3a-f1 Restore live jitter tolerance.** Keep the 200 ms live
+    budget; at Stop drain complete audio to recording routes only, pacing
+    concurrent live taps at their original deadlines. Ten stream pairs
+    on M2 and four on M4: zero candidate video/audio drops. Re-confirm
+    stop/integrity, concurrent manual/timed stops, and induced VT stalls.
+  - [x] **S.3b In-process profiles.** Profile 1080p, 4K and streaming on
+    both Macs. The meter SIMD trial was removed in follow-up 1 because
+    neutral-or-better process CPU was not established.
+  - [x] **S.3d Bounded stream stall reserve.** A stream's encoder worker
+    waits for outstanding submissions rather than discarding at eight;
+    its tap reserves 96 packets without delaying normal delivery. M2:
+    twelve interleaved pairs zero-drop, and ~110/210/310 ms VT freezes
+    lose 0 video/audio versus main's 18/31. Recording integrity retained.
+  - [ ] **S.3c Further CPU/graphics-residency optimization.** Round 2
+    re-measured the merged renderer: M4's static 1 fps control falls from
+    464 to 118 MiB; moving 4K content still has 24 non-purgeable 8 MiB
+    graphics regions and startup peaks remain. Removing canvas metadata
+    did not establish a CPU win; decoder-reader reuse introduced loop
+    frame gaps. Both trials were removed. Direct instruction counts now
+    work on both Macs. Further safe whole-process CPU reduction remains
+    open; S.3d separately fixes the measured encoder-freeze losses.
+  - [x] **S.3e Round-2 qualification.** Four interleaved main/candidate/OBS
+    rounds per scenario on both Macs (96 rows), final-byte stream/stall
+    and raw-wire checks, matched M4 memory controls, and file/crash checks.
+    All zero-drop files match A/V durations; overloaded flagship tails
+    differ in 9/80 files across both builds (documented, not claimed fixed).
+    Full report: `/Volumes/IsocastBuild/astra-s3r2/scratch/REPORT.md`.
+  - [x] **S.3f Graceful overload.** Program/stream admission precedes ISO
+    work; sustained load reduces ISO admission instead of filling every
+    queue. Stop waits for all accepted frames/audio and counts tail repeats.
+    Against 85c5d6d: M4 flagship Stop 723 -> 127.5 ms (eight pairs), M2
+    989 -> 150 ms (four); program drops zero. M2 simultaneous stream:
+    program and stream zero video/audio drops in four pairs, at the expense
+    of 10,345 ISO pictures. Healthy three-file controls, split/cancel,
+    continuous/offset audio and crash fragments verified. Further M4
+    zero-drop throughput work remains separate; round-three report in
+    `/Volumes/IsocastBuild/astra-s3r3/scratch/REPORT.md`.
+  - [x] **S.3g M4 Max throughput.** Native controls with deterministic
+    property order and real VT traces distinguish unset (automatic)
+    look-ahead from an explicit zero, although both read back as zero.
+    Eight final M4 pairs: flagship Stop 747 -> 83 ms, zero candidate drops;
+    four final M2 pairs per scenario retain zero protected program/stream
+    drops, equal final A/V durations and truthful ISO losses. Final-byte
+    codec/lifecycle/crash checks and release gates pass; full tables and
+    rejected global-hint/sustained-pressure trials are in the round report.
+
+### A. Alpha: the daily driver (Ryan, 2026-10-13)
+
+The stopping point: once these are done, features freeze and Ryan uses
+Isocast for his daily content creation and streams for a stress-test week,
+sending bug reports; then fixes, then the next phase. Everything not here
+waits (full workspaces, other themes, scenes 5.3+, plugin tiers 7.3/7.4b/5.7,
+layout editing, Windows, release prep).
+
+- [ ] **A.1 Native app by default.** The Console redesign (N.5) merged,
+  then N.3: the Slint app is the app Ryan opens.
+- [ ] **A.2 OBS workflows in the native app.** Scenes, sources, filters,
+  transitions, Studio Mode, mixer, program + ISO recording, streaming:
+  one scripted pass in real windows on the test Macs, every finding fixed.
+- [ ] **A.3 OBS gaps for daily use:** custom hotkeys (G.5), pause
+  recording (G.3), virtual camera (G.1). Replay buffer and projectors wait.
+- [ ] **A.4 Graceful overload (S.3 round 3):** the program and stream stay
+  whole while ISOs drop first; A/V durations equal (S.2c); stop stays fast.
+- [ ] **A.5 Timeline MVP (C.1, C.2):** takes append, retake, remove,
+  reorder, export one joined file; a simple Create view in the app.
+- [ ] **A.6 Log everything, report bugs in one click.**
+  - Structured logs from the daemon, app and CLI on every launch, every API
+    call with its result and timing, every event, warning, state and device
+    change, and once a second while live: CPU, GPU, memory, drops per
+    output, encoder queue depth, disk speed, thermal and power state.
+  - Crash capture: panics with backtraces, macOS crash reports for our
+    processes, "last run ended abnormally" at the next launch.
+  - `bug_report` on the method table (Help > Report a Bug… in the app,
+    `isocast report`, MCP): a GitHub issue body (summary plus a
+    machine-readable triage block for the agent that reviews it) and a zip
+    (logs, metrics, crash reports, manifests, setup, plugins, permissions,
+    an environment snapshot of the Mac: macOS build, chip, memory,
+    displays, cameras and mics with formats, disk).
+  - Secrets (stream keys, tokens) always redacted; the user previews
+    everything before it leaves the Mac; nothing is sent automatically
+    (it opens a prefilled GitHub issue to post with the zip attached).
+- [ ] **A.7 Exit test.** A 2-hour soak with real camera, mic and display,
+  program + ISOs + a test stream, 0 drops on Ryan's M5 Max; kill and crash
+  tests recover every recording; the A.2 checklist passes; then hand over.
+
+### G. OBS gaps (Ryan, 2026-10-13: "everything in OBS natively and fast")
+
+What OBS has that Isocast doesn't yet (from docs/obs-parity.md, the N.2
+notes and section 9). Each on the method table, CLI and MCP, then in the
+native app; each verified against OBS's behaviour on a test Mac.
+
+- [ ] **G.1 Virtual camera.** The program as a macOS camera (CoreMediaIO
+  camera extension), selectable in other apps; start/stop from the API.
+- [ ] **G.2 Replay buffer.** Keep the last N seconds of the program (and
+  ISOs) in memory; save on command or hotkey.
+- [ ] **G.3 Pause recording.** Pause/resume a take without a new file;
+  A/V stay in sync; the manifest records the pauses.
+- [ ] **G.4 Projectors and multiview.** Fullscreen or windowed preview,
+  program, scene or source on any display; a multiview grid.
+- [ ] **G.5 Custom hotkeys.** Every action bindable, stored per profile,
+  global (while the app isn't focused) where macOS allows.
+- [ ] **G.6 Small parity items.** Item flip (horizontal/vertical), stinger
+  audio, media source play/pause/seek/restart on the API, floating docks
+  in the native app.
+- [ ] **G.7 Later items from section 9, when Ryan asks:** a second
+  (vertical) canvas, SRT/WHIP streaming, NDI, Syphon, Audio Unit
+  plugins.
+
+### T. Themes (Ryan, 2026-10-13)
+
+**Parked until after the alpha (Ryan, 2026-10-13): "we'll probably want
+switchable themes at some point, but let's just start with console for
+right now."** Console (N.5) is the app's look; nothing below starts until
+he asks, and the open questions in docs/notes.md wait with it.
+
+Ryan likes four of the Paper directions (Workbench, Console, Daylight,
+Blender) for their signature pieces, not their colours, and wants to swap
+between them, pieces included; a switch may restart the app. Design:
+[docs/themes.md](docs/themes.md) (revised after a taste and a technical
+critique). A theme is tokens, fonts, one compiled piece per slot (picked
+at launch with `if` on a `Look` global; dispatchers generated from the
+slot registry) and layout tokens for the shared containers. Console
+(N.5) is the default; plugin themes inherit from a base, the built-ins
+set everything. Switching relaunches the app without taking focus;
+recordings and streams carry on in isocastd. Theme plugins are data
+only. A built-in theme is a **preview** until every signature piece in
+Ryan's pitch draws (docs/themes.md 4.2); only then is it **ready** (in
+the picker, "Ready for Ryan"). After A (A lists "other themes" as
+waiting). T.3a waits for Ryan's OK to commit the board-check scripts
+(notes, Questions for Ryan).
+
+- [ ] **T.1 The setting and the theme kind** (needs N.5).
+  `isocast_protocol::theme` (TOKENS with ranges, SLOTS with actions and
+  extras, `resolve()` enforcing every limit), `[[themes]]` in plugin
+  manifests with field-path and file:line checks (file types and sizes,
+  fonts parsed, image headers), `app.toml` beside the socket,
+  `theme_list`/`theme_get`/`theme_set` (restart only on a change,
+  `--reload`, `--preview`)/`theme_report`/`plugin_check`,
+  `theme_changed`/`theme_applied`, `isocast theme list|show|set|check`,
+  MCP `list_themes`/`get_theme`/`set_theme`/`check_plugin`; a theme-only
+  plugin installs without `--allow`.
+- [ ] **T.2 Tokens, fonts, launch and relaunch.** The `Theme` global
+  generated from TOKENS, fonts registered before the window, `--theme`,
+  `--safe`, the launch marker, native light/dark appearance, canvas
+  handle tokens, the window frame kept in prefs, relaunch (exec) on
+  `theme_changed` after draining queued edits, without activating if
+  the app was in the background, loop guard in the environment;
+  Settings › General › Appearance and View › Theme. Console stays
+  pixel-identical; a recording and stream through 20 relaunches lose 0
+  frames; a relaunch leaves the frontmost app frontmost.
+- [ ] **T.3 Slots** (each pixel- and `--a11y`-identical):
+  - [ ] T.3a Generated dispatchers, behaviour bases, `Look` enums, theme
+    features; the Console baseline (A/A, idle, metering); live
+    scrubbing on the Transitions Duration (the one behaviour change).
+  - [ ] T.3b Dock actions as `[DockAction]` models, changed row by row.
+  - [ ] T.3c Layout and canvas tokens in the containers
+    (`sidebar-dialog`, FlexboxLayout footer, `visible: false` folding).
+  - [ ] T.3d Frame slots, `lcd` and `template-field` as slots.
+- [ ] **T.4 Workbench:** T.4a controls, T.4b docks and mixer, T.4c
+  frame and bars, T.4d dialogs and forms (each a preview, checked board
+  by board); **ready** after T.7b, T.7c, T.7d and T.7f's focused dock.
+- [ ] **T.5 Daylight:** the same four areas, plus the light appearance
+  and the picture mat; **ready** after T.7a, T.7c, T.7d and T.7e.
+- [ ] **T.6 Blender:** the same four areas, plus the top bar from the
+  menu bar's one model, the outliner, panels and the tabbed Properties
+  editor (in-window); **ready** after T.7a, T.7b, T.7d and T.7f's action
+  table (so after G.5).
+- [ ] **T.7 Data the pieces need**, each on the method table first
+  (T.7a and T.7d first: Console needs them too):
+  - [ ] T.7a Free space, volume and time left while idle; GB per hour.
+  - [ ] T.7b Per-channel and program levels; EBU R128 loudness.
+  - [ ] T.7c Media position, duration and codec (with G.6).
+  - [ ] T.7d Form sections, per-field defaults and reset, live-locked
+    fields.
+  - [ ] T.7e ISO file-name template and a sample name.
+  - [ ] T.7f App-side: canvas fps, quick-transition durations, item
+    counts, Settings groups, preview zoom and pan, folded panels, focused
+    dock, Welcome dismiss and links, menu filter, the action table (from
+    G.5).
+- [ ] **T.8 Later, when Ryan asks:** tabbed docks (Workbench's
+  icon-over-label tabs, Daylight's tool tabs), workspaces (a layout
+  feature, not a theme: Blender's "Beyond OBS" and Console's
+  Live/Build/Create boards), real windows for Blender's Preferences and
+  Properties, code pieces in theme plugins (once Slint stabilises
+  ComponentContainer), SVG icon overrides, more-contrast variants.
+
+### 5. Scenes as code
+
+Ryan's scene language (see `docs/scene-language.md`): scenes authored in TSX
+or plain setup data, laid out and animated with CSS ideas on the session
+clock, and fed by live data and plugins. Every capability is on the method
+table and in `isocast setup schema`.
+
+- [x] **5.0 Compiled scenes.** The scene thread resolves the setup's
+  scenes into compiled draw lists; the compositor draws them from one
+  storage buffer of draw records with cached bind groups, sends the last
+  frame again when nothing changed, and reports its timings in `engine`
+  (docs/scenes-as-code.md, 5.0). Same pictures, no setup change.
+- [x] **5.1 Layout.** Flexbox and grid with `taffy`; `px`, `%`, `inset`,
+  absolute positioning, aspect ratio, object-fit. `layout` on items and
+  scenes, `rect` optional, `overflow` clipping, `get --resolved` and the
+  layout generation frames carry (docs/scenes-as-code.md, 5.1).
+- [ ] **5.2 Keyframes.** `@keyframes`-style animations and transitions with
+  CSS easing, evaluated at each canvas tick; enter and exit animations.
+  - [x] **5.2a Keyframe animations.** `[[keyframes]]`, item `animations`
+    (on_air, shown and clock clocks), `cubic_bezier` and `steps` easings,
+    the per-tick evaluation pass (docs/scenes-as-code.md, 5.2a).
+  - [ ] **5.2b Animated changes, enter and exit, scene transitions.**
+    After 5.1 and 5.2a (docs/scenes-as-code.md, 5.2b).
+- [ ] **5.3 Shader effects and transitions.** Custom WGSL effects on items
+  and custom WGSL scene transitions.
+- [ ] **5.4 TSX authoring.** `isocast scene build scenes.tsx` compiles
+  components and props to setup data in an embedded JS runtime; `plan` and
+  `apply` take it directly.
+- [ ] **5.5 Live data.** A data store in the engine (`isocast data set`,
+  MCP, events); components re-render when their data changes, merged by id
+  like React, never per frame.
+  - [x] **5.5a Data store, content items, bound text.** `data_*` methods,
+    CLI `isocast data`, MCP get_data/set_data, `data_changed`, kept keys
+    per scene collection; `content` (text, image) on items; text `data =
+    "key"` (docs/scenes-as-code.md, 5.5a).
+  - [ ] **5.5b Live components.** After 5.4a and 5.2b
+    (docs/scenes-as-code.md, 5.5b).
+- [ ] **5.6 External APIs.** Scene code can fetch and open WebSockets under
+  a permission list; a Twitch chat overlay as the worked example
+  (anonymous read-only chat).
+- [ ] **5.7 Plugin nodes.** Plugins declare node types (props schema plus a
+  shader, TSX component, web page or external process that renders them),
+  listed in the schema so agents can use them.
+
+### 6. The app (flat design)
+
+Moved into V1 (V1.4–V1.7) on 2026-10-11.
+
+### N. Native app in Slint (Ryan, 2026-10-12)
+
+Ryan: "let's just go ahead and redesign the entire thing in slint". The
+app is rebuilt as a native Slint (1.18, Skia renderer on wgpu 30) app, one
+codebase for macOS now and Windows later, replacing the AppKit + WKWebView
+app once it reaches parity. Same OBS layout and flat look; the engine,
+CLI and MCP don't change (the app stays a client of isocastd). The shipped
+app uses Slint's royalty-free licence: an "About Slint" notice in
+Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
+
+- [x] **N.1 Spike (de-risk).** A Slint window with OBS-style docks and
+  splitters, a dropdown, a text field (IME), the native menu bar and the
+  About notice; the daemon's frames shown zero-copy (shared GPU surfaces
+  across processes, RGBA8 at the monitor's size) with a draggable
+  selection box drawn in the same frame; an offscreen screenshot test
+  (approved by Ryan). Pass: ≤5% of a core at 60 fps in a real window,
+  box and picture in the same frame, no black frames in 10 minutes, the
+  Scenes list exposed to screen readers.
+- [x] **N.2 Parity.** Every view of today's app rebuilt (docks, dialogs,
+  settings, dropdowns, first run, studio mode, mixer, status bar), in the
+  design language of docs/design.md. Carry over from the spike: the
+  Controls dock must fit at the minimum window width (cut off below ~1170
+  px today), drags must keep up (pipeline live applies; 32 picture moves/s
+  on an M2 vs the web app's 50), the app menu names Isocast, Instrument
+  Sans bundled, colour management of the native layer (Rec. 709 tag), the
+  portable `--preview image` path's cost (~21% on an M2). Split into
+  areas built side by side (src/areas/mod.rs):
+  - [x] **N.2.0 Foundation.** Every design.md token, the widget kit, the
+    window split into five areas over a shared session, docks that fit
+    the 900px minimum, a bundle that names the app Isocast
+    (scripts/ui-dev.sh), snapshot states per area.
+  - [x] **N.2.A Scenes and sources.** Scenes and Sources docks, source
+    toolbar, adding sources, Properties, Filters, Edit Transform, Rename,
+    their menus. Open: reordering scenes, items and filters isn't applied
+    by the daemon (its plan ignores order: "No changes"; the web app has
+    it too).
+  - [x] **N.2.B Audio.** Audio Mixer, Advanced Audio Properties, meters
+    (smoothing, peak hold, cost), the mixer's menus.
+  - [x] **N.2.C Controls and status.** Controls, Scene Transitions,
+    Studio Mode, status bar, recording and streaming states and details,
+    toasts (dropped frames).
+  - [x] **N.2.D Settings and first run.** Settings (every tab), first
+    run, Welcome, connecting and failed states.
+  - [x] **N.2.E The canvas.** Selection, move/resize/crop/snapping,
+    locked items, pipelined live applies during drags, Studio Mode's two
+    pictures, Rec. 709 on the native layer, `--preview image` cost.
+  - [x] **N.2.F Integration.** The five areas merged on slint/n2, their
+    duplicates made one (settings form, open panel, device choices,
+    canvas prefs), their seams wired (row hover → canvas outline, the
+    preview's item menu, Start Streaming → Settings), checked as a whole.
+    Open: reordering isn't applied by the daemon (N.2.A); the checks on
+    an M4 and a P3 display wait for exonbook's screen (Waiting on Ryan);
+    with meters moving the window costs 13–14% of a core on a base M2
+    (whole-window redraws); run outside its bundle the app menu says
+    isocast-ui (scripts/ui-dev.sh's bundle says Isocast).
+  - [x] **N.2.G Critique fixes.** The parity and design critics' findings
+    on the integrated app: transform numbers sent as integers, lists
+    changed row by row (renames and double-clicks survive the status
+    poll), dialog fields keep the focus, context menus open on release
+    (no stuck pointer grab), dialogs scroll in short windows, Escape
+    commits nothing, ⇧⌘A/⇧⌘N/Return as in the web app, details close
+    when recording or streaming stops, `--a11y` lists dialogs and menus,
+    and the type spaced and leaded as the web app's (tracking and
+    leading tokens). Left on purpose: notes.md Decisions, 2026-10-13.
+- [ ] **N.3 Switch.** The Slint app becomes Isocast.app; the web app is
+  retired.
+- [ ] **N.4 Windows (parked by Ryan, 2026-10-13: later).** Shared D3D12 textures for the preview, packaging
+  (with the engine's Windows platform crate, separate work).
+
+### 7. Plugins
+
+- [x] **7.1 Plugin model.** Manifest format and three tiers, from safest to
+  most powerful: external processes that use the control API (any
+  language), WGSL shader filters, and WebAssembly components (wasmtime)
+  for audio filters and custom sources. (Design slice "7.1 Plugin registry
+  and process plugins": the manifest with every tier's sections, the
+  registry, grants and the process tier; the WGSL and wasm runtimes are
+  7.3 and 7.4.)
+- [x] **7.2** External-process plugins, with a Stream Deck-style example.
+- [ ] **7.3** Third-party shader filters (WGSL), next to the built-in ones
+  from 4.9. Also: the `schema` method (left from 7.1), and plugin kinds in
+  setups for filters, transitions and content (audio filters' came with
+  7.4a, as did `plugin remove --force`).
+- [ ] **7.4** Third-party WebAssembly audio filters and custom sources,
+  next to the built-in ones from phase 4.
+  - [x] **7.4a WebAssembly audio filters** (design slice 7.4a): wasmtime
+    with the component model, the WIT package (`wit/plugin.wit`),
+    precompiling and checking at `plugin add`, filters in the mixer with
+    work and memory limits, bypass and fresh instances, plugin kinds for
+    audio filters in setups, `examples/plugins/gain` (a gain and a
+    sidechain ducker). Done when the wasm gain equals the built-in gain,
+    the ducker matches the compressor within 0.5 dB, a trap, an endless
+    loop and a memory overrun each bypass the filter with one warning and
+    turn it off after three while the files keep every sample, per-block
+    cost is measured (gain ≤ 0.05 ms), and the flagship A/B with a wasm
+    filter on the tone shows no regression (isocast-m2-a).
+  - [ ] **7.4b WebAssembly sources** (design slice 7.4b).
+- [x] **7.5** `isocast plugin add`, `list` and `remove`.
+- [x] **7.6 Events by kind.** `watch` takes `kinds` and `except` (the
+  API, `isocast watch --kinds/--except`, and MCP's event thread, which
+  asks for all but levels), so a client that shows no audio levels isn't
+  woken 20 times a second; the deck asks only for what its page shows.
+  Done when the idle deck receives no events and the 4K flagship with the
+  deck installed drops no more than main (isocast-m2-a, 5+5 runs).
+
+### 8. Open-source release prep (parked by Ryan, 2026-10-13: later)
+
+- [ ] **8.1** CI on GitHub Actions (macOS on Apple silicon) with formatting,
+  lint and test gates.
+  Write the workflow; don't create the GitHub repo or push.
+- [ ] **8.2** Release build script for signed, notarized Apple silicon
+  (arm64) builds and a Homebrew formula. **Needs Ryan** for signing credentials.
+- [ ] **8.3** Docs: getting started, setup reference, MCP tools, plugins.
+
+### 9. Later (pull into the queue once the above is done)
+
+- Streaming: RTMP and SRT through FFmpeg or GStreamer, WHIP through `str0m`.
+- Syphon client source; Audio Unit plugins as audio filters.
+- A second canvas (vertical video) and a replay buffer.
+- Windows and Linux backends.
+- NDI input and output.
+- FilmCraft reads `session.json` to line up ISO files without audio sync.
+
+## Log
+
+One line per finished task, newest last.
+
+- 0.1 (2026-10-11): skeleton, setup format and checker, example rig.
+- 1.1 (2026-10-11): `isocast record --source test-pattern --source tone
+  --seconds 10` writes an HEVC 1920×1080 60 fps .mov with an AAC 48 kHz
+  stereo track through AVAssetWriter/VideoToolbox. ffprobe: both streams
+  10.000000 s, 600 frames, r_frame_rate 60/1, Rec. 709 tags; signalstats
+  shows exactly 6 flash frames at each whole second and silencedetect shows
+  the beeps there too. Also checked: 4K60 and 720p30 sources, Ctrl-C stop
+  (file ends on a frame boundary), validation errors.
+- 1.2 (2026-10-11): `isocast devices [--json]` lists displays (stable UUIDs,
+  pixel size, refresh), windows (with screen permission), cameras with their
+  formats merged by size and pixel format, microphones with sample rates
+  and channels, and the three permissions, without prompting. Ran it on this
+  Mac: 2 displays, 8 cameras incl. the iPhone as Continuity Camera, 8 mics,
+  all permissions granted; JSON parses. Binding decision (objc2 family) is
+  in notes.
+- 1.3 (2026-10-11): `isocast record --source screen --seconds 10` writes HEVC
+  3840×2160 (panel native, not the 5120×2880 backing) 60/1 fps, 600 frames,
+  exactly 10.000000 s, Rec. 709, 0 dropped, at ~4% of one core.
+  ScreenCaptureKit frames go through the engine's frame clock; it reported
+  315 new frames and the file has 300 distinct ones (content changed at
+  ~30 Hz). Also: second display by name with a tone track, unknown display
+  error listing valid ones. Screen permission was already granted.
+- 1.4a (2026-10-11): `isocast record --source camera:Insta360 --source tone
+  --seconds 10` writes HEVC 1920×1080 30/1 fps (the camera's best format),
+  300 frames, both streams exactly 10.000000 s, start offset 0 (the session
+  waits for the camera's first frame); 301 frames captured. Errors list the
+  device's formats or the available cameras. Found that OBS's "iPhone"
+  source is the iPhone screen over USB; support for it is in, untested.
+- 1.5 (2026-10-11): `isocast record --source test-pattern --source mic:Wave
+  --source system-audio --seconds 8` writes the video plus a mono AAC track
+  from the Elgato Wave:3 (peak −23.6 dB) and a stereo system audio track, all
+  three exactly 8.000000 s, 0 dropouts. A quiet system sound played during
+  the take shows in the system track at −36.6 dB, matching a reference
+  capture. Mic and screen permission were already granted.
+- 1.6 (2026-10-11): every session writes `<date> <time>.session.json` with each
+  file's start offset on the session timeline (written at start, once all
+  files start, and at the end). Recorded a 30 fps and a 60 fps test pattern
+  with the tone in both: flashes fall on exactly 0, 1, … 9 s in both files
+  (0.00 ms apart), beeps match across files, flash vs beep ≤ 1.2 ms (AAC
+  onset). The manifest reads as `recording` mid-take and `complete` after.
+- 1.7 (2026-10-11): `isocast record <setup>` with Ryan's rig layout (stand-ins:
+  Insta360 X3 for the capture card, a 1152×2504@60 test pattern for the
+  iPhone screen; neither device is connected) wrote SCREEN- (3840×2160@60),
+  FACECAM- (1920×1080@30) and IPHONE- files, each with the mic (mono) and
+  desktop audio (stereo) tracks, all streams exactly 10.000000 s. With 2 s
+  movie fragments, `kill -9` at ~7 s left all three files decodable with 0
+  errors (6 s each: 360/180/360 frames) plus a manifest with offsets; a
+  normal finish is a standard indexed movie.
+- 1.8a (2026-10-11): a 4K60 recording of 2,000,000 s is refused with the free
+  space, the estimated need and the rate per minute. With `keep_free_gb` set
+  1.5 GB under the SSD's free space and `dd` writing 2 GB of filler
+  mid-take, a 30 s recording stopped cleanly at 4.84 s: the file plays
+  (4.87 s, both streams) and the manifest says `failed` with the reason.
+- 1.8b (2026-10-11): each recording first writes and fsyncs a 64 MB probe: the
+  SSD measured 854–877 MB/s; an 8K60 ProRes 4444 setup (estimated 1.4 GB/s)
+  is refused before any file is created. Network volumes are flagged from
+  `MNT_LOCAL` (checked against `mount`: the SMB share lacks `local`).
+- 1.8c (2026-10-11): the engine reports live counters every second
+  (`RecordOptions::on_status`) and the CLI warns as soon as a file drops
+  frames or audio. Freezing the recorder for 1 s with SIGSTOP produced
+  "dropped 3 frame(s) at 3 s" then "58 … (61 so far)", matching the final
+  61; an 8 s screen + camera + mic + system audio take printed no warnings.
+- 1.8d (2026-10-11): new `encoder.bit_depth` (8/10). ffprobe on real takes:
+  ProRes 422 and 422 HQ (profiles Standard/HQ, yuv422p10le), HEVC Main and
+  Main 10 (yuv420p10le), H.264 High; all tagged bt709 primaries, transfer
+  and matrix, tv range. The screen in 10-bit HEVC (10-bit capture) and in
+  ProRes 422 HQ at 4K60 (~1.5 Gb/s) both decode with 0 errors. H.264 10-bit
+  is rejected by setup validation with the alternatives.
+- 1.8e (2026-10-11): 10-minute take of the stand-in rig (4K60 screen,
+  Insta360 facecam, 1152×2504@60 and 1280×720@30 test patterns; mic, system
+  audio and the tone in every file): all 16 streams exactly 600.000000 s,
+  offsets 0, 0 audio dropouts; 18000/18000 frames at 30 fps and
+  35999/36000 at 60 fps (one shared hiccup at 592.5 s). All 600 flashes on
+  exact whole seconds in both pattern files; tone beeps within 1.17 ms of
+  whole seconds in all four files to the end, so the files line up within
+  1.2 ms (a frame is 16.7 ms). Debug build: 57% of one core, 239 MB.
+- 2.1 (2026-10-11): `isocastd` owns the session and answers JSON-RPC 2.0
+  (status, devices, start, stop, shutdown) on a Unix socket; `isocast start`
+  launches it if needed, `status` shows live counters, `stop` returns the
+  report. Verified start → status → stop, "already recording"/"not
+  recording" errors, precise errors for unknown methods and bad params, a
+  timed take ending by itself, a display matched by name inside the daemon
+  (AppKit on its main thread), and SIGTERM mid-take finishing the file
+  (fully indexed, manifest `complete`) and removing the socket.
+- 2.2 (2026-10-11): the daemon holds a revisioned live setup: `isocast get`,
+  `plan FILE|--patch JSON` (diff with id paths plus problems), `apply …
+  --revision N` (atomic; refuses stale revisions and setups with problems)
+  and `watch` (event stream). Verified on Ryan's example setup: a patch
+  changing fps, retargeting the facecam and removing the iPhone planned as
+  `canvas.fps 60 → 30`, `sources.facecam.device …`, `- sources.iphone`;
+  removing a referenced source was refused with both problems; a stale
+  revision was refused; `start` without a setup recorded the live one (30
+  fps screen + Insta360, scratch folder); `watch` showed setup_changed,
+  started, status ticks and stopped.
+- 2.3a (2026-10-11): `isocast marker LABEL` and `isocast scene ID` (API
+  `marker`, `switch_scene`, events, scene in status). The manifest gains
+  `markers` and a `scenes` timeline, rewritten as they arrive. Verified: the
+  first scene goes on air when a setup is applied; a switch before recording
+  sets the starting scene (0.0 s); during a take a marker at 1.05 s, a switch
+  at 1.91 s and a marker at 1.93 s were in the manifest mid-take and after
+  stop; marker while idle and unknown scenes are refused with the options.
+- 2.3b (2026-10-11): `isocast mcp` serves 9 intent-level tools over stdio
+  (rmcp 3.5): get_status, list_devices, get_setup, plan_change,
+  apply_change, start_recording, stop_recording, switch_scene, add_marker,
+  each a call on the daemon's method table, with annotations and output
+  schemas. Verified with a scratch stdio MCP client: initialize (protocol
+  2025-06-18) → tools/list → plan → apply → start → switch scene → marker
+  → switch → marker → stop; the report and manifest hold both markers and
+  the scene timeline; a bad scene and a second stop come back as tool
+  errors with the reason.
+- 2.4 (2026-10-11): markers came in 2.3a; `isocast split` (API `split`, MCP
+  `split_take`) now ends the current files at the next whole second (≥0.5 s
+  ahead) and continues into a new take's files and manifest, without
+  stopping any source. Verified with 30 and 60 fps patterns + tone and two
+  splits: takes of exactly 3.0 s (90/180 frames), 2.0 s (60/120) and the
+  rest (31/61), 181 frames in all at 30 fps for a 6.01 s session (none lost
+  or doubled); takes 2 and 3 open on a whole-second flash and beep; each
+  manifest has its own markers; streams in every file are equal length.
+- 2.5a (2026-10-11): `isocast doctor [SETUP] [--folder]` (API `doctor`, MCP
+  `check_setup`) checks permissions against what the setup needs, the chip
+  and hardware encoders (VideoToolbox), the setup's validity, each source
+  resolved to a device and the format it would record (without opening it),
+  and the recording disk's hours of room, speed and network status. On
+  Ryan's setup it flagged the missing capture card (listing the cameras),
+  resolved the screen to 3840×2160@60, `iphone` to the Continuity camera and
+  `mic` to the MacBook mic, and passed the SSD (17 h, 874 MB/s). Through the
+  daemon with no live setup it checks the machine only.
+- 1.4b (2026-10-11): with Ryan's devices through the signed daemon: "Studio
+  Video" (his facecam) 1920×1080 60/1, 600 frames, 0 dropped; "Ryan iPhone"
+  (screen over USB) 1206×2622 60/1, 0 dropped, size taken from its first
+  frame; "Studio Audio" stereo in both; all streams 10.000000 s. A Studio
+  Video frame looked right (orientation, colour). The capture card is not
+  in use now (question in notes).
+- 2.5b (2026-10-11): `isocast tune [setup]` (MCP `tune_encoders`) encodes
+  every ISO stream at once with each candidate codec on busy camera-like
+  frames, judges speed (1.25× real time after a 1 s warm-up), disk speed
+  and an hour on disk, and returns a recommendation plus a patch for `plan`.
+  On Ryan's rig (screen 3840×2160@60, Studio Video 1920×1080@60, iPhone
+  screen 1206×2622@60, its size learned by opening it) HEVC 8-bit ran
+  1.5–2.2× and was recommended; ProRes ran 10–15× but only 0.4–0.7 h fit.
+  Verified the refusals (start while tuning, tune while tuning) and that an
+  invalid setup is rejected with its field path.
+- 2.4 follow-up (2026-10-11): fixes from a code review of splits. A file a
+  split ends is finished on its own thread and kept open up to 500 ms for
+  its last audio; the split time is picked after the new files exist and at
+  least 1 s after the current take's start; splits that never begin are
+  cancelled even with no packet after them; marker/scene replies give the
+  take and its timeline; status lists the new take's files. Verified on the
+  rig: a 60 s take then a split, 0 dropped frames in both takes, take 1's
+  audio is real mic sound up to its last sample (no padded zeros), audio and
+  video both 61.000 s; markers replied 59.90 s/take 1 and 1.92 s/take 2,
+  exactly as in the manifests; a double split gave a 1.000 s take; split
+  then stop left no orphan file or manifest.
+- 3.1a (2026-10-11): wgpu 30 on Metal; CoreVideo frames become wgpu
+  textures through a CVMetalTextureCache (no copies), drawn by one shader
+  that converts Y'CbCr with the frame's matrix and range. `isocast snapshot
+  SOURCE [-o FILE] [--width N]` and MCP `preview_frame` return a PNG.
+  Verified: test-pattern pixels exactly equal the drawn bar values (BGRA);
+  a 4K screen snapshot (420v) against an ffmpeg BT.709 decode of a
+  recording of the same screen: median difference 0, per-channel bias
+  under 0.15 levels on unchanged pixels; 10-bit (x420) agrees with 8-bit
+  (bias under 0.3); Studio Video and the iPhone screen look right. Audio
+  sources and unknown names give errors listing the valid choices.
+- 3.1b (2026-10-11): while recording, `snapshot` of a recorded source uses
+  the newest frame the recording captured, without taking it from the
+  frame clock; test patterns and displays still open on their own; other
+  cameras are refused (opening one could change its format under the
+  recording). Verified during a rig recording: facecam, iphone and screen
+  snapshots in 0.08–0.3 s, `camera:Studio Video` refused naming the
+  recorded sources, and every file kept 0 dropped frames.
+- 3.2 (2026-10-11): scene items gain `crop` (pixels off each edge) and
+  must have a non-empty rect; the renderer draws a scene's visible items
+  back to front, each cropped and scaled into its rect, clipped at the
+  canvas edges. `isocast snapshot --scene ID` (MCP `preview_frame` with
+  `scene`) draws a scene, and with no argument the scene on air. Verified
+  with two test patterns: 7 pixel checks exact (position and scaling, a
+  1-bar crop, a hidden item not drawn, draw order, an item half off the
+  canvas); Ryan's desktop and closeup scenes drawn idle, and the on-air
+  scene drawn from a running recording's frames in 0.07 s with 0 dropped
+  frames.
+- 3.3 (2026-10-11): with `recording.program` enabled, every scene's sources
+  open with the session and a compositor draws the scene on air on the GPU
+  at each canvas tick into an IOSurface canvas that goes straight to the
+  program file (`{date} {time}.mov`, its own encoder, one audio track per
+  `program.audio` source until 3.4 mixes them); it splits into takes like
+  the ISO files, and `tune` counts it. Verified with test patterns: program
+  and ISO files 187 frames each, 0 dropped, same 6.233 s; whole-second
+  flashes on the same frames in both; a scene switch at 3.157 s took effect
+  on frame 95 (3.167 s), the first tick after it. On Ryan's real rig (4K60
+  screen, Studio Video, iPhone screen, 4K60 program with two audio tracks)
+  a 60 s take with a switch halfway: all four files 3592 frames, 0 dropped,
+  59.867 s; desktop and closeup frames look right. The first real-rig run
+  dropped ~10% in 5-frame bursts because a busy encoder dropped frames at
+  once; video appends now wait up to 100 ms.
+- 3.4 (2026-10-11): sources gain `audio = { gain_db, muted, offset_ms }`.
+  The program's audio is one stereo mix of `program.audio` (mono sources
+  centred), mixed 200 ms behind real time on the session timeline; ISO
+  files keep raw audio shifted by the offset. Gain and mute change a
+  running mix at once (`isocast audio SOURCE --gain/--mute/--unmute
+  --offset`, MCP `set_audio`, or any apply); live status carries peak and
+  RMS levels per source and for the mix. Verified with a 1 kHz tone (+100
+  ms) and a 440 Hz tone (−6 dB) muting the first mid-take: ISO onsets
+  exactly +100.0 and 0.0 ms, the mix's 440 Hz at exactly −6 dB, the 1 kHz
+  at full level then 0.000 from the second after the mute; meters read −6
+  dBFS for amplitude 0.5. Ryan's rig: one stereo mix track, 0 drops.
+- 3.5 (2026-10-11): transitions (`cut`, `fade` with `duration_ms`; a
+  setup-wide `[transition]`, cut by default, and per switch), a preview
+  scene (`isocast preview ID`, MCP `preview_scene`) and `isocast take`
+  (MCP `take_preview`), which puts preview on air and moves the old
+  program to preview. The compositor draws both scenes of a fade on their
+  own canvases and blends them (layers now have opacity); the manifest's
+  scene timeline records each transition. Verified with a black scene and
+  a test-pattern scene: `take --fade 1000` at 1.372 s ramped linearly from
+  frame 42 (1.400 s) to full on frame 72, exactly 30 frames; `scene dark
+  --cut` at 3.918 s went black on frame 118 (3.933 s); 0 dropped frames.
+- 3.6 (2026-10-11): MCP `preview_frame` (and `isocast snapshot`) shows
+  the program by default, the preview (`--preview`), any scene or any
+  source. While recording, the program image is the exact canvas the
+  compositor recorded last (it publishes each canvas to a frame slot), so
+  transitions show as recorded. Verified during a recording: a snapshot
+  1.0 s into a 2 s fade was 0.49 of full brightness; `--preview` showed
+  the staged scene while another was on air. Source and scene snapshots
+  came in 3.1–3.2.
+- 3.7 (2026-10-11): one-hour soak of Ryan's rig without the iPhone (4K60
+  display, Studio Video, Studio Audio, Elgato Wave, system audio, a 4K60
+  program with a 3-source mix, fades every 5 min, markers every 10 min)
+  plus a synthetic sync reference (test pattern + tone ISO), release
+  build: every file 3599.95 s and 215,995 frames, 2 dropped per file (all
+  at once, at 36 min, while a debug build wrote to the same SSD), 0 audio
+  dropouts, 12 scene switches and 5 markers in the manifest. Sync: flashes
+  on exact whole-second frames and beeps within 0.02 ms of whole seconds
+  in all three ISO files at the start, middle and end (no drift). Daemon
+  CPU median 49% of one core (max 56%), 135 MB, GPU ~43% busy, no thermal
+  warnings (M5 Max).
+- 4.1 (2026-10-11): scene items gain an `id` (default: their source),
+  optional `source` (boxes and groups have none), `style` (opacity,
+  background, radius, border, shadow, transform) and `children` placed in
+  their parent's rect and moved, rotated, scaled and faded with it. The
+  renderer draws every item as a transformed quad with an SDF rounded
+  rect, border, CSS-style Gaussian shadow, premultiplied alpha. Patches
+  and diffs match items by id, else source. Verified with a styled test
+  scene: 10 pixel checks (background box, rounded corner, border colour,
+  shadow falloff (9,17,26) vs computed (8,17,25), a 50% group and its
+  child, a 90° rotation); the 3.2 plain-scene checks still exact; a patch
+  by item id changed one border colour; a recorded program shows the
+  styled scene. 19 new unit tests (clock, patches, validation, radii,
+  transforms, audio tracks, mixer) pass.
+- 4.2 (2026-10-11): each source kind has its own settings struct and
+  checks (`isocast_protocol::source`, registered in one `source_kinds!`
+  list) and an opener (`isocast_engine::source::open`) that delivers
+  frames into a frame slot and/or audio into a feed; test patterns and
+  tones became generator threads on the session timeline, so the session
+  has one video path (frame clock) and one audio path, and snapshots,
+  doctor and tune open sources the same way. `docs/obs-parity.md` explains
+  adding a kind. Verified: flashes on frames 0, 30, ... 150 and beeps 0.02
+  ms after whole seconds in both ISO and program files; the display,
+  Studio Video, Studio Audio and Elgato Wave recorded 8.000 s with 0 drops
+  and their own audio tracks; snapshots of a pattern (bar exact) and the
+  camera; unit tests pass. Setup files are unchanged.
+- 4.3 (2026-10-11): `color` (any size, canvas by default), `image` (PNG,
+  JPEG upright by EXIF, GIF with animation, WebP, BMP, TGA, SVG at a set
+  size) and `slideshow` (files, slide time, cut or fade, loop, shuffle,
+  fitted and centred) sources; image paths in a setup file are relative to
+  it; RGB frames keep their alpha. Verified with a scene of all of them:
+  colour (32,64,96) exact, a 50%-alpha PNG blended to (143,32,48) vs
+  (144,32,48) computed, an SVG circle with transparent corners; recorded:
+  the GIF changes every 6th frame (200 ms at 30 fps), the slide show holds
+  15 frames and fades over 15 (500 ms) each way; 0 dropped frames.
+- 4.4 (2026-10-11): `text` sources (text or a file re-read when it
+  changes; font, size, weight, italic, colour, outline, shadow,
+  background, alignment, wrap width, padding, line height, fixed size),
+  shaped and rasterised with cosmic-text into a picture drawn like an
+  image. Verified: a bold title with outline and shadow, centred lines and
+  a file-fed chat box with a translucent background look right; editing
+  the file mid-recording changed the program at 1.57 s (written at ~1.5
+  s); fonts load in well under a second even in debug.
+- 4.5a (2026-10-11): `media` sources play video and audio files (a
+  playlist, looping or not, at 0.25-4x speed) through AVAssetReader
+  (hardware decode to IOSurface 4:2:0 frames, stereo float audio), paced
+  onto the session timeline by two generators on one schedule. Verified
+  with a 3 s clip that flashes and beeps on whole seconds, looped over 7 s:
+  flashes on frames 0, 30, ... 180 across the loops, beeps where the clip
+  has them (1.0027/2.0053 s within it) in ISO and program; at 2x speed
+  flashes every 15 frames and beeps every 0.5 s; 0 drops.
+- 4.5b (2026-10-11): the compositor tells the session timeline which
+  sources are on air since when; media with `restart_on_activate` (the
+  default, as in OBS) plays from the start each time it comes on air and
+  not while off air, video and audio restarting from the same moment.
+  Verified: cutting to the clip's scene at 2.252 s, the program shows the
+  clip's first flash on frame 68 (the next tick, 2.267 s), then every 30
+  frames; its beeps at 2.267, 3.269, 4.272 and 5.267 s (the clip's own
+  offsets from the restart, across a loop); no clip audio before.
+- 4.6 (2026-10-11): `window` (an app's largest on-screen window, by name
+  or bundle id and optional title, scaled to keep its size if resized),
+  `application` (all of an app's windows on a display) and
+  `application_audio` sources through ScreenCaptureKit, a `cursor` option
+  on screen captures, quick specs `window:APP` and `app-audio:APP`, and
+  doctor probes for them. Verified: a Finder window recorded at its Retina
+  pixel size 1840×872 (920×436 points) showing only that window, the
+  Finder app at the display's 3840×2160, 0 drops; Music's audio captured
+  (silent: nothing was playing, so not verified with sound); unknown
+  windows and apps fail listing what is open.
+- 4.7a (2026-10-11): `browser` sources render a URL or local HTML file in
+  an offscreen WKWebView on the daemon's main thread (which now runs a real
+  run loop), snapshotted at the source's frame rate once the page has
+  loaded, with custom CSS (OBS's transparent-body default) and light
+  appearance. Verified: an animated page with a half-transparent box over
+  a colour source recorded with the box moving and the background showing
+  through; 1080p60 delivered 363 frames in 6 s with 348 of 360 recorded
+  frames distinct (daemon 54% of a core in a debug build); custom CSS, a
+  file in a folder with a space, https://example.com, and validation
+  errors for a bad scheme or no url/file; the hidden page window is left
+  out of window lists.
+- 4.7b (2026-10-11): `control_audio = true` sends a browser source's sound
+  (Web Audio and media elements) to the mixer and ISO files as its own
+  stereo audio instead of the speakers; without it pages play aloud, as in
+  OBS. Media autoplays; local pages can fetch the files next to them.
+  Verified: a page beeping every second recorded beeps exactly 1.000 s
+  apart at the page's level (0.5), its flashes within one frame (audio
+  24–57 ms later); two looping <audio> files (one created by script) at
+  their file levels; system audio recorded alongside had none of it, and
+  with control_audio off had the beeps at the page's −26 dB; fetch() of a
+  neighbouring JSON works (fails without the preference); unit tests for
+  message decoding, timestamps and resampling.
+- 4.7c (2026-10-11): browser sources take `shutdown_when_hidden` (unload
+  while the program doesn't show the page, leaving an empty frame, and
+  load it afresh when shown) and `refresh_when_shown`; `refresh_browser`
+  (CLI `isocast refresh`, MCP `refresh_browser`) reloads a page while
+  recording, bypassing the cache. Verified with a page whose bar shows its
+  age: switching away at 2.8 s and back at 5.9 s, the ISO file showed the
+  page running on (refresh_when_shown) or empty (shutdown_when_hidden)
+  while hidden, then 0.1 s old at 6.0 s; `isocast refresh` reset it to
+  0.1 s; no reload at the start; errors when idle and for a non-browser id
+  (listing the browser sources); `--json`; the MCP tool is listed.
+- 4.8 (2026-10-11): a scene item can show another scene (`scene = "id"`
+  instead of `source`), drawn on its own transparent canvas-sized texture
+  and then like a source, so crop, radius, border, shadow, transform and
+  opacity apply to it as a whole; nesting can go 8 deep; cycles (through
+  hidden items too) are refused naming the chain. Sources inside nested
+  scenes are on air when the outer scene is. Verified: snapshots of a
+  three-level setup; at full size the nested red at 80% read exactly
+  (186, 51, 58) over blue, empty parts of the nested scene the blue
+  (32, 64, 96) and its border (210, 217, 223); a program recording with
+  the outer scene on air; a browser source three scenes down with
+  shutdown_when_hidden stayed loaded while it was on air, emptied when cut
+  away and reloaded when cut back; unit tests for references, cycles and
+  the drawing order.
+- 4.9a (2026-10-11): video sources take `filters` (a kind registry like
+  sources'), run on the GPU in order wherever the source is shown (the
+  program, scene and source snapshots; ISO files stay as captured), and
+  changes apply to a running recording at once; Color Correction is the
+  first. Verified by snapshot pixels against hand-computed values:
+  brightness, gamma, contrast, saturation, hue shift, multiply, add,
+  opacity, a disabled filter and two chained filters all exact; the same
+  in a scene snapshot and (within HEVC rounding) the program; a patch
+  mid-recording turned the program from green to blue; the 5K display
+  through a filter at 1080p60 dropped 0 of 480 frames; validation names
+  the field and range.
+- 4.9b (2026-10-11): `chroma_key` (key colour type green/blue/magenta/
+  custom, similarity, smoothness, spill, opacity, contrast, brightness,
+  gamma; OBS's defaults 400/80/100), `color_key` (80/50) and `luma_key`.
+  Verified over a magenta background: a dull generated green screen was
+  removed completely with OBS's defaults while skin and grey patches kept
+  their colours and a skin/green fringe went partly transparent with its
+  green reduced; exact green was removed by the colour key and a near
+  green kept at 0.674 opacity (0.677 predicted for its actual pixel);
+  luma max/min removed white and black, kept grey, and a soft edge gave
+  the predicted 62 of 128.
+- 4.9c (2026-10-11): `crop_pad` (edges, negative pads, or an area),
+  `scaling` (a size or an aspect; point, bilinear, bicubic, lanczos or
+  area; undistort) and `scroll` (speeds, a window, loop). Filters can now
+  change the picture's size and move with the frame's time. Verified with
+  generated images: crop, pad and area exact in size and pixels; point
+  scaling kept the quadrants exact; aspect 2:1 stretched to 200×100;
+  undistort put 137 at x=125 against 137.2 computed (160 without); a
+  scrolling line in the program moved exactly 2 px per frame at 60 px/s,
+  wrapped at 200 px, scrolled off once without loop, and a 50 px window
+  scrolling up showed the image's lower half after 2 s and wrapped at 4 s.
+- 4.9d (2026-10-11): `sharpen`, `image_mask` (colour or alpha mask,
+  multiply/add/subtract blends; the image covers the picture keeping its
+  shape, or stretches) and `lut` (.cube, or .png as 512×512 tiles or a
+  strip; amount). Files load once per path; a missing one skips its
+  filter with one log line. Verified with generated images and tables:
+  a step edge sharpened to exactly 0 and 255 beside it with flat areas
+  unchanged; each mask and blend mode gave its expected colour; cover and
+  stretch differed as designed; identity .cube and .png LUTs returned
+  (64, 128, 192) exactly, inverting ones (191, 128/127, 63), half amount
+  127; a missing LUT left the picture as it was.
+- 4.9e (2026-10-11): `render_delay` (0–500 ms) holds a source's picture
+  back in the program, at its place in the chain, keeping GPU copies of
+  recent pictures (snapshots skip it). Verified with the beeping, flashing
+  page and its audio in the program: without a delay its flashes led the
+  beeps by 21 ms every second; with 200 ms they trailed by 174–208 ms,
+  200 ms later within one 30 fps frame.
+- 4.9f (2026-10-11): `recording.iso.filtered = true` records sources with
+  filters as filtered: each such ISO source gets a GPU stage that runs its
+  live filters and draws into frames of the chain's output size (fixed
+  when the file starts; later size changes are scaled to fit). Verified:
+  a source with crop (left 50) and a 120° hue shift recorded a 50×100 ISO
+  file whose top-left was blue (the green quadrant, turned) and bottom-left
+  white, alongside an unfiltered source and the program, 90 frames each,
+  0 dropped; with `filtered = false` the same file was 100×100 and red at
+  the top-left, as captured.
+- 4.12a (2026-10-11): scene items take `fit` (stretch by default, contain,
+  cover, width, height, scale_down, none: OBS's bounding box types) and
+  `align` (nine positions); the rect clips the picture and the item's
+  background shows behind it. Verified by snapshot: 14 items (every fit,
+  six alignments, a crop) matched a per-pixel model on all 140,000 pixels
+  within 0.5 levels (native size exactly); a nested scene letterboxed in
+  the item's colour; a 50% PNG over navy read (128, 128, 192) as computed;
+  a 4:2:0 clip with cover put its edge at x≈469.9 as computed; the program
+  frame matched the snapshot within HEVC error. (Built in parallel by an
+  agent in a worktree; merged and re-checked on main: a fixed scene of an
+  image, a video file, text and a colour snapshotted identically, max
+  difference 0, before and after the merge, and display capture renders
+  correctly.)
+- 4.12b (2026-10-11): `scale_filter` per item (point, bilinear by default,
+  bicubic, lanczos, area), with kernels shared with the Scaling filter.
+  Verified: every method enlarging 10× and shrinking 4× matched its kernel
+  model within 0.5 levels (point exactly, away from texel-edge ties); point
+  keeps a 4:2:0 clip's red/blue edge hard; a 1080p60 program drawing a 4K
+  pattern with lanczos, area and bicubic dropped 0 of 300 frames.
+- 4.12c (2026-10-11): `blend` per item: normal, additive, subtract,
+  screen, multiply, lighten, darken, as GPU blend states on premultiplied
+  colour. Verified: 28 pixels (opaque, opacity 0.5, a box, inside a nested
+  scene, all seven modes) within 0.5 levels of the formulas; the program
+  recordings matched within HEVC error with 0 dropped frames.
+- 4.13a (2026-10-11): sources take `audio.balance` (−1 left … 1 right) and
+  the setup `[audio] pan_law` (`sine` by default, `square`, `linear`: the
+  classic laws relative to the centre and capped there, so 0 keeps both
+  sides as captured and ±1 silences the far side); it changes a running
+  mix at once (`isocast audio SOURCE --balance X`, MCP `set_audio`).
+  Verified per channel with 0.5 tones: at ±0.5 the far side read 0.2707
+  (sine, 0.2706 expected), 0.3536 (square), 0.2501 (linear); a mono file at
+  −0.25 read 0.3930/0.4330/0.3750; full right left −84 dB; live changes
+  took effect from the next beep. Re-checked on main through the signed
+  app: left/right ratio 0.5417 at sine 0.5 (0.5412 expected).
+- 4.13b (2026-10-11): `audio.monitor` (`off`, `monitor_only`,
+  `monitor_and_output`) and `[audio] monitoring_device` (`default` follows
+  the system output, or an output's id or name); outputs in `isocast
+  devices`; `isocast audio SOURCE --monitor MODE` and MCP change it live;
+  status shows the monitor. Each source's audio goes to the monitor as
+  captured, after gain, mute and balance, and a Core Audio output unit
+  plays it. Verified silently (`ISOCAST_MONITOR_SILENT=1`): a −6 dB tone at
+  sine 0.5 read L −17.354 / R −12.021 dB in the monitor (−17.353/−12.020
+  expected); 48.0k frames/s with 0 underruns over 22 s, 14–25 ms
+  buffered; a missing device is a status error and recording continues.
+  Re-checked on main through the signed app: a monitor-only tone was absent
+  from the program and kept in its ISO track, the monitor ran on the
+  headphone output with 0 underruns. The audible check is Ryan's (Ready
+  for Ryan).
+- 4.10a (2026-10-11): sources take `audio_filters` (registry
+  `audio_filter_kinds!`): gain, invert_polarity, noise_gate,
+  noise_suppression (RNNoise via nnnoiseless), compressor with
+  `sidechain_source`, limiter, expander, upward_compressor, equalizer, run
+  by the mixer on each input just before it is mixed; sidechains hear the
+  other source aligned (after its filters), a sidechain-only source is
+  opened but not mixed, noise suppression's 20 ms delay is fed ahead, and
+  changes reach a running mix at once. Verified (agent, in-process) with a
+  1 kHz tone stepped −40/−20/−6/−30/silence/−30 dBFS: gain −6 →
+  −46/−26/−12/−36; invert correlation −1.00000; gate cut −40, passed
+  −20/−6, held −30 open after loud and shut after silence; compressor
+  4:1@−18 −6 → −15.00; limiter −12.00; expander 3:1@−25 −76.02/−46.02;
+  upward 2:1@−20 −30/−25; EQ −12/0/+6 → −11.38/+0.01/+5.93 dB at
+  100 Hz/1 kHz/10 kHz; `say` speech plus pink noise: pauses −42.10 →
+  −68.61 dBFS, speech −18.88 → −18.94, aligned at 0 samples; music −12
+  ducked to −37.19 (25.19 computed) under a −10 dB voice. Re-checked on
+  main through the signed app after merging with 4.13: gain −6 gave 0.2507
+  (0.2506), compressor 4:1@−18 −14.97 dBFS with balance kept.
+- 4.10b (2026-10-11): `recording.iso.filtered` also records audio through
+  its filters (per-source chain in the audio runner, stamped back by its
+  delay); sidechains are left out of ISO files. Verified: every filter's
+  ISO levels equal the mix's; noise suppression in an ISO track −41.95 →
+  −67.65 dBFS, aligned with the program; ducked music stayed −12.00 in its
+  ISO track while the program had −37.19.
+- 4.11a (2026-10-11): transitions are a kind registry (swipe, slide,
+  fade_to_color, luma_wipe with 12 procedural patterns or an image, move)
+  drawn by one GPU pass over both scenes' canvases (Move interpolates the
+  scenes' layers); scenes take `transition` overrides (switch > scene >
+  setup); `duration_ms` defaults to 300. Verified (agent) on gradient
+  scenes read back per frame: slides and swipes within 1 px of the eased
+  offsets, fade linear, fade to white peaking at its 25% switch point,
+  luma softness within 0.02 of the formula, an inverted circle on the
+  computed frames, all 12 patterns by eye; Move's box centroid within
+  0.6 px and area within 1%. Re-checked on main through the signed app
+  with the real display, camera and mic at 1080p60: slide (scene
+  override), circle wipe, move and fade in one 12 s recording, 720/720
+  frames and 0 dropped in the program and both ISO files.
+- 4.11b (2026-10-11): stingers (cut point, or a side-by-side/stacked track
+  matte) play their video over the switch, opened with the session and
+  started a frame ahead; media with alpha decodes to BGRA; restart-on-show
+  media waits with its first frame decoded. Verified (agent) with ProRes
+  4444 stingers: the video's time correct on every frame (±0.001 s), the
+  cut on exactly the 500 ms frame, straight alpha, the matte edge on every
+  frame, 7 reuses on schedule. Stinger audio is not played yet.
+- 4.14 (2026-10-11): `isocast setup import-obs COLLECTION [-o OUT]
+  [--canvas WxH[@FPS]] [--profile P] [--json]` (daemon `import_obs`, MCP
+  `import_obs_collection`) reads an OBS scene collection into a setup:
+  sources with ids from their names and devices matched to this Mac,
+  scenes and items (OBS's anchor-and-rotate placement, all bounds types,
+  crop, groups as children, nested scenes, scale filter, blend mode),
+  video and audio filters, balance and monitoring, Source Record as ISO
+  sources, the current transition (cut, fade, swipe, slide, fade to
+  colour, luma wipe, stinger, move), and the canvas, frame rate and
+  recording settings from the collection and its profile; it lists
+  everything else with the reason. Verified (agent): a synthetic
+  collection's snapshot matched 25/25 hand-computed OBS pixel positions
+  (12/12 rescaled to 1920×1080) and recorded 60 frames, 0 dropped.
+  Re-checked on main through the signed app: Ryan's Recording collection
+  imported 8 sources and 2 scenes, Rebase 11 sources and 7 scenes with its
+  noise suppression as an audio filter, both passing `setup check`.
+- V1.1 (2026-10-12): the live engine (`record::Engine`): sources, the
+  program compositor and the program mix run while the daemon is live;
+  recordings attach and detach on it (and `tap_program` gives a stream
+  the program's frames and mix); `apply` changes scenes at the next frame
+  and opens/closes sources in the background; `frame` serves JPEG frames
+  of the program, studio preview or a source (long-poll), `engine`
+  holds it, `levels`/`source_changed`/`engine_changed` events; CLI `frame`,
+  `engine start|stop`; MCP `live_frame`, `live_engine`. Verified through
+  the signed app with the real screen (3840×2160), Studio Video, Studio
+  Audio, a test pattern and a tone: engine start 1.8 s, preview 60.2 fps
+  at 1280×720 over the socket, a recording started in 2.1 s on the running
+  engine while switching scenes and moving the camera: program, SCREEN
+  and FACECAM files 480/480 frames at 60 fps, 8.000 s, 0 dropped, 0 audio
+  dropouts, scene timeline in the manifest; program flashes and beeps
+  aligned exactly; `isocast record` (in-process) still records two test
+  patterns + tone with flashes aligned across files and beeps within
+  0.1 ms; a source added and removed while running with 0 missed program
+  frames; idle stop after 15 s and a cold restart in 0.44 s; ~10% of a
+  core while running (debug build).
+- 4.12d (2026-10-12): scene items' `show_transition` / `hide_transition`
+  (`fade`, or `slide` in from / out to a side within the item's rect, with
+  duration and easing) play when `visible` changes in the live engine; the
+  OBS import maps fade, slide and swipe. Verified through the signed app:
+  a red box hidden with a 1 s linear slide right covered its rect 1.0 →
+  0 over exactly 1.0 s (clipped to the rect mid-way) and shown with a 1 s
+  fade rose 0 → 1 over 1.0 s, in a recorded program file.
+- V1.1 soak (2026-10-12): 10 min recording on the live engine of the real
+  screen (4K ISO), Studio Video and the program with Studio Audio and a
+  tone: 36000/36000 frames in each file, 0 dropped, 0 audio dropouts,
+  600.000 s audio and video, beeps at the same sub-frame offset at the
+  start and the end (no drift), daemon RSS steady at 200–235 MB, 30–55%
+  of a core (debug build).
+- V1.3 (2026-10-12): the live setup persists in `setup.toml` (atomic save
+  with `.bak`; a file that won't load is kept, reported in status/get,
+  and moved aside on the next apply). `isocast setup init` (method,
+  MCP) builds Screen + Camera / Camera / Screen from this Mac's devices,
+  ranking real cameras over virtual ones, with refused devices as
+  placeholders; `isocast permissions [--request] [--open X]` gives each
+  permission's state, next step and System Settings link. Verified (agent)
+  with real-device `setup check`/`doctor` and an 8 s synthetic recording;
+  on main through a signed copy: `setup init --camera "Studio Video"
+  --microphone "Studio Audio" --apply` then a 10 s recording of the real
+  screen and camera: 600/600 frames per file, 0 dropped.
+- 4.15 (2026-10-12): unknown fields on sources, filters, audio filters and
+  transitions are reported with their path, a guess and the kind's
+  fields, in TOML and JSON, plan, apply, MCP, scene switches and the saved
+  file. Verified (agent) with an eight-typo setup in both formats.
+- V1.2 (2026-10-12): streaming of the program as VideoToolbox H.264 (High,
+  no B-frames, keyframes every 2 s) and AAC over Isocast's own RTMP/RTMPS
+  client; presets for Twitch, YouTube, Facebook, Kick and custom; the key
+  in the Keychain (never in setups, status or logs); reconnects; drops
+  video under congestion; bitrates, drops and congestion in status; CLI
+  `isocast stream …`, MCP. It taps the live engine, independent of
+  recordings, at most 1080p by default. Verified (agent) against local
+  ffmpeg RTMP and an RTMPS terminator: A/V within 0.2 ms, keyframes every
+  2.000 s, reconnect after the listener was killed, an 8 s stall with 0
+  recording drops, 1440p60 sent as 1080p60. On main with real devices:
+  12 s to a local listener (H.264 High 1080p60 + AAC-LC 48 kHz, keyframes
+  every 2 s) while a 10 s recording of the screen and Studio Video wrote
+  600/600 frames per file, 0 dropped, with a scene switch mid-stream.
+- V1.4 (2026-10-12): the desktop app (`crates/isocast-app`, see
+  docs/app.md): an AppKit window hosting the web interface (built in,
+  served at isocast://app/), a thin client of isocastd through the shared
+  `isocast-client` crate, with live frames, events, menus, a snapshot mode
+  (`isocast-app --snapshot`) and `scripts/app-dev.sh [--release]` building
+  a signed Isocast.app. Verified (agent) with snapshots and the CLI
+  unchanged; on main in a real window through the signed engine.
+- V1.5 (2026-10-12): scenes, sources, canvas editing (move, Shift-resize,
+  Option-crop, snapping, nudging), inspector, studio mode, undo; every
+  edit through `apply`. Verified (agent) by scripted pointer/key events
+  and reading the live setup back.
+- V1.6 (2026-10-12): mixer meters and faders; Record and Go live with
+  timers and health popovers, marker and split. Verified (agent) by a
+  recording through the app and a stream to a local ffmpeg listener
+  (H.264/AAC, 14 s, 0 dropped).
+- V1.7 (2026-10-12): settings (stream, recording, video, audio) and the
+  first run (permissions, devices, layout → `init_setup`). Verified on
+  main by clicking through the real window against a fresh signed engine:
+  permissions showed allowed, Studio Video and Studio Audio chosen, a
+  scratch recordings folder typed in, "Create setup" landed in the main
+  window with the screen and the camera inset live; Record, key 2 to the
+  Camera scene, Stop wrote program, SCREEN and CAMERA files with the
+  switch in the manifest (with three test daemons recording at once the
+  4K screen and program dropped frames; repeated 15 s recordings under
+  the same load dropped none).
+- V1.2 real service (2026-10-12): with Ryan's go-ahead and his key (set by
+  him in the app, kept in the Keychain), a separate test engine streamed
+  a synthetic test card (test pattern, tone, text; no screen, camera or
+  mic) over RTMPS to X's ingest (rtmps://ca.pscp.tv:443/x) for 61 s:
+  live throughout, 1802 frames at 30 fps, 0 dropped, 0 reconnects, a clean
+  stop. The near-static card encoded at ~150–250 kb/s against a 6000 kb/s
+  target (see the low-bitrate gotcha).
+- V1.2 X live tests (2026-10-12): 1080p30 and 1080p60 over RTMPS to X at
+  9000 + 128 kb/s CBR with a test card: 5 min each, 15 min at 60 fps while
+  recording the program and two ISOs, and a stop/restart with live scene
+  and text changes; all with 0 dropped frames, 0 audio dropouts and 0
+  reconnects, 10 s video samples 8800–9277 kb/s, audio 124–132; the
+  recording's three files had 51453 frames each at 60 fps (ffprobe), and
+  the program file decoded without errors. Also fixed: center/right text
+  alignment in a fixed-size text box, and `stream stop` reporting 0 kb/s.
+- V1.8 perf-audio/events (2026-10-12): bounded, shared event fan-out
+  stopped memory growth under 64 stalled readers (late sample 572→543 MB);
+  all stalled clients disconnected, eight healthy clients each received
+  285 levels, 12 status, started and stopped events. The real rig wrote
+  three 12 s files with 720 frames each, zero dropped frames/audio;
+  synthetic program/ISO sync stayed within 1.167 ms (AAC onset tolerance),
+  and silent monitoring reported zero underruns.
+- V1.5–V1.7 redo, OBS layout (2026-10-12): the app now has OBS Studio's
+  places and words — preview with the source toolbar, Scenes | Sources |
+  Audio Mixer | Scene Transitions | Controls docks, status bar (LIVE/REC,
+  dropped frames, CPU, FPS from new `status` fields), Studio Mode with the
+  transition column, Properties/Filters/Edit Transform/Advanced Audio
+  dialogs instead of the inspector, OBS-style Settings and menus, and the
+  Low→Incredible quality slider. Verified by snapshots of every view at
+  1024–1920 px, scripted behaviour checks, a recording and a local stream;
+  the real window, title bar and menus checked in the test VM.
+- Smooth canvas drags (2026-10-12): the picture moves with the selection
+  box: live applies (no fsync per step), steps every display frame, H.264
+  monitors at 60 fps while working on the canvas, and the box drawn from
+  the displayed frame's layout. Verified with scripts/drag-lag.py: gap
+  between box and picture 0 px median (0.6 p95), both moving 45 times/s
+  in a 60 fps recording of the window; decoder 60 frames/s during drags.
+- Device dropdowns (2026-10-12, Ryan's request): every setting with known
+  choices is a dropdown of what the hardware offers — camera device,
+  Resolution (one control for width/height) and Frame rate per size,
+  microphones, displays (saved by id), windows (app, then title, with
+  "part of a title" free entry), application capture, sidechain and
+  aspect, the monitoring device; unplugged values stay visible; a refresh
+  re-reads devices. Camera Auto picks the highest rate up to the canvas
+  rate, then the largest size that fits the canvas (either orientation).
+  Each running source reports its measured `received_fps` in `status`.
+  Verified by an implementer, three independent reviewers (12 issues, all
+  fixed) and read-back of applied values on a test engine.
+- V1.8 setup-obs (2026-10-12): canvases must be even, 16–8192 (a 16385-wide
+  canvas crashed the engine start and hung every later `start`; a 1281×721
+  one recorded 1280×720 silently); a panicking engine start is reported
+  instead of hanging. Audio-only media in an off-air scene stays silent
+  (880 Hz band -91 dB off air, -21 dB from the switch at 1.95 s; with no
+  item it still plays). OBS import uses the recorded track (RecTracks=2 →
+  track 2's source), lists extra tracks, the scaled output size and the
+  scene on air, and missing files/folders get their own errors. Verified
+  on release builds against the finder's repros on an isolated daemon.
+- V1.8 m4-bridge (2026-10-12): desktop-session bridge uses Interactive
+  process policy. A standalone 10 ms sleep fell from ~75–85 ms to ~13–14 ms;
+  launchctl confirmed interactive spawn type after reloading an idle bridge.
+  Release build, fmt, clippy -D warnings and 94 tests passed on exonbook.
+- V1.8 m4-iso (2026-10-12): all recording outputs use asynchronous
+  AVAssetWriter with independent bounded input queues; removed the direct
+  HEVC session and its ISO-only flag. Four interleaved synthetic flagship
+  runs per build on M4: old branch 1930 frame drops/966 audio dropouts,
+  fallback 1065/0, main 1116/265. All 36 decoded frame counts matched the
+  manifests; MP4 splits had zero drops and flash/beep sync within 0.021 ms;
+  SIGKILL left three decodable 6.016 s MOVs. All five presets record with
+  the expected HEVC depth. Release, fmt, clippy and 94 tests passed.
+  Remaining video back-pressure and M5 requalification are explicitly blocked.
+- N.1 (2026-10-12): the Slint app (crates/isocast-ui) shows the daemon's
+  program zero-copy (shared_frames: an IOSurface ring per viewer over a
+  Mach service) as a native layer with the selection box drawn from each
+  frame's revision. Two independent verifiers on an M2 test Mac, real
+  window, interactive scheduling: 2.0-2.9% of a core at 60 fps (web app
+  plus WebKit ~35%), 0 ms box/picture lag and 0 mismatches over thousands
+  of frames (real pointer drags too), 10-minute soak 36,069 frames with 0
+  black, AXList "Scenes" with on-air state. Merged as d39c3e4; recording
+  A/B before/after the merge on exonbook identical (0 drops, 44.9% vs
+  45.2% CPU); 99 tests, clippy and fmt clean.
+- V1.8 robustness (2026-10-12): stop during an engine warm-up cancels the
+  start (status `starting`, `last_error`), stop never returns an older
+  report, killed recordings are marked failed and reported (start note,
+  doctor), keep_free_gb = 0 still stops cleanly before the disk fills, a
+  stop right after start keeps a 1 s take, live drop counts no longer
+  count a frame still being written, a slow disk test isn't cached, and
+  clearer space/filename/missing-source errors. Each reproduced on main
+  and re-run on the fix with synthetic sources on an isolated daemon
+  (FIFO-held disk tests, kill -9, a 300 MB RAM disk, 300 s loaded runs).
+- V1.8 agent-surface (2026-10-12): merged as fc39214 (12 of 14 fixed, each
+  reproduced on main first). Re-checked on the merged build on exonbook:
+  all 30 MCP tools' outputSchemas are objects (the official SDK rejected
+  the list before).
+- V1.8 robustness (2026-10-12): merged as 43c48cc. Re-checked on the
+  merged build on exonbook with synthetic sources: a stop 0.3 s into a
+  start keeps a 1 s take (60 frames, 0 dropped) instead of recording on;
+  after kill -9 mid-take, doctor warns and the next start notes the
+  interrupted session and marks its manifest "failed"; a daemon shutdown
+  mid-take finalizes all three files (60 frames each, ffprobe-counted).
+- V1.8 streaming (2026-10-12): merged as 4b9e677 (all 9 fixed). Re-checked
+  on the merged build on exonbook: 20 s to a local RTMP listener, 1080p60
+  H.264 + AAC received, 1191 frames sent, 0 dropped, 0 reconnects, 6239
+  kb/s for a 6000 kb/s constant-bitrate target, keyframes on the 2 s grid
+  after a start pair (0.000/0.017 s; follow-up queued). All four V1.8 hard
+  test areas merged: 37 of 40 findings fixed; fmt, clippy -D warnings and
+  99 tests clean on exonbook.
+- UI polish (2026-10-12): merged as ab51aae. docs/design.md is the design
+  language (tokens for the web app now and the Slint app in N.2). 49
+  views snapshotted before/after on an M2 (pairs under
+  /Volumes/IsocastBuild/ui-polish/build/pairs and refine/half). Drag A/B
+  on isocast-m2-b, old vs polished UI, 2 runs each: lag 0 ms in all,
+  picture moves 39.5/47.8 vs 38.7/40.0 a second, median gap 0.0/0.7 vs a
+  constant 1.4 px (the selection box's new 2 px outline ring shifts the
+  detected outline).
+- V1.8 throughput-diagnostics (2026-10-12): 48 locked synthetic recorder
+  runs on the M4 and both M2s; all 144 file counts matched manifests (42
+  decoded, 102 indexed). Traced hardware VT completions at ~42 fps in
+  failing M2 flagship runs and EncodeFrame calls up to 97 ms. A bounded,
+  separate encoder worker preserved audio but still dropped video; it and
+  the other policy experiments were removed. Byte-identical flagship-1080
+  clips, four interleaved pairs per M2: zero drops in all 48 files, baseline
+  daemon CPU 51.0% (27.0) vs 49.95% (26.7), VT 28.55% vs 24.55%. Sample,
+  spindump and powermetrics evidence plus unresolved limits are in
+  `/Volumes/IsocastBuild/astra-throughput/scratch/REPORT.md`. Local fmt,
+  clippy --all-targets -D warnings and existing tests passed.
+- V1.8 stream-start-keyframe (2026-10-12): a stream (and each reconnect)
+  starts with the keyframe asked for at connecting, and the 2 s grid from
+  it: a keyframe the encoder made before the connection no longer slips in
+  a frame earlier. 20 s 1080p streams to a local ffmpeg RTMP listener on
+  isocast-m2-b, keyframes by ffprobe: main had 0.000/0.017 then 2.017…
+  at 60 fps and 0.000/0.033 then 2.033… at 30; now 0.000, 2.000 … 18.000
+  at both. With the daemon SIGSTOPped 30-80 ms every 0.1-0.4 s (seeds 3
+  and 4, 12-121 frames dropped) no pairs; off-grid keyframes only where the
+  grid frame was missed (12.033, 14.05, 16.05), back on the grid next. A
+  reconnect mid-stream: the second connection's file also 0.000, 2.000….
+- V1.8 mcp-field-paths (2026-10-12): every parameter error names its field
+  path and lists the valid options, on the socket and in MCP, wire format
+  unchanged. Sent 125 wrong params (50 MCP tool calls, 75 socket requests)
+  to an isolated daemon: all name the field (before: no socket error had a
+  path; MCP stopped at `transition`, `setup.sources[0]` or nothing for
+  init_setup's options), e.g. `params.setup.sources[0].filters[0].gamma`,
+  `transition.direction`, `layout`. A valid patch with a chroma key, gain
+  filter and swipe applied, saved and reloaded from TOML; a 4 s synthetic
+  recording with two switches: 120/120 frames in both files, 0 dropped.
+- V1.8 mcp-events (2026-10-12): MCP's `get_events` reads the newest 500
+  of isocastd's events (cursor, kinds, limit, wait), kept by a watch in
+  the MCP server that reconnects after restarts. Real stdio sessions
+  (initialize, tools/list: 31 tools): locally a pinned-source warning
+  arrived at once; on isocast-m2-a the synthetic flagship's first drop
+  warning came 2.0 s into the take ("program dropped 1 frame(s) at 2 s")
+  and the report had 523-547 drops per file. A reader that never polled
+  through 40000 applies + 40000 warnings + 20 s of recording held 500
+  events and RSS 33.1-33.5 MB (M2: 4000 applies, 23.8 MB flat, all 73
+  drop warnings kept). restart_isocastd, SIGTERM and SIGKILL mid-take
+  each gave connection lost/back events (SIGKILL's says the take didn't
+  stop), with the watch back before the next tool returned.
+- V1.8 encoder-capacity (2026-10-13): `isocast tune` reports `capacity`
+  (fits >= 1.25x, no_margin, cannot_keep_up < 1x); when the setup doesn't
+  fit it benchmarks changes closest first (program file at 1440p/1080p via
+  the new recording.program.width/height, a lower preset, half the frame
+  rate, one ISO fewer, combinations) and recommends the closest that fits
+  as a patch; its measurements are kept in <setup>.tune.json and `start`
+  notes (CLI, MCP, warning event) when a recording can't keep up by them,
+  naming the fix. A canvas fps change now reopens the sources that follow
+  it. isocast-m2-a: flagship 0.70-0.71x cannot_keep_up (recorded
+  1044-1054/1440), 1080p program 1.04x no_margin (1440/1440 x3), 30 fps
+  1.75-1.79x recommended: start of the flagship got the note with the
+  patch; after the patch no note and 720/720 x3, 0 dropped; MCP
+  start_recording returned the note; a heavier unmeasured setup got the
+  "asks more than tune measured" note; flagship-1080 (the 1080p-program
+  files, no_margin) none.
+  exonbook (M4 Max): flagship fits 1.28x twice, no note, 24 s 1440/1440
+  x3; at 120 fps 0.70x, a 1080p program didn't help (0.70x), 60 fps
+  recommended. fmt, clippy -D warnings and tests clean.
+- V1.8 encoder-capacity, re-check (2026-10-13): merged as 7abe7bc; on
+  isocast-m2-b (macOS 26.7) the merged build's tune gives the same
+  verdicts as on m2-a (4K program 0.71x "can't keep up", 1080p program
+  1.05x "no margin", 30 fps 1.83x recommended) and start prints the
+  warning with the patch. All V1.8 follow-ups merged; fmt, clippy and 99
+  tests clean on exonbook.
+- S.1a (2026-10-13): `scripts/obs-bench.py` runs the same synthetic
+  scenes in Isocast and OBS 32.2.2 (OpenGL and Metal), driven through
+  obs-websocket from an isolated OBS home, interleaved 3 rounds x 4
+  scenarios on exonbook (M4 Max) and isocast-m2-a (M2), twice. Same work:
+  Isocast at 0.47-0.56x OBS's CPU (app + its VT services: 43-48% vs
+  80-91% of a core), 27-66% less GPU time, 2.7-8x less memory, 30-49% less
+  machine power, launch 0.06 vs 0.4-0.7 s; on the M2 at 4K60 OBS kept 27%
+  distinct frames (its log: 82% skipped for encoding lag), Isocast 99.5%.
+  Isocast's flagship (3 files) used 67-69% CPU vs OBS's 89% for 1 file but
+  dropped 3-4% (M4 Max) and 27% (M2) of frames; recording stop 0.34 vs
+  0.14 s. Verified with ffprobe (decoded frames, codecs, 1 s keyframes,
+  B-frames, Rec. 709 tags, bitrates), OBS's own log (CRF 0.70, keyint 1 s,
+  AAC 256 CBR, Hybrid MOV, hardware decoding) and repeated-frame counts.
+- P.1 (2026-10-13): named scene collections (scenes, sources,
+  transitions, canvas size) and profiles (frame rate, recording, stream,
+  audio) stored side by side in `setup/` and swapped live: library,
+  library_get/create (blank or copy)/rename/delete/switch/import/import_obs
+  on the method table, `isocast collection|profile …` (--json), eight MCP
+  tools, a library_changed event; switches refused while recording or
+  streaming. Isolated engine (synthetic sources for the engine):
+  examples/recording.toml saved by main's isocastd migrated to the same
+  live setup (1598 bytes of JSON), backup byte-identical, setup.toml
+  untouched; collection+profile switched 1080p60 → 720p30 with the engine
+  running, then a 6 s take: program 1280×720 HEVC 60 fps 360 frames, ISO
+  files 180 frames each at 30 fps, AAC 282 frames, 0 dropped; refusals
+  while recording (3) and streaming to a local RTMP listener (2); Ryan's
+  OBS Recording collection and his three profiles imported (combined
+  `setup import-obs` unchanged from main); main's isocastd on the migrated
+  folder left all 25 library files byte-identical and its change was taken
+  in as a new pair at the next start; MCP 39 tools exercised.
+- stream audio CBR (2026-10-13): stream AAC now uses AudioToolbox's
+  constant bitrate mode (X's ingest had flagged "audio bitrate 17 kbps,
+  recommended 128"). Local RTMP listener, 20 s each, 1080p30 and 1080p60,
+  silence / quiet tone (-51 dBFS) / loud tone (-6 dBFS): every run
+  averaged exactly 160.0 kb/s (target 160) or 128.0 (target 128),
+  per-second 157.0–161.2 / 125.4–129.0 (46 or 47 AAC frames per second);
+  before, silence sent 2.2 kb/s (6-byte frames), a quiet tone ~21 then
+  142, a loud tone 84–130. Video held 6000.0–6000.2 and 9000.0–9000.2
+  kb/s per second; no drops. Recordings keep the variable mode.
+- N.2.0 (2026-10-12): the Slint app's foundation on slint/n2: all
+  design.md tokens, a widget kit (buttons, fields, dropdown with
+  duplicate-name details, choices, slider/fader, meter, lists, docks,
+  forms, menus with submenus, popover, modal dialogs, tabs, toasts,
+  tooltips) with keyboard focus and accessibility, and the window split
+  into five areas over an App/Session core (any API call, the web app's
+  edit queue). Verified offscreen against an isolated engine: 1440x900
+  matches 01-main's layout, every dock is whole at 900x600, Studio Mode
+  matches 03-studio, the gallery's dialog/menu/dropdown match
+  08-create-source and 04-source-menu, an 8 s drag soak drew 0 black and
+  0 drifted frames, --a11y lists rows with index, count and selected.
+- N.2.A (2026-10-12): the Slint app's scenes and sources area on
+  slint/n2-a-sources: Scenes and Sources docks (rename inline, drag to
+  reorder, groups fold, ISO/eye/lock, state badges, OBS's scene, item,
+  list and preview menus), source toolbar quick settings for every kind,
+  Create/Select Source (drafts for sources that need a file), Properties
+  and Filters drawn from the setup schema with the source's live picture
+  (shared_frames with the source as target), Edit Transform, Rename,
+  copy/paste, the Edit menu's Order and Transform, system open and colour
+  panels. Verified offscreen at 1440x900 against an isolated engine beside
+  18 of the web app's snapshots (pairs in /Volumes/IsocastBuild/
+  n2-a-sources/pairs), and on isocast-m2-a in a real window (right-click
+  menus, a row drag, Add files' open panel).
+- N.2.B (2026-10-12): the Slint app's Audio Mixer and Advanced Audio
+  Properties on slint/n2-b-audio, to the web app's behaviour: the mixer's
+  sources (audio-only plus the scene's), hiding (kept per viewer), strip
+  flags, fader (live, 0 dB on double-click), mute, both menus, smoothed
+  meters with peak hold at 30 fps that rest in silence, and the table
+  with balance, offset, monitoring and Program/ISO tracks. Verified
+  offscreen on isocast-m2-b against the web app's 01-main, 43-mixer-menu
+  and 15-adv-audio (same layout to a point), plus strip states, hidden,
+  dock menu and 900x600; in a real window there (cua-driver): right-click
+  menu, fader drag to −36.2 dB, double-click to 0, mute, Advanced Audio's
+  balance drag (0.74) and ISO box all reached the live setup. CPU with
+  three tones metering: 20–29% of a core (web app 33–37%), resting 2.2%
+  (web app 19%).
+- N.2.C (2026-10-12): area C on slint/n2-c-controls.
+  - Status bar: the stream's dropped frames, rate and health, LIVE/REC
+    timers that don't drift, CPU and FPS.
+  - REC and LIVE details popovers.
+  - The dropped-frames toast, updated in place, with Details.
+  - "Recording saved" with Show in Finder.
+  - Toasts over dialogs.
+  - Scene Transitions as transitions.js (a stinger asks for its video
+    first).
+  - Transition Properties on the shared schema form (live edits, Cancel
+    restores, drafts applied on OK).
+  - Studio column and take.
+  Verified:
+  - Offscreen on isocast-m2-a, side by side with 13 of the web app's
+    snapshots (01, 03, 16, 16b, 42, 44, 45, 46, 50, 51, 53, 63, 81).
+  - A real stream to a loopback RTMP listener: live, Reconnecting when
+    killed, then stopped.
+  - A real window on the M2 driven through accessibility (cua-driver):
+    record; REC details; stop; Fade to Colour from the dock; a live
+    switch-point edit read back by `isocast get`; Cancel back to 50;
+    Studio Mode; Bars into preview; Transition swapped preview and
+    program.
+- N.2.D (2026-10-12): Settings (all seven pages, the draft applied as one
+  undoable patch, stream key to the Keychain, the quality slider), the
+  first run (permissions, devices, layout, init_setup), Welcome (open a
+  setup, import from OBS) and the connecting/failed states, on
+  slint/n2-d-settings. Verified offscreen against isolated engines (every
+  page and state side by side with the web app's references; OK saved the
+  name, FPS and ISO to the daemon's file; import and open made the live
+  setup on an empty engine) and on isocast-m2-b (devices listed, Create
+  setup made "My setup"; the open panel came up from Browse in a real
+  background window and cancelled cleanly).
+- N.2.E (2026-10-12): the Slint canvas does what the web app's does:
+  click/hover/move/resize/crop with snapping, guides and readout, rotated
+  and locked items, right-click menus, the empty scene, Preview Scaling →
+  Canvas, Studio Mode's two live pictures; gesture steps pipelined; native
+  pictures tagged sRGB (BT.709 darkened them); --preview image caches the
+  docks. Verified offscreen (snapshot states canvas-hover, canvas-drag,
+  canvas-hold, preview-scale; side by side with 02/03/06/40) and in real
+  windows on isocast-m2-a: clicks, drags and an Option-crop through
+  cua-driver, Studio Mode in both modes, colours within 1/255 of the web
+  app, drag-lag 46.8 picture moves/s median vs the web app's 47.3 with
+  0.7 px gap, CPU image 21.3%/13.6% vs web 44.7%/27.3% (meters
+  moving/silent), layers 2.5% silent. exonbook was locked (Waiting on
+  Ryan), so nothing ran there.
+- N.2.F (2026-10-13): the five areas merged on slint/n2 and made one app:
+  one settings form (area A's, now src/form/ and the kit's SettingsForm,
+  also under Transition Properties), one open panel, one device list,
+  one set of snapping/preview-rate prefs; Sources row hover outlines the
+  item on the canvas; the preview's item menu as the web app's; docks
+  cached in layers mode too. Verified: fmt, clippy -D warnings, 110
+  workspace tests; all 49 reference views snapshotted offscreen beside
+  the web app's (contact sheets in /Volumes/IsocastBuild/n2-integrate/
+  compare and compare2x); on isocast-m2-b (exonbook locked) in real
+  windows: 60 fps silent 2.9% of a core layers / 14.6% image, metering
+  13.2–14.4% / 20.4–20.9% (web app 45.2%), drag-lag 44.2 picture
+  moves/s median, gap ≤1.4 px median / ≤2 px p95 (web app 48.8, p95
+  5.5–8.2 px), a 10-minute --check run 36025 frames, 0 black, 0 lost;
+  the real accessibility tree (cua-driver) lists the docks and an open
+  Properties dialog's controls.
+- N.2.G (2026-10-13): the critics' high-priority findings fixed on
+  slint/n2 (b879255 behaviour and layout, 9462e64 type). Verified: fmt,
+  clippy -D warnings, 111 workspace tests; the 49 reference views at 1x
+  and 2x beside the web app's, every difference score down or level
+  (mean −0.24; contact sheets in /Volumes/IsocastBuild/n2-fix/compare
+  and compare2x); on isocast-m2-b in real windows with cua-driver:
+  renames typed across a poll, transforms applied as integers, Create
+  Source's field takes typing and its Cancel works by real click, a real
+  click works in a menu opened by a background right-click, Escape
+  applies nothing; drag-lag 44.2 picture moves/s median (43.3–46.5),
+  gap 0.7 px median, ≤1.4 px p95 (web app 42.8, 38.0–50.5, p95 6.8–8.2
+  px); a 10-minute --check run 36030 frames, 0 black, 0 lost, longest
+  repeat 1. CPU that session read higher on m2-b for both builds alike
+  (A/B with 907f4dd: metering 20.3–21.6% vs 20.3–21.0%; --preview image
+  at rest 23.7% vs 23.2%; web app 47.3%).
+- S.3a (2026-10-13): recording stop waits for delivered media and actual
+  finalization instead of an unconditional 300 ms tail. Complete mixer
+  inputs can run immediately; missing inputs retain the 200 ms allowance.
+  The early-finish predicate compares frame ticks (separate nanosecond
+  rounding caused spurious waits). Four interleaved main/candidate/OBS
+  rounds: M4 1080p/4K stop 346/356.5 → 64.5/83.5 ms, OBS 127.5/144;
+  M2 364.5/386.5 → 84.5/93 ms, OBS 151/2104 (OBS overloaded at 4K).
+  All 16 candidate benchmark MOVs plus nine qualification files complete,
+  zero drops, equal A/V durations; split/cancel and killed-fragment checks
+  pass. Release fmt/clippy/tests clean. Full evidence and limitations:
+  `/Volumes/IsocastBuild/astra-s3/scratch/REPORT.md`.
+- S.3b (2026-10-13): meter peak/power reductions use independent SIMD
+  lanes outside the lock, with odd-chunk parity against the monitor path.
+  Profiles of all three scenarios on both Macs show a smaller meter
+  hotspot; NEON confirmed in disassembly. Whole-process CPU is flat/mixed:
+  M4 main/candidate medians 31.95/31.6, 33.55/33.5, 29.3/29.25%; M2
+  34.8/34.0, 35.65/35.5, 29.55/33.35%. No broad CPU or memory win claimed.
+  M4 IPC differences only 0.04–0.23%; memory investigation localized 336
+  MiB to GPU activation, with a native trace proving renderer buffer
+  churn for the compiled-scenes owner. M2 stream had one 11-video/29-audio
+  drop run, then eight clean follow-up runs. Release gates and real-output
+  qualification pass; report has all A/B tables and remaining limits.
+- S.3a-f1 (2026-10-13): restored the unconditional 200 ms live mix budget.
+  Stop requests bounded early delivery to recording routes; concurrent
+  streams retain paced delivery of the same audio. This also fixes an
+  intermediate Stop flush that caused three stream audio dropouts.
+  Meter SIMD removed. Final normal streaming A/B: M2 10/10 and M4 4/4
+  candidate runs zero video/audio drops, main also clean. Four stop pairs
+  per resolution: M4 1080p/4K 363.5/363 → 71/65.5 ms; M2 340.5/372 →
+  79/93.5 ms. All candidate MOVs complete with expected frames and equal
+  A/V durations. Four concurrent lifecycle pairs stayed zero-drop; hard
+  100/200/300 ms encoder suspensions leave recording intact and streaming
+  no worse than main (over-budget drops remain visible). Seven safety
+  cases rechecked. Release fmt/clippy, 104 unit tests and one doc test pass;
+  REPORT.md Follow-up 1 has the complete evidence and bounded-stall limits.
+- 5.0 (2026-10-13): compiled scenes. A scene thread compiles the live
+  setup's scenes on every change into flat draw lists of 272-byte draw
+  records (item node ids kept across changes); the compositor adopts a
+  version with one atomic load per tick, keeps the records in one storage
+  buffer read as `draws[instance_index]`, rewrites only the records a
+  picture's size or format or a show/hide transition changes, caches bind
+  groups by texture (captured frames get stable textures per IOSurface),
+  sends the last frame again when nothing changed, and reports
+  `compositor.cpu_us` (p50, p99), `reused`, `draws` and
+  `scenes.resolve_us` in `status`/`engine` (CLI, --json, MCP; bench.py
+  keeps them); scene snapshots and studio mode's preview draw the same
+  lists. Verified on isocast-m2-a (pictures on exonbook too), against
+  main: a fixed scene with every item feature (all fits and alignments,
+  the 5 scale filters, the 7 blend modes, opacity, backgrounds, radii,
+  borders, shadows, transforms, a group with a grandchild, a nested scene
+  with crop/border/shadow, hidden and off-canvas items; colour, RGBA image,
+  text and 4:2:0 video) snapshotted at full size and 640 wide, its nested
+  scene, the program's canvas and studio mode's preview are identical
+  (max difference 0; JPEGs byte for byte); 4.8's nested values rebuilt
+  read (186, 51, 58), (32, 64, 96) and border (210, 217, 223) in both;
+  4.12d's show/hide: slide hide 1.0 -> 0 over 61 frames and fade show 0 ->
+  1 over 60, curves identical to main's. Compositor CPU per tick p50
+  (5.0a -> 5.0, 3 runs each): flagship-1080 1173 -> 579 us (0.49x),
+  flagship 4K 1580 -> 873 us (0.55x), a 40-item static scene 4784 -> 42 us
+  with 1246-1247 of 1247-1248 program frames sent again; 0 dropped
+  (flagship-1080, static), the 4K flagship drops what main drops (the M2's
+  encoder limit). The static scene's HEVC program decodes to the same
+  framemd5 sequence as 5.0a's in all 3 runs, and in ProRes 422 HQ to one
+  identical picture in all 1380 frames in both. Allocations per tick
+  (uncommitted counting allocator): 0 on sent-again ticks for 10, 40 and
+  160 items; 66/72/77 on drawn ticks for 13/51/201 draws (wgpu's command
+  recording). Flagship gate vs main (3 runs): flagship-1080 daemon CPU
+  49.9 -> 42.4%, 0/0 dropped; flagship 45.7 -> 41.7%, 3474 -> 3470
+  dropped. Scene transitions (fade, move, swipe, luma wipe) recorded 540
+  of 540 frames on exonbook.
+- 5.1 (2026-10-13): layout. Items and scenes take `layout` (CSS flexbox,
+  grid, block and absolute positioning in snake case, laid out by taffy
+  0.10 on the scene thread when the scenes or their pictures' sizes
+  change, never per frame); `rect` is optional (rect or layout, not both;
+  a rect is absolute at its pixels, and scenes without layout skip
+  taffy); pictures size themselves from the picture as drawn (through
+  filters; a 16:9 shape until known), with a least size of 0;
+  `overflow = "hidden"` clips children to the rounded rect (clip records
+  in a second storage buffer); `get --resolved` (CLI, --json, MCP
+  get_setup `resolved`) returns every item's rect, canvas box and
+  transform with a layout generation that program frames carry (H.264
+  revision records, shared and JPEG frames); field-path errors from
+  check, plan, the socket and MCP. Verified on isocast-m2-a and exonbook
+  (same results): snapshot pixels for a flex row of three 320x180
+  pictures (padding 40, gap 20) at x = 40, 380, 720, centring at
+  800,450, a flex_grow 1:2 column (flex_basis 0) split at 360, a 1fr 2fr
+  grid at 640, inset/%/aspect_ratio 2 with fit contain at 480,108
+  960x480, an overflow clip cut at the card's edge and corner, the same
+  on air (by luma), Ryan's facecam by right/bottom = by rect (max
+  difference 0 at 3840x2160); get --resolved = the pixels (difference
+  0); live edits relay out with a new generation that frames carry, a
+  rename keeps it, a filter or a playlist changing a picture's size
+  relays out; hiding with a fade moves siblings up at once while the item
+  fades where it was; Move between laid-out scenes; 5.0's fixed scene
+  with every feature max difference 0 against 5.0 (JPEGs byte for
+  byte); examples/recording.toml, a copy of Ryan's live setup and a
+  migrated library load and save byte for byte against 5.0. On
+  isocast-m2-a: a 1,000-item flex scene resolves in 857-861 us median
+  (50 items 90-205 us across sessions: cold execution, over the 100 us
+  budget in two of three); 100 live layout applies at 30/s while
+  recording: 0 missed program frames, 420/420 frames. Flagship gate
+  against 5.0 (6 and 9 runs): flagship-1080 daemon CPU 43.2 -> 43.2%, 0
+  dropped; 4K flagship 41.9 -> 42.3%, dropped 10,423 -> 10,420; within
+  the spread of two near-identical builds (control).
+- 7.1, 7.2, 7.5 (2026-10-13): plugins: the isocast-plugin.toml manifest
+  (every tier's sections, checked with field paths), the registry in the
+  plugins folder (an isolated engine's own), `plugin_list|add|remove|
+  set_enabled` on the method table, `isocast plugin add|list|remove|
+  enable|disable` (--json), MCP list_plugins/add_plugin/remove_plugin;
+  grants equal to what a manifest asks for, enforced per call on each
+  plugin's own socket (and by peer process on the main one); process
+  plugins sandboxed (Seatbelt, no isocastd privacy grants), restarted with
+  backoff and turned off after 5 crashes in 5 minutes; the deck example
+  (Python, standard library). Isolated engines on isocast-m2-a and
+  exonbook: add without --allow refused listing the 8 methods; the deck's
+  page switched scenes, recorded, marked and split (2 takes, the marker
+  and the scene timeline in the manifests, 0 dropped); `methods.shutdown:
+  probe may call: get`; the sandbox denied ~/Documents, home, writes
+  outside its data folder, /usr/bin/open, /bin/sh, security, the main
+  socket, outbound network, signalling isocastd and screen capture; kill
+  -9 restarted the deck in 0.01 s; a crash-looping plugin restarted after
+  1, 2, 4, 8 s and was off at 15.4 s; remove stopped it; a 30 s recording
+  with plugins crash-looping, hanging, spinning a core, stopped (SIGSTOP)
+  and killed every 3 s had every file complete (1800/900/1800 frames, 0
+  dropped, as without plugins). Flagship benchmark with the deck idle vs
+  main: CPU and memory the same, 0 drops at 1080p; the M2's saturated 4K
+  flagship 0.8–1.4% more of its drops (~0.2% of frames, within the spread
+  between rounds); the idle deck itself 0.40% of a core, isocastd 13.3%
+  with it vs 13.2% without (notes, Benchmarks).
+- V1.8 synthetic soak (2026-10-13): one-hour synthetic flagship soaks
+  (4K60 desktop + 1080p60 camera ISOs + program, HEVC high, fade every
+  30 s) on the M5 (4K program) and isocast-m2-b (1080p program) recorded
+  216000/216000 frames in every file with 0 dropped frames, 0 audio
+  dropouts and 0 missed program ticks; `ffprobe -count_frames` decoded
+  all 216000 frames of all 6 files with no errors and video = audio =
+  3600.000 s; isocastd CPU 15.0% (M5) / 57.2% (M2) median, fds and
+  threads flat, no warnings in the log or event stream. Memory grows
+  ~22–30 MB/hour (new task above).
+- V1.8 media-loop memory growth (2026-10-13): media readers release their
+  AVAssetReader inside an autorelease pool and frame imports drain one of
+  their own. Isolated engine on the M5 (macOS 27.2), soak flagship with
+  2 s loops, `heap -s --forkCorpse` live heap: 30 min recording (1080p
+  program + camera ISO) main 12.88 → 29.90 MB (+41 MB/h; NSError +1/s,
+  MTLTextureDescriptorInternal +29/s) vs fix 10.87 → 13.27 MB (+5.7 MB/h,
+  every autoreleased class flat); the rest is the MOV sample tables
+  (CMBlockBuffer blocks, also without audio), freed at stop. Live engine
+  alone: NSError 58 → 120 in 61 s on main, 18 → 18 fixed. On
+  isocast-m2-b (macOS 26.7) main doesn't autorelease these (NSError
+  18 → 18) and both builds recorded 5 min with 0 drops. bench.py
+  flagship A/B (4 alternating 60 s runs): isocastd CPU 13.6% fix vs
+  13.7% main median, RSS 111 vs 112 MB.
+- S.2a (2026-10-13): chaos-test repairs on isolated release daemons on
+  Ryan's M5 Max, each reproduced on main df7055f first. Instance lock:
+  stalled daemon + full accept queue + `isocast get` gave 2 daemons and
+  an unstoppable recording on main, now 1 daemon, `get` names the busy
+  pid after 10 s, stop works; 8 parallel launches -> 1 daemon. Stream
+  stop against a SIGSTOPped server 17.5 s/4.4 s -> 0.51 s; flapping
+  server (3 s up/3 s down, 20 retries) failed after 39.5 s on main,
+  survived 52.7 s/8 reconnects; key hint only when every connection was
+  accepted and dropped. Slow disk (throttled, contended disk image,
+  ProRes LT): 0 of 39 warnings named the disk on main, 38 of 39 now
+  (test write 0.17 ms at start, 31-147 ms while dropping); a 3 s daemon
+  freeze isn't blamed on the disk. split racing stop: 6 timeouts on main
+  -> 5 "stopped before it could split" (wrong state). 64 MB request line
+  -> -32600 at 16 MB. A/B 40 s 1080p60 take: CPU 17.2/17.4% main vs
+  17.5/17.3%, 0 drops; start p50 41 vs 40 ms; healthy stream stop
+  4.9/3.8 vs 5.6/5.2 ms.
+- S.2 repair-scale port (2026-10-13): stress/scale-port brings the scale
+  repairs onto main after 5.0: c1e3d40, 9f40df8 and 8db69d7 ported,
+  b3751cf not needed (5.0 already keeps and reuses imports). Re-verified
+  with the scale agent's stress.py on the M5 Max, main 28ddad1 vs port,
+  interleaved: iso16 froze main 2/2 (0/17 files; iso16-noprog and
+  isofiltered16 too), the port wrote every file in all of them (8 of 17
+  files drop ~142 frames: encoder capacity); a failed file says "49 of
+  1440 frames due over 24.0 s, 1391 dropped" with manifest counts (main:
+  "49 frames over 0.8 s, 0 dropped", null); src192 163-167% vs 158-163%
+  CPU, ~57 fps min on both (old main: 230-239%, 33 fps); filters4
+  25.2-25.5 -> 22.1-22.5%, filters16 65-66 -> 61-63%, filters4k16 69-73
+  -> 64-65%, stillfilters4-mixed 17-18 -> 15.5-16%; iso4k8 RSS 8.3 ->
+  1.2 GB, CPU 111-120 -> 77%. Pictures: static128 and stillfilters4
+  program files identical to main's (psnr inf), plain and filtered ISO
+  colour within 1 code value of VideoToolbox's on the same frame,
+  isoh264-8 has no frame missing at any file start and every loss
+  counted (main hides ~410 as repeats). Flagship gate on isocast-m2-b
+  (bench.py, 4+4 alternating): flagship-1080 46.2 vs 46.4% CPU, 0
+  dropped, 12/12 files on both; flagship 4K 44.5 vs 44.7%, 4693 vs 4706
+  dropped (the M2's 4K limit). fmt, clippy, 141 tests clean.
+- S.3d (2026-10-13): stream-only bounded encoder waiting and tap reserve;
+  12 M2 A/B pairs clean, induced ~110/210/310 ms stalls 18 video/31 audio
+  drops on main versus 0/0, received video gaps removed, both recordings
+  complete at 1308/1308 frames with equal A/V durations. Release fmt,
+  all-target clippy and tests passed; no recording path or queue changed.
+- S.3 counters (2026-10-13): both benchmark scripts measure whole-process
+  retired instructions with public macOS counters, including the M2 whose
+  powermetrics IPC sampler fails. Verified on real M2 streams and an M4
+  program recording, plus missing/decreasing-counter handling; no new
+  dependency or test file. Final comparison results remain in S.3's report.
+- S.3 churn attribution (2026-10-13): unified logs plus generated clip
+  timestamps tie a mid-stream VT churn episode to another benchmark's
+  FFmpeg clip preparation outside the common lock. Both entry points now
+  prepare under that lock; verified a real preparation request blocks
+  without starting an encoder while an existing stream benchmark owns it.
+- S.3e (2026-10-13): 96 final main/candidate/OBS rows complete, retired
+  instructions measured on both Macs. Final-byte M2 streams: 12 pairs all
+  zero-drop; induced freezes main 18 video/30 audio versus candidate 0/0,
+  with four further raw-wire pairs gap-free on the candidate. All 80 MOVs
+  finalized and decoded, all 42 zero-drop files duration-matched; nine
+  overloaded tails mismatch on both builds, preserved as failures. Four
+  killed recordings retain 360 decodable frames each. M4 matched static
+  memory control 464 -> 118 MiB on current main; no additional runtime CPU
+  optimization accepted. Release fmt/clippy/tests clean; report has tables,
+  hashes, rejected patches and remaining limits.
+- P.2 (2026-10-13): the Profile and Scene Collection menus in both apps,
+  laid out as OBS's: New…, Duplicate…, Rename…, Remove… (on the one in
+  use), Import…, Export…, then every profile or scene collection, the one
+  in use checked (same-named ones show their id); choosing one switches.
+  Name and Remove dialogs in each app's dialog style; every command a
+  `library_*` call, refusals in the engine's words; Import takes Isocast
+  exports, whole setups and OBS's collections and profiles (the CLI's file
+  code, now isocast_client::library); undo history is forgotten after any
+  switch. Web app: native NSMenus filled by the interface (`menu_items`);
+  Slint app: MenuBar repeaters over a new area F. Verified offscreen
+  against an isolated engine (snapshots of both menus and all four
+  dialogs in each app; create, duplicate, rename, switch by menu click,
+  remove, import of an export/a whole setup/an OBS collection, export to
+  TOML and JSON, the toasts' Switch to it, undo after a switch leaving
+  the new collection alone (1 scene before and after), refusals while
+  recording, each checked with `isocast collection|profile list`), and
+  in real windows on isocast-m2-b through cua-driver with both apps open
+  on one isolated engine: native menus captured open in both apps, New
+  (web), Duplicate and Rename (Slint), switch from each app's list,
+  Remove from each (file kept in deleted/), Export and Import through the
+  real save and open panels in each app, a CLI `collection new`, and
+  switches while recording refused in both (the 20 s take: 607 frames, 0
+  dropped); every change appeared in the other app's menu at once. Slint
+  app with meters moving: 12.4% of a core on the M2 (N.2: 13-14%).
+- 5.5a (2026-10-13): data store, content items, bound text. `data_get`,
+  `data_set` (atomic, `persist` true/false/as was), `data_delete` and
+  `data_changed` (≤ 20 a second) on the method table, `isocast data
+  get|set|delete` (--json), MCP get_data/set_data, `status.data`;
+  dotted keys ≤ 128 characters, values ≤ 64 KB, 16 MB in all, errors
+  naming the param and rule; kept keys saved beside the scene collection
+  (`collections/<id>.data.json`, debounced, atomic, following switches,
+  deletes and duplicates); plugins' data grants enforced. Items take
+  `content` (text or image, the sources' settings and checks) and text
+  takes `data = "key"` (content and global text sources); content is drawn
+  on the scene thread, shared by key, made a texture at adopt (nothing
+  per tick), laid-out text measured and drawn its box's size. Verified on
+  base M2s (isolated, synthetic, bench lock): 60 changes during a ProRes
+  recording each show in exactly one new frame, its pts ≤ +0.4 ms after
+  the change (+4.3 ms on m2-a), drawn ≤ 17.1 ms after (20.9 on m2-a); a
+  1,000/s flood on unshown keys while recording: 20 data_changed a
+  second, compositor p99 745 µs vs 695 idle (idle windows 648–876), RSS
+  and footprint within 1.5 MB, 0 dropped or missed in 83 s; flooding a
+  shown title: 0 dropped, p99 1,494 µs; 60,000 shown sets with nothing
+  drawn: RSS flat at 84 MB (fixed a 33 MB/s growth on the way); a kept
+  key survives `isocast restart`, an unkept one doesn't; bad, long keys
+  and a 70 KB value refused naming the rule; MCP round trip; inline text
+  and image content snapshot identical to the equivalent sources (max
+  difference 0, M5 and m2-b); examples/recording.toml, a copy of Ryan's
+  setup and a migrated library load and save byte for byte against main;
+  flagship gate on isocast-m2-a, alternating, 3 runs each: flagship-1080
+  CPU 42.9% main vs 42.9%, 0 drops both; flagship 43.2 vs 42.2%, dropped
+  3,483 vs 3,483 (the M2's 4K limit); and on isocast-m2-b over two rounds
+  (46.3/46.6 vs 45.5/46.8%, 0 drops; 44.7/44.6 vs 44.8/44.5%, drops
+  within 0.3%). Left: text pictures take ~5 ms on a base M2 at rest (over
+  the design's 2 ms; notes, Gotchas), the apps don't list or edit content
+  items, `watch` doesn't hold plugins' data events to their grants.
+- 7.6 (2026-10-13): `watch` takes `kinds`/`except` (API, `isocast watch
+  --kinds/--except`, MCP's event thread asks for all but levels, the deck
+  for 4 kinds). isocast-m2-a, 1080p60 synthetic engine idle-running, 3
+  alternating 45 s rounds per build: a watcher with no filter gets 17.7
+  events/s, the deck's and MCP's filters 0; the idle deck's CPU 0.311% of
+  a core on main vs 0.022%; isocastd 10.8-11.5% either way. 4K flagship
+  with the deck installed (main with main's deck vs branch), 10+10 runs in
+  two interleaved rounds: dropped frames per run median 1159 vs 1158.5
+  (the M2's encoder limit), isocastd CPU 41.85 vs 42.2%, 0 audio dropouts.
+- 7.4a (2026-10-13): WebAssembly audio filters (wasmtime 49, the WIT
+  package, plugin kinds for audio filters in setups, examples/plugins/gain
+  with a gain and a sidechain ducker). Unit tests on the example: the wasm
+  gain is bit for bit the built-in gain (peak 0.2506 for 0.5 at -6 dB), the
+  ducker 0 dB from the built-in compressor. isocast-m2-a (release, lock):
+  gain 9.3-10.8 µs a block (p99 21-30), ducker with a sidechain 52-64 µs
+  (p99 183-190); trap, endless loop (out of 5,000,000 fuel 2.1-4.9 ms into
+  the call) and memory set mid-recording: 3 warnings per chain then off,
+  both files 14.00 s A/V, every beep, beeps 0.02 ms from flashes, 840/840
+  frames, 0 dropped, 0 audio dropouts. Main vs branch saved setups (every
+  built-in audio filter; examples/recording.toml) byte for byte equal.
+  Flagship A/B (main's built-in gain vs the wasm gain on the tone): 4K 5+5
+  drops/run median 1162 vs 1165, CPU 42.5 vs 42.4%, RSS 124 vs 128 MB;
+  1080 3+3: 0 vs 0 dropped, 9/9 files complete, CPU 44.4 vs 43.6%.
+- S.2c / S.3f (2026-10-13): overloaded files keep complete audio and equal
+  final A/V duration with explicitly counted tail repeats; program/stream
+  outputs have admission priority. Eight M4 and four M2 flagship pairs:
+  program drops zero; Stop medians 723/989 -> 127.5/150 ms. All 72 candidate
+  matrix files and 22 lifecycle files pass duration/count/decode checks;
+  six killed files retain decodable, presentation-ordered fragments after
+  disabling recording B-frame reordering. Release fmt/clippy/tests pass.
+- V1.8 m4-throughput / S.3g (2026-10-13): the M4 Max explicitly disables
+  automatic HEVC look-ahead. Eight final paired flagships store 35,040 of
+  35,040 frames, zero drops; main loses 2,354. Stop medians M4 747 -> 83 ms,
+  overloaded M2 984.5 -> 153 ms. Four M2 concurrent-stream pairs have zero
+  program/stream video/audio drops. All 60 candidate matrix files and 28
+  final-byte lifecycle/codec files are duration/count matched and decode
+  cleanly; six killed files preserve decodable fragments. The M5 real-device
+  check remains explicitly unqualified. Release fmt/clippy/tests pass.
+- 5.2a (2026-10-13): keyframe animations. Setups take `[[keyframes]]`
+  (stops by id, CSS's @keyframes) and items `animations` (keyframes,
+  duration_ms, delay_ms, easing, iterations, direction, fill, start =
+  on_air | shown | clock); animatable: opacity, translate (px or %),
+  scale, rotate, background, border colour and width, radius, shadow,
+  crop (`params` waits for item filters, 5.3a); easings gain `{
+  cubic_bezier = [...] }` and `{ steps = n, position }` wherever one is
+  taken (the four names bit for bit); errors name the field and list the
+  sets; 5.2b's built-in ids are kept. The scene thread compiles tracks of
+  floats; the compositor evaluates them at each tick's time from a compact
+  per-scene list, patches moving items' records in place, rewrites
+  restyled ones, uploads through a staging belt; program, preview, nested
+  scenes and Move each on their own clocks; `engine.compositor.animated`.
+  Verified on isocast-m2-a (60 fps ProRes program): linear 0 → 300 px
+  moves exactly 5.000 px a frame (0.0 px error), cubic_bezier within
+  0.034 px, steps = 4 jumps 4 times (frames 15/30/45/60), an infinite
+  alternating loop 0.0 px off schedule over 62 s, on_air restarts on the
+  first frame after a switch and clock doesn't; shown, nested, Move and
+  preview checks; item transitions' frames identical to 5.5a's (61/61
+  each way), scene transitions within the same residuals; per animated
+  property 0.056 µs (1,000 translates) and 0.036 (1,000 on 100 boxes)
+  with the clocks up, 0.24 at 100 (a fixed ~20 µs once anything
+  animates), ~0.44 µs at rest where the whole tick runs ~8× slower;
+  0 drops in every cost run. Flagship gate on isocast-m2-a (alternating,
+  10 runs each at 1080, 6 at 4K): CPU per pair median −0.25 points both,
+  4K dropped 6,970 vs 6,994, 1080 0 vs 0 except one disturbed 5.2a run
+  (14). Local: the every-feature scene snapshots identical, existing
+  setups load and save byte for byte, keyframe sets patch by id. Left:
+  the apps don't list or edit animations; `params`; finished animations
+  are still evaluated each tick; at rest the per-property cost is over
+  0.2 µs.
+- C.1 (2026-10-13): timelines on the one method table (API, `isocast
+  timeline …`/`isocast retake` with --json, 9 MCP tools, timeline_changed,
+  export_progress, export_finished). Isolated engine, synthetic sources
+  (program + 60 fps desktop + 30 fps camera ISOs, tone in each): 4 takes
+  (stop, split, stop), retake of the 4th, retake while recording (the
+  running take dropped, the next one followed), remove c2, move c3 first,
+  export: c3+c1+c5 = 112+169+114 frames, every joined file 6.583 s = the
+  clips' lengths, video packets and decoded frames identical to the
+  parts', 316,000 audio samples, flash-to-beep 1.2 ms at 60 fps (the
+  30 fps file 16.7 ms, the same as in its takes), no decode errors; the
+  16 take files recorded before the edits unchanged (sha256, mtime); the
+  timeline byte for byte the same after `isocast restart`; kill -9 mid-take
+  left the split's finished take on the timeline and the killed one off.
+  Edge cases: video-only ISO files joined; a source missing from a clip
+  skipped, naming it; errors name the field and list ids. isocast-m2-b:
+  flagship-1080 3+3 vs main with a timeline open: CPU 45.8 vs 45.8%, 0
+  drops both, 9/9 files; a 40 s 4K/1080 export in 5.4 s while recording
+  with 0 drops (docs/notes.md, Benchmarks).
+- C.1 fixes (2026-10-13): the adversarial review's findings, each
+  reproduced on 9d1b42c first. `retake` during a stop now waits for it and
+  retakes the stopped take (was: "OK" for a take never recorded, or a 30 s
+  hang, and the take dropped); retakes are one at a time and a second
+  before the new take begins drops nothing more (was: "dropped" but kept);
+  a retake while recording begins the next take 0.25–0.35 s later (was
+  0.5–1.5 s) on a 1/10 s grid and says when (`begins_at`; the CLI returns
+  once it has begun); one export at a time, enforced, with unique ids;
+  exports never take a same-disk recording's reserve (refused, or
+  stopped); no program, no export; clearer errors for unfinished takes;
+  interrupted takes listed under `removed`; restart refused and shutdown
+  clean during an export, and a killed export cleaned up at the next
+  start; dropped frames on clips; names fit 255 bytes; a broken current
+  timeline is said. Verified on an isolated engine: retake 0–200 ms after
+  a stop 6/6 consistent, two concurrent retakes 3/3 (one take dropped, the
+  new take the clip), begins_at = the take's started_at to the ms, takes
+  split by retake exact (0 dropped, durations whole frames); main flow
+  export ALL OK (verify.py: packets and frames identical, 9.65 s each,
+  flash-to-beep ≤ 1.17 ms); a 50-clip export (49 whole-second splits)
+  ALL OK; two CLI exports at once 6/6 one refused; kill -9 mid-export
+  then restart: manifest failed, partial removed, 201 take files
+  unchanged; isocast-m2-b: an export at 965 MiB free beside a recording
+  keeping 1 GB refused, the recording ran its full 30.0 s; with room, an
+  export to the same disk while recording, 0 drops.

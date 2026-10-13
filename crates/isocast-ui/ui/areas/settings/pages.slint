@@ -1,0 +1,793 @@
+// Settings' pages (the web app's settings.js, docs/design.md 3.12): each
+// shows the draft in SettingsArea and changes it by field name; Apply or
+// OK sends the change. In OBS's order: General, Stream, Output, Audio,
+// Video, Hotkeys, Advanced.
+
+import { Theme } from "../../theme.slint";
+import { Icons } from "../../icons.slint";
+import {
+    Button, ButtonVariant, Callout, CalloutKind, Checkbox, ControlSize, Dropdown, FormRow, IconButton,
+    NumberField, Segmented, Switch, TextField,
+} from "../../kit.slint";
+import { SettingsArea } from "state.slint";
+import { Disclosure, Fill, PageNote, QualitySlider, ServiceRow, SetGroup, SetPage, ShortcutRow } from "parts.slint";
+
+// ---------- General ----------
+
+export component GeneralPage inherits SetPage {
+    SetGroup {
+        title: "Setup";
+        FormRow {
+            label: "Name";
+            hint: "Shown in the title bar.";
+            TextField {
+                text: SettingsArea.name;
+                label: "Name";
+                committed(text) => { SettingsArea.set-text("name", text); }
+            }
+        }
+        if SettingsArea.setup-file != "": FormRow {
+            label: "Kept in";
+            hint: "Isocast saves the live setup here after every change (the one before as .bak).";
+            Text {
+                text: SettingsArea.setup-file;
+                color: Theme.text-2;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+        }
+    }
+    SetGroup {
+        title: "Snapping";
+        FormRow {
+            label: "Enable";
+            hint: "Edges and centres snap to the canvas and to other sources; hold ⌘ while dragging to place freely.";
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
+                Switch {
+                    on <=> SettingsArea.snapping;
+                    label: "Snapping";
+                    toggled(on) => { SettingsArea.set-flag("snapping", on); }
+                }
+            }
+            Fill { }
+        }
+        FormRow {
+            label: "Snap Sensitivity";
+            NumberField {
+                width: Theme.field-s;
+                value: SettingsArea.snap-distance;
+                minimum: 1;
+                maximum: 40;
+                unit: "px";
+                label: "Snap Sensitivity";
+                changed(value) => { SettingsArea.set-number("snap_distance", value); }
+            }
+            Fill { }
+        }
+    }
+    SetGroup {
+        title: "Preview";
+        FormRow {
+            label: "Preview Frame Rate";
+            hint: "Match canvas shows motion as recorded; 30 fps uses less power (monitors still follow the canvas rate while you drag).";
+            Segmented {
+                horizontal-stretch: 0;
+                options: [{ value: "canvas", label: "Match canvas" }, { value: "30", label: "30 fps (saves power)" }];
+                value <=> SettingsArea.preview-rate;
+                label: "Preview Frame Rate";
+                selected(value) => { SettingsArea.set-text("preview_rate", value); }
+            }
+            Fill { }
+        }
+    }
+}
+
+// ---------- Stream ----------
+
+// No stream yet: choose a service. Custom servers and Kick need their
+// server address first.
+component ChooseService inherits VerticalLayout {
+    spacing: 0;
+    alignment: start;
+    if SettingsArea.needs-server == "": VerticalLayout {
+        spacing: Theme.space-4;
+        Text {
+            max-width: 560px;
+            text: "Stream the program live: the canvas and the program mix, sent as H.264 and AAC over RTMP or RTMPS. Choose where to:";
+            color: Theme.text-2;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            alignment: start;
+            VerticalLayout {
+                preferred-width: 560px;
+                max-width: 560px;
+                horizontal-stretch: 1;
+                spacing: 0;
+                Rectangle {
+                    height: 1px;
+                    background: Theme.line;
+                }
+                for service in SettingsArea.services: ServiceRow {
+                    label: service.label;
+                    hint: service.hint;
+                    clicked => { SettingsArea.choose-service(service.id); }
+                }
+            }
+        }
+    }
+    if SettingsArea.needs-server != "": VerticalLayout {
+        spacing: Theme.space-3;
+        Text {
+            max-width: 560px;
+            text: SettingsArea.needs-server == "kick"
+                ? "Kick gives each channel its own server: copy the Stream URL from the Creator Dashboard (Channel → Stream URL and Key)."
+                : "The server’s address, without the stream key: like rtmp://host/app or rtmps://host/app.";
+            color: Theme.text-2;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            alignment: start;
+            HorizontalLayout {
+                preferred-width: 560px;
+                max-width: 560px;
+                horizontal-stretch: 1;
+                spacing: Theme.space-2;
+                server := TextField {
+                    mono: true;
+                    placeholder: "rtmps://…";
+                    label: "Server";
+                    auto-focus: true;
+                    submits: false;
+                    accepted(text) => {
+                        if SettingsArea.server-valid(text) {
+                            SettingsArea.server-chosen(text);
+                        }
+                    }
+                }
+                Button {
+                    text: "Back";
+                    clicked => { SettingsArea.server-back(); }
+                }
+                Button {
+                    text: "Continue";
+                    variant: ButtonVariant.primary;
+                    enabled: SettingsArea.server-valid(server.text);
+                    clicked => { SettingsArea.server-chosen(server.text); }
+                }
+            }
+        }
+    }
+}
+
+component StreamKeyRow inherits FormRow {
+    label: "Stream Key";
+    hint: SettingsArea.key-saved ? "Saved in the Keychain. Paste a new one to replace it." : "From your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.";
+    key := TextField {
+        input-type: InputType.password;
+        placeholder: SettingsArea.key-saved ? "••••••••••••  saved" : "Paste the key";
+        label: "Stream Key";
+        submits: false;
+        accepted(text) => {
+            if text != "" {
+                SettingsArea.save-key(text);
+                self.text = "";
+            }
+        }
+    }
+    Button {
+        text: "Save Key";
+        enabled: key.text != "" && !SettingsArea.key-busy;
+        clicked => {
+            SettingsArea.save-key(key.text);
+            key.text = "";
+        }
+    }
+    if SettingsArea.key-saved: Button {
+        text: "Remove";
+        clicked => { SettingsArea.clear-key(); }
+    }
+}
+
+export component StreamPage inherits VerticalLayout {
+    spacing: 0;
+    alignment: start;
+    if SettingsArea.notice != "": Callout {
+        kind: CalloutKind.info;
+        title: SettingsArea.notice;
+    }
+    if SettingsArea.has-stream && SettingsArea.stream-live: Callout {
+        kind: CalloutKind.info;
+        title: "Changes apply the next time you start streaming.";
+    }
+    if !SettingsArea.has-stream: SetPage {
+        ChooseService { }
+    }
+    if SettingsArea.has-stream: SetPage {
+        SetGroup {
+            FormRow {
+                label: "Service";
+                Dropdown {
+                    width: Theme.field-m;
+                    options: [
+                        { value: "twitch", label: "Twitch" },
+                        { value: "youtube", label: "YouTube" },
+                        { value: "kick", label: "Kick" },
+                        { value: "facebook", label: "Facebook" },
+                        { value: "custom", label: "Custom server" },
+                    ];
+                    value <=> SettingsArea.service;
+                    label: "Service";
+                    selected(value) => { SettingsArea.set-text("service", value); }
+                }
+                Fill { }
+            }
+            FormRow {
+                label: "Server";
+                hint: SettingsArea.server-hint;
+                TextField {
+                    text: SettingsArea.server;
+                    mono: true;
+                    placeholder: SettingsArea.server-placeholder;
+                    label: "Server";
+                    committed(text) => { SettingsArea.set-text("server", text); }
+                }
+            }
+            StreamKeyRow { }
+        }
+        SetGroup {
+            title: "Output";
+            FormRow {
+                label: "Video Bitrate";
+                hint: "Twitch suggests up to 6000 kb/s; YouTube 4500–9000 for 1080p.";
+                NumberField {
+                    width: Theme.field-s;
+                    value: SettingsArea.video-bitrate;
+                    minimum: 200;
+                    maximum: 50000;
+                    step: 100;
+                    unit: "kb/s";
+                    label: "Video Bitrate";
+                    changed(value) => { SettingsArea.set-number("video_bitrate", value); }
+                }
+                Fill { }
+            }
+            FormRow {
+                label: "Rate Control";
+                hint: "Constant (CBR) is what YouTube and Twitch ask for. Average sends less when the picture is still.";
+                Segmented {
+                horizontal-stretch: 0;
+                    options: [{ value: "constant", label: "Constant (CBR)" }, { value: "average", label: "Average (VBR)" }];
+                    value <=> SettingsArea.rate-control;
+                    label: "Rate Control";
+                    selected(value) => { SettingsArea.set-text("rate_control", value); }
+                }
+                Fill { }
+            }
+            FormRow {
+                label: "Audio Bitrate";
+                Dropdown {
+                    width: Theme.field-s;
+                    options: [
+                        { value: "64", label: "64 kb/s" },
+                        { value: "96", label: "96 kb/s" },
+                        { value: "128", label: "128 kb/s" },
+                        { value: "160", label: "160 kb/s" },
+                        { value: "192", label: "192 kb/s" },
+                        { value: "256", label: "256 kb/s" },
+                        { value: "320", label: "320 kb/s" },
+                    ];
+                    value <=> SettingsArea.audio-bitrate;
+                    label: "Audio Bitrate";
+                    selected(value) => { SettingsArea.set-text("audio_bitrate", value); }
+                }
+                Fill { }
+            }
+            FormRow {
+                label: "Keyframe Interval";
+                hint: "Every 2 s is what Twitch and YouTube ask for.";
+                NumberField {
+                    width: Theme.field-s;
+                    value: SettingsArea.keyframe-interval;
+                    minimum: 1;
+                    maximum: 10;
+                    unit: "s";
+                    label: "Keyframe Interval";
+                    changed(value) => { SettingsArea.set-number("keyframe_interval", value); }
+                }
+                Fill { }
+            }
+            FormRow {
+                label: "Output Resolution";
+                hint: SettingsArea.stream-custom-size ? "" : "The canvas, scaled down to fit 1080p if it is larger.";
+                Segmented {
+                horizontal-stretch: 0;
+                    options: [{ value: "canvas", label: "Canvas" }, { value: "custom", label: "Custom" }];
+                    value: SettingsArea.stream-custom-size ? "custom" : "canvas";
+                    label: "Output Resolution";
+                    selected(value) => { SettingsArea.set-text("stream_size", value); }
+                }
+                if SettingsArea.stream-custom-size: NumberField {
+                    width: Theme.field-xs;
+                    prefix: "W";
+                    value: SettingsArea.stream-width;
+                    minimum: 16;
+                    maximum: 8192;
+                    step: 2;
+                    label: "Output width";
+                    changed(value) => { SettingsArea.set-number("stream_width", value); }
+                }
+                if SettingsArea.stream-custom-size: NumberField {
+                    width: Theme.field-xs;
+                    prefix: "H";
+                    value: SettingsArea.stream-height;
+                    minimum: 16;
+                    maximum: 8192;
+                    step: 2;
+                    label: "Output height";
+                    changed(value) => { SettingsArea.set-number("stream_height", value); }
+                }
+                Fill { }
+            }
+        }
+        HorizontalLayout {
+            alignment: start;
+            Button {
+                text: "Turn off streaming";
+                variant: ButtonVariant.danger;
+                enabled: !SettingsArea.stream-live;
+                clicked => { SettingsArea.set-flag("stream", false); }
+            }
+        }
+    }
+}
+
+// ---------- Output ----------
+
+// The encoder and its format; 8- or 10-bit for HEVC.
+component EncoderRows inherits VerticalLayout {
+    in property <string> which;
+    in property <string> codec;
+    in property <string> container;
+    in property <string> depth;
+    in property <bool> shows-depth;
+    spacing: Theme.space-2;
+    FormRow {
+        label: "Encoder";
+        Dropdown {
+            width: Theme.field-m;
+            options: SettingsArea.codecs;
+            value: root.codec;
+            label: "Encoder";
+            selected(value) => { SettingsArea.set-text(root.which + "_codec", value); }
+        }
+        Fill { }
+    }
+    FormRow {
+        label: "Recording Format";
+        Segmented {
+                horizontal-stretch: 0;
+            options: [{ value: "mov", label: "MOV" }, { value: "mp4", label: "MP4" }];
+            value: root.container;
+            label: "Recording Format";
+            selected(value) => { SettingsArea.set-text(root.which + "_container", value); }
+        }
+        if root.shows-depth: Segmented {
+                horizontal-stretch: 0;
+            options: [{ value: "8", label: "8-bit" }, { value: "10", label: "10-bit" }];
+            value: root.depth;
+            label: "Bit depth";
+            selected(value) => { SettingsArea.set-text(root.which + "_depth", value); }
+        }
+        Fill { }
+    }
+}
+
+export component OutputPage inherits SetPage {
+    SetGroup {
+        title: "Recording";
+        FormRow {
+            label: "Recording Path";
+            TextField {
+                text: SettingsArea.folder;
+                mono: true;
+                label: "Recording Path";
+                committed(text) => { SettingsArea.set-text("folder", text); }
+            }
+            Button {
+                text: "Browse";
+                clicked => { SettingsArea.browse-folder(); }
+            }
+        }
+        FormRow {
+            label: "Recording Quality";
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: Theme.space-1;
+                padding-top: 2px;
+                HorizontalLayout {
+                    alignment: start;
+                    QualitySlider {
+                        preferred-width: 460px;
+                        max-width: 460px;
+                        horizontal-stretch: 1;
+                        labels: ["Low", "Medium", "High", "Very high", "Incredible"];
+                        stop: SettingsArea.quality-stop;
+                        at: SettingsArea.quality-at;
+                        enabled: !SettingsArea.quality-disabled;
+                        chosen(i) => { SettingsArea.choose-quality(i); }
+                    }
+                }
+                if SettingsArea.quality-status != "": Text {
+                    text: SettingsArea.quality-status;
+                    color: Theme.text-2;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                }
+            }
+        }
+        FormRow {
+            label: "";
+            Disclosure {
+                text: "Advanced";
+                open <=> SettingsArea.quality-advanced;
+            }
+            Fill { }
+        }
+        if SettingsArea.quality-advanced: FormRow {
+            label: "Program Quality";
+            hint: "Constant quality, 1–100; higher makes bigger files.";
+            NumberField {
+                width: Theme.field-s;
+                value: SettingsArea.program-quality;
+                minimum: 1;
+                maximum: 100;
+                enabled: SettingsArea.program-on;
+                label: "Program Quality";
+                changed(value) => { SettingsArea.set-number("program_quality", value); }
+            }
+            Fill { }
+        }
+        if SettingsArea.quality-advanced: FormRow {
+            label: "ISO Quality";
+            NumberField {
+                width: Theme.field-s;
+                value: SettingsArea.iso-quality;
+                minimum: 1;
+                maximum: 100;
+                enabled: SettingsArea.iso-on;
+                label: "ISO Quality";
+                changed(value) => { SettingsArea.set-number("iso_quality", value); }
+            }
+            Fill { }
+        }
+        FormRow {
+            label: "Keep Free";
+            hint: "A recording won’t start without room for it plus this, and stops cleanly when the disk gets this low.";
+            NumberField {
+                width: Theme.field-s;
+                value: SettingsArea.keep-free;
+                minimum: 0;
+                maximum: 10000;
+                step: 0.5;
+                unit: "GB";
+                label: "Keep Free";
+                changed(value) => { SettingsArea.set-number("keep_free", value); }
+            }
+            Fill { }
+        }
+    }
+    SetGroup {
+        title: "Program";
+        FormRow {
+            label: "Record Program";
+            hint: "The canvas as everyone sees it, with the program mix.";
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
+                Switch {
+                    on <=> SettingsArea.program-on;
+                    label: "Record Program";
+                    toggled(on) => { SettingsArea.set-flag("program", on); }
+                }
+            }
+            Fill { }
+        }
+        if SettingsArea.program-on: EncoderRows {
+            which: "program";
+            codec: SettingsArea.program-codec;
+            container: SettingsArea.program-container;
+            depth: SettingsArea.program-depth;
+            shows-depth: SettingsArea.program-shows-depth;
+        }
+    }
+    SetGroup {
+        title: "ISO Recording";
+        FormRow {
+            label: "Record ISO Files";
+            hint: "Each source chosen below in its own file, at its own size, on the program’s clock. Also in each source’s right-click menu.";
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
+                Switch {
+                    on <=> SettingsArea.iso-on;
+                    label: "Record ISO Files";
+                    toggled(on) => { SettingsArea.set-flag("iso", on); }
+                }
+            }
+            Fill { }
+        }
+        if SettingsArea.iso-on: FormRow {
+            label: "Sources";
+            HorizontalLayout {
+                spacing: Theme.space-4;
+                alignment: start;
+                horizontal-stretch: 1;
+                for source in SettingsArea.iso-sources: Checkbox {
+                    text: source.name;
+                    checked: source.on;
+                    small: true;
+                    toggled(on) => { SettingsArea.set-iso-source(source.id, on); }
+                }
+                if SettingsArea.iso-sources.length == 0: Text {
+                    text: "No video sources yet.";
+                    color: Theme.text-2;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        if SettingsArea.iso-on: EncoderRows {
+            which: "iso";
+            codec: SettingsArea.iso-codec;
+            container: SettingsArea.iso-container;
+            depth: SettingsArea.iso-depth;
+            shows-depth: SettingsArea.iso-shows-depth;
+        }
+        if SettingsArea.iso-on: FormRow {
+            label: "With Filters";
+            hint: "Record sources as the program shows them (filters applied) instead of as captured.";
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
+                Switch {
+                    on <=> SettingsArea.iso-filtered;
+                    label: "With Filters";
+                    toggled(on) => { SettingsArea.set-flag("iso_filtered", on); }
+                }
+            }
+            Fill { }
+        }
+    }
+}
+
+// ---------- Audio ----------
+
+component RefreshDevices inherits IconButton {
+    icon: Icons.refresh;
+    label: "Look for devices again";
+    small: true;
+    icon-size: Theme.icon-sm;
+    spinning: SettingsArea.looking;
+    enabled: !SettingsArea.looking;
+    clicked => { SettingsArea.refresh-devices(); }
+}
+
+export component AudioPage inherits SetPage {
+    if SettingsArea.mics.length > 0: SetGroup {
+        title: "Audio Devices";
+        for mic[i] in SettingsArea.mics: FormRow {
+            label: mic.name;
+            Dropdown {
+                width: Theme.field-l;
+                options: mic.options;
+                value: mic.value;
+                show-detail: true;
+                label: mic.name;
+                selected(value) => { SettingsArea.set-mic(mic.id, value); }
+            }
+            if i == 0: VerticalLayout {
+                alignment: center;
+                RefreshDevices { }
+            }
+            Fill { }
+        }
+        HorizontalLayout {
+            padding-left: Theme.hint-indent;
+            Text {
+                text: "Your Audio Input Capture sources. Add more with + under Sources.";
+                color: Theme.text-3;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading-sm;
+                wrap: word-wrap;
+            }
+        }
+    }
+    SetGroup {
+        title: "Advanced";
+        FormRow {
+            label: "Monitoring Device";
+            hint: "Where sources you monitor play (Audio Mixer → ⋮ → Audio Monitoring).";
+            Dropdown {
+                width: Theme.field-l;
+                options: SettingsArea.outputs;
+                value <=> SettingsArea.monitoring-device;
+                show-detail: true;
+                label: "Monitoring Device";
+                selected(value) => { SettingsArea.set-text("monitoring_device", value); }
+            }
+            VerticalLayout {
+                alignment: center;
+                RefreshDevices { }
+            }
+            Fill { }
+        }
+        FormRow {
+            label: "Balance Law";
+            hint: "How moving a source towards one side lowers the other.";
+            Dropdown {
+                width: Theme.field-l;
+                options: SettingsArea.pan-laws;
+                value <=> SettingsArea.pan-law;
+                label: "Balance Law";
+                selected(value) => { SettingsArea.set-text("pan_law", value); }
+            }
+            Fill { }
+        }
+    }
+}
+
+// ---------- Video ----------
+
+export component VideoPage inherits SetPage {
+    SetGroup {
+        title: "Video";
+        FormRow {
+            label: "Base (Canvas) Resolution";
+            hint: "Recordings and the program are made at this size. Sources keep their pixel positions when it changes.";
+            Dropdown {
+                width: Theme.field-m;
+                options: SettingsArea.canvas-sizes;
+                value <=> SettingsArea.canvas-size;
+                label: "Base (Canvas) Resolution";
+                selected(value) => { SettingsArea.set-text("canvas_size", value); }
+            }
+            NumberField {
+                width: Theme.field-xs;
+                prefix: "W";
+                value: SettingsArea.canvas-width;
+                minimum: 16;
+                maximum: 8192;
+                step: 2;
+                label: "Canvas width";
+                changed(value) => { SettingsArea.set-number("canvas_width", value); }
+            }
+            NumberField {
+                width: Theme.field-xs;
+                prefix: "H";
+                value: SettingsArea.canvas-height;
+                minimum: 16;
+                maximum: 8192;
+                step: 2;
+                label: "Canvas height";
+                changed(value) => { SettingsArea.set-number("canvas_height", value); }
+            }
+            Fill { }
+        }
+        FormRow {
+            label: "Common FPS Values";
+            Dropdown {
+                width: Theme.field-s;
+                options: SettingsArea.fps-options;
+                value <=> SettingsArea.fps;
+                label: "Common FPS Values";
+                selected(value) => { SettingsArea.set-text("fps", value); }
+            }
+            Fill { }
+        }
+    }
+}
+
+// ---------- Hotkeys ----------
+
+export component HotkeysPage inherits SetPage {
+    spacing: Theme.space-4;
+    // The web app's 4px above and 12px below, inside the page's gaps.
+    VerticalLayout {
+        padding-top: Theme.space-1;
+        padding-bottom: Theme.space-3;
+        PageNote {
+            text: "Isocast’s keys are fixed for now. They don’t fire while you type in a field.";
+        }
+    }
+    for group in SettingsArea.hotkeys: VerticalLayout {
+        spacing: 0;
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            Text {
+                text: group.title;
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                font-weight: Theme.weight-semibold;
+                vertical-alignment: center;
+            }
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 1;
+                Rectangle {
+                    height: 1px;
+                    background: Theme.line;
+                }
+            }
+        }
+        VerticalLayout {
+            padding-top: Theme.space-2;
+            spacing: 0;
+            for row[i] in group.rows: ShortcutRow {
+                what: row.what;
+                keys: row.keys;
+                last: i == group.rows.length - 1;
+            }
+        }
+    }
+}
+
+// ---------- Advanced ----------
+
+export component AdvancedPage inherits SetPage {
+    SetGroup {
+        title: "Automatically Reconnect";
+        if !SettingsArea.has-stream: PageNote {
+            text: "Set up streaming (Stream) to change how it reconnects.";
+        }
+        if SettingsArea.has-stream: FormRow {
+            label: "Enable";
+            VerticalLayout {
+                alignment: center;
+                horizontal-stretch: 0;
+                Switch {
+                    on <=> SettingsArea.reconnect-on;
+                    label: "Automatically Reconnect";
+                    toggled(on) => { SettingsArea.set-flag("reconnect", on); }
+                }
+            }
+            Fill { }
+        }
+        if SettingsArea.has-stream: FormRow {
+            label: "Retry Delay";
+            NumberField {
+                width: Theme.field-s;
+                value: SettingsArea.reconnect-delay;
+                minimum: 1;
+                maximum: 600;
+                unit: "s";
+                enabled: SettingsArea.reconnect-on;
+                label: "Retry Delay";
+                changed(value) => { SettingsArea.set-number("reconnect_delay", value); }
+            }
+            Fill { }
+        }
+        if SettingsArea.has-stream: FormRow {
+            label: "Maximum Retries";
+            NumberField {
+                width: Theme.field-s;
+                value: SettingsArea.reconnect-retries;
+                minimum: 1;
+                maximum: 1000;
+                enabled: SettingsArea.reconnect-on;
+                label: "Maximum Retries";
+                changed(value) => { SettingsArea.set-number("reconnect_retries", value); }
+            }
+            Fill { }
+        }
+    }
+}

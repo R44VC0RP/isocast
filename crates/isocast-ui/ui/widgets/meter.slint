@@ -1,0 +1,84 @@
+// An audio meter (docs/design.md 3.16): dBFS from −60 to 0, an 8px bar on
+// a neutral track, lit green below −18, amber to −6 and red above, the
+// peak at half strength over the RMS, a 2px hold line, and the scale under
+// it (its minor and mid labels make way on narrow meters). The levels are
+// the caller's, already smoothed (rise at once, fall ~24 dB/s for RMS, ~32
+// for peak, hold 1.5 s): this only draws them.
+
+import { Theme } from "../theme.slint";
+
+// A lit zone: [from, to] in dB.
+component Zone inherits Rectangle {
+    in property <float> from;
+    in property <float> to;
+    in property <float> level;
+    in property <color> zone-color;
+    // The whole bar's width (−60 to 0 dB).
+    in property <length> span;
+    property <float> top: min(root.to, root.level);
+    x: root.span * (root.from + 60) / 60;
+    width: max(0px, root.span * (root.top - root.from) / 60);
+    visible: root.top > root.from;
+    background: root.zone-color;
+}
+
+export component Meter inherits Rectangle {
+    in property <float> rms: -60;
+    in property <float> peak: -60;
+    in property <float> hold: -60;
+    // A muted source still shows what it hears, dimmed.
+    in property <bool> muted;
+    in property <bool> show-scale: true;
+    in property <string> label;
+
+    height: root.show-scale ? Theme.meter : Theme.meter-bar + 2px;
+    accessible-role: progress-indicator;
+    accessible-label: root.label;
+    accessible-value: round(max(-60, root.rms)) + " dB";
+
+    bar := Rectangle {
+        y: 2px;
+        height: Theme.meter-bar;
+        border-radius: 1px;
+        clip: true;
+        background: Theme.meter-track;
+        opacity: root.muted ? Theme.muted-meter-opacity : 1;
+
+        Zone { span: bar.width; height: bar.height; from: -60; to: -18; level: root.peak; zone-color: Theme.meter-ok.with-alpha(0.5); }
+        Zone { span: bar.width; height: bar.height; from: -18; to: -6; level: root.peak; zone-color: Theme.meter-warn.with-alpha(0.5); }
+        Zone { span: bar.width; height: bar.height; from: -6; to: 0; level: root.peak; zone-color: Theme.meter-clip.with-alpha(0.5); }
+        Zone { span: bar.width; height: bar.height; from: -60; to: -18; level: root.rms; zone-color: Theme.meter-ok; }
+        Zone { span: bar.width; height: bar.height; from: -18; to: -6; level: root.rms; zone-color: Theme.meter-warn; }
+        Zone { span: bar.width; height: bar.height; from: -6; to: 0; level: root.rms; zone-color: Theme.meter-clip; }
+
+        if root.hold > -59.5: Rectangle {
+            x: max(0px, parent.width * (min(0, root.hold) + 60) / 60 - 1px);
+            width: 2px;
+            background: root.hold > -6 ? Theme.meter-clip : root.hold > -18 ? Theme.meter-warn : Theme.meter-ok;
+        }
+    }
+
+    if root.show-scale: Rectangle {
+        y: 12px;
+        height: 10px;
+        for tick in [
+            { db: -60, rank: 0 },
+            { db: -48, rank: 2 },
+            { db: -36, rank: 0 },
+            { db: -24, rank: 2 },
+            { db: -18, rank: 1 },
+            { db: -12, rank: 0 },
+            { db: -6, rank: 1 },
+            { db: 0, rank: 0 },
+        ]: Text {
+            // Minor labels (rank 1) go below 360px, mid ones (2) below 200px.
+            visible: tick.rank == 0 || (tick.rank == 1 && root.width > 360px) || (tick.rank == 2 && root.width > 200px);
+            x: tick.db == -60 ? 0 : tick.db == 0 ? parent.width - self.width : parent.width * (tick.db + 60) / 60 - self.width / 2;
+            text: tick.db == 0 ? "0" : "−" + (-tick.db);
+            color: Theme.text-3;
+            font-size: Theme.fs-micro;
+            vertical-alignment: top;
+            accessible-role: none;
+        }
+    }
+}

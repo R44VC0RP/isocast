@@ -1,0 +1,101 @@
+// What the whole window shares: the connection, the open dialog, Studio
+// Mode, the selection, and the per-viewer layout (dock sizes, what's
+// shown). The app (src/app.rs) keeps it; every area reads it, and changes
+// it through these callbacks so the app hears about it.
+//
+// Each area has a global of its own for its data (areas/*/state.slint);
+// put things here only when more than one area needs them.
+
+export enum ConnectionState { connecting, connected, disconnected, failed }
+
+export global Ui {
+    // ---- The engine
+    in property <ConnectionState> connection: ConnectionState.connecting;
+    // Why it isn't connected (failed, disconnected).
+    in property <string> connection-error;
+    // The live setup has been read at least once.
+    in property <bool> loaded;
+    // The live setup exists (no setup: the Welcome screen).
+    in property <bool> has-setup;
+    in property <string> setup-name;
+    in property <int> canvas-width: 1920;
+    in property <int> canvas-height: 1080;
+    // Recording or streaming (the program monitor gets its teal frame).
+    in property <bool> live;
+
+    // ---- Scenes: on air, in preview (Studio Mode), and the one whose
+    // items are edited (the preview's in Studio Mode, else the one on air).
+    in property <string> on-air-scene;
+    in property <string> preview-scene;
+    in property <string> editing-scene;
+    in-out property <bool> studio;
+
+    // ---- The selected scene item (in `editing-scene`), by its key path
+    // ("" for none). Areas select through `select`.
+    in property <string> selected-item;
+    // The selected item's source id ("" for a nested scene or none), its
+    // name and kind label: for the source toolbar, Properties, Filters.
+    in property <string> selected-source;
+    in property <string> selected-name;
+    in property <string> selected-kind;
+    // Its icon, by name (`Icons.named`).
+    in property <string> selected-icon;
+
+    // ---- One dialog at a time: its kind ("" for none) and what it is for
+    // (a source id, a settings tab…). Kinds: create-source (arg: source
+    // kind), properties, filters, rename (arg: source id), transform,
+    // advanced-audio, transition (arg: transition kind), settings (arg:
+    // tab), about. Areas show theirs with `if Ui.dialog == "…"`.
+    in-out property <string> dialog;
+    in-out property <string> dialog-arg;
+    // The first run is showing over the window.
+    in-out property <bool> onboarding;
+
+    // ---- The layout (per viewer; the app keeps it between runs)
+    in-out property <bool> show-source-toolbar: true;
+    in-out property <bool> show-status-bar: true;
+    in-out property <bool> show-scenes: true;
+    in-out property <bool> show-sources: true;
+    in-out property <bool> show-mixer: true;
+    in-out property <bool> show-transitions: true;
+    in-out property <bool> show-controls: true;
+    in-out property <bool> docks-locked;
+    in-out property <bool> preview-locked;
+    // "window" (as large as fits) or "canvas" (one canvas pixel to a
+    // screen pixel).
+    in-out property <string> preview-scale: "window";
+    // Canvas snapping (Settings → General): edges and centres snap within
+    // `snap-distance` screen points; ⌘ while dragging places freely.
+    in-out property <bool> snap-enabled: true;
+    in-out property <float> snap-distance: 8;
+    // The preview's frame rate (Settings → General): "canvas" (the
+    // canvas's, at most 60) or "30" (saves power; the canvas's while
+    // working on it).
+    in-out property <string> preview-rate: "canvas";
+    // The dock row's height; 0 for the default (a third of the window,
+    // 224 to 320px).
+    in-out property <length> docks-height: 0px;
+    // Widths of the docks with one (the mixer takes what's left).
+    in-out property <length> scenes-width: 210px;
+    in-out property <length> sources-width: 250px;
+    in-out property <length> transitions-width: 200px;
+    in-out property <length> controls-width: 200px;
+
+    // ---- To the app
+    // A menu command, from the menu bar or the keyboard (the ids are the
+    // web app's: settings, studio_mode, new_scene, add_source, undo, redo,
+    // transform_edit, rotate_cw, order_up, filters, properties,
+    // lock_preview, advanced_audio, source_toolbar, reset_ui, dock_scenes…).
+    callback menu(string);
+    // Select an item of the scene being edited ("" for none).
+    callback select(string);
+    // Open a dialog (kind, arg) or close the open one.
+    callback open-dialog(string, string);
+    callback close-dialog();
+    // Studio Mode on or off.
+    callback set-studio(bool);
+    // The layout changed (keep it).
+    callback layout-changed();
+    // Leave the app.
+    callback quit();
+}

@@ -1,0 +1,89 @@
+// Area B, audio: the Audio Mixer dock, Advanced Audio Properties, the
+// meters and the mixer's menus. src/areas/mixer.rs fills this.
+
+import { DropdownOption } from "../../kit.slint";
+
+export struct Strip {
+    // The source's id.
+    id: string,
+    name: string,
+    // The fader, in dB, and as written ("−12.0 dB").
+    gain-db: float,
+    gain-text: string,
+    muted: bool,
+    // Not in the program mix ("not in mix").
+    not-in-mix: bool,
+    // Heard through the monitoring device (the headphones flag), and
+    // whether only there (left out of the output).
+    monitored: bool,
+    monitor-only: bool,
+    // Its source is opening, or failed to open (and why).
+    opening: bool,
+    failed: bool,
+    error: string,
+}
+
+// A strip's meter, in dBFS after the fader: RMS, peak and the held peak,
+// smoothed (rise at once, fall ~24 and ~32 dB/s, hold 1.5 s). Apart from
+// `Strip` so a moving meter re-evaluates only the meter.
+export struct Level {
+    rms: float,
+    peak: float,
+    hold: float,
+}
+
+// A row of Advanced Audio Properties.
+export struct AudioRow {
+    id: string,
+    name: string,
+    gain-db: float,
+    muted: bool,
+    // −1 (left) to 1 (right), and as written ("C", "L20", "R100").
+    balance: float,
+    balance-text: string,
+    offset-ms: float,
+    // "off", "monitor_only" or "monitor_and_output".
+    monitor: string,
+    // In the program mix, and attached to every ISO file.
+    program: bool,
+    iso: bool,
+}
+
+export global MixerArea {
+    // ---- The dock
+    // One per audio source the mixer shows (audio-only sources, and
+    // sources with sound in the scene on air or in preview), less the
+    // hidden ones, in the setup's order.
+    in property <[Strip]> strips;
+    // Their meters, in the same order.
+    in property <[Level]> levels;
+    // How many sources the mixer would show before hiding (0: "No audio
+    // sources"; none shown: "Every audio source is hidden").
+    in property <int> source-count;
+    // The sources hidden from the mixer (per viewer, kept with the layout).
+    in-out property <[string]> hidden;
+    // A snapshot state asks this strip to open its ⋮ menu.
+    in property <string> menu-for;
+    in property <int> menu-index;
+    in property <int> menu-serial;
+
+    // A fader moving (dB), where it ended, and its double-click (0 dB).
+    callback gain-moved(string, float);
+    callback gain-changed(string, float);
+    callback gain-reset(string);
+    callback toggle-mute(string);
+
+    // ---- Advanced Audio Properties: every audio source.
+    in property <[AudioRow]> rows;
+    in property <[DropdownOption]> monitoring;
+    // ISO recording is on (the ISO boxes are faint when it isn't).
+    in property <bool> iso-enabled;
+    callback set-gain(string, float);
+    callback set-muted(string, bool);
+    callback balance-moved(string, float);
+    callback balance-changed(string, float);
+    callback set-offset(string, float);
+    callback set-monitor(string, string);
+    callback set-program(string, bool);
+    callback set-iso(string, bool);
+}

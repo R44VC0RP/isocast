@@ -1,0 +1,190 @@
+[package]
+name = "isocast-platform-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "macOS back end for Isocast: host clock, CoreVideo frames, AVFoundation file writing."
+
+[target.'cfg(target_os = "macos")'.dependencies]
+anyhow = "1.0.104"
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
+isocast-engine = { path = "../isocast-engine" }
+isocast-protocol = { path = "../isocast-protocol" }
+isocast-surfaces = { path = "../isocast-surfaces", features = ["wgpu"] }
+base64 = "0.22.1"
+libc = "0.2"
+# The Keychain (stream keys). Already in the build through native-tls.
+security-framework = "3.7.0"
+objc2 = { version = "0.6.5", features = ["exception"] }
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLPixelFormat", "MTLResource", "MTLTexture", "objc2-io-surface"] }
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSAppearance",
+    "NSApplication",
+    "NSColor",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImageRep",
+    "NSImage",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSView",
+    "NSWindow",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-app-kit",
+    "objc2-core-foundation",
+    "WKNavigation",
+    "WKPreferences",
+    "WKScriptMessage",
+    "WKScriptMessageHandler",
+    "WKSnapshotConfiguration",
+    "WKUserContentController",
+    "WKUserScript",
+    "WKWebView",
+    "WKWebViewConfiguration",
+] }
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "dispatch2",
+    "objc2-core-foundation",
+    "objc2-core-media",
+    "objc2-core-video",
+    "AVAsset",
+    "AVAssetReader",
+    "AVAssetReaderOutput",
+    "AVAssetTrack",
+    "AVAssetWriter",
+    "AVAssetWriterInput",
+    "AVCaptureAudioDataOutput",
+    "AVCaptureDevice",
+    "AVCaptureInput",
+    "AVCaptureOutputBase",
+    "AVCaptureSession",
+    "AVCaptureVideoDataOutput",
+    "AVMediaFormat",
+    "AVVideoSettings",
+] }
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "AVAudioSettings"] }
+objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "AUComponent",
+    "AudioCodec",
+    "AudioComponent",
+    "AudioConverter",
+    "AudioOutputUnit",
+    "AudioUnitProperties",
+    "objc2-core-audio-types",
+] }
+objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware"] }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFBase",
+    "CFCGTypes",
+    "CFData",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+    "CFUUID",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+    "CGDirectDisplay",
+    "CGDisplayStream",
+    "CGDisplayConfiguration",
+    "CGError",
+    "CGWindow",
+    "libc",
+] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-audio-types",
+    "objc2-core-video",
+    "CMBase",
+    "CMBlockBuffer",
+    "CMFormatDescription",
+    "CMSampleBuffer",
+    "CMSync",
+    "CMTime",
+    "CMTimeRange",
+] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVPixelBufferIOSurface",
+    "CVPixelBufferPool",
+    "CVMetalTexture",
+    "CVMetalTextureCache",
+    "CVReturn",
+    "objc2",
+    "objc2-io-surface",
+    "objc2-metal",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "NSArray",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSError",
+    "NSNotification",
+    "NSOperation",
+    "NSObject",
+    "NSString",
+    "NSURL",
+    "NSValue",
+    "NSRunLoop",
+    "NSPort",
+    "NSTimer",
+    "NSDate",
+    "NSGeometry",
+    "NSURLRequest",
+    "NSKeyValueCoding",
+] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-graphics",
+    "objc2-core-media",
+    "objc2-core-video",
+    "VTCompressionProperties",
+    "VTCompressionSession",
+    "VTErrors",
+    "VTPixelTransferSession",
+    "VTSession",
+    "VTUtilities",
+    "VTVideoEncoderList",
+] }
+objc2-image-io = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-graphics",
+    "CGImageDestination",
+] }
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "dispatch2",
+    "libc",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-core-media",
+    "SCShareableContent",
+    "SCStream",
+] }

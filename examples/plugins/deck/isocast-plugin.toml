@@ -1,0 +1,24 @@
+# A Stream Deck-style controller: a page on 127.0.0.1 with a button per
+# scene, Record, Marker and Split, driving isocastd over its method table.
+# Plain Python, standard library only, to show that a plugin can be written
+# in any language. Install it with:
+#
+#   isocast plugin add examples/plugins/deck --allow
+#
+# then open the address it prints in its log (`isocast plugin list` says
+# where the log is).
+id = "deck"
+name = "Deck"
+version = "0.1.0"
+api = 1
+description = "Stream Deck-style buttons for scenes, Record, Marker and Split, on a local page."
+license = "MIT OR Apache-2.0"
+
+[permissions]
+# Exactly what it calls: it reads the setup and what is on air, follows
+# events, and switches scenes, marks, splits, starts and stops.
+methods = ["get", "status", "watch", "switch_scene", "marker", "split", "start", "stop"]
+
+[process]
+command = ["python3", "deck.py"]
+autostart = true

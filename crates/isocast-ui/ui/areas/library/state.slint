@@ -1,0 +1,44 @@
+// Area F, scene collections and profiles (P.2): the menu bar's Profile and
+// Scene Collection menus, as OBS has them, and their dialogs. New,
+// Duplicate, Rename and Remove act on the one in use; Import adds one from
+// a file; Export writes the one in use to a file; below them, every one in
+// the library, the one in use checked. src/areas/library.rs fills this.
+
+// A scene collection or profile in the library, as the menus list it.
+export struct LibraryRow {
+    id: string,
+    name: string,
+    // The one in use (checked).
+    current: bool,
+    // Its file can't be read, so it can't be switched to.
+    problem: bool,
+}
+
+export global LibraryArea {
+    // Replaced whole whenever the library changes (and after a choice), so
+    // each entry's check mark follows `current`.
+    in property <[LibraryRow]> collections;
+    in property <[LibraryRow]> profiles;
+    // The engine has a library (one from before P.1 doesn't).
+    in property <bool> available;
+    // One is in use (Duplicate, Rename, Export), and another can take its
+    // place (Remove).
+    in property <bool> has-collection;
+    in property <bool> has-profile;
+    in property <bool> can-remove-collection;
+    in property <bool> can-remove-profile;
+
+    // ---- New, Duplicate, Rename ("library-name", arg: KIND:MODE)
+    in property <string> name-title;
+    in property <string> name-heading;
+    in-out property <string> name;
+    // ---- Remove ("library-remove", arg: KIND)
+    in property <string> remove-title;
+    in property <string> remove-heading;
+    in property <string> remove-note;
+
+    // An entry of a menu's list: kind ("collection" or "profile"), id.
+    callback switch-to(string, string);
+    callback name-accept();
+    callback remove-accept();
+}

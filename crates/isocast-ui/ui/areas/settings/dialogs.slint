@@ -1,0 +1,118 @@
+// Area D's dialogs: Settings ("settings", arg: the tab) and About Isocast
+// ("about", with the About Slint notice the royalty-free licence asks
+// for). Put on the window by app.slint.
+
+import { AboutSlint } from "std-widgets.slint";
+import { Theme } from "../../theme.slint";
+import { BrandMark } from "../../icons.slint";
+import { Ui } from "../../state.slint";
+import { Dialog, Hairline, NavList, ScrollArea } from "../../kit.slint";
+import { SettingsArea } from "state.slint";
+import { SetPage } from "parts.slint";
+import { AdvancedPage, AudioPage, GeneralPage, HotkeysPage, OutputPage, StreamPage, VideoPage } from "pages.slint";
+
+export component SettingsDialogs inherits Rectangle {
+    in property <string> version;
+
+    if Ui.dialog == "settings": Dialog {
+        title: "Settings";
+        dialog-width: 940px;
+        dialog-height: 680px;
+        ok-text: "OK";
+        cancel-text: "Cancel";
+        apply-text: "Apply";
+        apply-enabled: SettingsArea.dirty && !SettingsArea.applying;
+        ok-enabled: !SettingsArea.applying;
+        accepted => { SettingsArea.ok(); }
+        cancelled => { SettingsArea.cancel(); }
+        applied => { SettingsArea.apply(); }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+            NavList {
+                label: "Settings";
+                tabs: SettingsArea.tabs;
+                current <=> SettingsArea.tab;
+                selected(id) => {
+                    pages.scroll-to-top();
+                    SettingsArea.tab-chosen(id);
+                }
+            }
+            pages := ScrollArea {
+                horizontal-stretch: 1;
+                if !SettingsArea.has-draft: SetPage {
+                    Text {
+                        text: "Set up your first scene to change its settings.";
+                        color: Theme.text-2;
+                    }
+                }
+                if SettingsArea.has-draft && SettingsArea.tab == "general": GeneralPage { }
+                if SettingsArea.has-draft && SettingsArea.tab == "stream": StreamPage { }
+                if SettingsArea.has-draft && SettingsArea.tab == "output": OutputPage { }
+                if SettingsArea.has-draft && SettingsArea.tab == "audio": AudioPage { }
+                if SettingsArea.has-draft && SettingsArea.tab == "video": VideoPage { }
+                if SettingsArea.has-draft && SettingsArea.tab == "hotkeys": HotkeysPage { }
+                if SettingsArea.has-draft && SettingsArea.tab == "advanced": AdvancedPage { }
+            }
+        }
+    }
+
+    if Ui.dialog == "about": Dialog {
+        title: "About Isocast";
+        dialog-width: 460px;
+        ok-text: "OK";
+        cancel-text: "";
+        accepted => { Ui.close-dialog(); }
+        cancelled => { Ui.close-dialog(); }
+
+        VerticalLayout {
+            padding-top: Theme.space-5;
+            padding-bottom: Theme.space-5;
+            padding-left: Theme.space-5;
+            padding-right: Theme.space-5;
+            spacing: Theme.space-4;
+
+            HorizontalLayout {
+                spacing: Theme.space-3;
+                BrandMark {
+                    size: 48px;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: "Isocast";
+                        font-family: Theme.font-brand;
+                        font-size: Theme.fs-display;
+                        font-weight: Theme.weight-semibold;
+                        letter-spacing: Theme.tracking-display;
+                        color: Theme.text;
+                    }
+                    Text {
+                        text: "Version " + root.version + " · MIT OR Apache-2.0";
+                        color: Theme.text-2;
+                        font-size: Theme.fs-sm;
+                        letter-spacing: Theme.tracking-sm;
+                    }
+                }
+            }
+            Text {
+                text: "Scenes and sources, an ISO file per source, and full control from the command line and MCP.";
+                color: Theme.text-2;
+                wrap: word-wrap;
+            }
+            Hairline { }
+            Text {
+                text: "The interface is built with Slint, used under its royalty-free licence:";
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading-sm;
+                wrap: word-wrap;
+            }
+            AboutSlint {
+                height: 110px;
+            }
+        }
+    }
+}

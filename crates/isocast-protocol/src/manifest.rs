@@ -1,0 +1,99 @@
+//! The session manifest: what a recording session wrote, on one clock.
+//!
+//! Every session writes `<date> <time>.session.json` next to its files. Each
+//! file's `start_offset_seconds` places it on the session timeline, so an
+//! editor can line the files up exactly without syncing by audio. The
+//! manifest is written when the session starts, again once every file has
+//! started, and when it ends, so it survives a crash.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+/// The manifest format version.
+pub const MANIFEST_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionManifest {
+    /// Manifest format version. Currently 1.
+    pub version: u32,
+    /// The setup's name.
+    pub setup: String,
+    pub status: SessionStatus,
+    /// Local wall-clock time of the session timeline's zero, RFC 3339.
+    pub started_at: String,
+    /// Host clock (`mach_absolute_time`, in nanoseconds) at the timeline's
+    /// zero. Comparable between sessions recorded in the same boot.
+    pub host_time_ns: i64,
+    /// Length of the session timeline; absent while recording.
+    pub duration_seconds: Option<f64>,
+    pub files: Vec<ManifestFile>,
+    /// Markers added while recording, in order.
+    #[serde(default)]
+    pub markers: Vec<Marker>,
+    /// The scene on air from each time on, starting with the scene at the
+    /// start of the session.
+    #[serde(default)]
+    pub scenes: Vec<SceneChange>,
+    /// Problems during recording.
+    pub errors: Vec<String>,
+}
+
+/// A labelled moment on the session timeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Marker {
+    pub time_seconds: f64,
+    pub label: String,
+}
+
+/// A switch to `scene` (an id) at a moment on the session timeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SceneChange {
+    pub time_seconds: f64,
+    pub scene: String,
+    /// How it came on air, unless it was a cut (it is fully on air at
+    /// `time_seconds` plus the duration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<crate::Transition>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    /// Still recording, or the process ended without finishing (a crash).
+    Recording,
+    Complete,
+    /// Finished, but with errors; see `errors`.
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ManifestFile {
+    /// File name, in the manifest's folder.
+    pub path: String,
+    /// The id of the video source recorded in the file.
+    pub source: String,
+    /// The source's kind, like `camera` or `display`.
+    pub kind: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    /// Audio tracks in order, after the video track.
+    pub audio: Vec<ManifestAudio>,
+    /// Where the file's first frame sits on the session timeline; absent
+    /// until the file has started.
+    pub start_offset_seconds: Option<f64>,
+    /// Absent until the file is finished.
+    pub duration_seconds: Option<f64>,
+    pub frames: Option<u64>,
+    /// Explicit tail repeats included in `frames`, without hiding drops.
+    pub repeated_frames: Option<u64>,
+    pub dropped_frames: Option<u64>,
+    pub audio_dropouts: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ManifestAudio {
+    /// The id of the audio source.
+    pub source: String,
+    pub channels: u32,
+}

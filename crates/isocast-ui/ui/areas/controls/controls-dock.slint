@@ -1,0 +1,72 @@
+// The Controls dock (docs/design.md 3.19): Start/Stop Streaming, Start/Stop
+// Recording (with Marker and Split beside it while recording), Studio
+// Mode, Settings, Exit; full-width 28px buttons 4px apart.
+
+import { Theme } from "../../theme.slint";
+import { Icons } from "../../icons.slint";
+import { Ui } from "../../state.slint";
+import { Button, ButtonVariant, Dock } from "../../kit.slint";
+import { ControlsArea } from "state.slint";
+
+export component ControlsDock inherits Dock {
+    property <bool> streaming: ControlsArea.stream-state == "live" || ControlsArea.stream-state == "connecting" || ControlsArea.stream-state == "reconnecting";
+    property <bool> recording: ControlsArea.record-state == "recording";
+
+    title: "Controls";
+
+    VerticalLayout {
+        vertical-stretch: 1;
+        padding-top: Theme.space-2;
+        padding-bottom: Theme.space-2;
+        padding-left: Theme.pane-x;
+        padding-right: Theme.pane-x;
+        spacing: Theme.space-1;
+        alignment: start;
+
+        Button {
+            text: ControlsArea.stream-state == "connecting" ? "Connecting…" : ControlsArea.stream-state == "reconnecting" ? "Reconnecting…" : root.streaming ? "Stop Streaming" : "Start Streaming";
+            variant: ControlsArea.stream-state == "reconnecting" ? ButtonVariant.live-warn : root.streaming ? ButtonVariant.live : ButtonVariant.secondary;
+            enabled: Ui.has-setup && !ControlsArea.busy-stream;
+            clicked => { ControlsArea.toggle-stream(); }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-1;
+            Button {
+                horizontal-stretch: 1;
+                text: ControlsArea.record-state == "starting" ? "Starting…" : ControlsArea.record-state == "stopping" ? "Stopping…" : root.recording ? "Stop Recording" : "Start Recording";
+                variant: root.recording || ControlsArea.record-state == "starting" ? ButtonVariant.live : ButtonVariant.secondary;
+                enabled: Ui.has-setup && !ControlsArea.busy-record;
+                clicked => { ControlsArea.toggle-record(); }
+            }
+            if root.recording: Button {
+                width: Theme.control-h;
+                icon: Icons.flag;
+                accessible-name: "Marker";
+                tooltip: "Add a marker at this moment";
+                clicked => { ControlsArea.marker(""); }
+            }
+            if root.recording: Button {
+                width: Theme.control-h;
+                icon: Icons.scissors;
+                accessible-name: "Split";
+                tooltip: "Split: end these files at the next whole second and carry on in new ones";
+                clicked => { ControlsArea.split(); }
+            }
+        }
+        Button {
+            text: "Studio Mode";
+            checked: Ui.studio;
+            toggle: true;
+            enabled: Ui.has-setup;
+            clicked => { Ui.set-studio(!Ui.studio); }
+        }
+        Button {
+            text: "Settings";
+            clicked => { Ui.open-dialog("settings", ""); }
+        }
+        Button {
+            text: "Exit";
+            clicked => { Ui.quit(); }
+        }
+    }
+}

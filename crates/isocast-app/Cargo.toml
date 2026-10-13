@@ -1,0 +1,101 @@
+[package]
+name = "isocast-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Isocast desktop app: a native window hosting the web interface, a thin client of isocastd."
+
+# Not "Isocast": on a case-insensitive disk it would overwrite the CLI's
+# `isocast`. The app bundle names it Isocast (scripts/app-dev.sh).
+[[bin]]
+name = "isocast-app"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+base64 = "0.22.1"
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
+isocast-client = { path = "../isocast-client" }
+isocast-protocol = { path = "../isocast-protocol" }
+serde_json = "1.0.154"
+objc2 = { version = "0.6.5", features = ["exception"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSAppearance",
+    "NSApplication",
+    "NSBitmapImageRep",
+    "NSButton",
+    "NSCell",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSImageRep",
+    "NSMenu",
+    "NSMenuItem",
+    "NSOpenPanel",
+    "NSPanel",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSSavePanel",
+    "NSScreen",
+    "NSView",
+    "NSWindow",
+    "NSWorkspace",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "NSArray",
+    "NSData",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSError",
+    "NSGeometry",
+    "NSNotification",
+    "NSObject",
+    "NSString",
+    "NSTimer",
+    "NSDate",
+    "NSRunLoop",
+    "NSURL",
+    "NSURLRequest",
+    "NSURLResponse",
+    "NSUserDefaults",
+    "NSValue",
+    "NSKeyValueCoding",
+    "NSProcessInfo",
+] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-app-kit",
+    "objc2-core-foundation",
+    "WKContentWorld",
+    "WKNavigation",
+    "WKNavigationDelegate",
+    "WKPreferences",
+    "WKScriptMessage",
+    "WKScriptMessageHandlerWithReply",
+    "WKSnapshotConfiguration",
+    "WKURLSchemeHandler",
+    "WKURLSchemeTask",
+    "WKUserContentController",
+    "WKUserScript",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKWebsiteDataStore",
+] }

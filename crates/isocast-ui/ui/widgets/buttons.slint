@@ -1,0 +1,297 @@
+// Buttons (docs/design.md 3.5): four variants plus the live states of the
+// Controls dock, three sizes, and the icon-only buttons of toolbars and
+// rows. One primary button per surface (OK, Close, Continue, Transition…).
+
+import { Theme, Motion } from "../theme.slint";
+import { Icon, Icons } from "../icons.slint";
+import { FocusRing } from "focus.slint";
+import { Tip } from "tooltip.slint";
+
+export enum ButtonVariant {
+    // Bordered, on `control`: the default.
+    secondary,
+    // Copper fill, white label: OK, Close, Continue, Create setup,
+    // Transition, Try again.
+    primary,
+    // No border or fill until hovered: toolbars, helpers, toast actions.
+    quiet,
+    // Secondary, with a red label (a destructive action that isn't live).
+    danger,
+    // Red fill: a running control (Stop Recording, Stop Streaming).
+    live,
+    // Amber fill: a live control that is struggling (Reconnecting…).
+    live-warn,
+}
+
+export enum ControlSize {
+    // 24px: the source toolbar, dock toolbars, toast actions, quick
+    // transitions, dialog helpers.
+    small,
+    // 28px.
+    regular,
+    // 32px, 13px type: onboarding, Welcome, the full-window states.
+    large,
+}
+
+export component Button inherits Rectangle {
+    in property <string> text;
+    // A leading icon (`Icons.*`), drawn at 14px.
+    in property <string> icon;
+    in property <ButtonVariant> variant: ButtonVariant.secondary;
+    in property <ControlSize> size: ControlSize.regular;
+    in property <bool> enabled: true;
+    // A toggle that is on (Studio Mode): copper tint and edge, copper label.
+    in property <bool> checked;
+    // Tell screen readers it is a toggle (with `checked`).
+    in property <bool> toggle;
+    // Looks pressed while the menu it opened is showing.
+    in property <bool> menu-open;
+    // In a dialog's footer: at least 80px wide.
+    in property <bool> footer;
+    // Where the label sits when the button is wider than it (full-width
+    // controls keep it centred).
+    in property <LayoutAlignment> content-alignment: LayoutAlignment.center;
+    in property <int> font-weight: Theme.weight-medium;
+    in property <string> tooltip;
+    // What screen readers say, if not `text` (an icon-only button).
+    in property <string> accessible-name;
+    out property <bool> has-focus: fs.has-focus;
+    out property <bool> has-hover: ta.has-hover;
+    callback clicked();
+
+
+    forward-focus: fs;
+    property <bool> keyboard;
+    property <bool> hovered: ta.has-hover && root.enabled;
+    property <bool> pressed: (ta.pressed && root.enabled) || root.menu-open;
+    property <color> fill: root.checked ? Theme.accent-soft
+        : root.variant == ButtonVariant.primary ? (root.pressed ? Theme.accent-fill-active : root.hovered ? Theme.accent-fill-hover : Theme.accent-fill)
+        : root.variant == ButtonVariant.quiet ? (root.pressed ? Theme.control-hover : root.hovered ? Theme.hover : transparent)
+        : root.variant == ButtonVariant.live ? (root.pressed ? Theme.danger-fill-active : root.hovered ? Theme.danger-fill-hover : Theme.danger-fill)
+        : root.variant == ButtonVariant.live-warn ? Theme.warning
+        : (root.pressed ? Theme.control-active : root.hovered ? Theme.control-hover : Theme.control);
+    property <color> edge: root.checked ? Theme.accent
+        : root.variant == ButtonVariant.primary || root.variant == ButtonVariant.quiet ? transparent
+        : root.variant == ButtonVariant.live || root.variant == ButtonVariant.live-warn ? root.fill
+        : Theme.line-strong;
+    property <color> ink: root.checked ? Theme.accent-text
+        : root.variant == ButtonVariant.primary || root.variant == ButtonVariant.live ? Theme.on-accent
+        : root.variant == ButtonVariant.live-warn ? Theme.on-warning
+        : root.variant == ButtonVariant.quiet ? (root.hovered || root.pressed ? Theme.text : Theme.text-2)
+        : root.variant == ButtonVariant.danger ? Theme.danger-text
+        : Theme.text;
+    property <length> pad: root.size == ControlSize.small ? Theme.space-2 : root.size == ControlSize.large ? Theme.space-4 : Theme.space-3;
+
+    height: root.size == ControlSize.small ? Theme.control-h-sm : root.size == ControlSize.large ? Theme.control-h-lg : Theme.control-h;
+    min-width: max(root.footer ? 80px : 0px, content.min-width);
+    preferred-width: max(root.footer ? 80px : 0px, content.preferred-width);
+    border-radius: Theme.r;
+    border-width: 1px;
+    border-color: root.edge;
+    background: root.fill;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    animate background { duration: Theme.fast; easing: Motion.ease; }
+
+    accessible-role: button;
+    accessible-label: root.accessible-name != "" ? root.accessible-name : root.text;
+    accessible-enabled: root.enabled;
+    accessible-checkable: root.toggle;
+    accessible-checked: root.checked;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    content := HorizontalLayout {
+        padding-left: root.pad;
+        padding-right: root.pad;
+        spacing: Theme.space-2;
+        alignment: root.content-alignment;
+
+        if root.icon != "": VerticalLayout {
+            alignment: center;
+            Icon {
+                path: root.icon;
+                size: Theme.icon-sm;
+                color: root.ink;
+            }
+        }
+        label := Text {
+            text: root.text;
+            color: root.ink;
+            font-size: root.size == ControlSize.large ? Theme.fs : Theme.fs-sm;
+            letter-spacing: Theme.tracking-for(root.size == ControlSize.large ? Theme.fs : Theme.fs-sm);
+            font-weight: root.font-weight;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+    }
+
+    FocusRing {
+        shown: fs.has-focus && root.keyboard;
+    }
+
+    if root.tooltip != "": Tooltip {
+        Tip { text: root.tooltip; }
+    }
+}
+
+// A square button with only an icon: 28px, or 24px (`small`) in rows,
+// dock toolbars and the mixer. Its label is the tooltip and what screen
+// readers say.
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> small;
+    in property <length> icon-size: Theme.icon;
+    in property <bool> enabled: true;
+    // On (a toggle that is set): the icon in `on-color`.
+    in property <bool> on;
+    in property <color> on-color: Theme.accent-text;
+    // The icon in red (a muted strip's speaker).
+    in property <bool> danger;
+    // Looks pressed while the menu it opened is showing.
+    in property <bool> menu-open;
+    // Turns its icon (a refresh while it works).
+    in property <bool> spinning;
+    // Show the label as a tooltip.
+    in property <bool> show-tooltip: true;
+    // Screen readers: a toggle (with `on` as its state).
+    in property <bool> toggle;
+    out property <bool> has-focus: fs.has-focus;
+    out property <bool> has-hover: ta.has-hover;
+    callback clicked();
+
+
+    forward-focus: fs;
+    property <bool> keyboard;
+    property <bool> hovered: ta.has-hover && root.enabled;
+    property <bool> pressed: (ta.pressed && root.enabled) || root.menu-open;
+
+    width: root.small ? Theme.icon-button-sm : Theme.icon-button;
+    height: self.width;
+    border-radius: Theme.r;
+    background: root.pressed ? Theme.control-active : root.hovered ? Theme.control-hover : transparent;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    animate background { duration: Theme.fast; easing: Motion.ease; }
+
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-checkable: root.toggle;
+    accessible-checked: root.on;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        path: root.icon;
+        size: root.icon-size;
+        color: root.danger ? Theme.danger-text : root.on ? root.on-color : root.hovered || root.pressed ? Theme.text : Theme.text-2;
+        transform-rotation: root.spinning ? (animation-tick() / 800ms) * 360deg : 0deg;
+    }
+
+    FocusRing {
+        shown: fs.has-focus && root.keyboard;
+    }
+
+    if root.show-tooltip && root.label != "": Tooltip {
+        Tip { text: root.label; }
+    }
+}
+
+// A text button in copper with an underline (the web's `.link`).
+export component LinkButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    forward-focus: fs;
+    property <bool> keyboard;
+
+    min-width: label.preferred-width;
+    preferred-width: label.preferred-width;
+    height: label.preferred-height;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.clicked(); }
+
+    label := Text {
+        text: root.text;
+        color: Theme.accent-text;
+        font-weight: Theme.weight-medium;
+        accessible-role: none;
+    }
+    Rectangle {
+        y: label.preferred-height - 2px;
+        height: 1px;
+        background: Theme.accent-text;
+    }
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    FocusRing {
+        shown: fs.has-focus && root.keyboard;
+    }
+}

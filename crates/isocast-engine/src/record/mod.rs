@@ -1,0 +1,1251 @@
+//! Recording sessions: start the sources a setup needs, write one file per
+//! ISO source on the shared clock, and stop cleanly.
+
+use std::any::Any;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc::{self, SyncSender};
+use std::thread;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Local, SecondsFormat};
+use isocast_protocol::manifest::{
+    MANIFEST_VERSION, ManifestAudio, ManifestFile, Marker, SceneChange, SessionManifest,
+    SessionStatus,
+};
+use isocast_protocol::{
+    AudioSettings, Container, Filter, PROGRAM, PanLaw, Setup, Transition, TransitionKind,
+};
+
+pub use isocast_protocol::api::{
+    AudioLevel, CaptureReport, DiskReport, FileReport, LiveFile, LiveStatus, Report,
+};
+
+use crate::audio_filter::LiveAudioFilters;
+
+mod disk;
+mod engine;
+mod file;
+mod frame_stream;
+mod iso_frames;
+mod mix;
+mod monitor;
+mod program;
+mod scenes;
+mod shared_frames;
+mod timings;
+
+pub use engine::{Engine, EngineEvent, JpegFrame, OnEngineEvent, ProgramTap};
+pub use frame_stream::{FeedRate, FrameFeed};
+pub use shared_frames::{DEFAULT_SLOTS, SharedControl, SharedEvent, SharedFeed};
+
+use crate::source::{AUDIO_CHUNK, FrameSlot};
+use crate::{
+    AudioTrackSpec, BrowserControl, FileWriter, Platform, SAMPLE_RATE, Time, VideoTrackSpec,
+    WriterSpec,
+};
+
+/// How far ahead of "now" the session clock starts, so every source and
+/// writer is running when the first frame is due.
+const START_DELAY: Duration = Duration::from_millis(200);
+/// How long to wait for every capture's first frame before the session
+/// clock starts. Cameras can take a moment to warm up; waiting lets every
+/// file start together.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(3);
+/// The shortest a recording stopped just after it started gets, so every
+/// file it announced holds something.
+const MIN_TAKE: Duration = Duration::from_secs(1);
+/// How much faster than the estimated data rate a disk should test, so it
+/// keeps up when its speed dips.
+const SPEED_MARGIN: f64 = 2.0;
+/// How far ahead a split is scheduled, so the next take's files exist in
+/// time.
+const SPLIT_LEAD: Duration = Duration::from_millis(500);
+/// How far ahead a [`SplitTiming::Soonest`] split is scheduled. The next
+/// take's files already exist when it is timed, and every frame and audio
+/// buffer a file has received is stamped before "now", so this only has to
+/// cover the moment it takes to hand the split to each file's writer.
+const SPLIT_SOON_LEAD: Duration = Duration::from_millis(250);
+/// How long a switch waits for a stinger video the setup only just gained
+/// to load.
+const STINGER_WAIT: Duration = Duration::from_secs(2);
+/// How long, in capture time, a file a split ended stays open for its last
+/// audio, which can arrive after the next take's first frame.
+const SPLIT_AUDIO_WAIT: Duration = Duration::from_millis(500);
+/// How often live status is reported.
+const STATUS_INTERVAL: Duration = Duration::from_secs(1);
+/// How overdue a frame must be before live status counts it as dropped
+/// even though no newer frame has arrived.
+const STALL_AFTER: Duration = Duration::from_secs(1);
+/// How often free space is checked while recording.
+const SPACE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// A recording stops cleanly when free space falls below
+/// `recording.keep_free_gb`, or below this many seconds of its files at
+/// their highest likely data rate (and [`MIN_FREE_BYTES`]) if that is more,
+/// so that a reserve of 0 still leaves room to finish every file.
+const MIN_FREE_SECONDS: f64 = 10.0;
+const MIN_FREE_BYTES: f64 = 64e6;
+/// Packets a file writer may fall behind before its sources drop for it.
+const QUEUE_DEPTH: usize = 64;
+/// Audio chunks the program mixer may hold before its sources drop for it.
+const MIX_QUEUE_DEPTH: usize = 512;
+/// Audio timestamps within this many samples (2 ms) of where the track
+/// already is are treated as continuous; beyond it, gaps are filled with
+/// silence and overlaps are trimmed.
+const AUDIO_JITTER: i64 = SAMPLE_RATE as i64 / 500;
+/// How long after the session ends audio captures keep delivering, so the
+/// last chunks before the end still arrive.
+const AUDIO_TAIL: Duration = Duration::from_millis(150);
+/// Audio held for a file that has not received its first frame yet.
+const MAX_PENDING_AUDIO: usize = 500;
+
+pub struct RecordOptions<'a> {
+    /// Write files here instead of `recording.folder`.
+    pub folder: Option<PathBuf>,
+    /// Stop after this long. Without it, record until `stop` is set.
+    pub duration: Option<Duration>,
+    /// Set to stop recording (for example on Ctrl-C).
+    pub stop: Arc<AtomicBool>,
+    /// Called once every file is created and the sources are starting,
+    /// with the paths being written.
+    pub on_start: Option<OnStart<'a>>,
+    /// Called about once a second while recording, with live counters.
+    pub on_status: Option<OnStatus<'a>>,
+    /// Called as each take finishes (a split's take once its files are
+    /// finished, the last at the end), in take order, with its final
+    /// manifest once written.
+    pub on_take: Option<OnTake<'a>>,
+    /// Markers, scene switches and live settings from another thread.
+    pub control: Option<Arc<SessionControl>>,
+}
+
+/// Markers and scene switches for a running session, from another thread.
+/// Times are on the host clock; the manifest places them on the session
+/// timeline and is rewritten as they come in. Also gives other threads the
+/// session's newest frames.
+#[derive(Default)]
+pub struct SessionControl {
+    state: Mutex<ControlState>,
+    /// While a recording stops, complete mix blocks through its last frame
+    /// boundary may bypass the live jitter delay. Zero keeps normal pacing.
+    mix_drain_until: AtomicI64,
+    frames: Mutex<Frames>,
+    /// Each audio source's mix settings, which can change while recording.
+    audio: Mutex<BTreeMap<String, AudioSettings>>,
+    /// How balance pans sources, which can change while recording.
+    pan_law: Mutex<PanLaw>,
+    /// The browser sources' pages, by source id.
+    browsers: Mutex<BTreeMap<String, Arc<dyn BrowserControl>>>,
+    /// Each source's filters, which can change while recording.
+    filters: SourceFilters,
+    /// Each source's audio filters, which can change while recording.
+    audio_filters: Arc<LiveAudioFilters>,
+    /// How long each stinger video the session loaded plays, by file.
+    stingers: Mutex<HashMap<String, Duration>>,
+    /// Stinger videos the setup gained that are still being loaded, by
+    /// file: a switch to one waits a moment for it.
+    loading_stingers: Mutex<Vec<String>>,
+    /// Why stinger videos of the setup couldn't be loaded, by file.
+    failed_stingers: Mutex<HashMap<String, String>>,
+    /// The highest rate anyone asked to see the program at since the
+    /// program last looked (0: nobody): it is drawn at least that often
+    /// while asked, and at every canvas frame while outputs take them.
+    program_wanted: AtomicU32,
+    /// The data store text shows keys of (`data = "key"`): the daemon's,
+    /// or one of its own.
+    data: Arc<crate::data::DataStore>,
+}
+
+/// The rate a client's monitor is taken to show the program or studio
+/// mode's preview at when it doesn't say (JPEG monitors fetch at most 30 a
+/// second).
+pub(crate) const MONITOR_FPS: u32 = 30;
+
+/// How long a request for the program's picture waits for the program to
+/// draw one when it was idle (it starts at its next frame).
+const FRESH_FRAME_WAIT: Duration = Duration::from_millis(300);
+
+/// The newest frame of `slot` and its time, waiting up to
+/// [`FRESH_FRAME_WAIT`] for one if it has none.
+pub(crate) fn wait_for_frame<F: Clone>(slot: &FrameSlot<F>) -> Option<(F, Time)> {
+    let deadline = std::time::Instant::now() + FRESH_FRAME_WAIT;
+    loop {
+        if let Some(newest) = slot.newest_timed() {
+            return Some(newest);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// The filters of the sources that have any, by source id, shared with the
+/// program so changes show at once.
+pub(crate) type SourceFilters = Arc<Mutex<HashMap<String, Arc<[Filter]>>>>;
+
+/// `setup`'s sources' filters.
+fn source_filters(setup: &Setup) -> HashMap<String, Arc<[Filter]>> {
+    setup
+        .sources
+        .iter()
+        .filter(|source| !source.filters.is_empty())
+        .map(|source| (source.id.clone(), source.filters.as_slice().into()))
+        .collect()
+}
+
+/// The session's capture slots, by source id. Their frame type depends on
+/// the platform, so they are kept type-erased.
+#[derive(Default)]
+struct Frames {
+    ids: Vec<String>,
+    slots: Option<Box<dyn Any + Send + Sync>>,
+}
+
+#[derive(Default)]
+struct ControlState {
+    /// The session timeline's zero, once known.
+    epoch: Option<Time>,
+    /// When each take starts; the first at `epoch`.
+    takes: Vec<Time>,
+    markers: Vec<(Time, String)>,
+    /// Scene switches: when, to which scene, how.
+    scenes: Vec<(Time, Arc<str>, Transition)>,
+    /// When the recording ends, once known (a time limit, a stop, a full
+    /// disk): markers and switches after it aren't on its timeline.
+    end: Option<Time>,
+    /// Something was added since the manifest was last written.
+    changed: bool,
+    /// A request to split into a new take, answered with its files.
+    split: Option<(SplitTiming, mpsc::Sender<SplitReply>)>,
+    /// The recording has ended (or never ran): splits are refused at once.
+    finished: bool,
+}
+
+/// When a split's new take begins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitTiming {
+    /// At the next whole second of the session clock at least half a
+    /// second away (`split`): whole seconds lie on every file's frame grid.
+    WholeSecond,
+    /// As soon as every file can switch (`retake`, where someone is waiting
+    /// to begin again): the next moment on every file's frame grid and the
+    /// audio's sample grid at least [`SPLIT_SOON_LEAD`] away (every 1/10 s
+    /// for 60 and 30 fps files; see `split_time`).
+    Soonest,
+}
+
+/// The take a split began.
+#[derive(Debug, Clone)]
+pub struct SplitTake {
+    /// Its number in the session, from 1.
+    pub take: u32,
+    pub files: Vec<PathBuf>,
+    /// Its session manifest.
+    pub manifest: PathBuf,
+    /// When its files begin (local time), and how long after the split was
+    /// answered: frames and audio before then go to the take before.
+    pub begins_at: DateTime<Local>,
+    pub begins_in: Duration,
+}
+
+/// Why a split didn't happen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitRefused {
+    /// The recording is ending (stopping, at its time limit, or the disk
+    /// filling) or has ended, so no new take can begin in it.
+    pub ending: bool,
+    pub message: String,
+}
+
+/// What a split is answered with.
+pub type SplitReply = Result<SplitTake, SplitRefused>;
+
+impl ControlState {
+    /// The take `at` falls in (1 for the first) and its time on that
+    /// take's timeline; before the first take, 0 in take 1.
+    fn place(&self, at: Time) -> Option<(u32, f64)> {
+        let first = *self.takes.first()?;
+        let i = self
+            .takes
+            .iter()
+            .rposition(|start| *start <= at)
+            .unwrap_or(0);
+        let from = self.takes[i].max(first);
+        Some((i as u32 + 1, at.saturating_since(from).as_secs_f64()))
+    }
+
+    /// An error with where the recording ended (take and time) if it ended
+    /// before `at`.
+    fn check_end(&self, at: Time) -> Result<(), (u32, f64)> {
+        match self.end {
+            Some(end) if at >= end => Err(self.place(end).unwrap_or((1, 0.0))),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl SessionControl {
+    /// A control whose engine shows `data`'s values in bound text.
+    pub fn with_data(data: Arc<crate::data::DataStore>) -> Self {
+        Self {
+            data,
+            ..Self::default()
+        }
+    }
+
+    /// The data store bound text reads.
+    pub fn data(&self) -> &Arc<crate::data::DataStore> {
+        &self.data
+    }
+
+    /// Add a marker at `at`. Returns the take it falls in (1 for the first)
+    /// and its time on that take's timeline, or `None` before the session
+    /// clock has started (it then counts as 0 in take 1). A marker after
+    /// the recording's end isn't added: the error is where it ended.
+    pub fn marker(&self, at: Time, label: String) -> Result<Option<(u32, f64)>, (u32, f64)> {
+        let mut state = self.state.lock().unwrap();
+        state.check_end(at)?;
+        state.markers.push((at, label));
+        state.changed = true;
+        Ok(state.place(at))
+    }
+
+    /// Record that `scene` went on air at `at` with `transition`; see
+    /// [`SessionControl::marker`]. A switch after the recording's end
+    /// still changes the program, but isn't on the recording's timeline.
+    pub fn switch_scene(
+        &self,
+        at: Time,
+        scene: String,
+        transition: Transition,
+    ) -> Result<Option<(u32, f64)>, (u32, f64)> {
+        let mut state = self.state.lock().unwrap();
+        state.scenes.push((at, scene.into(), transition));
+        state.changed = true;
+        state.check_end(at)?;
+        Ok(state.place(at))
+    }
+
+    /// The recording ends at `at`, or sooner if it was already going to.
+    fn end_recording(&self, at: Time) {
+        let mut state = self.state.lock().unwrap();
+        state.end = Some(state.end.map_or(at, |end| end.min(at)));
+    }
+
+    /// Make `transition` ready to run in this session: a stinger lasts as
+    /// long as its video, which the session must have loaded (from the
+    /// setup's transitions). One the setup only just gained is waited for,
+    /// up to [`STINGER_WAIT`].
+    pub fn prepare(&self, transition: &mut Transition) -> Result<(), String> {
+        let TransitionKind::Stinger(stinger) = &transition.kind else {
+            return Ok(());
+        };
+        let waiting_since = std::time::Instant::now();
+        loop {
+            let stingers = self.stingers.lock().unwrap();
+            if let Some(length) = stingers.get(&stinger.file) {
+                transition.duration_ms = length.as_millis().clamp(1, u128::from(u32::MAX)) as u32;
+                return Ok(());
+            }
+            let loading = self
+                .loading_stingers
+                .lock()
+                .unwrap()
+                .contains(&stinger.file);
+            if loading && waiting_since.elapsed() < STINGER_WAIT {
+                drop(stingers);
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            if loading {
+                return Err(format!(
+                    "transition.file: {:?} is still loading; try again in a moment",
+                    stinger.file
+                ));
+            }
+            if let Some(reason) = self.failed_stingers.lock().unwrap().get(&stinger.file) {
+                return Err(format!(
+                    "transition.file: the stinger video {:?} couldn't be loaded ({reason}); fix \
+                     the file, or switch with another transition",
+                    stinger.file
+                ));
+            }
+            let loaded: Vec<&str> = stingers.keys().map(String::as_str).collect();
+            return Err(format!(
+                "transition.file: {:?} isn't loaded; a stinger's video must be in the live \
+                 setup's transitions (transition or scenes[].transition), which loads it; \
+                 loaded: {}",
+                stinger.file,
+                if loaded.is_empty() {
+                    "none".to_string()
+                } else {
+                    loaded.join(", ")
+                }
+            ));
+        }
+    }
+
+    /// Note the stinger videos `files` as being loaded (see
+    /// [`SessionControl::prepare`]).
+    pub(crate) fn loading_stingers(&self, files: &[String]) {
+        let mut loading = self.loading_stingers.lock().unwrap();
+        for file in files {
+            if !loading.contains(file) {
+                loading.push(file.clone());
+            }
+        }
+    }
+
+    /// The stinger videos `files` have loaded, or failed to (`failed`,
+    /// with why); those not in `wanted` (the setup's) aren't loading any
+    /// more either.
+    pub(crate) fn loaded_stingers(
+        &self,
+        files: &[String],
+        failed: HashMap<String, String>,
+        wanted: &[String],
+    ) {
+        self.loading_stingers
+            .lock()
+            .unwrap()
+            .retain(|file| !files.contains(file) && wanted.contains(file));
+        let mut failures = self.failed_stingers.lock().unwrap();
+        failures.retain(|file, _| !files.contains(file) && wanted.contains(file));
+        failures.extend(failed);
+    }
+
+    /// Ask the session to split into a new take (at `timing`), without
+    /// stopping any source. The receiver gets the new take, or why it
+    /// couldn't split; it is always answered, at once once the recording
+    /// has ended.
+    pub fn split(&self, timing: SplitTiming) -> mpsc::Receiver<SplitReply> {
+        let (tx, rx) = mpsc::channel();
+        let mut state = self.state.lock().unwrap();
+        if state.finished {
+            let _ = tx.send(Err(SplitRefused {
+                ending: true,
+                message: "the recording has stopped".into(),
+            }));
+        } else if state.split.is_some() {
+            let _ = tx.send(Err(SplitRefused {
+                ending: false,
+                message: "a split is already on its way".into(),
+            }));
+        } else {
+            state.split = Some((timing, tx));
+        }
+        rx
+    }
+
+    fn take_split(&self) -> Option<(SplitTiming, mpsc::Sender<SplitReply>)> {
+        self.state.lock().unwrap().split.take()
+    }
+
+    /// The recording has ended: a split still waiting is refused, and so is
+    /// any asked for from now on (until the next recording begins).
+    fn finish_recording(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.finished = true;
+        if let Some((_, reply)) = state.split.take() {
+            let _ = reply.send(Err(SplitRefused {
+                ending: true,
+                message: "the recording stopped before it could split".into(),
+            }));
+        }
+    }
+
+    /// Take the gain, mute, balance and audio filters of `setup`'s audio
+    /// sources, and its pan law, for the program mix (and filtered ISO
+    /// audio) from now on. Sync offsets apply from the next recording.
+    pub fn set_audio(&self, setup: &Setup) {
+        let mut audio = self.audio.lock().unwrap();
+        for source in setup.sources.iter().filter(|s| s.kind.has_audio()) {
+            audio.insert(source.id.clone(), source.audio);
+        }
+        *self.pan_law.lock().unwrap() = setup.audio.pan_law;
+        self.audio_filters.set(setup);
+    }
+
+    /// Take `setup`'s sources' filters, for the program from its next frame.
+    pub fn set_filters(&self, setup: &Setup) {
+        *self.filters.lock().unwrap() = source_filters(setup);
+    }
+
+    /// Reload browser source `id`'s page, bypassing the cache. Errors list
+    /// the session's browser sources.
+    pub fn refresh_browser(&self, id: &str) -> Result<(), String> {
+        let browsers = self.browsers.lock().unwrap();
+        match browsers.get(id) {
+            Some(page) => {
+                page.refresh();
+                Ok(())
+            }
+            None if browsers.is_empty() => Err("the recording has no browser sources".to_string()),
+            None => Err(format!(
+                "{id:?} is not a browser source of the recording; browser sources: {}",
+                browsers.keys().cloned().collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
+
+    fn audio_settings(&self, id: &str) -> Option<AudioSettings> {
+        self.audio.lock().unwrap().get(id).copied()
+    }
+
+    fn pan_law(&self) -> PanLaw {
+        *self.pan_law.lock().unwrap()
+    }
+
+    /// Ids of the video sources the session captures from devices.
+    pub fn captured(&self) -> Vec<String> {
+        self.frames.lock().unwrap().ids.clone()
+    }
+
+    /// The newest frame the session captured from source `id`, without
+    /// taking it from the recording. `F` is the platform's frame type. The
+    /// program draws only while something wants its picture, so asking for
+    /// it ([`PROGRAM`]) when it has none waits a moment for a fresh one.
+    pub fn newest_frame<F: Clone + Send + 'static>(&self, id: &str) -> Option<F> {
+        let slot = {
+            let frames = self.frames.lock().unwrap();
+            let slots = frames.slots.as_ref()?.downcast_ref::<Slots<F>>()?;
+            let (_, slot) = slots.iter().find(|(source, _)| source == id)?;
+            slot.clone()
+        };
+        if id != PROGRAM {
+            return slot.newest();
+        }
+        self.want_program(MONITOR_FPS);
+        wait_for_frame(&slot).map(|(frame, _)| frame)
+    }
+
+    /// Someone shows the program at `fps`: it is drawn at least that often
+    /// (on the canvas's frame grid) for a while.
+    pub(crate) fn want_program(&self, fps: u32) {
+        self.program_wanted.fetch_max(fps.max(1), Ordering::SeqCst);
+    }
+
+    /// The highest rate the program was asked for since this was last
+    /// called; 0 if nobody asked.
+    pub(crate) fn take_program_wanted(&self) -> u32 {
+        self.program_wanted.swap(0, Ordering::SeqCst)
+    }
+
+    fn set_frames<F: Clone + Send + 'static>(&self, slots: Slots<F>) {
+        let mut frames = self.frames.lock().unwrap();
+        frames.ids = slots.iter().map(|(id, _)| id.clone()).collect();
+        frames.slots = Some(Box::new(slots));
+    }
+
+    /// A recording starts at `epoch`: its first take, with no markers yet.
+    fn begin_recording(&self, epoch: Time) {
+        let mut state = self.state.lock().unwrap();
+        state.epoch = Some(epoch);
+        state.takes = vec![epoch];
+        state.markers.clear();
+        state.end = None;
+        state.split = None;
+        state.finished = false;
+    }
+
+    /// What the program shows at `at`: the scene of the last switch at or
+    /// before it (or the first scene put on air), and the transition from
+    /// the scene before still under way, if any.
+    fn on_air(&self, at: Time) -> Option<OnAir> {
+        let state = self.state.lock().unwrap();
+        let index = state
+            .scenes
+            .iter()
+            .rposition(|(switched, ..)| *switched <= at)
+            .unwrap_or(0);
+        let (switched, scene, transition) = state.scenes.get(index)?;
+        let mut on_air = OnAir {
+            scene: scene.clone(),
+            from: None,
+        };
+        if index > 0 && !transition.is_cut() && at >= *switched && transition.duration_ms > 0 {
+            let duration = Duration::from_millis(transition.duration_ms.into());
+            let progress = at.saturating_since(*switched).as_secs_f64() / duration.as_secs_f64();
+            if progress < 1.0 {
+                let (_, previous, _) = &state.scenes[index - 1];
+                on_air.from = Some(Changing {
+                    scene: previous.clone(),
+                    transition: transition.clone(),
+                    progress: progress as f32,
+                    began: *switched,
+                });
+            }
+        }
+        Some(on_air)
+    }
+
+    fn begin_take(&self, at: Time) {
+        self.state.lock().unwrap().takes.push(at);
+    }
+
+    fn take_changed(&self) -> bool {
+        std::mem::take(&mut self.state.lock().unwrap().changed)
+    }
+
+    /// Markers and scene switches of the take running from `from` until
+    /// `until`, on its timeline. The scene on air when it starts is at 0.
+    fn timeline(&self, from: Time, until: Time) -> (Vec<Marker>, Vec<SceneChange>) {
+        let state = self.state.lock().unwrap();
+        let seconds = |at: Time| at.saturating_since(from).as_secs_f64();
+        let markers = state
+            .markers
+            .iter()
+            .filter(|(at, _)| *at < until && (*at >= from || from == state.epoch.unwrap_or(from)))
+            .map(|(at, label)| Marker {
+                time_seconds: seconds(*at),
+                label: label.clone(),
+            })
+            .collect();
+        let on_air = state.scenes.iter().rposition(|(at, ..)| *at <= from);
+        let scenes = state
+            .scenes
+            .iter()
+            .enumerate()
+            .filter(|(i, (at, ..))| Some(*i) == on_air || (*at > from && *at < until))
+            .map(|(_, (at, scene, transition))| SceneChange {
+                time_seconds: seconds(*at),
+                scene: scene.to_string(),
+                transition: (!transition.is_cut()).then(|| transition.clone()),
+            })
+            .collect();
+        (markers, scenes)
+    }
+}
+
+/// What the program shows at one moment.
+pub(super) struct OnAir {
+    pub scene: Arc<str>,
+    /// The transition to it still under way, if any.
+    pub from: Option<Changing>,
+}
+
+/// A transition under way.
+pub(super) struct Changing {
+    /// The scene it changes from.
+    pub scene: Arc<str>,
+    pub transition: Transition,
+    /// How far it has got, 0 to 1.
+    pub progress: f32,
+    /// When it began (the switch).
+    pub began: Time,
+}
+
+/// Called with live counters while recording.
+pub type OnStatus<'a> = &'a (dyn Fn(&LiveStatus) + Sync);
+
+/// Called with the paths of the files a session is writing, and its first
+/// take's manifest.
+pub type OnStart<'a> = &'a (dyn Fn(&[PathBuf], &Path) + Sync);
+
+/// Called with a finished take's number (from 1), its manifest's path and
+/// the manifest as written.
+pub type OnTake<'a> = &'a (dyn Fn(u32, &Path, &SessionManifest) + Sync);
+
+struct FilePlan {
+    /// The take this file belongs to, from 1.
+    take: u32,
+    /// The take's timeline zero, once it is known.
+    epoch: AtomicI64,
+    source: String,
+    /// The source's kind, for the manifest.
+    kind: &'static str,
+    /// When the file's timeline starts (its first frame), published by its
+    /// writer; `i64::MIN` until then.
+    start: AtomicI64,
+    /// Live counters, published by the file's writer: frames written, and
+    /// the time of the newest frame the writer has handled (written or not).
+    frames: AtomicU64,
+    newest: AtomicI64,
+    audio_dropouts: AtomicU64,
+    audio: Vec<String>,
+    spec: WriterSpec,
+}
+
+/// Where a source sends packets for one file or output.
+type Output<F> = SyncSender<Packet<F>>;
+
+/// A frame or a chunk of audio on the session clock, on its way to a file
+/// or another output.
+pub enum Packet<F> {
+    Video {
+        frame: F,
+        pts: Time,
+    },
+    Audio {
+        track: usize,
+        samples: Arc<[f32]>,
+        pts: Time,
+    },
+}
+
+/// What the session's opened sources deliver: video size and rate, and
+/// audio channels, by source id.
+struct Formats {
+    video: BTreeMap<String, (u32, u32, u32)>,
+    audio: BTreeMap<String, u32>,
+}
+
+/// Frame slots by source id.
+type Slots<F> = Vec<(String, Arc<FrameSlot<F>>)>;
+
+/// State shared by every thread of a session.
+struct Shared {
+    epoch: Time,
+    /// When the session ends; `Time::MAX` until known.
+    end: AtomicI64,
+}
+
+impl Shared {
+    fn end(&self) -> Time {
+        Time::from_nanos(self.end.load(Ordering::SeqCst))
+    }
+
+    fn stop_at(&self, at: Time) {
+        self.end.fetch_min(at.as_nanos(), Ordering::SeqCst);
+    }
+}
+
+/// Record a session described by `setup`, blocking until it ends: its
+/// sources start, the recording runs, and they stop. Every source must
+/// start, or nothing is recorded.
+pub fn record<P: Platform>(platform: &P, setup: &Setup, options: &RecordOptions) -> Result<Report> {
+    let iso = &setup.recording.iso;
+    if !(iso.enabled && !iso.sources.is_empty()) && !setup.recording.program.enabled {
+        bail!(
+            "nothing to record: set recording.program.enabled = true, or set \
+             recording.iso.enabled = true and list video sources in recording.iso.sources"
+        );
+    }
+    let engine = Engine::start(platform, setup, options.control.clone(), None)?;
+    if let Some((_, error)) = engine.first_failure() {
+        engine.stop();
+        bail!("{error}");
+    }
+    let report = engine.record(options);
+    engine.stop();
+    report
+}
+
+/// One take: a file per ISO source and a manifest, on a timeline starting
+/// at `epoch`.
+struct Take {
+    epoch: Time,
+    started_at: DateTime<Local>,
+    manifest_path: PathBuf,
+    plans: Vec<Arc<FilePlan>>,
+    /// Each file's outcome, once it is finished.
+    results: Vec<Option<Result<FileReport>>>,
+    /// When the take ends: a split, or the end of the session.
+    end: Option<Time>,
+    /// Its final manifest has been written.
+    finalized: bool,
+    /// The final manifest, once made (for [`OnTake`]).
+    manifest: Option<SessionManifest>,
+}
+
+/// A take's files and manifest name, before it begins.
+struct TakePlan {
+    plans: Vec<Arc<FilePlan>>,
+    manifest_path: PathBuf,
+}
+
+impl Take {
+    fn begin(plan: TakePlan, epoch: Time, started_at: DateTime<Local>) -> Self {
+        for file in &plan.plans {
+            file.epoch.store(epoch.as_nanos(), Ordering::SeqCst);
+        }
+        Self {
+            epoch,
+            started_at,
+            manifest_path: plan.manifest_path,
+            results: plan.plans.iter().map(|_| None).collect(),
+            plans: plan.plans,
+            end: None,
+            finalized: false,
+            manifest: None,
+        }
+    }
+
+    fn errors(&self) -> Vec<String> {
+        self.results
+            .iter()
+            .flatten()
+            .filter_map(|r| r.as_ref().err().map(|err| format!("{err:#}")))
+            .collect()
+    }
+
+    fn status(&self, errors: &[String]) -> SessionStatus {
+        if errors.is_empty() {
+            SessionStatus::Complete
+        } else {
+            SessionStatus::Failed
+        }
+    }
+}
+
+/// The files of take `number`, named for the current time.
+fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Result<TakePlan> {
+    let iso = &setup.recording.iso;
+    let program = &setup.recording.program;
+    // The program has one track: the stereo mix of its audio sources.
+    let program_audio: Vec<String> = if program.audio.is_empty() {
+        Vec::new()
+    } else {
+        vec![PROGRAM.to_string()]
+    };
+    let audio_tracks = |ids: &[String]| -> Vec<AudioTrackSpec> {
+        ids.iter()
+            .map(|id| match id.as_str() {
+                PROGRAM => AudioTrackSpec { channels: 2 },
+                id => AudioTrackSpec {
+                    channels: formats.audio[id],
+                },
+            })
+            .collect()
+    };
+    let extension = |container| match container {
+        Container::Mov => "mov",
+        Container::Mp4 => "mp4",
+    };
+    let now = Local::now();
+    // Each file: its source, kind, size and rate, encoder and audio.
+    let mut files = Vec::new();
+    if iso.enabled {
+        for id in &iso.sources {
+            let (width, height, fps) = formats.video[id];
+            files.push((
+                file_name(&iso.filename, id, &now),
+                id.clone(),
+                setup.source(id).expect("validated").kind.label(),
+                (width, height, fps),
+                &iso.encoder,
+                &iso.audio,
+            ));
+        }
+    }
+    if program.enabled {
+        // Drawn at the canvas size; the encoder scales it to the file's.
+        let (width, height) = program.size(&setup.canvas);
+        files.push((
+            file_name(&program.filename, PROGRAM, &now),
+            PROGRAM.to_string(),
+            PROGRAM,
+            (width, height, setup.canvas.fps),
+            &program.encoder,
+            &program_audio,
+        ));
+    }
+    let names: Vec<(String, &str)> = files
+        .iter()
+        .map(|(stem, _, _, _, encoder, _)| (stem.clone(), extension(encoder.container)))
+        .collect();
+    let (paths, manifest_path) =
+        unique_paths(folder, &names, &file_name("{date} {time}", "", &now));
+    let plans = files
+        .into_iter()
+        .zip(paths)
+        .map(
+            |((_, source, kind, (width, height, fps), encoder, audio), path)| {
+                Arc::new(FilePlan {
+                    take: number,
+                    epoch: AtomicI64::new(i64::MIN),
+                    source,
+                    kind,
+                    start: AtomicI64::new(i64::MIN),
+                    frames: AtomicU64::new(0),
+                    newest: AtomicI64::new(i64::MIN),
+                    audio_dropouts: AtomicU64::new(0),
+                    audio: audio.clone(),
+                    spec: WriterSpec {
+                        path,
+                        container: encoder.container,
+                        video: VideoTrackSpec {
+                            width,
+                            height,
+                            fps,
+                            encoder: encoder.clone(),
+                        },
+                        audio: audio_tracks(audio),
+                    },
+                })
+            },
+        )
+        .collect();
+    Ok(TakePlan {
+        plans,
+        manifest_path,
+    })
+}
+
+/// The sources the program mix's audio filters duck by that it doesn't
+/// play itself.
+fn sidechain_sources(setup: &Setup) -> Vec<&str> {
+    let mix = &setup.recording.program.audio;
+    let mut out = Vec::new();
+    for id in mix {
+        let filters = setup.source(id).map_or(&[][..], |s| &s.audio_filters[..]);
+        for key in filters.iter().filter_map(|filter| filter.sidechain()) {
+            if !mix.iter().any(|m| m == key) && !out.contains(&key) {
+                out.push(key);
+            }
+        }
+    }
+    out
+}
+
+/// A writer for each file, or none if any can't be created.
+fn create_writers<P: Platform>(platform: &P, plans: &[Arc<FilePlan>]) -> Result<Vec<P::Writer>> {
+    let mut writers = Vec::new();
+    for plan in plans {
+        match platform.create_writer(&plan.spec) {
+            Ok(mut writer) => {
+                if plan.source == PROGRAM {
+                    writer.prioritize_video();
+                }
+                writers.push(writer);
+            }
+            Err(err) => {
+                writers.into_iter().for_each(FileWriter::cancel);
+                return Err(err.context(format!("could not create {}", plan.spec.path.display())));
+            }
+        }
+    }
+    Ok(writers)
+}
+
+fn sleep_until<P: Platform>(platform: &P, at: Time) {
+    let now = platform.now();
+    if at > now {
+        thread::sleep(at.saturating_since(now));
+    }
+}
+
+/// Live counters for every file. A frame counts as dropped once a newer
+/// one has reached the file, or once it is [`STALL_AFTER`] overdue (so a
+/// file that stops receiving frames shows up too).
+fn live_status(
+    plans: &[Arc<FilePlan>],
+    levels: Vec<AudioLevel>,
+    shared: &Shared,
+    now: Time,
+) -> LiveStatus {
+    let overdue = (now - STALL_AFTER).min(shared.end());
+    LiveStatus {
+        levels,
+        monitor: None,
+        elapsed_seconds: now.saturating_since(shared.epoch).as_secs_f64(),
+        disk: None,
+        files: plans
+            .iter()
+            .map(|plan| {
+                let start = plan.start.load(Ordering::SeqCst);
+                // The newest frame first: the count is at least up to it.
+                let newest = Time::from_nanos(plan.newest.load(Ordering::Acquire));
+                let frames = plan.frames.load(Ordering::Relaxed);
+                let due = if start == i64::MIN {
+                    0
+                } else {
+                    let start = Time::from_nanos(start);
+                    let fps = plan.spec.video.fps;
+                    let seen = newest.ticks_since(start, fps) + 1;
+                    seen.max(overdue.ticks_since(start, fps)).max(0) as u64
+                };
+                LiveFile {
+                    source: plan.source.clone(),
+                    frames,
+                    dropped_frames: due.saturating_sub(frames),
+                    audio_dropouts: plan.audio_dropouts.load(Ordering::Relaxed),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// A take's manifest as it stands: files that haven't finished have no
+/// duration or counts yet.
+fn take_manifest(
+    setup: &Setup,
+    take: &Take,
+    status: SessionStatus,
+    errors: &[String],
+    control: Option<&SessionControl>,
+) -> SessionManifest {
+    let finished = status != SessionStatus::Recording;
+    let plans = &take.plans;
+    // A file that failed has no report; its counters say what it holds and
+    // what it lost up to the take's end.
+    let failed = |plan: &FilePlan| {
+        let start = plan.start.load(Ordering::SeqCst);
+        let end = take.end?;
+        (start != i64::MIN).then(|| {
+            let start = Time::from_nanos(start);
+            let fps = plan.spec.video.fps;
+            let end = file::file_end(start, end.max(start), fps);
+            let frames = plan.frames.load(Ordering::SeqCst);
+            FileReport {
+                path: plan.spec.path.clone(),
+                take: plan.take,
+                source: plan.source.clone(),
+                audio: plan.audio.clone(),
+                start_offset_seconds: 0.0,
+                duration_seconds: end.saturating_since(start).as_secs_f64(),
+                frames,
+                repeated_frames: 0,
+                dropped_frames: (end.ticks_since(start, fps).max(0) as u64).saturating_sub(frames),
+                audio_dropouts: plan.audio_dropouts.load(Ordering::Relaxed),
+            }
+        })
+    };
+    let results: Vec<Option<Cow<FileReport>>> = take
+        .results
+        .iter()
+        .zip(plans)
+        .map(|(r, plan)| match r {
+            Some(Ok(report)) => Some(Cow::Borrowed(report)),
+            Some(Err(_)) => failed(plan).map(Cow::Owned),
+            None => None,
+        })
+        .collect();
+    let (markers, scenes) = control.map_or_else(Default::default, |control| {
+        control.timeline(take.epoch, take.end.unwrap_or(Time::MAX))
+    });
+    SessionManifest {
+        version: MANIFEST_VERSION,
+        setup: setup.name.clone(),
+        status,
+        started_at: take
+            .started_at
+            .to_rfc3339_opts(SecondsFormat::Millis, false),
+        host_time_ns: take.epoch.as_nanos(),
+        duration_seconds: finished.then(|| {
+            take.end
+                .unwrap_or(take.epoch)
+                .saturating_since(take.epoch)
+                .as_secs_f64()
+        }),
+        markers,
+        scenes,
+        files: plans
+            .iter()
+            .zip(results)
+            .map(|(plan, result)| {
+                let start = plan.start.load(Ordering::SeqCst);
+                ManifestFile {
+                    path: plan
+                        .spec
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    source: plan.source.clone(),
+                    kind: plan.kind.to_string(),
+                    width: plan.spec.video.width,
+                    height: plan.spec.video.height,
+                    fps: plan.spec.video.fps,
+                    audio: plan
+                        .audio
+                        .iter()
+                        .zip(&plan.spec.audio)
+                        .map(|(source, track)| ManifestAudio {
+                            source: source.clone(),
+                            channels: track.channels,
+                        })
+                        .collect(),
+                    start_offset_seconds: (start != i64::MIN).then(|| {
+                        Time::from_nanos(start)
+                            .saturating_since(take.epoch)
+                            .as_secs_f64()
+                    }),
+                    duration_seconds: result.as_ref().map(|r| r.duration_seconds),
+                    frames: result.as_ref().map(|r| r.frames),
+                    repeated_frames: result.as_ref().map(|r| r.repeated_frames),
+                    dropped_frames: result.as_ref().map(|r| r.dropped_frames),
+                    audio_dropouts: result.as_ref().map(|r| r.audio_dropouts),
+                }
+            })
+            .collect(),
+        errors: errors.to_vec(),
+    }
+}
+
+/// Write the manifest so that a reader (or a crash) never sees half of it.
+fn write_manifest(path: &Path, manifest: &SessionManifest) -> Result<()> {
+    let partial = path.with_extension("json.partial");
+    let json = serde_json::to_string_pretty(manifest)?;
+    std::fs::write(&partial, json + "\n")
+        .and_then(|()| std::fs::rename(&partial, path))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&partial);
+        })
+        .with_context(|| format!("could not write {}", path.display()))
+}
+
+/// The file recordings in a folder lock (shared) while they write there, so
+/// a manifest a killed or crashed recording left saying "recording" can be
+/// told from one still being written.
+const FOLDER_LOCK: &str = ".isocast.lock";
+
+/// What an interrupted session's manifest says about it.
+const INTERRUPTED: &str = "the recording ended without finishing: the process recording it \
+                           (isocastd or `isocast record`) was stopped or crashed; its files hold \
+                           what was written up to about 2 s before that (nothing, and won't open, \
+                           if it had run for less than about 2 s), and their durations and frame \
+                           counts are unknown";
+
+/// A recording's hold on its folder's lock, released when dropped.
+pub(crate) struct FolderLock {
+    _file: std::fs::File,
+}
+
+impl FolderLock {
+    /// Hold `folder`'s lock alongside other recordings there; `None` if the
+    /// folder can't be locked (some network shares).
+    pub(crate) fn hold(folder: &Path) -> Option<Self> {
+        let file = lock_file(folder)?;
+        file.lock_shared().ok()?;
+        Some(Self { _file: file })
+    }
+}
+
+fn lock_file(folder: &Path) -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(folder.join(FOLDER_LOCK))
+        .ok()
+}
+
+/// Session manifests in `folder` that still say "recording" although
+/// nothing records there: their recording was killed or crashed. Empty
+/// while a recording writes in the folder (it holds the lock), or if the
+/// folder can't be read or locked. With `mark`, each is rewritten as failed,
+/// saying so.
+pub fn interrupted_sessions(folder: &Path, mark: bool) -> Vec<PathBuf> {
+    let Some(lock) = lock_file(folder) else {
+        return Vec::new();
+    };
+    // Exclusive while scanning, so no recording starts writing meanwhile.
+    if lock.try_lock().is_err() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".session.json") && !name.starts_with('.'))
+        })
+        .filter_map(|path| {
+            let json = std::fs::read_to_string(&path).ok()?;
+            let mut manifest: SessionManifest = serde_json::from_str(&json).ok()?;
+            if manifest.status != SessionStatus::Recording {
+                return None;
+            }
+            if mark {
+                manifest.status = SessionStatus::Failed;
+                manifest.errors.push(INTERRUPTED.to_string());
+                write_manifest(&path, &manifest).ok()?;
+            }
+            Some(path)
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// What to tell the user about `interrupted` sessions (see
+/// [`interrupted_sessions`]), marked or not.
+pub fn interrupted_note(interrupted: &[PathBuf], marked: bool) -> Option<String> {
+    let list = interrupted
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (what, its, manifest, says, it) = match interrupted.len() {
+        0 => return None,
+        1 => (
+            "an earlier recording was".to_string(),
+            "its",
+            "manifest",
+            "says",
+            "it",
+        ),
+        n => (
+            format!("{n} earlier recordings were"),
+            "their",
+            "manifests",
+            "say",
+            "them",
+        ),
+    };
+    let what = format!(
+        "{what} interrupted (killed or crashed): {list}; {its} files play up to about 2 s \
+         before that (a take shorter than that left files that don't open)"
+    );
+    Some(match marked {
+        true => format!("{what}, and {its} {manifest} now {says} so (status \"failed\")"),
+        false => format!(
+            "{what}, but {its} {manifest} still {says} \"recording\" until the next recording \
+             in this folder marks {it} as failed"
+        ),
+    })
+}
+
+/// Fill in a file name template: {SOURCE}, {source}, {date}, {time}.
+fn file_name(template: &str, source: &str, now: &DateTime<Local>) -> String {
+    template
+        .replace("{SOURCE}", &source.to_uppercase())
+        .replace("{source}", source)
+        .replace("{date}", &now.format("%Y-%m-%d").to_string())
+        .replace("{time}", &now.format("%H-%M-%S").to_string())
+}
+
+/// Paths for every file of a session and its manifest, numbered so none of
+/// them overwrites an existing file.
+fn unique_paths(
+    folder: &Path,
+    names: &[(String, &str)],
+    manifest_stem: &str,
+) -> (Vec<PathBuf>, PathBuf) {
+    (1..)
+        .map(|n| {
+            let suffix = if n == 1 {
+                String::new()
+            } else {
+                format!(" {n}")
+            };
+            let files = names
+                .iter()
+                .map(|(stem, extension)| folder.join(format!("{stem}{suffix}.{extension}")))
+                .collect::<Vec<_>>();
+            let manifest = folder.join(format!("{manifest_stem}{suffix}.session.json"));
+            (files, manifest)
+        })
+        .find(|(files, manifest)| !manifest.exists() && files.iter().all(|p| !p.exists()))
+        .expect("some numbered name is free")
+}
+
+pub fn expand_home(folder: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match (folder.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
+            home.join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(folder),
+    }
+}

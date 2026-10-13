@@ -1,0 +1,1013 @@
+//! What the Scenes and Sources docks and their menus do to the setup (the
+//! web app's scenes.js, sources.js, lib/items.js and lib/transform.js):
+//! scenes added, duplicated, removed, moved and given a transition;
+//! items shown, locked, recorded on their own, moved in the stack,
+//! copied and pasted, removed (with their source when nothing else shows
+//! it), renamed, and transformed. Every change is an edit of the live
+//! setup (or, for structural ones, the whole setup) through `App`.
+
+use std::rc::Rc;
+
+use isocast_protocol::api::{Method, SnapshotParams};
+use isocast_protocol::{SceneItem, Setup};
+use serde_json::{Map, Value, json};
+
+use crate::ToastKind;
+use crate::app::App;
+use crate::model;
+use crate::session::EditOptions;
+use crate::toasts::Toast;
+
+// ---------- The setup as JSON ----------
+
+fn setup_json(app: &Rc<App>) -> Option<Value> {
+    app.session.borrow().setup_json().cloned()
+}
+
+fn scenes_of(setup: &Value) -> Vec<Value> {
+    setup["scenes"].as_array().cloned().unwrap_or_default()
+}
+
+fn name_of(value: &Value) -> String {
+    value["name"]
+        .as_str()
+        .or(value["id"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// What patches call an item: its id, else its source or scene.
+fn key_of(item: &Value) -> Option<&str> {
+    item["id"]
+        .as_str()
+        .or(item["source"].as_str())
+        .or(item["scene"].as_str())
+}
+
+/// The fields that identify a JSON item in a patch.
+fn identity(item: &Value) -> Value {
+    if let Some(id) = item["id"].as_str() {
+        json!({ "id": id })
+    } else if let Some(source) = item["source"].as_str() {
+        json!({ "source": source })
+    } else {
+        json!({ "scene": item["scene"] })
+    }
+}
+
+/// A patch list putting identified items in exactly this order and
+/// content: every old item removed, then every new one added.
+fn replace_list(old: &[Value], new: &[Value]) -> Vec<Value> {
+    old.iter()
+        .map(|item| {
+            let mut id = identity(item);
+            id["remove"] = json!(true);
+            id
+        })
+        .chain(new.iter().cloned())
+        .collect()
+}
+
+/// The JSON items from the top level down to `path` in scene `scene`.
+fn item_chain_json(setup: &Value, scene: &str, path: &str) -> Option<Vec<Value>> {
+    let scene = scenes_of(setup).into_iter().find(|s| s["id"] == scene)?;
+    let mut items = scene["items"].as_array().cloned().unwrap_or_default();
+    let mut chain = Vec::new();
+    for k in model::path_keys(path) {
+        let item = items.iter().find(|i| key_of(i) == Some(k))?.clone();
+        items = item["children"].as_array().cloned().unwrap_or_default();
+        chain.push(item);
+    }
+    (!chain.is_empty()).then_some(chain)
+}
+
+/// A patch changing `fields` of the item at the end of a JSON chain.
+fn item_patch_json(scene: &str, chain: &[Value], fields: Value) -> Value {
+    let Some((last, parents)) = chain.split_last() else {
+        return json!({});
+    };
+    let mut node = identity(last);
+    if let (Some(node), Value::Object(fields)) = (node.as_object_mut(), fields) {
+        node.extend(fields);
+    }
+    for parent in parents.iter().rev() {
+        let mut outer = identity(parent);
+        outer["children"] = json!([node]);
+        node = outer;
+    }
+    json!({ "scenes": [{ "id": scene, "items": [node] }] })
+}
+
+/// Remove every reference to source `id` from a setup.
+fn without_source(setup: &Value, id: &str) -> Value {
+    fn prune(items: &Value, id: &str) -> Value {
+        Value::Array(
+            items
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter(|i| i["source"] != id)
+                        .map(|i| {
+                            let mut i = i.clone();
+                            if i.get("children").is_some() {
+                                i["children"] = prune(&i["children"], id);
+                            }
+                            i
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    }
+    let drop = |list: &Value| {
+        Value::Array(
+            list.as_array()
+                .map(|l| l.iter().filter(|s| *s != id).cloned().collect())
+                .unwrap_or_default(),
+        )
+    };
+    let mut out = setup.clone();
+    out["sources"] = Value::Array(
+        setup["sources"]
+            .as_array()
+            .map(|s| s.iter().filter(|s| s["id"] != id).cloned().collect())
+            .unwrap_or_default(),
+    );
+    out["scenes"] = Value::Array(
+        scenes_of(setup)
+            .into_iter()
+            .map(|mut scene| {
+                scene["items"] = prune(&scene["items"], id);
+                scene
+            })
+            .collect(),
+    );
+    if let Some(program) = out["recording"].get_mut("program")
+        && program.get("audio").is_some()
+    {
+        program["audio"] = drop(&program["audio"]);
+    }
+    if let Some(iso) = out["recording"].get_mut("iso")
+        && iso.is_object()
+    {
+        if iso.get("sources").is_some() {
+            iso["sources"] = drop(&iso["sources"]);
+        }
+        if iso.get("audio").is_some() {
+            iso["audio"] = drop(&iso["audio"]);
+        }
+    }
+    out
+}
+
+/// Remove scene `id` and every item showing it.
+fn without_scene(setup: &Value, id: &str) -> Value {
+    fn prune(items: &Value, id: &str) -> Value {
+        Value::Array(
+            items
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter(|i| i["scene"] != id)
+                        .map(|i| {
+                            let mut i = i.clone();
+                            if i.get("children").is_some() {
+                                i["children"] = prune(&i["children"], id);
+                            }
+                            i
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    }
+    let mut out = setup.clone();
+    out["scenes"] = Value::Array(
+        scenes_of(setup)
+            .into_iter()
+            .filter(|s| s["id"] != id)
+            .map(|mut scene| {
+                scene["items"] = prune(&scene["items"], id);
+                scene
+            })
+            .collect(),
+    );
+    out
+}
+
+/// `list` with the entry at `from` moved to land before index `to`.
+pub fn moved<T: Clone>(list: &[T], from: usize, to: usize) -> Vec<T> {
+    let mut out = list.to_vec();
+    if from >= out.len() {
+        return out;
+    }
+    let item = out.remove(from);
+    let to = if to > from { to - 1 } else { to };
+    out.insert(to.min(out.len()), item);
+    out
+}
+
+// ---------- Scenes ----------
+
+/// Add Scene: "Scene N", empty, after the others, then chosen (on air,
+/// or into preview). Returns its id.
+pub fn add_scene(app: &Rc<App>) -> Option<String> {
+    let (id, name) = {
+        let s = app.session.borrow();
+        let setup = s.setup.clone()?;
+        let name = model::next_name("Scene", setup.scenes.iter().map(model::scene_name));
+        let id = model::new_id(&name, model::taken_ids(&setup));
+        (id, name)
+    };
+    let scene = id.clone();
+    app.edit_then(
+        json!({ "scenes": [{ "id": id, "name": name, "items": [] }] }),
+        EditOptions::default(),
+        move |app, applied| {
+            if applied {
+                app.choose_scene(&scene);
+            }
+        },
+    );
+    Some(id)
+}
+
+pub fn duplicate_scene(app: &Rc<App>, id: &str) -> Option<String> {
+    let setup = setup_json(app)?;
+    let mut scenes = scenes_of(&setup);
+    let index = scenes.iter().position(|s| s["id"] == id)?;
+    let names: Vec<String> = scenes.iter().map(name_of).collect();
+    let name = model::next_name(&name_of(&scenes[index]), names.iter().map(String::as_str));
+    let typed = app.session.borrow().setup.clone()?;
+    let new = model::new_id(&name, model::taken_ids(&typed));
+    let mut copy = scenes[index].clone();
+    copy["id"] = json!(new);
+    copy["name"] = json!(name);
+    scenes.insert(index + 1, copy);
+    let mut next = setup;
+    next["scenes"] = Value::Array(scenes);
+    // Switch once the daemon has the duplicate (the web app awaits it).
+    let chosen = new.clone();
+    app.replace_setup_then(next, true, move |app, applied| {
+        if applied {
+            app.choose_scene(&chosen);
+        }
+    });
+    Some(new)
+}
+
+/// Remove a scene (and every item showing it), with Undo.
+pub fn remove_scene(app: &Rc<App>, id: &str) {
+    let Some(setup) = setup_json(app) else { return };
+    let Some(scene) = scenes_of(&setup).into_iter().find(|s| s["id"] == id) else {
+        return;
+    };
+    app.replace_setup(without_scene(&setup, id), true);
+    app.show_toast(
+        Toast::new(
+            ToastKind::Info,
+            format!("Removed “{}”", name_of(&scene)),
+            "",
+        )
+        .action("Undo", move |app| {
+            app.replace_setup(setup.clone(), true);
+        }),
+    );
+}
+
+/// Move a scene in the list: "up", "down", "top" or "bottom".
+pub fn move_scene(app: &Rc<App>, id: &str, place: &str) {
+    let Some(setup) = setup_json(app) else { return };
+    let scenes = scenes_of(&setup);
+    let Some(from) = scenes.iter().position(|s| s["id"] == id) else {
+        return;
+    };
+    let to = match place {
+        "up" if from > 0 => from - 1,
+        "down" => from + 2,
+        "top" => 0,
+        "bottom" => scenes.len(),
+        _ => return,
+    };
+    move_scene_to(app, from, to);
+}
+
+/// A scene dragged from `from` to land before `to`.
+pub fn move_scene_to(app: &Rc<App>, from: usize, to: usize) {
+    let Some(mut setup) = setup_json(app) else {
+        return;
+    };
+    let scenes = scenes_of(&setup);
+    if from >= scenes.len() || to > scenes.len() || to == from || to == from + 1 {
+        return;
+    }
+    setup["scenes"] = Value::Array(moved(&scenes, from, to));
+    app.replace_setup(setup, true);
+}
+
+/// A scene's transition override (None for none).
+pub fn set_override(app: &Rc<App>, id: &str, kind: Option<&str>) {
+    let Some(setup) = setup_json(app) else { return };
+    let Some(scene) = scenes_of(&setup).into_iter().find(|s| s["id"] == id) else {
+        return;
+    };
+    let transition = match kind {
+        None => Value::Null,
+        Some(kind) => {
+            let duration = scene["transition"]["duration_ms"]
+                .as_u64()
+                .or(setup["transition"]["duration_ms"].as_u64())
+                .unwrap_or(300);
+            object_patch(
+                &scene["transition"],
+                &json!({ "kind": kind, "duration_ms": duration }),
+            )
+        }
+    };
+    app.edit(
+        json!({ "scenes": [{ "id": id, "transition": transition }] }),
+        EditOptions::default(),
+    );
+}
+
+/// A patch turning object `from` into `to` (changed fields set, missing
+/// ones nulled; nested objects recursively; lists replaced whole).
+pub fn object_patch(from: &Value, to: &Value) -> Value {
+    let empty = Map::new();
+    let from_map = from.as_object().unwrap_or(&empty);
+    let to_map = to.as_object().unwrap_or(&empty);
+    let mut out = Map::new();
+    for key in from_map.keys() {
+        if !to_map.contains_key(key) {
+            out.insert(key.clone(), Value::Null);
+        }
+    }
+    for (key, value) in to_map {
+        let old = from_map.get(key).unwrap_or(&Value::Null);
+        if old.is_object() && value.is_object() {
+            let inner = object_patch(old, value);
+            if inner.as_object().is_some_and(|o| !o.is_empty()) {
+                out.insert(key.clone(), inner);
+            }
+        } else if old != value {
+            let keyed = |l: &Value| {
+                l.as_array().is_some_and(|a| {
+                    !a.is_empty()
+                        && a.iter().all(|i| {
+                            i["id"].is_string()
+                                || i["source"].is_string()
+                                || i["scene"].is_string()
+                                || i["kind"].is_string()
+                        })
+                })
+            };
+            let merges = old.is_array()
+                && value.is_array()
+                && keyed(old)
+                && (value.as_array().is_some_and(Vec::is_empty) || keyed(value));
+            if merges {
+                out.insert(
+                    key.clone(),
+                    Value::Array(replace_list(
+                        old.as_array().map(Vec::as_slice).unwrap_or_default(),
+                        value.as_array().map(Vec::as_slice).unwrap_or_default(),
+                    )),
+                );
+            } else {
+                out.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+// ---------- Items ----------
+
+/// The selected item's scene id and JSON chain.
+pub fn selected_json(app: &Rc<App>) -> Option<(String, Vec<Value>)> {
+    let s = app.session.borrow();
+    let selection = s.selection.clone()?;
+    let setup = s.setup_json()?;
+    let chain = item_chain_json(setup, &selection.scene, &selection.path)?;
+    Some((selection.scene, chain))
+}
+
+/// The item at `path` in the scene being edited: its scene and chain.
+fn chain_at(app: &Rc<App>, path: &str) -> Option<(String, Vec<Value>)> {
+    let s = app.session.borrow();
+    let scene = s.editing_scene()?;
+    let chain = item_chain_json(s.setup_json()?, &scene, path)?;
+    Some((scene, chain))
+}
+
+/// Change fields of the selected item (`live`: a gesture's key).
+pub fn update_selected(app: &Rc<App>, fields: Value, live: Option<String>) {
+    if let Some((scene, chain)) = selected_json(app) {
+        let options = match live {
+            Some(key) => EditOptions {
+                key: Some(key),
+                interval: std::time::Duration::from_millis(50),
+                ..EditOptions::default()
+            },
+            None => EditOptions::default(),
+        };
+        app.edit(item_patch_json(&scene, &chain, fields), options);
+    }
+}
+
+/// Flip a boolean field (visible, locked) of the item at `path`.
+pub fn toggle_item(app: &Rc<App>, path: &str, field: &str, default: bool) {
+    if let Some((scene, chain)) = chain_at(app, path) {
+        let now = chain[chain.len() - 1][field].as_bool().unwrap_or(default);
+        app.edit(
+            item_patch_json(&scene, &chain, json!({ field: !now })),
+            EditOptions::default(),
+        );
+    }
+}
+
+/// Whether source `id` records to its own file.
+pub fn is_iso(setup: &Setup, id: &str) -> bool {
+    setup.recording.iso.enabled && setup.recording.iso.sources.iter().any(|s| s == id)
+}
+
+/// Record source `id` to its own file, or stop (turning ISO recording on
+/// if it was off).
+pub fn set_iso(app: &Rc<App>, id: &str, on: bool) {
+    let patch = {
+        let s = app.session.borrow();
+        let Some(setup) = s.setup.clone() else { return };
+        let iso = &setup.recording.iso;
+        let mut sources: Vec<String> = iso.sources.iter().filter(|s| *s != id).cloned().collect();
+        if on {
+            sources.push(id.to_string());
+        }
+        let mut patch = json!({ "recording": { "iso": { "sources": sources } } });
+        if on && !iso.enabled {
+            patch["recording"]["iso"]["enabled"] = json!(true);
+        }
+        patch
+    };
+    app.edit(patch, EditOptions::default());
+}
+
+/// How many items in every scene show source `id`.
+fn uses(setup: &Setup, id: &str) -> usize {
+    fn walk(items: &[SceneItem], id: &str) -> usize {
+        items
+            .iter()
+            .map(|i| usize::from(i.source.as_deref() == Some(id)) + walk(&i.children, id))
+            .sum()
+    }
+    setup.scenes.iter().map(|s| walk(&s.items, id)).sum()
+}
+
+/// Remove an item from its scene. As in OBS, a video source no other item
+/// shows goes with it. Undo brings either back.
+pub fn remove_from_scene(app: &Rc<App>, scene: &str, chain: &[Value]) {
+    let Some(item) = chain.last() else { return };
+    let (setup, typed) = {
+        let s = app.session.borrow();
+        (s.setup_json().cloned(), s.setup.clone())
+    };
+    let (Some(setup), Some(typed)) = (setup, typed) else {
+        return;
+    };
+    let source = item["source"]
+        .as_str()
+        .and_then(|id| model::find_source(&typed, id));
+    app.select("");
+    if let Some(source) = source
+        && source.kind.has_video()
+        && uses(&typed, &source.id) <= 1
+    {
+        app.replace_setup(without_source(&setup, &source.id), true);
+        let before = setup.clone();
+        app.show_toast(
+            Toast::new(
+                ToastKind::Info,
+                format!("Removed “{}”", model::source_name(source)),
+                "",
+            )
+            .action("Undo", move |app| {
+                app.replace_setup(before.clone(), true);
+            }),
+        );
+        return;
+    }
+    let label = item_label_json(&typed, item);
+    let scene_name = model::find_scene(&typed, scene)
+        .map(model::scene_name)
+        .unwrap_or(scene)
+        .to_string();
+    let before: Vec<Value> = scenes_of(&setup)
+        .into_iter()
+        .find(|s| s["id"] == scene)
+        .and_then(|s| s["items"].as_array().cloned())
+        .unwrap_or_default();
+    app.edit(
+        item_patch_json(scene, chain, json!({ "remove": true })),
+        EditOptions::default(),
+    );
+    let scene = scene.to_string();
+    app.show_toast(
+        Toast::new(
+            ToastKind::Info,
+            format!("Removed “{label}” from {scene_name}"),
+            "",
+        )
+        .action("Undo", move |app| {
+            let now: Vec<Value> = setup_json(app)
+                .and_then(|s| {
+                    scenes_of(&s)
+                        .into_iter()
+                        .find(|x| x["id"] == scene.as_str())
+                        .and_then(|x| x["items"].as_array().cloned())
+                })
+                .unwrap_or_default();
+            app.edit(
+                json!({ "scenes": [{ "id": scene, "items": replace_list(&now, &before) }] }),
+                EditOptions::default(),
+            );
+        }),
+    );
+}
+
+fn item_label_json(setup: &Setup, item: &Value) -> String {
+    serde_json::from_value::<SceneItem>(item.clone())
+        .map(|i| model::item_label(setup, &i))
+        .unwrap_or_else(|_| key_of(item).unwrap_or("Item").to_string())
+}
+
+/// Remove the selected item (− and ⌫).
+pub fn remove_selected(app: &Rc<App>) {
+    if let Some((scene, chain)) = selected_json(app) {
+        remove_from_scene(app, &scene, &chain);
+    }
+}
+
+/// Put the items of a level (the scene's top level, or a group's
+/// children) in a new order.
+fn reorder(app: &Rc<App>, scene: &str, parents: &[Value], items: &[Value]) {
+    let patch = if parents.is_empty() {
+        let old: Vec<Value> = setup_json(app)
+            .and_then(|s| {
+                scenes_of(&s)
+                    .into_iter()
+                    .find(|x| x["id"] == scene)
+                    .and_then(|x| x["items"].as_array().cloned())
+            })
+            .unwrap_or_default();
+        json!({ "scenes": [{ "id": scene, "items": replace_list(&old, items) }] })
+    } else {
+        let parent = &parents[parents.len() - 1];
+        let old = parent["children"].as_array().cloned().unwrap_or_default();
+        item_patch_json(
+            scene,
+            parents,
+            json!({ "children": replace_list(&old, items) }),
+        )
+    };
+    app.edit(patch, EditOptions::default());
+}
+
+/// Move the selected item: "forward" (up the list), "backward", "front"
+/// (top) or "back" (bottom).
+pub fn order_selected(app: &Rc<App>, place: &str) {
+    let Some((scene, chain)) = selected_json(app) else {
+        return;
+    };
+    let item = chain[chain.len() - 1].clone();
+    let parents = &chain[..chain.len() - 1];
+    let siblings: Vec<Value> = match parents.last() {
+        Some(parent) => parent["children"].as_array().cloned().unwrap_or_default(),
+        None => setup_json(app)
+            .and_then(|s| {
+                scenes_of(&s)
+                    .into_iter()
+                    .find(|x| x["id"] == scene.as_str())
+                    .and_then(|x| x["items"].as_array().cloned())
+            })
+            .unwrap_or_default(),
+    };
+    let k = key_of(&item).map(str::to_string);
+    let Some(index) = siblings
+        .iter()
+        .position(|i| key_of(i).map(str::to_string) == k)
+    else {
+        return;
+    };
+    let others: Vec<Value> = siblings
+        .iter()
+        .filter(|i| key_of(i).map(str::to_string) != k)
+        .cloned()
+        .collect();
+    let list = match place {
+        "front" => others.iter().cloned().chain([item]).collect(),
+        "back" => [item].into_iter().chain(others.iter().cloned()).collect(),
+        _ => {
+            let mut list = others.clone();
+            let to = if place == "forward" {
+                (index + 1).min(others.len())
+            } else {
+                index.saturating_sub(1)
+            };
+            list.insert(to, item);
+            list
+        }
+    };
+    if list == siblings {
+        return;
+    }
+    reorder(app, &scene, parents, &list);
+}
+
+/// A row of the Sources list dragged from `from` to land before row `to`
+/// (rows top first: `rows` are their paths and parents' paths). It only
+/// moves among its own siblings.
+pub fn move_row(app: &Rc<App>, rows: &[(String, String)], from: usize, to: usize) {
+    let Some((path, parent)) = rows.get(from).cloned() else {
+        return;
+    };
+    let near = rows.get(to.min(rows.len().saturating_sub(1)));
+    let above = to.checked_sub(1).and_then(|i| rows.get(i));
+    // Dropped among another group's rows: keep it where it was.
+    if near.is_none_or(|n| n.1 != parent)
+        && above.is_none_or(|a| a.1 != parent)
+        && above.is_none_or(|a| a.0 != parent)
+    {
+        return;
+    }
+    let siblings: Vec<&(String, String)> = rows.iter().filter(|r| r.1 == parent).collect();
+    let before = rows[..to.min(rows.len())]
+        .iter()
+        .filter(|r| r.1 == parent)
+        .count();
+    let Some(from_index) = siblings.iter().position(|r| r.0 == path) else {
+        return;
+    };
+    let display: Vec<String> = moved(&siblings, from_index, before)
+        .into_iter()
+        .map(|r| r.0.clone())
+        .collect();
+    let Some((scene, chain)) = chain_at(app, &path) else {
+        return;
+    };
+    let parents = &chain[..chain.len() - 1];
+    let level: Vec<Value> = match parents.last() {
+        Some(p) => p["children"].as_array().cloned().unwrap_or_default(),
+        None => setup_json(app)
+            .and_then(|s| {
+                scenes_of(&s)
+                    .into_iter()
+                    .find(|x| x["id"] == scene.as_str())
+                    .and_then(|x| x["items"].as_array().cloned())
+            })
+            .unwrap_or_default(),
+    };
+    // Rows are top first; the stack is back to front.
+    let items: Vec<Value> = display
+        .iter()
+        .rev()
+        .filter_map(|p| {
+            let k = p.rsplit('/').next().unwrap_or(p);
+            level.iter().find(|i| key_of(i) == Some(k)).cloned()
+        })
+        .collect();
+    if items.len() == level.len() && items != level {
+        reorder(app, &scene, parents, &items);
+    }
+}
+
+/// Rename what the item at `path` shows: its source, or its scene.
+pub fn rename_item(app: &Rc<App>, path: &str, name: &str) {
+    let name = name.trim();
+    let Some((_, chain)) = chain_at(app, path) else {
+        return;
+    };
+    let item = &chain[chain.len() - 1];
+    if name.is_empty() {
+        return;
+    }
+    let patch = if let Some(source) = item["source"].as_str() {
+        json!({ "sources": [{ "id": source, "name": name }] })
+    } else if let Some(scene) = item["scene"].as_str() {
+        json!({ "scenes": [{ "id": scene, "name": name }] })
+    } else {
+        return;
+    };
+    app.edit(patch, EditOptions::default());
+}
+
+/// Copy the selected item (⌘C).
+pub fn copy_selected(app: &Rc<App>) -> Option<Value> {
+    selected_json(app).map(|(_, chain)| chain[chain.len() - 1].clone())
+}
+
+/// Paste `item` into the scene being edited: showing the same source (a
+/// reference), or a copy of the source (`duplicate`).
+pub fn paste(app: &Rc<App>, item: &Value, duplicate: bool) {
+    let (scene, typed, setup) = {
+        let s = app.session.borrow();
+        let (Some(scene), Some(typed), Some(setup)) =
+            (s.editing_scene(), s.setup.clone(), s.setup_json().cloned())
+        else {
+            return;
+        };
+        (scene, typed, setup)
+    };
+    let mut item = item.clone();
+    let mut patch = json!({});
+    if duplicate
+        && let Some(id) = item["source"].as_str().map(str::to_string)
+        && let Some(source) = setup["sources"]
+            .as_array()
+            .and_then(|s| s.iter().find(|x| x["id"] == id.as_str()))
+    {
+        let name = format!("{} 2", name_of(source));
+        let new = model::new_id(&name, model::taken_ids(&typed));
+        let mut copy = source.clone();
+        copy["id"] = json!(new);
+        copy["name"] = json!(name);
+        patch["sources"] = json!([copy]);
+        item["source"] = json!(new);
+        if let Some(object) = item.as_object_mut() {
+            object.remove("id");
+        }
+    }
+    // Two items showing one source in a scene need ids of their own.
+    let keys: Vec<String> = scenes_of(&setup)
+        .into_iter()
+        .find(|s| s["id"] == scene.as_str())
+        .and_then(|s| s["items"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| key_of(i).map(str::to_string))
+        .collect();
+    if let Some(k) = key_of(&item)
+        && keys.iter().any(|x| x == k)
+    {
+        let label = item_label_json(&typed, &item);
+        let taken = keys
+            .iter()
+            .map(String::as_str)
+            .chain(model::taken_ids(&typed))
+            .collect::<Vec<_>>();
+        item["id"] = json!(model::new_id(&label, taken));
+    }
+    let path = key_of(&item).unwrap_or_default().to_string();
+    patch["scenes"] = json!([{ "id": scene, "items": [item] }]);
+    app.edit_then(patch, EditOptions::default(), move |app, applied| {
+        if applied {
+            app.select(&path);
+        }
+    });
+}
+
+// ---------- Transform ----------
+
+/// The native size of a source's picture, if it can be known without
+/// asking: from the live engine, which runs every source, or from its
+/// settings.
+pub fn known_size(app: &Rc<App>, source: &str) -> Option<(f64, f64)> {
+    let s = app.session.borrow();
+    if let Some(run) = s.running.get(source)
+        && let (Some(w), Some(h)) = (run.width, run.height)
+        && w > 0
+        && h > 0
+    {
+        return Some((w as f64, h as f64));
+    }
+    let setup = s.setup_json()?;
+    let source = setup["sources"]
+        .as_array()?
+        .iter()
+        .find(|x| x["id"] == source)?;
+    let canvas = &setup["canvas"];
+    let number = |v: &Value| v.as_f64().filter(|n| *n > 0.0);
+    let both = |src: &Value| Some((number(&src["width"])?, number(&src["height"])?));
+    match source["kind"].as_str()? {
+        "test_pattern" => Some((
+            number(&source["width"]).unwrap_or(1920.0),
+            number(&source["height"]).unwrap_or(1080.0),
+        )),
+        "color" => both(source).or_else(|| both(canvas)),
+        "browser" => Some((
+            number(&source["width"]).unwrap_or(800.0),
+            number(&source["height"]).unwrap_or(600.0),
+        )),
+        "camera" | "image" | "slideshow" | "text" => both(source),
+        _ => None,
+    }
+}
+
+/// The size of a source's picture: known, or measured once from a
+/// snapshot; `then` runs with it (None if it can't be known).
+pub fn source_size(
+    app: &Rc<App>,
+    source: Option<String>,
+    then: impl FnOnce(&Rc<App>, Option<(f64, f64)>) + 'static,
+) {
+    let Some(source) = source else {
+        then(app, None);
+        return;
+    };
+    if let Some(size) = known_size(app, &source) {
+        then(app, Some(size));
+        return;
+    }
+    app.call(
+        Method::Snapshot(SnapshotParams {
+            source: Some(source),
+            scene: None,
+            preview: false,
+            width: None,
+        }),
+        move |app, result| {
+            let size = result
+                .ok()
+                .and_then(|v| Some((v["width"].as_f64()?, v["height"].as_f64()?)));
+            then(app, size)
+        },
+    );
+}
+
+/// The selected item, unless it is locked.
+fn unlocked(app: &Rc<App>) -> Option<(String, Vec<Value>)> {
+    selected_json(app).filter(|(_, chain)| chain[chain.len() - 1]["locked"] != true)
+}
+
+fn crop_of(item: &Value) -> [f64; 4] {
+    let c = &item["crop"];
+    let n = |k: &str| c[k].as_f64().unwrap_or(0.0);
+    [n("left"), n("top"), n("right"), n("bottom")]
+}
+
+/// A patch taking away an item's scale and offset (keeping its rotation),
+/// so its rect is where it is drawn.
+fn unscaled(item: &Value, fields: &mut Value) {
+    if !item["style"]["transform"].is_null() {
+        fields["style"] = json!({ "transform": { "scale": null, "translate": null } });
+    }
+}
+
+/// A whole number for a signed setup field (`rect.x`, `rect.y`): the
+/// daemon's `Rect` and `Crop` are integers and refuse `720.0`.
+pub fn int(v: f64) -> Value {
+    json!(v.round() as i64)
+}
+
+/// A whole, non-negative number for an unsigned setup field
+/// (`rect.width`, `crop.left`, ...).
+pub fn whole(v: f64) -> Value {
+    json!(v.round().max(0.0) as u64)
+}
+
+fn canvas_size(app: &Rc<App>) -> (f64, f64) {
+    app.session
+        .borrow()
+        .setup
+        .as_ref()
+        .map(|s| (s.canvas.width as f64, s.canvas.height as f64))
+        .unwrap_or((1920.0, 1080.0))
+}
+
+/// Fit to Screen (⌘F): as large as fits on the canvas, keeping its shape,
+/// centred.
+pub fn fit_to_screen(app: &Rc<App>) {
+    let Some((_, chain)) = unlocked(app) else {
+        return;
+    };
+    let item = chain[chain.len() - 1].clone();
+    let source = item["source"].as_str().map(str::to_string);
+    source_size(app, source, move |app, natural| {
+        let (cw, ch) = canvas_size(app);
+        let crop = crop_of(&item);
+        let size = natural
+            .map(|(w, h)| {
+                (
+                    (w - crop[0] - crop[2]).max(1.0),
+                    (h - crop[1] - crop[3]).max(1.0),
+                )
+            })
+            .unwrap_or((
+                item["rect"]["width"].as_f64().unwrap_or(cw),
+                item["rect"]["height"].as_f64().unwrap_or(ch),
+            ));
+        let scale = (cw / size.0).min(ch / size.1);
+        let width = (size.0 * scale).round().max(1.0);
+        let height = (size.1 * scale).round().max(1.0);
+        let mut fields = json!({ "rect": {
+            "x": int((cw - width) / 2.0), "y": int((ch - height) / 2.0),
+            "width": whole(width), "height": whole(height),
+        } });
+        unscaled(&item, &mut fields);
+        update_selected(app, fields, None);
+    });
+}
+
+/// Stretch to Screen (⌘S): cover the canvas exactly.
+pub fn stretch_to_screen(app: &Rc<App>) {
+    let Some((_, chain)) = unlocked(app) else {
+        return;
+    };
+    let (cw, ch) = canvas_size(app);
+    let mut fields = json!({ "rect": { "x": 0, "y": 0, "width": whole(cw), "height": whole(ch) } });
+    unscaled(&chain[chain.len() - 1], &mut fields);
+    update_selected(app, fields, None);
+}
+
+/// Center to Screen (⌘D), or only along one axis ("x": horizontally,
+/// "y": vertically).
+pub fn center_to_screen(app: &Rc<App>, axis: Option<&str>) {
+    let Some((_, chain)) = unlocked(app) else {
+        return;
+    };
+    let item = &chain[chain.len() - 1];
+    let (cw, ch) = canvas_size(app);
+    let t = &item["style"]["transform"]["translate"];
+    let (tx, ty) = (t[0].as_f64().unwrap_or(0.0), t[1].as_f64().unwrap_or(0.0));
+    let (w, h) = (
+        item["rect"]["width"].as_f64().unwrap_or(0.0),
+        item["rect"]["height"].as_f64().unwrap_or(0.0),
+    );
+    let mut rect = Map::new();
+    if axis != Some("y") {
+        rect.insert("x".into(), int((cw - w) / 2.0 - tx));
+    }
+    if axis != Some("x") {
+        rect.insert("y".into(), int((ch - h) / 2.0 - ty));
+    }
+    update_selected(app, json!({ "rect": rect }), None);
+}
+
+/// Reset Transform (⌘R): its own size at the top left, no rotation, scale
+/// or crop.
+pub fn reset_transform(app: &Rc<App>) {
+    let Some((_, chain)) = unlocked(app) else {
+        return;
+    };
+    let item = chain[chain.len() - 1].clone();
+    let source = item["source"].as_str().map(str::to_string);
+    source_size(app, source, move |app, natural| {
+        let (w, h) = natural.unwrap_or((
+            item["rect"]["width"].as_f64().unwrap_or(1.0),
+            item["rect"]["height"].as_f64().unwrap_or(1.0),
+        ));
+        let mut fields = json!({
+            "rect": { "x": 0, "y": 0, "width": whole(w), "height": whole(h) },
+            "crop": null, "fit": null, "align": null,
+        });
+        if !item["style"]["transform"].is_null() {
+            fields["style"] = json!({ "transform": null });
+        }
+        update_selected(app, fields, None);
+    });
+}
+
+/// Rotate by `degrees` (clockwise), about the centre.
+pub fn rotate_by(app: &Rc<App>, degrees: f64) {
+    let Some((_, chain)) = unlocked(app) else {
+        return;
+    };
+    let item = &chain[chain.len() - 1];
+    let now = item["style"]["transform"]["rotate"].as_f64().unwrap_or(0.0);
+    let mut next = ((now + degrees) % 360.0 + 360.0) % 360.0;
+    if next > 180.0 {
+        next -= 360.0;
+    }
+    if next == 0.0 && item["style"]["transform"].is_null() {
+        return;
+    }
+    let rotate = if next == 0.0 {
+        Value::Null
+    } else {
+        json!(next)
+    };
+    update_selected(
+        app,
+        json!({ "style": { "transform": { "rotate": rotate } } }),
+        None,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{int, whole};
+    use serde_json::json;
+
+    #[test]
+    fn transform_numbers_fit_the_typed_rect_and_crop() {
+        let rect = json!({ "x": int(-12.6), "y": int(720.0), "width": whole(1919.5), "height": whole(-3.0) });
+        let rect: isocast_protocol::Rect = serde_json::from_value(rect).unwrap();
+        assert_eq!(
+            (rect.x, rect.y, rect.width, rect.height),
+            (-13, 720, 1920, 0)
+        );
+        let crop = json!({ "left": whole(4.4), "top": whole(0.0), "right": whole(8.0), "bottom": whole(2.5) });
+        let crop: isocast_protocol::Crop = serde_json::from_value(crop).unwrap();
+        assert_eq!((crop.left, crop.right, crop.bottom), (4, 8, 3));
+    }
+}

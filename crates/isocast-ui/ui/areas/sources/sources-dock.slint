@@ -1,0 +1,278 @@
+// The Sources dock (the web app's sources.js): the items of the scene
+// being edited, the front one at the top, as in OBS, groups' children
+// under them (their chevron folds them). Each row has the source's kind
+// icon and name, its state, then ISO (records the source to its own file;
+// shown on hover, copper when on), eye (visible) and lock. A click
+// selects (the canvas shows the box), double-click opens Properties, F2
+// renames, a drag restacks; the toolbar adds (a menu of kinds), removes,
+// opens Properties and moves the item; right-click opens the item's menu
+// (away from the items: Add and Paste). Hovering a row outlines its item
+// on the canvas.
+
+import { Theme } from "../../theme.slint";
+import { Icon, Icons } from "../../icons.slint";
+import { Ui } from "../../state.slint";
+import {
+    Dock, DockToolbar, Dot, DropLine, IconButton, List, ListEmpty, ListRow, Menus, TextField,
+    Tip, ToolbarGap,
+} from "../../kit.slint";
+import { CanvasArea } from "../canvas/state.slint";
+import { SourcesArea } from "state.slint";
+
+export component SourcesDock inherits Dock {
+    property <int> current: -1;
+    property <int> drag-from: -1;
+    property <int> drop-at: -1;
+
+    title: "Sources";
+
+    list := List {
+        label: "Sources";
+        count: SourcesArea.items.length;
+        current: root.current;
+        navigate(index) => { Ui.select(SourcesArea.items[index].path); }
+        unhandled-key(event) => {
+            if event.text == Key.F2 && root.current >= 0 {
+                SourcesArea.renaming-item = SourcesArea.items[root.current].path;
+                return true;
+            }
+            if (event.text == Key.Backspace || event.text == Key.Delete) && root.current >= 0 {
+                Ui.menu("remove");
+                return true;
+            }
+            false
+        }
+        background-clicked => { Ui.select(""); }
+        background-menu(x, y) => { Menus.request("sources:list", x, y, 0, 0); }
+
+        for item[i] in SourcesArea.items: Rectangle {
+            property <bool> chosen: item.path == Ui.selected-item;
+            changed chosen => {
+                if self.chosen {
+                    root.current = i;
+                } else if root.current == i {
+                    root.current = -1;
+                }
+            }
+            init => {
+                if self.chosen {
+                    root.current = i;
+                }
+            }
+            // A hovered row outlines its item on the canvas, as the
+            // canvas's own hover does.
+            property <bool> hovered: row.has-hover;
+            changed hovered => {
+                if self.hovered {
+                    CanvasArea.hover-item = item.path;
+                } else if CanvasArea.hover-item == item.path {
+                    CanvasArea.hover-item = "";
+                }
+            }
+            height: Theme.row;
+
+            row := ListRow {
+                text: item.name;
+                icon: Icons.named(item.icon);
+                selected: parent.chosen;
+                dim: !item.visible;
+                depth: item.depth;
+                description: item.state == "failed" ? item.error : item.visible ? "" : "Hidden";
+                index: i;
+                count: SourcesArea.items.length;
+                focus-shown: list.keyboard-focus && parent.chosen;
+                draggable: SourcesArea.renaming-item == "";
+                dragging: root.drag-from == i;
+                clicked => { Ui.select(item.path); }
+                double-clicked => {
+                    if item.source != "" {
+                        Ui.open-dialog("properties", item.source);
+                    }
+                }
+                context-menu(x, y) => {
+                    Ui.select(item.path);
+                    Menus.request("sources:item:" + item.path, x, y, 0, 0);
+                }
+                drag-moved(y) => {
+                    root.drag-from = i;
+                    root.drop-at = max(0, min(SourcesArea.items.length, floor((i * Theme.row + y + Theme.row / 2) / Theme.row)));
+                }
+                drag-ended => {
+                    if root.drop-at >= 0 && root.drop-at != root.drag-from && root.drop-at != root.drag-from + 1 {
+                        SourcesArea.move-item(root.drag-from, root.drop-at);
+                    }
+                    root.drag-from = -1;
+                    root.drop-at = -1;
+                }
+
+                if item.state == "failed": Rectangle {
+                    width: Theme.control-h-sm;
+                    Icon {
+                        path: Icons.warning;
+                        size: Theme.icon-sm;
+                        color: Theme.danger-text;
+                    }
+                    Tooltip {
+                        Tip {
+                            text: item.error;
+                        }
+                    }
+                }
+                if item.state == "opening": Rectangle {
+                    width: Theme.control-h-sm;
+                    Dot {
+                        width: 6px;
+                        height: 6px;
+                        pulse: true;
+                    }
+                    Tooltip {
+                        Tip {
+                            text: "Starting…";
+                        }
+                    }
+                }
+                if item.can-iso: VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: Icons.record;
+                        icon-size: Theme.icon-sm;
+                        label: item.iso ? "Records its own ISO file; click to stop" : "Record its own ISO file";
+                        on: item.iso;
+                        on-color: Theme.accent-hover;
+                        toggle: true;
+                        // Hidden until the row is hovered, unless on.
+                        opacity: item.iso || row.has-hover || self.has-focus ? 1 : 0;
+                        clicked => { SourcesArea.toggle-iso(item.path); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: item.visible ? Icons.eye : Icons.eye-off;
+                        icon-size: Theme.icon-sm;
+                        label: item.visible ? "Hide" : "Show";
+                        toggle: true;
+                        clicked => { SourcesArea.toggle-visible(item.path); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        small: true;
+                        icon: item.locked ? Icons.lock : Icons.unlock;
+                        icon-size: Theme.icon-sm;
+                        label: item.locked ? "Unlock" : "Lock";
+                        on: item.locked;
+                        on-color: Theme.text;
+                        toggle: true;
+                        clicked => { SourcesArea.toggle-locked(item.path); }
+                    }
+                }
+            }
+
+            // A group's chevron folds it away.
+            if item.group: TouchArea {
+                x: Theme.pane-x + item.depth * 16px;
+                width: Theme.icon;
+                mouse-cursor: pointer;
+                clicked => { SourcesArea.toggle-group(item.path); }
+                Tooltip {
+                    Tip {
+                        text: item.expanded ? "Fold it away" : "Show what’s in it";
+                    }
+                }
+            }
+            if item.missing: Tooltip {
+                Tip {
+                    text: "No source “" + item.name + "” in the setup";
+                }
+            }
+
+            if root.drop-at == i: DropLine {
+                y: -1px;
+            }
+            if root.drop-at == SourcesArea.items.length && i == SourcesArea.items.length - 1: DropLine {
+                y: parent.height - 1px;
+            }
+
+            if SourcesArea.renaming-item == item.path: TextField {
+                x: Theme.pane-x + item.depth * 16px + Theme.icon + Theme.space-2 - 5px;
+                y: (parent.height - self.height) / 2;
+                width: parent.width - self.x - Theme.space-1;
+                small: true;
+                font-size: Theme.fs;
+                text: item.name;
+                label: "Name";
+                submits: false;
+                auto-focus: true;
+                accepted(name) => {
+                    SourcesArea.renaming-item = "";
+                    SourcesArea.rename-item(item.path, name);
+                }
+                committed(name) => {
+                    if SourcesArea.renaming-item == item.path {
+                        SourcesArea.renaming-item = "";
+                        SourcesArea.rename-item(item.path, name);
+                    }
+                }
+                cancelled => { SourcesArea.renaming-item = ""; }
+            }
+        }
+        if SourcesArea.items.length == 0 && Ui.editing-scene != "": ListEmpty {
+            text: "No sources in this scene. Click + below, or right-click here, to add one.";
+        }
+        if Ui.editing-scene == "": ListEmpty {
+            text: "No scene.";
+        }
+    }
+
+    DockToolbar {
+        add := IconButton {
+            small: true;
+            icon: Icons.plus;
+            label: "Add a source";
+            enabled: Ui.editing-scene != "";
+            menu-open: Menus.open && Menus.owner == "sources:add";
+            property <int> serial: SourcesArea.add-menu-serial;
+            changed serial => {
+                if self.enabled {
+                    self.clicked();
+                }
+            }
+            clicked => {
+                Menus.request("sources:add", self.absolute-position.x, self.absolute-position.y, self.width, self.height);
+            }
+        }
+        IconButton {
+            small: true;
+            icon: Icons.minus;
+            label: "Remove the selected source";
+            enabled: Ui.selected-item != "";
+            clicked => { Ui.menu("remove"); }
+        }
+        IconButton {
+            small: true;
+            icon: Icons.settings;
+            label: "Properties of the selected source";
+            enabled: Ui.selected-source != "";
+            clicked => { Ui.menu("properties"); }
+        }
+        ToolbarGap { }
+        IconButton {
+            small: true;
+            icon: Icons.chevron-up;
+            label: "Move up";
+            enabled: Ui.selected-item != "";
+            clicked => { Ui.menu("order_up"); }
+        }
+        IconButton {
+            small: true;
+            icon: Icons.chevron-down;
+            label: "Move down";
+            enabled: Ui.selected-item != "";
+            clicked => { Ui.menu("order_down"); }
+        }
+    }
+}

@@ -1,0 +1,49 @@
+// Keyboard focus (docs/design.md 2.10): a bone ring 2px wide after a 1px
+// gap, outside the control; or a 2px ring inside it for things as wide as
+// their pane (rows, tabs, segments). Only keyboard focus shows a ring (Tab,
+// or arrows moving between rows), never a click: widgets track that in a
+// `keyboard` property set from `FocusScope.focus-gained`'s reason.
+
+import { Theme } from "../theme.slint";
+
+// Put it last inside the control, so it draws on top. Hidden unless
+// `shown`.
+export component FocusRing inherits Rectangle {
+    in property <bool> shown;
+    in property <bool> inset;
+    // The control's own corner radius (the ring follows it outside).
+    in property <length> radius: Theme.r;
+    // What shows in the 1px gap: the surface the control sits on.
+    in property <color> gap: Theme.surface-panel;
+
+    x: 0;
+    y: 0;
+    width: 100%;
+    height: 100%;
+    visible: root.shown;
+    accessible-role: none;
+
+    if root.inset: Rectangle {
+        border-width: Theme.focus-width;
+        border-color: Theme.focus-ring;
+        border-radius: root.radius;
+    }
+    if !root.inset: Rectangle {
+        x: -Theme.focus-gap;
+        y: -Theme.focus-gap;
+        width: parent.width + 2 * Theme.focus-gap;
+        height: parent.height + 2 * Theme.focus-gap;
+        border-width: Theme.focus-gap;
+        border-color: root.gap;
+        border-radius: root.radius + Theme.focus-gap;
+    }
+    if !root.inset: Rectangle {
+        x: -Theme.focus-gap - Theme.focus-width;
+        y: -Theme.focus-gap - Theme.focus-width;
+        width: parent.width + 2 * (Theme.focus-gap + Theme.focus-width);
+        height: parent.height + 2 * (Theme.focus-gap + Theme.focus-width);
+        border-width: Theme.focus-width;
+        border-color: Theme.focus-ring;
+        border-radius: root.radius + Theme.focus-gap + Theme.focus-width;
+    }
+}

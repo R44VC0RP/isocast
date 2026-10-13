@@ -1,0 +1,212 @@
+// Create/Select Source (the web app's add-source.js), OBS's way: a new
+// source with a name, or one already in the setup (for a nested scene, a
+// scene), and whether it starts visible. Audio sources play in every
+// scene, so they are only made new. Rename (the mixer's and the menus')
+// is here too: it is the same small shape.
+
+import { Theme } from "../../theme.slint";
+import { Ui } from "../../state.slint";
+import { Checkbox, Dialog, FocusRing, Form, Radio, ScrollArea, TextField } from "../../kit.slint";
+import { SourcesArea } from "state.slint";
+
+// A choice in the list of existing ones: 28px, 8px in, the selected row
+// marked as in the docks.
+component Pick inherits Rectangle {
+    in property <string> text;
+    in property <bool> on;
+    in property <int> index;
+    in property <int> count;
+    callback clicked();
+    callback double-clicked();
+
+    height: Theme.row;
+    background: root.on ? Theme.selected : ta.has-hover ? Theme.hover : transparent;
+    accessible-role: list-item;
+    accessible-label: root.text;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.on;
+    accessible-item-index: root.index;
+    accessible-item-count: root.count;
+    accessible-action-default => { root.clicked(); }
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
+    }
+    Text {
+        x: Theme.space-2;
+        width: parent.width - 2 * Theme.space-2;
+        text: root.text;
+        color: Theme.text;
+        font-size: Theme.fs;
+        letter-spacing: Theme.tracking;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: none;
+    }
+    if root.on: Rectangle {
+        x: 0;
+        width: 3px;
+        background: Theme.accent-hover;
+    }
+}
+
+export component CreateSourceDialog inherits Dialog {
+    property <bool> fresh: SourcesArea.create-mode == "new";
+
+    title: "Create/Select Source";
+    dialog-width: 440px;
+    ok-enabled: root.fresh ? SourcesArea.create-name != "" && !SourcesArea.create-taken : SourcesArea.create-pick != "";
+    accepted => { SourcesArea.create-accept(); }
+    cancelled => { Ui.close-dialog(); }
+
+    Form {
+        Text {
+            text: SourcesArea.create-heading;
+            color: Theme.text;
+            font-size: Theme.fs;
+            letter-spacing: Theme.tracking;
+            font-weight: Theme.weight-semibold;
+            overflow: elide;
+        }
+        if !SourcesArea.create-is-scene: Radio {
+            text: "Create new";
+            checked: root.fresh;
+            clicked => {
+                SourcesArea.create-mode = "new";
+                SourcesArea.create-changed();
+            }
+            step(by) => {
+                if by > 0 && SourcesArea.create-existing.length > 0 {
+                    SourcesArea.create-mode = "existing";
+                    SourcesArea.create-changed();
+                }
+            }
+        }
+        if !SourcesArea.create-is-scene: HorizontalLayout {
+            padding-left: 24px;
+            opacity: root.fresh ? 1 : Theme.disabled-opacity;
+            TextField {
+                text: SourcesArea.create-name;
+                label: "Name";
+                auto-focus: true;
+                font-size: Theme.fs-sm;
+                edited(text) => {
+                    SourcesArea.create-name = text;
+                    SourcesArea.create-mode = "new";
+                    SourcesArea.create-changed();
+                }
+            }
+        }
+        if !SourcesArea.create-is-scene && root.fresh && SourcesArea.create-taken: HorizontalLayout {
+            padding-left: 24px;
+            Text {
+                text: "A source is already called that.";
+                color: Theme.danger-text;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+            }
+        }
+        if !SourcesArea.create-audio-only: Radio {
+            text: "Add Existing";
+            checked: !root.fresh;
+            enabled: SourcesArea.create-existing.length > 0;
+            clicked => {
+                SourcesArea.create-mode = "existing";
+                SourcesArea.create-changed();
+            }
+            step(by) => {
+                if by < 0 && !SourcesArea.create-is-scene {
+                    SourcesArea.create-mode = "new";
+                    SourcesArea.create-changed();
+                }
+            }
+        }
+        if !SourcesArea.create-audio-only: HorizontalLayout {
+            padding-left: 24px;
+            Rectangle {
+                height: min(168px, max(Theme.row, SourcesArea.create-existing.length * Theme.row) + 2px);
+                background: Theme.surface-inset;
+                border-width: 1px;
+                border-color: Theme.line;
+                border-radius: Theme.r;
+                clip: true;
+                opacity: !root.fresh ? 1 : Theme.disabled-opacity;
+                accessible-role: list;
+                accessible-label: "Existing";
+
+                if SourcesArea.create-existing.length == 0: Text {
+                    x: Theme.space-2;
+                    width: parent.width - 2 * Theme.space-2;
+                    height: Theme.row;
+                    text: SourcesArea.create-empty;
+                    color: Theme.text-3;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    vertical-alignment: center;
+                }
+                ScrollArea {
+                    x: 1px;
+                    y: 1px;
+                    width: parent.width - 2px;
+                    height: parent.height - 2px;
+                    for pick[i] in SourcesArea.create-existing: Pick {
+                        text: pick.label;
+                        on: pick.id == SourcesArea.create-pick;
+                        index: i;
+                        count: SourcesArea.create-existing.length;
+                        clicked => {
+                            SourcesArea.create-mode = "existing";
+                            SourcesArea.create-pick = pick.id;
+                            SourcesArea.create-changed();
+                        }
+                        double-clicked => {
+                            SourcesArea.create-mode = "existing";
+                            SourcesArea.create-pick = pick.id;
+                            SourcesArea.create-accept();
+                        }
+                    }
+                }
+            }
+        }
+        if !SourcesArea.create-audio-only: Checkbox {
+            text: "Make source visible";
+            checked: SourcesArea.create-visible;
+            toggled(on) => { SourcesArea.create-visible = on; }
+        }
+        if SourcesArea.create-audio-only: Text {
+            text: "Audio sources play in every scene; it goes in the Audio Mixer and the program mix.";
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            line-height-factor: Theme.leading-sm;
+            wrap: word-wrap;
+        }
+    }
+}
+
+export component RenameDialog inherits Dialog {
+    title: "Rename";
+    dialog-width: 380px;
+    ok-enabled: SourcesArea.rename-name != "";
+    accepted => { SourcesArea.rename-accept(); }
+    cancelled => { Ui.close-dialog(); }
+
+    Form {
+        Text {
+            text: SourcesArea.rename-heading;
+            color: Theme.text;
+            font-size: Theme.fs;
+            letter-spacing: Theme.tracking;
+            font-weight: Theme.weight-semibold;
+            overflow: elide;
+        }
+        // Made after the dialog takes focus, so the field keeps it.
+        if true: TextField {
+            text: SourcesArea.rename-name;
+            label: "Name";
+            auto-focus: true;
+            edited(text) => { SourcesArea.rename-name = text; }
+        }
+    }
+}

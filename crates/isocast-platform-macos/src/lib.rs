@@ -1,0 +1,410 @@
+//! macOS back end for Isocast.
+//!
+//! The master clock is the host clock, which CoreMedia, ScreenCaptureKit and
+//! AVFoundation already stamp their samples with. Frames are IOSurface-backed
+//! `CVPixelBuffer`s, so later stages can use them on the GPU without copying.
+//! Files are written by AVAssetWriter, which encodes with VideoToolbox on the
+//! media engines.
+#![cfg(target_os = "macos")]
+
+// Isocast is built for Apple silicon only: its media engines (hardware
+// HEVC, ProRes) and unified memory are what the design relies on.
+#[cfg(not(target_arch = "aarch64"))]
+compile_error!("Isocast supports Apple silicon Macs only (aarch64-apple-darwin), not Intel Macs");
+
+use std::ffi::{CStr, CString};
+use std::mem::MaybeUninit;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+use std::sync::{OnceLock, mpsc};
+
+mod audio;
+mod browser;
+mod camera;
+mod capture;
+mod devices;
+mod frames;
+mod gpu;
+mod join;
+mod jpeg;
+mod keychain;
+mod media;
+mod output;
+mod permissions;
+pub mod plugin;
+mod stream;
+mod system;
+mod writer;
+
+use isocast_engine::{
+    AudioSink, CameraRequest, CaptureFormat, Platform, Probe, Time, VideoSink, Volume, WriterSpec,
+};
+use isocast_protocol::api::Machine;
+use isocast_protocol::devices::{Devices, PermissionKind, PermissionsReport};
+use isocast_protocol::{Canvas, SourceKind};
+use objc2_core_media::{CMClock, CMTime};
+use objc2_core_video::{
+    CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
+    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
+    kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+};
+
+pub use audio::{MicrophoneCapture, SystemAudioCapture};
+pub use camera::CameraCapture;
+pub use capture::DisplayCapture;
+pub use frames::{FramePool, PixelBuffer};
+pub use gpu::MetalImporter;
+pub use stream::{AacEncoder, H264Encoder};
+pub use writer::AssetWriter;
+
+const NANOS_PER_SEC: i128 = 1_000_000_000;
+
+#[derive(Clone, Copy)]
+pub struct MacPlatform;
+
+/// A running capture of any kind. Dropping it stops the capture.
+pub enum Capture {
+    Display(DisplayCapture),
+    Camera(CameraCapture),
+    Microphone(MicrophoneCapture),
+    SystemAudio(SystemAudioCapture),
+    Browser(browser::BrowserCapture),
+}
+
+impl Platform for MacPlatform {
+    type Frame = PixelBuffer;
+    type FramePool = FramePool;
+    type Writer = AssetWriter;
+    type Capture = Capture;
+    type Importer = MetalImporter;
+    type Media = media::MediaReader;
+    type Playback = output::Playback;
+    type VideoEncoder = H264Encoder;
+    type AudioEncoder = AacEncoder;
+    type SharedSurface = isocast_surfaces::Surface;
+
+    fn now(&self) -> Time {
+        host_time()
+    }
+
+    fn devices(&self) -> anyhow::Result<Devices> {
+        devices::devices()
+    }
+
+    fn volume(&self, path: &Path) -> anyhow::Result<Volume> {
+        volume(path)
+    }
+
+    fn write_latency(&self, probe: &Path) -> Option<std::time::Duration> {
+        write_latency(probe).ok()
+    }
+
+    fn permissions(&self) -> anyhow::Result<PermissionsReport> {
+        Ok(permissions::report(devices::permissions()?))
+    }
+
+    fn request_permissions(&self) -> anyhow::Result<PermissionsReport> {
+        let permissions = devices::request_permissions(std::time::Duration::from_secs(60))?;
+        Ok(permissions::report(permissions))
+    }
+
+    fn open_permission_settings(&self, permission: PermissionKind) -> anyhow::Result<String> {
+        permissions::open_settings(permission)
+    }
+
+    fn media_info(&self, path: &Path) -> anyhow::Result<isocast_engine::MediaInfo> {
+        media::media_info(path)
+    }
+
+    fn open_media(
+        &self,
+        path: &Path,
+        part: isocast_engine::MediaPart,
+    ) -> anyhow::Result<media::MediaReader> {
+        media::open_media(path, part)
+    }
+
+    fn frame_importer(&self, gpu: &isocast_engine::gpu::Gpu) -> anyhow::Result<MetalImporter> {
+        MetalImporter::new(gpu)
+    }
+
+    fn machine(&self) -> Machine {
+        system::machine()
+    }
+
+    fn probe(&self, source: &SourceKind, canvas: &Canvas) -> anyhow::Result<Option<Probe>> {
+        system::probe(source, canvas)
+    }
+
+    fn frame_pool(&self, width: u32, height: u32) -> anyhow::Result<FramePool> {
+        FramePool::new(width, height)
+    }
+
+    fn ycbcr_frame_pool(&self, width: u32, height: u32) -> anyhow::Result<FramePool> {
+        FramePool::ycbcr(width, height)
+    }
+
+    fn real_time_thread(&self) {
+        // SAFETY: sets the calling thread's own quality of service.
+        unsafe {
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
+        }
+    }
+
+    fn thread_cpu_time(&self) -> Option<std::time::Duration> {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: writes the calling thread's CPU time into `time`.
+        let status = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
+        (status == 0).then(|| {
+            std::time::Duration::new(time.tv_sec.max(0) as u64, time.tv_nsec.max(0) as u32)
+        })
+    }
+
+    fn frame_size(&self, frame: &PixelBuffer) -> (u32, u32) {
+        (
+            CVPixelBufferGetWidth(&frame.0) as u32,
+            CVPixelBufferGetHeight(&frame.0) as u32,
+        )
+    }
+
+    fn frame_is_ycbcr(&self, frame: &PixelBuffer) -> bool {
+        [
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+            kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
+        ]
+        .contains(&CVPixelBufferGetPixelFormatType(&frame.0))
+    }
+
+    fn shared_surface(
+        &self,
+        gpu: &isocast_engine::gpu::Gpu,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<(isocast_surfaces::Surface, wgpu::Texture)> {
+        let surface = isocast_surfaces::Surface::rgba(width, height)?;
+        let texture = surface.texture(&gpu.device, wgpu::TextureUsages::RENDER_ATTACHMENT)?;
+        Ok((surface, texture))
+    }
+
+    fn encode_jpeg(
+        &self,
+        frame: &PixelBuffer,
+        max_width: Option<u32>,
+        quality: f32,
+    ) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+        jpeg::encode(frame, max_width, quality)
+    }
+
+    fn create_writer(&self, spec: &WriterSpec) -> anyhow::Result<AssetWriter> {
+        AssetWriter::create(spec)
+    }
+
+    fn capture_screen(
+        &self,
+        target: isocast_engine::ScreenTarget<'_>,
+        fps: u32,
+        ten_bit: bool,
+        cursor: bool,
+        sink: VideoSink<PixelBuffer>,
+    ) -> anyhow::Result<(Capture, CaptureFormat)> {
+        let (capture, format) = capture::capture_screen(target, fps, ten_bit, cursor, sink)?;
+        Ok((Capture::Display(capture), format))
+    }
+
+    fn capture_camera(
+        &self,
+        device: &str,
+        request: CameraRequest,
+        canvas: &Canvas,
+        sink: VideoSink<PixelBuffer>,
+    ) -> anyhow::Result<(Capture, CaptureFormat)> {
+        let (capture, format) = camera::capture_camera(device, request, canvas, sink)?;
+        Ok((Capture::Camera(capture), format))
+    }
+
+    fn capture_microphone(&self, device: &str, sink: AudioSink) -> anyhow::Result<(Capture, u32)> {
+        let (capture, channels) = audio::capture_microphone(device, sink)?;
+        Ok((Capture::Microphone(capture), channels))
+    }
+
+    fn capture_system_audio(
+        &self,
+        sink: AudioSink,
+        exclude_own: bool,
+    ) -> anyhow::Result<(Capture, u32)> {
+        let (capture, channels) = audio::capture_system_audio(sink, exclude_own)?;
+        Ok((Capture::SystemAudio(capture), channels))
+    }
+
+    fn play_audio(
+        &self,
+        device: &str,
+        render: isocast_engine::AudioRender,
+    ) -> anyhow::Result<(output::Playback, String)> {
+        output::play_audio(device, render)
+    }
+
+    fn capture_browser(
+        &self,
+        page: &isocast_engine::BrowserPage<'_>,
+        video: VideoSink<PixelBuffer>,
+        audio: Option<AudioSink>,
+    ) -> anyhow::Result<(
+        Capture,
+        CaptureFormat,
+        std::sync::Arc<dyn isocast_engine::BrowserControl>,
+    )> {
+        let (capture, format, control) = browser::capture_browser(page, video, audio)?;
+        Ok((Capture::Browser(capture), format, control))
+    }
+
+    fn capture_application_audio(
+        &self,
+        app: &str,
+        sink: AudioSink,
+    ) -> anyhow::Result<(Capture, u32)> {
+        let (capture, channels) = audio::capture_application_audio(app, sink)?;
+        Ok((Capture::SystemAudio(capture), channels))
+    }
+
+    fn create_video_encoder(
+        &self,
+        spec: &isocast_engine::LiveVideoSpec,
+    ) -> anyhow::Result<H264Encoder> {
+        H264Encoder::new(spec)
+    }
+
+    fn create_audio_encoder(
+        &self,
+        spec: &isocast_engine::LiveAudioSpec,
+    ) -> anyhow::Result<AacEncoder> {
+        AacEncoder::new(spec)
+    }
+
+    fn has_secret(&self, service: &str, account: &str) -> anyhow::Result<bool> {
+        keychain::has_secret(service, account)
+    }
+
+    fn secret(&self, service: &str, account: &str) -> anyhow::Result<Option<String>> {
+        keychain::secret(service, account)
+    }
+
+    fn set_secret(&self, service: &str, account: &str, secret: &str) -> anyhow::Result<()> {
+        keychain::set_secret(service, account, secret)
+    }
+
+    fn delete_secret(&self, service: &str, account: &str) -> anyhow::Result<bool> {
+        keychain::delete_secret(service, account)
+    }
+
+    fn join_files(
+        &self,
+        spec: &isocast_engine::JoinSpec,
+        progress: isocast_engine::OnJoinProgress,
+    ) -> anyhow::Result<isocast_engine::Joined> {
+        join::join(spec, progress)
+    }
+}
+
+/// The volume holding `path`: space available to an unprivileged process,
+/// its file system, and whether it is a network share.
+pub fn volume(path: &Path) -> anyhow::Result<Volume> {
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    let mut stats = MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let stats = unsafe { stats.assume_init() };
+    let name = unsafe { CStr::from_ptr(stats.f_fstypename.as_ptr()) };
+    Ok(Volume {
+        free_bytes: stats.f_bavail * stats.f_bsize as u64,
+        file_system: name.to_string_lossy().into_owned(),
+        network: stats.f_flags & libc::MNT_LOCAL as u32 == 0,
+    })
+}
+
+/// Write 4 KB at the start of `probe` and fsync it, timed. Plain fsync,
+/// not F_FULLFSYNC (what Rust's `sync_data` does here), which would flush
+/// the drive's whole cache and slow the recording it measures.
+fn write_latency(probe: &Path) -> std::io::Result<std::time::Duration> {
+    use std::os::unix::fs::FileExt;
+    use std::os::unix::io::AsRawFd;
+    let started = std::time::Instant::now();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(probe)?;
+    file.write_all_at(&[0; 4096], 0)?;
+    if unsafe { libc::fsync(file.as_raw_fd()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(started.elapsed())
+}
+
+/// The main thread runs (or is about to run) its run loop (see
+/// [`run_main_queue`]).
+static MAIN_LOOP: OnceLock<()> = OnceLock::new();
+
+/// Declare that this process's main thread is about to run
+/// [`run_main_queue`], so main-thread work asked for before it starts waits
+/// for it instead of being skipped.
+pub fn will_run_main_queue() {
+    let _ = MAIN_LOOP.set(());
+}
+
+/// Run this (the main) thread's run loop forever, so that work that must
+/// run on the main thread can: AppKit's display names, and WebKit for
+/// browser sources, which needs a live run loop. Jobs from other threads
+/// arrive on the main dispatch queue, which the run loop drains.
+/// (`dispatch_main` won't do: main-queue blocks then run on other threads,
+/// and there is no run loop.)
+pub fn run_main_queue() -> ! {
+    will_run_main_queue();
+    let mtm = objc2::MainThreadMarker::new().expect("run_main_queue runs on the main thread");
+    // A background app: no Dock icon or menu bar, but AppKit is set up.
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Prohibited);
+    let run_loop = objc2_foundation::NSRunLoop::mainRunLoop();
+    // A port keeps the run loop running when nothing else is scheduled.
+    let port = objc2_foundation::NSPort::port();
+    unsafe { run_loop.addPort_forMode(&port, objc2_foundation::NSDefaultRunLoopMode) };
+    loop {
+        run_loop.run();
+    }
+}
+
+/// Run `job` on the main thread and wait for its result, if this process
+/// serves the main thread (see [`run_main_queue`]) or this is the main
+/// thread. `None` if nobody answers within `timeout`.
+pub(crate) fn on_main_thread<T: Send + 'static>(
+    timeout: std::time::Duration,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    if objc2::MainThreadMarker::new().is_some() {
+        return Some(job());
+    }
+    MAIN_LOOP.get()?;
+    let (tx, rx) = mpsc::channel();
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        let _ = tx.send(job());
+    });
+    rx.recv_timeout(timeout).ok()
+}
+
+/// The current host time.
+pub fn host_time() -> Time {
+    from_cm_time(unsafe { CMClock::host_time_clock().time() })
+}
+
+/// Convert a host-clock `CMTime` (as stamped on captured samples) to `Time`.
+pub fn from_cm_time(time: CMTime) -> Time {
+    Time::from_nanos((time.value as i128 * NANOS_PER_SEC / time.timescale as i128) as i64)
+}

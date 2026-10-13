@@ -1,0 +1,95 @@
+// The contract between Isocast and its WebAssembly plugins: components
+// built for one of these worlds (docs/scenes-as-code.md, "7.4 WebAssembly
+// tier"). Minor versions of the package only add.
+//
+// A component gets nothing but what is imported here: no WASI (no files,
+// network, clocks or randomness), so it must be built without them (see
+// examples/plugins/gain). Its memory is limited (64 MB) and each call has a
+// budget of work (fuel); a call that traps or runs past its budget is
+// contained: Isocast bypasses the plugin for that call and starts a fresh
+// instance.
+
+package isocast:plugin@1.0.0;
+
+interface types {
+  /// A param's value, as the setup gives it (or the manifest's default):
+  /// `f32` params come as `number`, `i32` as `integer`, `bool` as `flag`,
+  /// `string`, `enum` and `file` as `text`, `color` as `color` (straight
+  /// RGBA, 0 to 1).
+  variant value {
+    number(f64),
+    integer(s64),
+    flag(bool),
+    text(string),
+    color(tuple<f32, f32, f32, f32>),
+  }
+
+  record param {
+    name: string,
+    value: value,
+  }
+
+  record source-info {
+    width: u32,
+    height: u32,
+    fps: u32,
+    channels: u32,
+  }
+}
+
+interface host {
+  /// Write a line to the plugin's log (`isocast plugin list` says where);
+  /// level 0 error, 1 warning, 2 info, 3 debug. At most 20 lines a second
+  /// are kept.
+  log: func(level: u8, message: string);
+  /// A data key's value as JSON, if the plugin may read it
+  /// (`permissions.data_read`) and it is set. (Isocast has no data store
+  /// yet, so for now this is always none.)
+  data-get: func(key: string) -> option<string>;
+}
+
+/// An audio filter: one in a source's chain of filters, run on its sound
+/// before the program mix (and in filtered ISO files), at 48 kHz.
+world audio-filter {
+  use types.{param};
+  import host;
+
+  /// At start and whenever its settings change: the sample rate, the
+  /// number of interleaved channels (1 or 2) and every param of the
+  /// manifest, each with the setup's value or its default. An error
+  /// bypasses the filter, with the message in a warning.
+  export configure: func(sample-rate: u32, channels: u32, params: list<param>) -> result<_, string>;
+
+  /// Frames of delay it adds (a look-ahead); that much more audio is fed
+  /// ahead, so its sound lands where it was captured.
+  export latency: func() -> u32;
+
+  /// A block of interleaved samples, returned filtered and the same
+  /// length; usually 10 ms (480 frames), longer at the start of a run when
+  /// the chain has latency, shorter at its end. For a filter whose
+  /// manifest asks for a sidechain (`sidechain = true`), `sidechain` is
+  /// the `sidechain_source`'s sound for the same frames as stereo
+  /// interleaved samples (2 per frame), or none while that source is muted
+  /// or no sidechain source is set. Each call has a budget of work (fuel);
+  /// a call that traps or runs past it leaves the block unfiltered and
+  /// gets a fresh instance.
+  export process: func(samples: list<f32>, sidechain: option<list<f32>>) -> list<f32>;
+
+  /// Forget the sound so far: the source's sound starts afresh (its first
+  /// block, or after a mute or a gap).
+  export reset: func();
+}
+
+/// A source made by a plugin: pictures and sound on the session clock.
+/// (Run by a later Isocast; see docs/scenes-as-code.md, 7.4b.)
+world source {
+  use types.{param, source-info};
+  import host;
+
+  export configure: func(params: list<param>) -> result<source-info, string>;
+  /// The picture at `time-ns` on the session clock: width × height BGRA,
+  /// premultiplied, rows packed.
+  export video: func(time-ns: u64) -> list<u8>;
+  /// `frames` frames of interleaved audio from `time-ns`.
+  export audio: func(time-ns: u64, frames: u32) -> list<f32>;
+}

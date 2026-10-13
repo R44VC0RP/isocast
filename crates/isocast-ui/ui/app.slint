@@ -1,0 +1,494 @@
+// The Isocast window, laid out as OBS Studio's default (docs/design.md
+// 3.1): the preview on top, the source toolbar under it, then the Scenes,
+// Sources, Audio Mixer, Scene Transitions and Controls docks with
+// splitters between them, and the status bar; menus, dialogs and toasts
+// over everything. Each part is an area's (ui/areas/, see
+// src/areas/mod.rs); this file only puts them in place, so it changes
+// rarely. Every change goes to isocastd through callbacks the Rust side
+// answers; nothing here holds state the daemon owns.
+
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { Ui, ConnectionState } from "state.slint";
+import {
+    ColumnSplitter, EditCommands, MenuHost, Menus, RowSplitter, SettingsForms, Toasts, ToastStack, Viewport,
+} from "kit.slint";
+import { KitGallery } from "kit-gallery.slint";
+import { CanvasArea } from "areas/canvas/state.slint";
+import { Stage } from "areas/canvas/stage.slint";
+import { SourcesArea } from "areas/sources/state.slint";
+import { ScenesDock } from "areas/sources/scenes-dock.slint";
+import { SourcesDock } from "areas/sources/sources-dock.slint";
+import { SourceToolbar } from "areas/sources/source-toolbar.slint";
+import { SourcesDialogs } from "areas/sources/dialogs.slint";
+import { MixerArea } from "areas/mixer/state.slint";
+import { MixerDock } from "areas/mixer/mixer-dock.slint";
+import { MixerDialogs } from "areas/mixer/dialogs.slint";
+import { ControlsArea } from "areas/controls/state.slint";
+import { ControlsDock } from "areas/controls/controls-dock.slint";
+import { TransitionsDock } from "areas/controls/transitions-dock.slint";
+import { StatusBar } from "areas/controls/statusbar.slint";
+import { ControlsDialogs } from "areas/controls/dialogs.slint";
+import { SettingsArea } from "areas/settings/state.slint";
+import { SettingsDialogs } from "areas/settings/dialogs.slint";
+import { ConnectingState, Welcome } from "areas/settings/states.slint";
+import { Onboarding } from "areas/settings/onboarding.slint";
+import { LibraryArea } from "areas/library/state.slint";
+import { LibraryDialogs } from "areas/library/dialogs.slint";
+
+// What Rust sees: the globals and the structs in their models.
+export { Theme, Ui, ConnectionState, Menus, Toasts, EditCommands, SettingsForms }
+export { CanvasArea, SourcesArea, MixerArea, ControlsArea, SettingsArea, LibraryArea }
+export { DropdownOption, MenuEntry, MenuList, MenuEntryKind, NavTab, Segment, ToastData, ToastRow, ToastKind, FormField, FormGroup } from "kit.slint";
+export { SceneRow, ItemRow, FilterRow, PickRow } from "areas/sources/state.slint";
+export { Strip, Level, AudioRow } from "areas/mixer/state.slint";
+export { FileRow } from "areas/controls/state.slint";
+export { DeviceChoice, HotkeyGroup, HotkeyRow, IsoChoice, MicRow, PermissionRow, ServiceChoice } from "areas/settings/state.slint";
+export { LibraryRow } from "areas/library/state.slint";
+
+// The preview, the source toolbar, the docks.
+component Workspace inherits VerticalLayout {
+    // The edited monitor's place (see Stage).
+    out property <length> area-x: stage.area-x;
+    out property <length> area-y: stage.area-y;
+    out property <length> area-width: stage.area-width;
+    out property <length> area-height: stage.area-height;
+    out property <length> picture-left: stage.picture-left;
+    out property <length> picture-top: stage.picture-top;
+    out property <length> picture-right: stage.picture-right;
+    out property <length> picture-width: stage.picture-width;
+    out property <length> picture-height: stage.picture-height;
+    out property <int> picture-pixel-width: stage.picture-pixel-width;
+    out property <int> picture-pixel-height: stage.picture-pixel-height;
+    out property <float> scale: stage.scale;
+    out property <bool> dragging: stage.dragging;
+    out property <length> box-left: stage.box-left;
+    out property <length> box-top: stage.box-top;
+    out property <length> box-width: stage.box-width;
+    out property <length> box-height: stage.box-height;
+    out property <length> program-x: stage.program-x;
+    out property <length> program-y: stage.program-y;
+    out property <length> program-width: stage.program-width;
+    out property <length> program-height: stage.program-height;
+    out property <int> program-pixel-width: stage.program-pixel-width;
+    out property <int> program-pixel-height: stage.program-pixel-height;
+    out property <length> stage-x: stage.stage-x;
+    out property <length> stage-y: stage.stage-y;
+    out property <length> stage-width: stage.stage-width;
+    out property <length> stage-height: stage.stage-height;
+
+    // The window is redrawn whole for every change (the mixer's meters
+    // 30 times a second, and every video frame with `--preview image`):
+    // the docks are drawn into layers once and reused until they change,
+    // so a frame costs the meters (and the picture), not every word of
+    // every dock. The mixer changes with every meter step, so with native
+    // pictures (redrawn only for the meters) it draws directly.
+    property <bool> cache-docks: true;
+
+    // The dock row's height: as set, or about a third of the window.
+    property <length> docks-height: Ui.docks-height > 0 ? Ui.docks-height : round(min(320px, max(224px, Viewport.height * 0.3)) / 1px) * 1px;
+
+    spacing: 0;
+
+    stage := Stage {
+        vertical-stretch: 1;
+        min-height: 80px;
+    }
+
+    if Ui.show-source-toolbar: SourceToolbar {
+        cache-rendering-hint: root.cache-docks;
+    }
+
+    RowSplitter {
+        size: root.docks-height;
+        min-size: 120px;
+        max-size: max(120px, Viewport.height - 220px);
+        locked: Ui.docks-locked;
+        changing(height) => { Ui.docks-height = height; }
+        resized => { Ui.layout-changed(); }
+    }
+
+    // The docks share the width: the mixer takes what's left, and when the
+    // window is narrow the docks give way down to their minimums (140,
+    // 170, 240, 160, 160: 874px with the splitters, under the window's
+    // 900px minimum), so Controls is never cut off. The hairline above
+    // counts in their height, as the web app's border does.
+    HorizontalLayout {
+        height: root.docks-height - 1px;
+        spacing: 0;
+
+        if Ui.show-scenes: ScenesDock {
+            cache-rendering-hint: root.cache-docks;
+            preferred-width: Ui.scenes-width;
+            min-width: 140px;
+            horizontal-stretch: 0;
+        }
+        if Ui.show-scenes && (Ui.show-sources || Ui.show-mixer || Ui.show-transitions || Ui.show-controls): ColumnSplitter {
+            size: Ui.scenes-width;
+            min-size: 140px;
+            locked: Ui.docks-locked;
+            changing(width) => { Ui.scenes-width = width; }
+            resized => { Ui.layout-changed(); }
+        }
+
+        if Ui.show-sources: SourcesDock {
+            cache-rendering-hint: root.cache-docks;
+            preferred-width: Ui.sources-width;
+            min-width: 170px;
+            horizontal-stretch: 0;
+        }
+        if Ui.show-sources && (Ui.show-mixer || Ui.show-transitions || Ui.show-controls): ColumnSplitter {
+            size: Ui.sources-width;
+            min-size: 170px;
+            locked: Ui.docks-locked;
+            changing(width) => { Ui.sources-width = width; }
+            resized => { Ui.layout-changed(); }
+        }
+
+        if Ui.show-mixer: MixerDock {
+            // Kept for the video frames between meter steps in image mode.
+            cache-rendering-hint: !CanvasArea.native-picture;
+            min-width: 240px;
+            horizontal-stretch: 1;
+        }
+        // Right of the mixer, the splitter resizes the dock after it.
+        if Ui.show-mixer && Ui.show-transitions: ColumnSplitter {
+            size: Ui.transitions-width;
+            min-size: 160px;
+            sign: -1;
+            locked: Ui.docks-locked;
+            changing(width) => { Ui.transitions-width = width; }
+            resized => { Ui.layout-changed(); }
+        }
+        if Ui.show-mixer && !Ui.show-transitions && Ui.show-controls: ColumnSplitter {
+            size: Ui.controls-width;
+            min-size: 160px;
+            sign: -1;
+            locked: Ui.docks-locked;
+            changing(width) => { Ui.controls-width = width; }
+            resized => { Ui.layout-changed(); }
+        }
+
+        if Ui.show-transitions: TransitionsDock {
+            cache-rendering-hint: root.cache-docks;
+            preferred-width: Ui.transitions-width;
+            min-width: 160px;
+            horizontal-stretch: 0;
+        }
+        if Ui.show-transitions && Ui.show-controls: ColumnSplitter {
+            size: Ui.transitions-width;
+            min-size: 160px;
+            locked: Ui.docks-locked;
+            changing(width) => { Ui.transitions-width = width; }
+            resized => { Ui.layout-changed(); }
+        }
+
+        if Ui.show-controls: ControlsDock {
+            cache-rendering-hint: root.cache-docks;
+            preferred-width: Ui.controls-width;
+            min-width: 160px;
+            horizontal-stretch: 0;
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    in property <string> title-text: "Isocast";
+    in property <string> version: "0.0.1";
+    // Offscreen snapshots have no native menu bar (Slint would draw one in
+    // the window instead), so it is hidden there.
+    in property <bool> native-menu: true;
+
+    // Where the edited monitor and its picture are, in window points, and
+    // the selection box: for the native layers (src/layers.rs), scripted
+    // drags and checks. Studio Mode's program monitor too.
+    out property <length> preview-x: workspace.area-x;
+    out property <length> preview-y: workspace.area-y;
+    out property <length> preview-width: workspace.area-width;
+    out property <length> preview-height: workspace.area-height;
+    out property <length> picture-left: workspace.picture-left;
+    out property <length> picture-top: workspace.picture-top;
+    out property <length> picture-right: workspace.picture-right;
+    out property <length> picture-width: workspace.picture-width;
+    out property <length> picture-height: workspace.picture-height;
+    out property <int> picture-pixel-width: workspace.picture-pixel-width;
+    out property <int> picture-pixel-height: workspace.picture-pixel-height;
+    out property <float> canvas-scale: workspace.scale;
+    out property <bool> dragging: workspace.dragging;
+    out property <length> box-left: workspace.box-left;
+    out property <length> box-top: workspace.box-top;
+    out property <length> box-width: workspace.box-width;
+    out property <length> box-height: workspace.box-height;
+    out property <length> program-x: workspace.program-x;
+    out property <length> program-y: workspace.program-y;
+    out property <length> program-width: workspace.program-width;
+    out property <length> program-height: workspace.program-height;
+    out property <int> program-pixel-width: workspace.program-pixel-width;
+    out property <int> program-pixel-height: workspace.program-pixel-height;
+    // The whole preview area (the native layers' stage).
+    out property <length> stage-x: workspace.stage-x;
+    out property <length> stage-y: workspace.stage-y;
+    out property <length> stage-width: workspace.stage-width;
+    out property <length> stage-height: workspace.stage-height;
+
+    // Snapshots: the widget kit on one page (`--state kit`), with its menu,
+    // dropdown or dialog open.
+    in-out property <bool> kit-gallery;
+    in-out property <bool> kit-dialog;
+    in-out property <int> kit-dropdown;
+
+    // An Edit menu command: the focused field's, else the window's.
+    function edit(command: string) {
+        EditCommands.run(command);
+        edit-fallback.running = true;
+    }
+
+    property <bool> ready: Ui.loaded || (Ui.connection == ConnectionState.connected && Ui.has-setup);
+
+    title: root.title-text;
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 900px;
+    min-height: 560px;
+    // With the picture in native layers under the interface, the window
+    // lets the preview show through (the Rust side keeps the NSWindow
+    // itself opaque, in this colour).
+    background: CanvasArea.native-picture ? transparent : Theme.surface-chrome;
+    default-font-size: Theme.fs;
+    default-font-family: Theme.font-ui;
+    forward-focus: keys;
+
+    // Overlays size themselves to the window.
+    init => {
+        Viewport.width = self.width;
+        Viewport.height = self.height;
+    }
+    changed width => { Viewport.width = self.width; }
+    changed height => { Viewport.height = self.height; }
+
+    // After a field had its chance at an Edit command.
+    edit-fallback := Timer {
+        interval: 30ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if EditCommands.handled != EditCommands.serial {
+                Ui.menu(EditCommands.command);
+            }
+        }
+    }
+
+    // The menu bar, after OBS's where Isocast has the function (the ids
+    // are the web app's, src/mac MENU_ACTIONS; App::menu and the areas
+    // handle them).
+    MenuBar {
+        visible: root.native-menu;
+        Menu {
+            title: "File";
+            MenuItem { title: "Show Recordings"; activated => { Ui.menu("show_recordings"); } }
+            MenuSeparator { }
+            MenuItem { title: "Add Scene"; shortcut: @keys(Control + Shift + N); activated => { Ui.menu("new_scene"); } }
+            MenuItem { title: "Add Source…"; shortcut: @keys(Control + Shift + A); activated => { Ui.menu("add_source"); } }
+            MenuSeparator { }
+            MenuItem { title: "Settings…"; shortcut: @keys(Control + ","); activated => { Ui.menu("settings"); } }
+            MenuSeparator { }
+            MenuItem { title: "Close Window"; shortcut: @keys(Control + W); activated => { Ui.quit(); } }
+        }
+        Menu {
+            title: "Edit";
+            MenuItem { title: "Undo"; shortcut: @keys(Control + Z); activated => { root.edit("undo"); } }
+            MenuItem { title: "Redo"; shortcut: @keys(Control + Shift + Z); activated => { root.edit("redo"); } }
+            MenuSeparator { }
+            MenuItem { title: "Cut"; shortcut: @keys(Control + X); activated => { root.edit("cut"); } }
+            MenuItem { title: "Copy"; shortcut: @keys(Control + C); activated => { root.edit("copy"); } }
+            MenuItem { title: "Paste"; shortcut: @keys(Control + V); activated => { root.edit("paste"); } }
+            MenuItem { title: "Paste (Duplicate)"; activated => { Ui.menu("paste_duplicate"); } }
+            MenuItem { title: "Select All"; shortcut: @keys(Control + A); activated => { root.edit("select-all"); } }
+            MenuSeparator { }
+            Menu {
+                title: "Transform";
+                MenuItem { title: "Edit Transform…"; shortcut: @keys(Control + E); activated => { Ui.menu("transform_edit"); } }
+                MenuItem { title: "Reset Transform"; shortcut: @keys(Control + R); activated => { Ui.menu("transform_reset"); } }
+                MenuSeparator { }
+                MenuItem { title: "Rotate 90° Clockwise"; activated => { Ui.menu("rotate_cw"); } }
+                MenuItem { title: "Rotate 90° Counterclockwise"; activated => { Ui.menu("rotate_ccw"); } }
+                MenuItem { title: "Rotate 180°"; activated => { Ui.menu("rotate_180"); } }
+                MenuSeparator { }
+                MenuItem { title: "Fit to Screen"; shortcut: @keys(Control + F); activated => { Ui.menu("fit_screen"); } }
+                MenuItem { title: "Stretch to Screen"; shortcut: @keys(Control + S); activated => { Ui.menu("stretch_screen"); } }
+                MenuItem { title: "Center to Screen"; shortcut: @keys(Control + D); activated => { Ui.menu("center_screen"); } }
+                MenuItem { title: "Center Vertically"; activated => { Ui.menu("center_vertical"); } }
+                MenuItem { title: "Center Horizontally"; activated => { Ui.menu("center_horizontal"); } }
+            }
+            Menu {
+                title: "Order";
+                MenuItem { title: "Move Up"; activated => { Ui.menu("order_up"); } }
+                MenuItem { title: "Move Down"; activated => { Ui.menu("order_down"); } }
+                MenuSeparator { }
+                MenuItem { title: "Move to Top"; activated => { Ui.menu("order_top"); } }
+                MenuItem { title: "Move to Bottom"; activated => { Ui.menu("order_bottom"); } }
+            }
+            MenuSeparator { }
+            MenuItem { title: "Filters…"; activated => { Ui.menu("filters"); } }
+            MenuItem { title: "Properties…"; activated => { Ui.menu("properties"); } }
+            MenuSeparator { }
+            MenuItem { title: "Lock Preview"; checkable: true; checked: Ui.preview-locked; activated => { Ui.menu("lock_preview"); } }
+            MenuSeparator { }
+            MenuItem { title: "Advanced Audio Properties"; activated => { Ui.menu("advanced_audio"); } }
+        }
+        Menu {
+            title: "View";
+            MenuItem { title: "Studio Mode"; shortcut: @keys(Control + Shift + S); checkable: true; checked: Ui.studio; activated => { Ui.menu("studio_mode"); } }
+            MenuSeparator { }
+            MenuItem { title: "Source Toolbar"; checkable: true; checked: Ui.show-source-toolbar; activated => { Ui.menu("source_toolbar"); } }
+            MenuItem { title: "Status Bar"; checkable: true; checked: Ui.show-status-bar; activated => { Ui.menu("status_bar"); } }
+            MenuSeparator { }
+            MenuItem { title: "Reset UI"; activated => { Ui.menu("reset_ui"); } }
+        }
+        Menu {
+            title: "Docks";
+            MenuItem { title: "Lock Docks"; checkable: true; checked: Ui.docks-locked; activated => { Ui.menu("lock_docks"); } }
+            MenuItem { title: "Reset Docks"; activated => { Ui.menu("reset_docks"); } }
+            MenuSeparator { }
+            MenuItem { title: "Scenes"; checkable: true; checked: Ui.show-scenes; activated => { Ui.menu("dock_scenes"); } }
+            MenuItem { title: "Sources"; checkable: true; checked: Ui.show-sources; activated => { Ui.menu("dock_sources"); } }
+            MenuItem { title: "Audio Mixer"; checkable: true; checked: Ui.show-mixer; activated => { Ui.menu("dock_mixer"); } }
+            MenuItem { title: "Scene Transitions"; checkable: true; checked: Ui.show-transitions; activated => { Ui.menu("dock_transitions"); } }
+            MenuItem { title: "Controls"; checkable: true; checked: Ui.show-controls; activated => { Ui.menu("dock_controls"); } }
+        }
+        // Profile and Scene Collection, as OBS has them (area F,
+        // src/areas/library.rs): the commands act on the one in use; the
+        // list below switches. Each entry's check follows `current` (the
+        // lists are replaced whole, since choosing a checkable item flips
+        // its check by itself).
+        Menu {
+            title: "Profile";
+            MenuItem { title: "New…"; enabled: LibraryArea.available; activated => { Ui.menu("profile_new"); } }
+            MenuItem { title: "Duplicate…"; enabled: LibraryArea.has-profile; activated => { Ui.menu("profile_duplicate"); } }
+            MenuItem { title: "Rename…"; enabled: LibraryArea.has-profile; activated => { Ui.menu("profile_rename"); } }
+            MenuItem { title: "Remove…"; enabled: LibraryArea.can-remove-profile; activated => { Ui.menu("profile_remove"); } }
+            MenuSeparator { }
+            MenuItem { title: "Import…"; enabled: LibraryArea.available; activated => { Ui.menu("profile_import"); } }
+            MenuItem { title: "Export…"; enabled: LibraryArea.has-profile; activated => { Ui.menu("profile_export"); } }
+            if LibraryArea.profiles.length > 0: MenuSeparator { }
+            for row in LibraryArea.profiles: MenuItem {
+                title: row.name;
+                checkable: true;
+                checked: row.current;
+                enabled: !row.problem;
+                activated => { LibraryArea.switch-to("profile", row.id); }
+            }
+        }
+        Menu {
+            title: "Scene Collection";
+            MenuItem { title: "New…"; enabled: LibraryArea.available; activated => { Ui.menu("collection_new"); } }
+            MenuItem { title: "Duplicate…"; enabled: LibraryArea.has-collection; activated => { Ui.menu("collection_duplicate"); } }
+            MenuItem { title: "Rename…"; enabled: LibraryArea.has-collection; activated => { Ui.menu("collection_rename"); } }
+            MenuItem { title: "Remove…"; enabled: LibraryArea.can-remove-collection; activated => { Ui.menu("collection_remove"); } }
+            MenuSeparator { }
+            MenuItem { title: "Import…"; enabled: LibraryArea.available; activated => { Ui.menu("collection_import"); } }
+            MenuItem { title: "Export…"; enabled: LibraryArea.has-collection; activated => { Ui.menu("collection_export"); } }
+            if LibraryArea.collections.length > 0: MenuSeparator { }
+            for row in LibraryArea.collections: MenuItem {
+                title: row.name;
+                checkable: true;
+                checked: row.current;
+                enabled: !row.problem;
+                activated => { LibraryArea.switch-to("collection", row.id); }
+            }
+        }
+        Menu {
+            title: "Tools";
+            MenuItem { title: "Auto-Configuration Wizard…"; activated => { Ui.menu("start_over"); } }
+        }
+        Menu {
+            title: "Window";
+            MenuItem { title: "Minimize"; shortcut: @keys(Control + M); activated => { Ui.menu("minimize"); } }
+            MenuItem { title: "Zoom"; activated => { Ui.menu("zoom"); } }
+            MenuSeparator { }
+            MenuItem { title: "Bring All to Front"; activated => { Ui.menu("bring_all_to_front"); } }
+        }
+        Menu {
+            title: "Help";
+            MenuItem { title: "Keyboard Shortcuts"; shortcut: @keys(Control + "/"); activated => { Ui.menu("hotkeys"); } }
+            MenuSeparator { }
+            MenuItem { title: "About Isocast"; activated => { Ui.open-dialog("about", ""); } }
+        }
+    }
+
+    // Keys nothing else took (web app: app.js onKey): 1–9 choose that
+    // scene, Escape deselects, Return or Space takes the preview in Studio
+    // Mode, Delete removes the selected item, arrows nudge it (⇧ ×10).
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.modifiers.control || event.modifiers.meta || event.modifiers.alt || Ui.dialog != "" {
+                return reject;
+            }
+            if event.text >= "1" && event.text <= "9" && event.text.character-count == 1 {
+                Ui.menu("scene:" + event.text);
+                return accept;
+            }
+            if event.text == Key.Escape {
+                Ui.menu("deselect");
+                return accept;
+            }
+            if Ui.studio && (event.text == "\n" || event.text == " ") {
+                Ui.menu("take");
+                return accept;
+            }
+            if event.text == Key.Backspace || event.text == Key.Delete {
+                Ui.menu("remove");
+                return accept;
+            }
+            if Ui.selected-item != "" && (event.text == Key.LeftArrow || event.text == Key.RightArrow || event.text == Key.UpArrow || event.text == Key.DownArrow) {
+                Ui.menu("nudge:" + (event.text == Key.LeftArrow ? -1 : event.text == Key.RightArrow ? 1 : 0) * (event.modifiers.shift ? 10 : 1) + "," + (event.text == Key.UpArrow ? -1 : event.text == Key.DownArrow ? 1 : 0) * (event.modifiers.shift ? 10 : 1));
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            spacing: 0;
+            workspace := Workspace {
+                vertical-stretch: 1;
+            }
+            if Ui.show-status-bar: StatusBar {
+                // Drawn once and reused, as the docks are (see Workspace).
+                cache-rendering-hint: true;
+            }
+        }
+    }
+
+    // Until the setup is read: where the window stands with isocastd, over
+    // the workspace.
+    if !root.ready: ConnectingState {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height - (Ui.show-status-bar ? Theme.statusbar : 0px);
+    }
+
+    // Over the window: Welcome (no setup yet), the dialogs, the gallery,
+    // the menu and the toasts.
+    if Ui.loaded && !Ui.has-setup && !Ui.onboarding: Welcome { }
+    if Ui.onboarding: Onboarding { }
+
+    SourcesDialogs { }
+    MixerDialogs { }
+    ControlsDialogs { }
+    SettingsDialogs {
+        version: root.version;
+    }
+    LibraryDialogs { }
+
+    if root.kit-gallery: KitGallery {
+        show-dialog: root.kit-dialog;
+        open-dropdown: root.kit-dropdown;
+    }
+
+    MenuHost { }
+
+    ToastStack {
+        area-width: root.width;
+    }
+}

@@ -1,0 +1,196 @@
+// Forms (docs/design.md 3.11, 3.12): one label column everywhere
+// (Settings, Properties, Filters, Edit Transform): labels right-aligned in
+// 168px, 12px from the value; hints under their control, 180px in;
+// sections titled with a hairline filling the rest of their line.
+
+import { Theme } from "../theme.slint";
+import { Icon, Icons } from "../icons.slint";
+
+// A form's body: 16px top and bottom, 20px sides, rows 8px apart.
+export component Form inherits VerticalLayout {
+    padding-top: Theme.space-4;
+    padding-bottom: Theme.space-4;
+    padding-left: Theme.space-5;
+    padding-right: Theme.space-5;
+    spacing: Theme.space-2;
+    alignment: start;
+}
+
+// A caption under a control: 12/16 in `text-3`, indented to the value
+// column by default.
+export component Hint inherits Rectangle {
+    in property <string> text;
+    in property <length> indent: Theme.hint-indent;
+    in property <bool> live;
+    in property <bool> warn;
+    height: label.preferred-height;
+    label := Text {
+        x: root.indent;
+        width: parent.width - root.indent;
+        text: root.text;
+        color: root.warn ? Theme.warning : root.live ? Theme.text-2 : Theme.text-3;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        line-height-factor: Theme.leading-sm;
+        wrap: word-wrap;
+    }
+}
+
+// One row: its label, then its controls (children, 8px apart) filling the
+// value column, then an optional hint under them.
+export component FormRow inherits VerticalLayout {
+    in property <string> label;
+    in property <string> hint;
+    // The hint in `text-2` with figures (a live reading, like "Receiving
+    // 1920×1080 at 60 fps"), or amber when it warns.
+    in property <bool> hint-live;
+    in property <bool> hint-warn;
+    in property <length> label-width: Theme.label-col;
+    // The label in the middle of a taller row (Crop beside its two lines),
+    // not beside the first line.
+    in property <bool> label-centered;
+    // Dim the whole row (a locked form).
+    in property <bool> enabled: true;
+
+    spacing: Theme.space-1;
+    alignment: start;
+
+    HorizontalLayout {
+        spacing: Theme.label-gap;
+        opacity: root.enabled ? 1 : Theme.disabled-opacity;
+        // One line sits in the middle of a 28px row; a long label wraps.
+        // (The row's height is at least 28px from here: a `min-height` on
+        // the row itself would replace its controls' own minimum, and a
+        // short window would squeeze two lines of fields into one.)
+        VerticalLayout {
+            width: root.label-width;
+            min-height: max(Theme.control-h, label-text.preferred-height + 6px);
+            padding-top: root.label-centered ? 0px : 6px;
+            alignment: root.label-centered ? LayoutAlignment.center : LayoutAlignment.start;
+            label-text := Text {
+                horizontal-alignment: right;
+                text: root.label;
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading-sm;
+                wrap: word-wrap;
+                accessible-role: none;
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-2;
+            alignment: stretch;
+            @children
+        }
+    }
+    if root.hint != "": Hint {
+        text: root.hint;
+        indent: root.label-width + Theme.label-gap;
+        live: root.hint-live;
+        warn: root.hint-warn;
+    }
+}
+
+// A section title ("Appearance", "Recording") with a hairline filling the
+// rest of its line, 8px above it.
+export component FormSection inherits VerticalLayout {
+    in property <string> title;
+    padding-top: Theme.space-2;
+    HorizontalLayout {
+        spacing: Theme.space-2;
+        Text {
+            text: root.title;
+            color: Theme.text-2;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Rectangle {
+                height: 1px;
+                background: Theme.line;
+            }
+        }
+    }
+}
+
+// A 1px line between groups of rows, 8px above and below.
+export component FormSeparator inherits VerticalLayout {
+    padding-top: Theme.space-2;
+    padding-bottom: Theme.space-2;
+    Rectangle {
+        height: 1px;
+        background: Theme.line;
+    }
+}
+
+// Settings that belong to the choice above them: 180px in, a hairline on
+// their left, a narrower label column (120px).
+export component SubForm inherits HorizontalLayout {
+    padding-left: Theme.hint-indent;
+    padding-top: Theme.space-2;
+    Rectangle {
+        width: 1px;
+        background: Theme.line;
+    }
+    VerticalLayout {
+        padding-left: Theme.space-3;
+        spacing: Theme.space-2;
+        horizontal-stretch: 1;
+        @children
+    }
+}
+
+export enum CalloutKind { error, info }
+
+// A full-width band at the top of a form: an error (red tint) or a note
+// (copper tint), with a title and a message.
+export component Callout inherits Rectangle {
+    in property <CalloutKind> kind: CalloutKind.error;
+    in property <string> title;
+    in property <string> message;
+    background: root.kind == CalloutKind.error ? Theme.danger-soft : Theme.accent-soft;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.title;
+    accessible-description: root.message;
+
+    HorizontalLayout {
+        padding-top: Theme.space-3;
+        padding-bottom: Theme.space-3;
+        padding-left: Theme.space-5;
+        padding-right: Theme.space-5;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            alignment: start;
+            Icon {
+                path: root.kind == CalloutKind.error ? Icons.alert : Icons.info;
+                color: root.kind == CalloutKind.error ? Theme.danger-text : Theme.accent-text;
+            }
+        }
+        VerticalLayout {
+            spacing: 2px;
+            horizontal-stretch: 1;
+            if root.title != "": Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading-sm;
+                font-weight: Theme.weight-semibold;
+                wrap: word-wrap;
+            }
+            if root.message != "": Text {
+                text: root.message;
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading-sm;
+                wrap: word-wrap;
+            }
+        }
+    }
+}

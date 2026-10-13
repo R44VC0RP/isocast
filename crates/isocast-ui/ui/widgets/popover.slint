@@ -1,0 +1,101 @@
+// A popover (docs/design.md 3.10): a floating panel anchored to the
+// element it is declared in (REC and LIVE details over the status bar,
+// a helper beside a field). A click outside or Escape closes it.
+//
+// Put it inside its anchor, outside any layout, and call `show()`:
+//
+//     rec := Rectangle {
+//         TouchArea { clicked => { details.show(); } }
+//         details := Popover {
+//             placement: PopoverPlacement.above-right;
+//             panel-width: 420px;
+//             VerticalLayout { … }
+//         }
+//     }
+
+import { Theme, Motion } from "../theme.slint";
+import { MenuPanel } from "menus.slint";
+import { Viewport } from "globals.slint";
+import { ToastStack } from "toast.slint";
+
+export enum PopoverPlacement { below-left, below-right, above-left, above-right }
+
+export component Popover inherits Rectangle {
+    in property <PopoverPlacement> placement: PopoverPlacement.below-left;
+    in property <length> panel-width: Theme.popover-min;
+    out property <bool> open: popup.is-open;
+    callback closed();
+
+    public function show() {
+        popup.show();
+        root.shown = true;
+    }
+
+    public function close() {
+        popup.close();
+        root.shown = false;
+        root.closed();
+    }
+
+    property <bool> shown;
+
+    x: 0;
+    y: 0;
+    width: 100%;
+    height: 100%;
+    accessible-role: none;
+
+    popup := PopupWindow {
+        x: -root.absolute-position.x;
+        y: -root.absolute-position.y;
+        width: Viewport.width;
+        height: Viewport.height;
+        close-policy: no-auto-close;
+
+        TouchArea {
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down {
+                    root.close();
+                }
+            }
+        }
+
+        property <length> margin: Theme.space-2;
+        property <bool> above: root.placement == PopoverPlacement.above-left || root.placement == PopoverPlacement.above-right;
+        property <bool> right: root.placement == PopoverPlacement.below-right || root.placement == PopoverPlacement.above-right;
+        property <length> h: content.preferred-height;
+        property <length> want-x: self.right ? root.absolute-position.x + root.width - root.panel-width : root.absolute-position.x;
+        property <length> want-y: self.above ? root.absolute-position.y - self.h - 6px : root.absolute-position.y + root.height + 6px;
+
+        keys := FocusScope {
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.close();
+                    return accept;
+                }
+                reject
+            }
+
+            MenuPanel {
+                x: max(popup.margin, min(popup.want-x, popup.width - root.panel-width - popup.margin));
+                y: max(popup.margin, min(popup.want-y, popup.height - popup.h - popup.margin));
+                width: root.panel-width;
+                height: popup.h;
+                opacity: root.shown ? 1 : 0;
+                animate opacity { duration: Theme.med; easing: Motion.ease; }
+
+                TouchArea { }
+                content := VerticalLayout {
+                    padding: Theme.space-1;
+                    @children
+                }
+            }
+        }
+
+        // Toasts show over the popover too.
+        ToastStack {
+            area-width: Viewport.width;
+        }
+    }
+}

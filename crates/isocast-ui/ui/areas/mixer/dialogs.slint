@@ -1,0 +1,246 @@
+// Area B's dialogs: Advanced Audio Properties ("advanced-audio"), as in
+// OBS: one row per audio source with its volume, mute, balance, sync
+// offset and monitoring, and where it is recorded (Isocast's tracks: the
+// program mix, and the ISO files). Put on the window by app.slint.
+
+import { Theme } from "../../theme.slint";
+import { Ui } from "../../state.slint";
+import { Checkbox, Dialog, Viewport, Dropdown, ListEmpty, NumberField, ScrollArea, Slider, Tip } from "../../kit.slint";
+import { AudioRow, MixerArea } from "state.slint";
+
+// The table's columns (the web app's: name ≥ 120, then 104 44 170 108 200
+// 136, 12px apart), from the dialog's width (1060, at most the window's
+// less 40; less its border and 16px sides). In a narrow window the name
+// gives way first (to 80), then Balance and Audio Monitoring.
+global Columns {
+    out property <length> dialog: 1060px;
+    out property <length> gap: 12px;
+    property <length> table: min(root.dialog, Viewport.width - 40px) - 2px - 32px;
+    property <length> fixed: 104px + 44px + 170px + 108px + 200px + 136px + 6 * 12px;
+    property <length> deficit: max(0px, 80px + root.fixed - root.table);
+    out property <length> name-w: max(80px, root.table - root.fixed);
+    out property <length> balance-w: 170px - root.deficit * 0.4;
+    out property <length> monitor-w: 200px - root.deficit * 0.6;
+}
+
+component Columned inherits HorizontalLayout {
+    spacing: Columns.gap;
+}
+
+// A column's tooltip (a `Tooltip` straight in a dialog's tree trips the
+// Slint 1.18 compiler; inside a component it's fine).
+component HeadTip inherits Rectangle {
+    in property <string> tooltip;
+    Tooltip {
+        Tip { text: root.tooltip; }
+    }
+}
+
+component Head inherits Text {
+    color: Theme.text-2;
+    font-size: Theme.fs-xs;
+    letter-spacing: Theme.tracking-xs;
+    font-weight: Theme.weight-semibold;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+component AudioTableRow inherits Rectangle {
+    in property <AudioRow> audio;
+    in property <bool> last;
+
+    min-height: 40px;
+    accessible-role: groupbox;
+    accessible-label: root.audio.name;
+
+    if !root.last: Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.line-soft;
+    }
+
+    Columned {
+        Text {
+            width: Columns.name-w;
+            text: root.audio.name;
+            color: Theme.text;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        VerticalLayout {
+            width: 104px;
+            alignment: center;
+            NumberField {
+                max-width: 104px;
+                label: "Volume of " + root.audio.name;
+                value: root.audio.gain-db;
+                minimum: -100;
+                maximum: 30;
+                step: 0.1;
+                unit: "dB";
+                submits: false;
+                changed(db) => { MixerArea.set-gain(root.audio.id, db); }
+            }
+        }
+        HorizontalLayout {
+            width: 44px;
+            alignment: center;
+            Checkbox {
+                label: "Mute " + root.audio.name;
+                checked: root.audio.muted;
+                toggled(on) => { MixerArea.set-muted(root.audio.id, on); }
+            }
+        }
+        HorizontalLayout {
+            width: Columns.balance-w;
+            spacing: Theme.space-2;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                Slider {
+                    label: "Balance of " + root.audio.name;
+                    value-text: root.audio.balance-text;
+                    minimum: -1;
+                    maximum: 1;
+                    step: 0.01;
+                    origin: 0;
+                    value: root.audio.balance;
+                    moved(b) => { MixerArea.balance-moved(root.audio.id, b); }
+                    changed(b) => { MixerArea.balance-changed(root.audio.id, b); }
+                }
+            }
+            Text {
+                width: 30px;
+                text: root.audio.balance-text;
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+        }
+        VerticalLayout {
+            width: 108px;
+            alignment: center;
+            NumberField {
+                max-width: 108px;
+                label: "Sync offset of " + root.audio.name;
+                value: root.audio.offset-ms;
+                minimum: -5000;
+                maximum: 5000;
+                step: 1;
+                unit: "ms";
+                submits: false;
+                changed(ms) => { MixerArea.set-offset(root.audio.id, ms); }
+            }
+        }
+        VerticalLayout {
+            width: Columns.monitor-w;
+            alignment: center;
+            Dropdown {
+                label: "Audio monitoring of " + root.audio.name;
+                options: MixerArea.monitoring;
+                value: root.audio.monitor;
+                selected(value) => { MixerArea.set-monitor(root.audio.id, value); }
+            }
+        }
+        HorizontalLayout {
+            width: 136px;
+            spacing: Theme.space-3;
+            Checkbox {
+                text: "Program";
+                small: true;
+                label: "Record " + root.audio.name + " in the program mix";
+                checked: root.audio.program;
+                toggled(on) => { MixerArea.set-program(root.audio.id, on); }
+            }
+            Checkbox {
+                text: "ISO";
+                small: true;
+                faint: !MixerArea.iso-enabled;
+                tooltip: MixerArea.iso-enabled ? "Recorded with every ISO file" : "ISO recording is off (Settings → Output)";
+                checked: root.audio.iso;
+                toggled(on) => { MixerArea.set-iso(root.audio.id, on); }
+            }
+        }
+    }
+}
+
+export component MixerDialogs inherits Rectangle {
+    if Ui.dialog == "advanced-audio": Dialog {
+        title: "Advanced Audio Properties";
+        dialog-width: Columns.dialog;
+        ok-text: "Close";
+        cancel-text: "";
+        accepted => { Ui.close-dialog(); }
+        cancelled => { Ui.close-dialog(); }
+
+        VerticalLayout {
+            padding-top: Theme.space-2;
+            padding-bottom: Theme.space-4;
+            padding-left: Theme.space-4;
+            padding-right: Theme.space-4;
+            spacing: 0;
+
+            Columned {
+                height: 32px;
+                Head {
+                    width: Columns.name-w;
+                    text: "Name";
+                }
+                Head {
+                    width: 104px;
+                    text: "Volume";
+                }
+                Head {
+                    width: 44px;
+                    text: "Mute";
+                    horizontal-alignment: center;
+                }
+                Head {
+                    width: Columns.balance-w;
+                    text: "Balance";
+                }
+                Head {
+                    width: 108px;
+                    text: "Sync Offset";
+                }
+                Head {
+                    width: Columns.monitor-w;
+                    text: "Audio Monitoring";
+                }
+                Rectangle {
+                    width: 136px;
+                    Head {
+                        x: 0;
+                        width: parent.width;
+                        height: parent.height;
+                        text: "Tracks";
+                    }
+                    HeadTip {
+                        tooltip: "Where it is recorded: the program mix (Program), and attached to every ISO file (ISO)";
+                    }
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.line-soft;
+            }
+            if MixerArea.rows.length == 0: ListEmpty {
+                text: "No audio sources.";
+            }
+            ScrollArea {
+                min-height: 0;
+                preferred-height: self.content-height;
+                vertical-stretch: 1;
+                for row[i] in MixerArea.rows: AudioTableRow {
+                    audio: row;
+                    last: i == MixerArea.rows.length - 1;
+                }
+            }
+        }
+    }
+}

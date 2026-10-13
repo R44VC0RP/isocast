@@ -1,0 +1,18 @@
+// Area A's dialogs, each shown while `Ui.dialog` names it: Create/Select
+// Source ("create-source", arg: the source kind, or "scene"), Properties
+// ("properties", arg: source id), Filters ("filters", arg: source id),
+// Edit Transform ("transform", the selected item), Rename ("rename", arg:
+// source id). Put on the window by app.slint.
+
+import { Ui } from "../../state.slint";
+import { CreateSourceDialog, RenameDialog } from "create-source.slint";
+import { PropertiesDialog, FiltersDialog } from "properties.slint";
+import { TransformDialog } from "transform.slint";
+
+export component SourcesDialogs inherits Rectangle {
+    if Ui.dialog == "create-source": CreateSourceDialog { }
+    if Ui.dialog == "properties": PropertiesDialog { }
+    if Ui.dialog == "filters": FiltersDialog { }
+    if Ui.dialog == "transform": TransformDialog { }
+    if Ui.dialog == "rename": RenameDialog { }
+}

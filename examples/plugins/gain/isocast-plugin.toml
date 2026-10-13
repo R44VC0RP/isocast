@@ -1,0 +1,44 @@
+# Two audio filters written as WebAssembly components (Rust, built for
+# wasm32-wasip2 by ./build.sh; the built .wasm files are kept here):
+#
+#   gain    raises or lowers the volume, exactly like the built-in gain;
+#           it can also misbehave on purpose (`fault`) to show that a
+#           broken plugin can't hurt a recording
+#   ducker  turns its source down while a sidechain source (a voice)
+#           makes sound, like the built-in compressor with a sidechain
+#
+# Install it with:
+#
+#   isocast plugin add examples/plugins/gain --allow
+#
+# then use the filters in a source's audio filters:
+#
+#   [[sources]]
+#   id = "music"
+#   kind = "tone"
+#   audio_filters = [
+#     { kind = "gain/gain", gain_db = -6 },
+#     { kind = "gain/ducker", sidechain_source = "mic", ratio = 10 },
+#   ]
+id = "gain"
+name = "Gain and ducker"
+version = "0.1.0"
+api = 1
+description = "A gain and a sidechain ducker as WebAssembly audio filters (an example)."
+license = "MIT OR Apache-2.0"
+
+[[audio_filters]]
+id = "gain"
+component = "gain.wasm"
+params.gain_db = { type = "f32", default = 0.0, min = -30.0, max = 30.0, doc = "How much louder (or quieter, below 0) in dB." }
+params.fault = { type = "enum", values = ["none", "trap", "loop", "memory"], default = "none", doc = "Misbehave on purpose after fault_after_ms of sound, to see Isocast contain it: crash (trap), never return (loop), or allocate past the memory limit (memory)." }
+params.fault_after_ms = { type = "i32", default = 1000, min = 0, max = 600000, doc = "How much sound each fresh copy filters before misbehaving." }
+
+[[audio_filters]]
+id = "ducker"
+component = "ducker.wasm"
+sidechain = true
+params.ratio = { type = "f32", default = 10.0, min = 1.0, max = 32.0, doc = "How much sound above the threshold is reduced: at 4, 8 dB over comes out 2 dB over." }
+params.threshold_db = { type = "f32", default = -18.0, min = -60.0, max = 0.0, doc = "Where reduction starts, in dBFS of the sidechain's level." }
+params.attack_ms = { type = "f32", default = 6.0, min = 1.0, max = 500.0, doc = "How fast it reacts when the sidechain gets louder." }
+params.release_ms = { type = "f32", default = 60.0, min = 1.0, max = 1000.0, doc = "How fast it recovers when the sidechain gets quieter." }

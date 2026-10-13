@@ -1,0 +1,156 @@
+// Sliders (docs/design.md 3.9) are neutral: a 2px track, a 2px fill in
+// `text-3` from `origin` to the value (a bipolar one, like Balance, fills
+// from the centre), a 12px bone thumb with a dark ring. The mixer's fader
+// is the same slider. From the keyboard, arrows move it a hundredth of its
+// range (⇧ a tenth), Home and End to its ends.
+
+import { Theme } from "../theme.slint";
+import { FocusRing } from "focus.slint";
+import { Tip } from "tooltip.slint";
+
+export component Slider inherits Rectangle {
+    in property <float> value;
+    in property <float> minimum: 0;
+    in property <float> maximum: 1;
+    in property <float> step: 0.01;
+    // Where the fill starts (default: `minimum`).
+    in property <float> origin: root.minimum;
+    in property <bool> enabled: true;
+    // What screen readers call it, and the value they read.
+    in property <string> label;
+    in property <string> value-text;
+    in property <string> tooltip;
+    // While dragging (the value at the pointer).
+    callback moved(float);
+    // A final value: a release, a click, a key.
+    callback changed(float);
+    // A double-click (the mixer's fader goes back to 0 dB).
+    callback double-clicked();
+
+    forward-focus: fs;
+    property <bool> keyboard;
+    property <float> span: max(0.000001, root.maximum - root.minimum);
+    // While dragging, the thumb follows the pointer, not `value`.
+    property <bool> dragging;
+    property <float> drag-value;
+    property <float> shown: root.dragging ? root.drag-value : root.value;
+    property <float> fraction: max(0, min(1, (root.shown - root.minimum) / root.span));
+    property <float> from: max(0, min(1, (root.origin - root.minimum) / root.span));
+    property <float> unit: max(root.step, round(root.span / 100 / root.step) * root.step);
+
+    function at(x: length) -> float {
+        return max(root.minimum, min(root.maximum, round((root.minimum + max(0, min(1, x / root.width)) * root.span) / root.step) * root.step));
+    }
+
+    function nudge(by: float) {
+        root.changed(max(root.minimum, min(root.maximum, round((root.value + by) / root.step) * root.step)));
+    }
+
+    height: Theme.slider-h;
+    min-width: 40px;
+    horizontal-stretch: 1;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    accessible-role: slider;
+    accessible-label: root.label;
+    accessible-value: root.value-text != "" ? root.value-text : "" + root.value;
+    accessible-value-minimum: root.minimum;
+    accessible-value-maximum: root.maximum;
+    accessible-value-step: root.unit;
+    accessible-enabled: root.enabled;
+    accessible-action-increment => { root.nudge(root.unit); }
+    accessible-action-decrement => { root.nudge(-root.unit); }
+
+    // Track
+    Rectangle {
+        y: (parent.height - Theme.track) / 2;
+        height: Theme.track;
+        border-radius: 1px;
+        background: Theme.line-strong;
+    }
+    // Fill
+    Rectangle {
+        x: parent.width * min(root.from, root.fraction);
+        y: (parent.height - Theme.track) / 2;
+        width: parent.width * abs(root.fraction - root.from);
+        height: Theme.track;
+        border-radius: 1px;
+        background: Theme.text-3;
+    }
+    // Thumb, with a 1px ring of the monitor's black
+    thumb := Rectangle {
+        x: parent.width * root.fraction - self.width / 2;
+        y: (parent.height - self.height) / 2;
+        width: Theme.thumb + 2px;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: Theme.surface-monitor;
+        Rectangle {
+            x: 1px;
+            y: 1px;
+            width: Theme.thumb;
+            height: Theme.thumb;
+            border-radius: self.width / 2;
+            background: Theme.bone;
+        }
+        FocusRing {
+            shown: fs.has-focus && root.keyboard;
+            radius: parent.width / 2;
+        }
+    }
+
+    TouchArea {
+        enabled: root.enabled;
+        // A double-click ends any drag first, so its own value doesn't
+        // follow the reset.
+        double-clicked => {
+            root.dragging = false;
+            root.double-clicked();
+        }
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.dragging = true;
+                root.drag-value = root.at(self.mouse-x);
+                root.moved(root.drag-value);
+            } else if event.kind == PointerEventKind.move && root.dragging {
+                root.drag-value = root.at(self.mouse-x);
+                root.moved(root.drag-value);
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) && root.dragging {
+                root.dragging = false;
+                root.changed(root.drag-value);
+            }
+        }
+    }
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.modifiers.meta || event.modifiers.control || event.modifiers.alt {
+                return reject;
+            }
+            if event.text == Key.LeftArrow || event.text == Key.DownArrow {
+                root.nudge(-root.unit * (event.modifiers.shift ? 10 : 1));
+                return accept;
+            }
+            if event.text == Key.RightArrow || event.text == Key.UpArrow {
+                root.nudge(root.unit * (event.modifiers.shift ? 10 : 1));
+                return accept;
+            }
+            if event.text == Key.Home {
+                root.changed(root.minimum);
+                return accept;
+            }
+            if event.text == Key.End {
+                root.changed(root.maximum);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    if root.tooltip != "": Tooltip {
+        Tip { text: root.tooltip; }
+    }
+}

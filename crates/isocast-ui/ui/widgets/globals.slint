@@ -1,0 +1,36 @@
+// The kit's shared state: keys that don't reach a field directly, and the
+// window's size for overlays.
+
+// The Edit menu's text commands (the native menu bar takes ⌘X ⌘C ⌘V ⌘A ⌘Z
+// before the field sees them): the menu sets `command` and bumps
+// `serial`, and the focused field runs it and sets `handled` to the
+// serial; when no field did, the window does its own (copies the selected
+// item, undoes a setup change). Commands: cut, copy, paste, select-all,
+// undo, redo.
+export global EditCommands {
+    in-out property <int> serial;
+    in-out property <int> handled;
+    in-out property <string> command;
+
+    public function run(command: string) {
+        root.command = command;
+        root.serial += 1;
+    }
+}
+
+// Return in a single-line field commits it, then submits the open dialog
+// (as OK would): the field bumps `submit` after committing, and the
+// dialog accepts when it changes. Fields with `submits: false` don't.
+export global DialogKeys {
+    in-out property <int> submit;
+    // Escape is closing the dialog: a half-typed number isn't committed as
+    // its field loses focus (the web app drops it too).
+    in-out property <bool> cancelling;
+}
+
+// The window's size, for overlays (menus, popovers, dialogs) that cover the
+// whole window from wherever they are declared. AppWindow keeps it.
+export global Viewport {
+    in-out property <length> width: 1280px;
+    in-out property <length> height: 800px;
+}

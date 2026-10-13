@@ -1,0 +1,34 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/isocast/isocast"
+
+# Noise suppression (RNNoise) runs in real time, and unoptimised it costs
+# about 11% of a core per channel, so its crates are optimised even in
+# debug builds (which the dev app runs).
+[profile.dev.package.nnnoiseless]
+opt-level = 3
+
+[profile.dev.package.easyfft]
+opt-level = 3
+
+[profile.dev.package.realfft]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3
+
+# Builds to hand out (`cargo build --profile dist`): link-time optimisation
+# across crates and one codegen unit. The engine binary is 30% smaller
+# (21.0 to 14.6 MB); CPU use measured the same as `release` (its time is
+# spent in the OS's capture, GPU and encoder frameworks), and builds take
+# ~8× longer, so day-to-day release builds stay as they are.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

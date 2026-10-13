@@ -1,0 +1,284 @@
+// A dropdown (the web app's `Select`, 3.6): a field with the chosen
+// option and a chevron, and a list that keyboard and pointer both drive.
+// Options carry a `detail`, shown dim after the label in the list (and in
+// the field with `show-detail`): two devices with the same name are told
+// apart by it (src/kit.rs `disambiguate` fills it in for duplicates).
+
+import { Theme, Motion } from "../theme.slint";
+import { Icon, Icons } from "../icons.slint";
+import { FieldFrame } from "fields.slint";
+import { MenuPanel } from "menus.slint";
+import { FocusRing } from "focus.slint";
+import { Tip } from "tooltip.slint";
+
+export struct DropdownOption {
+    value: string,
+    label: string,
+    // Dim text after the label (a device's model, "2 of 2", a hint).
+    detail: string,
+    disabled: bool,
+}
+
+export component Dropdown inherits Rectangle {
+    in property <[DropdownOption]> options;
+    // The chosen option's value ("" for none).
+    in-out property <string> value;
+    in property <string> placeholder: "None";
+    // What screen readers call it (the form label beside it).
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> small;
+    // Show the chosen option's detail in the field too.
+    in property <bool> show-detail;
+    in property <string> tooltip;
+    out property <bool> open: popup.is-open;
+    out property <bool> has-focus: fs.has-focus;
+    // The value chosen (only when it changes).
+    callback selected(string);
+
+    public function show-list() {
+        if root.enabled && root.options.length > 0 {
+            root.highlighted = max(0, root.current);
+            popup.show();
+        }
+    }
+
+
+    forward-focus: fs;
+    property <bool> keyboard;
+    property <int> highlighted: -1;
+    // The chosen option's index, found by the options themselves.
+    property <int> current: -1;
+    property <int> rows: min(root.options.length, 14);
+
+    function choose(index: int) {
+        if index >= 0 && index < root.options.length && !root.options[index].disabled {
+            popup.close();
+            if root.options[index].value != root.value {
+                root.value = root.options[index].value;
+                root.selected(root.value);
+            }
+        }
+    }
+
+    function move-highlight(by: int) {
+        root.highlighted = max(0, min(root.options.length - 1, root.highlighted + by));
+    }
+
+    height: root.small ? Theme.control-h-sm : Theme.control-h;
+    min-width: 80px;
+    preferred-width: Theme.field-m;
+    accessible-role: combobox;
+    accessible-label: root.label;
+    accessible-value: root.current >= 0 ? root.options[root.current].label : root.placeholder;
+    accessible-enabled: root.enabled;
+    accessible-expandable: true;
+    accessible-expanded: popup.is-open;
+    accessible-action-default => { root.show-list(); }
+    accessible-action-expand => { root.show-list(); }
+
+    // Each option checks whether it is the chosen one.
+    for option[i] in root.options: Rectangle {
+        property <bool> chosen: option.value == root.value;
+        width: 0;
+        height: 0;
+        visible: false;
+        init => {
+            if self.chosen {
+                root.current = i;
+            }
+        }
+        changed chosen => {
+            if self.chosen {
+                root.current = i;
+            } else if root.current == i {
+                root.current = -1;
+            }
+        }
+    }
+
+    FieldFrame {
+        editing: popup.is-open || (fs.has-focus && root.keyboard);
+        hovered: ta.has-hover;
+        enabled: root.enabled;
+
+        HorizontalLayout {
+            padding-left: Theme.space-2;
+            padding-right: 28px;
+            spacing: Theme.space-2;
+            Text {
+                text: root.current >= 0 ? root.options[root.current].label : root.placeholder;
+                color: root.current >= 0 ? Theme.text : Theme.text-3;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
+            if root.show-detail && root.current >= 0 && root.options[root.current].detail != "": Text {
+                horizontal-stretch: 1;
+                text: root.options[root.current].detail;
+                color: Theme.text-3;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+        }
+
+        Icon {
+            x: parent.width - self.width - Theme.space-2;
+            y: (parent.height - self.height) / 2;
+            path: Icons.chevron-down;
+            size: Theme.icon-sm;
+            color: Theme.text-2;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.show-list(); }
+    }
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" || event.text == Key.DownArrow || event.text == Key.UpArrow {
+                root.show-list();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    if root.tooltip != "": Tooltip {
+        Tip { text: root.tooltip; }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 2px;
+        width: max(root.width, 160px);
+        height: root.rows * Theme.menu-item + 2 * Theme.space-1 + 2px;
+        close-policy: close-on-click-outside;
+
+        MenuPanel {
+            accessible-role: list;
+            accessible-label: root.label;
+
+            list-keys := FocusScope {
+                init => { self.focus(); }
+                key-pressed(event) => {
+                    if event.text == Key.DownArrow {
+                        root.move-highlight(1);
+                        if (root.highlighted + 1) * Theme.menu-item > -flick.content-y + flick.height {
+                            flick.content-y = flick.height - (root.highlighted + 1) * Theme.menu-item;
+                        }
+                        return accept;
+                    }
+                    if event.text == Key.UpArrow {
+                        root.move-highlight(-1);
+                        if root.highlighted * Theme.menu-item < -flick.content-y {
+                            flick.content-y = -root.highlighted * Theme.menu-item;
+                        }
+                        return accept;
+                    }
+                    if event.text == Key.Home {
+                        root.highlighted = 0;
+                        flick.content-y = 0;
+                        return accept;
+                    }
+                    if event.text == Key.End {
+                        root.highlighted = root.options.length - 1;
+                        flick.content-y = min(0px, flick.height - root.options.length * Theme.menu-item);
+                        return accept;
+                    }
+                    if event.text == "\n" || event.text == " " {
+                        root.choose(root.highlighted);
+                        return accept;
+                    }
+                    if event.text == Key.Escape || event.text == Key.Tab {
+                        popup.close();
+                        return accept;
+                    }
+                    reject
+                }
+
+                flick := Flickable {
+                    x: Theme.space-1;
+                    y: Theme.space-1;
+                    width: parent.width - 2 * Theme.space-1;
+                    height: parent.height - 2 * Theme.space-1;
+                    content-height: root.options.length * Theme.menu-item;
+
+                    for option[i] in root.options: Rectangle {
+                        y: i * Theme.menu-item;
+                        height: Theme.menu-item;
+                        border-radius: Theme.r;
+                        background: i == root.highlighted && !option.disabled ? Theme.overlay-hover : transparent;
+                        accessible-role: list-item;
+                        accessible-label: option.detail != "" ? option.label + ", " + option.detail : option.label;
+                        accessible-item-selectable: true;
+                        accessible-item-selected: option.value == root.value;
+                        accessible-item-index: i;
+                        accessible-item-count: root.options.length;
+                        accessible-enabled: !option.disabled;
+                        accessible-action-default => { root.choose(i); }
+
+                        HorizontalLayout {
+                            padding-left: Theme.space-2;
+                            padding-right: Theme.space-3;
+                            spacing: Theme.space-2;
+                            Rectangle {
+                                width: Theme.icon;
+                                if option.value == root.value: Icon {
+                                    y: (parent.height - self.height) / 2;
+                                    path: Icons.check;
+                                    color: Theme.accent-text;
+                                }
+                            }
+                            Text {
+                                text: option.label;
+                                color: option.disabled ? Theme.text-disabled : Theme.text;
+                                font-size: Theme.fs;
+                                letter-spacing: Theme.tracking;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                accessible-role: none;
+                            }
+                            if option.detail != "": Text {
+                                text: option.detail;
+                                color: option.disabled ? Theme.text-disabled : i == root.highlighted ? Theme.text-2 : Theme.text-3;
+                                font-size: Theme.fs-sm;
+                                letter-spacing: Theme.tracking-sm;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                accessible-role: none;
+                            }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                        }
+
+                        TouchArea {
+                            enabled: !option.disabled;
+                            changed has-hover => {
+                                if self.has-hover {
+                                    root.highlighted = i;
+                                }
+                            }
+                            clicked => { root.choose(i); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

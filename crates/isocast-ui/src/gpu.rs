@@ -1,0 +1,67 @@
+//! The GPU device the window and the preview share. The app creates it and
+//! hands it to Slint (`WGPUConfiguration::Manual`), so textures it makes
+//! (today the test picture, later the daemon's shared frames) are drawn by
+//! Slint's Skia renderer without a copy.
+
+use std::future::Future;
+use std::pin::pin;
+use std::task::{Context as TaskContext, Poll, Waker};
+
+use anyhow::{Context, Result};
+use slint::wgpu_30::wgpu;
+
+#[derive(Clone)]
+pub struct Gpu {
+    pub instance: wgpu::Instance,
+    pub adapter: wgpu::Adapter,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+}
+
+impl Gpu {
+    pub fn new() -> Result<Self> {
+        // The platform's own API only: Metal on macOS, DX12 on Windows,
+        // Vulkan elsewhere (never GL).
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            ..Default::default()
+        }))
+        .context("no GPU found")?;
+        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("isocast-ui"),
+            ..Default::default()
+        }))
+        .context("could not open the GPU")?;
+        Ok(Self {
+            instance,
+            adapter,
+            device,
+            queue,
+        })
+    }
+
+    pub fn slint_configuration(&self) -> slint::wgpu_30::WGPUConfiguration {
+        slint::wgpu_30::WGPUConfiguration::Manual {
+            instance: self.instance.clone(),
+            adapter: self.adapter.clone(),
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+        }
+    }
+}
+
+/// wgpu's device requests complete at once on native backends.
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    let mut future = pin!(future);
+    let mut context = TaskContext::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        std::thread::yield_now();
+    }
+}

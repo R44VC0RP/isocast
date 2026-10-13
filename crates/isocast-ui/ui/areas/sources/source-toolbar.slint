@@ -1,0 +1,185 @@
+// The source toolbar under the preview (docs/design.md 3.18; the web
+// app's source-toolbar.js), as OBS has it: the selected source's icon and
+// name, Properties and Filters (quiet buttons), and the one setting
+// people change most for its kind (a display, a device, an app, the
+// text, the colour, the file, a page's URL with Refresh). With nothing
+// selected it says so.
+
+import { Theme } from "../../theme.slint";
+import { Icon, Icons } from "../../icons.slint";
+import { Ui } from "../../state.slint";
+import {
+    Button, ButtonVariant, ColorField, ControlSize, Dropdown, TextField, Tip, ToolbarSeparator,
+} from "../../kit.slint";
+import { SourcesArea } from "state.slint";
+
+export component SourceToolbar inherits Rectangle {
+    // `SourcesArea.open-quick` changing opens the quick setting's list.
+    property <int> open-quick: SourcesArea.open-quick;
+    changed open-quick => {
+        if SourcesArea.quick-kind == "choice" {
+            quick.show-list();
+        }
+    }
+
+    property <string> kind: SourcesArea.quick-label != "" ? SourcesArea.quick-kind : "";
+
+    height: Theme.source-toolbar;
+    background: Theme.surface-panel;
+    clip: true;
+    accessible-role: groupbox;
+    accessible-label: "Source toolbar";
+
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.line;
+    }
+
+    if Ui.selected-item == "": Text {
+        x: Theme.pane-x;
+        y: 1px;
+        height: parent.height - 1px;
+        text: "No source selected";
+        color: Theme.text-3;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        vertical-alignment: center;
+    }
+
+    HorizontalLayout {
+        y: 1px;
+        height: parent.height - 1px;
+        visible: Ui.selected-item != "";
+        padding-left: Theme.pane-x;
+        padding-right: Theme.pane-x;
+        spacing: Theme.space-2;
+        alignment: start;
+
+        Rectangle {
+            max-width: 220px;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                padding-right: Theme.space-1;
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        path: Icons.named(Ui.selected-icon);
+                    }
+                }
+                Text {
+                    text: Ui.selected-name;
+                    color: Theme.text;
+                    font-size: Theme.fs;
+                    letter-spacing: Theme.tracking;
+                    font-weight: Theme.weight-semibold;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+            if Ui.selected-kind != "": Tooltip {
+                Tip {
+                    text: Ui.selected-kind;
+                }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Button {
+                text: "Properties";
+                icon: Icons.settings;
+                variant: ButtonVariant.quiet;
+                size: ControlSize.small;
+                enabled: Ui.selected-source != "";
+                clicked => { Ui.menu("properties"); }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Button {
+                text: "Filters";
+                icon: Icons.filters;
+                variant: ButtonVariant.quiet;
+                size: ControlSize.small;
+                enabled: Ui.selected-source != "";
+                clicked => { Ui.menu("filters"); }
+            }
+        }
+        if root.kind != "": ToolbarSeparator { }
+        if root.kind != "": Text {
+            text: SourcesArea.quick-label;
+            color: Theme.text-2;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            vertical-alignment: center;
+        }
+        // A dropdown: a display, a device, an app.
+        VerticalLayout {
+            alignment: center;
+            visible: root.kind == "choice";
+            quick := Dropdown {
+                width: root.kind == "choice" ? 260px : 0px;
+                small: true;
+                label: SourcesArea.quick-label;
+                options: SourcesArea.quick-options;
+                value: SourcesArea.quick-value;
+                placeholder: "Choose…";
+                selected(value) => { SourcesArea.quick-choose(value); }
+            }
+        }
+        // A text source's words.
+        if root.kind == "text": VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            min-width: 120px;
+            max-width: 520px;
+            TextField {
+                small: true;
+                text: SourcesArea.quick-text;
+                label: SourcesArea.quick-label;
+                committed(text) => { SourcesArea.quick-text-changed(text); }
+            }
+        }
+        // A colour source's colour.
+        if root.kind == "color": VerticalLayout {
+            alignment: center;
+            ColorField {
+                width: 160px;
+                height: Theme.control-h-sm;
+                value: SourcesArea.quick-text;
+                swatch: SourcesArea.quick-swatch;
+                label: SourcesArea.quick-label;
+                changed(text) => { SourcesArea.quick-text-changed(text); }
+                pick => { SourcesArea.quick-pick-color(); }
+            }
+        }
+        // A file's name, a page's URL.
+        if root.kind == "path": Rectangle {
+            max-width: 360px;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: SourcesArea.quick-text;
+                color: Theme.text;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            if SourcesArea.quick-tooltip != "": Tooltip {
+                Tip {
+                    text: SourcesArea.quick-tooltip;
+                }
+            }
+        }
+        if root.kind != "" && SourcesArea.quick-button != "": VerticalLayout {
+            alignment: center;
+            Button {
+                text: SourcesArea.quick-button;
+                size: ControlSize.small;
+                tooltip: SourcesArea.quick-button-tooltip;
+                clicked => { SourcesArea.quick-button-clicked(); }
+            }
+        }
+    }
+}

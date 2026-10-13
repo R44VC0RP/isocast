@@ -1,0 +1,552 @@
+//! Monitors' video (`frames`): a target's picture (the program, studio
+//! mode's preview or a source) as low-latency H.264 from the hardware
+//! encoder. Everyone watching the same target at the same size shares one
+//! encoder thread, which runs only while someone watches, at the highest
+//! rate any of them asks for (a viewer can change its rate at any time, as
+//! the app does while the user drags on the canvas). Each record is encoded
+//! once (see `isocast_protocol::api::frames`) and the same bytes go to
+//! every viewer.
+//!
+//! The encoder scales and converts the frame itself (on the GPU and media
+//! engines), so the CPU only hands frames over and copies the compressed
+//! bytes, a few kilobytes each.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use anyhow::Result;
+use isocast_protocol::api::frames;
+
+use crate::source::FrameSlot;
+use crate::stream::flv::avc_decoder_configuration;
+use crate::{EncodedVideo, LiveVideoSpec, Platform, Time, VideoEncoder};
+
+/// Bits per pixel per frame: a sharp monitor picture of a screen.
+const BITS_PER_PIXEL: f64 = 0.1;
+/// Keyframes come at least this often. A viewer joining or falling behind
+/// gets one at once, and nothing is lost on the way, so more would only
+/// add bitrate spikes (and a slower frame, mid-drag).
+const KEYFRAME_SECONDS: u32 = 60;
+/// Records a viewer may fall behind before it skips ahead to the next
+/// keyframe (a frame can come with a revision record).
+const VIEWER_QUEUE: usize = 16;
+/// How long to wait for a frame before checking on viewers, the target and
+/// keyframe requests.
+const WAIT: Duration = Duration::from_millis(50);
+/// The longest an encoded frame may take to come out.
+const ENCODE_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// One record's bytes, shared by every viewer.
+pub type Record = Arc<[u8]>;
+
+/// The most frames a second a stream sends.
+pub const MAX_FPS: u32 = 60;
+
+/// What a stream shows.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Key {
+    pub(crate) target: String,
+    pub(crate) max_width: Option<u32>,
+}
+
+/// The running streams.
+pub(crate) type Streams = Mutex<HashMap<Key, Arc<Shared>>>;
+
+/// Where a target's frames arrive and, for pictures drawn on the canvas's
+/// frame grid (the program and the preview), that grid (when it starts and
+/// its rate) and the setup revision each frame was drawn from.
+pub(crate) struct Source<F> {
+    pub(crate) slot: Arc<FrameSlot<F>>,
+    pub(crate) grid: Option<(Time, u32)>,
+    pub(crate) drawn: Option<Arc<Drawn>>,
+}
+
+/// What a program (or preview) frame was drawn from: the setup revision,
+/// and the layout generation (see [`crate::record::Engine::resolved`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Stamp {
+    pub revision: u64,
+    pub generation: u64,
+}
+
+/// What recent program frames were drawn from, by tick.
+pub(crate) type Drawn = Mutex<VecDeque<(Time, Stamp)>>;
+
+/// Ticks of [`Drawn`] kept: more than any frame waits to be streamed.
+const DRAWN_KEPT: usize = 32;
+
+/// Note that the frame at `tick` was drawn from `stamp`.
+pub(crate) fn drawn(drawn: &Drawn, tick: Time, stamp: Stamp) {
+    let mut drawn = drawn.lock().unwrap();
+    if drawn.len() == DRAWN_KEPT {
+        drawn.pop_front();
+    }
+    drawn.push_back((tick, stamp));
+}
+
+/// What the frame at `tick` was drawn from, if known.
+pub(crate) fn stamp_at(drawn: &Drawn, tick: Time) -> Option<Stamp> {
+    let drawn = drawn.lock().unwrap();
+    drawn
+        .iter()
+        .rev()
+        .find(|(at, _)| *at == tick)
+        .map(|(_, stamp)| *stamp)
+}
+
+pub(crate) struct Shared {
+    viewers: Mutex<Vec<Viewer>>,
+    want_keyframe: AtomicBool,
+    next_viewer: AtomicU64,
+}
+
+struct Viewer {
+    id: u64,
+    tx: SyncSender<Record>,
+    /// The most frames a second it wants.
+    fps: Arc<AtomicU32>,
+    /// Has the current config and a keyframe, so frames decode.
+    synced: bool,
+    /// The setup revision and layout generation it was last told frames
+    /// show.
+    revision: Option<Stamp>,
+}
+
+/// One client watching a target: the stream's records, in order, until
+/// dropped. The channel closes when the stream ends (after an end record
+/// saying why, when there is room for it).
+pub struct FrameFeed {
+    pub records: Receiver<Record>,
+    fps: Arc<AtomicU32>,
+    shared: Arc<Shared>,
+    id: u64,
+}
+
+impl FrameFeed {
+    /// A handle that changes how many frames a second this viewer wants,
+    /// from any thread; the stream follows from its next frame, without a
+    /// new keyframe.
+    pub fn rate(&self) -> FeedRate {
+        FeedRate(self.fps.clone())
+    }
+}
+
+/// Changes a viewer's rate (see [`FrameFeed::rate`]).
+#[derive(Clone)]
+pub struct FeedRate(Arc<AtomicU32>);
+
+impl FeedRate {
+    pub fn set(&self, fps: u32) {
+        self.0.store(fps.clamp(1, MAX_FPS), Ordering::Relaxed);
+    }
+}
+
+/// The highest rate any running stream's viewer asks for.
+pub(crate) fn highest_rate(streams: &Streams) -> Option<u32> {
+    let running = streams.lock().unwrap();
+    running
+        .values()
+        .flat_map(|shared| {
+            shared
+                .viewers
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|viewer| viewer.fps.load(Ordering::Relaxed))
+                .collect::<Vec<_>>()
+        })
+        .max()
+}
+
+impl Drop for FrameFeed {
+    fn drop(&mut self) {
+        self.shared
+            .viewers
+            .lock()
+            .unwrap()
+            .retain(|viewer| viewer.id != self.id);
+    }
+}
+
+/// Watch `key`'s stream at up to `fps` frames a second, starting it if
+/// nobody watches it yet. `source` finds where the target's frames arrive
+/// (looked up again all the time, since a source can reopen, and given the
+/// stream's rate then), or says why it can't.
+pub(crate) fn watch<P: Platform>(
+    streams: &Arc<Streams>,
+    platform: &P,
+    key: Key,
+    fps: u32,
+    source: impl Fn(u32) -> Result<Source<P::Frame>, String> + Send + 'static,
+) -> FrameFeed {
+    let (tx, records) = sync_channel(VIEWER_QUEUE);
+    // Held while the viewer is added, so a stream whose last viewer just
+    // left can't remove itself in between.
+    let mut running = streams.lock().unwrap();
+    let shared = match running.get(&key) {
+        Some(shared) => shared.clone(),
+        None => {
+            let shared = Arc::new(Shared {
+                viewers: Mutex::new(Vec::new()),
+                want_keyframe: AtomicBool::new(true),
+                next_viewer: AtomicU64::new(0),
+            });
+            running.insert(key.clone(), shared.clone());
+            let (streams, stream, platform) = (streams.clone(), shared.clone(), platform.clone());
+            thread::Builder::new()
+                .name(format!("frames {}", key.target))
+                .spawn(move || run(&streams, &stream, &key, &platform, source))
+                .expect("could not start a frame stream thread");
+            shared
+        }
+    };
+    let id = shared.next_viewer.fetch_add(1, Ordering::Relaxed);
+    let fps = Arc::new(AtomicU32::new(fps.clamp(1, MAX_FPS)));
+    shared.viewers.lock().unwrap().push(Viewer {
+        id,
+        tx,
+        fps: fps.clone(),
+        synced: false,
+        revision: None,
+    });
+    shared.want_keyframe.store(true, Ordering::SeqCst);
+    FrameFeed {
+        records,
+        fps,
+        shared,
+        id,
+    }
+}
+
+/// The encoder for one input size.
+struct Encoding<E> {
+    encoder: E,
+    input: (u32, u32),
+    output: (u32, u32),
+    /// The rate it was told to expect.
+    fps: u32,
+    /// The current config record.
+    config: Option<Record>,
+    last_pts: Option<Time>,
+    /// The setup revision of frames given to the encoder and not out yet,
+    /// by time.
+    revisions: VecDeque<(Time, Option<Stamp>)>,
+}
+
+/// Encode the target's frames, at most as many a second as any viewer
+/// wants, until nobody watches or the target goes away.
+fn run<P: Platform>(
+    streams: &Streams,
+    shared: &Arc<Shared>,
+    key: &Key,
+    platform: &P,
+    source: impl Fn(u32) -> Result<Source<P::Frame>, String>,
+) {
+    let mut encoding: Option<Encoding<P::VideoEncoder>> = None;
+    let mut pace = Pace::default();
+    loop {
+        let fps = shared
+            .viewers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|viewer| viewer.fps.load(Ordering::Relaxed))
+            .max();
+        let Some(fps) = fps else {
+            let mut running = streams.lock().unwrap();
+            if shared.viewers.lock().unwrap().is_empty() {
+                remove(&mut running, key, shared);
+                return;
+            }
+            continue;
+        };
+        let Source { slot, grid, drawn } = match source(fps) {
+            Ok(source) => source,
+            Err(why) => return end(streams, key, shared, &why),
+        };
+        // Someone who just joined gets the newest frame again.
+        let again = || shared.want_keyframe.load(Ordering::SeqCst);
+        let Some((frame, at)) = pace.next(platform, &slot, grid, fps, again) else {
+            continue;
+        };
+        let size = platform.frame_size(&frame);
+        if encoding.as_ref().is_none_or(|e| e.input != size) {
+            match start_encoder(platform, size, key, fps) {
+                Ok(started) => {
+                    encoding = Some(started);
+                    shared.want_keyframe.store(true, Ordering::SeqCst);
+                }
+                Err(err) => return end(streams, key, shared, &format!("{err:#}")),
+            }
+        }
+        let encoding = encoding.as_mut().expect("started above");
+        // A new rate goes to the running encoder: no new session, no
+        // keyframe.
+        if encoding.fps != fps {
+            let bitrate = bitrate_kbps(encoding.output, fps);
+            if let Err(err) = encoding.encoder.set_rate(fps, bitrate) {
+                return end(streams, key, shared, &format!("{err:#}"));
+            }
+            encoding.fps = fps;
+        }
+        // Frame times must increase, even for a frame sent again.
+        let pts = match encoding.last_pts {
+            Some(last) if at <= last => last + Duration::from_millis(1),
+            _ => at,
+        };
+        let keyframe = shared.want_keyframe.swap(false, Ordering::SeqCst);
+        let revision = drawn.and_then(|drawn| stamp_at(&drawn, at));
+        let result = encoding
+            .encoder
+            .encode(&frame, pts, keyframe)
+            .and_then(|()| {
+                drop(frame);
+                encoding.last_pts = Some(pts);
+                if encoding.revisions.len() == DRAWN_KEPT {
+                    encoding.revisions.pop_front();
+                }
+                encoding.revisions.push_back((pts, revision));
+                let mut out = encoding.encoder.receive_timeout(ENCODE_TIMEOUT)?;
+                while let Some(encoded) = out {
+                    deliver(shared, encoding, encoded);
+                    out = encoding.encoder.receive()?;
+                }
+                Ok(())
+            });
+        if let Err(err) = result {
+            return end(streams, key, shared, &format!("{err:#}"));
+        }
+    }
+}
+
+/// Picks the frames a monitor shows at a rate from a target's slot.
+#[derive(Default)]
+pub(crate) struct Pace {
+    last: Option<Time>,
+    /// A frame passed over for being off the grid.
+    skipped: Option<Time>,
+}
+
+impl Pace {
+    /// The next frame to show at `fps`, waiting up to [`WAIT`] for it; or,
+    /// when none comes and `again` says so, the newest one again (a still
+    /// screen only sends frames when it changes). `None` if none is due:
+    /// ask again.
+    pub(crate) fn next<P: Platform>(
+        &mut self,
+        platform: &P,
+        slot: &FrameSlot<P::Frame>,
+        grid: Option<(Time, u32)>,
+        fps: u32,
+        again: impl Fn() -> bool,
+    ) -> Option<(P::Frame, Time)> {
+        let period = Duration::from_secs(1) / fps;
+        // On the canvas's grid at a multiple of the stream's rate, only every
+        // n-th tick from its start: then every program and preview stream at
+        // a rate carries the same ticks, and a window showing several
+        // monitors redraws them together (one composite a frame, not one
+        // per monitor).
+        let grid = grid.filter(|&(_, rate)| rate % fps == 0 && rate >= 2 * fps);
+        // A frame at least about a period after the last one, so a 60 fps
+        // program is shown at 30 without waking for the frames between.
+        let from = self
+            .last
+            .map_or(Time::from_nanos(i64::MIN), |last| last + period * 3 / 4);
+        let from = self
+            .skipped
+            .map_or(from, |at| from.max(Time::from_nanos(at.as_nanos() + 1)));
+        if let Some(wait) = from.as_nanos().checked_sub(platform.now().as_nanos())
+            && wait > 0
+        {
+            thread::sleep(Duration::from_nanos(wait as u64).min(WAIT));
+        }
+        let (picked, again) = match slot.wait_from(from, WAIT) {
+            Some(frame) => (Some(frame), false),
+            None if again() => (slot.newest_timed(), true),
+            None => (None, false),
+        };
+        let (frame, at) = picked?;
+        if let Some((start, rate)) = grid
+            && !again
+            && at
+                .ticks_since(start, rate)
+                .rem_euclid(i64::from(rate / fps))
+                != 0
+        {
+            self.skipped = Some(at);
+            return None;
+        }
+        self.last = Some(at);
+        self.skipped = None;
+        Some((frame, at))
+    }
+}
+
+/// An encoder for frames of `input` size at `fps`, scaled to the stream's
+/// width.
+fn start_encoder<P: Platform>(
+    platform: &P,
+    input: (u32, u32),
+    key: &Key,
+    fps: u32,
+) -> Result<Encoding<P::VideoEncoder>> {
+    let output = scaled(input, key.max_width);
+    let encoder = platform.create_video_encoder(&LiveVideoSpec {
+        width: output.0,
+        height: output.1,
+        fps,
+        bitrate_kbps: bitrate_kbps(output, fps),
+        keyframe_interval: fps * KEYFRAME_SECONDS,
+        constant_bitrate: false,
+        low_latency: true,
+    })?;
+    Ok(Encoding {
+        encoder,
+        input,
+        output,
+        fps,
+        config: None,
+        last_pts: None,
+        revisions: VecDeque::new(),
+    })
+}
+
+/// The bitrate for `size` at `fps`.
+fn bitrate_kbps((width, height): (u32, u32), fps: u32) -> u32 {
+    let bits = f64::from(width) * f64::from(height) * f64::from(fps) * BITS_PER_PIXEL;
+    ((bits / 1000.0) as u32).max(300)
+}
+
+/// `size` scaled down to at most `max_width` wide, keeping its shape, in
+/// even numbers (4:2:0 H.264 needs them).
+fn scaled((width, height): (u32, u32), max_width: Option<u32>) -> (u32, u32) {
+    let (w, h) = match max_width {
+        Some(max) if max > 0 && max < width => (
+            max,
+            ((u64::from(height) * u64::from(max) + u64::from(width) / 2) / u64::from(width)) as u32,
+        ),
+        _ => (width, height),
+    };
+    ((w & !1).max(2), (h & !1).max(2))
+}
+
+/// Send an encoded frame to every viewer: a viewer that isn't in sync yet
+/// (just joined, or fell behind) gets the config and waits for a keyframe;
+/// one that doesn't know the setup revision the frame shows is told first.
+fn deliver<E>(shared: &Shared, encoding: &mut Encoding<E>, encoded: EncodedVideo) {
+    let (width, height) = encoding.output;
+    let revision = match encoding
+        .revisions
+        .iter()
+        .position(|(pts, _)| *pts == encoded.pts)
+    {
+        Some(index) => {
+            let revision = encoding.revisions[index].1;
+            encoding.revisions.drain(..=index);
+            revision
+        }
+        None => None,
+    };
+    let mut config_changed = false;
+    if let Some(record) = encoded
+        .parameter_sets
+        .as_ref()
+        .filter(|_| encoded.keyframe)
+        .and_then(avc_decoder_configuration)
+    {
+        let current = encoding.config.as_deref().map(|c| &c[frames::HEADER..]);
+        if current != Some(&record[..]) {
+            encoding.config =
+                Some(frames::encode(frames::CONFIG, 0, width, height, &record).into());
+            config_changed = true;
+        }
+    }
+    let kind = match encoded.keyframe {
+        true => frames::KEY_FRAME,
+        false => frames::FRAME,
+    };
+    let seq = encoded.pts.as_nanos().max(0) as u64;
+    let record: Record = frames::encode(kind, seq, width, height, &encoded.data).into();
+    let revision_record: Option<Record> = revision.map(|stamp| {
+        let mut payload = [0u8; 16];
+        payload[..8].copy_from_slice(&stamp.revision.to_be_bytes());
+        payload[8..].copy_from_slice(&stamp.generation.to_be_bytes());
+        frames::encode(frames::REVISION, seq, 0, 0, &payload).into()
+    });
+    let mut behind = false;
+    shared.viewers.lock().unwrap().retain_mut(|viewer| {
+        if encoded.keyframe && (!viewer.synced || config_changed) {
+            viewer.synced = false;
+            if let Some(config) = &encoding.config {
+                match viewer.tx.try_send(config.clone()) {
+                    Ok(()) => viewer.synced = true,
+                    Err(TrySendError::Full(_)) => {}
+                    Err(TrySendError::Disconnected(_)) => return false,
+                }
+            }
+        }
+        if viewer.synced
+            && let Some(update) = &revision_record
+            && viewer.revision != revision
+        {
+            match viewer.tx.try_send(update.clone()) {
+                Ok(()) => viewer.revision = revision,
+                Err(TrySendError::Full(_)) => viewer.synced = false,
+                Err(TrySendError::Disconnected(_)) => return false,
+            }
+        }
+        if viewer.synced {
+            match viewer.tx.try_send(record.clone()) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => viewer.synced = false,
+                Err(TrySendError::Disconnected(_)) => return false,
+            }
+        }
+        if !viewer.synced {
+            // Told again once back in sync.
+            viewer.revision = None;
+            behind = true;
+        }
+        true
+    });
+    if behind {
+        shared.want_keyframe.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Stop the stream: tell every viewer why, then close their channels.
+fn end(streams: &Streams, key: &Key, shared: &Arc<Shared>, why: &str) {
+    remove(&mut streams.lock().unwrap(), key, shared);
+    let record: Record = frames::encode(frames::END, 0, 0, 0, why.as_bytes()).into();
+    for viewer in shared.viewers.lock().unwrap().drain(..) {
+        let _ = viewer.tx.try_send(record.clone());
+    }
+}
+
+/// Forget `shared` as `key`'s stream (unless another has taken its place).
+fn remove(running: &mut HashMap<Key, Arc<Shared>>, key: &Key, shared: &Arc<Shared>) {
+    if running
+        .get(key)
+        .is_some_and(|current| Arc::ptr_eq(current, shared))
+    {
+        running.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scaled;
+
+    #[test]
+    fn sizes_keep_their_shape_in_even_numbers() {
+        assert_eq!(scaled((1920, 1080), Some(1664)), (1664, 936));
+        assert_eq!(scaled((1920, 1080), None), (1920, 1080));
+        assert_eq!(scaled((1280, 720), Some(1920)), (1280, 720));
+        assert_eq!(scaled((1206, 2622), Some(500)), (500, 1086));
+        assert_eq!(scaled((3, 3), None), (2, 2));
+    }
+}

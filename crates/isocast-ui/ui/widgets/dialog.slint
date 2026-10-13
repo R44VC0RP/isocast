@@ -1,0 +1,325 @@
+// Dialogs (docs/design.md 3.11), as OBS has them: window-like panels over
+// a dimmed window, with a centred title bar (drag it to move the dialog,
+// double-click to put it back), a body, and a footer: a helper on the left
+// (Defaults, Reset) and the actions on the right (Cancel, then OK).
+//
+// A dialog is modal: it lives in a popup that covers the window, so the
+// window behind can't be clicked, Tab stays inside it, and focus goes back
+// where it was when it closes. Escape cancels; Return accepts (from a
+// single-line field too, after the field commits).
+//
+// Declare it where its state is and show it with an `if`:
+//
+//     if Ui.dialog == "rename": Dialog {
+//         title: "Rename";
+//         dialog-width: 400px;
+//         accepted => { … }
+//         cancelled => { Ui.close-dialog(); }
+//         Form { FormRow { label: "Name"; TextField { auto-focus: true; } } }
+//     }
+
+import { Theme, Motion } from "../theme.slint";
+import { Button, ButtonVariant } from "buttons.slint";
+import { DialogKeys, Viewport } from "globals.slint";
+import { ToastStack } from "toast.slint";
+
+// The footer on its own, for a dialog that draws its own (`footer: false`).
+export component DialogFooter inherits Rectangle {
+    in property <string> ok-text: "OK";
+    in property <bool> ok-enabled: true;
+    in property <string> cancel-text: "Cancel";
+    in property <string> apply-text;
+    in property <bool> apply-enabled: true;
+    in property <string> extra-text;
+    in property <bool> extra-enabled: true;
+    in property <string> note;
+    callback ok();
+    callback cancel();
+    callback apply();
+    callback extra();
+
+    height: Theme.dialog-foot;
+    accessible-role: none;
+
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.line;
+    }
+    HorizontalLayout {
+        padding-left: Theme.space-4;
+        padding-right: Theme.space-4;
+        spacing: Theme.space-2;
+        alignment: stretch;
+
+        if root.extra-text != "": VerticalLayout {
+            alignment: center;
+            // Helpers on the left aren't held to 80px (web: only the
+            // actions on the right are).
+            Button {
+                text: root.extra-text;
+                enabled: root.extra-enabled;
+                clicked => { root.extra(); }
+            }
+        }
+        if root.note != "": Text {
+            text: root.note;
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+        if root.cancel-text != "": VerticalLayout {
+            alignment: center;
+            Button {
+                text: root.cancel-text;
+                footer: true;
+                clicked => { root.cancel(); }
+            }
+        }
+        if root.apply-text != "": VerticalLayout {
+            alignment: center;
+            Button {
+                text: root.apply-text;
+                enabled: root.apply-enabled;
+                footer: true;
+                clicked => { root.apply(); }
+            }
+        }
+        if root.ok-text != "": VerticalLayout {
+            alignment: center;
+            Button {
+                text: root.ok-text;
+                variant: ButtonVariant.primary;
+                enabled: root.ok-enabled;
+                footer: true;
+                clicked => { root.ok(); }
+            }
+        }
+    }
+}
+
+export component Dialog inherits Rectangle {
+    in property <string> title;
+    in property <length> dialog-width: 560px;
+    // 0 to fit the content (never taller than the window less 40px).
+    in property <length> dialog-height: 0px;
+    // The footer and its buttons ("" leaves a button out).
+    in property <bool> footer: true;
+    in property <string> ok-text: "OK";
+    in property <bool> ok-enabled: true;
+    in property <string> cancel-text: "Cancel";
+    in property <string> apply-text;
+    in property <bool> apply-enabled: true;
+    in property <string> extra-text;
+    in property <bool> extra-enabled: true;
+    in property <string> note;
+    // OK, or Return.
+    callback accepted();
+    // Cancel, Escape.
+    callback cancelled();
+    callback applied();
+    callback extra();
+
+    property <bool> shown;
+    property <length> offset-x;
+    property <length> offset-y;
+    property <length> drag-x;
+    property <length> drag-y;
+    property <int> submit: DialogKeys.submit;
+
+    changed submit => {
+        if root.ok-enabled && root.ok-text != "" {
+            root.accepted();
+        }
+    }
+
+    init => {
+        DialogKeys.cancelling = false;
+        popup.show();
+        root.shown = true;
+    }
+
+    // 1px, not 0: an empty item counts as hidden, and the accessibility
+    // tree (and `--a11y`) leaves out the popups of hidden items.
+    width: 1px;
+    height: 1px;
+    accessible-role: none;
+
+    popup := PopupWindow {
+        x: -root.absolute-position.x;
+        y: -root.absolute-position.y;
+        width: Viewport.width;
+        height: Viewport.height;
+        close-policy: no-auto-close;
+
+        Rectangle {
+            background: Theme.scrim;
+            opacity: root.shown ? 1 : 0;
+            animate opacity { duration: Theme.med; easing: Motion.ease; }
+        }
+        TouchArea { }
+
+        keys := FocusScope {
+            init => { self.focus(); }
+            capture-key-pressed(event) => {
+                if event.text == Key.Escape {
+                    DialogKeys.cancelling = true;
+                    root.cancelled();
+                    return accept;
+                }
+                reject
+            }
+            key-pressed(event) => {
+                if event.text == "\n" && root.ok-enabled && root.ok-text != "" {
+                    root.accepted();
+                    return accept;
+                }
+                reject
+            }
+
+            // The frame's 1px border top and bottom around a title bar of
+            // header − 1px: one more pixel than header + body + foot.
+            property <length> fit: root.dialog-height > 0 ? root.dialog-height : body.preferred-height + Theme.header + 1px + (root.footer ? Theme.dialog-foot : 0);
+            property <length> h: min(self.fit, parent.height - 40px);
+            property <length> w: min(root.dialog-width, parent.width - 40px);
+
+            frame := Rectangle {
+                // Centred; moved by its title bar, which stays on screen.
+                x: max(80px - parent.w, min(parent.width - 80px, (parent.width - parent.w) / 2 + root.offset-x));
+                y: max(0px, min(parent.height - 40px, (parent.height - parent.h) / 2 + root.offset-y));
+                width: parent.w;
+                height: parent.h;
+                background: Theme.surface-panel;
+                border-width: 1px;
+                border-color: Theme.line-strong;
+                border-radius: Theme.r-panel;
+                drop-shadow-color: Theme.shadow-color;
+                drop-shadow-blur: Theme.shadow-blur;
+                drop-shadow-offset-y: Theme.shadow-y;
+                opacity: root.shown ? 1 : 0;
+                animate opacity { duration: Theme.med; easing: Motion.ease; }
+                accessible-role: groupbox;
+                accessible-label: root.title;
+
+                VerticalLayout {
+                    padding: 1px;
+                    spacing: 0;
+
+                    // The title bar: drag it to move the dialog.
+                    Rectangle {
+                        height: Theme.header - 1px;
+                        background: Theme.surface-chrome;
+                        border-top-left-radius: Theme.r-panel - 1px;
+                        border-top-right-radius: Theme.r-panel - 1px;
+                        Text {
+                            x: Theme.space-4;
+                            width: parent.width - 2 * Theme.space-4;
+                            height: parent.height - 1px;
+                            text: root.title;
+                            color: Theme.text-2;
+                            font-size: Theme.fs-sm;
+                            letter-spacing: Theme.tracking-sm;
+                            font-weight: Theme.weight-semibold;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            accessible-role: none;
+                        }
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: Theme.line;
+                        }
+                        TouchArea {
+                            pointer-event(event) => {
+                                if event.kind == PointerEventKind.down {
+                                    root.drag-x = root.offset-x;
+                                    root.drag-y = root.offset-y;
+                                }
+                            }
+                            moved => {
+                                root.offset-x = root.drag-x + self.mouse-x - self.pressed-x;
+                                root.offset-y = root.drag-y + self.mouse-y - self.pressed-y;
+                            }
+                            double-clicked => {
+                                root.offset-x = 0;
+                                root.offset-y = 0;
+                            }
+                        }
+                    }
+
+                    // The body scrolls when the window is shorter than its
+                    // content can shrink to (the web app's `.dialog-body`
+                    // has overflow-y: auto); otherwise it fills the dialog
+                    // (stretching rows, like a form's own ScrollArea, grow).
+                    body-area := Rectangle {
+                        vertical-stretch: 1;
+                        // A layout's minimum is what it can't go below.
+                        min-height: 0px;
+                        preferred-height: body.preferred-height;
+                        property <length> total: max(self.height, body.min-height);
+                        property <bool> scrolls: body.min-height > self.height + 0.5px;
+
+                        body-flick := Flickable {
+                            width: parent.width;
+                            height: parent.height;
+                            content-height: parent.total;
+                            // The wheel and trackpad scroll it; a drag
+                            // inside is the content's (a slider, a list).
+                            interactive: false;
+                            body := VerticalLayout {
+                                width: parent.width;
+                                height: body-area.total;
+                                spacing: 0;
+                                @children
+                            }
+                        }
+
+                        if body-area.scrolls: Rectangle {
+                            x: parent.width - Theme.scrollbar;
+                            width: Theme.scrollbar;
+                            property <float> page: body-flick.height / body-area.total;
+                            property <length> thumb-h: max(24px, (body-flick.height - 4px) * self.page);
+                            property <length> travel: body-flick.height - 4px - self.thumb-h;
+                            property <float> at: -body-flick.content-y / max(1px, body-area.total - body-flick.height);
+                            Rectangle {
+                                x: 2px;
+                                y: 2px + parent.travel * parent.at;
+                                width: Theme.scrollbar - 4px;
+                                height: parent.thumb-h;
+                                border-radius: self.width / 2;
+                                background: Theme.scroll-thumb;
+                            }
+                        }
+                    }
+
+                    if root.footer: DialogFooter {
+                        ok-text: root.ok-text;
+                        ok-enabled: root.ok-enabled;
+                        cancel-text: root.cancel-text;
+                        apply-text: root.apply-text;
+                        apply-enabled: root.apply-enabled;
+                        extra-text: root.extra-text;
+                        extra-enabled: root.extra-enabled;
+                        note: root.note;
+                        ok => { root.accepted(); }
+                        cancel => { root.cancelled(); }
+                        apply => { root.applied(); }
+                        extra => { root.extra(); }
+                    }
+                }
+            }
+        }
+
+        // Toasts show over the dialog too (the window's own stack is under
+        // this popup).
+        ToastStack {
+            area-width: Viewport.width;
+        }
+    }
+}

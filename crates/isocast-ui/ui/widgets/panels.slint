@@ -1,0 +1,190 @@
+// Docks and their parts (docs/design.md 3.2, 3.3): a dock is a panel with
+// a 28px header band (the bands line up across the dock row), its content,
+// and an optional 32px toolbar at the foot; docks meet at 1px hairlines,
+// with splitters that resize them. No cards, no gaps.
+
+import { Theme } from "../theme.slint";
+
+// The header band: "Scenes", "Sources", … in OBS's words.
+export component PanelHeader inherits Rectangle {
+    in property <string> title;
+    height: Theme.header;
+    background: Theme.surface-header;
+    accessible-role: none;
+
+    Text {
+        x: Theme.pane-x;
+        width: parent.width - 2 * Theme.pane-x;
+        height: parent.height - 1px;
+        text: root.title;
+        color: Theme.text-2;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        font-weight: Theme.weight-semibold;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: none;
+    }
+    HorizontalLayout {
+        x: Theme.pane-x;
+        width: parent.width - Theme.pane-x - Theme.space-1;
+        height: parent.height - 1px;
+        alignment: end;
+        @children
+    }
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.line;
+    }
+}
+
+// A dock: its header, then its children top to bottom (the content, which
+// should stretch, and a DockToolbar last if it has one).
+export component Dock inherits Rectangle {
+    in property <string> title;
+    background: Theme.surface-panel;
+    clip: true;
+    accessible-role: groupbox;
+    accessible-label: root.title;
+
+    VerticalLayout {
+        spacing: 0;
+        PanelHeader {
+            title: root.title;
+        }
+        @children
+    }
+}
+
+// The toolbar at a dock's foot (OBS's + − ⚙ ∧ ∨): 24px icon buttons 2px
+// apart, the first glyph in line with the rows (12px in).
+export component DockToolbar inherits Rectangle {
+    height: Theme.toolbar;
+    background: Theme.surface-panel;
+    accessible-role: none;
+
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.line;
+    }
+    // 24px buttons centred under the hairline.
+    HorizontalLayout {
+        y: 1px;
+        height: parent.height - 1px;
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-2;
+        padding-top: (parent.height - 1px - Theme.icon-button-sm) / 2;
+        padding-bottom: (parent.height - 1px - Theme.icon-button-sm) / 2;
+        spacing: 2px;
+        alignment: start;
+        @children
+    }
+}
+
+// An 8px gap between groups of toolbar buttons.
+export component ToolbarGap inherits Rectangle {
+    width: Theme.space-2;
+}
+
+// A 1px × 16px divider in a toolbar (the source toolbar's `.tb-sep`).
+export component ToolbarSeparator inherits Rectangle {
+    width: 1px + 2 * Theme.space-1;
+    accessible-role: none;
+    Rectangle {
+        x: Theme.space-1;
+        y: (parent.height - self.height) / 2;
+        width: 1px;
+        height: 16px;
+        background: Theme.line-strong;
+    }
+}
+
+// A vertical hairline between two docks, with a 7px grab area: dragging
+// it reports the new `size` of the dock it resizes (the caller's: `sign`
+// is 1 for the dock on its left, -1 for the one on its right), clamped.
+export component ColumnSplitter inherits Rectangle {
+    in property <length> size;
+    in property <length> min-size: 140px;
+    in property <length> max-size: 640px;
+    in property <int> sign: 1;
+    in property <bool> locked;
+    // While dragging, and once let go.
+    callback changing(length);
+    callback resized(length);
+
+    property <length> start;
+    property <length> last;
+
+    width: 1px;
+    background: Theme.line;
+    accessible-role: none;
+
+    TouchArea {
+        x: -3px;
+        width: 7px;
+        enabled: !root.locked;
+        mouse-cursor: root.locked ? MouseCursor.default : MouseCursor.col-resize;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                root.start = root.size;
+                root.last = root.size;
+            } else if event.kind == PointerEventKind.up {
+                root.resized(root.last);
+            }
+        }
+        moved => {
+            root.last = clamp(root.start + root.sign * (self.mouse-x - self.pressed-x), root.min-size, root.max-size);
+            root.changing(root.last);
+        }
+    }
+}
+
+// The hairline above the docks, with a 7px grab area: dragging it reports
+// the docks' new height (dragging up makes them taller).
+export component RowSplitter inherits Rectangle {
+    in property <length> size;
+    in property <length> min-size: 120px;
+    in property <length> max-size: 2000px;
+    in property <bool> locked;
+    callback changing(length);
+    callback resized(length);
+
+    property <length> start;
+    property <length> last;
+
+    height: 1px;
+    background: Theme.line;
+    accessible-role: none;
+
+    TouchArea {
+        y: -3px;
+        height: 7px;
+        enabled: !root.locked;
+        mouse-cursor: root.locked ? MouseCursor.default : MouseCursor.row-resize;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                root.start = root.size;
+                root.last = root.size;
+            } else if event.kind == PointerEventKind.up {
+                root.resized(root.last);
+            }
+        }
+        moved => {
+            root.last = clamp(root.start - (self.mouse-y - self.pressed-y), root.min-size, root.max-size);
+            root.changing(root.last);
+        }
+    }
+}
+
+// A 1px structural line (between dialog regions, settings groups).
+export component Hairline inherits Rectangle {
+    in property <bool> vertical;
+    min-width: root.vertical ? 1px : 0px;
+    max-width: root.vertical ? 1px : 100000px;
+    min-height: root.vertical ? 0px : 1px;
+    max-height: root.vertical ? 100000px : 1px;
+    background: Theme.line;
+    accessible-role: none;
+}
