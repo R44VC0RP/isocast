@@ -2,7 +2,7 @@
 
 **Record and stream your Mac like OBS, with every source saved as its own file, at a fraction of the CPU.**
 
-![Isocast recording a scene: a terminal, a picture-in-picture and a lower third, with the audio mixer and controls below](docs/images/app.png)
+![Isocast recording: the Screen scene shows a terminal with a picture-in-picture photo and a title, above the recording timer, frame rate, dropped frames and CPU, with scenes, sources, the audio mixer and controls below](docs/images/app.png)
 
 ## What it does
 
@@ -12,9 +12,9 @@ transitions, and mix your audio. Bring your OBS scene collections with you:
 Isocast imports them.
 
 **Studio Mode.** Line up the next scene in the preview while the program
-stays on air, then take it live with a transition.
+stays on air, then take it live with a cut, a fade or another transition.
 
-![Studio Mode: the intro scene in preview next to the live program](docs/images/studio.png)
+![Studio Mode: the Starting soon intro in preview on the left, the live program on the right, and the Transition button between them](docs/images/studio.png)
 
 **Every source in its own file.** Alongside the finished video, Isocast can
 save each screen, window and camera as a separate full-quality file (an ISO
@@ -27,7 +27,7 @@ without re-recording, and without syncing anything by hand.
 which sources get their own file, and where to stream (Twitch, YouTube,
 Kick, Facebook or any RTMP server). Stream keys stay in your Keychain.
 
-![The Output settings: recording path, quality presets, program and ISO recording](docs/images/settings.png)
+![Settings, Output page: where recordings go, the quality preset, the encoder and format, and which sources get their own file](docs/images/settings.png)
 
 **Control it from anywhere.** The app, the `isocast` command and AI agents
 (over MCP) all drive the same engine, so you can script a show, switch

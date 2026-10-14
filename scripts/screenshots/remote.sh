@@ -21,7 +21,13 @@ export ISOCAST_BACKGROUND=1
 isocast="$checkout/target/release/isocast"
 app="$S/Isocast.app"
 cua=/Applications/CuaDriver.app/Contents/MacOS/cua-driver
-session="docs-shots-$$"
+# cua-driver ends idle sessions, so every call gets a fresh session label.
+sid() { echo "docs-shots-$$-$(date +%s)-$RANDOM"; }
+# The app window's size in points (2x pixels). It goes on a virtual HiDPI
+# display made for it (virtual-display.m), so it can be bigger than the
+# test Mac's own screen.
+window_w="${SHOTS_WINDOW_W:-1440}"
+window_h="${SHOTS_WINDOW_H:-900}"
 
 log() { echo "shots: $*"; }
 cua() { "$cua" call "$1" "$2"; }
@@ -41,7 +47,7 @@ print("%s %s" % (wins[0]["window_id"], wins[0]["pid"]) if wins else "")
 
 close_window() { # close_window APP [TITLE]
     w="$(window_of "$@")"
-    [ -n "$w" ] && cua hotkey "{\"pid\":${w#* },\"window_id\":${w% *},\"keys\":[\"cmd\",\"w\"],\"session\":\"$session\"}" >/dev/null
+    [ -n "$w" ] && cua hotkey "{\"pid\":${w#* },\"window_id\":${w% *},\"keys\":[\"cmd\",\"w\"],\"session\":\"$(sid)\"}" >/dev/null
 }
 
 grab() { # grab NAME APP [TITLE]
@@ -49,21 +55,21 @@ grab() { # grab NAME APP [TITLE]
     set -- "$name" "$(window_of "$@")"
     [ -n "$2" ] || { log "no window for $1"; return 1; }
     wid="${2% *}"; pid="${2#* }"
-    cua get_window_state "{\"pid\":$pid,\"window_id\":$wid,\"include_accessibility_tree\":false,\"max_image_dimension\":0,\"screenshot_out_file\":\"$out/$1.png\",\"session\":\"$session\"}" >/dev/null
+    cua get_window_state "{\"pid\":$pid,\"window_id\":$wid,\"include_accessibility_tree\":false,\"max_image_dimension\":0,\"screenshot_out_file\":\"$out/$1.png\",\"session\":\"$(sid)\"}" >/dev/null
     log "$1: $(sips -g pixelWidth -g pixelHeight "$out/$1.png" | awk '/pixel/ {printf "%s ", $2}')"
 }
 
 frame() { # frame APP X Y W H [TITLE]
     set -- "$(window_of "$1" "${6:-}")" "$2" "$3" "$4" "$5"
     wid="${1% *}"; pid="${1#* }"
-    cua set_window_frame "{\"pid\":$pid,\"window_id\":$wid,\"x\":$2,\"y\":$3,\"width\":$4,\"height\":$5,\"session\":\"$session\"}" >/dev/null
+    cua set_window_frame "{\"pid\":$pid,\"window_id\":$wid,\"x\":$2,\"y\":$3,\"width\":$4,\"height\":$5,\"session\":\"$(sid)\"}" >/dev/null
 }
 
 menu() { # menu APP "Menu" "Item"
     w="$(window_of "$1")"; shift
     wid="${w% *}"; pid="${w#* }"
     path="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "$@")"
-    cua invoke_menu "{\"pid\":$pid,\"window_id\":$wid,\"path\":$path,\"session\":\"$session\"}" >/dev/null
+    cua invoke_menu "{\"pid\":$pid,\"window_id\":$wid,\"path\":$path,\"session\":\"$(sid)\"}" >/dev/null
 }
 
 start() {
@@ -84,6 +90,14 @@ time.sleep(3600)
     pgrep -q -f "CuaDriver.app/Contents/MacOS/cua-driver serve" || open -g -n -a CuaDriver --args serve
     sleep 2
     swift "$S/display-mode.swift" --hidpi
+    # A HiDPI display big enough for the app window (the test Mac's own
+    # screen is smaller); stop removes it.
+    clang -fobjc-arc -framework Foundation -framework CoreGraphics \
+        "$S/virtual-display.m" -o "$S/virtual-display" || return 1
+    "$S/virtual-display" "$window_w" "$((window_h + 60))" >"$S/vd.log" 2>&1 &
+    echo $! >"$S/vd.pid"
+    while ! grep -q '^display' "$S/vd.log"; do sleep 1; done
+    log "$(cat "$S/vd.log")"
     # Terminal first: the Screen scene captures its window, and the CLI in
     # it waits for $S/demo.go before driving the engine.
     "$isocast" engine stop >/dev/null 2>&1 || true
@@ -117,12 +131,20 @@ time.sleep(3600)
         log "ui-dev.sh failed"; return 1; }
     env ISOCAST_SOCKET="$ISOCAST_SOCKET" "$app/Contents/MacOS/isocast-ui" >"$S/app.log" 2>&1 &
     sleep 6
-    log "app window: $(window_of Isocast)"
+    set -- $(cat "$S/vd.log")
+    frame Isocast "${3%.*}" 30 "$window_w" "$window_h"
+    sleep 2
+    log "app window: $(window_of Isocast) $(cua list_windows '{"on_screen_only":true}' | python3 -c '
+import json, sys
+for w in json.load(sys.stdin)["windows"]:
+    if w.get("app_name") == "Isocast":
+        b = w["bounds"]; print("%gx%g at %g,%g" % (b["width"], b["height"], b["x"], b["y"]))
+')"
 }
 
 front() { # front APP [TITLE]: bring it to the front, the pointer out of the way
     w="$(window_of "$@")"
-    cua bring_to_front "{\"pid\":${w#* },\"session\":\"$session\"}" >/dev/null
+    cua bring_to_front "{\"pid\":${w#* },\"session\":\"$(sid)\"}" >/dev/null
     swift "$S/cursor.swift"
     sleep 1
 }
@@ -136,7 +158,7 @@ stop() {
     sleep 1
     # Close our Terminal windows (titled with the engine folder's name).
     while w="$(window_of Terminal isocast-shots)" && [ -n "$w" ]; do
-        cua hotkey "{\"pid\":${w#* },\"window_id\":${w% *},\"keys\":[\"cmd\",\"w\"],\"session\":\"$session\"}" >/dev/null || break
+        cua hotkey "{\"pid\":${w#* },\"window_id\":${w% *},\"keys\":[\"cmd\",\"w\"],\"session\":\"$(sid)\"}" >/dev/null || break
         sleep 1
         [ "$w" = "$(window_of Terminal isocast-shots)" ] && break
     done
@@ -146,6 +168,8 @@ stop() {
         defaults write com.apple.Terminal "Startup Window Settings" "$(cat "$S/terminal-default")"
         rm -f "$S/terminal-default"
     fi
+    [ -e "$S/vd.pid" ] && kill "$(cat "$S/vd.pid")" 2>/dev/null
+    rm -f "$S/vd.pid" "$S/vd.log"
     swift "$S/display-mode.swift" 3 >/dev/null 2>&1 || true
     [ -e "$S/lock.pid" ] && kill "$(cat "$S/lock.pid")" 2>/dev/null
     rm -f "$S/lock.pid" "$S/locked"

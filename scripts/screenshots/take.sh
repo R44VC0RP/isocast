@@ -5,11 +5,13 @@
 #   export ISOCAST_TESTMAC=<test Mac>         # an SSH host, as for testmac.sh
 #   scripts/testmac.sh build                  # build and sign it there first
 #   scripts/screenshots/take.sh [--keep]      # then this
+#   SHOTS="app studio settings" scripts/screenshots/take.sh   # only these
 #
 # It copies this folder to the test Mac, and in its desktop session
-# (testmac.sh gui) switches the display to its largest 2x mode, starts an isolated engine with setup.toml
-# (a Terminal window running cli.command, two generated pictures, text, a
-# tone as the mic), opens the app, takes each window with cua-driver, and
+# (testmac.sh gui) switches the display to its largest 2x mode, adds a
+# virtual 2x display for the 1440x900 app window (virtual-display.m),
+# starts an isolated engine with setup.toml (a Terminal window running
+# cli.command, two generated pictures, text, a tone as the mic), opens the app, takes each window with cua-driver, and
 # puts everything back (--keep leaves it running to look at). The PNGs are
 # trimmed to the window here (Pillow, through uv) and written to
 # docs/images/.
@@ -21,10 +23,13 @@ export ISOCAST_TESTMAC="$host"
 shots="$here/scripts/screenshots"
 keep=0
 [ "${1:-}" = "--keep" ] && keep=1
+# Which images to write to docs/images (all five by default).
+only="${SHOTS:-app studio settings recordings cli}"
 
 ssh "$host" 'mkdir -p "$HOME/isocast-scratch/docs-shots" && rm -rf "$HOME/isocast-scratch/docs-shots/out"'
 scp -q "$shots/remote.sh" "$shots/shoot.sh" "$shots/setup.toml" "$shots/cli.command" \
-    "$shots/display-mode.swift" "$shots/cursor.swift" "$shots/landscape.jpg" "$shots/brb.jpg" \
+    "$shots/display-mode.swift" "$shots/cursor.swift" "$shots/virtual-display.m" \
+    "$shots/landscape.jpg" "$shots/brb.jpg" \
     "$host:isocast-scratch/docs-shots/"
 
 if [ "$keep" = 1 ]; then
@@ -40,14 +45,17 @@ scp -q "$host:isocast-scratch/docs-shots/out/*.png" "$work/"
 
 # Window captures come with transparent margins (and sometimes the pointer
 # in them): keep the rows and columns that are mostly opaque.
-uv run --quiet --no-project --with pillow python3 - "$work" "$here/docs/images" <<'PY'
+# Then quantize to a 256-colour palette with dithering (libimagequant, as
+# pngquant does): about a third of the size, no visible banding.
+(cd "$work" && uv run --quiet --no-project --with pillow --with imagequant python3 - "$work" "$here/docs/images" $only) <<'PY'
 import sys
 from pathlib import Path
+import imagequant
 from PIL import Image
 
 src, dst = Path(sys.argv[1]), Path(sys.argv[2])
 dst.mkdir(parents=True, exist_ok=True)
-for name in ("app", "studio", "settings", "recordings", "cli"):
+for name in sys.argv[3:]:
     path = src / f"{name}.png"
     if not path.exists():
         print(f"missing: {name}.png")
@@ -60,6 +68,7 @@ for name in ("app", "studio", "settings", "recordings", "cli"):
     cols = [x for x in range(w) if sum(1 for y in range(0, h, 4) if data[x, y] > 200) > h / 4 * 0.3]
     box = (cols[0], rows[0], cols[-1] + 1, rows[-1] + 1)
     out = im.crop(box)
+    out = imagequant.quantize_pil_image(out, dithering_level=1.0, max_colors=256, min_quality=80, max_quality=98)
     out.save(dst / f"{name}.png", optimize=True)
     size = (dst / f"{name}.png").stat().st_size
     print(f"{name}.png {out.size[0]}x{out.size[1]} {size / 1e6:.2f} MB")

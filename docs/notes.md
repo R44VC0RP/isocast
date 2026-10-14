@@ -3078,6 +3078,16 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-14: README screenshots at 1440x900 on isocast-m2-b: its screen
+  is only 960x720 points at 2x, and cua-driver's set_window_frame can't
+  make a window bigger than the screen ("did not settle"). take.sh now adds
+  a temporary 1440x960-point HiDPI virtual display
+  (scripts/screenshots/virtual-display.m, CoreGraphics' undeclared
+  CGVirtualDisplay classes; it lasts while the process runs) and puts the
+  app window there, giving 2880x1800 captures. cua-driver also ends idle
+  sessions mid-run, so every call now gets a fresh session label. Images
+  are quantized with libimagequant (via uv) to about a third of their size
+  without visible banding.
 - 2026-10-13 (engine-e2e): `start`/`split` return media paths, not the
   manifest; match its files. A split reply precedes `begins_at`: a Stop
   before that boundary cancels the pending take. Pixel averages need FFmpeg

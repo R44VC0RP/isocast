@@ -27,7 +27,7 @@ sleep 2
 swift "$S/cursor.swift"
 grab settings Isocast
 w="$(window_of Isocast)"
-cua press_key "{\"pid\":${w#* },\"window_id\":${w% *},\"key\":\"escape\",\"session\":\"$session\"}" >/dev/null
+cua press_key "{\"pid\":${w#* },\"window_id\":${w% *},\"key\":\"escape\",\"session\":\"$(sid)\"}" >/dev/null
 
 # Stop, then the take's files in Finder: File > Show Recordings reveals the
 # folder in its parent; open it, in the list view.
@@ -37,7 +37,7 @@ sleep 2
 menu Isocast File "Show Recordings"
 sleep 3
 w="$(window_of Finder Shared)"
-[ -n "$w" ] && cua hotkey "{\"pid\":${w#* },\"window_id\":${w% *},\"keys\":[\"cmd\",\"down\"],\"session\":\"$session\"}" >/dev/null
+[ -n "$w" ] && cua hotkey "{\"pid\":${w#* },\"window_id\":${w% *},\"keys\":[\"cmd\",\"down\"],\"session\":\"$(sid)\"}" >/dev/null
 sleep 2
 menu Finder View "as List" || log "couldn't switch Finder to the list view"
 frame Finder 60 80 840 400 Recordings

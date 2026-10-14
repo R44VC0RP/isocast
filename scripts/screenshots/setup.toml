@@ -65,12 +65,12 @@ rect = { x = 48, y = 900, width = 760, height = 104 }
 style = { background = "#101418e6", radius = 14 }
 
 [[scenes.items.children]]
-id = "lower-third-name"
+id = "title"
 rect = { x = 28, y = 14, width = 700, height = 44 }
 content = { kind = "text", text = "Building a recorder in Rust", size = 36, weight = 600, font = "Helvetica Neue" }
 
 [[scenes.items.children]]
-id = "lower-third-sub"
+id = "subtitle"
 rect = { x = 28, y = 60, width = 700, height = 30 }
 content = { kind = "text", text = "Episode 12 · scenes, ISO files and agents", size = 24, color = "#f2b84b", font = "Helvetica Neue" }
 
