@@ -59,9 +59,8 @@ const PENDING_AUDIO: usize = 64;
 const FINISH_WAIT: Duration = Duration::from_secs(10);
 /// Keyframe at least every second, so editors can scrub the files easily.
 const KEYFRAME_INTERVAL_SECONDS: f64 = 1.0;
-/// Files are written in fragments of this many seconds, so a crash or a
-/// killed process loses at most about this much: everything before the
-/// last fragment stays playable.
+/// Requested media-time fragment interval, not an acknowledgement that a
+/// boundary has reached disk. Queued encoding and AAC timing can lag inputs.
 const FRAGMENT_SECONDS: i64 = MOVIE_FRAGMENT_SECONDS;
 
 static PRIORITY_OUTPUTS: AtomicUsize = AtomicUsize::new(0);

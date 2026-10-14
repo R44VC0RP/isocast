@@ -1219,10 +1219,10 @@ const FOLDER_LOCK: &str = ".isocast.lock";
 
 /// What an interrupted session's manifest says about it.
 const INTERRUPTED: &str = "the recording ended without finishing: the process recording it \
-                           (isocastd or `isocast record`) was stopped or crashed; its files hold \
-                           what was written up to about 2 s before that (nothing, and won't open, \
-                           if it had run for less than about 2 s), and their durations and frame \
-                           counts are unknown";
+                           (isocastd or `isocast record`) was stopped or crashed; only completed \
+                           fragments may be playable, and a file with no completed fragment may \
+                           not open. Recoverable durations and frame counts are unknown; inspect \
+                           every file's video and audio tracks";
 
 /// A recording's hold on its folder's lock, released when dropped.
 pub(crate) struct FolderLock {
@@ -1280,17 +1280,14 @@ pub fn interrupted_sessions(folder: &Path, mark: bool) -> Vec<PathBuf> {
             if mark {
                 manifest.status = SessionStatus::Failed;
                 manifest.errors.push(INTERRUPTED.to_string());
-                if let Some(pause) = manifest.pauses.last().filter(|p| p.end_seconds.is_none()) {
-                    let safe = pause.crash_safe_seconds.unwrap_or(0.0);
-                    manifest.errors.push(format!(
-                        "it was interrupted while paused at {:.2} s of recorded time: its files \
-                         hold up to about {safe:.2} s (the last completed {}-second fragment \
-                         before the pause); the {:.2} s recorded after that were still in an \
-                         unfinished fragment and are lost",
-                        pause.time_seconds,
-                        crate::MOVIE_FRAGMENT_SECONDS,
-                        (pause.time_seconds - safe).max(0.0)
-                    ));
+                if !manifest.pauses.is_empty() {
+                    manifest.errors.push(
+                        "this take contains pauses: pause/resume replies checkpoint the cut \
+                         clock and manifest, not committed media. Pre-pause samples may still \
+                         be queued or in an unfinished fragment, including after resume; \
+                         recovered and lost durations cannot be inferred from the pause times"
+                            .into(),
+                    );
                 }
                 write_manifest(&path, &manifest).ok()?;
             }
@@ -1327,8 +1324,9 @@ pub fn interrupted_note(interrupted: &[PathBuf], marked: bool) -> Option<String>
         ),
     };
     let what = format!(
-        "{what} interrupted (killed or crashed): {list}; {its} files play up to about 2 s \
-         before that (a take shorter than that left files that don't open)"
+        "{what} interrupted (killed or crashed): {list}; recoverable duration is unknown. \
+         Only completed fragments may play; files with no completed fragment may not open. \
+         Inspect each file's audio/video tracks; pause/resume replies do not confirm durability"
     );
     Some(match marked {
         true => format!("{what}, and {its} {manifest} now {says} so (status \"failed\")"),

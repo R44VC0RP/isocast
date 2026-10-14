@@ -76,8 +76,8 @@ this Mac"):
 - `2026-10-12 09-30-00.session.json`: the manifest, with where each file
   starts on the shared clock, every scene switch and marker.
 
-Files are written in 2-second fragments, so even a crash leaves them
-playable. `isocast split` starts a new take without stopping anything;
+Completed movie fragments can survive a crash; see the recovery limitations
+below. `isocast split` starts a new take without stopping anything;
 `isocast marker "intro done"` marks a moment.
 
 `isocast pause` and `isocast resume` keep the same take and files. The paused
@@ -101,22 +101,32 @@ files are 60 fps, 100 ms with a 30 fps file, 250 ms with 24 fps and up to
 1 s with unusual rates. Pause and resume return after that boundary and the
 manifest checkpoint, so a pause can take up to one step to land and 100
 pause/resume pairs take about 10 s at 60 fps (20 s with a 30 fps file). A
-second pause or resume sent before the previous one has replied is refused
-("a pause/resume boundary is pending"); retry after the reply. Pausing works
-from the take's first frames: one asked for right as `start` returns cuts at
+concurrent direct pause/resume request during a pending cut is refused
+("a pause/resume boundary is pending"); retry after the reply. Hotkey actions
+are queued and executed in order instead. Pausing works from the take's first
+frames: one asked for right as `start` returns cuts at
 about 0.1 s. Audio fades to and from silence over 5 ms at the join to avoid
 clicks, without shifting samples or changing the duration.
 
-**Crash safety while paused.** Files are written in 2-second fragments of
-recorded time, and a fragment reaches the disk only when recording passes
-its end. While paused, nothing new is recorded, so the last fragment before
-the pause stays unfinished: if isocastd is killed or the Mac loses power
-during a pause, the files keep everything up to the last whole 2 s of
-recorded time before the pause, not the up-to-2 s after it. The open pause in
-the manifest says exactly how much is safe (`crash_safe_seconds`, for example
-2.0 for a pause at 3.7 s), and when the next recording in that folder marks
-the take as failed, its `errors` say how much was lost. Resuming or stopping
-makes that tail safe again as usual.
+**Crash recovery while paused.** The writer requests 2-second fragments of
+recorded time, but Pause only confirms the cut clock and manifest checkpoint.
+It does not confirm that any fragment has reached disk. Each manifest pause
+therefore records `recoverable_seconds_at_pause: null` (unknown, not zero),
+including after Resume. The former cut-time-derived `crash_safe_seconds`
+field was unreliable and is no longer emitted or trusted when reading older
+manifests.
+
+A cut exactly at 2.000 s removes the sample needed to close the first
+fragment: after a crash the entire file can be unreadable. At 4.000 s only
+2 s may survive. Even a cut just past a boundary can lose the preceding
+fragment when killed immediately after the reply, while writers are still
+draining. Audio and video need separate inspection: a recovered 2 s video
+fragment can contain only 1.961333 s of AAC. Neither the cut time nor a frame
+counter establishes a common recoverable duration across outputs and tracks.
+Resume restarts recording; its reply does not make the pre-pause tail
+durable. A successful Stop finalizes the files. After interruption, recovery
+messages report unknown durations rather than claiming exact saved or lost
+seconds.
 
 To build one video from takes, open a timeline first:
 `isocast timeline new "My video"`. Every take that finishes (`isocast stop`,

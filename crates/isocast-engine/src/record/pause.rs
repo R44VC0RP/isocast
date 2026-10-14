@@ -7,7 +7,7 @@ use std::time::Duration;
 use isocast_protocol::api::RecordingPause;
 use isocast_protocol::manifest::Pause;
 
-use crate::{MOVIE_FRAGMENT_SECONDS, SAMPLE_RATE, Time};
+use crate::{SAMPLE_RATE, Time};
 
 /// Five milliseconds to/from silence avoids a waveform discontinuity at a cut.
 /// These samples stay in place: the fade never changes sync or clip length.
@@ -146,15 +146,12 @@ impl Cuts {
                     .end
                     .or((until != Time::MAX).then_some(until))
                     .map(|end| end.min(until).saturating_since(from).as_secs_f64());
-                // Fragments are cut on media time from each file's start (the
-                // take's start, within a frame); the open fragment holds
-                // everything after the last whole fragment before the pause.
-                let fragment = MOVIE_FRAGMENT_SECONDS as f64;
                 Pause {
                     start_seconds: s.start.saturating_since(from).as_secs_f64(),
-                    crash_safe_seconds: end_seconds
-                        .is_none()
-                        .then(|| (time_seconds / fragment).floor() * fragment),
+                    // FileWriter accepts queued samples, not committed
+                    // fragments. Even draining those queues cannot establish
+                    // an on-disk lower bound across all outputs and tracks.
+                    recoverable_seconds_at_pause: None,
                     end_seconds,
                     time_seconds,
                 }

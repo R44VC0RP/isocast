@@ -169,13 +169,19 @@ action id, `source` (`global` or `focused`) and `phase` (`press` or `release`).
 `recording.pause` and `recording.resume` call the `pause` / `resume`
 methods; `recording.pause_toggle` resumes when the recording is paused and
 pauses otherwise (read from the recording's own clock, as `status` reports
-`live.paused`). All take `{}`. They act only on a running recording: idle,
-starting or stopping, a duplicate pause, or a toggle pressed while the
-previous cut is still pending (at most one cut step: 50 ms when every file
-is 60 fps, 100 ms with a 30 fps file, up to 1 s with odd rates) fails like
-the method does, with a warning and a `hotkey_fired` error. The streaming
-output is never paused. See [getting-started.md](getting-started.md) for what
-a pause does to the files.
+`live.paused`). All take `{}`. They act only on a running recording; invalid
+state or a duplicate pause emits a warning and a `hotkey_fired` error.
+
+The hotkey worker queues distinct press/release pairs and executes actions
+serially, waiting for each cut to finish. Two quick `pause_toggle` presses
+therefore pause and resume on successive cut boundaries; the second press
+can be queued while the first cut is pending. An input reply with
+`queued: true` confirms queueing, not action completion; watch `hotkey_fired` for the
+outcome. Direct concurrent `pause` / `resume` RPCs can instead be refused
+while a cut is pending. Cut steps are 50 ms when every file is 60 fps,
+100 ms with a 30 fps file, and up to 1 s with odd rates. The streaming output
+is never paused. See [getting-started.md](getting-started.md) for what a
+pause does to the files.
 
 `timeline.clear` is still reserved because there is no matching method;
 remove individual clips or create a new timeline instead. Its catalogue entry

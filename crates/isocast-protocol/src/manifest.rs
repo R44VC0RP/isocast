@@ -48,12 +48,14 @@ pub struct Pause {
     pub start_seconds: f64,
     pub end_seconds: Option<f64>,
     pub time_seconds: f64,
-    /// While the pause is open: the saved-timeline time up to which the
-    /// files are crash-safe. Content between this and `time_seconds` sits in
-    /// an unfinished movie fragment until recording resumes or stops, so a
-    /// crash during the pause loses it (at most one 2-second fragment).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crash_safe_seconds: Option<f64>,
+    /// Duration confirmed recoverable across every output and audio/video
+    /// track at this pause. Null means unknown, NOT zero. The current file
+    /// writer has no fragment-on-disk acknowledgement, so this stays null,
+    /// including after resume. The cut time and accepted sample counts are
+    /// not evidence of committed media. Legacy `crash_safe_seconds` values
+    /// were inferred from cut time and are intentionally not read or emitted.
+    #[serde(default)]
+    pub recoverable_seconds_at_pause: Option<f64>,
 }
 
 /// A labelled moment on the session timeline.

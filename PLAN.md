@@ -611,11 +611,24 @@ native app; each verified against OBS's behaviour on a test Mac.
   ISOs) in memory; save on command or hotkey.
 - [x] **G.3 Pause recording.** Pause/resume a take without a new file;
   A/V stay in sync; the manifest records the pauses.
+  - [x] **G.3 R1/R2 recovery contract.** Unknown recoverable duration when
+    writers cannot acknowledge committed fragments; no cut-derived durability
+    claims or exact loss messages. Exact-boundary/immediate-kill/Resume matrix
+    across codecs and 4K load; queued double-toggle behavior documented.
+  - [ ] **G.3b Crash-safe pause (and crash-safe takes generally).** Today
+    a fragment reaches disk only when a later sample is appended, so a crash
+    during a pause can lose everything since the last 2 s fragment, and a
+    take under 2 s entirely. Write segments ourselves (AVAssetWriter's
+    delegate segment output with our own encoders, or an equivalent) so a
+    pause, and every N seconds while recording, commits what's been
+    recorded; report recoverable seconds from committed output only.
+    Engine work for the record/* owner (Astra), with the reviewer's
+    55-case kill matrix as the check. After the alpha unless it's small.
 - [ ] **G.4 Projectors and multiview.** Fullscreen or windowed preview,
   program, scene or source on any display; a multiview grid.
 - [x] **G.5 Custom hotkeys (engine side).** Bindable action catalogue,
   per-profile bindings, CLI/MCP, and global press/release registration where
-  macOS allows. Timeline actions are wired; pause and timeline-clear remain
+  macOS allows. Timeline and pause actions are wired; timeline-clear remains
   reserved. Native Settings > Hotkeys and
   focused-key/Studio Mode presentation integration follow the app redesign.
   - [x] **G.5 review-quit.** Route AppKit quit events through graceful
@@ -2496,3 +2509,16 @@ One line per finished task, newest last.
   bounded acceptance/rejection and unchanged duration/frame-count gates.
   actionlint, fmt, release all-target clippy and 179 Rust tests pass. A
   hosted re-run after publication is still required; exact commands in REPORT.
+- G.3 R1/R2 (2026-10-13): replace cut-derived `crash_safe_seconds` with
+  explicit unknown `recoverable_seconds_at_pause: null`; legacy values are
+  discarded on recovery, and both manifest errors and Start notes avoid
+  invented saved/lost seconds. Explain that Pause/Resume acknowledge metadata,
+  not durable media; hotkey double toggles queue and execute serially.
+  Test Mac: legacy 2.000 s false promise reproduced, 55-case/165-file matrix
+  (111 readable and cleanly decoded; 54 without a movie header), all actual
+  cut targets exact and unknown metadata preserved through recovery. Includes
+  H.264/HEVC/ProRes, exact/adjacent boundaries, immediate/delayed kills,
+  during/after Resume, and 13 three-4K60 cases. Double toggle 0.283 ms apart
+  succeeds twice. e2e 12 PASS, 0 FAIL, bug_report unavailable; full fmt,
+  release all-target clippy and 180 tests pass. Full per-output comparison:
+  /Volumes/IsocastBuild/g3-pause/scratch/REPORT.md, "Re-review fixes".

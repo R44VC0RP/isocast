@@ -256,8 +256,9 @@ each section. Delete entries that stop being true.
   MCP: `pause_recording` / `resume_recording`. The native app's timer follows
   the pause state; adding its pause button belongs to the controls work.
   Hotkeys: `isocast hotkeys set pause 'ctrl+alt+cmd+p' recording.pause_toggle`
-  (also `recording.pause`, `recording.resume`). A crash while paused keeps
-  only whole 2 s fragments before the pause (manifest `crash_safe_seconds`).
+  (also `recording.pause`, `recording.resume`). Recoverable duration after a
+  crash is unknown: manifest `recoverable_seconds_at_pause: null`, including
+  after Resume. Pause/Resume replies do not acknowledge committed media.
 
 - 2026-10-13 — Repo docs and release files (8.1, 8.3, branch
   agent/docs-release): read README.md as a visitor would (the screenshots
@@ -458,6 +459,21 @@ each section. Delete entries that stop being true.
   a console, or can be dropped from the rig. Nothing waits on it.
 
 ## Benchmarks
+
+- 2026-10-13: **G.3 re-review R1/R2**, exonbook, synthetic reviewer rig,
+  common bench lock. 55 exact-target killed takes / 165 files: H.264, HEVC,
+  ProRes 422 at 0.05/2.0/2.05/3.7/4.0/4.05 s, both delayed and immediate
+  kills, during/after Resume; 13 three-4K60 HEVC q100 cases. 111 files have
+  readable fragments and decode cleanly, 54 have no movie header. Metadata
+  consistently says unknown (null), never a fabricated lower bound; all
+  failed manifests and recovery notes retain that uncertainty. Legacy main
+  reproduced 2.0 s claimed but 3/3 unreadable, then the new daemon removed
+  that field on recovery. Two focused toggle presses 0.283 ms apart queued
+  and succeeded (pause 1.30–1.35 s, two success events, three clean files).
+  Full e2e: 12 PASS, 0 FAIL, bug_report unavailable; all measured outputs
+  zero-drop. Full release gates: 180 tests, fmt and all-target clippy clean.
+  Every matrix row, including per-output AAC durations, is in REPORT.md
+  "Re-review fixes" at /Volumes/IsocastBuild/g3-pause/scratch.
 
 - 2026-10-13 (engine-e2e, first hosted run **38493967068**): the `macos-15`
   arm64 VM ran macOS 15.7.9 (24G830), image 20260907.0337.1. GitHub's
@@ -1166,6 +1182,19 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-13: **G.3 R1 replaces the cut-derived durability claim.** Neither
+  FileWriter acceptance (which can mean only queued) nor AVAssetWriter input
+  acceptance acknowledges an on-disk fragment. No numeric lower bound can
+  be substantiated for all files and A/V tracks. Each pause now explicitly
+  records `recoverable_seconds_at_pause: null` (unknown, not zero), retained
+  after Resume and in failed manifests. Legacy `crash_safe_seconds` is
+  ignored on input and omitted on rewrite; interruption errors and start
+  notes no longer invent saved/lost seconds. No new wait, encoder, routing
+  or hot-path change. A future numeric bound must come from actual committed
+  output/track evidence, not another cut-time formula. R2: hotkey actions
+  queue serially, so rapid double toggles execute on successive boundaries;
+  only concurrent direct RPCs can hit the pending-cut refusal.
+
 - 2026-10-13: **G.3 recording-only cut clock.** All writers share one
   clock; capture, composition, mix and streaming keep host time. Cuts land
   on 1/gcd(1e9, 48000, every recorded fps), after the newest inspected
@@ -1190,16 +1219,17 @@ each section. Delete entries that stop being true.
   taking the cut lock (a recording-epoch check guards against a new
   recording in between), and writers drop the cut read guard before native
   appends (cut-touching audio is staged first; the common path still borrows).
-  (F1) Kept the 2 s fragment bound and documented it: the open pause carries
-  `crash_safe_seconds` and an interrupted manifest says how much was lost.
+  (F1, superseded by R1 above) The original cut-derived recovery value was
+  wrong at exact boundaries and during encoder draining; it is now unknown.
   Rejected alternatives, measured: AVAssetWriter can't change
   `movieFragmentInterval` after writing starts ("Cannot call method when
   status is 1"), `flushSegment` only works in delegate segment mode (which is
   passthrough-only, so it would mean replacing the encoder pipeline), and
   padding past the fragment boundary would put paused time back into the
   file. A real fix needs a writer that encodes itself and writes segments.
-  (F4) Documented the cut steps and the pending-boundary refusal; no
-  coalescing. (F6) Pre-existing 30 fps ISO duplicate/skip, not G.3: below.
+  (F4) Documented the cut steps and concurrent direct-RPC refusal; hotkey
+  actions queue instead (R2). (F6) Pre-existing 30 fps ISO duplicate/skip,
+  not G.3: below.
 - 2026-10-13: **Visual check on pull requests (8.4).** Split in two
   workflows because one can't both run untrusted code and hold write
   tokens or secrets: visual.yml (`pull_request`, read-only token, no
@@ -3139,6 +3169,16 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-13 (G.3 R1): a pause at **exactly** 2.000 s removes the sample
+  needed to close the first fragment; 3/3 outputs can be unreadable. At
+  4.000 s only 2 s survive. Immediate SIGKILL after a successful 2.050 s
+  pause under 4K load likewise left all three unreadable in three trials;
+  at 4.050 s each retained only 2 s. Even after 350 ms outputs can disagree
+  (one ISO 2 s, others ~4 s). A recovered 2 s video fragment had 1.961333 s
+  AAC, not a common exact A/V bound. Successful Resume at 3.7 s still left
+  only 2 s on immediate kill. Request replies, metadata checkpoints and
+  input progress must never be described as media durability evidence.
+
 - 2026-10-14: README screenshots at 1440x900 on isocast-m2-b: its screen
   is only 960x720 points at 2x, and cua-driver's set_window_frame can't
   make a window bigger than the screen ("did not settle"). take.sh now adds
@@ -3154,8 +3194,9 @@ each section. Delete entries that stop being true.
   on wall time. Native probe on exonbook, H.264, 2 s interval, real-time
   input: appending through 3.7 s or exactly 4.0 s then idling 8 s leaves
   120 frames recoverable; appending one frame at 4.0 s writes the 2–4 s
-  fragment at once (240 frames). So any idle writer (a pause, a stalled
-  source) holds up to one fragment in memory. Probe source:
+  fragment (240 frames in that probe). This does not establish a durable
+  lower bound: queued encoders can lag, and AAC's fragment timing differs
+  (see R1 above). Probe source:
   /Volumes/IsocastBuild/g3-pause/scratch/f1probe.
 - 2026-10-13 (G.3 review, F6, owner: iso_frames): a 30 fps ISO on a 60 fps
   engine sometimes alternates duplicated and skipped source frames (counter
