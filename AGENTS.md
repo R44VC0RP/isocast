@@ -85,7 +85,9 @@ survive rebuilds as long as the app is re-signed. After rebuilding, run the
 script and `isocast restart`; the CLI warns when the app is older than the
 build.
 
-`fmt`, `clippy` and `test` must be clean before committing.
+`fmt` must be clean on every commit, with `clippy` and `test` for the
+crates changed. The full workspace `fmt`, `clippy` and `test` must be clean
+before a branch is handed off for review or merged; CI runs them too.
 
 Benchmarks and anything that opens a window run on the test Mac, never on
 Ryan's: `scripts/testmac.sh build`, then `scripts/testmac.sh run '<command>'`
