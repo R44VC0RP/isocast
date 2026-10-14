@@ -46,6 +46,7 @@ mod shared_frames {
         pub max_height: Option<u32>,
         pub fps: Option<u32>,
         pub slots: Option<u32>,
+        pub filtered: bool,
         pub seconds: f64,
         pub check: bool,
         pub expect: Vec<String>,
@@ -500,6 +501,10 @@ enum Command {
         /// With --shared: surfaces in the ring (4 if absent, 2 to 8).
         #[arg(long, requires = "shared")]
         slots: Option<u32>,
+        /// With --shared and a source: through the source's filters, as
+        /// the program shows it.
+        #[arg(long, requires = "shared")]
+        filtered: bool,
         /// With --shared: read every frame back through this process's GPU
         /// and fail on black frames or pixels the daemon never drew.
         #[arg(long, requires = "shared")]
@@ -1055,6 +1060,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             seconds,
             shared,
             slots,
+            filtered,
             check,
             expect,
             touch,
@@ -1066,6 +1072,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 max_height: height,
                 fps,
                 slots,
+                filtered,
                 seconds,
                 check,
                 expect,

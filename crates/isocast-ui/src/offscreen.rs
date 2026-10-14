@@ -263,7 +263,7 @@ impl Offscreen {
     /// `drag:X1,Y1,X2,Y2` (a pointer drag in window points), `hover:X,Y`
     /// (the pointer moved there, not pressed), `hide:DOCK`
     /// (scenes, sources, mixer, transitions, controls, toolbar, status),
-    /// `wait:MS` (for the daemon).
+    /// `wait:MS` (for the daemon), `quit:WHAT` (the quit question).
     fn state(&mut self, state: &str) -> Result<()> {
         let (name, arg) = state.split_once(':').unwrap_or((state, ""));
         let app = &self.app;
@@ -290,6 +290,7 @@ impl Offscreen {
                 };
                 self.hub.toast(kind, title, "");
             }
+            "quit" => crate::quit::sample(&self.hub, arg)?,
             "kit" => app.set_kit_gallery(true),
             "kit-dialog" => {
                 app.set_kit_gallery(true);
@@ -305,6 +306,9 @@ impl Offscreen {
                 app.set_kit_dropdown(app.get_kit_dropdown() + 1);
             }
             "type" => {
+                // Drawn first: a field shown by the state before is made
+                // (and takes focus) as it is drawn.
+                self.render()?;
                 for c in arg.chars() {
                     let text = slint::SharedString::from(c.to_string());
                     self.key(text);
@@ -366,6 +370,9 @@ impl Offscreen {
                 let until = Instant::now() + Duration::from_millis(ms);
                 while Instant::now() < until {
                     self.pump(Duration::from_millis(20));
+                    // The snapshot's clock moves too, so timers waiting on
+                    // it (a gesture's paced edits) fire.
+                    self.advance(Duration::from_millis(20));
                 }
             }
             other => {
@@ -382,7 +389,7 @@ impl Offscreen {
                             .flat_map(|s| s.iter().copied())
                             .collect();
                         bail!(
-                            "unknown state {other:?}; one of dialog:KIND[:ARG], menu:OWNER, menu-bar:ID, menu-bar-open:TITLE, toast:KIND:TITLE, kit, kit-dialog, kit-menu, kit-dropdown, type:TEXT, key:NAME, drag:X1,Y1,X2,Y2, hover:X,Y, press:LABEL, hide:DOCK, wait:MS, {}",
+                            "unknown state {other:?}; one of dialog:KIND[:ARG], menu:OWNER, menu-bar:ID, menu-bar-open:TITLE, toast:KIND:TITLE, kit, kit-dialog, kit-menu, kit-dropdown, type:TEXT, key:NAME, drag:X1,Y1,X2,Y2, hover:X,Y, press:LABEL, hide:DOCK, wait:MS, quit:recording|streaming|both, {}",
                             areas.join(", ")
                         )
                     }

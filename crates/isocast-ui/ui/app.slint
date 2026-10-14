@@ -38,11 +38,13 @@ import { LibraryArea } from "areas/library/state.slint";
 import { LibraryDialogs } from "areas/library/dialogs.slint";
 import { CreateArea } from "areas/create/state.slint";
 import { ClipBar } from "areas/create/clip-bar.slint";
+import { QuitDialog, QuitPrompt } from "quit.slint";
 
 // What Rust sees: the globals and the structs in their models.
 export { Theme, Ui, ConnectionState, Menus, Toasts, EditCommands, SettingsForms }
 export { CanvasArea, SourcesArea, MixerArea, ControlsArea, SettingsArea, LibraryArea }
 export { CreateArea }
+export { QuitPrompt }
 export { DropdownOption, MenuEntry, MenuList, MenuEntryKind, NavTab, Segment, ToastData, ToastRow, ToastKind, FormField, FormGroup } from "kit.slint";
 export { SceneRow, ItemRow, FilterRow, PickRow } from "areas/sources/state.slint";
 export { Strip, Level, AudioRow } from "areas/mixer/state.slint";
@@ -433,6 +435,9 @@ export component AppWindow inherits Window {
             title: "Window";
             MenuItem { title: "Minimize"; shortcut: @keys(Control + M); activated => { Ui.menu("minimize"); } }
             MenuItem { title: "Zoom"; activated => { Ui.menu("zoom"); } }
+            // ⌃⌘F (Slint's Meta is Control on macOS, Control is ⌘);
+            // again leaves full screen.
+            MenuItem { title: "Enter Full Screen"; shortcut: @keys(Meta + Control + F); activated => { Ui.menu("fullscreen"); } }
             MenuSeparator { }
             MenuItem { title: "Bring All to Front"; activated => { Ui.menu("bring_all_to_front"); } }
         }
@@ -449,6 +454,9 @@ export component AppWindow inherits Window {
     // scene, Escape deselects, Return or Space takes the preview in Studio
     // Mode, Delete removes the selected item, arrows nudge it (⇧ ×10).
     keys := FocusScope {
+        // A press on the canvas gives the keyboard back to the window.
+        property <int> canvas-pressed: CanvasArea.press-serial;
+        changed canvas-pressed => { self.focus(); }
         key-pressed(event) => {
             if event.modifiers.control || event.modifiers.meta || event.modifiers.alt || Ui.dialog != "" {
                 return reject;
@@ -509,6 +517,7 @@ export component AppWindow inherits Window {
         version: root.version;
     }
     LibraryDialogs { }
+    QuitDialog { }
 
     if root.kit-gallery: KitGallery {
         show-dialog: root.kit-dialog;
@@ -522,5 +531,7 @@ export component AppWindow inherits Window {
     ToastStack {
         area-width: root.width;
         y: Theme.statusbar + Theme.space-3;
+        // A dialog's own stack shows them clear of its sheet.
+        visible: Ui.dialog == "" || !Toasts.shown-in-dialog;
     }
 }

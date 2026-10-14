@@ -1293,6 +1293,7 @@ Options:
       --seconds <SECONDS>  Stop after this long (5 s if absent) [default: 5]
       --shared             Watch through GPU surfaces shared with the daemon (zero-copy, as the native app does) instead of saving H.264: reports the rate, how late frames arrive and the setup revisions they show
       --slots <SLOTS>      With --shared: surfaces in the ring (4 if absent, 2 to 8)
+      --filtered           With --shared and a source: through the source's filters, as the program shows it
       --check              With --shared: read every frame back through this process's GPU and fail on black frames or pixels the daemon never drew
       --expect <EXPECT>    With --check: a pixel some frame must have, as X,Y=#RRGGBB (X and Y fractions of the width and height). Repeatable
       --touch              With --check: halfway through, apply an empty live change (the setup stays the same, its revision goes up) and check frames show the new revision

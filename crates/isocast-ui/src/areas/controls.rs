@@ -48,13 +48,13 @@ const TRANSITIONS: &[(&str, &str)] = &[
     ("fade", "Fade"),
     ("swipe", "Swipe"),
     ("slide", "Slide"),
-    ("fade_to_color", "Fade to Colour"),
+    ("fade_to_color", "Fade to Color"),
     ("luma_wipe", "Luma Wipe"),
     ("stinger", "Stinger"),
     ("move", "Move"),
 ];
 
-/// A kind's label ("Fade to Colour"), or the kind itself.
+/// A kind's label ("Fade to Color"), or the kind itself.
 fn transition_label(kind: &str) -> String {
     TRANSITIONS
         .iter()

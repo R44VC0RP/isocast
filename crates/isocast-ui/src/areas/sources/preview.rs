@@ -143,6 +143,9 @@ fn receive(target: &str, stop: &AtomicBool, newest: &Slot) {
                 max_height: Some(720),
                 fps: Some(30),
                 slots: None,
+                // As the program shows it: Filters' preview shows each
+                // change, Properties' the source as it will look.
+                filtered: true,
             })?;
             while !stop.load(Ordering::Relaxed) {
                 if let Some(frame) = frames.newest(Some(Duration::from_millis(500)))?

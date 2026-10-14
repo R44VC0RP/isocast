@@ -199,10 +199,39 @@ export component Dropdown inherits Rectangle {
         Tip { text: root.tooltip; }
     }
 
+    // The widest choice (label and detail), so the list is as wide as it
+    // needs (up to 420px) and choices like "ProRes 422 HQ" and "ProRes
+    // 422 LT" can be told apart in a narrow form.
+    Rectangle {
+        width: 0;
+        height: 0;
+        clip: true;
+        opacity: 0;
+        accessible-role: none;
+        widest := VerticalLayout {
+            for option in root.options: HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: option.label;
+                    font-size: Theme.fs;
+                    letter-spacing: Theme.tracking;
+                    accessible-role: none;
+                }
+                if option.detail != "": Text {
+                    text: option.detail;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    accessible-role: none;
+                }
+            }
+        }
+    }
+
     popup := PopupWindow {
         x: 0;
         y: root.height + 2px;
-        width: max(root.width, 160px);
+        // The row's check, paddings and gaps around the widest choice.
+        width: max(root.width, 160px, min(420px, widest.preferred-width + Theme.icon + 3 * Theme.space-2 + Theme.space-3 + 2 * Theme.space-1 + 4px));
         height: root.rows * Theme.menu-item + 2 * Theme.space-1 + 2px;
         close-policy: close-on-click-outside;
 

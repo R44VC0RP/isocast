@@ -6,8 +6,9 @@
 //!
 //! - click an item to select it (the topmost under the pointer; a selected
 //!   child of a group over its parents), click nothing to deselect;
-//! - drag to move (Shift: along one axis), a handle to resize (Shift:
-//!   keeping the shape), Option-drag a handle to crop; edges and centres
+//! - drag to move (Shift: along one axis), a handle to resize (a corner
+//!   keeps the shape and a side stretches, as in OBS; Shift swaps them),
+//!   Option-drag a handle to crop; edges and centres
 //!   snap to the canvas and the other items (Settings → General; ⌘ places
 //!   freely), with guides and a readout while dragging;
 //! - locked items (and a locked preview) can be selected, not changed;
@@ -221,6 +222,9 @@ struct Gesture {
     targets: Targets,
     /// Cropping: the source's own size, if known.
     natural: Option<(f32, f32)>,
+    /// The item has no bounds (`fit: none`): its rect is the source's own
+    /// size and `style.transform.scale` sizes it, so resizing scales.
+    scales: bool,
     key: String,
 }
 
@@ -703,6 +707,7 @@ impl Canvas {
                 crop.bottom as f32,
             ],
             translate: item.style.transform.translate,
+            scales: item.fit == isocast_protocol::Fit::None && item.layout.is_none(),
             targets: Targets::new(
                 &setup,
                 &scene.items,
@@ -950,36 +955,14 @@ fn size_step(
     } else {
         p0.h
     };
-    let mut guides = Vec::new();
-    if !free && !keys.shift && p0.rotate == 0.0 {
-        let left = p0.cx + if ax != 0.0 { fx.min(fx + ax * w) } else { -hw };
-        let right = p0.cx + if ax != 0.0 { fx.max(fx + ax * w) } else { hw };
-        let top = p0.cy + if ay != 0.0 { fy.min(fy + ay * h) } else { -hh };
-        let bottom = p0.cy + if ay != 0.0 { fy.max(fy + ay * h) } else { hh };
-        if ax != 0.0
-            && let Some((offset, line)) =
-                snap(&[if ax > 0.0 { right } else { left }], &g.targets.xs, limit)
-        {
-            w += ax * offset;
-            guides.push(CanvasGuide {
-                vertical: true,
-                at: line,
-            });
-        }
-        if ay != 0.0
-            && let Some((offset, line)) =
-                snap(&[if ay > 0.0 { bottom } else { top }], &g.targets.ys, limit)
-        {
-            h += ay * offset;
-            guides.push(CanvasGuide {
-                vertical: false,
-                at: line,
-            });
-        }
-    }
-    if keys.shift {
-        let ratio = p0.w / p0.h;
-        if ax != 0.0 && ay != 0.0 {
+    // A corner keeps the shape and a side stretches, as in OBS; Shift
+    // swaps them. An item without bounds only scales (one factor), so
+    // every handle keeps its shape.
+    let corner = ax != 0.0 && ay != 0.0;
+    let keep = g.scales || corner != keys.shift;
+    let ratio = p0.w / p0.h;
+    if keep {
+        if corner {
             if w / ratio > h {
                 h = w / ratio;
             } else {
@@ -991,10 +974,81 @@ fn size_step(
             w = h * ratio;
         }
     }
+    // The dragged edges, for snapping.
+    let edges = |w: f32, h: f32| {
+        let left = p0.cx + if ax != 0.0 { fx.min(fx + ax * w) } else { -hw };
+        let right = p0.cx + if ax != 0.0 { fx.max(fx + ax * w) } else { hw };
+        let top = p0.cy + if ay != 0.0 { fy.min(fy + ay * h) } else { -hh };
+        let bottom = p0.cy + if ay != 0.0 { fy.max(fy + ay * h) } else { hh };
+        (
+            if ax > 0.0 { right } else { left },
+            if ay > 0.0 { bottom } else { top },
+        )
+    };
+    let mut guides = Vec::new();
+    if !free && p0.rotate == 0.0 {
+        let (edge_x, edge_y) = edges(w, h);
+        let snap_x = (ax != 0.0)
+            .then(|| snap(&[edge_x], &g.targets.xs, limit))
+            .flatten();
+        let snap_y = (ay != 0.0)
+            .then(|| snap(&[edge_y], &g.targets.ys, limit))
+            .flatten();
+        if keep && corner {
+            // One edge snaps; the other follows the shape.
+            if let Some((offset, line)) = snap_x {
+                w += ax * offset;
+                h = w / ratio;
+                guides.push(CanvasGuide {
+                    vertical: true,
+                    at: line,
+                });
+            } else if let Some((offset, line)) = snap_y {
+                h += ay * offset;
+                w = h * ratio;
+                guides.push(CanvasGuide {
+                    vertical: false,
+                    at: line,
+                });
+            }
+        } else if !keep {
+            if let Some((offset, line)) = snap_x {
+                w += ax * offset;
+                guides.push(CanvasGuide {
+                    vertical: true,
+                    at: line,
+                });
+            }
+            if let Some((offset, line)) = snap_y {
+                h += ay * offset;
+                guides.push(CanvasGuide {
+                    vertical: false,
+                    at: line,
+                });
+            }
+        }
+    }
     let clx = if ax != 0.0 { fx + ax * w / 2.0 } else { 0.0 };
     let cly = if ay != 0.0 { fy + ay * h / 2.0 } else { 0.0 };
     let (ox, oy) = rotate_by(clx, cly, p0.rotate);
     let (cx, cy) = (p0.cx + ox, p0.cy + oy);
+    if g.scales {
+        // The rect stays the source's size; the scale makes it this big,
+        // about the rect's centre, which moves so the far edge stays.
+        let [_, _, rw, rh] = g.rect0;
+        let scale = (w / rw.max(1.0) * 10_000.0).round() / 10_000.0;
+        let rx = (cx - g.origin.0 - g.translate[0] - rw / 2.0).round();
+        let ry = (cy - g.origin.1 - g.translate[1] - rh / 2.0).round();
+        return Step {
+            fields: json!({
+                "rect": { "x": rx as i64, "y": ry as i64, "width": rw as u64, "height": rh as u64 },
+                "style": { "transform": { "scale": scale } },
+            }),
+            guides,
+            readout: format!("{} × {} ({:.0}%)", w.round(), h.round(), scale * 100.0),
+            at: (cx - w / 2.0, cy - h / 2.0),
+        };
+    }
     let width = (w / p0.scale).round().max(1.0);
     let height = (h / p0.scale).round().max(1.0);
     let rx = (cx - g.origin.0 - g.translate[0] - width / 2.0).round();
@@ -1283,6 +1337,14 @@ impl Area for Canvas {
                 }
                 .into(),
             );
+        }
+    }
+
+    /// A dialog took the window: the item the pointer was over isn't
+    /// outlined any longer (the pointer may never come back over it).
+    fn dialog_opened(&self, app: &Rc<App>, _kind: &str, _arg: &str) {
+        if let Some(window) = app.window() {
+            window.global::<CanvasArea>().set_hover_item("".into());
         }
     }
 

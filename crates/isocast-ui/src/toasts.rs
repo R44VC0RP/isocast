@@ -1,5 +1,6 @@
 //! Toasts (docs/design.md 3.13), as the web app's `toast()`: info and
-//! success fade after 4 s, warnings after 8 s, errors stay until dismissed.
+//! success fade after 4 s, warnings and errors after 8 s; the pointer over
+//! one holds it until it leaves.
 //! A toast with the same key (or, without one, the same words) is updated
 //! in place and its time starts again, rather than stacking another; at
 //! most three show, newest first.
@@ -66,8 +67,22 @@ struct Shown {
     key: Option<String>,
     data: ToastData,
     action: Option<ToastAction>,
-    // Dismisses it when it fires (dropped with it).
-    _timer: Option<slint::Timer>,
+    /// How long it shows.
+    lasts: Duration,
+    // Dismisses it when it fires (dropped with it; none while hovered).
+    timer: Option<slint::Timer>,
+}
+
+/// A timer that dismisses toast `id` after `lasts`.
+fn dismiss_after(app: &Rc<App>, id: i32, lasts: Duration) -> slint::Timer {
+    let timer = slint::Timer::default();
+    let weak: Weak<App> = Rc::downgrade(app);
+    timer.start(slint::TimerMode::SingleShot, lasts, move || {
+        if let Some(app) = weak.upgrade() {
+            app.toasts.dismiss(&app, id);
+        }
+    });
+    timer
 }
 
 #[derive(Default)]
@@ -92,6 +107,12 @@ impl ToastList {
             if let Some(app) = weak.upgrade() {
                 *app.toasts.hidden.borrow_mut() = key.to_string();
                 app.toasts.publish(&app);
+            }
+        });
+        let weak = Rc::downgrade(app);
+        window.global::<Toasts>().on_hover(move |id, over| {
+            if let Some(app) = weak.upgrade() {
+                app.toasts.hover(&app, id, over);
             }
         });
         let weak = Rc::downgrade(app);
@@ -138,26 +159,12 @@ impl ToastList {
                 tone: SharedString::from(tone),
             })),
         };
-        // Errors stay; the rest go after a while.
-        let timer = (toast.kind != ToastKind::Error).then(|| {
-            let timer = slint::Timer::default();
-            let weak: Weak<App> = Rc::downgrade(app);
-            let after = if toast.kind == ToastKind::Warning {
-                8
-            } else {
-                4
-            };
-            timer.start(
-                slint::TimerMode::SingleShot,
-                Duration::from_secs(after),
-                move || {
-                    if let Some(app) = weak.upgrade() {
-                        app.toasts.dismiss(&app, id);
-                    }
-                },
-            );
-            timer
+        // Warnings and errors get time to be read.
+        let lasts = Duration::from_secs(match toast.kind {
+            ToastKind::Warning | ToastKind::Error => 8,
+            _ => 4,
         });
+        let timer = Some(dismiss_after(app, id, lasts));
         let entry = Shown {
             id,
             kind: toast.kind,
@@ -166,7 +173,8 @@ impl ToastList {
             key: toast.key,
             data,
             action,
-            _timer: timer,
+            lasts,
+            timer,
         };
         {
             let mut shown = self.shown.borrow_mut();
@@ -194,6 +202,15 @@ impl ToastList {
         };
         if removed {
             self.publish(app);
+        }
+    }
+
+    /// The pointer is over toast `id` (it stays) or left it (its time
+    /// starts again).
+    fn hover(&self, app: &Rc<App>, id: i32, over: bool) {
+        let mut shown = self.shown.borrow_mut();
+        if let Some(s) = shown.iter_mut().find(|s| s.id == id) {
+            s.timer = (!over).then(|| dismiss_after(app, id, s.lasts));
         }
     }
 

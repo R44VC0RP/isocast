@@ -85,6 +85,9 @@ export global CanvasArea {
     // button), moved (pressed or not), released; and a right click. The
     // flags are the keys held: Option, Shift, Command.
     callback pointer-down(float, float, bool, bool, bool);
+    // Counts presses on the editor: the window's keys take the keyboard
+    // back from a list (arrows nudge the item again).
+    in-out property <int> press-serial;
     callback pointer-moved(float, float, bool, bool, bool);
     callback pointer-up(float, float);
     // A right click at canvas (x, y), window point (wx, wy).

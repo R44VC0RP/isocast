@@ -540,6 +540,34 @@ layout editing, Windows, release prep).
 - [ ] **A.2 OBS workflows in the native app.** Scenes, sources, filters,
   transitions, Studio Mode, mixer, program + ISO recording, streaming:
   one scripted pass in real windows on the test Macs, every finding fixed.
+  - [x] **A.2 app #1 (QA-2 #2):** Quit, Close Window, Exit and the close
+    button ask "You are currently recording. Stop and quit?" while
+    recording or streaming (Stop and Quit / Keep Recording / Cancel).
+  - [x] **A.2 app #2 (QA-1 #2):** a corner handle keeps the aspect ratio,
+    Shift frees it; side handles stretch (Shift keeps the shape there).
+  - [x] **A.2 app #3 (QA-1 #5):** after a click on a Scenes or Sources row,
+    ↑/↓ move the selection (switching scenes) and F2 renames.
+  - [x] **A.2 app #4 (QA-2 #3):** toasts time out (errors and warnings
+    8 s, held while hovered), at most three, never over an open dialog.
+  - [x] **A.2 app #5 (QA-1 #8):** the Filters (and Properties) preview
+    shows the source through its filters (`shared_frames` `filtered`).
+  - [x] **A.2 app #6 (QA-1 #7):** filter rows have a menu (Rename,
+    Duplicate, Copy, Paste, Remove); a source's menu has Copy Filters and
+    Paste Filters; every change is one setup edit.
+  - [x] **A.2 app #7 (QA-1 #6):** Group Selected Items (⌘/Shift-click in
+    Sources, right-click), Add → Group, Ungroup and Move to Group, on the
+    engine's group model (items with children), one edit each.
+  - [x] **A.2 app #8 (QA-1 #4, app part):** a size field set alone takes its
+    pair from the source (one patch); refused changes name the source.
+  - [x] **A.2 app #9 (QA-2 #6, polish):** menus as wide as their choices,
+    whole names on hover in Sources and the mixer, a narrow Sources dock
+    gives the lock's room to names, LIVE orange while reconnecting, Show
+    Recordings opens the folder, hover outline cleared, Enter Full Screen
+    (⌃⌘F), en-US "Color".
+  - [x] **A.2 app #10 (after main):** items without bounds (`fit: none`)
+    resize by `style.transform.scale` on the canvas and in Edit Transform;
+    stretch items keep resizing the rect; Controls dock says "Stop" when
+    "Stop Recording" would be cut beside Pause and Marker.
   - [x] **A.2 QA-1 #1 engine:** native-size source items; preserve explicit
     bounds and custom legacy boxes; API/CLI, round-trip and offscreen checks.
   - [x] **A.2 QA-1 #3 engine:** publish pending opens and permission hints;
@@ -2758,6 +2786,59 @@ One line per finished task, newest last.
   contained worker 393 frames/file complete, poisoned state 177 interrupted,
   post-resume writer file 177 frames/5.9 s, native exit retains 360 frames.
   All decoded files clean. fmt, release clippy/tests (180), e2e 13/13 pass.
+- A.2 app #1 (2026-10-14): leaving while recording or streaming asks first
+  (⌘Q and the Dock through applicationShouldTerminate:, Close Window,
+  Controls → Exit, the close button); Stop and Quit stops then quits. m2-a
+  real window: each way showed the sheet, Cancel kept recording, Stop and
+  Quit left a complete 160.5 s take (h264+aac) and no app process, Keep
+  Recording quit with isocastd still recording.
+- A.2 app #2 (2026-10-14): corner resize keeps the shape by default, Shift
+  frees it, sides stay free, snapping kept (one edge snaps, the other
+  follows the shape). Offscreen 1440 and 900: 1120x630 dragged to 1031x580
+  (16:9), Shift 780x580, side 1078x630, snapped to the canvas edge
+  1800x1013. m2-a real window: 1209x680 (1.778), Shift 936x680.
+- A.2 app #3 (2026-10-14): a click on a row gives its list the keyboard
+  (↑ ↓ Home End, F2, Delete); a press on the canvas gives it back to the
+  window (arrows nudge again). Offscreen: click Bars, ↓ → brb on air; F2
+  fields in both lists; canvas click then → nudged x 0 → 1. m2-a real
+  window: ↓ brb, ↑ bars-full, F2 rename field in Scenes and Sources.
+- A.2 app #4 (2026-10-14): errors fade after 8 s unless hovered, three at
+  most; a dialog shows them beside or under its sheet, or keeps them
+  behind it. Offscreen 1440/900 with the quit sheet and Settings: toasts
+  right of or under the sheet, four sent → three shown. m2-a real window:
+  two error toasts at 6 s, gone at 10 s; a hovered one still up at 11 s,
+  gone 9.5 s after the pointer left.
+- A.2 app #5 (2026-10-14): `shared_frames` takes `filtered` (CLI
+  `frames --shared --filtered`): a source drawn through its live filters,
+  redrawn when they change; the Filters and Properties previews use it.
+  Offscreen and m2-a real window: hue shift 90 on a test pattern and the
+  media clip shows shifted bars in the dialog (two filters stack: 180).
+- A.2 app #6 (2026-10-14): filter row menu and inline rename (double-click
+  too), source Copy Filters / Paste Filters. Offscreen: duplicate gave
+  color-correction-2, rename typed into the field became its id, Copy
+  Filters on Intro Clip then Paste Filters on Test Pattern added both
+  (ids made unique), row Paste appended one more. m2-a real window: the
+  right-click menu, Duplicate added color-correction-2.
+- A.2 app #7 (2026-10-14): groups from the app. Offscreen: Intro Clip +
+  Test Pattern grouped into `group` at 120,120 1680x630 with children at
+  0,0 and 1200,0 (nothing moved on the canvas), Ungroup restored the exact
+  rects, Add → Group then Move to Group (Logo, Lower Third) grew it to
+  120,800 1636x256. m2-a real window: ⌘-click, right-click → Group Selected
+  Items made the same group.
+- A.2 app #8 (2026-10-14): Properties of a Color source: Width 400 then
+  Height 300 gave 400x1080 then 400x300 (isocast get), no refusal; Width
+  9000 was refused with the toast saying "“Backdrop”: width and height
+  must be from 1 to 8192" instead of `sources[0]`. m2-a real window.
+- A.2 app #9 (2026-10-14): offscreen 1024x681 Encoder menu shows "ProRes
+  422 Proxy · Apple VideoToolbox" whole, resolution menu "1080×1920
+  (vertical)", "Custom (1920×1080)"; 900x600 Sources names with ISO
+  badges get the lock's room; LIVE pill orange (stream:reconnecting);
+  hover outline gone after the pointer leaves the canvas and while a
+  dialog is open. m2-a: ⌃⌘F filled the 1024x768 screen and back, File →
+  Show Recordings opened a Finder window titled "rec". App CPU at rest
+  (m2-a, real window, --bench 20, alternating under the bench lock): main
+  18.0/16.9/19.2% vs branch 17.0/18.2/16.8% (median 18.0 vs 17.0), 29.4
+  redraws/s both.
 - A.6 hardening (2026-10-14): M-1 pins only successfully stored/read keys,
   capped at current + two previous per service/account. 3000 failed writes:
   pin count 0 -> 0, logger CPU/error 19.84 -> 21.22 us, warmed daemon RSS
@@ -2793,3 +2874,12 @@ One line per finished task, newest last.
   appearance (NSApp DarkAqua, set at launch since N.3), so title bar,
   traffic lights, menus and panels match on a light Mac. Verified on
   isocast-m2-b in light appearance: the real window's title bar is dark.
+- A.2 app #10 (2026-10-14): after merging main (425c990). Canvas on a
+  fit-none item (rect 1920x1080, scale 0.5): corner 836x470 at scale
+  0.4352, side 700x394 (vertical centre kept), Shift still one scale, left
+  handle keeps the right edge; stretch items: corner 409x230, Shift
+  380x180, side 380x270, scale 1; Reset Transform scale 1. m2-a real
+  window: the same on a 1280x720 clip (scale 0.75 → 0.6655, 0.7669,
+  0.6865, rect unchanged), stretch Test Pattern rect changed (Shift
+  ratio 2.281); Edit Transform Width 640 → scale 0.5, Height shows 360;
+  Controls dock "Stop" at 1024 px while recording.

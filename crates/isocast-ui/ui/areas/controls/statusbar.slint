@@ -314,7 +314,9 @@ export component StatusBar inherits Rectangle {
                 alignment: center;
                 Badge {
                     text: "LIVE";
-                    tone: BadgeTone.live;
+                    // Orange while it reconnects, as the button and the
+                    // line beside it are.
+                    tone: ControlsArea.stream-state == "reconnecting" ? BadgeTone.warning : BadgeTone.live;
                     dot: true;
                     status: true;
                 }

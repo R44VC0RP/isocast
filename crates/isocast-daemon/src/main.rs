@@ -982,6 +982,7 @@ trait LiveEngine: Send + Sync {
         max_size: (Option<u32>, Option<u32>),
         fps: u32,
         slots: u32,
+        filtered: bool,
     ) -> Result<SharedFeed<Surface>, String>;
     fn record(&self, options: &RecordOptions) -> Result<Report>;
     /// Where layout put every item, once the scenes are resolved.
@@ -1040,8 +1041,9 @@ impl<P: Platform<SharedSurface = Surface>> LiveEngine for LiveEngineOf<P> {
         max_size: (Option<u32>, Option<u32>),
         fps: u32,
         slots: u32,
+        filtered: bool,
     ) -> Result<SharedFeed<Surface>, String> {
-        LiveEngineOf::shared_frames(self, target, max_size, fps, slots)
+        LiveEngineOf::shared_frames(self, target, max_size, fps, slots, filtered)
     }
 
     fn record(&self, options: &RecordOptions) -> Result<Report> {
@@ -2980,6 +2982,7 @@ impl Daemon {
                 (params.max_width, params.max_height),
                 fps,
                 slots,
+                params.filtered,
             )
             .map_err(|message| RpcError {
                 code: RpcError::FAILED,

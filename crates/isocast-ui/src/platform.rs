@@ -244,6 +244,40 @@ pub fn copy_text(text: &str) {
 #[cfg(not(target_os = "macos"))]
 pub fn copy_text(_text: &str) {}
 
+/// Open `folder` (`~` allowed) in the Finder, as OBS's Show Recordings
+/// does; a folder that isn't there yet is made first (recording makes it
+/// anyway), and if that fails its nearest existing parent is shown.
+#[cfg(target_os = "macos")]
+pub fn open_folder(folder: &str) {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    let path = expand_home(folder);
+    if std::fs::create_dir_all(&path).is_err() {
+        let parent = std::path::Path::new(&path)
+            .ancestors()
+            .find(|p| p.is_dir())
+            .map(|p| p.display().to_string());
+        if let Some(parent) = parent {
+            reveal(&parent);
+        }
+        return;
+    }
+    // SAFETY: as in `choose`.
+    unsafe {
+        let path = ns_string(&path);
+        let url: Retained<AnyObject> = msg_send![class!(NSURL), fileURLWithPath: &*path];
+        let workspace: Retained<AnyObject> = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let _: bool = msg_send![&*workspace, openURL: &*url];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_folder(folder: &str) {
+    reveal(folder);
+}
+
 /// Window → Bring All to Front: the app's windows in front of others.
 #[cfg(target_os = "macos")]
 pub fn bring_all_to_front() {

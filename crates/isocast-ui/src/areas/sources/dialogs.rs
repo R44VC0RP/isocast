@@ -48,6 +48,9 @@ pub struct Dialogs {
     /// Filters: the source and the selected filter (list, key).
     filters_source: RefCell<String>,
     filter: RefCell<Option<(String, String)>>,
+    /// Filters copied (a filter's Copy, a source's Copy Filters), by
+    /// list ("filters", "audio_filters"), to paste into another source.
+    filter_clipboard: RefCell<Vec<(String, Value)>>,
     /// Rename: the source.
     rename_source: RefCell<String>,
     pub props_form: FormModel,
@@ -913,6 +916,8 @@ impl Dialogs {
             return;
         }
         let id = self.props_source.borrow().clone();
+        let mut changes = changes;
+        pair_size(app, &id, &mut changes);
         let mut source = json!({ "id": id });
         if let Some(object) = source.as_object_mut() {
             object.extend(changes);
@@ -1269,6 +1274,227 @@ impl Dialogs {
         }
     }
 
+    /// A filter row's menu (right-click), as OBS has it.
+    pub fn filter_item_menu(&self, list: &str) -> kit::MenuBuilder {
+        let can_paste = self
+            .filter_clipboard
+            .borrow()
+            .iter()
+            .any(|(l, _)| l == list);
+        kit::MenuBuilder::new()
+            .item("rename", "Rename")
+            .item("duplicate", "Duplicate")
+            .separator()
+            .item("copy", "Copy")
+            .item("paste", "Paste")
+            .disabled(!can_paste)
+            .separator()
+            .item("remove", "Remove")
+            .danger()
+    }
+
+    /// A choice from a filter row's menu (`list`, the filter's `key`).
+    pub fn filter_item_chosen(
+        &self,
+        app: &Rc<App>,
+        window: &AppWindow,
+        list: &str,
+        key: &str,
+        id: &str,
+    ) {
+        let filters = self.filters_of(app, list);
+        let Some(index) = filters.iter().position(|f| filter_key(f) == key) else {
+            return;
+        };
+        match id {
+            "rename" => {
+                self.filter_select(app, window, list, key);
+                window
+                    .global::<SourcesArea>()
+                    .set_renaming_filter(format!("{list}:{key}").into());
+            }
+            "duplicate" => {
+                let mut copy = filters[index].clone();
+                let taken: Vec<String> = filters.iter().map(filter_key).collect();
+                let new_key = unique_filter_id(&taken, &filter_key(&copy));
+                copy["id"] = json!(new_key);
+                let mut next = filters.clone();
+                next.insert(index + 1, copy);
+                self.filters_replace(app, list, &filters, next);
+                self.filter_select(app, window, list, &new_key);
+            }
+            "copy" => {
+                *self.filter_clipboard.borrow_mut() =
+                    vec![(list.to_string(), filters[index].clone())];
+                app.toast(
+                    ToastKind::Success,
+                    &format!("Copied “{}”", filter_name(&filters[index])),
+                    "Paste it into another source’s filters.",
+                );
+            }
+            "paste" => {
+                let source = self.filters_source.borrow().clone();
+                self.paste_filters(app, &source, Some(list));
+            }
+            "remove" => {
+                self.filter_select(app, window, list, key);
+                self.filter_remove(app, window, list);
+            }
+            _ => {}
+        }
+    }
+
+    /// Rename a filter: its id becomes the name as an id ("Warm Glow" →
+    /// `warm-glow`), kept in its place.
+    pub fn filter_rename(
+        &self,
+        app: &Rc<App>,
+        window: &AppWindow,
+        list: &str,
+        key: &str,
+        name: &str,
+    ) {
+        let filters = self.filters_of(app, list);
+        let Some(index) = filters.iter().position(|f| filter_key(f) == key) else {
+            return;
+        };
+        let base = filter_id_from(name);
+        if base.is_empty() || base == key || name.trim() == filter_name(&filters[index]) {
+            return;
+        }
+        let taken: Vec<String> = filters
+            .iter()
+            .map(filter_key)
+            .filter(|k| k != key)
+            .collect();
+        let new_key = if taken.contains(&base) {
+            unique_filter_id(&taken, &base)
+        } else {
+            base
+        };
+        let mut next = filters.clone();
+        next[index]["id"] = json!(new_key);
+        self.filters_replace(app, list, &filters, next);
+        self.filter_select(app, window, list, &new_key);
+    }
+
+    /// Copy every filter of `source` (a source's Copy Filters).
+    pub fn copy_filters(&self, app: &Rc<App>, source: &str) {
+        let Some(json) = source_json(app, source) else {
+            return;
+        };
+        let copied: Vec<(String, Value)> = ["filters", "audio_filters"]
+            .into_iter()
+            .flat_map(|list| {
+                json[list]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(move |f| (list.to_string(), f))
+            })
+            .collect();
+        let count = copied.len();
+        *self.filter_clipboard.borrow_mut() = copied;
+        app.toast(
+            ToastKind::Success,
+            &format!(
+                "Copied {count} filter{} of “{}”",
+                if count == 1 { "" } else { "s" },
+                name_or_kind(&json)
+            ),
+            "Paste Filters on another source adds them to it.",
+        );
+    }
+
+    /// Whether there are copied filters to paste.
+    pub fn has_copied_filters(&self) -> bool {
+        !self.filter_clipboard.borrow().is_empty()
+    }
+
+    /// Add the copied filters to `source` (only those of `only`'s list,
+    /// if given), after its own, with ids of their own: one edit.
+    pub fn paste_filters(&self, app: &Rc<App>, source: &str, only: Option<&str>) {
+        let Some(json) = source_json(app, source) else {
+            return;
+        };
+        let kind = json["kind"].as_str().unwrap_or_default().to_string();
+        let mut patch = Map::new();
+        patch.insert("id".into(), json!(source));
+        let mut added = 0;
+        for list in ["filters", "audio_filters"] {
+            if only.is_some_and(|only| only != list) {
+                continue;
+            }
+            // A source without a picture (or sound) takes no such filters.
+            let fits = if list == "filters" {
+                kind_has_video(&kind)
+            } else {
+                kind_has_audio(&json)
+            };
+            let copied: Vec<Value> = self
+                .filter_clipboard
+                .borrow()
+                .iter()
+                .filter(|(l, _)| l == list)
+                .map(|(_, f)| f.clone())
+                .collect();
+            if copied.is_empty() || !fits {
+                continue;
+            }
+            let mut taken: Vec<String> = json[list]
+                .as_array()
+                .map(|a| a.iter().map(filter_key).collect())
+                .unwrap_or_default();
+            let items: Vec<Value> = copied
+                .into_iter()
+                .map(|mut f| {
+                    let key = filter_key(&f);
+                    if taken.contains(&key) {
+                        let id = unique_filter_id(&taken, &key);
+                        f["id"] = json!(id);
+                    }
+                    taken.push(filter_key(&f));
+                    f
+                })
+                .collect();
+            added += items.len();
+            patch.insert(list.into(), Value::Array(items));
+        }
+        if added == 0 {
+            app.toast(
+                ToastKind::Info,
+                "Nothing to paste here",
+                "The copied filters are for a picture or sound this source doesn’t have.",
+            );
+            return;
+        }
+        app.edit(
+            json!({ "sources": [Value::Object(patch)] }),
+            EditOptions::default(),
+        );
+        if let Some(window) = app.window()
+            && window.global::<Ui>().get_dialog() == "filters"
+        {
+            self.show_filters(app, &window);
+        }
+    }
+
+    /// Put `next` in place of `filters` (`list` of the open source), in
+    /// order, in one edit.
+    fn filters_replace(&self, app: &Rc<App>, list: &str, filters: &[Value], next: Vec<Value>) {
+        let mut patch: Vec<Value> = filters
+            .iter()
+            .map(|f| {
+                let mut id = filter_identity(f);
+                id["remove"] = json!(true);
+                id
+            })
+            .collect();
+        patch.extend(next);
+        self.filters_patch(app, list, patch, EditOptions::default());
+    }
+
     fn filter_change(&self, app: &Rc<App>, changes: Map<String, Value>, live: Option<&str>) {
         let Some((list, filter)) = self.selected_filter(app) else {
             return;
@@ -1333,11 +1559,16 @@ impl Dialogs {
             n(&rect["height"], 0.0),
         );
         let (ax, ay) = anchor(&area.get_transform_anchor());
+        let t = &item["style"]["transform"];
+        // Without bounds the scale sizes it: the fields are the box shown.
+        let (x, y, w, h) = match shown_box(item) {
+            Some(b) => (b[0], b[1], b[2], b[3]),
+            None => (x, y, w, h),
+        };
         area.set_transform_x((x + ax * w) as f32);
         area.set_transform_y((y + ay * h) as f32);
         area.set_transform_w(w as f32);
         area.set_transform_h(h as f32);
-        let t = &item["style"]["transform"];
         area.set_transform_rotate(n(&t["rotate"], 0.0) as f32);
         area.set_transform_scale(((n(&t["scale"], 1.0) * 1000.0).round() / 10.0) as f32);
         area.set_transform_fit(item["fit"].as_str().unwrap_or("stretch").into());
@@ -1399,6 +1630,42 @@ impl Dialogs {
             crop[side] = items::whole(v);
             json!({ "crop": crop })
         };
+        if let Some([sx, sy, sw, sh]) = shown_box(item)
+            && matches!(field, "x" | "y" | "w" | "h")
+        {
+            // An item without bounds: its size is its scale (the rect stays
+            // the source's own), changed about the anchor, which stays put.
+            let (rw, rh) = (n(&rect["width"]).max(1.0), n(&rect["height"]).max(1.0));
+            let t = &item["style"]["transform"]["translate"];
+            let (tx, ty) = (n(&t[0]), n(&t[1]));
+            let scale0 = sw / rw;
+            let scale = match field {
+                "w" => v.max(1.0) / rw,
+                "h" => v.max(1.0) / rh,
+                _ => scale0,
+            };
+            let (nw, nh) = (rw * scale, rh * scale);
+            let left = match field {
+                "x" => v - ax * nw,
+                _ => sx + ax * sw - ax * nw,
+            };
+            let top = match field {
+                "y" => v - ay * nh,
+                _ => sy + ay * sh - ay * nh,
+            };
+            let fields = json!({
+                "rect": {
+                    "x": items::int(left + nw / 2.0 - rw / 2.0 - tx),
+                    "y": items::int(top + nh / 2.0 - rh / 2.0 - ty),
+                },
+                "style": { "transform": { "scale": (scale * 10_000.0).round() / 10_000.0 } },
+            });
+            // One live key for size and position: they change the same fields.
+            let live = live.then(|| format!("transform:size:{scene}"));
+            items::update_selected(app, fields, live);
+            self.show_transform(app, window);
+            return;
+        }
         let fields = match field {
             "x" => json!({ "rect": { "x": items::int(v - ax * n(&rect["width"])) } }),
             "y" => json!({ "rect": { "y": items::int(v - ay * n(&rect["height"])) } }),
@@ -1524,6 +1791,104 @@ fn filter_identity(f: &Value) -> Value {
         Some(id) => json!({ "id": id }),
         None => json!({ "kind": f["kind"] }),
     }
+}
+
+/// Width and height go together (a colour, a browser, a test pattern):
+/// one of them set alone takes the other from the source as it is now
+/// (its running size, else the canvas's), so the change applies at once
+/// instead of being refused; one cleared clears both.
+fn pair_size(app: &Rc<App>, id: &str, changes: &mut Map<String, Value>) {
+    let (w, h) = (
+        changes.get("width").cloned(),
+        changes.get("height").cloned(),
+    );
+    let (key, other) = match (&w, &h) {
+        (Some(_), None) => ("width", "height"),
+        (None, Some(_)) => ("height", "width"),
+        _ => return,
+    };
+    let Some(source) = source_json(app, id) else {
+        return;
+    };
+    if !source[other].is_null() {
+        if changes[key].is_null() {
+            changes.insert(other.into(), Value::Null);
+        }
+        return;
+    }
+    if changes[key].is_null() {
+        return;
+    }
+    let s = app.session.borrow();
+    let running = s.running.get(id).and_then(|r| {
+        let size = if other == "width" { r.width } else { r.height };
+        size.filter(|v| *v > 0)
+    });
+    let canvas = s.setup.as_ref().map(|x| {
+        if other == "width" {
+            x.canvas.width
+        } else {
+            x.canvas.height
+        }
+    });
+    if let Some(v) = running.or(canvas) {
+        changes.insert(other.into(), json!(v));
+    }
+}
+
+/// The box an item without bounds (`fit: none`) shows, in its parent's
+/// pixels (left, top, width, height): its rect (the source's own size)
+/// scaled about its centre and moved by its translate. `None` for an item
+/// whose rect is its box.
+fn shown_box(item: &Value) -> Option<[f64; 4]> {
+    if item["fit"] != "none" || !item["layout"].is_null() {
+        return None;
+    }
+    let n = |v: &Value, d: f64| v.as_f64().unwrap_or(d);
+    let rect = &item["rect"];
+    let t = &item["style"]["transform"];
+    let scale = n(&t["scale"], 1.0);
+    let (w, h) = (n(&rect["width"], 0.0), n(&rect["height"], 0.0));
+    let cx = n(&rect["x"], 0.0) + w / 2.0 + n(&t["translate"][0], 0.0);
+    let cy = n(&rect["y"], 0.0) + h / 2.0 + n(&t["translate"][1], 0.0);
+    Some([
+        cx - w * scale / 2.0,
+        cy - h * scale / 2.0,
+        w * scale,
+        h * scale,
+    ])
+}
+
+/// `base`, or `base-2`, `base-3`… if taken (ids are lowercase letters,
+/// digits and dashes).
+fn unique_filter_id(taken: &[String], base: &str) -> String {
+    let base = base.replace('_', "-");
+    // A filter without an id goes by its kind (`color_correction`).
+    let taken: Vec<String> = taken.iter().map(|t| t.replace('_', "-")).collect();
+    if !taken.contains(&base) {
+        return base;
+    }
+    let stem = match base.rsplit_once('-') {
+        Some((stem, n)) if n.chars().all(|c| c.is_ascii_digit()) && !stem.is_empty() => stem,
+        _ => base.as_str(),
+    };
+    (2..)
+        .map(|n| format!("{stem}-{n}"))
+        .find(|id| !taken.contains(id))
+        .expect("an unused number")
+}
+
+/// A typed name as a filter id: "Warm Glow" → `warm-glow`.
+fn filter_id_from(name: &str) -> String {
+    let mut id = String::new();
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            id.push(c.to_ascii_lowercase());
+        } else if !id.is_empty() && !id.ends_with('-') {
+            id.push('-');
+        }
+    }
+    id.trim_end_matches('-').to_string()
 }
 
 fn filter_name(f: &Value) -> String {

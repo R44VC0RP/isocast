@@ -114,6 +114,7 @@ impl Feed {
                     max_height: Some(want.height.max(16)),
                     fps: Some(want.fps),
                     slots: None,
+                    filtered: false,
                 })
             });
             let result: anyhow::Result<()> = stream.and_then(|mut frames| {

@@ -1366,6 +1366,79 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-14 (qa-app): **Resizing an item without bounds changes its
+  scale.** Since qa-engine, new items have `fit: none`: the rect is the
+  source's own size and `style.transform.scale` (one factor, about the
+  rect's centre) sizes it. Canvas handles then keep the shape on every
+  handle (Shift too: one factor can't stretch) and move the rect so the
+  far edge stays; Edit Transform shows and edits the box shown, about the
+  anchor; Fit to Screen scales; Stretch to Screen gives the item stretch
+  bounds (OBS does the same). `fit: stretch` items resize the rect as
+  before. Offscreen `wait:` now moves the snapshot clock, so a drag's
+  paced edits land before the snapshot.
+
+- 2026-10-14 (qa-app): **Interface English is en-US like OBS**
+  ("Color", "Fade to Color", "Color Source"); comments may keep British
+  spelling. **Dropdown menus size to their widest choice** (a hidden
+  layout measures label + detail, capped at 420px), so encoder names
+  aren't cut at 1024px. The Controls dock's "Stop Recor…" beside Marker
+  is left to ui/app-alpha, which is reworking that row (Pause).
+
+- 2026-10-14 (qa-app): **Paired size fields apply on their own.** The
+  engine wants width and height together (color, browser, test pattern,
+  camera, text); a Properties field set alone sends the other from the
+  source as it is now (its running size, else the canvas). Refused edits
+  show `sources[N]`/`scenes[N]` as the name (app.rs `named_paths`) until
+  qa-engine names them itself.
+
+- 2026-10-14 (qa-app): **Groups are items with children; the app makes
+  them.** Group Selected Items puts sibling items in a new item (id
+  `group`, `group-2`…) whose rect covers them, children offset so nothing
+  moves; Ungroup is the inverse; Add → Group adds an empty one (a 1x1 rect
+  at 0,0) and Move to Group moves a top-level item in, growing the group.
+  Groups don't scale their children (the engine places children
+  absolutely), unlike OBS. Multi-select is app-only state (⌘/Shift-click
+  marks rows); every change is one setup edit. On macOS Slint reports ⌘
+  as `control` and Control as `meta`, so ListRow's Control-click menu
+  now checks `meta` (it opened on ⌘-click before).
+
+- 2026-10-14 (qa-app): **Filter names are their ids.** A filter has no
+  name field (its id, or kind, is shown humanized), so Rename sets the id
+  from the typed name ("Warm Glow" -> `warm-glow`) and rewrites the list
+  in place; Duplicate and Paste make ids unique (`-2`, `-3`). The copied
+  filters live in the app until pasted (as the copied scene item does);
+  pasting is one setup edit, so Cmd-Z undoes it whole.
+
+- 2026-10-14 (qa-app): **Filtered source previews in the engine's shared
+  frames** (`SharedFramesParams.filtered`, record/shared_frames.rs): the
+  viewer thread runs `filter::Filters` over each frame with the source's
+  filters read from the live setup per frame (a change redraws a still
+  picture at once). Snapshots apply filters too but reopen the source
+  each time, too slow for a live preview. Minimal hook in qa-engine's
+  area: engine.rs `shared_frames` gains one parameter.
+
+- 2026-10-14 (qa-app): **Toasts: errors fade after 8 s too** (they stayed
+  until dismissed and piled up over dialogs, QA-2 #3); the pointer over one
+  holds it. In a dialog the popup's stack goes right of the sheet, else
+  under it, else stays hidden behind it (`Toasts.shown-in-dialog` hides
+  the window's own stack meanwhile).
+
+- 2026-10-14 (qa-app): **A list row click focuses its list** (List
+  `focus-list()`; a row TouchArea used to take the press and the list never
+  got focus, so ↑ ↓ F2 did nothing). Canvas presses bump
+  `CanvasArea.press-serial`, which focuses the window keys again.
+
+- 2026-10-14 (qa-app): **Canvas corner handles keep the shape; Shift frees
+  them** (OBS muscle memory, QA-1 #2). Side handles stretch; Shift on a side
+  keeps the shape. A shape-keeping corner snaps one edge and the other
+  follows.
+
+- 2026-10-14 (qa-app): **Quitting while recording asks, as OBS does.**
+  "Keep Recording" quits the app and leaves isocastd recording (a relaunch
+  shows it and Stop works); Cancel stays. ⌘Q is caught by adding
+  `applicationShouldTerminate:` to winit's app delegate class at runtime
+  (src/quit.rs), since winit doesn't answer it; the close button through
+  Slint's `on_close_requested`.
 - 2026-10-14 (delegator): **media-clock pacing is adaptive.** The kqueue
   critical-deadline fix (agent/hosted-pacing) removes 98-100% of the drops
   seen when isocastd runs under launchd policy (CI, launch agents, agents),

@@ -901,17 +901,28 @@ impl<P: Platform> Engine<P> {
     /// native client on this machine: drawn by the GPU, fitted in
     /// `max_size`, into a ring of `slots` surfaces shared with the client,
     /// at most `fps` frames a second (changed later with
-    /// [`SharedControl`](super::SharedControl)), while the feed lives. An
-    /// error lists the valid targets.
+    /// [`SharedControl`](super::SharedControl)), while the feed lives;
+    /// a source through its filters if `filtered`. An error lists the
+    /// valid targets.
     pub fn shared_frames(
         &self,
         target: &str,
         max_size: (Option<u32>, Option<u32>),
         fps: u32,
         slots: u32,
+        filtered: bool,
     ) -> Result<SharedFeed<P::SharedSurface>, String> {
         let fps = fps.clamp(1, 60);
         slot_of(&self.inner, target, fps)?;
+        let filters = (filtered && !matches!(target, PROGRAM | "preview")).then(|| {
+            let (inner, id) = (self.inner.clone(), target.to_string());
+            Box::new(move || {
+                let setup = inner.state.lock().unwrap().setup.clone();
+                setup
+                    .source(&id)
+                    .map_or_else(Vec::new, |s| s.filters.clone())
+            }) as shared_frames::LiveFilters
+        });
         let inner = self.inner.clone();
         let request = shared_frames::Request {
             target: target.to_string(),
@@ -924,6 +935,7 @@ impl<P: Platform> Engine<P> {
             &self.inner.platform,
             request,
             move |fps| stream_source(&inner, &target, fps),
+            filters,
         ))
     }
 

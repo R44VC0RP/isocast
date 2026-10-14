@@ -1410,6 +1410,11 @@ pub struct SharedFramesParams {
     /// but one; with none free, frames are skipped until it releases one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slots: Option<u32>,
+    /// With a source as the target: its picture through its filters, as
+    /// the program shows it (they're read live, so a change shows at
+    /// once), rather than as captured.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub filtered: bool,
 }
 
 /// The answer to `shared_frames`, before its [`shared::Event`] lines.

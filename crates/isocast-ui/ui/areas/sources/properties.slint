@@ -17,7 +17,7 @@ import { Ui } from "../../state.slint";
 import {
     Callout, CalloutKind, Capsule, CapsuleButton, CapsuleDivider, Dialog, DialogFooter, GroupHeading,
     GroupHint, IconButton, ListRow, Menus, ScrollArea, SettingsForm, SheetHeader, SheetSidebar,
-    SidebarHeading, Viewport,
+    SidebarHeading, TextField, Viewport,
 } from "../../kit.slint";
 import { SourcesArea, FilterRow } from "state.slint";
 import { SourcePreview } from "source-preview.slint";
@@ -146,7 +146,7 @@ component FilterGroup inherits VerticalLayout {
                 vertical-alignment: center;
             }
         }
-        for filter[i] in root.filters: FilterItem {
+        for filter[i] in root.filters: Rectangle {
             property <bool> chosen: SourcesArea.filter-list == root.list && SourcesArea.filter-key == filter.key;
             changed chosen => {
                 if self.chosen {
@@ -160,12 +160,45 @@ component FilterGroup inherits VerticalLayout {
                     root.current = i;
                 }
             }
-            filter: filter;
-            selected: self.chosen;
-            index: i;
-            count: root.filters.length;
-            clicked => { SourcesArea.filter-select(root.list, filter.key); }
-            toggled => { SourcesArea.filter-toggle(root.list, filter.key); }
+            height: Theme.row;
+
+            FilterItem {
+                filter: filter;
+                selected: parent.chosen;
+                index: i;
+                count: root.filters.length;
+                clicked => { SourcesArea.filter-select(root.list, filter.key); }
+                double-clicked => { SourcesArea.renaming-filter = (root.list + ":" + filter.key); }
+                toggled => { SourcesArea.filter-toggle(root.list, filter.key); }
+                // Right-click: Rename, Duplicate, Copy, Paste, Remove.
+                context-menu(x, y) => {
+                    SourcesArea.filter-select(root.list, filter.key);
+                    SourcesArea.filter-menu(root.list, filter.key, x, y);
+                }
+            }
+
+            if SourcesArea.renaming-filter == (root.list + ":" + filter.key): TextField {
+                x: Theme.list-inset + Theme.space-2 - 5px;
+                y: (parent.height - self.height) / 2;
+                width: parent.width - self.x - Theme.list-inset;
+                small: true;
+                font-size: Theme.fs;
+                text: filter.name;
+                label: "Filter name";
+                submits: false;
+                auto-focus: true;
+                accepted(name) => {
+                    SourcesArea.renaming-filter = "";
+                    SourcesArea.filter-rename(root.list, filter.key, name);
+                }
+                committed(name) => {
+                    if SourcesArea.renaming-filter == (root.list + ":" + filter.key) {
+                        SourcesArea.renaming-filter = "";
+                        SourcesArea.filter-rename(root.list, filter.key, name);
+                    }
+                }
+                cancelled => { SourcesArea.renaming-filter = ""; }
+            }
         }
     }
     HorizontalLayout {

@@ -36,7 +36,7 @@ import { Theme, Motion } from "../theme.slint";
 import { Icon } from "../icons.slint";
 import { Button, ButtonVariant } from "buttons.slint";
 import { DialogKeys, Viewport } from "globals.slint";
-import { ToastStack } from "toast.slint";
+import { ToastStack, Toasts } from "toast.slint";
 
 // The header's icon tile: 40px, the inset black, a `line-strong` edge,
 // 10px corners, the glyph 22px in `text-2` (strokes 1.65px, as Paper's
@@ -513,10 +513,17 @@ export component Dialog inherits Rectangle {
             }
         }
 
-        // Toasts show over the dialog too (the window's own stack is under
-        // this popup).
+        // Toasts show beside the sheet, or under it, never over it; with
+        // no room for them they wait behind it (the window's own stack is
+        // under this popup).
         ToastStack {
+            property <bool> right-room: Viewport.width - frame.x - frame.width >= Theme.toast-w + 2 * Theme.space-3;
+            property <bool> below-room: Viewport.height - frame.y - frame.height >= self.height + 2 * Theme.space-3;
             area-width: Viewport.width;
+            y: self.right-room ? Theme.space-3 : frame.y + frame.height + Theme.space-3;
+            visible: self.right-room || self.below-room;
+            init => { Toasts.shown-in-dialog = self.visible; }
+            changed visible => { Toasts.shown-in-dialog = self.visible; }
         }
     }
 }

@@ -372,7 +372,7 @@ export component KitGallery inherits Rectangle {
         BandBox {
             gap: Theme.space-4;
             TitleRow {
-                title: "Colour";
+                title: "Color";
                 note: "Neutral blacks with no tint, white text, one yellow LED, green for program, red for record";
             }
             HorizontalLayout {
@@ -1113,7 +1113,7 @@ export component KitGallery inherits Rectangle {
                                 show-detail: true;
                             }
                         }
-                        FieldRow { label: "Colour"; ColorField { value: "#1f3a4a"; swatch: #1f3a4a; width: Theme.field-s; label: "Colour"; } }
+                        FieldRow { label: "Color"; ColorField { value: "#1f3a4a"; swatch: #1f3a4a; width: Theme.field-s; label: "Color"; } }
                         FieldRow { label: "Text area"; top: true; TextArea { text: "Isocast design review\nSecond line"; width: Theme.field-l; label: "Text"; } }
                     }
                 }
@@ -1815,12 +1815,12 @@ export component KitGallery inherits Rectangle {
 
     if root.show-dialog: Dialog {
         title: "Create/Select Source";
-        subtitle: "Colour Source · Main";
+        subtitle: "Color Source · Main";
         icon: Icons.color;
         dialog-width: 440px;
         Form {
             Radio { text: "Create new"; checked: true; }
-            TextField { text: "Colour Source"; auto-focus: true; }
+            TextField { text: "Color Source"; auto-focus: true; }
             Radio { text: "Add Existing"; }
             PickList {
                 enabled: false;

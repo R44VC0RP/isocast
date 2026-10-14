@@ -32,6 +32,7 @@ pub struct Options {
     pub max_height: Option<u32>,
     pub fps: Option<u32>,
     pub slots: Option<u32>,
+    pub filtered: bool,
     pub seconds: f64,
     pub check: bool,
     pub expect: Vec<String>,
@@ -60,6 +61,7 @@ pub fn run(options: Options) -> Result<ExitCode> {
         max_height: options.max_height,
         fps: options.fps,
         slots: options.slots,
+        filtered: options.filtered,
     };
     let mut frames = Client::connect_or_launch()?.shared_frames(params)?;
     let gpu = if options.check {

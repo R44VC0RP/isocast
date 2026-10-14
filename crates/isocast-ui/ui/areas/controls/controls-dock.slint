@@ -6,8 +6,9 @@
 // button red; Studio Mode glows yellow while on; Exit is quiet. Split is
 // in the take's details (the status bar's REC): with the icon and the
 // words from the left, "Stop Recording" and two 28px buttons don't fit
-// the dock's 172px; with Marker beside it the words shorten ("Stop
-// Recor…") in a dock under ~210px rather than push Marker out. Pause
+// the dock's 172px; with Pause and Marker beside it the label is "Stop"
+// unless the dock is 224px or wider (the whole words in its tooltip),
+// rather than push them out or end in "Stop R…". Pause
 // (G.3) sits between them while recording, a toggle lit while paused.
 //
 // Start/Stop Virtual Camera sits under recording, as OBS has it, with a
@@ -176,6 +177,7 @@ component VirtualCameraDetails inherits VerticalLayout {
 export component ControlsDock inherits Dock {
     property <bool> streaming: ControlsArea.stream-state == "live" || ControlsArea.stream-state == "connecting" || ControlsArea.stream-state == "reconnecting";
     property <bool> recording: ControlsArea.record-state == "recording";
+    property <bool> room-for-words: Ui.controls-width >= 224px && Viewport.width >= Ui.scenes-width + Ui.sources-width + Ui.transitions-width + Ui.controls-width + 232px;
     property <bool> vcam-on: ControlsArea.vcam-state == "running" || ControlsArea.vcam-state == "starting";
     property <int> vcam-serial: ControlsArea.vcam-details-serial;
     // The dock row's height as app.slint's Workspace sets it (read from
@@ -209,7 +211,13 @@ export component ControlsDock inherits Dock {
                 // Its whole words for screen readers and as a tooltip
                 // when they are shortened.
                 tooltip: root.recording ? "Stop Recording" : "";
-                text: ControlsArea.record-state == "starting" ? "Starting…" : ControlsArea.record-state == "stopping" ? "Stopping…" : root.recording ? "Stop Recording" : "Start Recording";
+                accessible-name: root.recording ? "Stop Recording" : "";
+                // Beside Pause and Marker the whole words need the dock
+                // 224px wide (its width as set, when the window has room for
+                // every dock at theirs: read from the layout settings, not
+                // this dock, which would loop); else it says "Stop", red
+                // with its light, rather than "Stop R…".
+                text: ControlsArea.record-state == "starting" ? "Starting…" : ControlsArea.record-state == "stopping" ? "Stopping…" : root.recording ? (root.room-for-words ? "Stop Recording" : "Stop") : "Start Recording";
                 // Recording: the button is red, so its light goes bone.
                 dot: root.recording || ControlsArea.record-state == "starting" ? Theme.bone : Theme.danger;
                 variant: root.recording || ControlsArea.record-state == "starting" ? ButtonVariant.live : ButtonVariant.secondary;

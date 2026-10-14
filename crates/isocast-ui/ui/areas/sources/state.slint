@@ -40,6 +40,9 @@ export struct ItemRow {
     missing: bool,
     // The row it moves among: its parent's path ("" at the top level).
     parent: string,
+    // Chosen with ⌘ or Shift beside the selected one (Group Selected
+    // Items).
+    marked: bool,
 }
 
 // A filter in the Filters dialog's lists.
@@ -84,7 +87,7 @@ export global SourcesArea {
     in-out property <int> open-quick;
 
     // ---- Create/Select Source ("create-source")
-    // "Colour Source · Main", or "Scene".
+    // "Color Source · Main", or "Scene".
     in property <string> create-heading;
     // The kind's icon, by name (the sheet's glyph).
     in property <string> create-icon;
@@ -132,6 +135,8 @@ export global SourcesArea {
     in property <string> filter-heading;
     in property <bool> filter-off;
     in property <[FormGroup]> filter-form;
+    // The filter whose name is being edited ("LIST:KEY", "" for none).
+    in-out property <string> renaming-filter;
 
     // ---- A source's picture in Properties and Filters
     in property <image> preview;
@@ -198,6 +203,9 @@ export global SourcesArea {
     callback toggle-locked(string);
     callback toggle-iso(string);
     callback toggle-group(string);
+    // ⌘-click (`range` false) or Shift-click (true) on a row: add it to
+    // the selection, or take it out.
+    callback mark-item(string, bool);
     // The source toolbar.
     callback quick-choose(string);
     callback quick-text-changed(string);
@@ -217,6 +225,9 @@ export global SourcesArea {
     callback filter-remove(string);
     callback filter-move(string, int);
     callback filter-defaults();
+    // A filter row's menu (list, key, window point), and a new name for it.
+    callback filter-menu(string, string, length, length);
+    callback filter-rename(string, string, string);
     // A number of the transform (x, y, w, h, rotate, scale, crop-left…,
     // opacity, radius, border-width, shadow-blur): `live` while dragging.
     callback transform-number(string, float, bool);

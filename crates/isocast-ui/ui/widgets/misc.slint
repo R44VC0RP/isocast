@@ -43,6 +43,8 @@ export enum BadgeTone {
     live,
     // Red tint: REC.
     rec,
+    // Orange tint: LIVE while the stream reconnects.
+    warning,
 }
 
 // An 18px capsule badge, 10px semibold caps, 7px in; with a dot before the
@@ -54,14 +56,14 @@ export component Badge inherits Rectangle {
     in property <bool> dot;
     in property <bool> status;
     // The neutral badge's dot (`text-3` in the status bar's READY).
-    in property <color> dot-color: root.tone == BadgeTone.live ? Theme.onair : root.tone == BadgeTone.rec ? Theme.danger : Theme.text-3;
+    in property <color> dot-color: root.tone == BadgeTone.live ? Theme.onair : root.tone == BadgeTone.rec ? Theme.danger : root.tone == BadgeTone.warning ? Theme.warning : Theme.text-3;
 
     height: Theme.badge-h;
     min-width: row.min-width;
     preferred-width: row.preferred-width;
     horizontal-stretch: 0;
     border-radius: self.height / 2;
-    background: root.tone == BadgeTone.live ? Theme.onair-soft : root.tone == BadgeTone.rec ? Theme.danger-soft : Theme.control;
+    background: root.tone == BadgeTone.live ? Theme.onair-soft : root.tone == BadgeTone.rec ? Theme.danger-soft : root.tone == BadgeTone.warning ? Theme.warning-soft : Theme.control;
     accessible-role: AccessibleRole.text;
     accessible-label: root.text;
 
@@ -81,7 +83,7 @@ export component Badge inherits Rectangle {
         }
         Text {
             text: root.text;
-            color: root.tone == BadgeTone.live ? Theme.onair-text : root.tone == BadgeTone.rec ? Theme.danger-text : Theme.text-2;
+            color: root.tone == BadgeTone.live ? Theme.onair-text : root.tone == BadgeTone.rec ? Theme.danger-text : root.tone == BadgeTone.warning ? Theme.warning : Theme.text-2;
             font-size: Theme.fs-micro;
             letter-spacing: Theme.tracking-micro;
             font-weight: Theme.weight-semibold;

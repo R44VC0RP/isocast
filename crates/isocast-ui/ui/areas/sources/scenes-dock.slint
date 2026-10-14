@@ -70,12 +70,16 @@ export component ScenesDock inherits Dock {
                 // The web app's: only another scene switches (a click on
                 // the current one would switch again and end a double-click).
                 clicked => {
+                    list.focus-list();
                     if !parent.chosen {
                         SourcesArea.choose-scene(scene.id);
                     }
                 }
                 double-clicked => { SourcesArea.renaming-scene = scene.id; }
-                context-menu(x, y) => { Menus.request("scenes:" + scene.id, x, y, 0, 0); }
+                context-menu(x, y) => {
+                    list.focus-list();
+                    Menus.request("scenes:" + scene.id, x, y, 0, 0);
+                }
                 drag-moved(y) => {
                     root.drag-from = i;
                     root.drop-at = max(0, min(SourcesArea.scenes.length, floor((i * Theme.row + y + Theme.row / 2) / Theme.row)));

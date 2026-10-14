@@ -100,6 +100,10 @@ component MixerStrip inherits Rectangle {
             property <bool> flagged: root.strip.failed || root.strip.opening;
             property <length> badge-x: self.flag-x + (self.flagged ? Theme.icon + Theme.space-2 : 0px);
 
+            // Cut short in a narrow mixer: whole on hover.
+            if name.preferred-width > name.width + 0.5px: Tooltip {
+                Tip { text: root.strip.name; }
+            }
             name := Text {
                 x: 0;
                 width: min(self.preferred-width, parent.width);

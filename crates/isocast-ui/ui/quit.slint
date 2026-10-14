@@ -1,0 +1,56 @@
+// Leaving the app while it records or streams ("quit"), as OBS asks
+// before exiting: Stop and Quit ends the take (and the stream) and then
+// quits, Keep Recording quits and leaves isocastd recording (a relaunch
+// shows it, and Stop works), Cancel stays. Asked by Quit (⌘Q, the Dock),
+// Close Window, Controls → Exit and the window's close button (src/quit.rs).
+
+import { Theme } from "theme.slint";
+import { Icons } from "icons.slint";
+import { Ui } from "state.slint";
+import { Dialog } from "kit.slint";
+
+export global QuitPrompt {
+    // "You are currently recording." (or streaming, or both).
+    in property <string> heading;
+    in property <string> detail;
+    // "Keep Recording" / "Keep Streaming".
+    in property <string> keep-text;
+    // Stopping: the buttons wait.
+    in property <bool> stopping;
+    callback stop-and-quit();
+    callback keep();
+}
+
+export component QuitDialog inherits Rectangle {
+    if Ui.dialog == "quit": Dialog {
+        title: QuitPrompt.heading;
+        subtitle: "Stop and quit?";
+        icon: Icons.record;
+        dialog-width: 460px;
+        ok-text: QuitPrompt.stopping ? "Stopping…" : "Stop and Quit";
+        ok-enabled: !QuitPrompt.stopping;
+        ok-danger: true;
+        extra-text: QuitPrompt.keep-text;
+        extra-enabled: !QuitPrompt.stopping;
+        accepted => { QuitPrompt.stop-and-quit(); }
+        cancelled => {
+            if !QuitPrompt.stopping {
+                Ui.close-dialog();
+            }
+        }
+        extra => { QuitPrompt.keep(); }
+
+        VerticalLayout {
+            padding-left: Theme.sheet-pad;
+            padding-right: Theme.sheet-pad;
+            Text {
+                text: QuitPrompt.detail;
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading-sm;
+                wrap: word-wrap;
+            }
+        }
+    }
+}

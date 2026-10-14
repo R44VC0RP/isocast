@@ -143,7 +143,7 @@ export component SourcesDock inherits Dock {
                 text: item.name;
                 trailing-pad: Theme.space-1;
                 icon: Icons.named(item.icon);
-                selected: parent.chosen;
+                selected: parent.chosen || item.marked;
                 dim: !item.visible;
                 depth: item.depth;
                 description: item.state == "failed" || item.state == "waiting for permission" ? item.error : item.visible ? "" : "Hidden";
@@ -152,14 +152,24 @@ export component SourcesDock inherits Dock {
                 focus-shown: list.keyboard-focus && parent.chosen;
                 draggable: SourcesArea.renaming-item == "";
                 dragging: root.drag-from == i;
-                clicked => { Ui.select(item.path); }
+                clicked => {
+                    list.focus-list();
+                    if self.press-command || self.press-shift {
+                        SourcesArea.mark-item(item.path, self.press-shift);
+                    } else {
+                        Ui.select(item.path);
+                    }
+                }
                 double-clicked => {
                     if item.source != "" {
                         Ui.open-dialog("properties", item.source);
                     }
                 }
                 context-menu(x, y) => {
-                    Ui.select(item.path);
+                    list.focus-list();
+                    if !item.marked {
+                        Ui.select(item.path);
+                    }
                     Menus.request("sources:item:" + item.path, x, y, 0, 0);
                 }
                 drag-moved(y) => {
@@ -218,7 +228,9 @@ export component SourcesDock inherits Dock {
                     toggle: true;
                     clicked => { SourcesArea.toggle-visible(item.path); }
                 }
-                IconButton {
+                // A narrow dock shows the lock only on locked rows (the
+                // item's menu has Lock), so names keep the room.
+                if !root.narrow || item.locked: IconButton {
                     compact: true;
                     icon: item.locked ? Icons.lock : Icons.unlock;
                     icon-size: Theme.icon-row;
@@ -243,9 +255,11 @@ export component SourcesDock inherits Dock {
                     }
                 }
             }
-            if item.missing: Tooltip {
+            // A missing source says so; a name cut short (a narrow dock,
+            // the ISO badge beside it) shows whole on hover.
+            if item.missing || (row.elided && root.drag-from < 0 && SourcesArea.renaming-item != item.path): Tooltip {
                 Tip {
-                    text: "No source “" + item.name + "” in the setup";
+                    text: item.missing ? "No source “" + item.name + "” in the setup" : item.name;
                 }
             }
 

@@ -53,7 +53,6 @@ fn word(w: &str) -> &str {
         "fps" => "frame rate",
         "url" => "address",
         "css" => "CSS",
-        "color" => "colour",
         "id" => "ID",
         "lut" => "LUT",
         "rgb" => "RGB",
@@ -433,7 +432,7 @@ mod tests {
     fn names_and_ranges_read_as_the_web_app_reads_them() {
         assert_eq!(humanize("line_height"), "Line height");
         assert_eq!(humanize("fps"), "Frame rate");
-        assert_eq!(humanize("color"), "Colour");
+        assert_eq!(humanize("color"), "Color");
         assert_eq!(split_unit("attack_ms"), ("attack", "ms"));
         assert_eq!(range_of("Balance, −1 to 1."), Some((-1.0, 1.0)));
         assert_eq!(range_of("Speed (0.25–4)"), Some((0.25, 4.0)));

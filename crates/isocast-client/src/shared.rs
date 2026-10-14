@@ -15,6 +15,7 @@
 //!     max_height: Some(900),
 //!     fps: Some(60),
 //!     slots: None,
+//!     filtered: false,
 //! })?;
 //! // Keep the frame on screen until the next one has been drawn, then drop
 //! // it: dropping hands its slot back to the daemon.

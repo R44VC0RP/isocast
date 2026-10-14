@@ -61,7 +61,8 @@ export component ScrollArea inherits Rectangle {
             height: root.total;
             clicked => { root.background-clicked(); }
             pointer-event(event) => {
-                if event.kind == PointerEventKind.up && (event.button == PointerEventButton.right || (event.button == PointerEventButton.left && event.modifiers.control)) {
+                // A right-click, or a Control-click (`meta` on macOS).
+                if event.kind == PointerEventKind.up && (event.button == PointerEventButton.right || (event.button == PointerEventButton.left && event.modifiers.meta)) {
                     root.background-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
                 }
             }
@@ -135,6 +136,13 @@ export component ListRow inherits Rectangle {
     // Draw a state regardless of the pointer (the kit gallery): `hover`.
     in property <ShownState> shown: ShownState.live;
     out property <bool> has-hover: ta.has-hover;
+    // Its name doesn't fit (show it whole in a tooltip).
+    out property <bool> elided: label.preferred-width > label.width + 0.5px;
+    // The keys held at the last press (⌘ or Shift: add to a selection;
+    // Slint reports ⌘ as `control` on macOS, and the Control key as
+    // `meta`).
+    out property <bool> press-command;
+    out property <bool> press-shift;
     callback clicked();
     callback double-clicked();
     // A right-click (or ctrl-click), in window coordinates.
@@ -197,9 +205,12 @@ export component ListRow inherits Rectangle {
                     root.drag-ended();
                 }
                 root.dragged = false;
-                root.left-press = event.button == PointerEventButton.left && !event.modifiers.control;
+                root.left-press = event.button == PointerEventButton.left && !event.modifiers.meta;
+                root.press-command = event.modifiers.control;
+                root.press-shift = event.modifiers.shift;
             }
-            if event.kind == PointerEventKind.up && (event.button == PointerEventButton.right || (event.button == PointerEventButton.left && event.modifiers.control)) {
+            // A right-click, or a Control-click (`meta` on macOS).
+            if event.kind == PointerEventKind.up && (event.button == PointerEventButton.right || (event.button == PointerEventButton.left && event.modifiers.meta)) {
                 root.context-menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
@@ -217,7 +228,7 @@ export component ListRow inherits Rectangle {
                 color: root.selected ? Theme.accent-text : root.dim ? Theme.text-disabled : root.icon-color;
             }
         }
-        Text {
+        label := Text {
             horizontal-stretch: 1;
             text: root.text;
             color: root.ink;
@@ -273,6 +284,12 @@ export component List inherits Rectangle {
     callback background-clicked();
     callback background-menu(length, length);
 
+
+    // Take the keyboard (a row was clicked: its TouchArea, not the list,
+    // got the press), so ↑ ↓ and F2 work next, as in OBS.
+    public function focus-list() {
+        fs.focus();
+    }
 
     // Scroll so the row shows (call after selecting it from outside).
     public function show-row(index: int) {

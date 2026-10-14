@@ -43,6 +43,10 @@ pub const STATES: &[&str] = &[
     "scene:ID",
     "iso:SOURCE:on|off",
     "filter:LIST:KEY",
+    "mark:PATH[:range]",
+    "into:GROUP",
+    "filter-menu:LIST:KEY",
+    "filter-choose:LIST:KEY:ID",
     "anchor:ALIGN",
     "add-menu",
 ];
@@ -59,6 +63,9 @@ pub struct Sources {
     rows: RefCell<Vec<(String, String)>>,
     /// The copied item (⌘C).
     clipboard: RefCell<Option<Value>>,
+    /// Rows chosen together with ⌘ or Shift (paths, with the selected
+    /// one), for Group Selected Items; empty for a single selection.
+    marked: RefCell<Vec<String>>,
     pub dialogs: Dialogs,
     /// The colour panel's field and the colour last taken from it.
     color_target: RefCell<Option<(ColorTarget, String)>>,
@@ -77,6 +84,64 @@ enum ColorTarget {
 }
 
 impl Sources {
+    /// ⌘-click (toggle) or Shift-click (`range`: every row from the
+    /// selected one) on a Sources row: several items chosen at once, among
+    /// siblings, for Group Selected Items. The clicked one is selected.
+    pub fn mark_item(&self, app: &Rc<App>, path: &str, range: bool) {
+        let selected = app
+            .session
+            .borrow()
+            .selection
+            .as_ref()
+            .map(|s| s.path.clone());
+        let rows = self.rows.borrow().clone();
+        let parent_of = |p: &str| rows.iter().find(|r| r.0 == p).map(|r| r.1.clone());
+        {
+            let mut marked = self.marked.borrow_mut();
+            if marked.is_empty()
+                && let Some(selected) = &selected
+            {
+                marked.push(selected.clone());
+            }
+            // Only siblings: a row of another level starts again.
+            let parent = parent_of(path);
+            marked.retain(|m| parent_of(m) == parent);
+            match (range, selected.as_deref()) {
+                (true, Some(from)) if parent_of(from) == parent => {
+                    let at = |p: &str| rows.iter().position(|r| r.0 == p);
+                    if let (Some(a), Some(b)) = (at(from), at(path)) {
+                        for row in &rows[a.min(b)..=a.max(b)] {
+                            if row.1 == parent.clone().unwrap_or_default()
+                                && !marked.contains(&row.0)
+                            {
+                                marked.push(row.0.clone());
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(i) = marked.iter().position(|m| m == path) {
+                        marked.remove(i);
+                    } else {
+                        marked.push(path.to_string());
+                    }
+                }
+            }
+            if marked.len() < 2 {
+                marked.clear();
+            }
+        }
+        let keep =
+            self.marked.borrow().iter().any(|m| m == path) || self.marked.borrow().is_empty();
+        let next = if keep {
+            path.to_string()
+        } else {
+            self.marked.borrow().last().cloned().unwrap_or_default()
+        };
+        app.select(&next);
+        show_lists(app);
+    }
+
     /// A colour field's swatch: open the system colour panel with its
     /// colour, then take each colour chosen there, as a live gesture,
     /// until the panel closes (or another field asks).
@@ -156,6 +221,9 @@ impl Area for Sources {
         area.set_items(slint::ModelRc::from(self.item_rows.clone()));
         wire!(area, app, on_choose_scene, |app, _w, id| app
             .choose_scene(&id));
+        wire!(area, app, on_mark_item, |app, _w, path, range| {
+            app.sources.mark_item(&app, &path, range)
+        });
         wire!(area, app, on_rename_scene, |app, _w, id, name| {
             let name = name.trim();
             if name.is_empty() {
@@ -279,6 +347,19 @@ impl Area for Sources {
         wire!(area, app, on_filter_move, |app, _w, list, by| {
             app.sources.dialogs.filter_move(&app, &list, by)
         });
+        wire!(area, app, on_filter_menu, |app, _w, list, key, x, y| {
+            let menu = app.sources.dialogs.filter_item_menu(&list);
+            app.show_menu(
+                &format!("filters:item:{list}:{key}"),
+                menu,
+                [x, y, 0.0, 0.0],
+            );
+        });
+        wire!(area, app, on_filter_rename, |app, w, list, key, name| {
+            app.sources
+                .dialogs
+                .filter_rename(&app, &w, &list, &key, &name)
+        });
         wire!(area, app, on_filter_defaults, |app, _w| app
             .sources
             .dialogs
@@ -306,7 +387,18 @@ impl Area for Sources {
     }
 
     fn update(&self, app: &Rc<App>, window: &AppWindow, changed: Changed) {
-        if changed.any(Changed::SETUP | Changed::SCENES | Changed::RUNNING) {
+        // A selection made otherwise (a click, the canvas) ends a ⌘/Shift
+        // one, and so does another scene.
+        let mut lists = changed.any(Changed::SETUP | Changed::SCENES | Changed::RUNNING);
+        if changed.any(Changed::SELECTION | Changed::SCENES) {
+            let selected = window.global::<Ui>().get_selected_item().to_string();
+            let mut marked = self.marked.borrow_mut();
+            if !marked.is_empty() && (selected.is_empty() || !marked.contains(&selected)) {
+                marked.clear();
+                lists = true;
+            }
+        }
+        if lists {
             show_lists(app);
         }
         if changed.any(Changed::SELECTION | Changed::SETUP | Changed::DEVICES) {
@@ -357,6 +449,21 @@ impl Area for Sources {
         });
         let current_scene = || app.session.borrow().editing_scene();
         match id {
+            // The selected item's source's filters (its menu's Copy
+            // Filters and Paste Filters).
+            "copy_filters" | "paste_filters" => {
+                let found = app
+                    .session
+                    .borrow()
+                    .selected(|_, chain| chain[chain.len() - 1].source.clone());
+                if let Some(Some(source)) = found {
+                    if id == "copy_filters" {
+                        self.dialogs.copy_filters(app, &source);
+                    } else {
+                        self.dialogs.paste_filters(app, &source, None);
+                    }
+                }
+            }
             // ⇧⌘N only adds (as the web app's); the Scenes dock's + also
             // puts the new name in its field.
             "new_scene" => {
@@ -474,12 +581,27 @@ impl Area for Sources {
             }
             return true;
         }
+        if let Some((list, key)) = owner
+            .strip_prefix("filters:item:")
+            .and_then(|rest| rest.split_once(':'))
+        {
+            if let Some(window) = app.window() {
+                self.dialogs.filter_item_chosen(app, &window, list, key, id);
+            }
+            return true;
+        }
         if let Some(scene) = owner.strip_prefix("scenes:") {
             self.scene_chosen(app, scene, id);
             return true;
         }
         if !(owner.starts_with("sources:") || owner.starts_with("canvas")) {
             return false;
+        }
+        if id == "add:group" {
+            if let Some(path) = items::add_group(app) {
+                app.select(&path);
+            }
+            return true;
         }
         if let Some(kind) = id.strip_prefix("add:") {
             app.open_dialog("create-source", kind);
@@ -498,7 +620,11 @@ impl Area for Sources {
                     .map(|s| s.path.clone())
             })
         };
-        if let Some(kind) = id.strip_prefix("show:") {
+        if let Some(group) = id.strip_prefix("into:") {
+            if let Some(path) = selected_path() {
+                items::move_to_group(app, &path, group);
+            }
+        } else if let Some(kind) = id.strip_prefix("show:") {
             item_transition(app, "show_transition", kind);
         } else if let Some(kind) = id.strip_prefix("hide:") {
             item_transition(app, "hide_transition", kind);
@@ -545,6 +671,32 @@ impl Area for Sources {
                         items::toggle_item(app, &path, "locked", false);
                     }
                 }
+                "group_selected" => {
+                    let paths = self.marked.borrow().clone();
+                    match items::group_items(app, &paths) {
+                        Ok(path) => {
+                            self.marked.borrow_mut().clear();
+                            let weak = Rc::downgrade(app);
+                            // Selected once the edit has made it.
+                            slint::Timer::single_shot(
+                                std::time::Duration::from_millis(50),
+                                move || {
+                                    if let Some(app) = weak.upgrade() {
+                                        app.select(&path);
+                                    }
+                                },
+                            );
+                        }
+                        Err(why) => {
+                            app.toast(ToastKind::Info, "Can’t group these", why);
+                        }
+                    }
+                }
+                "ungroup" => {
+                    if let Some(path) = selected_path() {
+                        items::ungroup(app, &path);
+                    }
+                }
                 "lock_preview" | "preview_scale_window" | "preview_scale_canvas" => app.menu(id),
                 other => {
                     self.menu(app, other);
@@ -589,6 +741,40 @@ impl Area for Sources {
             "filter" => {
                 let (list, key) = arg.split_once(':').unwrap_or(("filters", arg));
                 self.dialogs.filter_select(app, window, list, key);
+            }
+            // ⌘-click (or Shift-click, `:range`) on a Sources row.
+            "mark" => {
+                let (path, range) = match arg.strip_suffix(":range") {
+                    Some(path) => (path, true),
+                    None => (arg, false),
+                };
+                self.mark_item(app, path, range);
+            }
+            // The selected item's menu's Move to Group → GROUP.
+            "into" => {
+                self.menu_chosen(app, "sources:list", &format!("into:{arg}"));
+            }
+            // A filter row's menu, open beside the sidebar (as a
+            // right-click opens it), and a choice from it.
+            "filter-menu" => {
+                let (list, key) = arg.split_once(':').unwrap_or(("filters", arg));
+                self.dialogs.filter_select(app, window, list, key);
+                let menu = self.dialogs.filter_item_menu(list);
+                app.show_menu(
+                    &format!("filters:item:{list}:{key}"),
+                    menu,
+                    [400.0, 120.0, 0.0, 0.0],
+                );
+            }
+            "filter-choose" => {
+                let mut parts = arg.splitn(3, ':');
+                let (Some(list), Some(key), Some(id)) = (parts.next(), parts.next(), parts.next())
+                else {
+                    return Some(Err(anyhow::anyhow!(
+                        "filter-choose takes LIST:KEY:ID (rename, duplicate, copy, paste, remove)"
+                    )));
+                };
+                self.dialogs.filter_item_chosen(app, window, list, key, id);
             }
             // Edit Transform's positional alignment.
             "anchor" => self.dialogs.transform_choose(app, window, "anchor", arg),
@@ -653,6 +839,7 @@ fn add_menu(icons: bool) -> MenuBuilder {
         .map(|k| (k.kind, k.label, k.icon))
         .collect();
     kinds.push(("scene", "Scene", "scene"));
+    kinds.push(("group", "Group", "group"));
     kinds.sort_by_key(|k| k.1.to_lowercase());
     kinds
         .into_iter()
@@ -667,7 +854,7 @@ const TRANSITIONS: [(&str, &str); 8] = [
     ("fade", "Fade"),
     ("swipe", "Swipe"),
     ("slide", "Slide"),
-    ("fade_to_color", "Fade to Colour"),
+    ("fade_to_color", "Fade to Color"),
     ("luma_wipe", "Luma Wipe"),
     ("stinger", "Stinger"),
     ("move", "Move"),
@@ -798,6 +985,12 @@ impl Sources {
         if on_preview {
             menu = self.preview_items(app, menu);
         }
+        let marked = self.marked.borrow().len();
+        if marked >= 2 {
+            menu = menu
+                .item("group_selected", "Group Selected Items")
+                .separator();
+        }
         menu = menu
             .submenu("Add", add_menu(false))
             .separator()
@@ -806,6 +999,26 @@ impl Sources {
         menu = self.paste_items(menu).separator();
         if rename && (item.source.is_some() || item.scene.is_some()) {
             menu = menu.item("rename", "Rename");
+        }
+        let is_group = item.source.is_none() && item.scene.is_none() && item.content.is_none();
+        if is_group {
+            menu = menu.item("ungroup", "Ungroup");
+        } else if marked < 2 {
+            let top_level = app
+                .session
+                .borrow()
+                .selection
+                .as_ref()
+                .is_some_and(|s| !s.path.contains('/'));
+            let groups = items::groups(app);
+            if top_level && !groups.is_empty() {
+                menu = menu.submenu(
+                    "Move to Group",
+                    groups.iter().fold(MenuBuilder::new(), |m, (key, label)| {
+                        m.item(&format!("into:{key}"), label)
+                    }),
+                );
+            }
         }
         let transition = |current: Option<&isocast_protocol::ItemTransition>, prefix: &str| {
             let kind = current.map(|t| format!("{:?}", t.kind).to_lowercase());
@@ -865,6 +1078,9 @@ impl Sources {
         if source.is_some() {
             menu = menu
                 .item("filters", "Filters")
+                .item("copy_filters", "Copy Filters")
+                .item("paste_filters", "Paste Filters")
+                .disabled(!self.dialogs.has_copied_filters())
                 .item("properties", "Properties");
         }
         menu
@@ -1008,6 +1224,7 @@ fn show_lists(app: &Rc<App>) {
             setup: &'a isocast_protocol::Setup,
             running: &'a std::collections::HashMap<String, isocast_protocol::api::SourceStatus>,
             collapsed: &'a HashSet<String>,
+            marked: &'a [String],
         }
         fn walk(
             w: &Walk,
@@ -1096,16 +1313,19 @@ fn show_lists(app: &Rc<App>) {
                         .into(),
                     missing,
                     parent: prefix.into(),
+                    marked: w.marked.contains(&path),
                 });
                 if group && expanded {
                     walk(w, &item.children, &path, depth + 1, rows);
                 }
             }
         }
+        let marked = app.sources.marked.borrow();
         let w = Walk {
             setup: &setup,
             running: &s.running,
             collapsed: &collapsed,
+            marked: &marked,
         };
         walk(&w, &scene.items, "", 0, &mut rows);
     }
@@ -1241,7 +1461,7 @@ fn show_quick_setting(app: &Rc<App>, window: &AppWindow) {
         }
         SourceKind::Color(_) => {
             let color = text("color");
-            area.set_quick_label("Colour".into());
+            area.set_quick_label("Color".into());
             area.set_quick_kind("color".into());
             area.set_quick_swatch(form::swatch(&color));
             area.set_quick_text(color.into());

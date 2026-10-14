@@ -162,8 +162,8 @@ for services, bitrates and how it behaves on a bad connection.
 
 Number keys switch scenes. **Studio** shows a preview next to the program:
 edit the preview, then **Take** it on air with the chosen transition.
-Drag sources on the canvas to move them (Shift keeps their shape, Option
-crops, ⌘ ignores snapping); the inspector on the right has their exact
+Drag sources on the canvas to move them (a corner keeps their shape and
+Shift frees it, Option crops, ⌘ ignores snapping); the inspector on the right has their exact
 position, fit, crop, blending, filters and settings.
 
 ## Agents

@@ -166,6 +166,7 @@ export component Monitor inherits Rectangle {
         property <float> cy: (self.mouse-y - root.reach) / 1px / k;
         pointer-event(event) => {
             if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                CanvasArea.press-serial += 1;
                 CanvasArea.pointer-down(self.cx, self.cy, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta || event.modifiers.control);
             } else if event.kind == PointerEventKind.up && event.button == PointerEventButton.right {
                 CanvasArea.context-menu(self.cx, self.cy, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
@@ -183,8 +184,15 @@ export component Monitor inherits Rectangle {
             root.pan-y = clamp(min(root.pan-y, root.max-pan-y) - event.delta-y, 0px, root.max-pan-y);
             accept
         }
+        // Left the canvas: no item is under the pointer (after a drag
+        // that ended outside it, once let go).
         changed has-hover => {
             if !self.has-hover && !self.pressed {
+                CanvasArea.pointer-moved(-1000000, -1000000, false, false, false);
+            }
+        }
+        changed pressed => {
+            if !self.pressed && !self.has-hover {
                 CanvasArea.pointer-moved(-1000000, -1000000, false, false, false);
             }
         }
@@ -205,7 +213,7 @@ export component Monitor inherits Rectangle {
 
             // The item under the pointer (or whose row is hovered).
             for b in CanvasArea.boxes: ItemFrame {
-                visible: b.path == CanvasArea.hover-item && b.path != Ui.selected-item;
+                visible: b.path == CanvasArea.hover-item && b.path != Ui.selected-item && Ui.dialog == "";
                 k: root.k;
                 bx: b.x;
                 by: b.y;

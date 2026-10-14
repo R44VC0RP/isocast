@@ -897,6 +897,21 @@ pub fn fit_to_screen(app: &Rc<App>) {
                 item["rect"]["height"].as_f64().unwrap_or(ch),
             ));
         let scale = (cw / size.0).min(ch / size.1);
+        if item["fit"] == "none" && item["layout"].is_null() {
+            // Without bounds: its own size, scaled to fit, centred (the
+            // scale is about the rect's centre).
+            let fields = json!({
+                "rect": {
+                    "x": int((cw - size.0) / 2.0), "y": int((ch - size.1) / 2.0),
+                    "width": whole(size.0), "height": whole(size.1),
+                },
+                "style": { "transform": {
+                    "scale": (scale * 10_000.0).round() / 10_000.0, "translate": null,
+                } },
+            });
+            update_selected(app, fields, None);
+            return;
+        }
         let width = (size.0 * scale).round().max(1.0);
         let height = (size.1 * scale).round().max(1.0);
         let mut fields = json!({ "rect": {
@@ -914,8 +929,15 @@ pub fn stretch_to_screen(app: &Rc<App>) {
         return;
     };
     let (cw, ch) = canvas_size(app);
+    let item = &chain[chain.len() - 1];
     let mut fields = json!({ "rect": { "x": 0, "y": 0, "width": whole(cw), "height": whole(ch) } });
-    unscaled(&chain[chain.len() - 1], &mut fields);
+    // One scale can't stretch: an item without bounds gets them (OBS's
+    // Stretch to Screen sets stretch bounds too).
+    if item["fit"] == "none" {
+        fields["fit"] = json!("stretch");
+        fields["style"] = json!({ "transform": { "scale": null, "translate": null } });
+    }
+    unscaled(item, &mut fields);
     update_selected(app, fields, None);
 }
 
@@ -991,6 +1013,252 @@ pub fn rotate_by(app: &Rc<App>, degrees: f64) {
         json!({ "style": { "transform": { "rotate": rotate } } }),
         None,
     );
+}
+
+// ---------- Groups ----------
+
+/// The items of one level of `scene` (its top level, or the children of
+/// the last of `parents`).
+fn level_of(app: &Rc<App>, scene: &str, parents: &[Value]) -> Vec<Value> {
+    match parents.last() {
+        Some(parent) => parent["children"].as_array().cloned().unwrap_or_default(),
+        None => setup_json(app)
+            .and_then(|s| {
+                scenes_of(&s)
+                    .into_iter()
+                    .find(|x| x["id"] == scene)
+                    .and_then(|x| x["items"].as_array().cloned())
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// An id for a new group ("group", "group-2"…) that no item key, source
+/// or scene of the setup has.
+fn group_id(app: &Rc<App>) -> String {
+    let s = app.session.borrow();
+    let Some(setup) = s.setup.as_ref() else {
+        return "group".into();
+    };
+    fn keys<'a>(items: &'a [isocast_protocol::SceneItem], out: &mut Vec<&'a str>) {
+        for item in items {
+            if let Some(k) = item.key() {
+                out.push(k);
+            }
+            keys(&item.children, out);
+        }
+    }
+    let mut taken = model::taken_ids(setup);
+    for scene in &setup.scenes {
+        keys(&scene.items, &mut taken);
+    }
+    model::new_id("Group", taken)
+}
+
+/// The `[x, y, width, height]` of a JSON item's rect, if it has one.
+fn rect_numbers(item: &Value) -> Option<[f64; 4]> {
+    let r = item.get("rect")?;
+    Some([
+        r["x"].as_f64()?,
+        r["y"].as_f64()?,
+        r["width"].as_f64()?,
+        r["height"].as_f64()?,
+    ])
+}
+
+/// `item` with its rect moved by (dx, dy).
+fn shifted(mut item: Value, dx: f64, dy: f64) -> Value {
+    if let Some([x, y, _, _]) = rect_numbers(&item) {
+        item["rect"]["x"] = int(x + dx);
+        item["rect"]["y"] = int(y + dy);
+    }
+    item
+}
+
+/// Group Selected Items: the items at `paths` (siblings) become the
+/// children of a new group as large as they cover, where the front one
+/// was, with nothing on the canvas moving. One edit; returns the group's
+/// path, or why not.
+pub fn group_items(app: &Rc<App>, paths: &[String]) -> Result<String, String> {
+    let chains: Vec<(String, Vec<Value>)> = paths.iter().filter_map(|p| chain_at(app, p)).collect();
+    if chains.len() < 2 || chains.len() != paths.len() {
+        return Err("Select two or more items in the Sources list to group.".into());
+    }
+    let (scene, first) = &chains[0];
+    let parents = &first[..first.len() - 1];
+    let parent_key = |chain: &[Value]| -> Vec<Option<String>> {
+        chain[..chain.len() - 1]
+            .iter()
+            .map(|i| key_of(i).map(str::to_string))
+            .collect()
+    };
+    if chains
+        .iter()
+        .any(|(_, c)| parent_key(c) != parent_key(first))
+    {
+        return Err("Only items side by side in one list can be grouped.".into());
+    }
+    let level = level_of(app, scene, parents);
+    let chosen: Vec<Option<String>> = chains
+        .iter()
+        .map(|(_, c)| key_of(&c[c.len() - 1]).map(str::to_string))
+        .collect();
+    let is_chosen = |i: &Value| chosen.contains(&key_of(i).map(str::to_string));
+    let members: Vec<Value> = level.iter().filter(|i| is_chosen(i)).cloned().collect();
+    let rects: Option<Vec<[f64; 4]>> = members.iter().map(rect_numbers).collect();
+    let Some(rects) = rects else {
+        return Err("Items placed by a layout can't be grouped yet.".into());
+    };
+    let left = rects.iter().map(|r| r[0]).fold(f64::INFINITY, f64::min);
+    let top = rects.iter().map(|r| r[1]).fold(f64::INFINITY, f64::min);
+    let right = rects
+        .iter()
+        .map(|r| r[0] + r[2])
+        .fold(f64::NEG_INFINITY, f64::max);
+    let bottom = rects
+        .iter()
+        .map(|r| r[1] + r[3])
+        .fold(f64::NEG_INFINITY, f64::max);
+    let id = group_id(app);
+    let group = json!({
+        "id": id,
+        "rect": {
+            "x": int(left),
+            "y": int(top),
+            "width": int((right - left).max(1.0)),
+            "height": int((bottom - top).max(1.0)),
+        },
+        "children": members
+            .iter()
+            .map(|i| shifted(i.clone(), -left, -top))
+            .collect::<Vec<_>>(),
+    });
+    // Where the front one was, among what's left.
+    let front = level.iter().rposition(&is_chosen).unwrap_or(0);
+    let at = level[..front].iter().filter(|i| !is_chosen(i)).count();
+    let mut items: Vec<Value> = level.iter().filter(|i| !is_chosen(i)).cloned().collect();
+    items.insert(at, group);
+    reorder(app, scene, parents, &items);
+    let mut path: Vec<String> = parents
+        .iter()
+        .filter_map(|i| key_of(i).map(str::to_string))
+        .collect();
+    path.push(id);
+    Ok(path.join("/"))
+}
+
+/// Add → Group: an empty group at the top of the scene being edited
+/// (Move to Group puts items in it). Returns its path.
+pub fn add_group(app: &Rc<App>) -> Option<String> {
+    let scene = app.session.borrow().editing_scene()?;
+    let id = group_id(app);
+    let group = json!({ "id": id, "rect": { "x": 0, "y": 0, "width": 1, "height": 1 } });
+    app.edit(
+        json!({ "scenes": [{ "id": scene, "items": [group] }] }),
+        EditOptions::default(),
+    );
+    Some(id)
+}
+
+/// Ungroup: a group's children back in its place, where they show now.
+pub fn ungroup(app: &Rc<App>, path: &str) {
+    let Some((scene, chain)) = chain_at(app, path) else {
+        return;
+    };
+    let group = &chain[chain.len() - 1];
+    let parents = &chain[..chain.len() - 1];
+    let [gx, gy, _, _] = rect_numbers(group).unwrap_or_default();
+    let children: Vec<Value> = group["children"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| shifted(c, gx, gy))
+        .collect();
+    let level = level_of(app, &scene, parents);
+    let key = key_of(group).map(str::to_string);
+    let mut items = Vec::new();
+    for item in level {
+        if key_of(&item).map(str::to_string) == key {
+            items.extend(children.iter().cloned());
+        } else {
+            items.push(item);
+        }
+    }
+    reorder(app, &scene, parents, &items);
+}
+
+/// The top-level groups of the scene being edited: (key, label).
+pub fn groups(app: &Rc<App>) -> Vec<(String, String)> {
+    let s = app.session.borrow();
+    let (Some(setup), Some(scene)) = (s.setup.as_ref(), s.editing_scene()) else {
+        return Vec::new();
+    };
+    model::find_scene(setup, &scene)
+        .map(|scene| {
+            scene
+                .items
+                .iter()
+                .filter(|i| i.source.is_none() && i.scene.is_none() && i.content.is_none())
+                .filter_map(|i| Some((i.key()?.to_string(), model::item_label(setup, i))))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Move the top-level item at `path` into the top-level group `group`,
+/// where it shows now (the group grows to cover it). One edit.
+pub fn move_to_group(app: &Rc<App>, path: &str, group: &str) {
+    let Some((scene, chain)) = chain_at(app, path) else {
+        return;
+    };
+    if chain.len() != 1 {
+        return;
+    }
+    let item = chain[0].clone();
+    let level = level_of(app, &scene, &[]);
+    let Some(g) = level.iter().find(|i| key_of(i) == Some(group)).cloned() else {
+        return;
+    };
+    let Some(r) = rect_numbers(&item) else {
+        return;
+    };
+    let mut children: Vec<Value> = g["children"].as_array().cloned().unwrap_or_default();
+    let [gx, gy, gw, gh] = rect_numbers(&g).unwrap_or([r[0], r[1], 1.0, 1.0]);
+    // The group's new box: what it covered (none if empty) and the item.
+    let (mut left, mut top, mut right, mut bottom) = (r[0], r[1], r[0] + r[2], r[1] + r[3]);
+    if !children.is_empty() {
+        left = left.min(gx);
+        top = top.min(gy);
+        right = right.max(gx + gw);
+        bottom = bottom.max(gy + gh);
+    }
+    children = children
+        .into_iter()
+        .map(|c| shifted(c, gx - left, gy - top))
+        .collect();
+    children.push(shifted(item.clone(), -left, -top));
+    let mut grown = g.clone();
+    grown["rect"] = json!({
+        "x": int(left),
+        "y": int(top),
+        "width": int((right - left).max(1.0)),
+        "height": int((bottom - top).max(1.0)),
+    });
+    grown["children"] = Value::Array(children);
+    let key = key_of(&item).map(str::to_string);
+    let items: Vec<Value> = level
+        .into_iter()
+        .filter(|i| key_of(i).map(str::to_string) != key)
+        .map(|i| {
+            if key_of(&i) == Some(group) {
+                grown.clone()
+            } else {
+                i
+            }
+        })
+        .collect();
+    reorder(app, &scene, &[], &items);
 }
 
 #[cfg(test)]

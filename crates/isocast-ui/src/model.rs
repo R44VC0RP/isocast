@@ -33,7 +33,7 @@ pub const KINDS: &[KindInfo] = &[
     kind("media", "Media Source", "media"),
     kind("text", "Text", "text"),
     kind("browser", "Browser", "browser"),
-    kind("color", "Colour Source", "color"),
+    kind("color", "Color Source", "color"),
     kind("test_pattern", "Test Pattern", "test-pattern"),
     kind("tone", "Tone", "tone"),
 ];
@@ -113,12 +113,23 @@ pub fn item_label(setup: &Setup, item: &SceneItem) -> String {
     if let Some(id) = &item.scene {
         return find_scene(setup, id).map_or(id.clone(), |s| scene_name(s).to_string());
     }
-    let fallback = if item.children.is_empty() {
+    let fallback = if item.children.is_empty() && item.content.is_some() {
         "Box"
     } else {
         "Group"
     };
-    item.id.clone().unwrap_or_else(|| fallback.into())
+    // A group's id as a name: `group-2` → "Group 2".
+    item.id
+        .as_deref()
+        .map(|id| {
+            let words = id.replace('-', " ");
+            let mut chars = words.chars();
+            chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        })
+        .unwrap_or_else(|| fallback.into())
 }
 
 pub fn item_icon(setup: &Setup, item: &SceneItem) -> &'static str {
@@ -128,7 +139,8 @@ pub fn item_icon(setup: &Setup, item: &SceneItem) -> &'static str {
     if item.scene.is_some() {
         return "scene";
     }
-    if item.children.is_empty() {
+    // Nothing of its own to show: a group (Add → Group starts empty).
+    if item.children.is_empty() && item.content.is_some() {
         "box"
     } else {
         "group"

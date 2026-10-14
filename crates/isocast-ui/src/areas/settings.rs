@@ -600,7 +600,7 @@ impl Area for Settings {
                     .as_ref()
                     .map(|s| s.recording.folder.clone());
                 if let Some(folder) = folder {
-                    platform::reveal(&folder);
+                    platform::open_folder(&folder);
                 }
             }
             "start_over" => self.start_first_run(app),

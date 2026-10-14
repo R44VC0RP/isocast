@@ -9,16 +9,20 @@
 //! Each viewer has its own ring and thread, so a viewer that stops handing
 //! slots back only stalls itself. Frames are picked at the viewer's rate
 //! like the H.264 monitors' ([`Pace`]), and asking for them keeps the
-//! program (or preview) drawn at that rate.
+//! program (or preview) drawn at that rate. A source can be shown through
+//! its filters (Filters' preview in the app), read live so each change
+//! shows at once.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use isocast_protocol::Filter;
 use isocast_protocol::ScaleFilter;
 
 use super::frame_stream::{MAX_FPS, Pace, Source, stamp_at};
+use crate::filter::Filters;
 use crate::gpu::{FrameImporter, Gpu};
 use crate::render::{Layer, Renderer};
 use crate::{Platform, Time};
@@ -147,13 +151,18 @@ pub(crate) struct Request {
     pub(crate) slots: u32,
 }
 
+/// A source's filters as they are now (the live setup's).
+pub(crate) type LiveFilters = Box<dyn Fn() -> Vec<Filter> + Send>;
+
 /// Start a viewer's stream of `request`. `source` finds where the target's
 /// frames arrive (looked up again all the time, since a source can reopen,
-/// and given the stream's rate then), or says why it can't.
+/// and given the stream's rate then), or says why it can't; `filters`, if
+/// given, are drawn over each frame.
 pub(crate) fn watch<P: Platform>(
     platform: &P,
     request: Request,
     source: impl Fn(u32) -> Result<Source<P::Frame>, String> + Send + 'static,
+    filters: Option<LiveFilters>,
 ) -> SharedFeed<P::SharedSurface> {
     let (tx, events) = channel();
     let control = SharedControl(Arc::new(Control {
@@ -169,7 +178,7 @@ pub(crate) fn watch<P: Platform>(
     isocast_diagnostics::spawn(
         format!("shared frames {}", request.target),
         move || {
-            if let Err(why) = run(&platform, &running, &tx, &request, source) {
+            if let Err(why) = run(&platform, &running, &tx, &request, source, filters) {
                 let _ = tx.send(SharedEvent::End(why));
             }
         },
@@ -202,6 +211,7 @@ fn run<P: Platform>(
     tx: &Sender<SharedEvent<P::SharedSurface>>,
     request: &Request,
     source: impl Fn(u32) -> Result<Source<P::Frame>, String>,
+    filters: Option<LiveFilters>,
 ) -> Result<(), String> {
     let failed = |err: anyhow::Error| format!("{err:#}");
     let gpu = Gpu::new().map_err(failed)?;
@@ -212,6 +222,9 @@ fn run<P: Platform>(
     let mut ring: Option<Ring<P::SharedSurface>> = None;
     let mut generation = 0;
     let mut pace = Pace::default();
+    // The filters drawn last, and what draws them (made on first use).
+    let mut drawn_filters: Vec<Filter> = Vec::new();
+    let mut filtering: Option<Filters> = None;
     loop {
         if control.0.closed.load(Ordering::SeqCst) {
             return Ok(());
@@ -244,13 +257,36 @@ fn run<P: Platform>(
             control.wait(WAIT);
             continue;
         }
+        // Changed filters show at once, even on a still picture.
+        if let Some(filters) = &filters {
+            let now = filters();
+            if now != drawn_filters {
+                drawn_filters = now;
+                if let Some(ring) = &mut ring {
+                    ring.fresh = true;
+                }
+            }
+        }
         let fps = control.0.fps.load(Ordering::Relaxed);
         let Source { slot, grid, drawn } = source(fps)?;
         let again = || ring.as_ref().is_none_or(|ring| ring.fresh);
         let Some((frame, at)) = pace.next(platform, &slot, grid, fps, again) else {
             continue;
         };
-        let input = platform.frame_size(&frame);
+        let mut picture = importer.import(&frame).map_err(failed)?;
+        if drawn_filters.iter().any(|filter| filter.enabled) {
+            let filtering =
+                filtering.get_or_insert_with(|| Filters::new(&gpu, renderer.format(), true));
+            picture = filtering.apply(
+                &gpu,
+                &renderer,
+                &request.target,
+                picture,
+                &drawn_filters,
+                at,
+            );
+        }
+        let input = (picture.width, picture.height);
         let size = fitted(input, max_size);
         if ring.as_ref().is_none_or(|ring| ring.size != size) {
             generation += 1;
@@ -288,7 +324,6 @@ fn run<P: Platform>(
             .iter()
             .position(|held| !held)
             .expect("a slot is free");
-        let picture = importer.import(&frame).map_err(failed)?;
         let mut layer = Layer::full(&picture, size.0, size.1);
         layer.scale_filter = if size.0 < input.0 {
             ScaleFilter::Area

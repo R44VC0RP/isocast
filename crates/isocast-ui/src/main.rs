@@ -36,6 +36,7 @@ mod picture;
 mod platform;
 mod prefs;
 mod preview;
+mod quit;
 // Settings forms from the setup's schema; the views (Properties,
 // Filters, Transition Properties) move onto it next.
 #[allow(dead_code)]

@@ -257,6 +257,7 @@ fn setup_when_ready(weak: slint::Weak<AppWindow>, shell: Rc<App>, setup: Setup) 
         if ready.is_none() {
             return setup_when_ready(weak, shell, setup);
         }
+        crate::quit::install_terminate_question();
         let output =
             crate::preview::Output::new(&app, setup.mode, &setup.device, setup.test_outline);
         match output {

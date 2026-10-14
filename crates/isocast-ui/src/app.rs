@@ -186,9 +186,7 @@ impl App {
                 prefs::save(&window);
             }
         });
-        ui.on_quit(|| {
-            let _ = slint::quit_event_loop();
-        });
+        crate::quit::connect(self, window);
 
         let menus = window.global::<Menus>();
         menus.on_step(kit::step);
@@ -859,7 +857,15 @@ impl App {
                 } else {
                     "Couldn’t apply the change"
                 };
-                self.failed(title, &error);
+                let message = self
+                    .session
+                    .borrow()
+                    .setup
+                    .as_ref()
+                    .map_or(error.message.clone(), |setup| {
+                        named_paths(&error.message, setup)
+                    });
+                self.toast(ToastKind::Error, title, message);
                 self.session.borrow_mut().recompute();
                 self.changed(Changed::SETUP);
                 for done in edit.done {
@@ -1244,6 +1250,10 @@ impl App {
                 self.refresh_status(false);
             }
             "minimize" => window.window().set_minimized(true),
+            "fullscreen" => {
+                let w = window.window();
+                w.set_fullscreen(!w.is_fullscreen());
+            }
             "zoom" => {
                 let w = window.window();
                 w.set_maximized(!w.is_maximized());
@@ -1273,6 +1283,57 @@ pub fn applies_json(app: &App) -> Value {
 /// A status before the daemon's first answer.
 fn empty_status(state: EngineState) -> Status {
     serde_json::from_value(json!({ "state": state })).expect("a minimal status")
+}
+
+/// An engine message with the setup paths people don't know by number
+/// named: `sources[7].width: …` → `“Color 2” width: …`, `scenes[1]` →
+/// `scene “Bars”`.
+pub fn named_paths(message: &str, setup: &isocast_protocol::Setup) -> String {
+    let mut out = String::new();
+    let mut rest = message;
+    while let Some(at) = rest.find("sources[").or_else(|| rest.find("scenes[")) {
+        let (head, tail) = rest.split_at(at);
+        out.push_str(head);
+        let (list, after) = if let Some(after) = tail.strip_prefix("sources[") {
+            ("sources", after)
+        } else {
+            ("scenes", &tail["scenes[".len()..])
+        };
+        let Some(close) = after.find(']') else {
+            out.push_str(tail);
+            return out;
+        };
+        let name = after[..close].parse::<usize>().ok().and_then(|i| {
+            if list == "sources" {
+                setup
+                    .sources
+                    .get(i)
+                    .map(|s| format!("“{}”", model::source_name(s)))
+            } else {
+                setup
+                    .scenes
+                    .get(i)
+                    .map(|s| format!("scene “{}”", model::scene_name(s)))
+            }
+        });
+        match name {
+            Some(name) => {
+                out.push_str(&name);
+                rest = &after[close + 1..];
+                // `.width` after a source reads as its field.
+                if let Some(field) = rest.strip_prefix('.') {
+                    out.push(' ');
+                    rest = field;
+                }
+            }
+            None => {
+                out.push_str(&tail[..tail.len() - after.len() + close + 1]);
+                rest = &after[close + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// "the stream dropped" → "The stream dropped".
