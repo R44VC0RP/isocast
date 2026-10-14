@@ -1734,6 +1734,13 @@ fn status(json: bool) -> Result<ExitCode> {
             previous.len()
         );
     }
+    if let Some(warning) = status
+        .diagnostics
+        .as_ref()
+        .and_then(|d| d["native_relay"]["last_warning"].as_str())
+    {
+        println!("Warning: {warning}");
+    }
     if let Some(file) = &status.setup_file {
         print_setup_file(file);
     }

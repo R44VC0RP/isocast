@@ -490,6 +490,26 @@ each section. Delete entries that stop being true.
 
 ## Benchmarks
 
+- 2026-10-14: **A.6 hardening M-1/M-2**, isocast-m2-a, common lock,
+  no screensharingd. Reviewer's 3000 distinct 1 KiB failed Keychain writes:
+  corrected warmed comparison (initial Keychain call + learned-cache warmup
+  + first inventory pass), pinned count **0 -> 0**, logger CPU/error median
+  **19.84 -> 21.22 us**, whole-daemon CPU/error **38.01 -> 39.24 us**,
+  RSS **47.58 -> 48.12 MB** (0.54 MB residual, not the original linear growth).
+  Initial baseline reproduced logger **19.18 -> 66.40 us** and RSS growth;
+  cold framework residency is why the final comparison warms startup first.
+  SIGKILL relay: warning + automatic new PID + redacted fatal tail. Holding
+  the owned scratch helper non-executable during 12000-token churn gives
+  **0 pending seed bytes at every sample**, 12000 discarded transport messages;
+  daemon RSS **103.37 -> 105.69 MB** during a concurrent 8 s recording,
+  both files **240 frames, no drops, clean decode**. Restore executable mode:
+  relay reseeds/restarts and retains its redacted native tail. Two real scoped
+  Keychain accounts rotated eight times each: pin counts stop at **3/6**;
+  current + two previous values redacted in JSONL and native output. Test
+  items removed. Reviewer relay harness: 100000/100000 native lines ordered,
+  no seed leaks, expected 100 redactions; peer-close idle CPU 0.0 s/5 s.
+  Evidence: a6-diagnostics/scratch/hardening and matching m2-a a6-hardening.
+
 - 2026-10-13: **G.3b feasibility, not a delivered crash-safe writer.** Main
   runtime f6f287d on exonbook M4 Max/macOS 26.6.2, synthetic inputs, common
   lock, no screensharingd. Three interleaved 16 s flagship rounds each of
@@ -1318,6 +1338,19 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-14: **A.6 hardening supersedes lifetime/unbounded pinning.**
+  `stream_key_set` pins after the Keychain write succeeds. Pins are keyed by
+  service/account and retain current + previous two values, mirrored in the
+  relay's private seed protocol; failed writes only churn the 512-entry LRU.
+  A native-relay supervisor publishes failure/recovery warnings and retries
+  once a second. It discards the dead peer's seed backlog; new credentials
+  remain in the bounded registry, not an outage queue. A new helper starts
+  with text disclosure disabled and receives a registry snapshot before
+  the ready marker. Generation-specific native log files preserve earlier
+  evidence. Darwin returns ENOBUFS (not WouldBlock) for a full nonblocking
+  local datagram receive buffer: this must retry, not be treated as peer death.
+  No recording-engine files changed.
 
 - 2026-10-13 (delegator, overnight): **G.3b (crash-safe takes) waits until
   after the alpha week.** The probes show it needs our own video/audio

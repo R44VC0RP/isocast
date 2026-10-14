@@ -13,6 +13,7 @@ use std::sync::{
 struct Secrets {
     values: Arc<Vec<String>>,
     pinned: Arc<Vec<String>>,
+    owners: BTreeMap<(String, String), Vec<String>>,
 }
 static SECRETS: OnceLock<Mutex<Secrets>> = OnceLock::new();
 static REVISION: AtomicU64 = AtomicU64::new(1);
@@ -21,20 +22,33 @@ fn registry() -> &'static Mutex<Secrets> {
     SECRETS.get_or_init(Mutex::default)
 }
 
-/// Explicit environment, Keychain and stream-key credentials never compete
-/// with untrusted API fields for the learned-value LRU, even after rotation.
-pub fn remember_secret(secret: &str) {
+/// Explicit credentials never compete with inferred API values. Keep only
+/// the current value and two previous values for each service/account.
+/// Call only after a successful credential read/write (or for the env key).
+pub fn remember_secret(service: &str, account: &str, secret: &str) {
     if secret.is_empty() || secret == "[redacted]" {
         return;
     }
     let mut state = registry().lock().unwrap_or_else(|p| p.into_inner());
-    if state.pinned.iter().any(|s| s == secret) {
+    let values = state
+        .owners
+        .entry((service.into(), account.into()))
+        .or_default();
+    if values.last().is_some_and(|s| s == secret) {
         return;
     }
-    Arc::make_mut(&mut state.pinned).push(secret.into());
+    values.retain(|s| s != secret);
+    if values.len() == 3 {
+        values.remove(0);
+    }
+    values.push(secret.into());
+    let mut pinned = state.owners.values().flatten().cloned().collect::<Vec<_>>();
+    pinned.sort();
+    pinned.dedup();
+    state.pinned = Arc::new(pinned);
     REVISION.fetch_add(1, Ordering::Release);
     drop(state);
-    crate::native::seed(secret, true);
+    crate::native::seed(secret, Some((service, account)));
 }
 
 /// Only API-learned values are bounded/evictable. Oversized structured values
@@ -52,7 +66,7 @@ pub(crate) fn learn_secret(secret: &str) {
     }
     REVISION.fetch_add(1, Ordering::Release);
     drop(state);
-    crate::native::seed(secret, false);
+    crate::native::seed(secret, None);
 }
 fn cacheable(secret: &str) -> bool {
     !secret.is_empty() && secret.len() <= 4096 && secret != "[redacted]"
@@ -75,13 +89,26 @@ fn insert(values: &mut Arc<Vec<String>>, secret: &str) -> bool {
 pub fn cache_evictions() -> u64 {
     EVICTIONS.load(Ordering::Relaxed)
 }
-pub(crate) fn known_secrets() -> Vec<(String, bool)> {
+pub fn pinned_count() -> usize {
+    registry()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .pinned
+        .len()
+}
+
+pub(crate) type KnownSecret = (String, Option<(String, String)>);
+pub(crate) fn known_secrets() -> Vec<KnownSecret> {
     let state = registry().lock().unwrap_or_else(|p| p.into_inner());
     state
         .values
         .iter()
-        .map(|s| (s.clone(), false))
-        .chain(state.pinned.iter().map(|s| (s.clone(), true)))
+        .map(|s| (s.clone(), None))
+        .chain(
+            state.owners.iter().flat_map(|(owner, values)| {
+                values.iter().map(|s| (s.clone(), Some(owner.clone())))
+            }),
+        )
         .collect()
 }
 

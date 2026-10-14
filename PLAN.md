@@ -570,6 +570,12 @@ layout editing, Windows, release prep).
   - [x] **A.6 review long run:** two hours, program+ISO 216000 frames each,
     no drops, 67056 polls, 40.7 MB logs within the daemon budget, prior
     crash evidence retained throughout (isocast-m2-b).
+  - [x] **A.6 hardening (M-1, M-2):** pin successful Keychain writes only;
+    current plus previous two values per service/account. Supervise/reseed
+    native relay restarts, report warnings, drop seeds during outages.
+    3000 failed writes leave pinned count zero and logger/RSS near baseline;
+    relay-kill and 12000-value unavailable-helper churn preserve recording,
+    bounded memory and redacted native logging after recovery.
   - [x] **A.6a Diagnostics backend:** shared bounded JSONL, API/events,
     one-second metrics, panic/abnormal-launch detection, redacted offline
     report preview/zip on API, CLI and MCP (agent/a6-diagnostics).
@@ -2649,3 +2655,13 @@ One line per finished task, newest last.
   contained worker 393 frames/file complete, poisoned state 177 interrupted,
   post-resume writer file 177 frames/5.9 s, native exit retains 360 frames.
   All decoded files clean. fmt, release clippy/tests (180), e2e 13/13 pass.
+- A.6 hardening (2026-10-14): M-1 pins only successfully stored/read keys,
+  capped at current + two previous per service/account. 3000 failed writes:
+  pin count 0 -> 0, logger CPU/error 19.84 -> 21.22 us, warmed daemon RSS
+  47.58 -> 48.12 MB; two accounts/eight rotations cap at 3/6 pins in both
+  processes. M-2 warns on native-relay exit, supervises/reseeds replacement,
+  and drops seed transport messages while unavailable. SIGKILL plus 12000
+  credentials during blocked respawn: 0 pending bytes; recovery keeps native
+  text redacted, concurrent 240-frame program/ISO files complete without drops.
+  Reviewer 100000-line relay harness retains order and redaction; release
+  fmt/clippy, 180 tests and all 13 engine-e2e scenarios pass.

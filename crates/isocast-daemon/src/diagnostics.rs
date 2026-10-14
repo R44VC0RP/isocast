@@ -117,6 +117,12 @@ pub fn event(event: &Event) {
 
 pub fn start(daemon: &Arc<Daemon>) {
     let weak = Arc::downgrade(daemon);
+    isocast_diagnostics::native::on_warning(move |message| {
+        if let Some(daemon) = weak.upgrade() {
+            daemon.publish(Event::Warning { message });
+        }
+    });
+    let weak = Arc::downgrade(daemon);
     isocast_diagnostics::on_worker_warning(move |message| {
         if let Some(daemon) = weak.upgrade() {
             daemon.worker_failed(message);

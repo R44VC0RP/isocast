@@ -121,7 +121,7 @@ pub fn init(process: &str, console: bool) -> Guard {
         previous_failure,
     });
     if let Ok(key) = std::env::var("ISOCAST_STREAM_KEY") {
-        redact::remember_secret(&key);
+        redact::remember_secret("environment", "ISOCAST_STREAM_KEY", key.trim());
     }
     std::panic::set_hook(Box::new(|panic| {
         let thread = std::thread::current();
@@ -229,7 +229,7 @@ pub fn ready() {
     }
 }
 pub fn health() -> Value {
-    json!({"native_relay_pid":native::pid(),"callback_records_dropped":output::dropped(),"credential_cache_evictions":redact::cache_evictions(),"write_errors":ERRORS.load(Ordering::Relaxed),"logging_cpu_ns":cfg!(unix).then(||LOG_CPU_NS.load(Ordering::Relaxed)),"launch":LOGGER.get().map(|l| &l.launch),"mode":if LOGGER.get().is_some_and(|l|l.init_error.is_none()) {"jsonl"} else {"stderr"},"init_error":LOGGER.get().and_then(|l|l.init_error.as_ref()),"previous_logging_failure":LOGGER.get().and_then(|l|l.previous_failure.as_ref()),"previous_abnormal":previous_abnormal(),"panics":PANICS.load(Ordering::Relaxed),"last_panic":LAST_PANIC.try_lock().ok().and_then(|v|v.clone())})
+    json!({"native_relay_pid":native::pid(),"native_relay":native::health(),"callback_records_dropped":output::dropped(),"credential_pinned_count":redact::pinned_count(),"credential_cache_evictions":redact::cache_evictions(),"write_errors":ERRORS.load(Ordering::Relaxed),"logging_cpu_ns":cfg!(unix).then(||LOG_CPU_NS.load(Ordering::Relaxed)),"launch":LOGGER.get().map(|l| &l.launch),"mode":if LOGGER.get().is_some_and(|l|l.init_error.is_none()) {"jsonl"} else {"stderr"},"init_error":LOGGER.get().and_then(|l|l.init_error.as_ref()),"previous_logging_failure":LOGGER.get().and_then(|l|l.previous_failure.as_ref()),"previous_abnormal":previous_abnormal(),"panics":PANICS.load(Ordering::Relaxed),"last_panic":LAST_PANIC.try_lock().ok().and_then(|v|v.clone())})
 }
 
 pub fn clean_exit() {

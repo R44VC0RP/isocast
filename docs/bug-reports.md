@@ -57,8 +57,14 @@ producer death, including a final line without newline. Its credential seed
 channel is private and polled even when stderr is silent, with a 256 KiB
 receive buffer. Backpressured seeds retry off the caller's thread; native
 lines are withheld only between the pending/ready markers for that backlog.
-Delivery recovery restores text logging automatically. Explicit credentials
-remain pinned in the relay as well as the producer. Native lines have `info` severity rather
+Delivery recovery restores text logging automatically. A supervisor reports
+unexpected relay exits as warning events and in text status, then respawns the
+helper (one attempt per second on failure). During an outage seed messages are
+dropped, not accumulated; the replacement is seeded from the bounded registry
+before it can disclose native text. Native output emitted while the helper is
+unavailable cannot be recovered. Relay restart/pending/drop counters are in
+`status.diagnostics.native_relay`. Explicit credentials use the same scoped
+rotation cap in the relay and producer. Native lines have `info` severity rather
 than guessing severity from arbitrary text. Bootstrap stderr appends, so
 pre-init failures survive the next launch. Camera diagnostic callbacks enqueue
 bounded messages for a worker; they perform neither file writes nor pruning.
@@ -175,8 +181,12 @@ Redaction happens before logging and again before preview/archive creation:
 exact credential names and credential suffixes (`api_key`, `access_token`,
 etc.), not substrings such as `hockey.clock`, `keyboard` or chroma-key enums.
 Short/enum-like values are not learned from arbitrary fields. Environment,
-Keychain and explicitly set stream keys are pinned for the process lifetime,
-including old values after key rotation; API traffic cannot evict them.
+Keychain and explicitly set stream keys keep the current and previous two
+values per service/account; ordinary API traffic cannot evict them. Stream
+keys are pinned only after a successful Keychain write, or after retrieval.
+Failed writes only enter the ordinary bounded learned-value cache.
+`status.diagnostics.credential_pinned_count` exposes the number of unique
+pinned values without exposing credentials or account names.
 The process also remembers the 512 most recently supplied API-learned values (least recently supplied
 evicted first, counted in `status.diagnostics.credential_cache_evictions`);
 API-learned values over 4 KiB are replaced in place and never remembered, so no request can

@@ -7,10 +7,10 @@ mod unix {
     use std::io::Write;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::{net::UnixDatagram, process::CommandExt};
-    use std::process::{Command, Stdio};
+    use std::process::{Child, Command, Stdio};
     use std::sync::{
         Arc, Condvar, Mutex, OnceLock,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     };
     const PENDING: &[u8] = b"\x1eisocast-seed-pending\n";
     const READY: &[u8] = b"\x1eisocast-seed-ready\n";
@@ -18,23 +18,83 @@ mod unix {
     // the receive budget. Leave room for the fragment header on both OSes.
     const SEED_FRAGMENT: usize = 1024;
     struct Seeds {
-        socket: UnixDatagram,
+        socket: Option<UnixDatagram>,
         pending: VecDeque<Vec<u8>>,
         withheld: bool,
+        dropped: u64,
     }
     static SEED: OnceLock<Arc<(Mutex<Seeds>, Condvar)>> = OnceLock::new();
     static PID: AtomicU32 = AtomicU32::new(0);
+    static DEATHS: AtomicU64 = AtomicU64::new(0);
+    static RESTARTS: AtomicU64 = AtomicU64::new(0);
+    static LAST_WARNING: Mutex<Option<String>> = Mutex::new(None);
+    static WARNING: OnceLock<Box<dyn Fn(String) + Send + Sync>> = OnceLock::new();
     pub fn pid() -> Option<u32> {
         let p = PID.load(Ordering::Relaxed);
         (p != 0).then_some(p)
     }
+    pub fn health() -> Value {
+        let (pending, dropped) = SEED.get().map_or((0, 0), |queue| {
+            let seeds = queue.0.lock().unwrap_or_else(|p| p.into_inner());
+            (
+                seeds.pending.iter().map(Vec::len).sum::<usize>(),
+                seeds.dropped,
+            )
+        });
+        json!({"unexpected_exits":DEATHS.load(Ordering::Relaxed),
+            "restarts":RESTARTS.load(Ordering::Relaxed),"pending_seed_bytes":pending,
+            "dropped_seed_messages":dropped,
+            "last_warning":LAST_WARNING.lock().unwrap_or_else(|p| p.into_inner()).clone()})
+    }
+    pub fn on_warning(notify: impl Fn(String) + Send + Sync + 'static) {
+        let _ = WARNING.set(Box::new(notify));
+        let previous = LAST_WARNING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let Some(message) = previous
+            && let Some(notify) = WARNING.get()
+        {
+            notify(message);
+        }
+    }
+    fn warning(message: String) {
+        *LAST_WARNING.lock().unwrap_or_else(|p| p.into_inner()) = Some(message.clone());
+        crate::emit("warn", "native", &message, Value::Null);
+        if let Some(notify) = WARNING.get() {
+            notify(message);
+        }
+    }
     impl Seeds {
+        fn disconnected(&mut self) {
+            self.socket = None;
+            self.dropped += self.pending.len() as u64;
+            self.pending.clear();
+            self.pending.shrink_to_fit();
+            self.withheld = true;
+        }
         fn flush(&mut self) {
+            let Some(socket) = &self.socket else { return };
             while let Some(message) = self.pending.front() {
-                if self.socket.send(message).is_err() {
-                    break;
+                match socket.send(message) {
+                    Ok(_) => {
+                        self.pending.pop_front();
+                    }
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.raw_os_error() == Some(libc::ENOBUFS) =>
+                    {
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        // The registry remains authoritative. Never keep a
+                        // retry backlog for a dead peer; its replacement is
+                        // seeded afresh before it may disclose native text.
+                        self.disconnected();
+                        return;
+                    }
                 }
-                self.pending.pop_front();
             }
             let withheld = !self.pending.is_empty();
             if withheld != self.withheld {
@@ -48,24 +108,113 @@ mod unix {
                 self.withheld = withheld;
             }
         }
-    }
-    pub fn seed(secret: &str, pinned: bool) {
-        if let Some(queue) = SEED.get() {
-            let mut seeds = queue.0.lock().unwrap_or_else(|p| p.into_inner());
-            // Fragment large explicit credentials into small datagrams; the
-            // receiver registers them only after their final fragment arrives.
-            let chunks = secret.as_bytes().chunks(SEED_FRAGMENT);
+        fn enqueue(&mut self, secret: &str, owner: Option<(&str, &str)>) {
+            if self.socket.is_none() {
+                self.dropped += 1;
+                return;
+            }
+            let payload = owner
+                .map(|(service, account)| serde_json::to_vec(&(service, account, secret)).unwrap());
+            let chunks = payload
+                .as_deref()
+                .unwrap_or(secret.as_bytes())
+                .chunks(SEED_FRAGMENT);
             let count = chunks.len();
             for (i, chunk) in chunks.enumerate() {
-                let mut message = vec![(u8::from(pinned) << 1) | u8::from(i + 1 == count)];
+                let mut message = vec![(u8::from(owner.is_some()) << 1) | u8::from(i + 1 == count)];
                 message.extend_from_slice(chunk);
-                seeds.pending.push_back(message);
+                self.pending.push_back(message);
             }
+        }
+    }
+    pub fn seed(secret: &str, owner: Option<(&str, &str)>) {
+        if let Some(queue) = SEED.get() {
+            let mut seeds = queue.0.lock().unwrap_or_else(|p| p.into_inner());
+            seeds.enqueue(secret, owner);
             seeds.flush();
             queue.1.notify_one();
         }
     }
     pub fn start(folder: &std::path::Path, launch: &str, process: &str) -> std::io::Result<()> {
+        let queue = Arc::new((
+            Mutex::new(Seeds {
+                socket: None,
+                pending: VecDeque::new(),
+                withheld: true,
+                dropped: 0,
+            }),
+            Condvar::new(),
+        ));
+        let _ = SEED.set(queue.clone());
+        let child = spawn_relay(folder, launch, process, 0, &queue)?;
+        let retry = queue.clone();
+        std::thread::Builder::new()
+            .name("native credential retry".into())
+            .spawn(move || {
+                let mut seeds = retry.0.lock().unwrap_or_else(|p| p.into_inner());
+                loop {
+                    while seeds.pending.is_empty() {
+                        seeds = retry.1.wait(seeds).unwrap_or_else(|p| p.into_inner());
+                    }
+                    seeds = retry
+                        .1
+                        .wait_timeout(seeds, std::time::Duration::from_millis(10))
+                        .unwrap_or_else(|p| p.into_inner())
+                        .0;
+                    seeds.flush();
+                }
+            })?;
+        let (folder, launch, process) = (folder.to_owned(), launch.to_owned(), process.to_owned());
+        std::thread::Builder::new().name("native relay supervisor".into()).spawn(move || {
+            let mut child = child;
+            let mut generation = 0;
+            loop {
+                let ended = child.wait();
+                PID.store(0, Ordering::Relaxed);
+                {
+                    let mut seeds = queue.0.lock().unwrap_or_else(|p| p.into_inner());
+                    seeds.disconnected();
+                    // Avoid EPIPE in native producers while no reader exists;
+                    // never redirect unsanitized text to a persistent log.
+                    if let Ok(null) = std::fs::OpenOptions::new().write(true).open("/dev/null") {
+                        unsafe { libc::dup2(null.as_raw_fd(), libc::STDERR_FILENO); }
+                    }
+                }
+                DEATHS.fetch_add(1, Ordering::Relaxed);
+                let reason = ended.map_or_else(|e| e.to_string(), |s| s.to_string());
+                warning(format!("native stderr relay exited unexpectedly ({reason}); restarting; native output during the gap is unavailable"));
+                let mut previous_error = None;
+                loop {
+                    // Bound respawn storms (e.g. its log volume is unavailable).
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    generation += 1;
+                    match spawn_relay(&folder, &launch, &process, generation, &queue) {
+                        Ok(next) => {
+                            child = next;
+                            RESTARTS.fetch_add(1, Ordering::Relaxed);
+                            warning("native stderr relay restarted; credential redaction restored before native logging resumes".into());
+                            break;
+                        }
+                        Err(error) => {
+                            let error = error.to_string();
+                            if previous_error.as_ref() != Some(&error) {
+                                warning(format!("native stderr relay unavailable: {error}; retrying"));
+                                previous_error = Some(error);
+                            }
+                        }
+                    }
+                }
+            }
+        })?;
+        Ok(())
+    }
+    fn spawn_relay(
+        folder: &std::path::Path,
+        launch: &str,
+        process: &str,
+        generation: u64,
+        queue: &Arc<(Mutex<Seeds>, Condvar)>,
+    ) -> std::io::Result<Child> {
         let (tx, rx) = UnixDatagram::pair()?;
         let capacity: libc::c_int = 256 * 1024;
         if unsafe {
@@ -82,8 +231,7 @@ mod unix {
         }
         tx.set_nonblocking(true)?;
         let fd = rx.as_raw_fd();
-        let context =
-            json!({"folder":folder,"launch":launch,"process":process,"pid":std::process::id()});
+        let context = json!({"folder":folder,"launch":launch,"process":process,"pid":std::process::id(),"generation":generation,"boot_pending":true});
         let mut command = Command::new(std::env::current_exe()?);
         command
             .arg("--native-log-relay")
@@ -102,6 +250,7 @@ mod unix {
         }
         let mut child = command.spawn()?;
         let input = child.stdin.take().unwrap();
+        let mut seeds = queue.0.lock().unwrap_or_else(|p| p.into_inner());
         if unsafe { libc::dup2(input.as_raw_fd(), libc::STDERR_FILENO) } < 0 {
             let _ = child.kill();
             let _ = child.wait();
@@ -110,41 +259,17 @@ mod unix {
         drop(input);
         drop(rx);
         PID.store(child.id(), Ordering::Relaxed);
-        let queue = Arc::new((
-            Mutex::new(Seeds {
-                socket: tx,
-                pending: VecDeque::new(),
-                withheld: false,
-            }),
-            Condvar::new(),
-        ));
-        let _ = SEED.set(queue.clone());
-        std::thread::Builder::new()
-            .name("native credential retry".into())
-            .spawn(move || {
-                let mut seeds = queue.0.lock().unwrap_or_else(|p| p.into_inner());
-                loop {
-                    while seeds.pending.is_empty() {
-                        seeds = queue.1.wait(seeds).unwrap_or_else(|p| p.into_inner());
-                    }
-                    // The relay's poll loop drains independently of native text.
-                    // Never wait for it on the caller's control/capture thread.
-                    seeds = queue
-                        .1
-                        .wait_timeout(seeds, std::time::Duration::from_millis(10))
-                        .unwrap_or_else(|p| p.into_inner())
-                        .0;
-                    seeds.flush();
-                }
-            })?;
-        for (secret, pinned) in crate::redact::known_secrets() {
-            seed(&secret, pinned);
+        seeds.socket = Some(tx);
+        seeds.withheld = true;
+        for (secret, owner) in crate::redact::known_secrets() {
+            seeds.enqueue(
+                &secret,
+                owner.as_ref().map(|(s, a)| (s.as_str(), a.as_str())),
+            );
         }
-        std::thread::spawn(move || {
-            let _ = child.wait();
-            PID.store(0, Ordering::Relaxed);
-        });
-        Ok(())
+        seeds.flush();
+        queue.1.notify_one();
+        Ok(child)
     }
     pub fn requested() -> bool {
         std::env::args().nth(1).as_deref() == Some("--native-log-relay")
@@ -163,17 +288,18 @@ mod unix {
         if launch.contains(['/', '\\']) {
             return Err(std::io::Error::other("invalid launch"));
         }
+        let generation = context["generation"].as_u64().unwrap_or(0);
+        let prefix = format!("{launch}-native-{generation:04}");
         let rx = unsafe { UnixDatagram::from_raw_fd(3) };
         rx.set_nonblocking(true)?;
         let mut segment = 0;
         let mut bytes = 0;
-        let mut file =
-            crate::private_file(&folder.join(format!("{launch}-native-{segment:04}.jsonl")))?;
+        let mut file = crate::private_file(&folder.join(format!("{prefix}-{segment:04}.jsonl")))?;
         let mut buffer = [0; 4096];
         let mut credential = Vec::new();
         let mut pending = Vec::new();
         let mut overlong = false;
-        let mut closed = false;
+        let mut closed = context["boot_pending"].as_bool().unwrap_or(false);
         let mut write = |line: &[u8], credential: &mut Vec<u8>| -> std::io::Result<()> {
             drain_seeds(&rx, credential);
             if line == PENDING {
@@ -197,7 +323,7 @@ mod unix {
             if bytes + line.len() > 4 << 20 {
                 let next = segment + 1;
                 let opened =
-                    crate::private_file(&folder.join(format!("{launch}-native-{next:04}.jsonl")))?;
+                    crate::private_file(&folder.join(format!("{prefix}-{next:04}.jsonl")))?;
                 file = opened;
                 segment = next;
                 bytes = 0;
@@ -283,7 +409,11 @@ mod unix {
             if packet[0] & 1 != 0 {
                 if let Ok(secret) = std::str::from_utf8(credential) {
                     if packet[0] & 2 != 0 {
-                        crate::redact::remember_secret(secret);
+                        if let Ok((service, account, key)) =
+                            serde_json::from_str::<(String, String, String)>(secret)
+                        {
+                            crate::redact::remember_secret(&service, &account, &key);
+                        }
                     } else {
                         crate::redact::learn_secret(secret);
                     }
@@ -294,10 +424,16 @@ mod unix {
     }
 }
 #[cfg(unix)]
-pub use unix::{pid, requested, run, seed, start};
+pub use unix::{health, on_warning, pid, requested, run, seed, start};
 #[cfg(not(unix))]
-pub fn seed(_secret: &str, _pinned: bool) {}
+pub fn seed(_secret: &str, _owner: Option<(&str, &str)>) {}
 #[cfg(not(unix))]
 pub fn pid() -> Option<u32> {
     None
 }
+#[cfg(not(unix))]
+pub fn health() -> serde_json::Value {
+    serde_json::Value::Null
+}
+#[cfg(not(unix))]
+pub fn on_warning(_notify: impl Fn(String) + Send + Sync + 'static) {}

@@ -2262,7 +2262,7 @@ impl Daemon {
                 Err(err) => return Err(failed(err)),
             },
         };
-        isocast_diagnostics::redact::remember_secret(&key);
+        isocast_diagnostics::redact::remember_secret(KEY_SERVICE, &account, &key);
         // Starting the engine happens outside the lock; until the stream is
         // in the state, this keeps the engine from idling out.
         state.streams_starting += 1;
@@ -2365,8 +2365,8 @@ impl Daemon {
             )));
         }
         let (service, account) = self.key_target(params.target)?;
-        isocast_diagnostics::redact::remember_secret(key);
         set_secret(KEY_SERVICE, &account, key).map_err(failed)?;
+        isocast_diagnostics::redact::remember_secret(KEY_SERVICE, &account, key);
         Ok(StreamKey {
             service,
             account,
@@ -3353,7 +3353,7 @@ fn has_secret(service: &str, account: &str) -> Result<bool> {
 fn secret(service: &str, account: &str) -> Result<Option<String>> {
     let key = MacPlatform.secret(service, account)?;
     if let Some(key) = &key {
-        isocast_diagnostics::redact::remember_secret(key);
+        isocast_diagnostics::redact::remember_secret(service, account, key);
     }
     Ok(key)
 }
