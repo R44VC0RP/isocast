@@ -1448,6 +1448,12 @@ each section. Delete entries that stop being true.
   switches to precise deadlines only when its wakes are measurably being
   stretched. Performance against OBS is a goal; robustness for headless
   launches shouldn't cost every user CPU.
+  Follow-up (same night): recording doesn't wait for clocks to qualify;
+  instead escalation is process-wide, so once any clock has seen stretched
+  sleeps, clocks created later (ISOs at record start, sources, the virtual
+  camera) start on precise deadlines. Normal-context CPU of the adaptive
+  build (+1.4..3.7% medians, overlapping ranges, all clocks ordinary) is
+  accepted as within noise.
 
 - 2026-10-14: **A.6 hardening supersedes lifetime/unbounded pinning.**
   `stream_key_set` pins after the Keychain write succeeds. Pins are keyed by

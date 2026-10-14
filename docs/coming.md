@@ -16,7 +16,6 @@ use it. Start and stop it from the app, the CLI or an agent.
 
 ## Also planned
 
-- Pause and resume a recording without starting a new file.
 - A replay buffer: keep the last seconds in memory and save them on
   command.
 - Projectors and a multiview grid.

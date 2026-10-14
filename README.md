@@ -2,7 +2,7 @@
 
 **Record and stream your Mac like OBS, with every source saved as its own file, at a fraction of the CPU.**
 
-![Isocast recording: the Screen scene shows a terminal with a picture-in-picture photo and a title, above the recording timer, frame rate, dropped frames and CPU, with scenes, sources, the audio mixer and controls below](docs/images/app.png)
+![Isocast recording: the Screen scene shows a terminal with a picture-in-picture photo and a title, above the recording timer, frame rate, dropped frames and CPU, with scenes, sources, the audio mixer and the controls (Stop, Pause, Virtual Camera, Studio Mode) below](docs/images/app.png)
 
 ## What it does
 
@@ -13,6 +13,9 @@ Isocast imports them.
 
 **Studio Mode.** Line up the next scene in the preview while the program
 stays on air, then take it live with a cut, a fade or another transition.
+Next to Record, **Pause** holds a take and picks it up again in the same
+file, and **Virtual Camera** sends the program to video-call apps (still in
+testing).
 
 ![Studio Mode: the Starting soon intro in preview on the left, the live program on the right, and the Transition button between them](docs/images/studio.png)
 
