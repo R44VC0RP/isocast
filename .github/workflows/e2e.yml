@@ -1,0 +1,97 @@
+name: Engine E2E
+
+on:
+  pull_request:
+    paths:
+      - 'crates/isocast-engine/**'
+      - 'crates/isocast-daemon/**'
+      - 'crates/isocast-protocol/**'
+      - 'crates/isocast-platform-*/**'
+      - 'crates/isocast-client/**'
+      - 'crates/isocast-cli/**'
+      - 'crates/isocast-plugin/**'
+      - 'examples/plugins/**'
+      - 'Cargo.*'
+      - 'scripts/e2e.py'
+      - '.github/workflows/e2e.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    # GitHub-hosted arm64 only. Untrusted PR code never reaches test Macs.
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check architecture
+        run: |
+          test "$(uname -m)" = arm64
+          echo "ISOCAST_SCRATCH=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/e2e.yml') }}
+          restore-keys: ffmpeg-${{ runner.os }}-${{ runner.arch }}-
+      - name: FFmpeg
+        run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+      - name: Build release engine
+        run: cargo build --locked --release -p isocast-daemon
+      - name: Probe VideoToolbox (real hardware-only encode)
+        run: python3 scripts/e2e.py --capabilities --report "$RUNNER_TEMP/capabilities.json"
+      - name: End-to-end scenarios
+        run: |
+          python3 scripts/e2e.py --keep-failures --work "$RUNNER_TEMP/e2e" \
+            --report "$RUNNER_TEMP/e2e-report.json"
+      - name: Job summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'e2e-report.json'
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('## Engine E2E\n\n| Scenario | Result | Reason |\n|---|---|---|\n')
+              if not path.exists():
+                  out.write('| harness | FAIL | Build or startup failed; see job logs |\n')
+              else:
+                  report = json.loads(path.read_text())
+                  caps = report.get('capabilities', {})
+                  out.write(f"| encoder | {caps.get('record_codec', 'unavailable')} | HEVC hardware: {caps.get('hevc')}; H.264 hardware: {caps.get('h264')} |\n")
+                  for row in report['scenarios']:
+                      reason = row['reason'].replace('|', '/').replace('\n', ' ')[:500]
+                      out.write(f"| {row['name']} | {row['status']} | {reason} |\n")
+                  for field in ('error', 'cleanup_error'):
+                      if report.get(field):
+                          out.write('| harness | FAIL | ' + report[field].replace('|', '/').replace('\n', ' ')[:500] + ' |\n')
+          PY
+      - name: Report and failing files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-e2e
+          path: |
+            ${{ runner.temp }}/e2e-report.json
+            ${{ runner.temp }}/capabilities.json
+            ${{ runner.temp }}/e2e
+          if-no-files-found: warn
+          retention-days: 7

@@ -152,6 +152,18 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-13 (8.4, branch agent/visual-ci): the visual check's first real
+  run on GitHub. The runner's GPU (macOS 15 arm64 VM, paravirtual Metal)
+  has not drawn the app yet; only this Mac has. After merging to main:
+  `gh workflow run visual.yml -R R44VC0RP/isocast --ref main -f base=main`
+  (warms the release cargo cache and must show 15 views, all "unchanged",
+  plus a `gpu: ...` line that isn't a CPU device), then
+  `gh run download -R R44VC0RP/isocast -n visual-screenshots` and look at
+  head/*.png. The judge needs the repo secret OPENCODE_API_KEY (added);
+  optional repo variable VISION_MODEL (default opencode/claude-sonnet-5-5).
+  To require the check: Settings > Branches > main > Require status checks
+  > `isocast/visual-check` (only after one PR has reported it).
+
 - 2026-10-13 (G.5): Ordinary global keys and push-to-talk need no new
   permissions and are verified. Global **media** keys need Input Monitoring
   for the signed daemon; it is absent on isocast-m2-b, so only their warning
@@ -418,6 +430,20 @@ each section. Delete entries that stop being true.
   a console, or can be dropped from the rig. Nothing waits on it.
 
 ## Benchmarks
+
+- 2026-10-13 (engine-e2e): local M5 Max and isocast-m2-a each pass 11/11
+  available scenarios, with explicit pause/bug_report skips on a619986.
+  Program and two ISO files: each 300 frames, 5.000 s video/audio, zero
+  drops, full decode; maximum beep/flash offsets 0.021 ms locally and
+  1.167 ms on M2. RTMP 6000.1/160.4 kb/s, keyframes at 0/2/4/6 s, no
+  video/audio drops; retake export 240 frames/4.000 s and removed takes
+  preserved. ProRes record/ISO/scenes/plugin/crash checks also pass locally.
+  CI-driver A/A on M2 (same release bytes, three alternating pairs each):
+  program CPU 33.1 vs 33.4%, stream 29.8 vs 30.2%, both within spread,
+  zero drops; flagship correctly skipped on a base M2. Another lane's
+  existing g1-review stream was active, so this qualifies automation, not
+  isolated performance. All runs held the common lock; no screen sharing.
+  Evidence and hosted first-run steps: `/Volumes/IsocastBuild/e2e/scratch/REPORT.md`.
 
 - 2026-10-13: **S.3 round 3, final delivery** (main 85c5d6d versus SHA
   `3ddf919913e6`; M4 eight interleaved flagship pairs, M2 four per scenario).
@@ -1064,6 +1090,72 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-13: **Visual check on pull requests (8.4).** Split in two
+  workflows because one can't both run untrusted code and hold write
+  tokens or secrets: visual.yml (`pull_request`, read-only token, no
+  secrets, works for forks) builds the merge base and the head in one
+  checkout and target folder, renders with the head's
+  scripts/visual-shots.sh and uploads PNGs + manifest.json;
+  visual-report.yml (`workflow_run`, runs the default branch's files only)
+  never checks out PR code: it validates the artifact (known names, PNG
+  magic, size caps, no links), checks the PR's head SHA against the API
+  (forks have no PR in the event, so the artifact's number is verified),
+  pushes the images to the orphan branch `ci-screenshots` under
+  pr/<n>/<sha>/ (comment images need a URL GitHub serves; artifacts aren't
+  viewable inline; a separate branch keeps main's history clean and can be
+  reset any time), runs the judge, upserts one comment
+  (`<!-- isocast-visual -->`), labels `visual-change` /
+  `visual-regression?` and sets the status `isocast/visual-check`
+  (success: nothing changed, or every changed view no_change /
+  intended_change and ready_to_merge; failure: possible_regression,
+  broken or not ready; error: couldn't judge). visual.yml runs on every PR
+  and skips the build when no UI path changed (a `paths:` filter would
+  leave other PRs without the required status).
+- 2026-10-13: **Deterministic offscreen renders.** The same build drew
+  0.05-5% different pixels run to run: the status bar's CPU reading (its
+  width shifts the right-aligned bar), the audio meters (real-time
+  decay) and the camera's live preview in its Properties. Fix:
+  ISOCAST_SNAPSHOT_STILL (offscreen.rs, a small hook) drops Levels events
+  and nulls `cpu_percent` in replies; visual-shots.sh shows the tone's
+  Properties (no preview) and keeps its engine in a fixed folder
+  (/tmp/isocast-visual-shots, the image path shows in dialogs). Result: 0
+  px changed across 15 views, repeated. Diff tolerance 8/255 per channel,
+  a view "changed" above 0.01% of pixels. Base builds made before this
+  hook still show live CPU and meters, so PRs opened before it merges get
+  small status-bar diffs.
+- 2026-10-13: **The judge is a restricted OpenCode agent.** One
+  `opencode run --standalone --agent judge` per changed view
+  (@opencode/cli 2.0.28 pinned; model `opencode/claude-sonnet-5-5`,
+  Anthropic Messages via https://opencode.ai/inference/v1, key from env
+  OPENCODE_API_KEY; `opencode/gpt-6-luna` also verified). The run folder is
+  a fresh copy of .github/visual-judge (from the default branch) and
+  XDG_CONFIG_HOME points at an empty config, so OpenCode's upward config,
+  agent, plugin and AGENTS.md discovery sees nothing from the PR; the PR's
+  images, diff and file copies sit in a sibling input folder. Three layers
+  keep it a judge: permissions deny `*` and allow only
+  external_directory/read for that folder, glob, grep and deliver_verdict;
+  the plugin deletes every other tool from each request and refuses any
+  other tool in `execute.before`; formatter, LSP, snapshots, compaction and
+  the built-in agents are off. The `{env:...}` substitution doesn't apply
+  in agent frontmatter, so visual_judge.py writes the input path into
+  judge.md. The workflow, not the model, writes the comment, labels and
+  status; verdict text is escaped and capped. Steps 12, 4000 output
+  tokens a request, 150 s a run, one retry, at most 15 views a run.
+- 2026-10-13 (engine-e2e): `scripts/e2e.py` is the approved stdlib-only
+  real-file harness. Each scenario owns an ad-hoc signed background dev app,
+  socket, setup/library, plugins, timeline and recordings; it holds the same
+  `.bench.lock` as bench.py and bounds a whole worker process group. Default
+  cleanup removes scratch files; `--keep` keeps all, `--keep-failures` keeps
+  failed cases for CI. `--report PATH` always writes JSON; `--json` also
+  prints it. Hardware-only FFmpeg probes select HEVC/H.264 or the engine's
+  ProRes path; streaming explicitly skips without H.264 hardware. `--codec
+  prores422` exercises the fallback directly. No capture sources are used.
+  The PR benchmark runs three interleaved base/head pairs, flags changes
+  beyond full run-to-run spread, and is informational. Its workflow_run
+  publisher executes only default-branch code, validates bounded numeric
+  JSON and current PR/head identity, and updates one bot comment. No optional
+  commit-status gate is enabled on noisy VM measurements.
 
 - 2026-10-13: **Contribution policy (Ryan).** Agent-written contributions
   are encouraged (latest state-of-the-art models at their highest reasoning
@@ -2692,6 +2784,16 @@ each section. Delete entries that stop being true.
   not one tool per API call.
 
 ## Gotchas
+
+- 2026-10-13 (engine-e2e): `start`/`split` return media paths, not the
+  manifest; match its files. A split reply precedes `begins_at`: a Stop
+  before that boundary cancels the pending take. Pixel averages need FFmpeg
+  `scale=1:1:flags=area` (the default scaler is not a full-frame mean).
+  Explicitly demux generated beep WAVs with `-f wav`: FFmpeg can mistake
+  their periodic bytes for MPEG-TS. macOS sometimes returns EPERM when
+  signaling a group of dead native children; the harness checks for live
+  non-zombie members before treating that as harmless, and cleanup errors
+  cannot suppress the JSON report. Three signal-race repetitions pass.
 
 - 2026-10-13: Screenshots on the test Macs: the bridge can't run
   `screencapture` ("could not create image from display": no Screen

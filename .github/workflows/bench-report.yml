@@ -1,0 +1,114 @@
+name: Engine Bench Report
+
+# Trusted half: default-branch scripts only, no PR checkout, cache or executable
+# artifact. The other job has read-only permissions and no repository secrets.
+on:
+  workflow_run:
+    workflows: [Engine Bench]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: engine-bench-report
+  cancel-in-progress: false
+
+jobs:
+  comment:
+    if: ${{ github.event.workflow_run.event == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Download bounded data artifact and identify current PR
+        id: artifact
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const run = context.payload.workflow_run;
+            if (run.repository.id !== context.payload.repository.id ||
+                run.path !== '.github/workflows/bench.yml') {
+              throw new Error('Unexpected workflow origin');
+            }
+            const prs = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+              ...context.repo, commit_sha: run.head_sha, per_page: 100
+            });
+            const matches = prs.filter(p => p.state === 'open' && p.head.sha === run.head_sha &&
+              p.base.repo.id === context.payload.repository.id &&
+              p.head.repo?.id === run.head_repository?.id);
+            if (matches.length !== 1) {
+              core.notice('Stale or ambiguous run: no current PR to update'); return;
+            }
+            core.setOutput('pr', matches[0].number);
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              ...context.repo, run_id: run.id, per_page: 100
+            });
+            const report = artifacts.filter(a => a.name === 'engine-bench-report' && !a.expired);
+            if (report.length !== 1) { core.notice('Missing report; will comment with run failure'); return; }
+            if (report[0].size_in_bytes > 300000) {
+              core.notice('Oversize artifact; will comment with validation failure'); return;
+            }
+            const zip = await github.rest.actions.downloadArtifact({
+              ...context.repo, artifact_id: report[0].id, archive_format: 'zip'
+            });
+            fs.writeFileSync(process.env.RUNNER_TEMP + '/bench.zip', Buffer.from(zip.data));
+            core.setOutput('downloaded', 'true');
+      - name: Validate data and render trusted Markdown
+        if: ${{ steps.artifact.outputs.pr != '' }}
+        env:
+          PR: ${{ steps.artifact.outputs.pr }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          DOWNLOADED: ${{ steps.artifact.outputs.downloaded }}
+        run: |
+          python3 - <<'PY'
+          import importlib.util, json, os, zipfile
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          text = '<!-- isocast-bench -->\n## Engine benchmark\n\nThe benchmark did not produce a valid report. See the linked run logs.\n'
+          if os.environ.get('DOWNLOADED') == 'true':
+              try:
+                  with zipfile.ZipFile(root / 'bench.zip') as archive:
+                      entries = archive.infolist()
+                      if len(entries) != 1 or entries[0].filename != 'bench-report.json' or entries[0].file_size > 262144:
+                          raise ValueError('Unexpected archive contents')
+                      data = json.loads(archive.read(entries[0]))
+                  if data['pr'] != int(os.environ['PR']) or data['head_sha'] != os.environ['HEAD_SHA']:
+                      raise ValueError('Artifact does not belong to this PR/head')
+                  spec = importlib.util.spec_from_file_location('trusted', '.github/scripts/bench_report.py')
+                  module = importlib.util.module_from_spec(spec)
+                  spec.loader.exec_module(module)
+                  text = module.summary(data)
+              except (ValueError, KeyError, TypeError, zipfile.BadZipFile):
+                  text += '\nArtifact validation failed. No artifact content was published.\n'
+          (root / 'comment.md').write_text(text)
+          PY
+      - name: Update one PR comment
+        if: ${{ steps.artifact.outputs.pr != '' }}
+        env:
+          PR: ${{ steps.artifact.outputs.pr }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const run = context.payload.workflow_run;
+            const issue_number = Number(process.env.PR);
+            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: issue_number});
+            if (pr.state !== 'open' || pr.head.sha !== run.head_sha ||
+                pr.head.repo?.id !== run.head_repository?.id) return; // newer push won the race
+            const body = fs.readFileSync(process.env.RUNNER_TEMP + '/comment.md', 'utf8') +
+              `\n[Run and raw measurements](${run.html_url})\n`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number, per_page: 100
+            });
+            const own = comments.find(c => c.user.login === 'github-actions[bot]' &&
+              c.body.startsWith('<!-- isocast-bench -->'));
+            if (own) await github.rest.issues.updateComment({...context.repo, comment_id: own.id, body});
+            else await github.rest.issues.createComment({...context.repo, issue_number, body});

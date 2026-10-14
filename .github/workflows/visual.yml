@@ -1,0 +1,203 @@
+name: Visual
+
+# Builds the pull request and its merge base, draws the app's standard views
+# offscreen with both (scripts/visual-shots.sh: synthetic sources, its own
+# clock, bundled fonts, no live readouts) and uploads before/after/diff PNGs
+# with a manifest. It runs the pull request's code, so it gets a read-only
+# token and no secrets; visual-report.yml (workflow_run, trusted) reads the
+# artifact, posts the comment, runs the judge and sets the commit status.
+#
+# It starts on every pull request, but only builds when one of UI_PATHS
+# changed; otherwise it uploads an empty manifest. (A `paths:` filter would
+# leave other pull requests without the isocast/visual-check status, which
+# blocks them forever once the check is required.)
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Branch, tag or commit to compare against
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: visual-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  ISOCAST_SHOTS_WORK: /tmp/isocast-visual-shots
+  # What the app shows depends on these; a change anywhere else skips the build.
+  UI_PATHS: >-
+    crates/isocast-ui/ crates/isocast-app/ui/ crates/isocast-protocol/
+    scripts/visual-shots.sh scripts/visual_diff.py scripts/screenshots/offscreen.toml
+    .github/workflows/visual.yml
+
+jobs:
+  changes:
+    name: interface changed?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ui: ${{ steps.refs.outputs.ui }}
+      head: ${{ steps.refs.outputs.head }}
+      base: ${{ steps.refs.outputs.base }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Base and head
+        id: refs
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_INPUT: ${{ inputs.base }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$BASE_SHA" ]; then
+            git fetch --no-tags origin "${BASE_INPUT:-main}"
+            BASE_SHA="$(git rev-parse FETCH_HEAD)"
+          fi
+          MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          ui=false
+          # shellcheck disable=SC2086 # UI_PATHS is a list of pathspecs
+          if [ "$EVENT" = workflow_dispatch ] || [ -n "$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA" -- $UI_PATHS)" ]; then
+            ui=true
+          fi
+          {
+            echo "head=$HEAD_SHA"
+            echo "base=$MERGE_BASE"
+            echo "ui=$ui"
+          } >> "$GITHUB_OUTPUT"
+          echo "head $HEAD_SHA, merge base $MERGE_BASE, interface changed: $ui"
+
+      - name: Empty manifest
+        if: ${{ steps.refs.outputs.ui == 'false' }}
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ steps.refs.outputs.head }}
+          BASE_SHA: ${{ steps.refs.outputs.base }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/visual"
+          jq -n --argjson pr "${PR:-0}" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
+            '{version: 1, pr: $pr, head_sha: $head, base_sha: $base, views: [], broken: [], gpu: [],
+              note: "no interface files changed"}' > "$RUNNER_TEMP/visual/manifest.json"
+
+      - name: Upload
+        if: ${{ steps.refs.outputs.ui == 'false' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-screenshots
+          path: ${{ runner.temp }}/visual/
+          retention-days: 14
+
+  shots:
+    name: screenshots (base vs head)
+    needs: changes
+    if: ${{ needs.changes.outputs.ui == 'true' }}
+    # GitHub-hosted only: never run pull request code on our own machines.
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.changes.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: GPU
+        run: |
+          sw_vers
+          sysctl -n machdep.cpu.brand_string
+          system_profiler SPDisplaysDataType
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: visual-release
+          # Only main writes the cache (run this workflow by hand on main to
+          # warm it); pull requests read it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The head's render and diff scripts draw both sides, so both use the
+      # same views, sizes and setup.
+      - name: Keep the head's scripts
+        run: |
+          tools="$RUNNER_TEMP/tools"
+          mkdir -p "$tools/screenshots"
+          cp scripts/visual-shots.sh scripts/visual_diff.py "$tools/"
+          cp scripts/screenshots/offscreen.toml scripts/screenshots/landscape.jpg \
+            scripts/screenshots/brb.jpg "$tools/screenshots/"
+
+      # One checkout and one target folder, so the second build only
+      # rebuilds what differs.
+      - name: Build base
+        env:
+          SHA: ${{ needs.changes.outputs.base }}
+        run: |
+          git checkout --quiet --detach "$SHA"
+          cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli
+          mkdir -p "$RUNNER_TEMP/bin-base"
+          cp target/release/isocast target/release/isocastd target/release/isocast-ui "$RUNNER_TEMP/bin-base/"
+
+      - name: Build head
+        env:
+          SHA: ${{ needs.changes.outputs.head }}
+        run: |
+          git checkout --quiet --detach "$SHA"
+          cargo build --release --locked -p isocast-ui -p isocast-daemon -p isocast-cli
+          mkdir -p "$RUNNER_TEMP/bin-head"
+          cp target/release/isocast target/release/isocastd target/release/isocast-ui "$RUNNER_TEMP/bin-head/"
+
+      # visual-shots.sh fails if the GPU adapter is a software one, and
+      # visual_diff.py if a picture is blank: comparing those would be noise.
+      - name: Render
+        run: |
+          tools="$RUNNER_TEMP/tools"
+          "$tools/visual-shots.sh" "$RUNNER_TEMP/bin-base" "$RUNNER_TEMP/shots-base"
+          "$tools/visual-shots.sh" "$RUNNER_TEMP/bin-head" "$RUNNER_TEMP/shots-head"
+
+      - name: Compare
+        id: compare
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ needs.changes.outputs.head }}
+          BASE_SHA: ${{ needs.changes.outputs.base }}
+        run: |
+          set +e
+          python3 "$RUNNER_TEMP/tools/visual_diff.py" \
+            "$RUNNER_TEMP/shots-base" "$RUNNER_TEMP/shots-head" "$RUNNER_TEMP/visual" \
+            ${PR:+--pr "$PR"} --head-sha "$HEAD_SHA" --base-sha "$BASE_SHA" \
+            --gpu "$RUNNER_TEMP/shots-base/gpu.txt" --gpu "$RUNNER_TEMP/shots-head/gpu.txt"
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Upload
+        if: ${{ !cancelled() && steps.compare.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-screenshots
+          path: ${{ runner.temp }}/visual/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Logs
+        if: ${{ failure() }}
+        run: tail -n 20 "$RUNNER_TEMP"/shots-*/logs/*.log || true
+
+      - name: Broken renders fail the job
+        if: ${{ steps.compare.outputs.rc != '0' }}
+        run: |
+          echo "visual_diff.py found blank or broken pictures (see Compare); the GPU may not be drawing in this runner."
+          exit 1

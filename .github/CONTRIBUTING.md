@@ -119,6 +119,26 @@ Nothing opens on screen, and your own setup isn't touched. The video area
 shows a stand-in test picture, so judge the interface around it. Drag the
 PNGs you need into the pull request.
 
+## Visual checks
+
+Pull requests that touch the interface also get an automatic visual check.
+`.github/workflows/visual.yml` builds your branch and its merge base,
+draws every standard view at 1440x900 (2x), 1920x1080 (1x) and 900x600
+(2x) with `scripts/visual-shots.sh`, and compares them pixel by pixel. A
+bot comment then shows before, after and a diff (changed pixels in
+magenta) for each view that changed. A judge agent (Claude Sonnet 5.5,
+running in OpenCode with read-only access to the images and your interface
+diff, and nothing else) reviews each changed view for clipped text,
+overlap, missing controls, misalignment and broken colours. Its verdict
+sets the `isocast/visual-check` status: success when nothing changed or
+every change looks intended, failure on a likely regression, error when
+the check couldn't run. The judge is a reviewer, not the last word: if it
+flags something you did on purpose, say so in the pull request.
+
+Maintainers: make the check required under Settings → Branches → `main` →
+Require status checks to pass → `isocast/visual-check` (it appears in the
+list after it has reported once).
+
 ## How pull requests land
 
 Until the alpha ends, Isocast's history is published as snapshots. An

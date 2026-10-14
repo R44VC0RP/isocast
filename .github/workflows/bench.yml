@@ -1,0 +1,109 @@
+name: Engine Bench
+
+on:
+  pull_request:
+    paths:
+      - 'crates/isocast-engine/**'
+      - 'crates/isocast-daemon/**'
+      - 'crates/isocast-protocol/**'
+      - 'crates/isocast-platform-*/**'
+      - 'crates/isocast-client/**'
+      - 'crates/isocast-cli/**'
+      - 'crates/isocast-plugin/**'
+      - 'Cargo.*'
+      - 'scripts/bench.py'
+      - 'scripts/e2e.py'
+      - '.github/scripts/bench_report.py'
+      - '.github/workflows/bench*.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: 0
+      ISOCAST_SIGN_IDENTITY: '-'
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      BASE_REF: ${{ github.event.pull_request.base.sha }}
+      PR: ${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check architecture
+        run: |
+          test "$(uname -m)" = arm64
+          echo "ISOCAST_SCRATCH=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Merge base
+        run: |
+          base="$(git merge-base "$BASE_REF" "$HEAD_SHA")"
+          echo "BASE_SHA=$base" >> "$GITHUB_ENV"
+          git worktree add --detach "$RUNNER_TEMP/base-src" "$base"
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/e2e.yml') }}
+          restore-keys: ffmpeg-${{ runner.os }}-${{ runner.arch }}-
+      - name: FFmpeg
+        run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+      - name: Probe hardware
+        run: python3 scripts/e2e.py --capabilities --report "$RUNNER_TEMP/capabilities.json"
+      - name: Build base and head release binaries
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin/base" "$RUNNER_TEMP/bin/head"
+          # Same target directory/toolchain/profile, with each binary frozen before the next build.
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          cargo build --locked --release --manifest-path "$RUNNER_TEMP/base-src/Cargo.toml" -p isocast-daemon -p isocast-cli
+          cp target/release/isocastd target/release/isocast "$RUNNER_TEMP/bin/base/"
+          cargo build --locked --release -p isocast-daemon -p isocast-cli
+          cp target/release/isocastd target/release/isocast "$RUNNER_TEMP/bin/head/"
+      - name: Three interleaved base/head pairs per scenario
+        run: |
+          python3 .github/scripts/bench_report.py run --work "$RUNNER_TEMP/bench" \
+            --head "$RUNNER_TEMP/bin/head/isocastd" --base "$RUNNER_TEMP/bin/base/isocastd" \
+            --cli "$RUNNER_TEMP/bin/head/isocast" --pr "$PR" --head-sha "$HEAD_SHA" --base-sha "$BASE_SHA" \
+            --capabilities "$RUNNER_TEMP/capabilities.json" --output "$RUNNER_TEMP/bench-report.json"
+      - name: Comparison table
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/bench-report.json" ]; then
+            python3 .github/scripts/bench_report.py render "$RUNNER_TEMP/bench-report.json" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '## Engine benchmark failed before measurements; see job logs.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Numeric report for trusted publisher
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-bench-report
+          path: ${{ runner.temp }}/bench-report.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Raw measurements and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-bench-evidence
+          path: |
+            ${{ runner.temp }}/capabilities.json
+            ${{ runner.temp }}/bench/**/results.jsonl
+            ${{ runner.temp }}/bench/**/bench.log
+            ${{ runner.temp }}/bench/**/*.session.json
+          if-no-files-found: warn
+          retention-days: 7

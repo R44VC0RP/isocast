@@ -1,0 +1,225 @@
+name: Visual report
+
+# The trusted half of the visual check. It runs on the base repository's
+# default branch after "Visual" finishes, never checks out or runs pull
+# request code, and only reads the screenshot artifact (validated: known
+# names, PNG and JSON only, size caps) and the GitHub API. It pushes the
+# images to the orphan branch `ci-screenshots` under pr/<number>/<head sha>/,
+# runs the judge (a restricted OpenCode agent, .github/visual-judge, only
+# with the OPENCODE_API_KEY secret), upserts one comment and sets the commit
+# status `isocast/visual-check` on the head commit.
+on:
+  workflow_run:
+    workflows: [Visual]
+    types: [completed]
+
+permissions: {}
+
+# Serialised: every run pushes to the same branch.
+concurrency:
+  group: visual-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: comment, judge and status
+    if: ${{ github.event.workflow_run.event == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read # the other run's artifact
+      contents: write # the ci-screenshots branch
+      pull-requests: write # the comment and labels
+      statuses: write # isocast/visual-check
+    env:
+      REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+    steps:
+      - name: Work folder
+        run: echo "WORK=$RUNNER_TEMP/visual" >> "$GITHUB_ENV"
+
+      - name: Check out the trusted scripts (default branch)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Download the screenshots
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: visual-screenshots
+          path: ${{ runner.temp }}/visual/artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Validate the artifact
+        id: artifact
+        if: ${{ steps.download.outcome == 'success' }}
+        env:
+          EVENT_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          python3 scripts/visual_report.py validate "$WORK/artifact"
+          manifest="$WORK/artifact/manifest.json"
+          pr="$(jq -r '.pr' "$manifest")"
+          sha="$(jq -r '.head_sha' "$manifest")"
+          if [ "$sha" != "$HEAD_SHA" ]; then
+            echo "the artifact is for $sha, not this run's $HEAD_SHA"; exit 1
+          fi
+          # Same-repository runs name the PR in the event; fork runs don't, so
+          # the artifact's number is used and checked against the API below.
+          if [ -n "$EVENT_PR" ] && [ "$EVENT_PR" != "$pr" ]; then
+            echo "the artifact says PR $pr, the event says $EVENT_PR"; exit 1
+          fi
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Check the pull request and fetch its interface diff
+        id: pr
+        if: ${{ steps.artifact.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.artifact.outputs.pr }}
+        run: |
+          set +e
+          python3 scripts/visual_report.py pr --repo "$REPO" --pr "$PR" --head-sha "$HEAD_SHA" \
+            --diff "$WORK/ui.diff" --sources "$WORK/sources"
+          rc=$?
+          set -e
+          if [ "$rc" = 3 ]; then echo "current=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          [ "$rc" = 0 ]
+          echo "current=true" >> "$GITHUB_OUTPUT"
+
+      - name: Pending status
+        if: ${{ steps.pr.outputs.current == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$REPO/statuses/$HEAD_SHA" -f state=pending -f context=isocast/visual-check \
+            -f description="Judging the screenshots" -f target_url="$RUN_URL" > /dev/null
+
+      - name: Push the images to ci-screenshots
+        id: images
+        if: ${{ steps.pr.outputs.current == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.artifact.outputs.pr }}
+        run: |
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          pages="$WORK/pages"
+          git init --quiet "$pages"
+          cd "$pages"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://github.com/$REPO.git"
+          for attempt in 1 2 3; do
+            if git -c http.extraheader="$auth" fetch --quiet --depth 1 origin ci-screenshots 2>/dev/null; then
+              git checkout --quiet -B ci-screenshots FETCH_HEAD
+            else
+              git checkout --quiet --orphan ci-screenshots
+              git rm -rf --quiet . 2>/dev/null || true
+              printf 'Screenshots for pull requests, written by .github/workflows/visual-report.yml.\n' > README.md
+              git add README.md
+            fi
+            dest="pr/$PR/$HEAD_SHA"
+            rm -rf "${dest:?}"
+            mkdir -p "$dest"
+            cp -R "$WORK/artifact/." "$dest/"
+            git add -A
+            git commit --quiet -m "PR #$PR at $HEAD_SHA" || true
+            if git -c http.extraheader="$auth" push --quiet origin HEAD:ci-screenshots; then
+              echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          exit 1
+
+      - name: Judge
+        id: judge
+        if: ${{ steps.images.outcome == 'success' }}
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          VISION_MODEL: ${{ vars.VISION_MODEL }}
+        run: |
+          if [ -z "$OPENCODE_API_KEY" ]; then
+            echo "skipped=the OPENCODE_API_KEY secret is not set" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! jq -e '[.views[] | select(.status != "unchanged")] | length > 0' "$WORK/artifact/manifest.json" > /dev/null; then
+            echo "skipped=nothing changed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          npm install --global --no-fund --no-audit @opencode/cli@2.0.28
+          python3 scripts/visual_judge.py "$WORK/artifact" --judge .github/visual-judge \
+            --work "$WORK/judge" --out "$WORK/judge.json" --diff "$WORK/ui.diff" \
+            --sources "$WORK/sources" --max-views 15 --timeout 150
+
+      - name: Comment
+        id: comment
+        if: ${{ steps.images.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.artifact.outputs.pr }}
+          IMAGES: ${{ steps.images.outputs.commit }}
+          SKIPPED: ${{ steps.judge.outputs.skipped }}
+          JUDGE_OUTCOME: ${{ steps.judge.outcome }}
+        run: |
+          judge=""
+          [ -f "$WORK/judge.json" ] && judge="$WORK/judge.json"
+          skipped="${SKIPPED:-}"
+          [ "$JUDGE_OUTCOME" = failure ] && skipped="the judge step failed"
+          python3 scripts/visual_report.py comment "$WORK/artifact" --repo "$REPO" --pr "$PR" \
+            --head-sha "$HEAD_SHA" --images-commit "$IMAGES" --run-url "$RUN_URL" \
+            ${judge:+--judge "$judge"} ${skipped:+--judge-skipped "$skipped"} \
+            --markdown "$WORK/comment.md" --status "$WORK/status.json"
+          id="$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- isocast-visual -->"))) | .id' | head -n 1)"
+          if [ -n "$id" ]; then
+            url="$(gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$WORK/comment.md" --jq .html_url)"
+          else
+            url="$(gh api "repos/$REPO/issues/$PR/comments" -F body=@"$WORK/comment.md" --jq .html_url)"
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Labels
+        if: ${{ steps.comment.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.artifact.outputs.pr }}
+        run: |
+          changed="$(jq '[.views[] | select(.status != "unchanged")] | length' "$WORK/artifact/manifest.json")"
+          state="$(jq -r .state "$WORK/status.json")"
+          label() { # label add|remove NAME
+            if [ "$1" = add ]; then
+              gh api "repos/$REPO/issues/$PR/labels" -f "labels[]=$2" > /dev/null
+            else
+              gh api -X DELETE "repos/$REPO/issues/$PR/labels/$(jq -rn --arg l "$2" '$l|@uri')" > /dev/null 2>&1 || true
+            fi
+          }
+          if [ "$changed" -gt 0 ]; then label add visual-change; else label remove visual-change; fi
+          if [ "$state" = failure ]; then label add 'visual-regression?'; else label remove 'visual-regression?'; fi
+
+      - name: Status
+        if: ${{ steps.comment.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          URL: ${{ steps.comment.outputs.url }}
+        run: |
+          gh api "repos/$REPO/statuses/$HEAD_SHA" -f context=isocast/visual-check \
+            -f state="$(jq -r .state "$WORK/status.json")" \
+            -f description="$(jq -r .description "$WORK/status.json")" \
+            -f target_url="$URL" > /dev/null
+
+      # The render failed, the artifact was rejected or a step above broke:
+      # say so on the commit instead of leaving no status (or a pending one).
+      - name: Error status
+        if: ${{ always() && steps.pr.outputs.current != 'false' && (failure() || steps.download.outcome != 'success' || steps.comment.outcome != 'success') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          gh api "repos/$REPO/statuses/$HEAD_SHA" -f context=isocast/visual-check -f state=error \
+            -f description="The visual check couldn't run (screenshots: $CONCLUSION)" \
+            -f target_url="$RUN_URL" > /dev/null

@@ -23,6 +23,7 @@ use crate::gpu::Gpu;
 use crate::picture::ITEM_RGB;
 use crate::usage::{self, Meter};
 use crate::{AppWindow, Menus, Options, ToastKind, Ui};
+use isocast_protocol::api::Event;
 
 struct OffscreenWindow {
     window: slint::Window,
@@ -78,10 +79,19 @@ struct Offscreen {
     now: Rc<Cell<Duration>>,
     target: Option<wgpu::Texture>,
     scale: f32,
+    /// ISOCAST_SNAPSHOT_STILL: leave out the readouts that change from run
+    /// to run (CPU, audio levels), so CI can compare two builds' pictures.
+    still: bool,
 }
 
 pub fn run(options: &Options) -> Result<()> {
     let gpu = Gpu::new()?;
+    // For CI (scripts/visual-shots.sh): which device drew the pictures.
+    let info = gpu.adapter.get_info();
+    eprintln!(
+        "gpu: {} ({:?}, {:?}, driver {:?} {:?})",
+        info.name, info.backend, info.device_type, info.driver, info.driver_info
+    );
     let (width, height) = options.size;
     let scale = options.scale;
     let renderer = SkiaWGPU30Renderer::new(
@@ -137,6 +147,7 @@ pub fn run(options: &Options) -> Result<()> {
         now,
         target: None,
         scale,
+        still: std::env::var_os("ISOCAST_SNAPSHOT_STILL").is_some(),
     };
     offscreen.wait_for_daemon(Duration::from_millis(options.wait_ms))?;
     for state in &options.states {
@@ -200,13 +211,30 @@ impl Offscreen {
     /// Apply the daemon's updates that arrive within `wait`.
     fn pump(&mut self, wait: Duration) {
         if let Ok(update) = self.updates.recv_timeout(wait) {
-            self.hub.apply(update);
+            self.apply(update);
             while let Ok(update) = self.updates.try_recv() {
-                self.hub.apply(update);
+                self.apply(update);
             }
         }
         slint::platform::update_timers_and_animations();
         self.hub.flush();
+    }
+
+    fn apply(&mut self, mut update: Update) {
+        if self.still {
+            match &mut update {
+                Update::Event(event) if matches!(**event, Event::Levels { .. }) => return,
+                Update::Reply {
+                    result: Ok(value), ..
+                } => {
+                    if let Some(cpu) = value.get_mut("cpu_percent") {
+                        *cpu = serde_json::Value::Null;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.hub.apply(update);
     }
 
     /// Run timers and animations to the end, a frame at a time.

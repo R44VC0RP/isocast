@@ -565,6 +565,12 @@ layout editing, Windows, release prep).
 - [ ] **A.7 Exit test.** A 2-hour soak with real camera, mic and display,
   program + ISOs + a test stream, 0 drops on Ryan's M5 Max; kill and crash
   tests recover every recording; the A.2 checklist passes; then hand over.
+  - [x] **A.7 engine-e2e.** A single-file synthetic engine harness, isolated
+    per scenario, with actual recording/stream/export/sync/scene/text/plugin
+    checks and crash recovery; macOS arm64 CI plus interleaved base/head PR
+    benchmarks and a trusted, data-only comment publisher. Eleven scenarios
+    pass on the local Mac and isocast-m2-a; pause/bug_report explicitly skip
+    until those methods land. Hosted first-run steps are in the e2e report.
 
 ### G. OBS gaps (Ryan, 2026-10-13: "everything in OBS natively and fast")
 
@@ -863,6 +869,11 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
 - [x] **8.3** Docs: getting started, setup reference, MCP tools, plugins.
   (With the user-facing README and its screenshots, licences and
   THIRD_PARTY_NOTICES, and the .github templates.)
+- [x] **8.4** Visual CI on pull requests (Ryan, 2026-10-13): build base and
+  head, render the standard views at three sizes, diff them, comment
+  before/after/diff, a restricted OpenCode judge per changed view, and the
+  commit status `isocast/visual-check`. First real run: see "Waiting on
+  Ryan" in docs/notes.md.
 
 ### 9. Later (pull into the queue once the above is done)
 
@@ -2270,3 +2281,29 @@ One line per finished task, newest last.
   exports complete and decode (57 + 30 frames), removed takes retained,
   188 focus samples all Terminal. MCP schema/strict args and old id aliases
   verified; fmt, release all-target clippy and 179 tests pass.
+- 8.4 (2026-10-13): .github/workflows/visual.yml (pull_request, read-only,
+  no secrets) renders 5 views x 3 sizes (1440x900@2, 1920x1080@1,
+  900x600@2) for merge base and head with scripts/visual-shots.sh and diffs
+  them with scripts/visual_diff.py; visual-report.yml (workflow_run,
+  trusted) validates the artifact, pushes images to `ci-screenshots`, runs
+  the judge (scripts/visual_judge.py + .github/visual-judge: Sonnet 5.5,
+  read/glob/grep + deliver_verdict only), upserts one comment and sets
+  `isocast/visual-check`. Verified locally (M5 Max): the same build twice
+  0 px changed in 15/15 views (ISOCAST_SNAPSHOT_STILL); a surface-panel
+  token change 26-62% changed in 15/15; a too-long button label
+  0.04-0.10% in 14/15 (elided, settings-900x600 hides it); judge: identical
+  -> no_change, token -> possible_regression (colour), clipped label ->
+  possible_regression (clipped_text) at every size, also with no code diff
+  (images only) and with opencode/gpt-6-luna; planted opencode.json,
+  .opencode/{agents,tools,plugins}, MCP server and AGENTS.md in the input
+  folder: none loaded (4 tools offered, no marker files), reads outside
+  the input folder denied. 14-view judge run $0.29, ~$0.02/view.
+  actionlint clean; nothing pushed.
+- A.7 engine-e2e (2026-10-13): stdlib-only isolated engine checks and arm64
+  PR CI/benchmarks. Local M5 Max and isocast-m2-a: 11 pass, 2 optional-method
+  skips each; 300/300 frames per 5 s program/ISO file, matched A/V durations,
+  clean decodes, <=1.167 ms pulse sync, zero RTMP drops, timeline/export,
+  text, Wasm gain and crash recovery verified. ProRes checks pass; timeout
+  and SIGTERM leave no child processes. Three-pair A/A benchmark automation
+  reports noise correctly. actionlint, fmt, release all-target clippy and
+  all 179 existing Rust tests pass. Hosted first-run steps in the e2e report.
