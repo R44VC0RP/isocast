@@ -571,6 +571,11 @@ layout editing, Windows, release prep).
     benchmarks and a trusted, data-only comment publisher. Eleven scenarios
     pass on the local Mac and isocast-m2-a; pause/bug_report explicitly skip
     until those methods land. Hosted first-run steps are in the e2e report.
+    - [x] **Hosted VM policy.** Inventory CPU/RAM/GPU/VT and qualify 720p30
+      H.264 with actual program+ISO/RTMP runs; retain zero drops when it fits,
+      otherwise cap accounted hosted video loss at 25% per output without
+      relaxing integrity/audio/sync checks. Local/test-Mac 1080p60 stays strict.
+      Both CLI modes verified locally; the next published run qualifies the VM.
 
 ### G. OBS gaps (Ryan, 2026-10-13: "everything in OBS natively and fast")
 
@@ -2461,3 +2466,13 @@ One line per finished task, newest last.
   and Undo; CPU vs main 9cda72d (medians) at rest 3.3 vs 3.1%, tones
   with the mixer shown 20.2 vs 20.0%, hidden 4.6 vs 4.0% (2f22005:
   18.0%). fmt, clippy --workspace -D warnings, 166 release tests clean.
+- A.7 engine-e2e hosted follow-up (2026-10-13): inspected Actions run
+  38493967068 and all ten retained MOVs (clean decode/equal A/V, 19–38%
+  losses, some short files). Added real hardware/throughput tables, a
+  720p30 H.264 qualification and explicit hosted-only loss accounting with
+  a 25% ceiling; zero-drop qualification keeps the whole suite strict.
+  Local strict mode 11 PASS/2 optional skips; hosted mode 12 PASS including
+  qualification/2 skips, all zero drops. Actual hosted artifacts prove the
+  bounded acceptance/rejection and unchanged duration/frame-count gates.
+  actionlint, fmt, release all-target clippy and 179 Rust tests pass. A
+  hosted re-run after publication is still required; exact commands in REPORT.

@@ -448,6 +448,37 @@ each section. Delete entries that stop being true.
 
 ## Benchmarks
 
+- 2026-10-13 (engine-e2e, first hosted run **38493967068**): the `macos-15`
+  arm64 VM ran macOS 15.7.9 (24G830), image 20260907.0337.1. GitHub's
+  documented standard allocation is **3 M1 vCPUs / 7 GB RAM**; this run did
+  not log actual core/RAM values or GPU identity, so those are advertised
+  specs, not measurements. Both hardware-only VT probes passed (two tiny
+  frames prove availability, not 1080p60 pipeline throughput). Retained
+  recordings delivered **37.14–48.50 fps**, losing **19.17–38.10%** of their
+  slots; program-only 79/299 (26.42%), three-output program 99/297 (33.33%),
+  RTMP 151/412 (36.65%). All ten MOVs fully decode with equal A/V durations,
+  but ISO files ended at 4.900/4.950 s instead of 5 s: tolerating drop
+  counters alone must not turn those into passes.
+  `e2e.yml` now explicitly uses `--hosted`: reports measured sysctl cores,
+  RAM, chip/VM flag, GPU/Metal and native VT encoder names; qualifies
+  **720p30 H.264** with two 5 s program+2-ISO takes and two 7 s RTMP streams.
+  If every output loses zero frames, the entire suite keeps the **0-drop**
+  bar. Otherwise **at most 25%** accounted video loss per output is allowed
+  (not an average across files); audio loss remains zero. Decodes, complete
+  manifests, target durations, equal A/V, frame accounting, sync and scene
+  timing still gate. A failed qualification does not silently select an
+  easier budget. Local/test Macs without the flag remain 1080p60/0 drops.
+  Both modes and the two-step workflow logic pass on the local M5 Max;
+  actual hosted 720p30 qualification awaits publication/re-run.
+  **Base-M1 users:** this establishes a constrained VM failure, not a native
+  M1 hardware limit. A full M1 has more CPU cores and a different GPU/media
+  path and scheduling environment; don't claim native M1 cannot do 1080p60
+  or that 720p30 is its ceiling. Measure a real M1 with the normal strict
+  suite/tune before recommending its profile. The lighter profile reduces
+  canvas pixels/second to 2/9 of 1080p60; its VM success is not yet proven.
+  Evidence, hardware source and exact retry commands: the **Hosted run**
+  section of `/Volumes/IsocastBuild/e2e/scratch/REPORT.md`.
+
 - 2026-10-13 (engine-e2e): local M5 Max and isocast-m2-a each pass 11/11
   available scenarios, with explicit pause/bug_report skips on a619986.
   Program and two ISO files: each 300 frames, 5.000 s video/audio, zero
