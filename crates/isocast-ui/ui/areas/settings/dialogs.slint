@@ -12,7 +12,7 @@ import { AboutSlint } from "std-widgets.slint";
 import { Theme } from "../../theme.slint";
 import { BrandMark, Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
-import { Dialog, DialogFooter, GroupHint, NavList, ScrollArea, SheetHeader, SheetSummary } from "../../kit.slint";
+import { Callout, CalloutKind, Dialog, DialogFooter, GroupHint, NavList, ScrollArea, SheetHeader, SheetSummary } from "../../kit.slint";
 import { SettingsArea } from "state.slint";
 import { SetPage } from "parts.slint";
 import { AdvancedPage, AudioPage, GeneralPage, HotkeysPage, OutputPage, StreamPage, VideoPage } from "pages.slint";
@@ -56,6 +56,18 @@ export component SettingsDialogs inherits Rectangle {
                     subtitle: SettingsArea.page-about;
                     icon: Icons.named(SettingsArea.page-icon);
                     icon-accent: SettingsArea.page-icon == "drive" ? Icons.drive-led : "";
+                }
+                // A refused Apply or OK says why here: its toast would sit
+                // behind the sheet.
+                if SettingsArea.refused != "": HorizontalLayout {
+                    padding-left: Theme.sheet-pad-wide;
+                    padding-right: Theme.sheet-pad-wide;
+                    padding-bottom: Theme.space-3;
+                    Callout {
+                        kind: CalloutKind.error;
+                        title: "Couldn’t apply the change";
+                        message: SettingsArea.refused;
+                    }
                 }
                 pages := ScrollArea {
                     vertical-stretch: 1;

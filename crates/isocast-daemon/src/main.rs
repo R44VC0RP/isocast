@@ -2404,6 +2404,7 @@ impl Daemon {
         }
         let (service, account) = self.key_target(params.target)?;
         set_secret(KEY_SERVICE, &account, key).map_err(failed)?;
+        forget_key_problem();
         isocast_diagnostics::redact::remember_secret(KEY_SERVICE, &account, key);
         Ok(StreamKey {
             service,
@@ -2415,6 +2416,7 @@ impl Daemon {
     fn stream_key_clear(&self, target: StreamKeyTarget) -> Result<StreamKey, RpcError> {
         let (service, account) = self.key_target(target)?;
         delete_secret(KEY_SERVICE, &account).map_err(failed)?;
+        forget_key_problem();
         Ok(StreamKey {
             service,
             account,
@@ -3179,9 +3181,49 @@ fn stream_status(state: &State) -> Option<StreamStatus> {
         return Some(stream.status());
     }
     let settings = stream_settings(state)?;
-    let key_set = std::env::var(KEY_ENV).is_ok_and(|key| !key.trim().is_empty())
-        || has_secret(KEY_SERVICE, &settings.key_account()).unwrap_or(false);
-    Some(StreamStatus::offline(&settings, key_set))
+    let from_env = std::env::var(KEY_ENV).is_ok_and(|key| !key.trim().is_empty());
+    let account = settings.key_account();
+    let key_set = from_env || has_secret(KEY_SERVICE, &account).unwrap_or(false);
+    let mut status = StreamStatus::offline(&settings, key_set);
+    if key_set && !from_env {
+        status.key_problem = key_problem(&account);
+    }
+    Some(status)
+}
+
+/// What `key_problem` last found: the account, when, and the problem.
+static KEY_CHECKED: Mutex<Option<(String, std::time::Instant, Option<String>)>> = Mutex::new(None);
+
+/// Whether the stored key for `account` can be read without a prompt (a
+/// key stored by another build can't): why not, if not. Asked again at
+/// most every 10 s per account, and at once after a key is set or cleared.
+fn key_problem(account: &str) -> Option<String> {
+    let mut checked = KEY_CHECKED.lock().unwrap();
+    if let Some((which, at, problem)) = checked.as_ref()
+        && which == account
+        && at.elapsed() < Duration::from_secs(10)
+    {
+        return problem.clone();
+    }
+    let problem = match secret(KEY_SERVICE, account) {
+        Err(err) if format!("{err:#}").contains("another build") => Some(
+            "The saved key was stored by another build of Isocast, which this one can't read \
+             without asking. Enter it again."
+                .to_string(),
+        ),
+        _ => None,
+    };
+    *checked = Some((
+        account.to_string(),
+        std::time::Instant::now(),
+        problem.clone(),
+    ));
+    problem
+}
+
+/// Forget what `key_problem` found (a key was just set or cleared).
+fn forget_key_problem() {
+    *KEY_CHECKED.lock().unwrap() = None;
 }
 
 /// "twitch", or "custom (rtmp://host/app)".

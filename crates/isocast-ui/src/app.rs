@@ -422,8 +422,16 @@ impl App {
             }
             Event::Stopped { error, .. } => {
                 self.refresh_status(true);
+                // A refused start also says so in its own words: one toast
+                // for the two (the same key), titled by the start.
                 if let Some(error) = error {
-                    self.toast(ToastKind::Error, "The recording stopped", error.clone());
+                    let key = format!("rec-error:{error}");
+                    if !self.toasts.has_key(&key) {
+                        self.show_toast(
+                            Toast::new(ToastKind::Error, "The recording stopped", error.clone())
+                                .key(key),
+                        );
+                    }
                 }
             }
             Event::Warning { message } => {
@@ -865,6 +873,7 @@ impl App {
                     .map_or(error.message.clone(), |setup| {
                         named_paths(&error.message, setup)
                     });
+                self.session.borrow_mut().last_refusal = Some(message.clone());
                 self.toast(ToastKind::Error, title, message);
                 self.session.borrow_mut().recompute();
                 self.changed(Changed::SETUP);

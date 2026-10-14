@@ -95,6 +95,13 @@ component Workspace inherits VerticalLayout {
     // so a frame costs the meters (and the picture), not every word of
     // every dock. The mixer changes with every meter step, so with native
     // pictures (redrawn only for the meters) it draws directly.
+    //
+    // A cached dock must never be made again: Slint 1.18's layer cache is
+    // keyed by component address and item index and isn't freed with the
+    // component, so a dock made again at the same address found the old
+    // dock's layer, whose dependencies never change, and showed another
+    // scene's items over the right rows (QA-3 R2). So the docks and the
+    // status bar stay made and are hidden by size, not with `if`.
     property <bool> cache-docks: true;
 
     // The dock row's height: as set, or 4/15 of the window (240px of a
@@ -135,14 +142,18 @@ component Workspace inherits VerticalLayout {
         height: max(130px, root.docks-height);
     }
 
-    if Ui.show-docks && !CreateArea.active: HorizontalLayout {
-        height: root.docks-height;
+    HorizontalLayout {
+        property <bool> shown: Ui.show-docks && !CreateArea.active;
+        height: self.shown ? root.docks-height : 0px;
+        visible: self.shown;
         spacing: 0;
 
-        if Ui.show-scenes: ScenesDock {
+        ScenesDock {
             cache-rendering-hint: root.cache-docks;
-            preferred-width: Ui.scenes-width;
-            min-width: 140px;
+            visible: Ui.show-scenes;
+            preferred-width: Ui.show-scenes ? Ui.scenes-width : 0px;
+            min-width: Ui.show-scenes ? 140px : 0px;
+            max-width: Ui.show-scenes ? 100000px : 0px;
             horizontal-stretch: 0;
         }
         if Ui.show-scenes && (Ui.show-sources || Ui.show-mixer || Ui.show-transitions || Ui.show-controls): ColumnSplitter {
@@ -153,10 +164,12 @@ component Workspace inherits VerticalLayout {
             resized => { Ui.layout-changed(); }
         }
 
-        if Ui.show-sources: SourcesDock {
+        SourcesDock {
             cache-rendering-hint: root.cache-docks;
-            preferred-width: Ui.sources-width;
-            min-width: 170px;
+            visible: Ui.show-sources;
+            preferred-width: Ui.show-sources ? Ui.sources-width : 0px;
+            min-width: Ui.show-sources ? 170px : 0px;
+            max-width: Ui.show-sources ? 100000px : 0px;
             horizontal-stretch: 0;
         }
         if Ui.show-sources && (Ui.show-mixer || Ui.show-transitions || Ui.show-controls): ColumnSplitter {
@@ -167,11 +180,13 @@ component Workspace inherits VerticalLayout {
             resized => { Ui.layout-changed(); }
         }
 
-        if Ui.show-mixer: MixerDock {
+        MixerDock {
             // Kept for the video frames between meter steps in image mode.
             cache-rendering-hint: !CanvasArea.native-picture;
-            min-width: 228px;
-            horizontal-stretch: 1;
+            visible: Ui.show-mixer;
+            min-width: Ui.show-mixer ? 228px : 0px;
+            max-width: Ui.show-mixer ? 100000px : 0px;
+            horizontal-stretch: Ui.show-mixer ? 1 : 0;
         }
         // Right of the mixer, the splitter resizes the dock after it.
         if Ui.show-mixer && Ui.show-transitions: ColumnSplitter {
@@ -191,10 +206,12 @@ component Workspace inherits VerticalLayout {
             resized => { Ui.layout-changed(); }
         }
 
-        if Ui.show-transitions: TransitionsDock {
+        TransitionsDock {
             cache-rendering-hint: root.cache-docks;
-            preferred-width: Ui.transitions-width;
-            min-width: 160px;
+            visible: Ui.show-transitions;
+            preferred-width: Ui.show-transitions ? Ui.transitions-width : 0px;
+            min-width: Ui.show-transitions ? 160px : 0px;
+            max-width: Ui.show-transitions ? 100000px : 0px;
             horizontal-stretch: 0;
         }
         if Ui.show-transitions && Ui.show-controls: ColumnSplitter {
@@ -205,10 +222,12 @@ component Workspace inherits VerticalLayout {
             resized => { Ui.layout-changed(); }
         }
 
-        if Ui.show-controls: ControlsDock {
+        ControlsDock {
             cache-rendering-hint: root.cache-docks;
-            preferred-width: Ui.controls-width;
-            min-width: 172px;
+            visible: Ui.show-controls;
+            preferred-width: Ui.show-controls ? Ui.controls-width : 0px;
+            min-width: Ui.show-controls ? 172px : 0px;
+            max-width: Ui.show-controls ? 100000px : 0px;
             horizontal-stretch: 0;
         }
     }
@@ -489,9 +508,12 @@ export component AppWindow inherits Window {
             workspace := Workspace {
                 vertical-stretch: 1;
             }
-            if Ui.show-status-bar: StatusBar {
-                // Drawn once and reused, as the docks are (see Workspace).
+            // Drawn once and reused, as the docks are, and kept made (see
+            // Workspace's cache-docks).
+            StatusBar {
                 cache-rendering-hint: true;
+                visible: Ui.show-status-bar;
+                height: Ui.show-status-bar ? Theme.statusbar : 0px;
             }
         }
     }

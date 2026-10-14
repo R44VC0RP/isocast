@@ -93,8 +93,11 @@ export component ControlBar inherits Rectangle {
             min-width: 0px;
             preferred-width: Theme.bar-slot;
             horizontal-stretch: 1;
-            if Ui.show-source-toolbar: SelectedSource {
+            // Kept made and hidden with the toolbar: a cached layer made
+            // again can show the old one's picture (app.slint, cache-docks).
+            SelectedSource {
                 cache-rendering-hint: true;
+                visible: Ui.show-source-toolbar;
                 x: 0;
                 width: parent.width - Theme.space-3;
                 height: parent.height;
@@ -197,7 +200,7 @@ export component ControlBar inherits Rectangle {
                 if root.recording: VerticalLayout {
                     alignment: center;
                     TransportButton {
-                        cache-rendering-hint: true;
+                        // Not cached: made again when shown (see app.slint, cache-docks).
                         kind: TransportKind.pause;
                         active: ControlsArea.paused;
                         enabled: !ControlsArea.busy-pause && ControlsArea.record-state == "recording";
@@ -234,8 +237,11 @@ export component ControlBar inherits Rectangle {
             }
 
             // The selected source's Properties and Filters.
-            if Ui.show-source-toolbar: VerticalLayout {
+            // Kept made, as the selected source is.
+            VerticalLayout {
                 alignment: center;
+                visible: Ui.show-source-toolbar;
+                width: Ui.show-source-toolbar ? self.preferred-width : 0px;
                 Capsule {
                     cache-rendering-hint: true;
                     large: true;

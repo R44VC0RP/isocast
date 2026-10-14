@@ -15,8 +15,9 @@
 // gear beside it that opens its output choice (program, preview, a scene
 // or a video source) and size in a popover. Six buttons need 208px under
 // the header, so they are 4px apart with 10px above and below (Paper's
-// board has five, 6px apart, 12px down); in a shorter dock Exit gives way
-// (Quit Isocast in the app menu does the same).
+// board has five, 6px apart, 12px down); in a shorter dock Exit becomes a
+// square button beside Settings (Quit Isocast in the app menu does the
+// same).
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
@@ -288,10 +289,25 @@ export component ControlsDock inherits Dock {
             enabled: Ui.has-setup;
             clicked => { Ui.set-studio(!Ui.studio); }
         }
-        DockButton {
-            text: "Settings";
-            icon: Icons.settings;
-            clicked => { Ui.open-dialog("settings", ""); }
+        // In a short dock (a 768px screen) Exit sits beside Settings as a
+        // square button, so it is always there, as in OBS (QA-3 5).
+        HorizontalLayout {
+            spacing: Theme.space-1;
+            DockButton {
+                horizontal-stretch: 1;
+                shrinks: true;
+                text: "Settings";
+                icon: Icons.settings;
+                clicked => { Ui.open-dialog("settings", ""); }
+            }
+            if root.row-height < 240px: Button {
+                width: Theme.control-h;
+                icon: Icons.log-out;
+                variant: ButtonVariant.quiet;
+                accessible-name: "Exit";
+                tooltip: "Exit (⌘Q)";
+                clicked => { Ui.quit(); }
+            }
         }
         if root.row-height >= 240px: DockButton {
             text: "Exit";

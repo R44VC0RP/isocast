@@ -319,6 +319,8 @@ struct Draft {
     /// Custom and Kick ask for a server before streaming is set up.
     needs_server: String,
     applying: bool,
+    /// Why the daemon refused the last Apply/OK ("" if it didn't).
+    refused: String,
     key_busy: bool,
 }
 
@@ -839,10 +841,22 @@ impl Settings {
                 if value == "h264" {
                     encoder["bit_depth"] = json!(8);
                 }
+                // A codec MP4 can't hold (ProRes) takes MOV with it, as the
+                // engine's encoder options list says (MP4 greys out).
+                if !mp4_ok(value) {
+                    encoder["container"] = json!("mov");
+                }
                 json!({"recording": {which: {"encoder": encoder}}})
             }
             "program_container" | "iso_container" => {
                 let which = field.trim_end_matches("_container");
+                let codec = self
+                    .draft_value(&["recording", which, "encoder", "codec"])
+                    .and_then(|v| v.as_str().map(str::to_string));
+                if value == "mp4" && codec.as_deref().is_some_and(|c| !mp4_ok(c)) {
+                    // Put the control back on MOV.
+                    return self.show(app);
+                }
                 json!({"recording": {which: {"encoder": {"container": value}}}})
             }
             "program_depth" | "iso_depth" => {
@@ -1029,6 +1043,7 @@ impl Settings {
             if d.applying {
                 return;
             }
+            d.refused.clear();
             if d.prefs != d.prefs_base {
                 let ui = window.global::<Ui>();
                 ui.set_snap_enabled(d.prefs.snapping);
@@ -1057,13 +1072,20 @@ impl Settings {
             return;
         };
         self.show(app);
+        app.session.borrow_mut().last_refusal = None;
         app.edit_then(patch, EditOptions::default(), move |app, ok| {
             let settings = &app.settings;
+            let refusal = app.session.borrow_mut().last_refusal.take();
             if let Some(d) = settings.draft.borrow_mut().as_mut() {
                 d.applying = false;
                 if ok {
                     d.base = d.draft.clone();
                     d.mics.clear();
+                } else {
+                    // In the sheet: the toast sits behind it.
+                    d.refused = refusal.unwrap_or_else(|| {
+                        "isocastd refused the change; nothing was applied.".into()
+                    });
                 }
             }
             if ok {
@@ -1157,6 +1179,7 @@ impl Settings {
         let key_set = status.is_some_and(|x| x.key_set);
         let ready = has_stream && key_set;
         area.set_notice(if ready { "" } else { d.notice.as_str() }.into());
+        area.set_refused(d.refused.as_str().into());
         area.set_has_stream(has_stream);
         area.set_needs_server(d.needs_server.as_str().into());
         area.set_stream_live(status.is_some_and(|x| {
@@ -1179,7 +1202,15 @@ impl Settings {
             }
             .into(),
         );
-        area.set_key_saved(status_service.as_deref() == Some(service.as_str()) && key_set);
+        let same_service = status_service.as_deref() == Some(service.as_str());
+        area.set_key_saved(same_service && key_set);
+        area.set_key_problem(
+            status
+                .filter(|_| same_service)
+                .and_then(|x| x.key_problem.clone())
+                .unwrap_or_default()
+                .into(),
+        );
         area.set_key_busy(d.key_busy);
         area.set_video_bitrate(number(&stream["video_bitrate_kbps"], 6000.0));
         area.set_rate_control(stream["rate_control"].as_str().unwrap_or("constant").into());
@@ -1245,11 +1276,13 @@ impl Settings {
                 .into(),
         );
         area.set_program_depth(depth(&program["encoder"]).into());
+        area.set_program_mp4_ok(mp4_ok(&program_codec));
         area.set_program_shows_depth(shows_depth(&program_codec));
         let iso_codec = codec(&iso["encoder"]);
         area.set_iso_codec(iso_codec.as_str().into());
         area.set_iso_container(iso["encoder"]["container"].as_str().unwrap_or("mov").into());
         area.set_iso_depth(depth(&iso["encoder"]).into());
+        area.set_iso_mp4_ok(mp4_ok(&iso_codec));
         area.set_iso_shows_depth(shows_depth(&iso_codec));
         area.set_iso_filtered(iso["filtered"] == json!(true));
         let chosen: Vec<&str> = iso["sources"]
@@ -2194,4 +2227,12 @@ fn read_setup(path: &str) -> Result<Value, String> {
         setup.resolve_paths(folder);
     }
     serde_json::to_value(setup).map_err(|err| err.to_string())
+}
+
+/// Whether `codec` (a setup name: "h264", "prores422_hq"…) can be
+/// recorded in MP4, from the engine's encoder options (`Codec::containers`).
+fn mp4_ok(codec: &str) -> bool {
+    serde_json::from_value::<isocast_protocol::Codec>(json!(codec))
+        .map(|c| c.containers().contains(&isocast_protocol::Container::Mp4))
+        .unwrap_or(true)
 }

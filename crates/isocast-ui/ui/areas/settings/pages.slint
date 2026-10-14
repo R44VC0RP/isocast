@@ -218,7 +218,7 @@ component StreamKeyRow inherits GroupRow {
             width: Theme.field-path - 2 * Theme.space-1 - 80px - (SettingsArea.key-saved ? 72px : 0px);
             small: true;
             input-type: InputType.password;
-            placeholder: SettingsArea.key-saved ? "••••••••••••  saved" : "Paste the key";
+            placeholder: SettingsArea.key-problem != "" ? "Paste the key again" : SettingsArea.key-saved ? "••••••••••••  saved" : "Paste the key";
             label: "Stream Key";
             submits: false;
             accepted(text) => {
@@ -260,10 +260,17 @@ export component StreamPage inherits SetPage {
         kind: CalloutKind.info;
         title: "Changes apply the next time you start streaming.";
     }
+    // A key stored by another build (an update, a move to Isocast.app)
+    // can't be read without asking: say so, and take it again below.
+    if SettingsArea.has-stream && SettingsArea.key-problem != "": Callout {
+        kind: CalloutKind.error;
+        title: "The saved stream key can’t be used";
+        message: SettingsArea.key-problem + " Paste it in Stream Key and press Save Key.";
+    }
     if !SettingsArea.has-stream: ChooseService { }
     if SettingsArea.has-stream: SetGroup {
         title: "Service";
-        hint: SettingsArea.server-hint + " " + (SettingsArea.key-saved ? "The key is saved in the Keychain; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.");
+        hint: SettingsArea.server-hint + " " + (SettingsArea.key-problem != "" ? "Paste the key from your service’s dashboard again; it replaces the one this build can’t read." : SettingsArea.key-saved ? "The key is saved in the Keychain; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.");
         GroupRow {
             label: "Service";
             place: RowPlace.first;
@@ -425,6 +432,7 @@ component EncoderRows inherits VerticalLayout {
     in property <string> which;
     in property <string> codec;
     in property <string> container;
+    in property <bool> mp4-ok: true;
     in property <string> depth;
     in property <bool> shows-depth;
     // The format row ends the group.
@@ -459,7 +467,7 @@ component EncoderRows inherits VerticalLayout {
         Centred {
             Segmented {
                 small: true;
-                options: [{ value: "mov", label: "MOV" }, { value: "mp4", label: "MP4" }];
+                options: [{ value: "mov", label: "MOV" }, { value: "mp4", label: "MP4", disabled: !root.mp4-ok }];
                 value: root.container;
                 label: "Recording Format";
                 selected(value) => { SettingsArea.set-text(root.which + "_container", value); }
@@ -614,6 +622,7 @@ export component OutputPage inherits SetPage {
             which: "program";
             codec: SettingsArea.program-codec;
             container: SettingsArea.program-container;
+            mp4-ok: SettingsArea.program-mp4-ok;
             depth: SettingsArea.program-depth;
             shows-depth: SettingsArea.program-shows-depth;
         }
@@ -650,6 +659,7 @@ export component OutputPage inherits SetPage {
             which: "iso";
             codec: SettingsArea.iso-codec;
             container: SettingsArea.iso-container;
+            mp4-ok: SettingsArea.iso-mp4-ok;
             depth: SettingsArea.iso-depth;
             shows-depth: SettingsArea.iso-shows-depth;
             last: false;

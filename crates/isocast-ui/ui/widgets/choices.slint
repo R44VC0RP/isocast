@@ -290,6 +290,9 @@ export component Switch inherits Rectangle {
 export struct Segment {
     value: string,
     label: string,
+    // Shown but not clickable (greyed): MP4 for a ProRes encoder. (Arrow
+    // keys can still reach it; the owner refuses it.)
+    disabled: bool,
 }
 
 // A capsule of choices, one chosen (`value`); the kit's tabs too. 24px:
@@ -382,6 +385,7 @@ export component Segmented inherits Rectangle {
             animate background { duration: Theme.fast; easing: Motion.ease; }
             accessible-role: tab;
             accessible-label: option.label;
+            accessible-enabled: !option.disabled;
             accessible-item-selectable: true;
             accessible-item-selected: self.on;
             accessible-item-index: i;
@@ -389,12 +393,12 @@ export component Segmented inherits Rectangle {
             accessible-action-default => { root.choose(option.value); }
 
             segment-ta := TouchArea {
-                enabled: root.enabled;
+                enabled: root.enabled && !option.disabled;
                 clicked => { root.choose(option.value); }
             }
             segment-label := Text {
                 text: option.label;
-                color: seg.on ? Theme.text : segment-ta.has-hover ? Theme.text-2 : Theme.text-3;
+                color: option.disabled ? Theme.text-disabled : seg.on ? Theme.text : segment-ta.has-hover ? Theme.text-2 : Theme.text-3;
                 font-size: Theme.fs-sm;
                 letter-spacing: Theme.tracking-sm;
                 font-weight: Theme.weight-medium;

@@ -22,8 +22,10 @@ use crate::{ReportFileRow, SettingsArea};
 /// (`ISSUE_REPOSITORY_URL` is None until the repository is public).
 const REPOSITORY: &str = "https://github.com/R44VC0RP/isocast";
 
-/// GitHub's new-issue links stay well under this many characters.
-const URL_LIMIT: usize = 7500;
+/// The new-issue link stays under this many characters: GitHub answers
+/// longer ones (Safari cuts the address at 4096) with an error page, so the
+/// triage block goes on the clipboard instead (QA-3 #1).
+const URL_LIMIT: usize = 2000;
 
 #[derive(Default)]
 pub struct Report {
@@ -70,6 +72,7 @@ impl Report {
             let area = window.global::<SettingsArea>();
             area.set_report_describe(SharedString::new());
             area.set_report_archive(SharedString::new());
+            area.set_report_copied(false);
             area.set_report_error(SharedString::new());
             area.set_report_issue("Collecting what the report holds…".into());
             area.set_report_issue_lines(1);
@@ -229,8 +232,23 @@ impl Report {
             &self.mac.borrow(),
             report.archive.as_deref(),
         );
+        // The full triage block, to paste into the issue's Triage field
+        // (the zip's ISSUE.md has it too).
+        let block = triage(&report.issue_body)
+            .map(|t| format!("```json\n{t}\n```"))
+            .unwrap_or_default();
+        if !block.is_empty() {
+            crate::platform::copy_text(&block);
+        }
         crate::platform::open_url(&url);
         self.reveal(app);
+        // The sheet's line says to paste it (a toast would sit behind the
+        // sheet, or be gone by the time the browser is back).
+        if let Some(window) = app.window() {
+            window
+                .global::<SettingsArea>()
+                .set_report_copied(!block.is_empty());
+        }
     }
 }
 
@@ -347,42 +365,25 @@ fn issue_url(
             .collect::<Vec<_>>()
             .join("&")
     };
-    // The triage block when it fits; otherwise ISSUE.md has it.
-    let with_triage = {
-        let mut all = fields.clone();
-        all.push(("triage", triage.to_string()));
-        format!("{base}{}", query(&all))
-    };
-    if with_triage.len() <= URL_LIMIT {
-        return with_triage;
-    }
-    // Too long: leave out its largest parts (named in "_left_out"; the
-    // zip's ISSUE.md has them all) until it fits.
-    if let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(triage) {
-        let mut sizes: Vec<(String, usize)> = map
-            .iter()
-            .map(|(k, v)| (k.clone(), v.to_string().len()))
-            .collect();
-        sizes.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-        let mut left_out = Vec::new();
-        for (key, _) in sizes {
-            map.remove(&key);
-            left_out.push(Value::String(key));
-            let mut cut = map.clone();
-            cut.insert("_left_out".into(), Value::Array(left_out.clone()));
-            let mut all = fields.clone();
-            all.push(("triage", Value::Object(cut).to_string()));
-            let url = format!("{base}{}", query(&all));
-            if url.len() <= URL_LIMIT {
-                return url;
-            }
-        }
-    }
+    // Never the triage block (the clipboard has it): a pointer to paste it.
     fields.push((
         "triage",
-        "Too long for the link: paste the triage block from the zip's ISSUE.md.".to_string(),
+        "Paste here: Isocast copied the triage block to the clipboard (it is also in the zip's ISSUE.md).".to_string(),
     ));
-    format!("{base}{}", query(&fields))
+    let mut url = format!("{base}{}", query(&fields));
+    // A very long description is cut to fit (the zip has it whole).
+    while url.len() > URL_LIMIT {
+        let summary = &mut fields[3].1;
+        let keep = summary.chars().count().saturating_sub(200);
+        if keep == 0 {
+            summary.clear();
+            url = format!("{base}{}", query(&fields));
+            break;
+        }
+        *summary = summary.chars().take(keep).collect::<String>() + " …";
+        url = format!("{base}{}", query(&fields));
+    }
+    url
 }
 
 /// Percent-encoding for a query value (RFC 3986 unreserved kept).

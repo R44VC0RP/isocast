@@ -137,6 +137,9 @@ const HISTORY: usize = 240;
 pub struct Session {
     pub link: Option<Link>,
     pub link_error: String,
+    /// The daemon's words for the last edit it refused (named for people),
+    /// for a sheet whose toast would sit behind it (Settings).
+    pub last_refusal: Option<String>,
     /// The live setup has been read at least once.
     pub loaded: bool,
     /// The setup as shown: the daemon's, plus edits not yet confirmed.

@@ -1501,6 +1501,23 @@ each section. Delete entries that stop being true.
   Optional ISOCAST_DEBUG_KEYS on isocastd records registration and native edges
   in diagnostics; the app's existing switch records its forwarding. Use a
   desktop target for unfocused automation, not a window-targeted Finder event.
+- 2026-10-14 (qa-app): **A stream key stored by another build is flagged,
+  not hidden.** The daemon tries to read the saved key without UI (cached
+  10 s per account, cleared when a key is set or cleared) and reports
+  `key_problem` in the stream status. Note: an item made by the `security`
+  tool can't be replaced by Isocast at all (-25244, owner change refused);
+  only items from another Isocast build are fixed by Save Key.
+
+- 2026-10-14 (qa-app): **Never make a cached layer again.** Slint 1.18's
+  skia renderer keys `layer_cache` by component address + item index and
+  doesn't release it in `free_graphics_resources` (nor when the hint goes
+  false): an element with `cache-rendering-hint` inside an `if` that is
+  made again can find the destroyed one's entry, whose dependency tracker
+  never goes dirty, and show its old picture for good (QA-3 R2). Keep such
+  elements made and hide them with `visible` and a zero size; the few
+  cached layers left inside an `if` (Pause, Studio Mode's heads) are now
+  uncached. Report upstream with a one-line fix (component_destroyed on
+  layer_cache).
 
 - 2026-10-14 (8.2d): release preparation now stops after Developer ID signing
   the native Slint app and DMG. One `app_target` line defaults to isocast-ui,

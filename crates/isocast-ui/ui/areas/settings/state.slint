@@ -105,6 +105,12 @@ export global SettingsArea {
     // A note at the top of Stream (why it opened: "Add your stream key
     // first."), until the stream is ready.
     in-out property <string> notice;
+    // Why isocastd refused the last Apply or OK ("" if it didn't).
+    in property <string> refused;
+    // The encoder chosen can be recorded in MP4 (ProRes can't): else MP4
+    // is greyed out.
+    in property <bool> program-mp4-ok: true;
+    in property <bool> iso-mp4-ok: true;
     // There is a live setup to change (else the page says to make one).
     in-out property <bool> has-draft;
     // The draft differs from the live setup (or the viewer's settings
@@ -159,6 +165,8 @@ export global SettingsArea {
     in-out property <string> server-hint;
     // A key is kept in the Keychain for this service.
     in-out property <bool> key-saved;
+    // Why the saved key can't be used ("" if it can): enter it again.
+    in property <string> key-problem;
     in-out property <bool> key-busy;
     in-out property <float> video-bitrate;
     in-out property <string> rate-control;
@@ -259,6 +267,8 @@ export global SettingsArea {
     in-out property <[ReportFileRow]> report-files;
     in-out property <string> report-files-summary;
     in-out property <string> report-archive;
+    // The issue page was opened and the triage block copied: say to paste.
+    in-out property <bool> report-copied;
     in-out property <bool> report-busy;
     in-out property <string> report-error;
     callback report-preview();

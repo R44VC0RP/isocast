@@ -24,7 +24,7 @@ component Well inherits Rectangle {
 export component BugReportDialog inherits Dialog {
     property <bool> saved: SettingsArea.report-archive != "";
     title: "Report a Bug";
-    subtitle: root.saved ? "Saved: attach the zip to the issue. Nothing was sent." : "Made on this Mac and never uploaded: you see all of it first.";
+    subtitle: SettingsArea.report-copied ? "Triage block copied: paste it into the issue’s Triage field (⌘V), then attach the zip." : root.saved ? "Saved: attach the zip to the issue. Nothing was sent." : "Made on this Mac and never uploaded: you see all of it first.";
     icon: Icons.alert;
     dialog-width: 640px;
     dialog-height: 620px;

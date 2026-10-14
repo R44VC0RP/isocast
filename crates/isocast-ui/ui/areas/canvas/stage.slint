@@ -234,8 +234,11 @@ export component Stage inherits Rectangle {
 
     // The main viewer line: a layer of its own (its words and chevrons
     // would otherwise be drawn again for every meter step).
-    if !Ui.studio: ViewerLine {
+    // Kept made and hidden in Studio Mode: a cached layer made again can
+    // show the old one's picture (see app.slint, cache-docks).
+    ViewerLine {
         cache-rendering-hint: true;
+        visible: !Ui.studio;
         y: 0;
         width: root.width;
         zoom: editor.scale * 1px / 1phx;
@@ -274,7 +277,7 @@ export component Stage inherits Rectangle {
     }
 
     if Ui.studio: MonitorHead {
-        cache-rendering-hint: true;
+        // Not cached: made again with Studio Mode (see app.slint, cache-docks).
         x: editor.x;
         y: root.slot-y;
         width: root.pic-w;
@@ -285,7 +288,7 @@ export component Stage inherits Rectangle {
         info-value: round(editor.scale * 100 * 1px / 1phx) + "%";
     }
     if Ui.studio: MonitorHead {
-        cache-rendering-hint: true;
+        // Not cached: made again with Studio Mode (see app.slint, cache-docks).
         x: program.x;
         y: root.slot-y;
         width: root.pic-w;
@@ -295,7 +298,7 @@ export component Stage inherits Rectangle {
         info: Format.canvas;
     }
     if Ui.studio: StudioColumn {
-        cache-rendering-hint: true;
+        // Not cached: made again with Studio Mode (see app.slint, cache-docks).
         x: root.pad + root.side + root.pad;
         y: root.slot-y;
         width: root.column;

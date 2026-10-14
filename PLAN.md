@@ -571,6 +571,17 @@ layout editing, Windows, release prep).
     resize by `style.transform.scale` on the canvas and in Edit Transform;
     stretch items keep resizing the rect; Controls dock says "Stop" when
     "Stop Recording" would be cut beside Pause and Marker.
+  - [x] **A.2 re-pass #5 (polish):** Exit always in the Controls dock (a
+    square button beside Settings in a short dock); a refused start shows one
+    toast, not two.
+  - [x] **A.2 re-pass #3:** Settings → Output greys out MP4 for ProRes
+    (from `Codec::containers`), and a refused Apply/OK says why in the sheet.
+  - [x] **A.2 re-pass #2:** a stream key stored by another build shows as
+    unusable in Settings → Stream, which takes it again.
+  - [x] **A.2 re-pass #1:** Open GitHub Issue opens a short link; the full
+    triage block goes on the clipboard (and stays in the zip).
+  - [x] **A.2 re-pass R2:** the Scenes and Sources docks follow the program
+    after the Create view, dock toggles, Studio Mode and refused starts.
   - [x] **A.2 QA-1 #1 engine:** native-size source items; preserve explicit
     bounds and custom legacy boxes; API/CLI, round-trip and offscreen checks.
   - [x] **A.2 QA-1 #3 engine:** publish pending opens and permission hints;
@@ -3007,3 +3018,33 @@ One line per finished task, newest last.
   Carbon; window-targeted foreground ones bypass it. 13/13 E2E cases pass on
   exonbook (GUI locked); hotkey E2E also passes on m2-a. fmt, release clippy
   and 183 tests pass; report: g5-hotkeys/scratch/R3-REPORT.md on build volume.
+- A.2 re-pass R2 (2026-10-14): cause: Slint 1.18's skia layer cache isn't
+  freed with a component, so a cached dock made again (`if`) at the same
+  address showed the old dock's picture over the right rows (the AX tree
+  had the right items). The docks, status bar, viewer line and source
+  toolbar now stay made and hide by size. m2-a real window: Create → 2 →
+  Create shows Bars and Test Pattern (main showed Main's items); hiding
+  Sources, 3, showing it: BRB items; Studio Mode twice; a refused Start
+  with two toasts then 2, 3: right each time. App CPU at rest (bench lock,
+  3 alternating runs): main 17.9/17.4/15.6 vs 17.1/17.4/16.6 (uncached it
+  was 35%).
+- A.2 re-pass #1 (2026-10-14): the new-issue link carries title, summary,
+  version, Mac and a pointer to paste (2000 characters at most, the
+  description cut if it must be); the triage block (6960 characters on
+  m2-a) is copied for the Triage field, and the sheet says to paste it.
+  m2-a: Safari opened github.com/…/issues/new (842-character address,
+  sign-in redirect) and the clipboard held the ```json block.
+- A.2 re-pass #2 (2026-10-14): `StreamStatus.key_problem` says when the
+  saved key can't be read without a prompt; Settings → Stream shows a red
+  callout and "Paste the key again", Start Streaming opens it there. m2-a:
+  a key stored with main's a2-qa build → callout; pasted a new key and
+  Save Key → key_problem none, "•••• saved".
+- A.2 re-pass #3 (2026-10-14): MP4 greyed for ProRes, choosing ProRes on
+  MP4 switches to MOV; a refused Apply/OK shows the engine's words in a
+  callout. Offscreen 1440/900: ProRes 422 HQ with MOV, MP4 grey. m2-a:
+  H.264 + MP4 → choose ProRes 422 HQ → OK saved prores422_hq/mov; canvas
+  1280x1080 while recording → callout "canvas: the canvas stays
+  1920×1080 at 30 fps while recording…", dialog stays open.
+- A.2 re-pass #5 (2026-10-14): m2-a 1024x681: Exit button beside Settings
+  (AX "Exit", pressing it quit the app); keep_free_gb 100000 → Start
+  Recording → one toast "Couldn't start recording" (was two).

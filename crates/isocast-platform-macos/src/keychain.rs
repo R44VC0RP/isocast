@@ -42,7 +42,8 @@ pub fn secret(service: &str, account: &str) -> Result<Option<String>> {
         Err(err) if err.code() == NOT_FOUND => Ok(None),
         Err(err) if [NEEDS_PERMISSION, AUTH_FAILED].contains(&err.code()) => Err(anyhow!(
             "the stream key in the Keychain was stored by another build of Isocast, which this \
-             one may not read without asking; store it again with `isocast stream key set`"
+             one may not read without asking; enter it again in Settings → Stream (or `isocast \
+             stream key set`)"
         )),
         Err(err) => Err(keychain_error("read", service, &err)),
     }

@@ -1554,7 +1554,16 @@ fn toggle_recording(app: &Rc<App>) {
             })),
             move |app, result| {
                 if let Err(error) = result {
-                    app.failed("Couldn’t start recording", &error);
+                    // Keyed as the engine's `stopped` toast with the same
+                    // words, so a refused start shows one toast, not two.
+                    app.show_toast(
+                        Toast::new(
+                            ToastKind::Error,
+                            "Couldn’t start recording",
+                            error.message.clone(),
+                        )
+                        .key(format!("rec-error:{}", error.message)),
+                    );
                 }
                 done(app);
             },
@@ -1845,6 +1854,10 @@ fn toggle_stream(app: &Rc<App>) {
             Some("Choose where to stream first.")
         } else if s.stream.as_ref().is_some_and(|x| !x.key_set) {
             Some("Add your stream key first. It’s kept in the Keychain, never in the setup.")
+        } else if s.stream.as_ref().is_some_and(|x| x.key_problem.is_some()) {
+            Some(
+                "Enter your stream key again: the saved one was stored by another build of Isocast.",
+            )
         } else {
             None
         };

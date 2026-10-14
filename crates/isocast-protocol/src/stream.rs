@@ -574,6 +574,11 @@ pub struct StreamStatus {
     /// `reconnects`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Why the stored key can't be used, though `key_set` (it was stored by
+    /// another build of Isocast, which this one may not read without
+    /// asking): store it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_problem: Option<String>,
 }
 
 impl StreamStatus {
@@ -605,6 +610,7 @@ impl StreamStatus {
             reconnects: 0,
             bytes_sent: 0,
             last_error: None,
+            key_problem: None,
         }
     }
 
