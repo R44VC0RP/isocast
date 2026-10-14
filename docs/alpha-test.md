@@ -72,8 +72,12 @@ program's should match the time you recorded (minus pauses).
 ## 6. When something's wrong
 
 Help > Report a Bug… builds a report: a GitHub issue body and a zip of logs
-and system details, with stream keys and tokens removed. Review it, then
-open the prefilled issue. Nothing is sent without you.
+and system details, with stream keys and tokens removed. Review the
+preview, then press **Send Report**: it files the issue on GitHub for you
+and uploads the zip privately (only maintainers can download it), then
+offers Open Issue. Nothing is sent until you press Send Report. **Save Zip
+Only** keeps the report on your Mac instead. If sending fails, the zip is
+saved and Open GitHub Issue lets you file it by hand.
 
 ## What passes
 

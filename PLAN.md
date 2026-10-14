@@ -537,7 +537,7 @@ layout editing, Windows, release prep).
 
 - [x] **A.1 Native app by default.** The Console redesign (N.5) merged,
   then N.3: the Slint app is the app Ryan opens.
-- [ ] **A.2 OBS workflows in the native app.** Scenes, sources, filters,
+- [x] **A.2 OBS workflows in the native app.** Scenes, sources, filters,
   transitions, Studio Mode, mixer, program + ISO recording, streaming:
   one scripted pass in real windows on the test Macs, every finding fixed.
   - [x] **A.2 QA-3 R3 hotkeys:** accept focused input even when registered
@@ -598,13 +598,13 @@ layout editing, Windows, release prep).
     Studio preview; API/CLI/MCP can clear preview and app follows it.
   - [x] **A.2 QA-2 #7 engine:** imported names are distinguishable;
     source mono downmix is available on the shared audio control surface.
-- [ ] **A.3 OBS gaps for daily use:** custom hotkeys (G.5), pause
+- [x] **A.3 OBS gaps for daily use:** custom hotkeys (G.5), pause
   recording (G.3), virtual camera (G.1). Replay buffer and projectors wait.
-- [ ] **A.4 Graceful overload (S.3 round 3):** the program and stream stay
+- [x] **A.4 Graceful overload (S.3 round 3):** the program and stream stay
   whole while ISOs drop first; A/V durations equal (S.2c); stop stays fast.
-- [ ] **A.5 Timeline MVP (C.1, C.2):** takes append, retake, remove,
+- [x] **A.5 Timeline MVP (C.1, C.2):** takes append, retake, remove,
   reorder, export one joined file; a simple Create view in the app.
-- [ ] **A.6 Log everything, report bugs in one click.**
+- [x] **A.6 Log everything, report bugs in one click.**
   - [x] **A.6 app:** Help > Report a Bug... in the Slint app: description,
     preview of exactly what is shared, the zip, the prefilled GitHub issue.
   - [x] **A.6 review #1:** contain panics, emergency-finalize poisoned state,
@@ -645,9 +645,9 @@ layout editing, Windows, release prep).
   - [x] **A.6 one-click reports (report worker):** `bug_report` `submit`
     (CLI `--submit`, MCP, the app's Send Report) posts the previewed
     ISSUE.md and zip to services/report-worker (GitHub App issue, private
-    R2 zip, secret scan, dedupe, rate limits, maintainer fetch). Deploying
-    it is waiting on Ryan.
-  - [ ] **A.6 strict zero-overhead gate.** Review-fix 6+6 versus current
+    R2 zip, secret scan, dedupe, rate limits, maintainer fetch). Deployed
+    and live since 2026-10-14.
+  - [ ] **A.6 strict zero-overhead gate (follow-up, GitHub #7).** Review-fix 6+6 versus current
     main a619986, including descendant helper CPU/RSS: 48.9 → 49.0% of
     one core (+0.1 point), instructions 553.1 → 558.7 M/s; 18/18 complete
     files per build, zero video/audio drops. A literal zero-overhead claim
@@ -672,7 +672,7 @@ layout editing, Windows, release prep).
   - Secrets (stream keys, tokens) always redacted; the user previews
     everything before it leaves the Mac; nothing is sent automatically
     (it opens a prefilled GitHub issue to post with the zip attached).
-- [ ] **A.7 Exit test.** A 2-hour soak with real camera, mic and display,
+- [ ] **A.7 Exit test (GitHub #2).** A 2-hour soak with real camera, mic and display,
   program + ISOs + a test stream, 0 drops on Ryan's M5 Max; kill and crash
   tests recover every recording; the A.2 checklist passes; then hand over.
   - [x] **A.7 engine-e2e.** A single-file synthetic engine harness, isolated
@@ -693,7 +693,7 @@ layout editing, Windows, release prep).
       Both Macs passed 11 E2E scenarios over SSH, where main also passed.
       Add native timer/Metal/process inventory and compositor wake/draw/wait
       timings before hosted qualification. See the hosted-pacing report.
-    - [ ] **Hosted pacing, runner qualification (needs publication).** Confirm
+    - [ ] **Hosted pacing, runner qualification (GitHub #5).** Confirm
       the cause and final bytes on GitHub's VM; do not infer a GPU limit from
       empty system_profiler output. M2 launch-context checks still lost nine
       frames in two 60 fps takes; universal zero-drop and universal CPU-neutral
@@ -3085,3 +3085,14 @@ One line per finished task, newest last.
   worker's 8 local tests pass. Offline, 429, no-endpoint and invalid-param
   paths keep the zip. Offscreen snapshots show the sheet sent and offline.
   The e2e bug_report case passes.
+- A.2–A.6 (2026-10-14): ticked at the alpha handover. Every item is on
+  main and published (A.2 QA passes and fixes, A.3 hotkeys/pause/virtual
+  camera, A.4 graceful overload, A.5 timeline and Create view, A.6 logs and
+  one-click reports through the deployed report service); `cargo test`
+  183/183 and `scripts/e2e.py` 13/13 with zero drops, locally and on
+  GitHub's runner. Follow-ups moved to GitHub issues: A.6 overhead #7,
+  hosted pacing #5. A.7 (Ryan's soak, #2) stays open.
+- 8.2 (2026-10-14): Isocast 0.0.1 Alpha published by Ryan's request as a
+  prerelease, tag v0.0.1 on the public snapshot 77ceb13, DMG SHA-256
+  16a86d30…7d917 (notarized, stapled, Gatekeeper accepted; downloaded
+  asset re-hashed to match).

@@ -152,43 +152,18 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
-- 2026-10-14 (8.2e release workflow): after merging/publishing this branch's
-  clean snapshot, create GitHub environment `release`, require Ryan's user
-  as reviewer (self-review allowed so he can approve his own run), and allow
-  main plus v* tags. Add its six environment secrets: Developer ID .p12
-  base64/password, App Store Connect Developer-role team API .p8 base64,
-  key id, issuer id and Apple team id (names/commands in docs/releasing.md).
-  Then tag the matching Cargo version **in the public snapshot checkout**,
-  or retry an existing tag with `gh workflow run release.yml --repo
-  R44VC0RP/isocast --ref main -f version=X.Y.Z`, and approve the environment.
-  No environment/secret configuration, workflow dispatch, tag push or draft
-  update was performed during development. This first real hosted run is
-  the remaining signing/API-notary integration check. See REPORT.md Workflow.
-- 2026-10-14 (report worker, agent/report-worker): one-click bug reports
-  are built and tested locally but not live. Ryan creates the GitHub App
-  (`node services/report-worker/register-app.mjs <pem path>`), the R2
-  bucket, the two secrets, then deploys and sets `REPORT_ENDPOINT` in
-  crates/isocast-protocol/src/diagnostics.rs. These are steps 1-8 in
-  services/report-worker/README.md (needs Workers Paid). Until then, Send
-  Report and `isocast report --submit` save the zip and say "no report
-  service is configured yet". Retry check:
-  `isocast report --describe "Test, please close" --submit`.
-
-- 2026-10-14 (A.2 R3 hotkeys): exonbook's GUI qualification is blocked by its
-  locked session (`lsappinfo front` names loginwindow; ScreenSaverEngine
-  85539). All 13 non-GUI E2E scenarios passed there, including pause/marker
-  through focused hotkeys_input. Real-window keyboard checks passed on
-  isocast-m2-a. Once unlocked, repeat the m2-a focused/desktop keyboard check
-  from `/Volumes/IsocastBuild/hotkeys-fire/scratch/final-binary.log`'s evidence
-  on exonbook; no unlock or permission prompt was bypassed.
-  Gate to retry: `scripts/testmac.sh gui 'lsappinfo info -only name "$(lsappinfo front)"'`
-  must no longer report loginwindow.
-
-- 2026-10-14 (ui/app-alpha): exonbook's desktop sits at the lock screen
-  (a password half typed in the field), so real-window checks there can't
-  run; this lane used isocast-m2-b between other agents' runs. To retry:
-  unlock exonbook, then `ISOCAST_TESTMAC=exonbook scripts/testmac.sh gui
-  '<command>'`.
+- 2026-10-14 (8.2e release workflow): the `release` environment exists
+  (reviewer R44VC0RP, main and v* only). Remaining: its six secrets
+  (docs/releasing.md steps 2–4), then one real hosted run. Tracked in GitHub
+  #11. Note: the v0.0.1 tag push queued a Release run waiting for approval;
+  it was cancelled (the release was already published, which the workflow
+  refuses to touch).
+- 2026-10-14 (A.2 R3 hotkeys): the focused/desktop keyboard check passed on
+  isocast-m2-a but not yet on exonbook, which was locked then and stays
+  unlocked since 2026-10-14 (handoff §7). Repeat the m2-a check from
+  `/Volumes/IsocastBuild/hotkeys-fire/scratch/final-binary.log`'s evidence
+  there. Gate: `scripts/testmac.sh gui 'lsappinfo info -only name "$(lsappinfo front)"'`
+  must not report loginwindow. GitHub #6.
 - 2026-10-14 (A.2 QA-1 #3): the QA Documents clip now has access on m2-a,
   including the isolated QA bundle, so a fresh pending TCC prompt could not
   be reproduced without changing grants. No grants reset or prompts answered.
@@ -218,7 +193,7 @@ each section. Delete entries that stop being true.
   A paused scratch QuickTime window remains. After unlocking, retry through
   the desktop bridge: `scripts/testmac.sh gui '/Applications/CuaDriver.app/Contents/MacOS/cua-driver call launch_app '\''{"bundle_id":"com.apple.QuickTimePlayerX","urls":["/Users/ryanvogel/isocast-scratch/g3b-segments/rotation2/r0-n1/export/r0-n1 PROGRAM.mov"],"session":"g3b-playback"}'\'''`, then inspect/play/close that window.
   This is not a G.3b qualification: no crash-safe writer was implemented.
-
+  Update 2026-10-14: exonbook stays unlocked now, so this can be retried.
 - 2026-10-13 (8.4, branch agent/visual-ci): the visual check's first real
   run on GitHub. The runner's GPU (macOS 15 arm64 VM, paravirtual Metal)
   has not drawn the app yet; only this Mac has. After merging to main:
@@ -284,18 +259,11 @@ each section. Delete entries that stop being true.
   answer privacy prompts; Allow (or close) them in Screen Sharing
   (`scripts/testmac.sh vnc` with ISOCAST_TESTMAC=isocast-m2-b). Blocks
   nothing; they cover the middle of the screen for gui jobs.
-- 2026-10-12: exonbook's screen is locked: ScreenSaverEngine runs and
-  `sysadminctl -screenLock status` says the lock is immediate, so every
-  window there is hidden (captures show only the aerial wallpaper; a Slint
-  window is reported occluded and stops drawing). Real-window checks for
-  N.2.E (drag-lag web vs ui, colours, CPU) ran on isocast-m2-a instead.
-  Needs: unlock exonbook's desktop session (or turn its screen saver and
-  lock off). Still locked on 2026-10-13, so the N.2 integration's
-  real-window checks (CPU, drag-lag, soak) ran on isocast-m2-b too.
-  Blocks: the same checks on an M4 and on a P3 display. Retry:
-  `ssh exonbook 'pgrep -fl ScreenSaverEngine'` prints nothing, then
+- 2026-10-12: exonbook's screen was locked, so the M4/P3 real-window
+  checks (N.2.E drag-lag web vs ui, colours, CPU) ran on the M2 test Macs
+  instead. exonbook stays unlocked since 2026-10-14 (handoff §7), so they
+  can run there now: check the lock as in handoff §7, then
   `scripts/testmac.sh gui 'python3 scripts/drag-lag.py --app ui'`.
-
 - 2026-10-12: M5 requalification after the M4 encoder rollback requires an
   approved M5 test window/device. The M4 brief prohibits benchmarks on
   Ryan's Mac and permits synthetic sources only; earlier M5 zero-drop
@@ -315,16 +283,16 @@ each section. Delete entries that stop being true.
 
 ## Ready for Ryan
 
-- 2026-10-14 (8.2): **Isocast 0.0.1 Alpha draft**, built from main f6570b7:
-  https://github.com/R44VC0RP/isocast/releases/tag/untagged-c889f52db0ccdfadb1d8
-  One draft, unpublished; DMG/checksum uploaded and digests verified. App
-  and DMG are notarized/stapled and Gatekeeper accepts both. Mounted native
-  app/CLI/bundled-engine take passes on isocast-m2-b (4 s, program+ISO,
-  120 frames each, zero drops/audio loss, equal A/V and clean decodes).
-  Latest artifact: `/Volumes/IsocastBuild/release/scratch/draft-20261014/notarized/Isocast-0.0.1-arm64.dmg`.
-  SHA-256 `baa7fcb7f9cd716c754d3f5c249016f8f800c21019b29dfeef2d540ce21bb74f`.
-  The older morning build is superseded. Full evidence in REPORT.md's Draft
-  section. The optional camera extension still needs its one-time install.
+- 2026-10-14 (8.2): **Isocast 0.0.1 Alpha is published** (prerelease, at
+  Ryan's request): https://github.com/R44VC0RP/isocast/releases/tag/v0.0.1
+  Built from main 70933b7 (Send Report and the live report service
+  included), tag v0.0.1 on the public snapshot 77ceb13. DMG SHA-256
+  `16a86d302985d9ee6860bee9fcbccd0fa0d77ea9dd700974dda1574f2b57d917`,
+  66,878,397 bytes; notarized, stapled, Gatekeeper accepted, and the
+  downloaded asset re-hashed to match. Install it like a user: download the
+  DMG, drag Isocast to Applications. Evidence:
+  `/Volumes/IsocastBuild/release/scratch/REPORT.md` "Rebuild for
+  publishing". The optional camera extension still needs its one-time install.
 
 - 2026-10-13 — The Slint app as Isocast.app (N.3, branch ui/app-alpha):
   `scripts/app-dev.sh --release` then `open ~/Applications/Isocast.app`
@@ -496,64 +464,6 @@ each section. Delete entries that stop being true.
   fade.
 
 ## Questions for Ryan
-
-- 2026-10-13 (themes, docs/themes.md section 15, revised): (1) **May
-  N.5's board-check scripts and the A/B CPU script go into `scripts/`?**
-  `pair.py`, `rules.py`, `ink.py` are in
-  `/Volumes/IsocastBuild/console-foundation/scripts/` and `ab.sh` in
-  `/Volumes/IsocastBuild/n2-fix/remote/`, not in git, so a fresh session
-  or a test Mac can't run the theme slices' checks; AGENTS.md asks for
-  approval before adding harnesses. T.3a waits on this. (2) Blender's
-  font: the boards use Inter Tight (Paper has no upright Inter), real
-  Blender uses Inter (wider); the design ships Inter Tight unless you
-  say Inter. (3) Blender's Preferences and Properties stay in-window,
-  drawn with the boards' title bar (only the close dot works); real
-  windows later (T.8)? (4) If the four themes cost more than +5 MB of
-  binary each (projected 5–9 MB; T.4a measures), is that fine? (5) One
-  theme for the whole app, not one per profile. (6) "Blender" is the
-  Blender Foundation's trademark: fine locally, maybe renamed
-  ("Editor") before any release. (7) The old copper look retires with
-  N.5 rather than becoming a fifth theme.
-- 2026-10-13 (N.5.2): two Console values from Paper fall under WCAG's
-  contrast minimums: the idle LCD's dimmed zeros (35% white on the inset
-  black, 2.99:1; 50% would be 4.98:1) and the white streaming glyph on
-  `onair-fill` #2EAE50 (2.64:1, under 3:1 for non-text). The app keeps
-  Paper's values (Theme `lcd-dim-opacity`, `on-onair`/`onair-fill`);
-  say if either should change (one token each). Nothing waits on it.
-
-- 2026-10-13 (7.4a): three things to overrule if you'd rather. (1) Wasm
-  calls are bounded by fuel (work), not the design's 1 ms epoch ticker
-  (wall time); see Decisions. (2) The example plugin's built components
-  (gain.wasm 16 KB, ducker.wasm 9 KB) are committed beside their source,
-  so `plugin add examples/plugins/gain` works without the wasm32-wasip2
-  target. (3) wasmtime makes isocastd 29 -> 43 MB and the CLI 32 -> 46 MB
-  (it links the engine); a cargo feature could keep it out of the CLI.
-  Nothing waits on these.
-
-- 2026-10-13: May the `alloc-count` cargo feature (a counting global
-  allocator in isocastd, off by default) be committed, as
-  docs/scenes-as-code.md proposes? 5.0 measured allocations per tick with
-  an uncommitted patch instead:
-  `/Volumes/IsocastBuild/scenes-5.0/scratch/alloc_patch.py REPO` applies
-  it (`--revert` takes it back); build with `--features
-  isocast-daemon/alloc-count`, and the daemon's log gets a line every 600
-  program ticks.
-
-- 2026-10-13: Taste call: the migration names your setup's collection after
-  the setup ("Recording", id `default`) and its profile "Default". Rename
-  either (`isocast collection rename default NAME`, `isocast profile rename
-  default NAME`) if you'd rather. Nothing waits on it.
-- 2026-10-13: The source toolbar's Properties and Filters: docs/design.md
-  (3.5, 3.18) says quiet buttons, which the Slint app follows; the web
-  app's final polish uses bordered small buttons
-  (crates/isocast-app/ui/ui/source-toolbar.js). Which should both use?
-  Nothing waits on it.
-
-- 2026-10-11: Your recordings folder (`~/dev/obs-recordings`) is on the
-  internal disk, which has ~31 GB free. Isocast estimates a full rig take
-  (4K60 screen + 1080p60 facecam + iPhone) at up to ~0.75 GB/minute in HEVC,
-  so the free-space check may warn or stop long takes. Record to the Extreme
-  SSD instead (`folder = "/Volumes/Extreme SSD/…"`), or set `keep_free_gb`?
 
 - 2026-10-11: Ryan's primary camera is "Studio Video" and his mic "Studio
   Audio" (XLR, network); `examples/recording.toml` now uses them instead of
@@ -1490,6 +1400,23 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-14 (Ryan): **GitHub issues are the work tracker now.** Known
+  issues, follow-ups and roadmap items are filed on R44VC0RP/isocast
+  (#2–#23), with milestones "Alpha week" (freeze: docs and fixes only) and
+  "After alpha", plus labels `tracking`, `parked`, `maintainer`,
+  `needs-hardware`, `performance`, `area:ci`, `area:release`. Issues are
+  public: no machine names, scratch paths or secrets in them.
+- 2026-10-14 (Ryan): **every open question answered yes.** Board-check and
+  A/B scripts go into `scripts/` (#14, unblocks T.3a); the `alloc-count`
+  feature is committed (#15); a cargo feature keeps wasmtime out of the
+  CLI (#13); both Console contrast values change (#12); theme decisions as
+  proposed, with "Blender" renamed before release (#17); the migration's
+  "Recording"/"Default" names stay; the source toolbar's Properties and
+  Filters use quiet buttons (docs/design.md 3.5, 3.18). Recordings go to
+  the Extreme SSD: live setup `recording.folder = "/Volumes/Extreme
+  SSD/Isocast"` (applied through `isocast apply`; doctor: 495 GB free,
+  ~11.9 h, 621 MB/s). The capture-card question stays open.
 
 - 2026-10-14 (8.2e): release workflow builds an existing validated version
   tag for both triggers (manual starts from main), serializes all releases,
