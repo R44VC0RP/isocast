@@ -32,6 +32,7 @@ mod jpeg;
 mod keychain;
 mod media;
 mod output;
+mod pacing;
 mod permissions;
 pub mod plugin;
 mod stream;
@@ -100,6 +101,10 @@ impl Platform for MacPlatform {
 
     fn now(&self) -> Time {
         host_time()
+    }
+
+    fn sleep_until(&self, at: Time) {
+        pacing::sleep_until(at);
     }
 
     fn devices(&self) -> anyhow::Result<Devices> {

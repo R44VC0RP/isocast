@@ -100,6 +100,8 @@ pub(super) struct Compositor<P: Platform> {
     starts: [Vec<(Arc<str>, Time)>; 2],
     /// Animated properties evaluated for the last frame drawn.
     animated: u32,
+    /// Final submission/completion wall time of the most recent draw.
+    pub(super) gpu_wait: std::time::Duration,
 }
 
 /// A source's newest frame, as drawn.
@@ -222,6 +224,7 @@ impl<P: Platform> Compositor<P> {
             epoch: Time::from_nanos(0),
             starts: Default::default(),
             animated: 0,
+            gpu_wait: std::time::Duration::ZERO,
         })
     }
 
@@ -417,6 +420,7 @@ impl<P: Platform> Compositor<P> {
         tick: Time,
         limit: Time,
     ) -> Result<Option<(P::Frame, bool)>> {
+        self.gpu_wait = std::time::Duration::ZERO;
         let changing = on_air.and_then(|on_air| on_air.from.as_ref());
         let scene = self.scene(on_air.map(|on_air| &*on_air.scene));
         let from = changing.and_then(|changing| self.scene(Some(&changing.scene)));
@@ -468,17 +472,17 @@ impl<P: Platform> Compositor<P> {
         }
         self.to_ycbcr
             .encode(&mut encoder, &self.picture_bound, &luma, &chroma);
+        let submitted = std::time::Instant::now();
         let submission = self.gpu.queue.submit([encoder.finish()]);
         self.draws = self.list.as_mut().map_or(0, DrawList::take_draws);
         self.animated = self.list.as_mut().map_or(0, DrawList::take_animated);
         // The encoder must read a finished picture.
-        self.gpu
-            .device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(DRAW_TIMEOUT),
-            })
-            .context("the GPU did not finish drawing the program")?;
+        let completed = self.gpu.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(DRAW_TIMEOUT),
+        });
+        self.gpu_wait = submitted.elapsed();
+        completed.context("the GPU did not finish drawing the program")?;
         let shown = &mut self.shown[feed as usize];
         shown.frame = Some(canvas.clone());
         shown.version = version;

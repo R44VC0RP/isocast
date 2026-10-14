@@ -1684,6 +1684,9 @@ pub struct Frame {
 /// The live engine: what it runs and how it keeps up.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EngineInfo {
+    /// Active media clocks, including per-source generators and ISO outputs.
+    #[serde(default)]
+    pub clocks: Vec<ClockPacingInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub worker_errors: Vec<String>,
     /// Seconds since it started.
@@ -1756,6 +1759,18 @@ pub enum PluginFilterState {
 /// The program's compositor: what drawing a canvas frame costs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CompositorInfo {
+    /// Lateness after the requested media wake deadline, including missed
+    /// ticks. Microseconds over the last 600 ticks, not time spent drawing.
+    #[serde(default)]
+    pub wake_lateness_us: Percentiles,
+    /// Wall time drawing a program frame (including submission and GPU wait).
+    /// Reused frames are included; microseconds over the last 600 draws.
+    #[serde(default)]
+    pub draw_wall_us: Percentiles,
+    /// Wall time in the final GPU submission/completion wait, not GPU
+    /// execution timestamps. Zero for reuse; same window as draw_wall_us.
+    #[serde(default)]
+    pub gpu_wait_us: Percentiles,
     /// CPU time the program's thread spent on each canvas tick that gave
     /// the program a frame (waiting for the GPU not included), in
     /// microseconds, over the last 600 such ticks (10 s at 60 fps).
@@ -1774,6 +1789,36 @@ pub struct CompositorInfo {
     /// property of each animation of an item in the scenes it drew.
     #[serde(default)]
     pub animated: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PacingMode {
+    #[default]
+    Ordinary,
+    Critical,
+}
+
+/// Each clock measures its own wakes and inherits critical pacing when another
+/// clock in the process has measured stretching. No policy is inferred from
+/// the process name or launch path.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ClockPacingInfo {
+    pub id: String,
+    pub period_ms: f64,
+    pub mode: PacingMode,
+    /// Adopted measured process-wide evidence at creation or a subsequent wait.
+    #[serde(default)]
+    pub inherited_critical: bool,
+    /// Escalations from this clock's own measured stretching (not inheritance).
+    pub escalations: u64,
+    pub wakes: u64,
+    /// All deadlines, including overdue catch-up ticks, over the last 600.
+    pub wake_lateness_us: Percentiles,
+    /// Lifetime maximum; includes rare blackouts that p99 can miss.
+    pub wake_max_us: f64,
+    /// Lifetime count more than one nominal period late (not output drops).
+    pub late_wakes: u64,
 }
 
 /// A median and a 99th percentile.

@@ -113,6 +113,7 @@ impl Drop for VirtualCamera {
 
 pub(super) fn start<P: Platform>(
     platform: &P,
+    clocks: Arc<crate::pacing::Clocks>,
     mut status: VirtualCameraStatus,
     input: impl Fn(Time) -> Result<Option<Input<P::Frame>>> + Send + 'static,
     on_change: OnCameraChange,
@@ -159,7 +160,7 @@ pub(super) fn start<P: Platform>(
                             pool,
                             sink,
                         };
-                        let result = run(&platform, &status, &stop, &input, &mut output);
+                        let result = run(&platform, &clocks, &status, &stop, &input, &mut output);
                         let closed = output.sink.close();
                         result.and(closed)
                         // Output destruction, including bounded native close, is here.
@@ -200,6 +201,7 @@ struct Output<P: Platform> {
 
 fn run<P: Platform>(
     platform: &P,
+    clocks: &crate::pacing::Clocks,
     status: &Mutex<VirtualCameraStatus>,
     stop: &AtomicBool,
     input: &impl Fn(Time) -> Result<Option<Input<P::Frame>>>,
@@ -209,6 +211,7 @@ fn run<P: Platform>(
     let size = (initial.width, initial.height);
     let fps = initial.fps;
     let period = Duration::from_secs(1) / fps;
+    let mut clock = clocks.start("virtual_camera".into(), period);
     let mut scene: Option<(Compositor<P>, u64, (u32, u32))> = None;
     // Prepare a named scene's extra compositor before its frame clock starts.
     if initial.settings.target == isocast_protocol::virtual_camera::Target::Scene
@@ -227,9 +230,9 @@ fn run<P: Platform>(
     loop {
         let tick = epoch.add_ticks(next, fps);
         while platform.now() < tick && !stop.load(Ordering::Acquire) {
-            std::thread::sleep(
-                tick.saturating_since(platform.now())
-                    .min(Duration::from_millis(10)),
+            clock.sleep_until(
+                platform,
+                tick.min(platform.now() + Duration::from_millis(10)),
             );
         }
         if stop.load(Ordering::Acquire) {

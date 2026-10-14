@@ -10,6 +10,8 @@ const WINDOW: usize = 600;
 
 /// The compositor's recent ticks. Recording one never allocates.
 pub(crate) struct CompositorTimings {
+    draw: Samples,
+    gpu_wait: Samples,
     /// CPU time of each recent tick that gave the program a frame, in
     /// nanoseconds; a ring of the last [`WINDOW`].
     cpu_ns: Box<[u32; WINDOW]>,
@@ -24,6 +26,8 @@ pub(crate) struct CompositorTimings {
 impl Default for CompositorTimings {
     fn default() -> Self {
         Self {
+            draw: Samples::default(),
+            gpu_wait: Samples::default(),
             cpu_ns: Box::new([0; WINDOW]),
             len: 0,
             next: 0,
@@ -35,6 +39,11 @@ impl Default for CompositorTimings {
 }
 
 impl CompositorTimings {
+    pub(crate) fn draw(&mut self, wall: Duration, gpu_wait: Duration) {
+        self.draw.push(wall);
+        self.gpu_wait.push(gpu_wait);
+    }
+
     /// A tick that gave the program a frame took `cpu` of the thread's
     /// time; `reused` if it sent the last frame again rather than drawing,
     /// else `draws` were drawn with `animated` properties evaluated.
@@ -54,6 +63,10 @@ impl CompositorTimings {
         let mut times: Vec<u32> = self.cpu_ns[..self.len].to_vec();
         times.sort_unstable();
         CompositorInfo {
+            // Filled from the program's adaptive clock by Engine::info.
+            wake_lateness_us: Percentiles::default(),
+            draw_wall_us: self.draw.info(),
+            gpu_wait_us: self.gpu_wait.info(),
             cpu_us: Percentiles {
                 p50: percentile(&times, 0.50),
                 p99: percentile(&times, 0.99),
@@ -61,6 +74,39 @@ impl CompositorTimings {
             reused: self.reused,
             draws: self.draws,
             animated: self.animated,
+        }
+    }
+}
+
+struct Samples {
+    ns: Box<[u32; WINDOW]>,
+    len: usize,
+    next: usize,
+}
+
+impl Default for Samples {
+    fn default() -> Self {
+        Self {
+            ns: Box::new([0; WINDOW]),
+            len: 0,
+            next: 0,
+        }
+    }
+}
+
+impl Samples {
+    fn push(&mut self, time: Duration) {
+        self.ns[self.next] = time.as_nanos().min(u128::from(u32::MAX)) as u32;
+        self.next = (self.next + 1) % WINDOW;
+        self.len = (self.len + 1).min(WINDOW);
+    }
+
+    fn info(&self) -> Percentiles {
+        let mut times = self.ns[..self.len].to_vec();
+        times.sort_unstable();
+        Percentiles {
+            p50: percentile(&times, 0.50),
+            p99: percentile(&times, 0.99),
         }
     }
 }

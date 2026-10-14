@@ -16,6 +16,7 @@ pub mod filter;
 pub mod gpu;
 pub mod hotkeys;
 pub mod layout;
+mod pacing;
 mod picture;
 pub mod record;
 pub mod render;
@@ -84,6 +85,15 @@ pub trait Platform: Clone + Send + Sync + 'static {
 
     /// The current time on the host clock, the session's master clock.
     fn now(&self) -> Time;
+
+    /// Critical media deadline used only after a clock detects stretched
+    /// ordinary sleeps. Back ends should bound background timer coalescing.
+    fn sleep_until(&self, at: Time) {
+        let now = self.now();
+        if at > now {
+            std::thread::sleep(at.saturating_since(now));
+        }
+    }
 
     /// Everything that can be captured, and the permissions that gate it.
     /// Never triggers a permission prompt.

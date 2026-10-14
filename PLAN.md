@@ -665,6 +665,35 @@ layout editing, Windows, release prep).
       otherwise cap accounted hosted video loss at 25% per output without
       relaxing integrity/audio/sync checks. Local/test-Mac 1080p60 stays strict.
       Both CLI modes verified locally; the next published run qualifies the VM.
+    - [x] **Hosted pacing, local reproduction and diagnostics.** Replace media
+      sleeps subject to launchd coalescing with absolute kqueue deadlines and
+      bounded leeway. One original M4 matrix stored 10,800 frames with no loss;
+      review later reproduced loss on all test Macs in throttled contexts.
+      Both Macs passed 11 E2E scenarios over SSH, where main also passed.
+      Add native timer/Metal/process inventory and compositor wake/draw/wait
+      timings before hosted qualification. See the hosted-pacing report.
+    - [ ] **Hosted pacing, runner qualification (needs publication).** Confirm
+      the cause and final bytes on GitHub's VM; do not infer a GPU limit from
+      empty system_profiler output. M2 launch-context checks still lost nine
+      frames in two 60 fps takes; universal zero-drop and universal CPU-neutral
+      claims are not established. Retry commands are in notes and REPORT.md.
+    - [x] **Adaptive pacing implementation and review follow-ups.** A fresh
+      process starts with ordinary sleeps, escalating on measured stretching;
+      virtual camera uses the same controller. Active program/source/ISO/camera
+      modes, wake percentiles, maxima and late counts are on status. Diagnostics
+      do not lock media workers. CI excludes app/probe binaries. Main merged
+      first; normal E2E 13/13 on M4 and M2, diagnostic camera transport checked.
+    - [x] **Adaptive non-regression qualification, process-wide evidence.**
+      Normal CPU accepted within noise by the delegator. No recording-start
+      wait: once any clock detects stretching, new clocks start critical and
+      early-created clocks adopt the evidence at their next wait. The evidence
+      survives live-engine restart, ending only with the process. Final M4/M2
+      default/Background matrix: 162/162 files pass every integrity check;
+      comparative drops equal/lower in all cells with the targeted M4
+      Background30 control included (both builds have ISO-throughput outliers).
+      Both strict normal E2E suites 13/13; fmt/clippy and 180 tests pass.
+      See REPORT.md **Process-wide escalation**, including all outliers and the
+      rejected constructor-only trial. No claim of loss-free Background operation.
 
 ### G. OBS gaps (Ryan, 2026-10-13: "everything in OBS natively and fast")
 
@@ -1080,6 +1109,35 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- A.7 process-wide escalation (2026-10-14): share measured timer stretching
+  across clock creation and subsequent waits, without an admission barrier or
+  extra startup wait. Live-engine restart and new ISO clocks inherit critical
+  mode with zero local escalations. Final matrix: all 162 files fully decoded,
+  10 s A/V and correct accounting; no short ISO. M4 drops by default30/
+  Background30/default60/Background60: 0/331/0/380 -> 0/295/0/199 (Background30
+  includes three targeted control pairs); M2 0/6/12/25 -> 0/3/7/22. Normal
+  E2E 13/13 each; fmt/release all-target clippy and 180 tests pass. Previous
+  CPU accepted within noise by decision; existing Background limits retained.
+
+- A.7 adaptive-pacing (2026-10-14): merged main 18b8d4c as 25a3238; ordinary
+  pacing selected on every clock in all final normal-context CPU rows, critical
+  pacing selected in every sampled throttled recording clock. Program/ISO/source/
+  virtual-camera modes and lock-free wake diagnostics verified; 49.9 MB of
+  app/probe payload excluded from CI diagnostics. Both Macs strict E2E 13/13;
+  fmt/release clippy and 180 tests pass. Powermetrics and throttled comparisons
+  do not prove the full requested non-regression gate; retained all failures,
+  including a short ISO, and marked that qualification blocked instead of
+  relaxing checks. See REPORT.md Adaptive pacing for all per-cell numbers.
+
+- A.7 hosted-pacing (2026-10-13): reproduced 10 ms sleeps stretched to ~80 ms
+  by default launchd and ~200 ms by Background, unaffected by interactive QoS.
+  Absolute critical kqueue timers cap intentional slack at 5 ms. Final M4
+  launch matrix 10,800/10,800 frames, M2 10,791/10,800, all 48 files decoded and
+  duration-matched; normal E2E 11/11 on each. Three final locked M4 A/B pairs:
+  median CPU 32.6 -> 30.1%, no drops; M2 CPU results contaminated by concurrent
+  builds/UI and excluded. fmt/release clippy/test (180 tests) clean. Hosted
+  diagnosis still awaits publication; no integrity or loss gate was relaxed.
 
 One line per finished task, newest last.
 

@@ -13,6 +13,8 @@ on:
       - 'examples/plugins/**'
       - 'Cargo.*'
       - 'scripts/e2e.py'
+      - 'scripts/pacing.py'
+      - 'scripts/pacing-probe.m'
       - '.github/workflows/e2e.yml'
   push:
     branches: [main]
@@ -56,6 +58,12 @@ jobs:
         run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
       - name: Build release engine
         run: cargo build --locked --release -p isocast-daemon
+      - name: Diagnose timers, process policy, Metal and compositor pacing
+        timeout-minutes: 11
+        continue-on-error: true
+        run: |
+          python3 scripts/pacing.py --work "$RUNNER_TEMP/pacing" \
+            --report "$RUNNER_TEMP/pacing.json"
       - name: Measure VM hardware and qualify 720p30 (program, two ISOs and RTMP)
         run: |
           python3 scripts/e2e.py --hosted --capabilities --keep-failures \
@@ -83,6 +91,11 @@ jobs:
           path: |
             ${{ runner.temp }}/e2e-report.json
             ${{ runner.temp }}/capabilities.json
+            ${{ runner.temp }}/pacing.json
+            ${{ runner.temp }}/pacing
+            !${{ runner.temp }}/pacing/**/Dev.app/**
+            !${{ runner.temp }}/pacing/**/probe
             ${{ runner.temp }}/e2e
+            !${{ runner.temp }}/e2e/**/Dev.app/**
           if-no-files-found: warn
           retention-days: 7

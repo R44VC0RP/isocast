@@ -165,6 +165,18 @@ each section. Delete entries that stop being true.
   snapshot clip-b -o <scratch>/clip.png` while leaving the prompt pending.
   FIFO-blocked native I/O verifies the timeout/status path; this is not a
   claim of a newly denied device/folder grant check.
+- 2026-10-13 (hosted-pacing): coordinator publication is needed to distinguish
+  inherited timer slack from paravirtualized GPU/VT stalls on the actual VM.
+  After merging `agent/hosted-pacing` to main, run
+  `scripts/publish-snapshot.sh --push "Bound media pacing and collect hosted diagnostics"`,
+  then `gh workflow run e2e.yml --repo R44VC0RP/isocast --ref main`. Read the
+  diagnostic step and download `engine-e2e`: `pacing.json` contains native
+  1000 x 10 ms sleeps, Metal name, requested process/thread policy, ten seconds
+  of compositor CPU/wake/draw/GPU-wait timings, drops and file checks. Task
+  policy getters can return zero even for a throttled launchd job; the timer
+  measurements are essential. Exact watch/download/inspection commands:
+  `/Volumes/IsocastBuild/hosted-pacing/scratch/REPORT.md`. No push or dispatch
+  was performed by the branch. Hosted loss/integrity gates are unchanged.
 
 - 2026-10-13 (G.3b investigation, compatibility check only): QuickTime on
   exonbook opens the one-second-rotation HEVC export and draws its picture,
@@ -508,6 +520,76 @@ each section. Delete entries that stop being true.
 
 ## Benchmarks
 
+- 2026-10-14 (process-wide escalation, supersedes the adaptive blocker): same
+  reviewer tools, three interleaved ten-second program+two-ISO pairs per cell
+  on exonbook and m2-a, compared with e7b4531 merged onto the same main.
+  All **162/162** final-build/control files fully decode, have 10 s A/V and
+  correct frame accounting; zero audio dropouts. Drop totals, critical ->
+  process-wide, default30/Background30/default60/Background60: M4
+  **0/331/0/380 -> 0/295/0/199**, M2 **0/6/12/25 -> 0/3/7/22**. M4 Background30
+  includes three additional targeted pairs: its initial candidate ISO outlier
+  (148/147, program 0) was reproduced in the reference (158/158, program 0).
+  All six pairs retained; this is the existing Background ISO throughput
+  limit, not a claim that either build is loss-free. Fifty-three of 54
+  sampled candidate ISO clocks inherited critical mode; one independently
+  detected stretching. Restarting the live engine preserved evidence: all four
+  new engine/source clocks and both later ISO clocks inherited critical with
+  zero local escalations, three 90-frame/3 s files passed integrity. Strict
+  normal E2E **13/13 on both**, fmt/clippy and 180 tests pass. Prior normal
+  CPU (+1.4..3.7% medians, overlapping ranges) accepted by the delegator;
+  not remeasured or relabelled exact equality. Evidence: hosted-pacing
+  REPORT.md **Process-wide escalation**, `scratch/process-wide/summary.json`.
+
+- 2026-10-14 (adaptive pacing, historical ffe3025; superseded above): powermetrics, same reviewer
+  `energy.py`/`take.py`, three alternating pairs per state, main 18b8d4c versus
+  adaptive; all final normal clocks ordinary, zero recording loss. Median
+  daemon CPU ms/s: M4 preview **214.50 -> 219.82**, record **466.39 -> 473.06**;
+  M2 preview **266.97 -> 276.74**, record **629.12 -> 644.73**. Ranges overlap;
+  final samples contain no active compiler, but other app/system load remains.
+  This is much closer than the review's +9–12% preview cost, **not proof of
+  exact CPU equality**. Normal strict E2E **13/13 on both Macs**.
+  Three interleaved ten-second pairs per throttled cell (always-critical ->
+  adaptive, all output drops summed): M4 default30 **0 -> 5** (one ISO short),
+  Background30 **0 -> 99**, default60 **0 -> 4**, Background60 **1259 -> 1017**;
+  M2 **0 -> 2**, **0 -> 1**, **14 -> 18**, **18 -> 18**, respectively. Do not
+  use the overall M4 improvement to hide the failing cells. Qualification is
+  blocked. Evidence under hosted-pacing/scratch/adaptive/{m4,m2}/r/{q30,q60,
+  qp1,qp2,qp2b,qp3}; original powermetrics plists retained.
+
+- 2026-10-14 (pacing adversarial review, e7b4531): **narrow the original
+  qualification.** In the builder's 720p30/1080p60 program+two-ISO matrix,
+  critical timers remove 98–100% of launchd loss (M2 default/Background
+  1080p60: 891 -> 7 and 2065 -> 15; M4: 1854 -> 0 and 2787 -> 12).
+  With heavier Background ISO loads the worst takes improve only 11–77%;
+  all three Macs still drop, and strict E2E still fails in throttled contexts.
+  M2b's two-hour daemon-context take loses 1.6% despite no drift. The app and
+  `isocast restart` did not reproduce the timer defect: this is headless/CI
+  robustness, not a normal-user recording fix. Normal preview powermetrics
+  measured +12% M4 (224 -> 251 ms/s), +9% M2 (239 -> 260), higher in five of
+  six pairs; earlier flagship CPU alone did not establish neutrality.
+  Review: `/Volumes/IsocastBuild/pacing-review/scratch/REVIEW.md`.
+
+- 2026-10-13 (hosted-pacing, baseline f12c8b1): default launchd on exonbook
+  stretches a 10 ms sleep to p50/p99 79.5/89.9 ms; Background 199.5/210.0 ms.
+  Interactive QoS and mach_wait_until do not fix it; time-constraint policy
+  fixes default but not Background. Critical kqueue timers work in both;
+  shipped timers retain explicit slack of min(remaining/4, 5 ms) for batching.
+  One original short M4 SSH/default/Background/Interactive matrix, 720p30 H.264 and
+  1080p60 HEVC with program + two ISOs: 24 files, 10,800 frames, 0 drops.
+  M2 same matrix: 10,791 frames, 9 reported drops (1 per file in default60,
+  2 per file in Background60). All 48 files fully decode, A/V both 10 s.
+  Both Macs pass all 11 then-available strict E2E scenarios **over SSH only**
+  (pause/report absent); this did not exercise the defect.
+  Final normal flagship-1080 bench.py measurements, three interleaved pairs
+  with the common lock held for the full batch: M4 median CPU 32.6 -> 30.1%,
+  VT 21.9 -> 20.9%, instructions 577.3 -> 582.4 M/s, all 18 files zero-loss.
+  Earlier M4 batches were noisier/higher (29.8 -> 30.6% strict timers;
+  30.4 -> 35.1% bounded timers with other benchmarks between rows). This is
+  not evidence of a CPU speedup. M2 CPU rows are not a performance gate:
+  another lane's live app/engine and new builds overlapped despite the lock.
+  Report includes every trial, binary hashes, uncertainties and runner steps:
+  `/Volumes/IsocastBuild/hosted-pacing/scratch/REPORT.md`.
+
 - 2026-10-14: **A.6 hardening M-1/M-2**, isocast-m2-a, common lock,
   no screensharingd. Reviewer's 3000 distinct 1 KiB failed Keychain writes:
   corrected warmed comparison (initial Keychain call + learned-cache warmup
@@ -659,7 +741,7 @@ each section. Delete entries that stop being true.
   Every matrix row, including per-output AAC durations, is in REPORT.md
   "Re-review fixes" at /Volumes/IsocastBuild/g3-pause/scratch.
 
-  - 2026-10-13 (engine-e2e, first hosted run **38493967068**): the `macos-15`
+- 2026-10-13 (engine-e2e, first hosted run **38493967068**): the `macos-15`
   arm64 VM ran macOS 15.7.9 (24G830), image 20260907.0337.1. GitHub's
   documented standard allocation is **3 M1 vCPUs / 7 GB RAM**; this run did
   not log actual core/RAM values or GPU identity, so those are advertised
@@ -1439,9 +1521,55 @@ each section. Delete entries that stop being true.
   `applicationShouldTerminate:` to winit's app delegate class at runtime
   (src/quit.rs), since winit doesn't answer it; the close button through
   Slint's `on_close_requested`.
+- 2026-10-14 (delegator, implemented): **recording never waits for pacing
+  qualification**. Once any media clock measures stretched ordinary sleeps,
+  a process-lifetime atomic flag publishes that evidence. New clocks inherit
+  critical mode at construction; already-created clocks adopt it at their
+  next wait too (on a cold M4, ISO allocation can precede the first probe).
+  A new daemon still starts ordinary and retains the program/source startup
+  probes. Live-engine stop/start does not erase evidence. No process/RT policy,
+  leeway, skip-window or admission change. `inherited_critical` distinguishes
+  shared evidence from `escalations` based on the clock's own measurements.
+  A constructor-only first trial still started an M4 take 100 ms late; its
+  9.9 s files were genuinely missing the start, not a tail-duration fix to
+  make in the writer. Adopting evidence at wait boundaries fixed that race;
+  the final matrix's every file passes integrity. CPU from the preceding
+  adaptive review is accepted within measurement noise (not exact equality).
+
+- 2026-10-14 (adaptive implementation before process-wide sharing): each
+  media clock owns its controller. Ordinary sleep is the default. Two actual
+  sleeps more than max(period/2, 20 ms) late select critical deadlines; during
+  the first two startup probes, one wake more than max(4*period, 40 ms) late
+  also suffices. The first two long waits are sliced at 20 ms to learn during
+  pre-roll; the steady ordinary cadence is unchanged. Overdue catch-up calls
+  do not vote. The selection stays until the clock exits: successful critical
+  wakes cannot establish recovery of ordinary sleeps, so there are no periodic
+  lossy retries. No process/RT policy or leeway/drop-tolerance changes.
+  `engine.clocks` lists active `program`, `iso:<id>`, `source:<id>:video|audio`
+  and `virtual_camera` clocks, mode/escalations, 600 recent wait percentiles,
+  lifetime max and >1-period count. Program and ISOs sample every tick; source
+  and camera waits can be cancellation-sized slices. Atomic u64 samples and
+  counters keep status readers off media locks and preserve >4.29 s stalls;
+  concurrent percentile snapshots are best-effort. Camera output exercised
+  the existing non-installing diagnostic IOSurface transport on both Macs,
+  not installed camera clients. Original native kqueue implementation retained.
+
+- 2026-10-13 (hosted-pacing, historical e7b4531 policy; adaptive replaces it):
+  media deadlines use `Platform::sleep_until`:
+  portable default sleep, macOS per-thread RAII kqueue, EV_ONESHOT with
+  NOTE_ABSOLUTE|NOTE_MACHTIME|NOTE_CRITICAL|NOTE_LEEWAY. Convert host time with
+  CoreMedia; retry interrupted waits at the same deadline. Coalescing is
+  limited to min(remaining/4, 5 ms), not disabled everywhere. No busy waiting,
+  process policy changes, RT priority, additional dependencies or hidden loss
+  tolerance. Program/ISO clocks and timed synthetic/media sources use it;
+  housekeeping keeps ordinary sleeps. Status adds 600-sample p50/p99 rings
+  for wake lateness (including missed ticks), draw wall time and final GPU
+  submission/completion wait (wall time, not GPU execution timestamps).
+
 - 2026-10-14 (delegator): **media-clock pacing is adaptive.** The kqueue
   critical-deadline fix (agent/hosted-pacing) removes 98-100% of the drops
-  seen when isocastd runs under launchd policy (CI, launch agents, agents),
+  in the reviewed 720p30/1080p60 program+two-ISO launchd matrix (not arbitrary
+  Background loads; see Benchmarks),
   but the review measured +9-12% daemon CPU while previewing in normal
   contexts, where the defect never occurred (the app and `isocast restart`
   inherit an interactive policy). Ordinary sleeps stay the default; a clock
@@ -3784,6 +3912,27 @@ each section. Delete entries that stop being true.
   not one tool per API call.
 
 ## Gotchas
+
+- 2026-10-14 (adaptive verification): don't reuse workspace artifacts blindly
+  after `git archive main` into a different source folder with the same
+  CARGO_TARGET_DIR. The first baseline reused merged-branch engine/protocol
+  artifacts (its status wrongly contained compositor wall/wake fields absent
+  from main). That trial was discarded; clean only the owned workspace
+  packages, rebuild and verify the runtime shape and hash. Final main is
+  `d915ca73...`, candidate `10e6ca00...`; hashes and full paths are in REPORT.md.
+
+- 2026-10-14 (pacing review finding 2): residual launchd loss is **whole-thread
+  blackouts, not timer leeway**. An engine-free 60 Hz NOTE_CRITICAL probe on
+  M2 stops running for ~50–70 ms every 625–628 slots (~10.43 s); its overdue
+  deadlines then wake together. M4 has sporadic similar stalls, M2b stronger
+  ones (a two-hour daemon take lost 1.6%, longest gap 1.9 s). The existing
+  >3-frame skip rule turns each blackout into aligned 1–3-slot losses at
+  60 fps; 30 fps can absorb M2's ~70 ms event. NOTE_CRITICAL cannot override
+  this scheduling blackout. Do not tune leeway or relax integrity/drop
+  tolerance to chase it. Heavy Background ISO loss is a second limitation:
+  all daemon CPU is clamped to background QoS, so ISO prepare/encode/write
+  can fall behind while the program's wake p99 looks healthy. Report maxima
+  and >1-period counts for program **and ISO** clocks; p99 misses rare stalls.
 
 - 2026-10-13: **A.6 redaction verification found two real edge cases:**
   `Authorization: Bearer VALUE` initially hid only "Bearer", and uppercase

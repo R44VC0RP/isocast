@@ -39,6 +39,7 @@ const AUDIO_QUEUE: usize = 1000;
 /// which sources the program has on air, since when.
 #[derive(Default)]
 pub(crate) struct Timeline {
+    pub(crate) clocks: Arc<crate::pacing::Clocks>,
     start: OnceLock<Time>,
     /// Source ids on air in the program and when each came on air; `None`
     /// when there is no program, so every source counts as on air from the
@@ -541,11 +542,11 @@ fn open_native<P: Platform>(
                 let (picture, _) = frames.remove(0);
                 still(platform, timeline, &picture, setup.canvas.fps)
             } else {
-                animation(platform, timeline, frames, setup.canvas.fps)
+                animation(platform, id, timeline, frames, setup.canvas.fps)
             }
         }
         SourceKind::Slideshow(slideshow) => {
-            slideshow_generator(platform, slideshow, setup, timeline)
+            slideshow_generator(platform, id, slideshow, setup, timeline)
         }
         SourceKind::Text(settings) => match (&settings.file, &settings.data) {
             (Some(file), _) => text_file(
@@ -563,7 +564,7 @@ fn open_native<P: Platform>(
                 still(platform, timeline, &picture, setup.canvas.fps)
             }
         },
-        SourceKind::Tone(tone) => Ok(tone_generator(platform, tone, timeline)),
+        SourceKind::Tone(tone) => Ok(tone_generator(platform, id, tone, timeline)),
         SourceKind::Media(settings) => media(platform, id, settings, setup, timeline, true),
         SourceKind::Browser(browser) => {
             let file = browser.file.as_deref().map(expand_home);
@@ -766,6 +767,9 @@ fn test_pattern<P: Platform>(
 ) -> Result<Opened<P>> {
     let &TestPatternSource { width, height, fps } = settings;
     let pattern = TestPattern::new(id, width, height, fps);
+    let mut clock = timeline
+        .clocks
+        .start(format!("source:{id}:video"), Duration::from_secs(1) / fps);
     let mut pool = platform.frame_pool(width, height)?;
     let slot = Arc::new(FrameSlot::new(timeline.clone()));
     if let Some(frame) =
@@ -784,7 +788,7 @@ fn test_pattern<P: Platform>(
             let late = Duration::from_secs(2) / fps;
             for n in 0.. {
                 let pts = start.add_ticks(n, fps);
-                if !sleep_until(&platform, pts, stop) {
+                if !sleep_until(&platform, &mut clock, pts, stop) {
                     return;
                 }
                 if platform.now() > pts + late {
@@ -821,6 +825,7 @@ fn test_pattern<P: Platform>(
 /// has "happened", like a capture device.
 fn tone_generator<P: Platform>(
     platform: &P,
+    id: &str,
     settings: &ToneSource,
     timeline: &Arc<Timeline>,
 ) -> Opened<P> {
@@ -829,6 +834,9 @@ fn tone_generator<P: Platform>(
     feed.started.store(true, Ordering::SeqCst);
     let (tx, chunks) = sync_channel::<(Arc<[f32]>, Time)>(AUDIO_QUEUE);
     let tone = Tone::new(settings.frequency);
+    let mut clock = timeline
+        .clocks
+        .start(format!("source:{id}:audio"), Duration::from_millis(10));
     let generator = Generator::spawn({
         let (platform, timeline) = (platform.clone(), timeline.clone());
         move |stop| {
@@ -840,6 +848,7 @@ fn tone_generator<P: Platform>(
                 let first = n * AUDIO_CHUNK;
                 if !sleep_until(
                     &platform,
+                    &mut clock,
                     start.add_ticks(first + AUDIO_CHUNK, SAMPLE_RATE),
                     stop,
                 ) {
@@ -894,11 +903,15 @@ fn still<P: Platform>(
 /// An animated GIF, looping on the timeline.
 fn animation<P: Platform>(
     platform: &P,
+    id: &str,
     timeline: &Arc<Timeline>,
     frames: Vec<(Picture, Duration)>,
     fps: u32,
 ) -> Result<Opened<P>> {
     let (width, height) = (frames[0].0.width, frames[0].0.height);
+    let mut clock = timeline
+        .clocks
+        .start(format!("source:{id}:video"), Duration::from_secs(1) / fps);
     let mut pool = platform.frame_pool(width, height)?;
     let slot = Arc::new(FrameSlot::new(timeline.clone()));
     if let Some(frame) = pool.draw(&mut |pixels, stride| frames[0].0.write_bgra(pixels, stride))? {
@@ -912,7 +925,7 @@ fn animation<P: Platform>(
             };
             let mut at = start;
             for (picture, delay) in frames.iter().cycle() {
-                if !sleep_until(&platform, at, stop) {
+                if !sleep_until(&platform, &mut clock, at, stop) {
                     return;
                 }
                 if let Ok(Some(frame)) =
@@ -945,6 +958,7 @@ const FADE_FPS: u32 = 30;
 /// end of it; images are decoded as they come up.
 fn slideshow_generator<P: Platform>(
     platform: &P,
+    id: &str,
     settings: &SlideshowSource,
     setup: &Setup,
     timeline: &Arc<Timeline>,
@@ -979,6 +993,10 @@ fn slideshow_generator<P: Platform>(
         Duration::from_millis(settings.transition.duration_ms.into())
     };
     let repeat = settings.repeat;
+    let mut clock = timeline.clocks.start(
+        format!("source:{id}:video"),
+        Duration::from_secs(1) / FADE_FPS,
+    );
     let generator = Generator::spawn({
         let (platform, slot, timeline) = (platform.clone(), slot.clone(), timeline.clone());
         move |stop| {
@@ -1005,7 +1023,7 @@ fn slideshow_generator<P: Platform>(
             let mut current = first;
             for index in 0..u32::MAX {
                 let begins = start + slide * index;
-                if !sleep_until(&platform, begins, stop) {
+                if !sleep_until(&platform, &mut clock, begins, stop) {
                     return;
                 }
                 show(&current, begins);
@@ -1017,7 +1035,7 @@ fn slideshow_generator<P: Platform>(
                 let steps = (fade.as_secs_f64() * f64::from(FADE_FPS)).round() as u32;
                 for step in 1..steps {
                     let at = fade_from + fade * step / steps;
-                    if !sleep_until(&platform, at, stop) {
+                    if !sleep_until(&platform, &mut clock, at, stop) {
                         return;
                     }
                     show(&current.blend(&next, step as f32 / steps as f32), at);
@@ -1248,6 +1266,10 @@ fn media<P: Platform>(
     let video = match infos.iter().find_map(|info| info.video) {
         None => None,
         Some((width, height)) => {
+            let mut clock = timeline.clocks.start(
+                format!("source:{id}:video"),
+                Duration::from_secs(1) / setup.canvas.fps,
+            );
             let slot = Arc::new(FrameSlot::new(timeline.clone()));
             // The first frame now, so the source is ready at once.
             let first = playlist
@@ -1283,7 +1305,7 @@ fn media<P: Platform>(
                                 }
                                 let pts = base + at.div_f64(speed);
                                 // Off air while waiting: the frame is stale.
-                                if !sleep_until(&platform, pts, stop) || !on() {
+                                if !sleep_until(&platform, &mut clock, pts, stop) || !on() {
                                     return Ok(false);
                                 }
                                 slot.push(frame, pts);
@@ -1303,6 +1325,9 @@ fn media<P: Platform>(
     };
 
     let audio = if with_audio && infos.iter().any(|info| info.audio) {
+        let mut clock = timeline
+            .clocks
+            .start(format!("source:{id}:audio"), Duration::from_millis(10));
         let feed = Arc::new(AudioFeed::default());
         // Files are ready at once.
         feed.started.store(true, Ordering::SeqCst);
@@ -1336,7 +1361,12 @@ fn media<P: Platform>(
                             let pts = base + at.div_f64(speed);
                             let frames = (samples.len() / 2) as u64;
                             // Deliver each chunk once all of it has "happened".
-                            if !sleep_until(&platform, pts.add_ticks(frames, SAMPLE_RATE), stop) {
+                            if !sleep_until(
+                                &platform,
+                                &mut clock,
+                                pts.add_ticks(frames, SAMPLE_RATE),
+                                stop,
+                            ) {
                                 return Ok(false);
                             }
                             let _ = tx.try_send((samples.into(), pts));
@@ -1598,7 +1628,12 @@ fn first_picture(path: &std::path::Path) -> Result<Picture> {
 
 /// Sleep until `at` on the host clock, in steps so `stop` is noticed.
 /// Returns false if stopped.
-fn sleep_until<P: Platform>(platform: &P, at: Time, stop: &AtomicBool) -> bool {
+fn sleep_until<P: Platform>(
+    platform: &P,
+    clock: &mut crate::pacing::MediaClock,
+    at: Time,
+    stop: &AtomicBool,
+) -> bool {
     loop {
         if stop.load(Ordering::SeqCst) {
             return false;
@@ -1607,6 +1642,6 @@ fn sleep_until<P: Platform>(platform: &P, at: Time, stop: &AtomicBool) -> bool {
         if now >= at {
             return true;
         }
-        thread::sleep(at.saturating_since(now).min(Duration::from_millis(20)));
+        clock.sleep_until(platform, at.min(now + Duration::from_millis(20)));
     }
 }

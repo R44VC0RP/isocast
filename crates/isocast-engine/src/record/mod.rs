@@ -1038,13 +1038,6 @@ fn create_writers<P: Platform>(platform: &P, plans: &[Arc<FilePlan>]) -> Result<
     Ok(writers)
 }
 
-fn sleep_until<P: Platform>(platform: &P, at: Time) {
-    let now = platform.now();
-    if at > now {
-        thread::sleep(at.saturating_since(now));
-    }
-}
-
 /// Live counters for every file. A frame counts as dropped once a newer
 /// one has reached the file, or once it is [`STALL_AFTER`] overdue (so a
 /// file that stops receiving frames shows up too).

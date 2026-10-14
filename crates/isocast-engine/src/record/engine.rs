@@ -39,8 +39,8 @@ use super::{
     Packet, QUEUE_DEPTH, RecordOptions, Report, SPACE_CHECK_INTERVAL, SPEED_MARGIN, SPLIT_LEAD,
     SPLIT_SOON_LEAD, START_DELAY, STATUS_INTERVAL, SessionControl, Shared, Slots, SourceFilters,
     SplitRefused, SplitTake, SplitTiming, Take, create_writers, expand_home, interrupted_note,
-    interrupted_sessions, live_status, plan_take, sidechain_sources, sleep_until, take_manifest,
-    wait_for_frame, write_manifest,
+    interrupted_sessions, live_status, plan_take, sidechain_sources, take_manifest, wait_for_frame,
+    write_manifest,
 };
 use crate::audio_filter::AudioStage;
 use crate::gpu::Gpu;
@@ -727,11 +727,17 @@ impl<P: Platform> Engine<P> {
     pub fn info(&self) -> EngineInfo {
         let inner = &self.inner;
         let state = inner.state.lock().unwrap();
+        let clocks = inner.timeline.clocks.info();
+        let mut compositor = inner.timings.lock().unwrap().info();
+        if let Some(clock) = clocks.iter().find(|clock| clock.id == "program") {
+            compositor.wake_lateness_us = clock.wake_lateness_us;
+        }
         let mut held_by = Vec::new();
         if inner.recording.load(Ordering::SeqCst) {
             held_by.push("recording".to_string());
         }
         EngineInfo {
+            clocks,
             worker_errors: self
                 .inner
                 .worker_errors
@@ -750,7 +756,7 @@ impl<P: Platform> Engine<P> {
             missed_frames: inner.frames_missed.load(Ordering::Relaxed),
             fps: f64::from_bits(inner.program_fps.load(Ordering::Relaxed)),
             outputs: held_by,
-            compositor: inner.timings.lock().unwrap().info(),
+            compositor,
             scenes: {
                 let (raster_us, content, content_mb) = inner.scenes.content();
                 ScenesInfo {
@@ -980,6 +986,7 @@ impl<P: Platform> Engine<P> {
         let began = std::time::Instant::now();
         super::virtual_camera::start(
             &self.inner.platform,
+            self.inner.timeline.clocks.clone(),
             status,
             move |after| {
                 let _keep_source_open = &source_guard;
@@ -1902,6 +1909,7 @@ fn run_program<P: Platform>(
     compositor.set_epoch(epoch);
     let frame = Duration::from_secs(1) / fps;
     // The version of the compiled scenes the compositor draws.
+    let mut clock = inner.timeline.clocks.start("program".into(), frame);
     let mut version = 0;
     let mut warned = false;
     // The sources on air, kept between ticks.
@@ -1921,7 +1929,7 @@ fn run_program<P: Platform>(
     };
     for n in first.. {
         let tick = epoch.add_ticks(n, fps);
-        sleep_until(platform, tick + frame);
+        clock.sleep_until(platform, tick + frame);
         if stop.load(Ordering::SeqCst) || inner.stopping.load(Ordering::SeqCst) {
             break;
         }
@@ -1973,6 +1981,7 @@ fn run_program<P: Platform>(
                 .set_on_air(on_air_sources.iter().map(|id| &**id), tick);
         }
         if outputs || program_rates.draws(n, fps) {
+            let draw_started = std::time::Instant::now();
             match compositor.draw(Feed::Program, on_air.as_ref(), tick, tick + frame / 2) {
                 Ok(Some((image, reused))) => {
                     gave = Some((reused, compositor.draws(), compositor.animated()));
@@ -1994,6 +2003,11 @@ fn run_program<P: Platform>(
                     }
                 }
             }
+            inner
+                .timings
+                .lock()
+                .unwrap()
+                .draw(draw_started.elapsed(), compositor.gpu_wait);
         } else if !monitored && !outputs {
             // Nothing wants the program: let its canvas go back to the pool.
             inner.program.clear();
@@ -2162,6 +2176,7 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
 /// filtered, and converted to Y'CbCr if their encoders would otherwise
 /// convert it themselves.
 struct IsoRunner<P: Platform> {
+    clock: crate::pacing::MediaClock,
     id: String,
     slot: Arc<FrameSlot<P::Frame>>,
     /// The files' frame size.
@@ -2286,7 +2301,7 @@ fn run_iso<P: Platform>(
         let tick = epoch.add_ticks(n, fps);
         // Frames up to half a frame after the tick are nearest to it; wait
         // another half frame for them to arrive.
-        sleep_until(platform, tick + frame);
+        runner.clock.sleep_until(platform, tick + frame);
         if tick >= shared.end() {
             break;
         }
@@ -2588,6 +2603,10 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
         }
         let (width, height, fps) = formats.video[id];
         let mut runner = IsoRunner {
+            clock: inner
+                .timeline
+                .clocks
+                .start(format!("iso:{id}"), Duration::from_secs(1) / fps),
             id: id.to_string(),
             slot: slots[id].clone(),
             size: (width, height),
