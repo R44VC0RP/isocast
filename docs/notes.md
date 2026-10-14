@@ -257,6 +257,22 @@ each section. Delete entries that stop being true.
 
 ## Ready for Ryan
 
+- 2026-10-13 — **A.6 adversarial review fixes supersede the original
+  handoff.** Panics are contained, poisoned-state emergency stops finalize
+  media, logging failures do not gate startup, and reports are compact and
+  paged. `isocast report --preview --private --json` returns an index and
+  preview ID; `isocast report-file ID ISSUE.md --json` reads it. No upload.
+  The remaining strict CPU claim is +0.1 point in the whole-daemon 6+6
+  against current main; private AVAssetWriter counters and the redesigned
+  app menu retain the documented availability/integration boundary.
+
+- 2026-10-13 — **A.6 diagnostics backend**, branch agent/a6-diagnostics:
+  after merging/building, `isocast report --preview --json` shows everything
+  the private offline zip would contain. CLI/MCP methods are ready for the
+  redesigned app's menu. The parent A.6 box stays open: strict CPU
+  no-regression is not established (+0.7 points of one core), and exact
+  AVAssetWriter-internal queue/latency counters are unavailable through its
+  public API. No report is uploaded and the repository URL remains unset.
 - 2026-10-13 — Pause recording (G.3, branch `agent/g3-pause`): while
   recording, `isocast pause --json`, then `isocast resume --json`. The take
   and every file stay the same, REC time freezes, and a concurrent stream
@@ -497,6 +513,90 @@ each section. Delete entries that stop being true.
   /Volumes/IsocastBuild/g3b-segments/scratch/REPORT.md and adjacent JSON;
   full media under ~/isocast-scratch/g3b-segments on exonbook.
 
+- 2026-10-13: **A.6 two-hour retention/recording proof**, isocast-m2-b,
+  the review setup (640×360/30 test pattern, text, tone), program+ISO and
+  10 Hz status polling under the common lock. **7200 s, 216000 frames per
+  file, zero video/audio drops**, ffprobe A/V durations both 7200.000 s.
+  **67056 polls**, **40706334 log bytes** written over two hours (19.4 MiB/h),
+  still within the 40 MiB daemon budget; the prior SIGKILL marker/tail was
+  retained at every 30 s checkpoint. This exercised the retention/polling
+  fixes while privacy/report work continued, not the later relay's memory.
+  Evidence: m2-b `~/isocast-scratch/a6-diagnostics/review-fixes/hours/`,
+  copied summary/run/status into the local review-fixes/evidence/m2-b folder.
+
+- 2026-10-13: **A.6 review-fix final whole-daemon 6+6**, isocast-m2-a,
+  main **a619986** (includes newer recording/animation/timeline work) versus
+  this branch, synthetic flagship-1080, common lock, no screensharingd:
+  daemon+descendants CPU **48.9 → 49.0%** of one core; ranges 42.6–49.3
+  versus 48.6–49.3 (the low first main run retained, not discarded).
+  Instructions **553.1 → 558.7 M/s**, VT **31.1 → 30.6%**, summed RSS
+  **109 → 122 MB**, compositor p50 **679.3 → 695.4 µs**, p99 **846.2 →
+  899.5 µs**. Both builds **18/18 complete files**, 1440 frames/file,
+  **zero video/audio drops**. Report the small nonzero overhead honestly;
+  this is whole-build comparison against current main, not an isolated
+  claim about each diagnostic component. Evidence: m2-a
+  `~/isocast-scratch/a6-diagnostics/review-fixes/ab-main/`.
+- 2026-10-13: **A.6 review final functional evidence.** Reviewer scripts:
+  contained panic during stream+record finalized **1174 frames / 39.1333 s**
+  per file, no decode errors; SIGKILL preserved **420 frames / 14.016 s**,
+  now flagged interrupted. A genuinely full log-only image (4 KiB fill,
+  zero free bytes) still recorded **810 frames / 27 s**, restarted and
+  recorded again; its report retains ENOSPC history and warning entries.
+  The original 1 MiB fill left ~170 KiB, enough for the now-compact logger,
+  so it no longer induced failures without the smaller fill block.
+  Before/after privacy scripts: late secret after 130 hockey/token entries,
+  URL path tokens, old client description and all plugin planted secrets
+  no longer leak. Chroma green/keyframe interval retained; >512 credentials
+  fails closed. Actual Keychain seeding before any stream start passed in
+  a local isolated engine, and its uniquely scoped test item was removed.
+  Strict previews use different HMAC pseudonyms and hide device identities;
+  only system/recording volume retained, actual-executable signing checked.
+  Three clean restarts after SIGKILL: warnings **[1,1,1] → [1,0,0]**.
+  MCP preview **71,227,715 → 6,815 bytes**; paged response **7,492 bytes**.
+  CommonMark recognizes the JSON triage fence after an unclosed user fence.
+  Native fatal tail (no newline) survived immediate _exit, with planted
+  native credentials absent. Evidence: `review-fixes/` under A.6 scratch.
+
+- 2026-10-13: **A.6 final functional pass** on m2-b: program + ISO each
+  240/240 frames over 8 s, zero drops; all 25 GPU samples available;
+  open descriptors **12 logged / 12 independently read**, sampler mean
+  **983 µs** for this small held engine (not the flagship benchmark).
+  Eleven planted credential/title values were absent from on-disk logs
+  and uncompressed archive contents, including Bearer/Basic headers,
+  uppercase RTMPS, URL password/query, and window-selection error text.
+  Relative `--out` resolved from the CLI's cwd; strict-path preview created
+  no zip. About 80 MB of API log traffic rotated/pruned to **63,853,294
+  bytes**, largest segment **3,976,577 bytes**; every retained line parsed.
+  The cursor retired deleted files and the bounded zip kept the newest
+  sentinel/error plus native crash evidence (nine old segments explicitly
+  omitted). Issue bodies **7,157 / 18,749 characters**, both triage JSON
+  blocks parsed. Final crash classification: a fresh worker panic matched
+  its launch; a subsequent SIGKILL had no falsely attributed panic, while
+  retaining the older crash in history. Results under `final-check/` and
+  `final-crash/` beside the A.6 report's remote evidence.
+
+- 2026-10-13: **A.6 diagnostics, isocast-m2-b (M2, macOS 26.7),** isolated
+  synthetic flagship-1080, release, common lock, no screensharingd; baseline
+  d6c8aec. Three interleaved 4+4 rounds: CPU medians main/candidate
+  45.85/46.50, 45.65/46.10, **45.65/46.35% of one core**. Every round:
+  **12/12 files complete per build, zero video/audio drops** (1440 frames
+  per file, 24 s, 4K60 + 1080p60 ISOs and 1080p60 program). Final round:
+  VT 25.0/25.1%, RSS 104/107 MB, retired instructions 552.5/558.8 M/s,
+  compositor p50 662/673 µs, p99 969/934 µs. The sampler's steady CPU
+  mean is **2142–2346 µs per one-second cycle (0.214–0.235%)**, its median
+  1407–1496 µs. All 92 recording samples had real per-process GPU counters.
+  Logger CPU ~0.051 s over each ~22 s window (~0.23% of a core; includes
+  sampler-written logs, so it is not additive with sampler CPU).
+  Native device notifications replaced polling the full inventory every
+  five seconds (sixty-second fallback); VT discovery uses `proc_name`
+  instead of resolving 719 executable paths (direct check: 7.1 vs 11.8 ms
+  in Python, identical VT PIDs). **Strict whole-process no-regression is
+  not established.** Stop this optimization branch after three rounds:
+  the wrong assumption was that process/device enumeration explained all
+  the extra CPU; redaction, serialization and synchronous event writes
+  remain. Future work can target that control/event path, not media code.
+  Evidence: `~/isocast-scratch/a6-diagnostics/bench{,-final,-qualified}`
+  on m2-b; local report/evidence under `/Volumes/IsocastBuild/a6-diagnostics/scratch`.
 - 2026-10-13: **G.3 re-review R1/R2**, exonbook, synthetic reviewer rig,
   common bench lock. 55 exact-target killed takes / 165 files: H.264, HEVC,
   ProRes 422 at 0.05/2.0/2.05/3.7/4.0/4.05 s, both delayed and immediate
@@ -512,7 +612,7 @@ each section. Delete entries that stop being true.
   Every matrix row, including per-output AAC durations, is in REPORT.md
   "Re-review fixes" at /Volumes/IsocastBuild/g3-pause/scratch.
 
-- 2026-10-13 (engine-e2e, first hosted run **38493967068**): the `macos-15`
+  - 2026-10-13 (engine-e2e, first hosted run **38493967068**): the `macos-15`
   arm64 VM ran macOS 15.7.9 (24G830), image 20260907.0337.1. GitHub's
   documented standard allocation is **3 M1 vCPUs / 7 GB RAM**; this run did
   not log actual core/RAM values or GPU identity, so those are advertised
@@ -1245,6 +1345,111 @@ each section. Delete entries that stop being true.
   draining alone is insufficient; AAC priming/tail and sample durations must
   be resolved explicitly. No replacement, dependency or runtime edit retained.
 
+- 2026-10-14: **A.6 fix round 3 supersedes round 2's credential tradeoff.**
+  Env/Keychain/explicit stream keys (including rotated values) are pinned
+  for the process lifetime in both producer and native relay. Only inferred
+  API fields use the 512-entry LRU. The relay polls stderr and its private seed
+  socket, whose receive budget is 256 KiB; a sender retry worker delivers a
+  backlog off the caller's thread, with ordered pending/ready pipe markers.
+  Only lines emitted during that backlog are withheld. Seeds are fragmented
+  at 1024 bytes: Darwin's independent default maxdgram is 2048, so a larger
+  receive buffer alone does not allow 4 KiB datagrams. A stalled-relay check
+  (600 credentials and a 9 KiB key) confirms temporary withholding, recovery,
+  redacted later text, and a final no-newline tail after producer exit.
+  Startup recovery now shares main's pause annotation (recoverability unknown,
+  open pause retained, null recoverable_seconds_at_pause); incident triage
+  includes paused. Failed `frames` returns nonzero with its partial-file
+  summary; Start/Resume name a failed compositor and Resume leaves the clock
+  paused. Only these small failure/reporting hooks touch record/*.
+
+- 2026-10-14: **A.6 fix round 2 (supersedes the fail-closed registry).**
+  Credential memory is a 512-entry LRU (by supply); >4 KiB values are scrubbed
+  in place, never cached; text is never wholesale withheld. Reports build a
+  fresh redactor from the live cache snapshot plus Keychain/env seeds, and its
+  learning doesn't touch the live cache. A compositor panic stops the program
+  slot: the manifest gets `program: …; program output failed` (status
+  failed), `status` shows the engine "degraded" with the worker error, and a
+  new recording is refused until the live engine restarts (no in-place
+  restart: the compositor owns GPU state the panic may have left half-built).
+  Failed files' manifest durations come from the finalized media
+  (`media_info`), else their newest handled frame. Detached engine threads use
+  `isocast_diagnostics::spawn(name, run, cleanup)`: the cleanup repairs the
+  owner (frames registry entry removed and viewers told, shared-frame ring
+  closed, connect/stream joins fail), then the daemon publishes a warning.
+  Errors bypass the per-peer log limit; the omission count flushes on
+  disconnect. Console processes (CLI/apps) with unwritable logs print one
+  warning and no JSONL. Engine edits are limited to these hooks.
+
+- 2026-10-13: **A.6 review privacy/reporting.** Exact credential names and
+  suffixes replace substring `key` matching; arbitrary short enum values
+  aren't learned. A bounded registry always accepts recent credentials and
+  fails closed for text after overflow, exposed in status. Reports seed
+  configured profile keys from the non-prompting Keychain API; client logs
+  omit params/prose. HMAC-SHA256 uses a fresh per-report random key (never
+  exported) for strict paths/titles/device identities. Serial fields and
+  unrelated mounts are removed; signing describes current_exe and omits
+  certificate-owner/team identity. hmac/subtle are new for the requested
+  construction; getrandom was already locked and supplies OS entropy.
+- 2026-10-13: **A.6 native stderr survives abrupt exit.** A small mode of
+  the same daemon executable drains stderr in an independent relay after
+  producer death. Credentials arrive on a private inherited datagram FD;
+  a failed seed channel closes text disclosure. Native text is redacted
+  before JSONL, bounded per line/segment, and bootstrap stderr appends.
+  Plugin output is redacted into 1 MiB current/previous files and included
+  in bundles. Camera callbacks use a bounded nonblocking log queue. Benchmark
+  CPU, retired instructions and RSS now include daemon descendants, so relay
+  work is not hidden outside the measurement.
+
+- 2026-10-13: **A.6 review #2–4.** Logger init now falls back to stderr
+  without gating startup; immutable-log-folder test and full log-only HFS+
+  volume both start/record. A totally full filesystem containing the IPC
+  socket still cannot allocate a socket inode (`bind`: ENOSPC); the corrected
+  log-only reproduction keeps IPC/recordings on the writable volume.
+  Levels are not logged, polling is compact per-peer/per-method summaries,
+  mutations/errors have per-peer log limits; pruning moved off callbacks.
+  Budgets: daemon 40 MiB, CLI and each app 8 MiB, protected fault tails.
+  Reviewer scripts m2-a: poll 145.2→15.7 MiB/h, engine 34.1→10.9 MiB/h,
+  recording 38.9→15.6 MiB/h. A 30 s get flood lost the old crash file before;
+  afterwards >2 million calls retained its crash file and marker. CPU tick
+  bug reproduced ps/log ratio 41.685; corrected ratio **1.0031** (8.38 vs
+  8.3542 CPU s over 30 s). mach2 is now a direct dependency for its current
+  timebase binding; it was already locked through isocast-surfaces.
+
+- 2026-10-13: **A.6 review #1 supersedes the abort policy below.** Panic
+  hooks only capture/sync (try-lock, fail-closed redaction), then unwind.
+  Contained connection/worker panics leave independent recordings/streams
+  alive; poisoned state invokes emergency finalization, interrupted markers
+  and exit 70, with a ten-second stuck-shutdown watchdog. Startup repairs
+  orphaned manifests and reports them in `status.interrupted`; unknown frame
+  counts remain null. Reviewer crash.sh on m2-a: b72536b aborted at ~27 s,
+  retaining 26 s/780 frames; fixed worker and connection cases finalized
+  39.4667 s/1184 frames each, zero drops, stream continued. Poisoned control
+  state finalized 28.1667 s/845 frames each (zero drops), both manifests
+  interrupted. SIGKILL retained 14.016 s/420 frames; next launch repaired
+  markers and obtained native duration 14.0333 s (OS metadata, not inferred
+  frame count). Scripts/evidence: a6-diagnostics/scratch/review-fixes.
+
+- 2026-10-13: **A.6 diagnostics (agent/a6-diagnostics).** Shared
+  `isocast-diagnostics` uses synchronous redacted JSONL at API/event rates,
+  not an asynchronous tracing queue: every complete line reaches the OS
+  immediately, errors flush, panic/clean markers sync. Segments are 4 MiB,
+  scope budget 64 MiB/seven days/twenty completed launches per process;
+  current active segments/markers are protected. `ISOCAST_SOCKET` scopes
+  all clients' logs; default is `~/Library/Logs/Isocast`. The only new
+  archive dependency is `zip` (deflate via the existing flate2/zlib-rs);
+  regex, SHA-256 and chrono were already in the lockfile. Reports are
+  offline and private, with a complete sanitized preview, not an upload.
+  `docs/bug-reports.md` describes the method table and bundle layout.
+- 2026-10-13: **A.6 panic policy and availability.** A Rust panic is logged
+  with a forced backtrace, then aborts the process rather than leaving a
+  dead worker/poisoned locks; this deliberately bypasses earlier local
+  `catch_unwind` recovery. Completed movie fragments survive. The isolated
+  `ISOCAST_DEBUG_PANIC_AFTER=N` fault worker exercises this. Reports match
+  a panic signature to the specific abnormal launch, never attribute an
+  older panic to a later SIGKILL. VT CPU is explicitly system-wide with
+  PID/start identity; GPU uses AGX's per-PID accumulatedGPUTime. H.264
+  queues/callback latency are measured; AVAssetWriter's opaque internal
+  queues remain null with a reason. No sudo/subprocess runs in the sampler.
 - 2026-10-13: **G.3 R1 replaces the cut-derived durability claim.** Neither
   FileWriter acceptance (which can mean only queued) nor AVAssetWriter input
   acceptance acknowledges an on-disk fragment. No numeric lower bound can
@@ -3259,6 +3464,35 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-13: **A.6 redaction verification found two real edge cases:**
+  `Authorization: Bearer VALUE` initially hid only "Bearer", and uppercase
+  `RTMPS://` initially kept its path. Both are fixed, as are window titles
+  embedded in ScreenCaptureKit's `no window ...; windows: ...` error. No
+  real credentials were used. Redaction runs before persistence and again
+  on report collection; a bounded warning summary preserves method/cause
+  rather than replacing a large API error with just "request completed".
+
+- 2026-10-13: **A.6 killed-encoder check.** Killing the VT encoder whose
+  `launchctl procinfo` responsible PID/path matched this isolated daemon
+  produced AVAssetWriter errors **AVFoundation -11883 / OSStatus -12912**
+  in the stopped event, final status and report bundle. A status only three
+  seconds after the kill was too early: finalization reported the failure
+  later. The stream stalled and reported 439 lost audio chunks, but no
+  explicit `stream.last_error` (existing engine behavior; no recovery fix
+  claimed here). Logs/metrics expose the stopped VT PID, in-flight queue,
+  stalled callbacks, drops and writer error. Also: libproc's NULL-buffer
+  FD query is capacity, not count (45 slots for a three-FD Python process);
+  diagnostics now counts the rows actually returned by PROC_PIDLISTFDS.
+
+- 2026-10-13: **A.6 native crash reports.** A background signed isocastd
+  panic on isocast-m2-b produced its `.ips` in
+  `/Library/Logs/DiagnosticReports` (readable to ec2-user), about 34 seconds
+  after abort, not in `~/Library/Logs/DiagnosticReports`. Report collection
+  checks both, parses the `.ips` header/body as separate JSON values, and
+  records omitted/unreadable files. Generate a report again after macOS
+  finishes the native crash report if only the immediate Rust crash file
+  appears. GPU user clients are registry children of AGXAccelerator, not
+  matches from IOServiceGetMatchingServices("AGXDeviceUserClient").
 - 2026-10-13 (G.3 R1): a pause at **exactly** 2.000 s removes the sample
   needed to close the first fragment; 3/3 outputs can be unreadable. At
   4.000 s only 2 s survive. Immediate SIGKILL after a successful 2.050 s

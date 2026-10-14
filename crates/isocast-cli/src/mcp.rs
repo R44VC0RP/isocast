@@ -878,6 +878,47 @@ impl Isocast {
     }
 
     #[tool(
+        description = "Generate a sanitized offline bug-report zip or preview every included file. Includes environment, logs, metrics, crashes and manifests, never media. Nothing is uploaded.",
+        annotations(read_only_hint = false)
+    )]
+    async fn bug_report(
+        &self,
+        Parameters(params): Parameters<isocast_protocol::diagnostics::BugReportParams>,
+    ) -> Result<CallToolResult, String> {
+        let Json(report): Json<isocast_protocol::diagnostics::BugReport> =
+            self.call(Method::BugReport(params)).await?;
+        let mut result = CallToolResult::success(vec![ContentBlock::text(format!(
+            "{} files. Preview ID: {}. Use read_bug_report_file for bounded contents; no upload occurred.",
+            report.files.len(),
+            report.preview_id.as_deref().unwrap_or("archive written")
+        ))]);
+        result.structured_content = Some(serde_json::to_value(report).map_err(|e| e.to_string())?);
+        Ok(result)
+    }
+
+    #[tool(
+        description = "Read a UTF-8 page (default 4096 bytes, max 16384) from a redacted bug-report preview. Use its preview_id and a file-index name; next_offset continues. Preview expires after five idle minutes.",
+        annotations(read_only_hint = true)
+    )]
+    async fn read_bug_report_file(
+        &self,
+        Parameters(params): Parameters<isocast_protocol::diagnostics::ReportFileParams>,
+    ) -> Result<Json<isocast_protocol::diagnostics::ReportFile>, String> {
+        self.call(Method::ReportFile(params)).await
+    }
+
+    #[tool(
+        description = "Read structured engine/client logs with severity/component filters and a cursor for subsequent reads.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_logs(
+        &self,
+        Parameters(params): Parameters<isocast_protocol::diagnostics::LogsParams>,
+    ) -> Result<Json<isocast_protocol::diagnostics::Logs>, String> {
+        self.call(Method::Logs(params)).await
+    }
+
+    #[tool(
         description = "What happened since you last looked: warnings (like a file dropping \
                        frames), recordings starting and stopping (with the report), scene \
                        switches, markers, stream and source state, the newest setup_changed and \

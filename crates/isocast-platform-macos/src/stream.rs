@@ -8,7 +8,7 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -91,16 +91,55 @@ unsafe impl Send for H264Encoder {}
 
 #[derive(Default)]
 struct Output {
+    session_id: u64,
+    purpose: &'static str,
+    size: [u32; 2],
     frames: Mutex<VecDeque<Result<EncodedVideo>>>,
     /// Signalled when a frame is added.
     ready: Condvar,
     dropped: AtomicU64,
     in_flight: AtomicU64,
+    latency_ns: AtomicU64,
+    callbacks: AtomicU64,
+    last_os_status: std::sync::atomic::AtomicI32,
+}
+
+static ENCODERS: Mutex<Vec<Weak<Output>>> = Mutex::new(Vec::new());
+static NEXT_ENCODER: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn diagnostics() -> serde_json::Value {
+    let mut encoders = ENCODERS.lock().unwrap();
+    encoders.retain(|e| e.strong_count() > 0);
+    serde_json::json!({"h264":encoders.iter().filter_map(Weak::upgrade).map(|e|serde_json::json!({
+        "session":e.session_id,"purpose":e.purpose,"size":e.size,"in_flight":e.in_flight.load(Ordering::Relaxed),"ready_packets":e.frames.lock().unwrap().len(),
+        "last_submit_to_callback_ns":e.latency_ns.load(Ordering::Relaxed),"callbacks":e.callbacks.load(Ordering::Relaxed),
+        "dropped":e.dropped.load(Ordering::Relaxed),"last_os_status":e.last_os_status.load(Ordering::Relaxed)
+    })).collect::<Vec<_>>(),"asset_writer_internal_queue":null,"asset_writer_queue_reason":"AVAssetWriter has no public queue-depth or encode-latency counter; per-file drops and disk latency are in recording"})
+}
+
+fn monotonic_ns() -> u64 {
+    // A scalar cookie, never dereferenced. No allocation or lock per frame.
+    let mut time = std::mem::MaybeUninit::<libc::timespec>::zeroed();
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, time.as_mut_ptr()) } != 0 {
+        return 0;
+    }
+    let time = unsafe { time.assume_init() };
+    time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
 }
 
 impl H264Encoder {
     pub fn new(spec: &LiveVideoSpec) -> Result<Self> {
-        let output = Arc::new(Output::default());
+        let output = Arc::new(Output {
+            session_id: NEXT_ENCODER.fetch_add(1, Ordering::Relaxed),
+            purpose: if spec.low_latency {
+                "monitor"
+            } else {
+                "stream"
+            },
+            size: [spec.width, spec.height],
+            ..Default::default()
+        });
+        ENCODERS.lock().unwrap().push(Arc::downgrade(&output));
         // Monitors want each frame decoded as soon as it arrives: VideoToolbox's
         // low-latency mode says in the stream that frames are never reordered
         // (without it, decoders hold up to five frames back). Encoders without
@@ -174,7 +213,9 @@ impl H264Encoder {
                     &CFNumber::new_i64(bits),
                 )
                 .inspect_err(|err| {
-                    eprintln!("isocastd: constant bitrate unavailable, using average: {err:#}")
+                    isocast_diagnostics::diagnostic!("warn";
+                        "isocastd: constant bitrate unavailable, using average: {err:#}"
+                    )
                 })
                 .is_ok();
             if !constant {
@@ -295,11 +336,13 @@ impl VideoEncoder for H264Encoder {
                 time,
                 duration,
                 options,
-                ptr::null_mut(),
+                monotonic_ns() as usize as *mut c_void,
                 ptr::null_mut(),
             )
         };
         if status != 0 {
+            self.output.in_flight.fetch_sub(1, Ordering::Relaxed);
+            self.output.last_os_status.store(status, Ordering::Relaxed);
             bail!("the H.264 encoder refused a frame (error {status})");
         }
         Ok(())
@@ -387,7 +430,7 @@ unsafe fn create_session(
 /// The session's output callback, on a VideoToolbox thread.
 unsafe extern "C-unwind" fn encoded(
     refcon: *mut c_void,
-    _frame: *mut c_void,
+    frame: *mut c_void,
     status: i32,
     flags: VTEncodeInfoFlags,
     sample: *mut CMSampleBuffer,
@@ -395,6 +438,14 @@ unsafe extern "C-unwind" fn encoded(
     // SAFETY: the refcon is the encoder's `Output`, alive until the session
     // is invalidated.
     let output = unsafe { &*(refcon as *const Output) };
+    output.latency_ns.store(
+        monotonic_ns().saturating_sub(frame as usize as u64),
+        Ordering::Relaxed,
+    );
+    output.callbacks.fetch_add(1, Ordering::Relaxed);
+    if status != 0 {
+        output.last_os_status.store(status, Ordering::Relaxed);
+    }
     let result = match unsafe { sample.as_ref() } {
         _ if status != 0 => Err(anyhow!("the H.264 encoder failed (error {status})")),
         None => {

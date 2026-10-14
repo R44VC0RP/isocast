@@ -106,8 +106,9 @@ impl Client {
             }
             if Instant::now() > deadline {
                 bail!(
-                    "isocastd did not start listening on {}; see {}",
+                    "isocastd did not start listening on {}; inspect `isocast logs` (folder {}) and bootstrap stderr {}",
                     socket_path().display(),
+                    isocast_diagnostics::logs_folder().display(),
                     log_path().display()
                 );
             }
@@ -151,6 +152,10 @@ impl Client {
 
     /// Send one request and read its response's result.
     fn request(&mut self, request: &impl Serialize) -> Result<Value> {
+        let started = Instant::now();
+        let audit = serde_json::to_value(request)?;
+        // Learn credentials without persisting arbitrary client params/prose.
+        let _ = isocast_diagnostics::redact::Redactor::default().value(&audit);
         let request = serde_json::to_string(request)?;
         writeln!(self.writer, "{request}").context("lost the connection to isocastd")?;
         let mut line = String::new();
@@ -163,8 +168,20 @@ impl Client {
         let response: Response = serde_json::from_str(&line)
             .with_context(|| format!("isocastd sent an unreadable response: {line}"))?;
         if let Some(error) = response.error {
+            isocast_diagnostics::emit(
+                "error",
+                "client",
+                "API request failed",
+                serde_json::json!({"method":audit["method"],"error":error,"duration_ms":started.elapsed().as_secs_f64()*1000.0}),
+            );
             return Err(DaemonError(error).into());
         }
+        isocast_diagnostics::poll::record(
+            audit["method"].as_str().unwrap_or("unknown"),
+            &serde_json::json!({"pid":std::process::id()}),
+            started.elapsed().as_secs_f64() * 1000.0,
+            line.len(),
+        );
         // A `null` result (like shutdown's) arrives as no result at all.
         Ok(response.result.unwrap_or_default())
     }
@@ -296,7 +313,7 @@ fn spawn_daemon(daemon: &Path, log: &Path) -> std::io::Result<()> {
                 1,
                 log.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
-                0o644,
+                0o600,
             ))?;
             check(libc::posix_spawn_file_actions_adddup2(&mut actions, 1, 2))?;
             let mut pid = 0;
@@ -355,7 +372,7 @@ fn daemon_path() -> Result<PathBuf> {
     if signed.exists() {
         let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
         if modified(&built) > modified(&signed) {
-            eprintln!(
+            isocast_diagnostics::diagnostic!("warn";
                 "warning: {} is newer than the signed daemon in {}; run scripts/sign-dev.sh",
                 built.display(),
                 app.display()

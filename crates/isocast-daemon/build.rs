@@ -1,7 +1,6 @@
-//! Embed Info.plist in the isocastd binary, so macOS can attribute privacy
-//! permissions (camera, microphone, screen recording) to isocastd itself.
-
+//! Embed the privacy-attribution plist and immutable build provenance.
 fn main() {
+    // Keep the embedded plist: permission attribution must survive this hook.
     let plist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Info.plist");
     println!("cargo:rerun-if-changed={}", plist.display());
     println!("cargo:rerun-if-env-changed=ISOCAST_BUILD_VERSION");
@@ -28,5 +27,52 @@ fn main() {
             "cargo:rustc-link-arg-bin=isocastd=-Wl,-sectcreate,__TEXT,__info_plist,{}",
             generated.display()
         );
+    }
+    let commit = std::env::var("ISOCAST_BUILD_COMMIT")
+        .ok()
+        .or_else(|| {
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| {
+                    let mut commit = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+                    if std::process::Command::new("git")
+                        .args(["status", "--porcelain", "--untracked-files=no"])
+                        .output()
+                        .is_ok_and(|s| s.status.success() && !s.stdout.is_empty())
+                    {
+                        commit.push_str("-dirty");
+                    }
+                    commit
+                })
+        })
+        .unwrap_or_else(|| "unknown (source archive)".into());
+    println!("cargo:rustc-env=ISOCAST_BUILD_COMMIT={commit}");
+    println!(
+        "cargo:rustc-env=ISOCAST_BUILD_PROFILE={}",
+        std::env::var("PROFILE").unwrap_or_default()
+    );
+    println!("cargo:rerun-if-env-changed=ISOCAST_BUILD_COMMIT");
+    // In worktrees .git is a file; resolve the actual HEAD/ref paths.
+    let branch = std::process::Command::new("git")
+        .args(["symbolic-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default();
+    for item in ["HEAD", branch.as_str()] {
+        if let Ok(out) = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", item])
+            .output()
+            && out.status.success()
+        {
+            println!(
+                "cargo:rerun-if-changed={}",
+                String::from_utf8_lossy(&out.stdout).trim()
+            );
+        }
     }
 }

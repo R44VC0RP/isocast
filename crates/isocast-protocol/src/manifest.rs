@@ -84,6 +84,17 @@ pub enum SessionStatus {
     Complete,
     /// Finished, but with errors; see `errors`.
     Failed,
+    /// The process or a critical worker stopped unexpectedly. Durable media
+    /// was finalized where possible; null counts were not guessed.
+    Interrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct InterruptedRecording {
+    #[serde(default)]
+    pub newly_detected: bool,
+    pub manifest: std::path::PathBuf,
+    pub recording: SessionManifest,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

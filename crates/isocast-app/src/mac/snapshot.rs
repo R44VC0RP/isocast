@@ -91,7 +91,7 @@ pub(crate) fn arm(_mtm: MainThreadMarker) {
     after(READY_TIMEOUT, || {
         let waiting = with_main(|main| main.snapshot.as_ref().is_some_and(|p| !p.started));
         if waiting == Some(true) {
-            eprintln!(
+            isocast_diagnostics::diagnostic!("warn";
                 "Isocast: the interface did not say it was ready; taking the snapshot anyway"
             );
             ready();
@@ -157,10 +157,12 @@ fn shoot() {
         match result {
             Ok(()) => {
                 println!("{}", options.path.display());
+                isocast_diagnostics::clean_exit();
                 std::process::exit(0);
             }
             Err(message) => {
-                eprintln!("Isocast: could not save the snapshot: {message}");
+                isocast_diagnostics::diagnostic!("error"; "Isocast: could not save the snapshot: {message}");
+                isocast_diagnostics::clean_exit();
                 std::process::exit(1);
             }
         }

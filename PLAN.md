@@ -547,6 +547,45 @@ layout editing, Windows, release prep).
 - [ ] **A.5 Timeline MVP (C.1, C.2):** takes append, retake, remove,
   reorder, export one joined file; a simple Create view in the app.
 - [ ] **A.6 Log everything, report bugs in one click.**
+  - [x] **A.6 review #1:** contain panics, emergency-finalize poisoned state,
+    and surface/repair interrupted manifests; reviewer repro on m2-a passes.
+  - [x] **A.6 review #2–4:** infallible logging startup, compact polling,
+    protected per-process crash retention, Mach CPU conversion. Reviewer
+    volume/flood and full log-only disk repros pass; ps/log CPU ratio 1.0031.
+  - [x] **A.6 review #5–12:** bounded fail-closed credential memory, exact
+    credential fields, configured Keychain export seeding, HTTP capability
+    path redaction, per-report HMAC/device pseudonyms, nonsticky warnings,
+    incident-time triage, compact/paged MCP preview, explicit severities,
+    deferred camera diagnostics and durable redacted native/plugin output.
+  - [x] **A.6 re-review N1–N7 (fix round 2):** LRU credential memory with
+    in-place oversized scrubbing and per-report Keychain-seeded redactors;
+    compositor panics fail the program file in the manifest and degrade
+    status; true failed-file durations; one contained spawn helper with owner
+    cleanup; unthrottled errors and disconnect omission counts; quiet console
+    fallback; no Debug text. Reviewer repros pass (m2-a + local).
+  - [x] **A.6 fix round 3 (R2-1–R2-5):** continuously drained/retrying native
+    credential delivery, lifetime-pinned actual credentials, pause-aware
+    recovery and incident triage, failed-frame exit status, and failed-program
+    Start/Resume refusal. Reviewer repros and 13/13 e2e cases pass on m2-a.
+  - [x] **A.6 review long run:** two hours, program+ISO 216000 frames each,
+    no drops, 67056 polls, 40.7 MB logs within the daemon budget, prior
+    crash evidence retained throughout (isocast-m2-b).
+  - [x] **A.6a Diagnostics backend:** shared bounded JSONL, API/events,
+    one-second metrics, panic/abnormal-launch detection, redacted offline
+    report preview/zip on API, CLI and MCP (agent/a6-diagnostics).
+  - [x] **A.6b Functional qualification:** real recording/stream/error/crash
+    bundles, planted-secret/title audit, retention, native crash collection,
+    CLI/MCP/app-launch hooks and available counters checked on isolated engines.
+  - [ ] **A.6 strict zero-overhead gate.** Review-fix 6+6 versus current
+    main a619986, including descendant helper CPU/RSS: 48.9 → 49.0% of
+    one core (+0.1 point), instructions 553.1 → 558.7 M/s; 18/18 complete
+    files per build, zero video/audio drops. A literal zero-overhead claim
+    is not made. Details in notes and
+    `/Volumes/IsocastBuild/a6-diagnostics/scratch/REPORT.md`.
+  - Remaining integration/availability: the redesigned app's Report a Bug
+    menu is deferred by the A.6 brief; exact AVAssetWriter-private encode
+    queue depth/latency have no public counter and are explicitly null,
+    alongside measured H.264 queues/latency and recording drops/disk pressure.
   - Structured logs from the daemon, app and CLI on every launch, every API
     call with its result and timing, every event, warning, state and device
     change, and once a second while live: CPU, GPU, memory, drops per
@@ -2203,6 +2242,34 @@ One line per finished task, newest last.
   Flagship A/B (main's built-in gain vs the wasm gain on the tone): 4K 5+5
   drops/run median 1162 vs 1165, CPU 42.5 vs 42.4%, RSS 124 vs 128 MB;
   1080 3+3: 0 vs 0 dropped, 9/9 files complete, CPU 44.4 vs 43.6%.
+- A.6a/b (2026-10-13): shared redacted JSONL, crash markers/backtraces,
+  available one-second metrics and offline bug_report/logs on API, CLI and
+  MCP. Verified real synthetic recording/local RTMP, missing camera, bad
+  setup, full disk image, owned VT service kill (-11883/-12912), panic and
+  SIGKILL; six interrupted files decode. Native .ips reports, 11-value
+  redaction audit, 80 MB retention flood, relative output/strict preview,
+  46-tool MCP round trip and both Rust app launch hooks pass; 165 existing
+  tests, release build/fmt/clippy clean. Three 4+4 flagship-1080 rounds all
+  zero-drop; sampler 0.214–0.235% of one core. Strict total CPU gate stays
+  blocked (+0.70 points in the final round); see A.6 and the scratch report.
+- A.6 review #1 (2026-10-13): panic hooks unwind instead of aborting;
+  connection/worker guards, emergency writer finalization and interrupted
+  manifest recovery. Reviewer m2-a repro: contained worker/connection
+  1184/1184 frames, poisoned state 845/845 frames, zero drops; SIGKILL
+  recovers 420 frames and an interrupted manifest. Release clippy/fmt and
+  165 existing tests pass. Shared recording files contain recovery hooks only.
+- A.6 review #2–12 (2026-10-13): infallible/compact logging and protected
+  crash retention, correct Mach CPU units, bounded fail-closed redaction,
+  configured-Keychain export seeding, HTTP capability-path removal,
+  per-report HMAC privacy, nonsticky warnings, preserved incident triage,
+  compact/paged MCP preview, callback-safe/native/plugin output. Reviewer
+  repros and end-to-end checks pass; two-hour streamless program+ISO run
+  with 67056 polls stays at 40.7 MB logs and retains crash evidence, both
+  files 216000 frames / 7200 s / zero losses. Whole-daemon 6+6 vs current
+  main a619986: 48.9→49.0% of a core, 18/18 complete files per build, zero
+  drops; +1.0% instructions, +13 MB summed RSS including native relay.
+  Release build/fmt/clippy and 165 tests pass. Details and limits in notes
+  and the scratch REPORT.md's Review fixes section.
 - S.2c / S.3f (2026-10-13): overloaded files keep complete audio and equal
   final A/V duration with explicitly counted tail repeats; program/stream
   outputs have admission priority. Eight M4 and four M2 flagship pairs:
@@ -2425,6 +2492,19 @@ One line per finished task, newest last.
   and SIGTERM leave no child processes. Three-pair A/A benchmark automation
   reports noise correctly. actionlint, fmt, release all-target clippy and
   all 179 existing Rust tests pass. Hosted first-run steps in the e2e report.
+- A.6 fix round 2 (2026-10-14): merged main; re-review N1-N7 fixed. One
+  5,000-byte token or 700 distinct tokens no longer withhold anything (0
+  "withheld", bad-apply error and versions present); late secret still
+  redacted. Injected compositor panic: manifest failed with the cause,
+  status "degraded"; writer-site BARS manifest 14.433 s = ffprobe; later
+  `frames` after a frame-stream panic deliver (was 0×0) with a warning;
+  error after 40 calls logged, omission flushed at disconnect; unwritable
+  logs: CLI prints one warning, no JSONL. Clean worker/state/SIGKILL cases
+  unchanged. The first start after a launch that repaired a killed take
+  names it again (e2e shutdown expected that note; it accepts the A.6
+  "interrupted" status). Main merged twice more (Console app, pause);
+  after the last: fmt, clippy -D warnings, 180 tests, crash cases rerun,
+  e2e on isocast-m2-a 13/13 pass incl. bug_report, shutdown and pause.
 - N.5.0 (2026-10-13): the Console foundation on ui/console. Every Console
   token from Paper in ui/theme.slint under Paper's names (97, plus the
   literals the boards use: LCD, sheet, capsule, meter, shadow sizes);
@@ -2558,3 +2638,14 @@ One line per finished task, newest last.
   Create 2.8% (3 runs, 20 s); 51 clips: zoom, scroll and drags at most
   29% of one core in any second; e2e.py 11 PASS (2 skips, not present on
   main).
+- A.6 fix round 3 (2026-10-14): R2-1–R2-5 fixed after merging main's pause
+  durability correction. Relay fatal-tail checks with 10/40/120/600 learned
+  values all retain readable redacted text; actual stalled-seed delivery
+  withholds only the pending line and recovers. Env and rotated/Keychain
+  stream credentials survive 600-value churn with no raw/zip leaks. Reviewer
+  paused SIGKILL: manifest explains unknown recoverability and triage paused
+  true; compositor fault refuses Resume/Start (exit 1), keeps the take paused;
+  frame-stream panic exits 1, next client gets 61 frames. m2-a regressions:
+  contained worker 393 frames/file complete, poisoned state 177 interrupted,
+  post-resume writer file 177 frames/5.9 s, native exit retains 360 frames.
+  All decoded files clean. fmt, release clippy/tests (180), e2e 13/13 pass.

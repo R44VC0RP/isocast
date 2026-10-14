@@ -91,6 +91,7 @@ pub(super) struct SceneThread<F> {
 }
 
 struct Shared<F> {
+    failure: Mutex<Option<String>>,
     input: Mutex<Waiting<F>>,
     wake: Condvar,
     stop: AtomicBool,
@@ -126,8 +127,10 @@ impl<F: Clone + Send + 'static> SceneThread<F> {
         frame_size: FrameSize<F>,
         data: Arc<DataStore>,
         on_warning: OnWarning,
+        on_failed: Arc<dyn Fn(String, bool) + Send + Sync>,
     ) -> Self {
         let shared = Arc::new(Shared {
+            failure: Mutex::new(None),
             input: Mutex::new(Waiting {
                 next: None,
                 sizes: Vec::new(),
@@ -163,7 +166,21 @@ impl<F: Clone + Send + 'static> SceneThread<F> {
             .name("scenes".into())
             .spawn({
                 let shared = shared.clone();
-                move || run(&shared, &frame_size, &data, &on_warning)
+                move || {
+                    if let Err(message) = isocast_diagnostics::contain("scene worker", || {
+                        run(&shared, &frame_size, &data, &on_warning)
+                    }) {
+                        *shared.failure.lock().unwrap_or_else(|p| p.into_inner()) =
+                            Some(message.clone());
+                        shared.stop.store(true, Ordering::SeqCst);
+                        on_failed(
+                            message,
+                            shared.input.is_poisoned()
+                                || shared.output.is_poisoned()
+                                || shared.bound.is_poisoned(),
+                        );
+                    }
+                }
             })
             .expect("could not start the scene thread");
         Self {
@@ -221,14 +238,31 @@ impl<F: Clone + Send + 'static> SceneThread<F> {
         self.shared.stop.store(true, Ordering::SeqCst);
         {
             // Under the lock, so the thread can't miss the wake-up.
-            let _input = self.shared.input.lock().unwrap();
+            let _input = self.shared.input.lock().unwrap_or_else(|p| p.into_inner());
             self.shared.wake.notify_all();
         }
         if let Some(thread) = self.thread.lock().unwrap().take() {
             let _ = thread.join();
         }
         // Let go of the sources' frames.
-        self.shared.output.lock().unwrap().take();
+        self.shared
+            .output
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+    }
+
+    pub(super) fn poisoned(&self) -> bool {
+        self.shared.input.is_poisoned()
+            || self.shared.output.is_poisoned()
+            || self.shared.bound.is_poisoned()
+    }
+    pub(super) fn failure(&self) -> Option<String> {
+        self.shared
+            .failure
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 

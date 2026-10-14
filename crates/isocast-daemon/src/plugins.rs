@@ -458,7 +458,7 @@ impl Registry {
             let record = match read_record(&dir) {
                 Ok(record) => record,
                 Err(err) => {
-                    eprintln!("isocastd: plugin {id}: {err}");
+                    isocast_diagnostics::diagnostic!("error"; "isocastd: plugin {id}: {err}");
                     continue;
                 }
             };
@@ -475,7 +475,7 @@ impl Registry {
             };
             shared.entries.lock().unwrap().insert(id.clone(), entry);
             if let Err(err) = shared.run(&id) {
-                eprintln!("isocastd: plugin {id}: {}", err.message);
+                isocast_diagnostics::diagnostic!("error"; "isocastd: plugin {id}: {}", err.message);
             }
         }
         shared.publish_kinds();
@@ -991,7 +991,7 @@ impl Shared {
     }
 
     fn warn(&self, message: String) {
-        eprintln!("isocastd: {message}");
+        isocast_diagnostics::diagnostic!("warn"; "isocastd: {message}");
         if let Some(hooks) = self.hooks.get() {
             (hooks.publish)(Event::Warning { message });
         }
@@ -1166,7 +1166,9 @@ impl Shared {
             listener.stop();
         }
         if let Err(err) = write_record(&entry.dir, &entry.record) {
-            eprintln!("isocastd: plugin {id}: couldn't save its state: {err}");
+            isocast_diagnostics::diagnostic!("error";
+                "isocastd: plugin {id}: couldn't save its state: {err}"
+            );
         }
     }
 }
@@ -1803,10 +1805,7 @@ fn spawn(
     _profile: Option<&str>,
 ) -> io::Result<u32> {
     use std::os::unix::process::CommandExt;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log)?;
+    let log = isocast_diagnostics::output::plugin_pipe(log)?;
     let child = std::process::Command::new(program)
         .args(args)
         .env_clear()

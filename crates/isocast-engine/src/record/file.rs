@@ -52,7 +52,10 @@ pub(super) fn write_files<W: FileWriter>(
         let finish = |file: OpenFile<W>, end: Time, take: usize, failure: Result<()>| {
             let done = done.clone();
             scope.spawn(move || {
-                let result = file.finish(end, failure);
+                let result =
+                    isocast_diagnostics::contain("file finalizer", || file.finish(end, failure))
+                        .map_err(anyhow::Error::msg)
+                        .and_then(|r| r);
                 let _ = done.send(Done {
                     take,
                     index,
@@ -67,94 +70,99 @@ pub(super) fn write_files<W: FileWriter>(
         // which can arrive after the next take's first frame.
         let mut closing: Option<Closing<W>> = None;
         let mut failure = Ok(());
-        for packet in packets {
-            if next.is_none()
-                && let Ok(split) = splits.try_recv()
-            {
-                next = Some((
-                    split.at,
-                    split.take,
-                    OpenFile::new(split.writer, split.plan, clock.clone()),
-                ));
-            }
-            let end = shared.end();
-            let (result, newest) = match packet {
-                Packet::Video { frame, pts } => {
-                    // A split the session ends before stays pending, and is
-                    // cancelled below.
-                    if let Some((at, ..)) = next
-                        && pts >= at
-                        && at < end
-                    {
-                        let (at, next_take, new) = next.take().expect("checked");
-                        let old = std::mem::replace(&mut file, new);
-                        let ended = Closing {
-                            at,
-                            take,
-                            file: old,
-                            failure: Ok(()),
-                        };
-                        if let Some(c) = closing.replace(ended) {
-                            finish(c.file, c.at, c.take, c.failure);
+        let written = isocast_diagnostics::contain("file writer", || {
+            for packet in packets {
+                if next.is_none()
+                    && let Ok(split) = splits.try_recv()
+                {
+                    next = Some((
+                        split.at,
+                        split.take,
+                        OpenFile::new(split.writer, split.plan, clock.clone()),
+                    ));
+                }
+                let end = shared.end();
+                let (result, newest) = match packet {
+                    Packet::Video { frame, pts } => {
+                        // A split the session ends before stays pending, and is
+                        // cancelled below.
+                        if let Some((at, ..)) = next
+                            && pts >= at
+                            && at < end
+                        {
+                            let (at, next_take, new) = next.take().expect("checked");
+                            let old = std::mem::replace(&mut file, new);
+                            let ended = Closing {
+                                at,
+                                take,
+                                file: old,
+                                failure: Ok(()),
+                            };
+                            if let Some(c) = closing.replace(ended) {
+                                finish(c.file, c.at, c.take, c.failure);
+                            }
+                            take = next_take;
                         }
-                        take = next_take;
+                        (file.video(&frame, pts, end), pts)
                     }
-                    (file.video(&frame, pts, end), pts)
-                }
-                Packet::Audio {
-                    track,
-                    samples,
-                    pts,
-                } => {
-                    if let Some(c) = &mut closing
-                        && c.failure.is_ok()
-                        && pts < c.at
-                    {
-                        c.failure = c.file.audio(track, &samples, pts, c.at.min(end));
+                    Packet::Audio {
+                        track,
+                        samples,
+                        pts,
+                    } => {
+                        if let Some(c) = &mut closing
+                            && c.failure.is_ok()
+                            && pts < c.at
+                        {
+                            c.failure = c.file.audio(track, &samples, pts, c.at.min(end));
+                        }
+                        // Audio before a split goes to the current file; the next
+                        // file holds what it gets until its first frame and trims
+                        // it.
+                        let until = next.as_ref().map_or(end, |(at, ..)| end.min(*at));
+                        let result = file.audio(track, &samples, pts, until);
+                        let result = if let Some((.., new)) = &mut next {
+                            result.and_then(|()| new.audio(track, &samples, pts, end))
+                        } else {
+                            result
+                        };
+                        (result, pts)
                     }
-                    // Audio before a split goes to the current file; the next
-                    // file holds what it gets until its first frame and trims
-                    // it.
-                    let until = next.as_ref().map_or(end, |(at, ..)| end.min(*at));
-                    let result = file.audio(track, &samples, pts, until);
-                    let result = if let Some((.., new)) = &mut next {
-                        result.and_then(|()| new.audio(track, &samples, pts, end))
-                    } else {
-                        result
-                    };
-                    (result, pts)
+                };
+                if let Some(c) = &closing
+                    && (c.failure.is_err()
+                        || c.file.audio_complete(c.at)
+                        || newest >= c.at + SPLIT_AUDIO_WAIT)
+                {
+                    let c = closing.take().expect("checked");
+                    finish(c.file, c.at, c.take, c.failure);
                 }
-            };
-            if let Some(c) = &closing
-                && (c.failure.is_err()
-                    || c.file.audio_complete(c.at)
-                    || newest >= c.at + SPLIT_AUDIO_WAIT)
-            {
-                let c = closing.take().expect("checked");
-                finish(c.file, c.at, c.take, c.failure);
+                if let Err(err) = result {
+                    failure = Err(err);
+                    break;
+                }
+                // The end is immutable once reached. Finish as soon as the last
+                // video frame and every audio track are present; retaining the
+                // route for the capture timeout only delays finalization. Stalled
+                // or missing inputs still use the session's bounded tail wait.
+                if end != Time::MAX
+                    && let Some(start) = file.start
+                    && file.last_video.is_some_and(|pts| {
+                        // Frame intervals aren't whole nanoseconds at 60 fps:
+                        // adding one to the last PTS can be 1 ns short of the
+                        // same boundary computed from the file's start.
+                        pts.ticks_since(start, file.fps()) + 1
+                            >= file_end(start, clock.state.read().unwrap().map(end), file.fps())
+                                .ticks_since(start, file.fps())
+                    })
+                    && file.audio_complete(end)
+                {
+                    break;
+                }
             }
-            if let Err(err) = result {
-                failure = Err(err);
-                break;
-            }
-            // The end is immutable once reached. Finish as soon as the last
-            // video frame and every audio track are present; retaining the
-            // route for the capture timeout only delays finalization. Stalled
-            // or missing inputs still use the session's bounded tail wait.
-            if end != Time::MAX
-                && let Some(start) = file.start
-                && file.last_video.is_some_and(|pts| {
-                    // Frame intervals aren't whole nanoseconds at 60 fps:
-                    // adding one to the last PTS can be 1 ns short of the
-                    // same boundary computed from the file's start.
-                    pts.ticks_since(start, file.fps()) + 1
-                        >= file_end(start, clock.state.read().unwrap().map(end), file.fps())
-                            .ticks_since(start, file.fps())
-                })
-                && file.audio_complete(end)
-            {
-                break;
-            }
+        });
+        if let Err(message) = written {
+            failure = Err(anyhow!(message));
         }
         if let Some(c) = closing {
             finish(c.file, c.at.min(shared.end()), c.take, c.failure);

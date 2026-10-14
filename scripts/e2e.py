@@ -750,7 +750,9 @@ def scenario_shutdown(e, cfg, evidence):
     recovery = e.rpc("start", {"seconds": 1})
     require("interrupt" in json.dumps(recovery.get("notes", [])).lower(),
             "next recording start did not report interrupted take")
-    require(read_json(killed["manifest"])["status"] == "failed", "crash manifest not recovered")
+    # The daemon repairs a killed take at its next launch (A.6: "interrupted").
+    require(read_json(killed["manifest"])["status"] in ("failed", "interrupted"),
+            "crash manifest not recovered")
     until(lambda: finished(recovery["manifest"]), 30, "recovery recording")
     evidence["recovery_notes"] = recovery.get("notes", [])
 

@@ -46,9 +46,21 @@ impl DiskProbe {
         let shared = state.clone();
         // Detached, so a write that never returns (a network share gone
         // away) can't hold up the end of the recording.
-        let _ = thread::Builder::new()
-            .name("disk probe".into())
-            .spawn(move || probe(&platform, &path, &shared));
+        let failed = state.clone();
+        let failed_path = path.clone();
+        let _ = isocast_diagnostics::spawn(
+            "disk probe",
+            move || probe(&platform, &path, &shared),
+            move |_| {
+                *failed.0.lock().unwrap_or_else(|p| p.into_inner()) = ProbeState {
+                    done: true,
+                    ..Default::default()
+                };
+                failed.0.clear_poison();
+                failed.1.notify_all();
+                let _ = std::fs::remove_file(failed_path);
+            },
+        );
         Self { state }
     }
 
@@ -84,7 +96,8 @@ fn probe<P: Platform>(platform: &P, path: &PathBuf, shared: &(Mutex<ProbeState>,
         times.get(times.len() / 2).copied()
     };
     let (state, wake) = shared;
-    state.lock().unwrap().at_start = measure();
+    let initial = measure();
+    state.lock().unwrap().at_start = initial;
     loop {
         {
             let mut guard = state.lock().unwrap();

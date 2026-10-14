@@ -23,6 +23,7 @@ mod browser;
 mod camera;
 mod capture;
 mod devices;
+pub mod diagnostics;
 mod frames;
 mod gpu;
 pub mod hotkeys;

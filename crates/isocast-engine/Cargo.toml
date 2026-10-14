@@ -7,6 +7,7 @@ repository.workspace = true
 description = "The Isocast engine: sessions, the shared clock, recording and the GPU renderer."
 
 [dependencies]
+isocast-diagnostics = { path = "../isocast-diagnostics" }
 anyhow = "1.0.104"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 isocast-protocol = { path = "../isocast-protocol" }

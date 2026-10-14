@@ -11,8 +11,8 @@ Each run signs the daemon into its own copy of the development app
 (`<work>/Isocast Dev.app`), starts it on its own socket and setup file (never
 Ryan's), records (or streams) the scenario, and measures:
 
-- isocastd CPU (% of one core, from its CPU time over the measured window),
-  resident memory at the end;
+- whole-daemon CPU (isocastd plus descendant helpers/plugins, % of one core),
+  with owned PIDs, retired instructions and total resident memory;
 - the machine's VideoToolbox encoder/decoder services' CPU over the same
   window (shared with anything else encoding, so noisier; n/a if a service
   starts, exits or resets during the sample);
@@ -110,6 +110,18 @@ def cpu_times(pids):
 
 def cpu_seconds(pids):
     return sum(cpu_times(pids).values())
+
+
+def process_tree(pid):
+    """Include native diagnostic relays rather than hiding work in a helper."""
+    rows = run(["ps", "-axo", "pid=,ppid="], check=False).stdout.splitlines()
+    parents = dict(tuple(map(int, row.split())) for row in rows if len(row.split()) == 2)
+    owned = {pid}
+    while True:
+        more = {child for child, parent in parents.items() if parent in owned}
+        if more <= owned:
+            return sorted(owned)
+        owned.update(more)
 
 
 class _RusageInfoV4(ctypes.Structure):
@@ -365,14 +377,16 @@ def measure(args, daemon, label, index, cleanup):
     time.sleep(2)
 
     vt = pids_of("VTEncoderXPCService") + pids_of("VTDecoderXPCService")
-    c0, v0 = cpu_seconds([pid]), cpu_times(vt)
-    i0, t0 = instruction_counts([pid]), time.time()
+    owned0 = process_tree(pid)
+    c0, v0 = cpu_times(owned0), cpu_times(vt)
+    i0, t0 = instruction_counts(owned0), time.time()
     time.sleep(args.seconds)
     vt = pids_of("VTEncoderXPCService") + pids_of("VTDecoderXPCService")
-    c1, v1 = cpu_seconds([pid]), cpu_times(vt)
-    i1, t1 = instruction_counts([pid]), time.time()
+    owned1 = process_tree(pid)
+    c1, v1 = cpu_times(owned1), cpu_times(vt)
+    i1, t1 = instruction_counts(owned1), time.time()
     vt_delta = cpu_delta(v0, v1)
-    memory = rss_mb(pid)
+    memory = sum(rss_mb(p) for p in owned1)
     # The compositor's own timings (CPU per tick, frames sent again), from
     # builds that report them (older daemons' read back as zeros).
     status = run([cli, "status", "--json"], env=env, check=False)
@@ -400,10 +414,12 @@ def measure(args, daemon, label, index, cleanup):
             except (OSError, ValueError):
                 pass  # being rewritten
             time.sleep(0.5)
+    daemon_cpu_delta = cpu_delta(c0, c1)
     result = {
         "label": label, "run": index, "scenario": args.scenario, "real": args.real,
         "daemon": str(daemon), "seconds": round(t1 - t0, 2),
-        "isocastd_cpu": round(100 * (c1 - c0) / (t1 - t0), 1),
+        "isocastd_cpu": round(100 * daemon_cpu_delta / (t1 - t0), 1) if daemon_cpu_delta is not None else None,
+        "daemon_pids_before": owned0, "daemon_pids_after": owned1,
         "isocastd_million_instructions_s": instruction_rate(i0, i1, t1 - t0),
         "vt_services_cpu": round(100 * vt_delta / (t1 - t0), 1) if vt_delta is not None else None,
         "rss_mb": round(memory), "files": [],
@@ -458,7 +474,10 @@ def summary(results):
     print("\n| build | runs | isocastd CPU % (median, range) | isocastd M instructions/s | VT services CPU % | RSS MB | dropped frames | audio dropouts | files complete | compositor µs/frame p50 (p99) |")
     print("|---|---|---|---|---|---|---|---|---|---|")
     for label, rs in by.items():
-        cpu = [r["isocastd_cpu"] for r in rs]
+        cpu = [r["isocastd_cpu"] for r in rs if r["isocastd_cpu"] is not None]
+        cpu_text = f"{statistics.median(cpu):.1f} ({min(cpu):.1f}–{max(cpu):.1f})" if cpu else "n/a"
+        if len(cpu) != len(rs):
+            cpu_text += f" ({len(cpu)}/{len(rs)} valid)"
         instructions = [r["isocastd_million_instructions_s"] for r in rs
                         if r.get("isocastd_million_instructions_s") is not None]
         instruction_text = f"{statistics.median(instructions):.1f}" if instructions else "n/a"
@@ -479,7 +498,7 @@ def summary(results):
         timed = [r["compositor"]["cpu_us"] for r in rs if r.get("compositor")]
         timing = (f"{statistics.median(t['p50'] for t in timed):.1f} "
                   f"({statistics.median(t['p99'] for t in timed):.1f})") if timed else "n/a"
-        print(f"| {label} | {len(rs)} | {statistics.median(cpu):.1f} ({min(cpu):.1f}–{max(cpu):.1f}) | "
+        print(f"| {label} | {len(rs)} | {cpu_text} | "
               f"{instruction_text} | {vt_text} | {statistics.median(rss):.0f} | {dropped} | {dropouts} | {complete} | {timing} |")
     for label, rs in by.items():
         streams = [r["stream"] for r in rs if "stream" in r]

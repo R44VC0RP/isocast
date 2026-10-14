@@ -13,6 +13,7 @@ name = "isocast-ui"
 path = "src/main.rs"
 
 [dependencies]
+isocast-diagnostics = { path = "../isocast-diagnostics" }
 anyhow = "1.0.104"
 # `wgpu`: the daemon's shared frames as wgpu textures (the portable preview).
 isocast-client = { path = "../isocast-client", features = ["wgpu"] }

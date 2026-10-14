@@ -361,7 +361,9 @@ fn open_page(
                     Ok(None) => {}
                     Err(err) => {
                         if !reported.replace(true) {
-                            eprintln!("isocastd: browser source snapshot failed: {err:#}");
+                            isocast_diagnostics::diagnostic!("warn";
+                                "isocastd: browser source snapshot failed: {err:#}"
+                            );
                         }
                     }
                 }
@@ -496,7 +498,9 @@ define_class!(
                 }
                 Err(err) => {
                     if !self.ivars().reported.replace(true) {
-                        eprintln!("isocastd: a browser source sent unreadable audio: {err:#}");
+                        isocast_diagnostics::diagnostic!("warn";
+                            "isocastd: a browser source sent unreadable audio: {err:#}"
+                        );
                     }
                 }
             }

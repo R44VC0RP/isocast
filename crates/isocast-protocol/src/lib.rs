@@ -12,6 +12,7 @@ pub mod change;
 mod content;
 pub mod data;
 pub mod devices;
+pub mod diagnostics;
 mod fields;
 mod filter;
 pub mod hotkeys;

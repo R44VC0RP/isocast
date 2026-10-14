@@ -351,7 +351,7 @@ impl Daemon {
             if from.exists()
                 && let Err(err) = std::fs::copy(&from, &to)
             {
-                eprintln!(
+                isocast_diagnostics::diagnostic!("warn";
                     "isocastd: couldn't copy {} to {}: {err}",
                     from.display(),
                     to.display()

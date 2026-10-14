@@ -81,15 +81,24 @@ const MAX_REQUEST: usize = 16 << 20;
 use isocast_platform_macos::MacPlatform;
 
 mod data;
+mod diagnostics;
 mod export;
 mod hotkeys;
 mod library;
 mod plugins;
+mod recovery;
 mod store;
 mod timeline;
 mod virtual_camera;
 
 fn main() -> ExitCode {
+    if isocast_diagnostics::native::requested() {
+        return if isocast_diagnostics::native::run().is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
     #[cfg(target_os = "macos")]
     if let Some(mode) = std::env::args().nth(1) {
         use isocast_platform_macos::virtual_camera;
@@ -122,18 +131,22 @@ fn main() -> ExitCode {
             return ExitCode::from(result as u8);
         }
     }
+    let _logs = isocast_diagnostics::init("isocastd", false);
     let socket = socket_path();
     match hold_instance_lock().and_then(|lock| Ok((lock, listen(&socket)?))) {
         // The lock is held until the process exits.
         Ok((_lock, listener)) => {
-            eprintln!("isocastd listening on {}", socket.display());
+            isocast_diagnostics::ready();
+            isocast_diagnostics::diagnostic!("isocastd listening on {}", socket.display());
             let daemon = Arc::new(Daemon::default());
             daemon.load_setup();
+            daemon.recover_recordings();
             daemon.load_data();
+            diagnostics::start(&daemon);
             daemon.load_timelines();
             start_plugins(&daemon);
             let saver = daemon.clone();
-            thread::spawn(move || saver.save_live_changes());
+            thread::spawn(move || saver.contain("setup saver", || saver.save_live_changes()));
             // On Ctrl-C, SIGTERM or SIGHUP, finish the files before exiting.
             let on_signal = daemon.clone();
             let handler = ctrlc::set_handler(move || {
@@ -141,9 +154,9 @@ fn main() -> ExitCode {
                 std::process::exit(0);
             });
             let idle = daemon.clone();
-            thread::spawn(move || idle.stop_idle_engine());
+            thread::spawn(move || idle.contain("idle monitor", || idle.stop_idle_engine()));
             if let Err(err) = handler {
-                eprintln!("isocastd: could not handle signals: {err}");
+                isocast_diagnostics::diagnostic!("error"; "isocastd: could not handle signals: {err}");
             }
             #[cfg(target_os = "macos")]
             isocast_platform_macos::will_run_main_queue();
@@ -158,7 +171,7 @@ fn main() -> ExitCode {
             run_main_queue(on_quit)
         }
         Err(err) => {
-            eprintln!("isocastd: {err:#}");
+            isocast_diagnostics::diagnostic!("error"; "isocastd: {err:#}");
             ExitCode::FAILURE
         }
     }
@@ -266,7 +279,9 @@ fn serve(listener: UnixListener, daemon: Arc<Daemon>) {
         // is held to its grant here too.
         let scope = daemon.plugins.scope_of_peer(&connection);
         thread::spawn(move || {
-            let _ = handle(connection, &daemon, scope);
+            daemon.contain("API connection", || {
+                let _ = handle(connection, &daemon, scope);
+            });
         });
     }
 }
@@ -285,7 +300,9 @@ fn start_plugins(daemon: &Arc<Daemon>) {
         serve: Box::new(move |connection, scope| {
             if let Some(daemon) = serve.upgrade() {
                 thread::spawn(move || {
-                    let _ = handle(connection, &daemon, Some(scope));
+                    daemon.contain("plugin connection", || {
+                        let _ = handle(connection, &daemon, Some(scope));
+                    });
                 });
             }
         }),
@@ -299,7 +316,18 @@ fn handle(
     daemon: &Arc<Daemon>,
     scope: Option<Arc<plugins::Scope>>,
 ) -> std::io::Result<()> {
+    if diagnostics::CONNECTION_PANIC.swap(false, Ordering::SeqCst) {
+        panic!("requested API connection panic");
+    }
+    if daemon.emergency.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let _tracked = scope.as_ref().and_then(|scope| scope.track(&connection));
+    #[cfg(target_os = "macos")]
+    let peer = isocast_platform_macos::diagnostics::peer(&connection);
+    #[cfg(not(target_os = "macos"))]
+    let peer = serde_json::json!({"transport":"unix"});
+    let _closed = diagnostics::PeerClosed(peer.clone());
     let mut focused = None;
     let mut writer = connection.try_clone()?;
     let mut reader = BufReader::new(connection);
@@ -313,6 +341,7 @@ fn handle(
             return Ok(());
         }
         if read > MAX_REQUEST {
+            let mut audit = diagnostics::ApiCall::new(r#"{"method":"[oversized request]"}"#, &peer);
             // The rest of the line can't be skipped without reading it, so
             // the connection ends here.
             let response = Response::err(
@@ -325,6 +354,7 @@ fn handle(
                     ),
                 },
             );
+            audit.response(&response);
             writeln!(writer, "{}", serde_json::to_string(&response)?)?;
             return Ok(());
         }
@@ -332,6 +362,7 @@ fn handle(
             continue;
         }
         let request = serde_json::from_str::<Request>(&line);
+        let mut audit = diagnostics::ApiCall::new(&line, &peer);
         if let (Some(scope), Ok(request)) = (&scope, &request)
             && let Some(message) = scope.refusal(&request.method)
         {
@@ -343,6 +374,7 @@ fn handle(
                 },
             );
             writeln!(writer, "{}", serde_json::to_string(&refused)?)?;
+            audit.response(&refused);
             continue;
         }
         let response = match request {
@@ -366,7 +398,10 @@ fn handle(
             }) => {
                 let params = params.unwrap_or_default();
                 match params.problem() {
-                    None => return watch(writer, daemon, id, &params),
+                    None => {
+                        audit.value(serde_json::json!({"subscribed":"events"}));
+                        return watch(writer, daemon, id, &params);
+                    }
                     Some(problem) => Response::err(
                         Some(id),
                         RpcError {
@@ -381,7 +416,10 @@ fn handle(
                 method: Method::Frames(params),
                 ..
             }) => match daemon.frames(&params) {
-                Ok((reply, feed)) => return stream_frames(reader, writer, daemon, id, reply, feed),
+                Ok((reply, feed)) => {
+                    audit.value(serde_json::to_value(&reply).unwrap_or_default());
+                    return stream_frames(reader, writer, daemon, id, reply, feed);
+                }
                 Err(error) => Response::err(Some(id), error),
             },
             Ok(Request {
@@ -390,6 +428,7 @@ fn handle(
                 ..
             }) => match daemon.shared_frames(&params) {
                 Ok((reply, feed, exporter)) => {
+                    audit.value(serde_json::to_value(&reply).unwrap_or_default());
                     return stream_shared_frames(reader, writer, daemon, id, reply, feed, exporter);
                 }
                 Err(error) => Response::err(Some(id), error),
@@ -400,6 +439,7 @@ fn handle(
                 if shutdown {
                     daemon.graceful_shutdown();
                     writeln!(writer, "{}", serde_json::to_string(&response)?)?;
+                    audit.response(&response);
                     std::process::exit(0);
                 }
                 response
@@ -416,7 +456,10 @@ fn handle(
                 },
             ),
         };
-        writeln!(writer, "{}", serde_json::to_string(&response)?)?;
+        let bytes = serde_json::to_vec(&response)?;
+        audit.response_bytes(&response, bytes.len());
+        writer.write_all(&bytes)?;
+        writer.write_all(b"\n")?;
     }
 }
 
@@ -633,6 +676,17 @@ fn watch(
         let warning = Notification::event(Event::Warning { message });
         writeln!(writer, "{}", serde_json::to_string(&warning)?)?;
     }
+    if wanted.contains(EventKind::Warning) {
+        for previous in isocast_diagnostics::previous_abnormal() {
+            let warning = Notification::event(Event::Warning {
+                message: format!(
+                    "previous daemon launch ended abnormally: {}; use bug_report",
+                    previous["launch"]
+                ),
+            });
+            writeln!(writer, "{}", serde_json::to_string(&warning)?)?;
+        }
+    }
     loop {
         match rx.recv_timeout(WATCH_HANGUP_CHECK) {
             Ok(event) => writer.write_all(&event)?,
@@ -706,6 +760,10 @@ fn id_of(line: &str) -> Option<u64> {
 
 #[derive(Default)]
 struct Daemon {
+    emergency: AtomicBool,
+    interrupted: Mutex<Vec<isocast_protocol::manifest::InterruptedRecording>>,
+    /// Manifests startup recovery marked that no `start` has mentioned yet.
+    interrupted_unnoted: Mutex<Vec<PathBuf>>,
     state: Mutex<State>,
     /// Signalled when a session ends.
     ended: Condvar,
@@ -903,6 +961,7 @@ struct Session {
 trait LiveEngine: Send + Sync {
     fn update(&self, setup: &Setup, revision: u64) -> Result<(), String>;
     fn info(&self) -> EngineInfo;
+    fn program_failure(&self) -> Option<String>;
     fn control(&self) -> Arc<SessionControl>;
     fn set_preview(&self, scene: Option<String>);
     fn frame_jpeg(
@@ -945,6 +1004,10 @@ impl<P: Platform<SharedSurface = Surface>> LiveEngine for LiveEngineOf<P> {
 
     fn info(&self) -> EngineInfo {
         LiveEngineOf::info(self)
+    }
+
+    fn program_failure(&self) -> Option<String> {
+        LiveEngineOf::program_failure(self)
     }
 
     fn control(&self) -> Arc<SessionControl> {
@@ -1084,6 +1147,7 @@ impl Daemon {
         self.data.flush();
         self.plugins.stop_all();
         let _ = std::fs::remove_file(socket_path());
+        isocast_diagnostics::clean_exit();
     }
 
     fn call(self: &Arc<Self>, request: Request) -> Response {
@@ -1105,6 +1169,13 @@ impl Daemon {
         let shutdown = request.method == Method::Shutdown;
         let result = match request.method {
             Method::Status => to_json(self.status()),
+            Method::BugReport(params) => diagnostics::bug_report(self, &params).and_then(to_json),
+            Method::ReportFile(params) => isocast_diagnostics::preview::read(&params)
+                .map_err(diagnostics::error)
+                .and_then(to_json),
+            Method::Logs(params) => isocast_diagnostics::bundle::logs(&params)
+                .map_err(diagnostics::error)
+                .and_then(to_json),
             Method::Pause => self.set_paused(true).and_then(to_json),
             Method::Resume => self.set_paused(false).and_then(to_json),
             Method::Devices => devices().map_err(failed).and_then(to_json),
@@ -1254,7 +1325,13 @@ impl Daemon {
         if matches!(event, Event::SetupChanged { .. }) {
             self.refresh_hotkeys();
         }
-        let mut watchers = self.watchers.lock().unwrap();
+        diagnostics::event(&event);
+        let mut watchers = self.watchers.lock().unwrap_or_else(|p| {
+            let mut watchers = p.into_inner();
+            watchers.clear();
+            self.watchers.clear_poison();
+            watchers
+        });
         // Nobody wants it (no one watches, or every watcher left its kind
         // out): not even serialized.
         let kind = event.kind();
@@ -1266,7 +1343,7 @@ impl Daemon {
         let mut bytes = match serde_json::to_vec(&Notification::event(event)) {
             Ok(bytes) => bytes,
             Err(error) => {
-                eprintln!("isocastd: could not serialize an event: {error}");
+                isocast_diagnostics::diagnostic!("error"; "isocastd: could not serialize an event: {error}");
                 return;
             }
         };
@@ -1340,19 +1417,25 @@ impl Daemon {
         let mut state = self.state.lock().unwrap();
         let loaded = state.file.load();
         for note in state.file.notes() {
-            eprintln!("isocastd: {note}");
+            isocast_diagnostics::diagnostic!("isocastd: {note}");
         }
         let path = state.file.info().path;
         match loaded {
             Some(setup) => {
-                eprintln!("isocastd: loaded the setup from {}", path.display());
+                isocast_diagnostics::diagnostic!(
+                    "isocastd: loaded the setup from {}",
+                    path.display()
+                );
                 state.scene = setup.scenes.first().map(|scene| scene.id.clone());
                 state.setup = Some(setup);
                 state.revision = first_revision();
             }
             None => match state.file.load_warning() {
-                Some(warning) => eprintln!("isocastd: {warning}"),
-                None => eprintln!("isocastd: no saved setup yet at {}", path.display()),
+                Some(warning) => isocast_diagnostics::diagnostic!("warn"; "isocastd: {warning}"),
+                None => isocast_diagnostics::diagnostic!(
+                    "isocastd: no saved setup yet at {}",
+                    path.display()
+                ),
             },
         }
     }
@@ -1365,7 +1448,7 @@ impl Daemon {
         match self.collection_file() {
             Some(file) => {
                 for note in self.data.load_collection(&file) {
-                    eprintln!("isocastd: {note}");
+                    isocast_diagnostics::diagnostic!("isocastd: {note}");
                 }
             }
             None => self.data.use_collection(None),
@@ -1623,7 +1706,11 @@ impl Daemon {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tune(&setup, params.folder.as_deref(), &memory)
         }))
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("the benchmark crashed; see isocastd.log")))
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "the benchmark panicked; use `isocast logs --level error` or `isocast report`"
+            ))
+        })
         .map_err(failed);
         self.state.lock().unwrap().tuning = false;
         result
@@ -1756,6 +1843,15 @@ impl Daemon {
         };
         let (control, stop, id, epoch) = {
             let state = self.state.lock().unwrap();
+            if !paused
+                && state
+                    .setup
+                    .as_ref()
+                    .is_some_and(|s| s.recording.program.enabled)
+                && let Some(reason) = state.engine.as_ref().and_then(|e| e.program_failure())
+            {
+                return Err(wrong(reason));
+            }
             let session = state
                 .session
                 .as_ref()
@@ -1794,6 +1890,15 @@ impl Daemon {
         let state = self.state.lock().unwrap();
         if stop.load(Ordering::SeqCst) || state.session.as_ref().is_none_or(|s| s.id != id) {
             return Err(wrong("recording: stopped during pause/resume".into()));
+        }
+        if !paused
+            && state
+                .setup
+                .as_ref()
+                .is_some_and(|s| s.recording.program.enabled)
+            && let Some(reason) = state.engine.as_ref().and_then(|e| e.program_failure())
+        {
+            return Err(wrong(reason));
         }
         let recording = control.pause_status(now()).expect("recording clock");
         drop(state);
@@ -2089,6 +2194,8 @@ impl Daemon {
             stream: stream_status(&state),
             cpu_percent: self.cpu.lock().unwrap().read(),
             data: Some(self.data.status()),
+            diagnostics: Some(isocast_diagnostics::health()),
+            interrupted: self.interrupted.lock().unwrap().clone(),
             timeline: {
                 let timelines = self.timelines.lock().unwrap();
                 timelines.current().and_then(|id| timelines.summary(id))
@@ -2155,6 +2262,7 @@ impl Daemon {
                 Err(err) => return Err(failed(err)),
             },
         };
+        isocast_diagnostics::redact::remember_secret(&key);
         // Starting the engine happens outside the lock; until the stream is
         // in the state, this keeps the engine from idling out.
         state.streams_starting += 1;
@@ -2257,6 +2365,7 @@ impl Daemon {
             )));
         }
         let (service, account) = self.key_target(params.target)?;
+        isocast_diagnostics::redact::remember_secret(key);
         set_secret(KEY_SERVICE, &account, key).map_err(failed)?;
         Ok(StreamKey {
             service,
@@ -2374,11 +2483,26 @@ impl Daemon {
                 )));
             }
         };
-        if self.state.lock().unwrap().session.is_some() {
-            return Err(RpcError {
-                code: RpcError::WRONG_STATE,
-                message: "already recording; stop the current session first".into(),
-            });
+        {
+            let state = self.state.lock().unwrap();
+            if params
+                .setup
+                .as_ref()
+                .or(state.setup.as_ref())
+                .is_some_and(|s| s.recording.program.enabled)
+                && let Some(reason) = state.engine.as_ref().and_then(|e| e.program_failure())
+            {
+                return Err(RpcError {
+                    code: RpcError::WRONG_STATE,
+                    message: reason,
+                });
+            }
+            if state.session.is_some() {
+                return Err(RpcError {
+                    code: RpcError::WRONG_STATE,
+                    message: "already recording; stop the current session first".into(),
+                });
+            }
         }
         // A setup given with the request becomes the live setup; say so if
         // it replaces another, since that one is only kept in the .bak.
@@ -2420,7 +2544,21 @@ impl Daemon {
         };
         // Recordings there that never finished (isocastd was killed or
         // crashed): the engine marks them as failed; say so now.
-        notes.extend(interrupted_note(&interrupted_sessions(&folder, true), true));
+        self.remember_recording_folder(&folder);
+        // Startup recovery may already have marked them (status.interrupted);
+        // the first start into their folder still says so, once.
+        let mut interrupted = interrupted_sessions(&folder, true);
+        for take in self
+            .interrupted_unnoted
+            .lock()
+            .unwrap()
+            .extract_if(.., |m| m.parent() == Some(&folder))
+        {
+            if !interrupted.contains(&take) {
+                interrupted.push(take);
+            }
+        }
+        notes.extend(interrupted_note(&interrupted, true));
         // A timeline that should be current but couldn't be read.
         notes.extend(
             self.timelines
@@ -2529,7 +2667,9 @@ impl Daemon {
                 on_take: Some(&on_take),
                 control: None,
             };
-            let ended = engine.record(&options).map_err(|err| format!("{err:#}"));
+            let ended =
+                isocast_diagnostics::contain("recording coordinator", || engine.record(&options))
+                    .and_then(|r| r.map_err(|err| format!("{err:#}")));
             daemon.session_over(&takes);
             if let Err(message) = &ended {
                 let _ = started_tx.send(Err(message.clone()));
@@ -2634,6 +2774,26 @@ impl Daemon {
                 EngineEvent::Levels(levels) => Event::Levels { levels },
                 EngineEvent::Source(status) => Event::SourceChanged { status },
                 EngineEvent::Warning(message) => Event::Warning { message },
+                EngineEvent::WorkerFailed {
+                    name,
+                    message,
+                    poisoned,
+                } => {
+                    if poisoned {
+                        daemon.emergency_stop(message.clone());
+                    } else if matches!(name.as_str(), "mixer" | "compositor") {
+                        let daemon = daemon.clone();
+                        let why = message.clone();
+                        thread::spawn(move || {
+                            daemon.contain("failed program output", || {
+                                if let Some(stream) = &daemon.state.lock().unwrap().stream {
+                                    stream.fail(why);
+                                }
+                            })
+                        });
+                    }
+                    Event::Warning { message }
+                }
             });
         });
         state.starting = true;
@@ -2645,7 +2805,7 @@ impl Daemon {
         }))
         .unwrap_or_else(|_| {
             Err(anyhow::anyhow!(
-                "the live engine crashed while starting; see isocastd.log"
+                "the live engine panicked while starting; use `isocast logs --level error` or `isocast report`"
             ))
         });
         let mut state = self.state.lock().unwrap();
@@ -2657,7 +2817,7 @@ impl Daemon {
         if let Some(setup) = &state.setup
             && let Err(message) = engine.update(&state.with_hotkey_holds(setup), state.revision)
         {
-            eprintln!("isocastd: {message}");
+            isocast_diagnostics::diagnostic!("error"; "isocastd: {message}");
         }
         if state.scene != scene
             && let Some(scene) = &state.scene
@@ -2891,7 +3051,9 @@ impl Daemon {
 
     /// Session `id` has ended, with its report or why it has none.
     fn ended(&self, id: u64, ended: Result<Report, String>) {
-        let mut state = self.state.lock().unwrap();
+        // A poisoned control-plane lock must not prevent a writer's completed
+        // report from reaching the emergency finalizer.
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.session.as_ref().is_some_and(|s| s.id == id) {
             state.session = None;
         }
@@ -3189,7 +3351,11 @@ fn has_secret(service: &str, account: &str) -> Result<bool> {
 
 #[cfg(target_os = "macos")]
 fn secret(service: &str, account: &str) -> Result<Option<String>> {
-    MacPlatform.secret(service, account)
+    let key = MacPlatform.secret(service, account)?;
+    if let Some(key) = &key {
+        isocast_diagnostics::redact::remember_secret(key);
+    }
+    Ok(key)
 }
 
 #[cfg(target_os = "macos")]

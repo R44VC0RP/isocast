@@ -119,7 +119,9 @@ fn tick(
                     w.images.insert(key, image);
                 }
                 Err(error) => {
-                    eprintln!("source preview: can't show a shared frame: {error:#}");
+                    isocast_diagnostics::diagnostic!("warn";
+                        "source preview: can't show a shared frame: {error:#}"
+                    );
                     return;
                 }
             }

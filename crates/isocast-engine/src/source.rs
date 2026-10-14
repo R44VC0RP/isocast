@@ -316,6 +316,15 @@ enum Running<P: Platform> {
 }
 
 impl<P: Platform> Opened<P> {
+    pub(crate) fn failure(&self) -> Option<String> {
+        let get = |g: &Generator| g.failure.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        match &self._running {
+            Running::Generator { _generator } => get(_generator),
+            Running::Generators { _generators } => _generators.iter().find_map(get),
+            Running::Browser { _watcher, .. } => _watcher.as_ref().and_then(get),
+            _ => None,
+        }
+    }
     /// The page of a browser source.
     pub(crate) fn browser(&self) -> Option<Arc<dyn BrowserControl>> {
         match &self._running {
@@ -327,18 +336,34 @@ impl<P: Platform> Opened<P> {
 
 /// A thread producing a synthetic source, stopped when dropped.
 struct Generator {
+    failure: Arc<Mutex<Option<String>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Generator {
     fn spawn(run: impl FnOnce(&AtomicBool) + Send + 'static) -> Self {
+        let failure = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let thread = thread::spawn({
             let stop = stop.clone();
-            move || run(&stop)
+            let failure = failure.clone();
+            move || {
+                if let Err(message) =
+                    isocast_diagnostics::contain("source generator", || run(&stop))
+                {
+                    isocast_diagnostics::emit(
+                        "error",
+                        "source",
+                        "source worker failed",
+                        serde_json::json!({"error":message}),
+                    );
+                    *failure.lock().unwrap_or_else(|p| p.into_inner()) = Some(message);
+                }
+            }
         });
         Self {
+            failure,
             stop,
             thread: Some(thread),
         }

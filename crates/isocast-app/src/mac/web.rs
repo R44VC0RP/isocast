@@ -307,7 +307,7 @@ fn native(command: &str, message: &Value) -> Value {
         }
         // Errors in the interface, for whoever runs the app from a terminal.
         "log" => {
-            eprintln!("Isocast interface: {}", text("message"));
+            isocast_diagnostics::diagnostic!("Isocast interface: {}", text("message"));
             Value::Null
         }
         _ => {

@@ -14,7 +14,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
 use std::time::Duration;
 
 use isocast_protocol::ScaleFilter;
@@ -165,14 +164,22 @@ pub(crate) fn watch<P: Platform>(
     }));
     let platform = platform.clone();
     let running = control.clone();
-    thread::Builder::new()
-        .name(format!("shared frames {}", request.target))
-        .spawn(move || {
+    let failed_tx = tx.clone();
+    let failed_control = control.clone();
+    isocast_diagnostics::spawn(
+        format!("shared frames {}", request.target),
+        move || {
             if let Err(why) = run(&platform, &running, &tx, &request, source) {
                 let _ = tx.send(SharedEvent::End(why));
             }
-        })
-        .expect("could not start a shared frame thread");
+        },
+        move |why| {
+            failed_control.0.closed.store(true, Ordering::SeqCst);
+            failed_control.0.changed.notify_all();
+            let _ = failed_tx.send(SharedEvent::End(why));
+        },
+    )
+    .expect("could not start a shared frame thread");
     SharedFeed { events, control }
 }
 

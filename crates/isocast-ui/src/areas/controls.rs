@@ -1335,7 +1335,7 @@ fn reveal(path: &str) {
         )
         .spawn();
     if let Err(error) = result {
-        eprintln!("couldn’t show {path}: {error}");
+        isocast_diagnostics::diagnostic!("error"; "couldn’t show {path}: {error}");
     }
 }
 

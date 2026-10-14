@@ -311,7 +311,7 @@ impl Tap {
         }
         if heard {
             if let Some(err) = monitor.open(platform) {
-                eprintln!(
+                isocast_diagnostics::diagnostic!("warn";
                     "isocastd: could not play monitored audio on {:?}: {err}",
                     monitor.device
                 );

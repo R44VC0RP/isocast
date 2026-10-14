@@ -174,10 +174,7 @@ pub struct Spawn<'a> {
 /// rather than isocastd and its camera, microphone and screen grants.
 /// Returns its process id.
 pub fn spawn(spawn: &Spawn) -> io::Result<u32> {
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(spawn.log)?;
+    let log = isocast_diagnostics::output::plugin_pipe(spawn.log)?;
     let null = std::fs::File::open("/dev/null")?;
     let cstring = |text: &[u8]| {
         CString::new(text).map_err(|_| io::Error::other("an argument or variable has a NUL byte"))

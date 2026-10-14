@@ -13,6 +13,7 @@ name = "isocast-app"
 path = "src/main.rs"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+isocast-diagnostics = { path = "../isocast-diagnostics" }
 base64 = "0.22.1"
 block2 = "0.6.2"
 dispatch2 = "0.3.1"

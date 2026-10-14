@@ -14,6 +14,7 @@ name = "isocastd"
 path = "src/main.rs"
 
 [dependencies]
+isocast-diagnostics = { path = "../isocast-diagnostics" }
 anyhow = "1.0.104"
 base64 = "0.22.1"
 # Already in the build through isocast-engine: timelines' local times.

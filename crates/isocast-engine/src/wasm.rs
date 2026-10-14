@@ -333,9 +333,9 @@ impl Runtime {
             |_store: StoreContextMut<'_, Host>, (_key,): (String,)| Ok((None::<String>,)),
         )?;
         let (logs, lines) = mpsc::sync_channel::<(PathBuf, String)>(256);
-        std::thread::Builder::new()
-            .name("plugin logs".into())
-            .spawn(move || {
+        isocast_diagnostics::spawn(
+            "plugin logs",
+            move || {
                 for (file, line) in lines {
                     let open = std::fs::OpenOptions::new()
                         .create(true)
@@ -345,8 +345,10 @@ impl Runtime {
                         let _ = file.write_all(line.as_bytes());
                     }
                 }
-            })
-            .map_err(|err| wasmtime::format_err!("{err}"))?;
+            },
+            |_| {},
+        )
+        .map_err(|err| wasmtime::format_err!("{err}"))?;
         Ok(Self {
             engine,
             linker,
@@ -447,9 +449,11 @@ impl Runtime {
         let mut jobs = self.jobs.lock().unwrap();
         let sender = jobs.get_or_insert_with(|| {
             let (tx, rx) = mpsc::channel::<Job>();
-            let _ = std::thread::Builder::new()
-                .name("plugin instances".into())
-                .spawn(move || rx.into_iter().for_each(|job| job()));
+            let _ = isocast_diagnostics::spawn(
+                "plugin instances",
+                move || rx.into_iter().for_each(|job| job()),
+                |_| {},
+            );
             tx
         });
         if let Err(mpsc::SendError(job)) = sender.send(job) {
@@ -681,7 +685,7 @@ impl Reports {
         let warn = self.warn.lock().unwrap().clone();
         match warn {
             Some(warn) => warn(message),
-            None => eprintln!("isocast: {message}"),
+            None => isocast_diagnostics::diagnostic!("warn"; "isocast: {message}"),
         }
     }
 
@@ -1277,7 +1281,7 @@ mod tests {
         for block in out.chunks_mut(960) {
             timed.process(block, &|_| None);
         }
-        eprintln!(
+        isocast_diagnostics::diagnostic!(
             "wasm gain: instance made in {:.0} µs, {:.1} µs a 10 ms block",
             made.as_secs_f64() * 1e6,
             started.elapsed().as_secs_f64() * 1e6 / 100.0
@@ -1332,7 +1336,9 @@ mod tests {
         for (a, b) in built_in.chunks(960).zip(wasm.chunks(960)) {
             worst = worst.max((db(a) - db(b)).abs());
         }
-        eprintln!("wasm ducker vs built-in compressor: at most {worst} dB apart");
+        isocast_diagnostics::diagnostic!(
+            "wasm ducker vs built-in compressor: at most {worst} dB apart"
+        );
         assert!(worst < 0.5, "{worst} dB apart");
         // And it did duck: 0.25 is 18 dB over -30, reduced by 18 × 0.9.
         let middle = db(&built_in[60_000..61_000]);

@@ -9,7 +9,6 @@ use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -544,11 +543,16 @@ fn open(server: &ServerUrl, until: Until) -> Result<Transport> {
 fn connect(server: &ServerUrl, until: Until) -> Result<TcpStream> {
     let (host, port, deadline) = (server.host.clone(), server.port, until.deadline);
     let (tx, rx) = mpsc::channel();
-    thread::Builder::new()
-        .name("stream connect".into())
-        .spawn(move || {
+    let failed = tx.clone();
+    isocast_diagnostics::spawn(
+        "stream connect",
+        move || {
             let _ = tx.send(connect_now(&host, port, deadline));
-        })?;
+        },
+        move |why| {
+            let _ = failed.send(Err(anyhow!(why)));
+        },
+    )?;
     loop {
         if until.stop.load(Ordering::SeqCst) {
             bail!("the stream was stopped while connecting");

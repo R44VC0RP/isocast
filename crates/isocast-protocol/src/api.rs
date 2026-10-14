@@ -250,6 +250,12 @@ pub enum Method {
     DataSet(Box<DataSetParams>),
     /// Delete data keys. Returns [`DataRevision`](crate::data::DataRevision).
     DataDelete(DataDeleteParams),
+    /// Create or preview a sanitized offline bug report. Never uploads.
+    BugReport(crate::diagnostics::BugReportParams),
+    /// Read structured logs with optional severity/component filters and cursor.
+    Logs(crate::diagnostics::LogsParams),
+    /// Bounded read of a file from a redacted bug-report preview.
+    ReportFile(crate::diagnostics::ReportFileParams),
     /// Make a timeline and make it current: from now on every take that
     /// finishes (a stop or a split) is added to its end. Its params are
     /// optional (`name`). Returns
@@ -1046,6 +1052,11 @@ pub struct Status {
     /// The data store: its keys, size, writes and events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<DataStatus>,
+    /// Log health and previous launches lacking a clean-exit marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interrupted: Vec<crate::manifest::InterruptedRecording>,
     /// The current timeline, which finished takes are added to, if one is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline: Option<TimelineSummary>,
@@ -1659,6 +1670,8 @@ pub struct Frame {
 /// The live engine: what it runs and how it keeps up.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EngineInfo {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worker_errors: Vec<String>,
     /// Seconds since it started.
     pub uptime_seconds: f64,
     pub canvas: Canvas,

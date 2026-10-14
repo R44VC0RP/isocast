@@ -522,7 +522,7 @@ impl Filters {
             .or_insert_with(|| match load_asset(gpu, file) {
                 Ok(asset) => Some(asset),
                 Err(err) => {
-                    eprintln!("isocastd: a filter is skipped: {err:#}");
+                    isocast_diagnostics::diagnostic!("warn"; "isocastd: a filter is skipped: {err:#}");
                     None
                 }
             })

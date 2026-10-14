@@ -77,6 +77,44 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Read a bounded page from a redacted report preview.
+    ReportFile {
+        preview_id: String,
+        file: String,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a private, redacted bug-report zip. Nothing is uploaded.
+    Report {
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        describe: Option<String>,
+        #[arg(long)]
+        preview: bool,
+        /// Pseudonymize paths, titles, device names and device IDs per report.
+        #[arg(long = "private", visible_alias = "hash-paths")]
+        hash_paths: bool,
+        #[arg(long)]
+        launches: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read structured logs (also works when the daemon is stopped).
+    Logs {
+        #[arg(long)]
+        follow: bool,
+        #[arg(long)]
+        level: Option<String>,
+        #[arg(long)]
+        component: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Customize profile hotkeys, including global keys and push-to-talk.
     Hotkeys {
         #[command(subcommand)]
@@ -636,7 +674,14 @@ enum SetupCommand {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let _logs = isocast_diagnostics::init("isocast", true);
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let _ = error.print();
+            return ExitCode::from(error.exit_code() as u8);
+        }
+    };
     // `isocast get | head` should end quietly when the reader goes away, as
     // other tools do, not panic on the closed pipe. Not for an in-process
     // recording (its files must finish) or the MCP server.
@@ -647,7 +692,7 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("error: {err:#}");
+            isocast_diagnostics::diagnostic!("error"; "error: {err:#}");
             // A daemon from an older build doesn't know newer methods (it
             // says "unknown variant `library`").
             if err.downcast_ref::<DaemonError>().is_some_and(|err| {
@@ -655,7 +700,7 @@ fn main() -> ExitCode {
                     || err.code() == RpcError::INVALID_REQUEST
                         && err.to_string().contains("unknown variant")
             }) {
-                eprintln!(
+                isocast_diagnostics::diagnostic!(
                     "isocastd is older than this isocast and doesn't have that; restart it to run \
                      this build's (`isocast restart`)"
                 );
@@ -667,6 +712,106 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
+        Command::ReportFile {
+            preview_id,
+            file,
+            offset,
+            limit,
+            json,
+        } => {
+            let page: isocast_protocol::diagnostics::ReportFile = Client::connect_or_launch()?
+                .call(Method::ReportFile(
+                    isocast_protocol::diagnostics::ReportFileParams {
+                        preview_id,
+                        file,
+                        offset,
+                        limit,
+                    },
+                ))?;
+            if json {
+                println!("{}", serde_json::to_string(&page)?);
+            } else {
+                print!("{}", page.content);
+                if let Some(offset) = page.next_offset {
+                    println!("\nNext offset: {offset}");
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Report {
+            out,
+            describe,
+            preview,
+            hash_paths,
+            launches,
+            json,
+        } => {
+            let params = isocast_protocol::diagnostics::BugReportParams {
+                out: out
+                    .map(|p| {
+                        if p.starts_with("~") {
+                            Ok(p)
+                        } else {
+                            std::path::absolute(p)
+                        }
+                    })
+                    .transpose()?,
+                describe,
+                preview,
+                hash_paths,
+                launches,
+            };
+            let report: isocast_protocol::diagnostics::BugReport =
+                Client::connect_or_launch()?.call(Method::BugReport(params))?;
+            if json || preview {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if let Some(path) = report.archive {
+                println!("{}\n{}", path.display(), report.issue_body);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Logs {
+            follow,
+            level,
+            component,
+            json,
+        } => {
+            let stopped = Arc::new(AtomicBool::new(false));
+            if follow {
+                let stopped = stopped.clone();
+                ctrlc::set_handler(move || stopped.store(true, Ordering::Relaxed))?;
+            }
+            let mut params = isocast_protocol::diagnostics::LogsParams {
+                level,
+                component,
+                ..Default::default()
+            };
+            loop {
+                let logs =
+                    isocast_diagnostics::bundle::logs(&params).map_err(anyhow::Error::msg)?;
+                for record in logs.records {
+                    if json {
+                        println!("{record}");
+                    } else {
+                        println!(
+                            "{} {:5} {} [{}] {} {}",
+                            record["time"].as_str().unwrap_or(""),
+                            record["level"].as_str().unwrap_or(""),
+                            record["process"].as_str().unwrap_or(""),
+                            record["component"].as_str().unwrap_or(""),
+                            record["message"].as_str().unwrap_or(""),
+                            record["fields"]
+                        );
+                    }
+                }
+                if !follow || stopped.load(Ordering::Relaxed) {
+                    break;
+                }
+                params.cursor = Some(logs.cursor);
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Setup { command } => match command {
             SetupCommand::Check { path, json } => check(&path, json),
             SetupCommand::Schema => {
@@ -1016,10 +1161,10 @@ fn check(path: &Path, json: bool) -> Result<ExitCode> {
     }
 
     for issue in &issues {
-        eprintln!("{}", issue_line(issue));
+        isocast_diagnostics::diagnostic!("warn"; "{}", issue_line(issue));
     }
     if !issues.is_empty() {
-        eprintln!("{} problem(s) in {}", issues.len(), path.display());
+        isocast_diagnostics::diagnostic!("error"; "{} problem(s) in {}", issues.len(), path.display());
         return Ok(code);
     }
 
@@ -1130,7 +1275,7 @@ fn import_obs(
         if output.is_some() {
             println!("{line}");
         } else {
-            eprintln!("{line}");
+            isocast_diagnostics::diagnostic!("{line}");
         }
     }
     Ok(code)
@@ -1218,7 +1363,7 @@ fn init_setup(
         if quiet {
             println!("{line}");
         } else {
-            eprintln!("{line}");
+            isocast_diagnostics::diagnostic!("{line}");
         }
     };
     if quiet {
@@ -1356,11 +1501,11 @@ fn record(
             return;
         }
         match duration {
-            Some(d) => eprintln!("Recording for {} s:", d.as_secs_f64()),
-            None => eprintln!("Recording, press Ctrl-C to stop:"),
+            Some(d) => isocast_diagnostics::diagnostic!("Recording for {} s:", d.as_secs_f64()),
+            None => isocast_diagnostics::diagnostic!("Recording, press Ctrl-C to stop:"),
         }
         for path in paths {
-            eprintln!("  {}", path.display());
+            isocast_diagnostics::diagnostic!("  {}", path.display());
         }
     };
     // Warn as soon as a file starts losing frames or audio.
@@ -1370,7 +1515,7 @@ fn record(
             return;
         }
         for message in status.new_drops(&mut reported.lock().unwrap()) {
-            eprintln!("warning: {message}");
+            isocast_diagnostics::diagnostic!("warn"; "warning: {message}");
         }
     };
     let options = RecordOptions {
@@ -1388,6 +1533,16 @@ fn record(
 
 /// Print a session report; failing if the session had errors.
 fn print_report(report: &Report, json: bool) -> Result<ExitCode> {
+    isocast_diagnostics::emit(
+        if report.errors.is_empty() {
+            "info"
+        } else {
+            "error"
+        },
+        "recording",
+        "recording completed",
+        serde_json::json!({"recording_report":report}),
+    );
     let code = if report.errors.is_empty() {
         ExitCode::SUCCESS
     } else {
@@ -1398,7 +1553,7 @@ fn print_report(report: &Report, json: bool) -> Result<ExitCode> {
         return Ok(code);
     }
     for warning in &report.warnings {
-        eprintln!("warning: {warning}");
+        isocast_diagnostics::diagnostic!("warn"; "warning: {warning}");
     }
     println!(
         "Recorded {:.2} s; manifest {}",
@@ -1429,7 +1584,7 @@ fn print_report(report: &Report, json: bool) -> Result<ExitCode> {
         );
     }
     for error in &report.errors {
-        eprintln!("error: {error}");
+        isocast_diagnostics::diagnostic!("error"; "error: {error}");
     }
     Ok(code)
 }
@@ -1469,7 +1624,7 @@ fn start(
             println!("  {}", file.display());
         }
         for note in &started.notes {
-            eprintln!("note: {note}");
+            isocast_diagnostics::diagnostic!("note: {note}");
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -1544,6 +1699,8 @@ fn status(json: bool) -> Result<ExitCode> {
             stream: None,
             cpu_percent: None,
             data: None,
+            diagnostics: None,
+            interrupted: Vec::new(),
             timeline: None,
             timeline_problem: None,
             export: None,
@@ -1560,6 +1717,21 @@ fn status(json: bool) -> Result<ExitCode> {
         println!(
             "Scene collection: {:?} ({}), profile: {:?} ({})",
             collection.name, collection.id, profile.name, profile.id
+        );
+    }
+    for take in &status.interrupted {
+        println!(
+            "Interrupted recording: {} (recoverable duration unknown; inspect its manifest)",
+            take.manifest.display(),
+        );
+    }
+    if let Some(diagnostics) = &status.diagnostics
+        && let Some(previous) = diagnostics["previous_abnormal"].as_array()
+        && !previous.is_empty()
+    {
+        println!(
+            "Warning: {} previous daemon launch(es) ended abnormally; run `isocast report`.",
+            previous.len()
         );
     }
     if let Some(file) = &status.setup_file {
@@ -1890,7 +2062,7 @@ fn tune(setup: Option<&Path>, folder: Option<PathBuf>, json: bool) -> Result<Exi
         .transpose()?;
     let folder = folder.map(std::path::absolute).transpose()?;
     if !json {
-        eprintln!("Benchmarking encoders; this takes a little while…");
+        isocast_diagnostics::diagnostic!("Benchmarking encoders; this takes a little while…");
     }
     let tuning: Tuning =
         Client::connect_or_launch()?.call(Method::Tune(Box::new(TuneParams { setup, folder })))?;
@@ -2054,7 +2226,9 @@ fn permissions(
             .iter()
             .any(|d| d.state == isocast_protocol::devices::Permission::NotDetermined);
         if undecided {
-            eprintln!("Asking macOS; answer its prompts (waiting up to a minute)…");
+            isocast_diagnostics::diagnostic!(
+                "Asking macOS; answer its prompts (waiting up to a minute)…"
+            );
         }
     }
     let report: isocast_protocol::devices::PermissionsReport = if request {
@@ -2189,10 +2363,10 @@ fn print_setup_file(file: &isocast_protocol::api::SetupFile) {
         println!("note: {note}");
     }
     if let Some(error) = &file.load_error {
-        eprintln!("warning: {}", error.describe(&file.path));
+        isocast_diagnostics::diagnostic!("warn"; "warning: {}", error.describe(&file.path));
     }
     if let Some(error) = &file.save_error {
-        eprintln!("warning: {error}");
+        isocast_diagnostics::diagnostic!("warn"; "warning: {error}");
     }
 }
 
@@ -2245,7 +2419,7 @@ fn plan(file: Option<&Path>, patch: Option<&str>, json: bool) -> Result<ExitCode
     }
     print_differences(&plan.changes);
     for problem in &plan.problems {
-        eprintln!("problem: {}", issue_line(problem));
+        isocast_diagnostics::diagnostic!("error"; "problem: {}", issue_line(problem));
     }
     for note in &plan.notes {
         println!("note: {note}");
@@ -2315,6 +2489,9 @@ fn print_differences(changes: &[Difference]) {
 }
 
 fn print_engine(engine: &EngineInfo) {
+    for error in &engine.worker_errors {
+        println!("  Engine worker failed: {error}");
+    }
     let canvas = &engine.canvas;
     let why = if engine.outputs.is_empty() {
         String::new()
@@ -2322,7 +2499,7 @@ fn print_engine(engine: &EngineInfo) {
         format!(" ({})", engine.outputs.join(", "))
     };
     println!(
-        "Live engine: running{why} for {:.0} s, {}×{} at {:.2} / {} fps, {} frames drawn, {} \
+        "Live engine: {health}{why} for {:.0} s, {}×{} at {:.2} / {} fps, {} frames drawn, {} \
          missed",
         engine.uptime_seconds,
         canvas.width,
@@ -2330,7 +2507,12 @@ fn print_engine(engine: &EngineInfo) {
         engine.fps,
         canvas.fps,
         engine.program_frames,
-        engine.missed_frames
+        engine.missed_frames,
+        health = if engine.worker_errors.is_empty() {
+            "running"
+        } else {
+            "degraded"
+        }
     );
     let compositor = &engine.compositor;
     println!(
@@ -2505,11 +2687,9 @@ fn frames(
     }
     file.flush()?;
     let elapsed = started.elapsed().as_secs_f64().max(0.001);
-    if count == 0
-        && let Some(why) = &ended
-    {
-        bail!("the frame stream ended: {why}");
-    }
+    // END carries a failure reason, even when a partial capture was saved.
+    // The normal requested-duration stop simply closes our connection.
+    let failed = ended.is_some();
     lags.sort_by(f64::total_cmp);
     let lag = |q: f64| {
         lags.get(((lags.len() as f64 - 1.0) * q).round() as usize)
@@ -2551,7 +2731,11 @@ fn frames(
             println!("The stream ended: {why}");
         }
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 /// The SPS and PPS NAL units in an `AVCDecoderConfigurationRecord`.
@@ -2864,7 +3048,7 @@ fn read_stream_key() -> Result<String> {
         .lock()
         .read_line(&mut key)
         .context("could not read the stream key")?;
-    eprintln!();
+    isocast_diagnostics::diagnostic!();
     Ok(key.trim().to_string())
 }
 

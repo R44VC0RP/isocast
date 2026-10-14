@@ -84,7 +84,7 @@ unsafe extern "C" {
     fn CFRunLoopGetMain() -> Ref;
     fn CFRunLoopAddSource(run_loop: Ref, source: Ref, mode: Ref);
     fn CFRunLoopRemoveSource(run_loop: Ref, source: Ref, mode: Ref);
-    fn CFRelease(value: Ref);
+    fn CFRelease(value: *const c_void);
     static kCFRunLoopCommonModes: Ref;
 }
 

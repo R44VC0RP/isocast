@@ -408,10 +408,14 @@ define_class!(
                 delivered.1 += 1;
                 let seconds = delivered.0.elapsed().as_secs_f64();
                 if seconds >= 5.0 {
-                    eprintln!(
-                        "isocastd: camera {:?}: {:.1} frames/s delivered",
-                        self.ivars().name,
-                        delivered.1 as f64 / seconds
+                    isocast_diagnostics::output::deferred(
+                        "info",
+                        module_path!(),
+                        format!(
+                            "isocastd: camera {:?}: {:.1} frames/s delivered",
+                            self.ivars().name,
+                            delivered.1 as f64 / seconds
+                        ),
                     );
                     *delivered = (Instant::now(), 0);
                 }
@@ -429,11 +433,15 @@ define_class!(
             let mut dropped = self.ivars().dropped.lock().unwrap();
             dropped.1 += 1;
             if dropped.0.elapsed() >= Duration::from_secs(5) {
-                eprintln!(
-                    "isocastd: camera {:?}: the capture output discarded {} late frame(s) in {:.0} s",
-                    self.ivars().name,
-                    dropped.1,
-                    dropped.0.elapsed().as_secs_f64()
+                isocast_diagnostics::output::deferred(
+                    "warn",
+                    module_path!(),
+                    format!(
+                        "isocastd: camera {:?}: the capture output discarded {} late frame(s) in {:.0} s",
+                        self.ivars().name,
+                        dropped.1,
+                        dropped.0.elapsed().as_secs_f64()
+                    ),
                 );
                 *dropped = (Instant::now(), 0);
             }

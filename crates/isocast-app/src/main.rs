@@ -19,6 +19,7 @@ use std::process::ExitCode;
 
 #[cfg(target_os = "macos")]
 fn main() -> ExitCode {
+    let _logs = isocast_diagnostics::init("isocast-app", true);
     let options = match options::Options::parse(std::env::args().skip(1)) {
         Ok(options::Parsed::Run(options)) => options,
         Ok(options::Parsed::Help) => {
@@ -26,7 +27,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(message) => {
-            eprintln!("Isocast: {message}\n\n{}", options::HELP);
+            isocast_diagnostics::diagnostic!("error"; "Isocast: {message}\n\n{}", options::HELP);
             return ExitCode::FAILURE;
         }
     };

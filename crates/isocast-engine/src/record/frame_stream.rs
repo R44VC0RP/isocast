@@ -167,7 +167,7 @@ impl Drop for FrameFeed {
         self.shared
             .viewers
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .retain(|viewer| viewer.id != self.id);
     }
 }
@@ -197,10 +197,14 @@ pub(crate) fn watch<P: Platform>(
             });
             running.insert(key.clone(), shared.clone());
             let (streams, stream, platform) = (streams.clone(), shared.clone(), platform.clone());
-            thread::Builder::new()
-                .name(format!("frames {}", key.target))
-                .spawn(move || run(&streams, &stream, &key, &platform, source))
-                .expect("could not start a frame stream thread");
+            let (failed_streams, failed_stream, failed_key) =
+                (streams.clone(), stream.clone(), key.clone());
+            isocast_diagnostics::spawn(
+                format!("frames {}", key.target),
+                move || run(&streams, &stream, &key, &platform, source),
+                move |why| end(&failed_streams, &failed_key, &failed_stream, &why),
+            )
+            .expect("could not start a frame stream thread");
             shared
         }
     };
@@ -520,9 +524,19 @@ fn deliver<E>(shared: &Shared, encoding: &mut Encoding<E>, encoded: EncodedVideo
 
 /// Stop the stream: tell every viewer why, then close their channels.
 fn end(streams: &Streams, key: &Key, shared: &Arc<Shared>, why: &str) {
-    remove(&mut streams.lock().unwrap(), key, shared);
+    remove(
+        &mut streams.lock().unwrap_or_else(|p| p.into_inner()),
+        key,
+        shared,
+    );
+    streams.clear_poison();
     let record: Record = frames::encode(frames::END, 0, 0, 0, why.as_bytes()).into();
-    for viewer in shared.viewers.lock().unwrap().drain(..) {
+    for viewer in shared
+        .viewers
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .drain(..)
+    {
         let _ = viewer.tx.try_send(record.clone());
     }
 }

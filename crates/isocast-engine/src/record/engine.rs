@@ -77,6 +77,11 @@ pub enum EngineEvent {
     Source(SourceStatus),
     /// Something needs attention.
     Warning(String),
+    WorkerFailed {
+        name: String,
+        message: String,
+        poisoned: bool,
+    },
 }
 
 /// Called with what happens in the engine, from its threads.
@@ -157,7 +162,10 @@ impl<F: Clone> Routes<F> {
     }
 
     pub(crate) fn remove(&self, key: u64) {
-        self.list.lock().unwrap().retain(|route| route.key != key);
+        self.list
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|route| route.key != key);
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -280,6 +288,8 @@ pub struct Engine<P: Platform> {
 }
 
 struct Inner<P: Platform> {
+    emergency: AtomicBool,
+    worker_errors: Mutex<Vec<String>>,
     platform: P,
     control: Arc<SessionControl>,
     timeline: Arc<Timeline>,
@@ -394,6 +404,33 @@ struct CompositorRun {
 }
 
 impl<P: Platform> Inner<P> {
+    fn worker<T>(&self, name: &str, run: impl FnOnce() -> T) -> Result<T, String> {
+        let result = isocast_diagnostics::contain(name, run);
+        if let Err(message) = &result {
+            self.worker_errors
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(message.clone());
+            let poisoned = self.state.is_poisoned()
+                || self.wanted.is_poisoned()
+                || self.loudest.is_poisoned()
+                || self.program_video.list.is_poisoned()
+                || self.program_audio.list.is_poisoned();
+            if poisoned {
+                self.emergency.store(true, Ordering::SeqCst);
+            }
+            if name == "compositor" {
+                self.program.stop(message.clone());
+                self.program_fps.store(0.0f64.to_bits(), Ordering::Relaxed);
+            }
+            self.event(EngineEvent::WorkerFailed {
+                name: name.into(),
+                message: message.clone(),
+                poisoned,
+            });
+        }
+        result
+    }
     /// Someone shows `target` (the program or studio mode's preview; others
     /// are captured anyway) at `fps`: it is drawn at least that often, on
     /// the canvas's frame grid, until [`PREVIEW_HOLD`] after the last ask.
@@ -472,8 +509,22 @@ impl<P: Platform> Engine<P> {
                     }
                 })
             },
+            {
+                let on_event = on_event.clone();
+                Arc::new(move |message, poisoned| {
+                    if let Some(on_event) = &on_event {
+                        on_event(EngineEvent::WorkerFailed {
+                            name: "scenes".into(),
+                            message,
+                            poisoned,
+                        });
+                    }
+                })
+            },
         );
         let inner = Arc::new(Inner {
+            emergency: AtomicBool::new(false),
+            worker_errors: Mutex::new(Vec::new()),
             platform: platform.clone(),
             control,
             // Only ever read newest first: no older canvases are kept.
@@ -546,18 +597,26 @@ impl<P: Platform> Engine<P> {
         let folder = expand_home(&inner.state.lock().unwrap().setup.recording.folder);
         if folder.is_dir() {
             let inner = inner.clone();
-            thread::spawn(move || {
-                let _ = write_speed(&inner, &folder);
-            });
+            let _ = isocast_diagnostics::spawn(
+                "initial disk probe",
+                move || {
+                    let _ = write_speed(&inner, &folder);
+                },
+                |_| {},
+            );
         }
         let threads = vec![
             thread::spawn({
                 let inner = inner.clone();
-                move || reconciler(&inner)
+                move || {
+                    let _ = inner.worker("source reconciler", || reconciler(&inner));
+                }
             }),
             thread::spawn({
                 let inner = inner.clone();
-                move || housekeeping(&inner)
+                move || {
+                    let _ = inner.worker("source housekeeping", || housekeeping(&inner));
+                }
             }),
         ];
         Ok(Self {
@@ -642,6 +701,14 @@ impl<P: Platform> Engine<P> {
         &self.inner.control
     }
 
+    /// Start/resume must not announce working program output after its worker
+    /// has failed. Stop remains available to finalize every recording.
+    pub fn program_failure(&self) -> Option<String> {
+        self.inner.program.stopped().map(|reason| format!(
+            "program output has failed: {reason}; stop the recording and restart the live engine"
+        ))
+    }
+
     /// The platform it runs on.
     pub fn platform(&self) -> &P {
         &self.inner.platform
@@ -661,6 +728,15 @@ impl<P: Platform> Engine<P> {
             held_by.push("recording".to_string());
         }
         EngineInfo {
+            worker_errors: self
+                .inner
+                .worker_errors
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .cloned()
+                .chain(self.inner.scenes.failure())
+                .collect(),
             uptime_seconds: inner.epoch().map_or(0.0, |epoch| {
                 inner.platform.now().saturating_since(epoch).as_secs_f64()
             }),
@@ -980,13 +1056,17 @@ impl<P: Platform> Engine<P> {
         if inner.recording.swap(true, Ordering::SeqCst) {
             bail!("already recording; stop the current recording first");
         }
-        let result = record(inner, options);
+        let result = isocast_diagnostics::contain("recording", || record(inner, options))
+            .map_err(anyhow::Error::msg)
+            .and_then(|r| r);
         {
-            let mut state = inner.state.lock().unwrap();
+            let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
             state.pins.clear();
             // Changes to the sources it recorded apply now.
             let setup = state.setup.clone();
-            *inner.wanted.lock().unwrap() = Some(setup);
+            if !inner.state.is_poisoned() {
+                *inner.wanted.lock().unwrap_or_else(|p| p.into_inner()) = Some(setup);
+            }
         }
         inner.wake.notify_all();
         inner.recording.store(false, Ordering::SeqCst);
@@ -1264,7 +1344,7 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
                         }
                         continue;
                     }
-                    eprintln!("isocastd: {message}");
+                    isocast_diagnostics::diagnostic!("warn"; "isocastd: {message}");
                     Live::failed(definition, message)
                 }
             };
@@ -1396,6 +1476,8 @@ impl<F: Clone + Send + 'static> AudioRun<F> {
         let channels = audio.channels;
         let feed = audio.feed.clone();
         let thread = thread::spawn({
+            let fault_inner = inner.clone();
+            let failure_feed = feed.clone();
             let platform = inner.platform.clone();
             let control = inner.control.clone();
             let routes = routes.clone();
@@ -1403,27 +1485,35 @@ impl<F: Clone + Send + 'static> AudioRun<F> {
             let stop = stop.clone();
             let id = id.to_string();
             move || {
-                platform.real_time_thread();
-                while !stop.load(Ordering::SeqCst) {
-                    match audio.chunks.recv_timeout(Duration::from_millis(10)) {
-                        Ok((samples, pts)) => {
-                            // The source's sync offset places it later (or
-                            // earlier) on the session clock.
-                            let offset = control
-                                .audio_settings(&id)
-                                .map_or(0, |s| i64::from(s.offset_ms) * 1_000_000);
-                            let pts = Time::from_nanos(pts.as_nanos() + offset);
-                            meter.add(&samples);
-                            tap.play(&platform, Some(&control), &samples);
-                            routes.audio(&samples, pts);
-                        }
-                        Err(RecvTimeoutError::Timeout) => {
-                            if audio.feed.stopped.lock().unwrap().is_some() {
-                                break;
+                let failure = fault_inner.worker(&format!("audio source {id}"), || {
+                    platform.real_time_thread();
+                    while !stop.load(Ordering::SeqCst) {
+                        match audio.chunks.recv_timeout(Duration::from_millis(10)) {
+                            Ok((samples, pts)) => {
+                                // The source's sync offset places it later (or
+                                // earlier) on the session clock.
+                                let offset = control
+                                    .audio_settings(&id)
+                                    .map_or(0, |s| i64::from(s.offset_ms) * 1_000_000);
+                                let pts = Time::from_nanos(pts.as_nanos() + offset);
+                                meter.add(&samples);
+                                tap.play(&platform, Some(&control), &samples);
+                                routes.audio(&samples, pts);
                             }
+                            Err(RecvTimeoutError::Timeout) => {
+                                if audio.feed.stopped.lock().unwrap().is_some() {
+                                    break;
+                                }
+                            }
+                            Err(RecvTimeoutError::Disconnected) => break,
                         }
-                        Err(RecvTimeoutError::Disconnected) => break,
                     }
+                });
+                if let Err(message) = failure {
+                    *failure_feed
+                        .stopped
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner()) = Some(message);
                 }
             }
         });
@@ -1543,13 +1633,16 @@ fn ensure_mixer<P: Platform>(inner: &Arc<Inner<P>>, state: &mut State<P>) {
             end: AtomicI64::new(i64::MAX),
         });
         let thread = thread::spawn({
+            let fault_inner = inner.clone();
             let platform = inner.platform.clone();
             let control = inner.control.clone();
             let outputs = inner.program_audio.clone();
             let shared = shared.clone();
             move || {
                 platform.real_time_thread();
-                mixer.run(&platform, &shared, from, Some(&control), &outputs);
+                let _ = fault_inner.worker("mixer", || {
+                    mixer.run(&platform, &shared, from, Some(&control), &outputs)
+                });
             }
         });
         state.mixer = Some(MixerRun {
@@ -1622,7 +1715,11 @@ fn ensure_compositor<P: Platform>(inner: &Arc<Inner<P>>, state: &mut State<P>) {
     let thread = thread::spawn({
         let inner = inner.clone();
         let stop = stop.clone();
-        move || run_program(&inner, compositor, wanted.2, &stop)
+        move || {
+            let _ = inner.worker("compositor", || {
+                run_program(&inner, compositor, wanted.2, &stop)
+            });
+        }
     });
     state.compositor = Some(CompositorRun {
         stop,
@@ -1953,8 +2050,12 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                         live.audio
                             .as_ref()
                             .and_then(|audio| audio.feed.stopped.lock().unwrap().clone())
-                    });
+                    })
+                    .or_else(|| live.opened.as_ref().and_then(|o| o.failure()));
                 if let Some(reason) = stopped {
+                    if let Some(video) = &live.video {
+                        video.slot.stop(reason.clone());
+                    }
                     live.run = SourceRun::Failed;
                     live.error = Some(format!("the capture stopped: {reason}"));
                     events.push(live.status(id));
@@ -2168,6 +2269,13 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
     let mut warnings = Vec::new();
     let iso = &setup.recording.iso;
     let program = &setup.recording.program;
+    if program.enabled
+        && let Some(reason) = inner.program.stopped()
+    {
+        bail!(
+            "program output has failed: {reason}; stop the recording and restart the live engine"
+        );
+    }
     let iso_enabled = iso.enabled && !iso.sources.is_empty();
     if !iso_enabled && !program.enabled {
         bail!(
@@ -2511,7 +2619,7 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
     let write = |take: &Take, status, errors: &[String]| {
         write_manifest(
             &take.manifest_path,
-            &take_manifest(setup, take, status, errors, Some(control)),
+            &take_manifest(platform, setup, take, status, errors, Some(control)),
         )
     };
     write(&takes[0], SessionStatus::Recording, &[])?;
@@ -2553,209 +2661,234 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
         let mut next_space_check = platform.now();
         let mut disk_full = None;
         let stop_below = reserve.max((rate * MIN_FREE_SECONDS).max(MIN_FREE_BYTES) as u64);
-        loop {
-            let now = platform.now();
-            // Stop cleanly, finishing every file, before the disk is full.
-            if now >= next_space_check {
-                next_space_check = now + SPACE_CHECK_INTERVAL;
-                if let Ok(free) = platform.volume(&folder).map(|v| v.free_bytes)
-                    && free < stop_below
-                    && disk_full.is_none()
+        let coordinator = isocast_diagnostics::contain("recording coordinator", || {
+            loop {
+                let now = platform.now();
+                if inner.emergency.load(Ordering::SeqCst)
+                    || inner.state.is_poisoned()
+                    || inner.scenes.poisoned()
                 {
-                    disk_full = Some(free);
+                    shared.stop_at(now.max(shared.epoch));
+                    break;
+                }
+                // Stop cleanly, finishing every file, before the disk is full.
+                if now >= next_space_check {
+                    next_space_check = now + SPACE_CHECK_INTERVAL;
+                    if let Ok(free) = platform.volume(&folder).map(|v| v.free_bytes)
+                        && free < stop_below
+                        && disk_full.is_none()
+                    {
+                        disk_full = Some(free);
+                        shared.stop_at(now.max(shared.epoch));
+                    }
+                }
+                let current = takes.last().expect("a take");
+                if let Some(on_status) = options.on_status
+                    && now >= next_status
+                {
+                    next_status = now + STATUS_INTERVAL;
+                    // The loudest of each source since the last status.
+                    let levels = std::mem::take(&mut *inner.loudest.lock().unwrap())
+                        .into_iter()
+                        .map(|(source, (peak_db, rms_db))| AudioLevel {
+                            source,
+                            peak_db,
+                            rms_db,
+                            channels: None,
+                        })
+                        .collect();
+                    let mut status = live_status(&current.plans, levels, shared, now, &clock);
+                    status.monitor = inner.monitor.lock().unwrap().status();
+                    // While frames or audio are being lost, see whether the
+                    // disk is why.
+                    let lost = status
+                        .files
+                        .iter()
+                        .map(|f| f.dropped_frames + f.audio_dropouts)
+                        .sum();
+                    if lost > losses {
+                        disk_probe.want();
+                    }
+                    losses = lost;
+                    status.disk = Some(disk_meter.sample(&current.plans, &disk_probe, now));
+                    on_status(&status);
+                }
+                // Markers and scene switches go into the manifest right away.
+                if let Some(generation) = control.take_changed() {
+                    let result = write(current, SessionStatus::Recording, &[]);
+                    let mut state = control.state.lock().unwrap();
+                    state.manifest_error = result.err().map(|e| format!("{e:#}"));
+                    if state.manifest_error.is_none() {
+                        state.saved_pause_generation = generation;
+                    }
+                }
+                if !all_started
+                    && current
+                        .plans
+                        .iter()
+                        .all(|p| p.start.load(Ordering::SeqCst) != i64::MIN)
+                {
+                    all_started = true;
+                    // Best effort: the final manifest is written at the end.
+                    let _ = write(current, SessionStatus::Recording, &[]);
+                }
+                // A stop asked for comes before a split asked for at the same
+                // time: the split is then refused, rather than announcing a take
+                // the stop ends before it begins.
+                if options.stop.load(Ordering::SeqCst) {
+                    shared.stop_at(now.max(shared.epoch + MIN_TAKE));
+                }
+                // A split: the next take's files start at a moment on every
+                // file's frame grid (the next whole second on the recording's
+                // clock, or the soonest such moment: see `SplitTiming`), at least
+                // a second after the current take's start.
+                if let Some((timing, reply)) = control.take_split() {
+                    let number = takes.len() as u32 + 1;
+                    let next = plan_take(setup, &formats, &folder, number)
+                        .and_then(|plan| Ok((create_writers(platform, &plan.plans)?, plan)))
+                        .map_err(|err| SplitRefused {
+                            ending: false,
+                            message: format!("{err:#}"),
+                        })
+                        .and_then(|(writers, plan)| {
+                            // Timed once the files exist, so none of them misses
+                            // the start.
+                            let now = platform.now();
+                            let current = takes.last().expect("a take");
+                            let rates: Vec<u32> = current
+                                .plans
+                                .iter()
+                                .chain(&plan.plans)
+                                .map(|plan| plan.spec.video.fps)
+                                .collect();
+                            let at = split_time(shared.epoch, current.epoch, &rates, timing, now);
+                            if at >= shared.end() {
+                                writers.into_iter().for_each(FileWriter::cancel);
+                                return Err(SplitRefused {
+                                    ending: true,
+                                    message: "the recording ends before a new take could start"
+                                        .into(),
+                                });
+                            }
+                            Ok((plan, writers, at, now))
+                        });
+                    match next {
+                        Ok((plan, writers, at, now)) => {
+                            let files: Vec<PathBuf> =
+                                plan.plans.iter().map(|p| p.spec.path.clone()).collect();
+                            let manifest = plan.manifest_path.clone();
+                            let index = takes.len();
+                            let mut gone = Vec::new();
+                            for (i, ((split, writer), file)) in split_senders
+                                .iter()
+                                .zip(writers)
+                                .zip(plan.plans.clone())
+                                .enumerate()
+                            {
+                                let sent = split.send(Split {
+                                    at,
+                                    take: index,
+                                    writer,
+                                    plan: file,
+                                });
+                                // That file's writer thread has stopped (its
+                                // writer failed), so this take can't have it.
+                                if let Err(mpsc::SendError(split)) = sent {
+                                    split.writer.cancel();
+                                    gone.push(i);
+                                }
+                            }
+                            let started_at = Local::now() + at.saturating_since(now);
+                            takes.last_mut().expect("a take").end = Some(at);
+                            let mut take = Take::begin(plan, at, started_at);
+                            for i in gone {
+                                take.results[i] = Some(Err(anyhow::anyhow!(
+                                    "{}: not recorded, because this source's file stopped in the \
+                                     previous take",
+                                    take.plans[i].spec.path.display()
+                                )));
+                            }
+                            takes.push(take);
+                            control.begin_take(at);
+                            let _ =
+                                write(takes.last().expect("a take"), SessionStatus::Recording, &[]);
+                            all_started = false;
+                            let _ = reply.send(Ok(SplitTake {
+                                take: number,
+                                files,
+                                manifest,
+                                begins_at: started_at,
+                                begins_in: at.saturating_since(now),
+                            }));
+                        }
+                        Err(refused) => {
+                            control.state.lock().unwrap().splitting = false;
+                            let _ = reply.send(Err(refused));
+                        }
+                    }
+                }
+                // Finished files of earlier takes; a take is done when all are.
+                for done in done_rx.try_iter() {
+                    takes[done.take].results[done.index] = Some(done.result);
+                }
+                let earlier = takes.len() - 1;
+                for take in &mut takes[..earlier] {
+                    if !take.finalized && take.results.iter().all(Option::is_some) {
+                        take.finalized = true;
+                        let mut errors = take.errors();
+                        if take.plans.iter().any(|p| p.source == PROGRAM)
+                            && let Some(reason) = inner.program.stopped()
+                        {
+                            errors.push(format!("program: {reason}; program output failed"));
+                        }
+                        let manifest = take_manifest(
+                            platform,
+                            setup,
+                            take,
+                            take.status(&errors),
+                            &errors,
+                            Some(control),
+                        );
+                        let _ = write_manifest(&take.manifest_path, &manifest);
+                        take.manifest = Some(manifest);
+                    }
+                }
+                // Finished takes, in order. One whose split comes after the
+                // recording's end isn't: the end rewrites it.
+                while reported < earlier
+                    && takes[reported].finalized
+                    && takes[reported].end.is_some_and(|end| end <= shared.end())
+                {
+                    let take = &takes[reported];
+                    if let (Some(on_take), Some(manifest)) = (options.on_take, &take.manifest) {
+                        on_take(reported as u32 + 1, &take.manifest_path, manifest);
+                    }
+                    reported += 1;
+                }
+                // Stop when asked (a stop right after the start still gives
+                // every announced file a moment; checked again here for one
+                // asked for since the split above), or when every file has
+                // stopped (for example because the disk is full).
+                if options.stop.load(Ordering::SeqCst) {
+                    shared.stop_at(now.max(shared.epoch + MIN_TAKE));
+                }
+                if writer_threads.iter().all(|t| t.is_finished()) {
                     shared.stop_at(now.max(shared.epoch));
                 }
-            }
-            let current = takes.last().expect("a take");
-            if let Some(on_status) = options.on_status
-                && now >= next_status
-            {
-                next_status = now + STATUS_INTERVAL;
-                // The loudest of each source since the last status.
-                let levels = std::mem::take(&mut *inner.loudest.lock().unwrap())
-                    .into_iter()
-                    .map(|(source, (peak_db, rms_db))| AudioLevel {
-                        source,
-                        peak_db,
-                        rms_db,
-                        channels: None,
-                    })
-                    .collect();
-                let mut status = live_status(&current.plans, levels, shared, now, &clock);
-                status.monitor = inner.monitor.lock().unwrap().status();
-                // While frames or audio are being lost, see whether the
-                // disk is why.
-                let lost = status
-                    .files
-                    .iter()
-                    .map(|f| f.dropped_frames + f.audio_dropouts)
-                    .sum();
-                if lost > losses {
-                    disk_probe.want();
+                // Markers and switches after the end are refused from now on
+                // (the files take a moment longer to finish).
+                let end = shared.end();
+                if end != Time::MAX {
+                    control.end_recording(end);
                 }
-                losses = lost;
-                status.disk = Some(disk_meter.sample(&current.plans, &disk_probe, now));
-                on_status(&status);
-            }
-            // Markers and scene switches go into the manifest right away.
-            if let Some(generation) = control.take_changed() {
-                let result = write(current, SessionStatus::Recording, &[]);
-                let mut state = control.state.lock().unwrap();
-                state.manifest_error = result.err().map(|e| format!("{e:#}"));
-                if state.manifest_error.is_none() {
-                    state.saved_pause_generation = generation;
+                if now >= end {
+                    break;
                 }
+                thread::sleep(Duration::from_millis(10));
             }
-            if !all_started
-                && current
-                    .plans
-                    .iter()
-                    .all(|p| p.start.load(Ordering::SeqCst) != i64::MIN)
-            {
-                all_started = true;
-                // Best effort: the final manifest is written at the end.
-                let _ = write(current, SessionStatus::Recording, &[]);
-            }
-            // A stop asked for comes before a split asked for at the same
-            // time: the split is then refused, rather than announcing a take
-            // the stop ends before it begins.
-            if options.stop.load(Ordering::SeqCst) {
-                shared.stop_at(now.max(shared.epoch + MIN_TAKE));
-            }
-            // A split: the next take's files start at a moment on every
-            // file's frame grid (the next whole second on the recording's
-            // clock, or the soonest such moment: see `SplitTiming`), at least
-            // a second after the current take's start.
-            if let Some((timing, reply)) = control.take_split() {
-                let number = takes.len() as u32 + 1;
-                let next = plan_take(setup, &formats, &folder, number)
-                    .and_then(|plan| Ok((create_writers(platform, &plan.plans)?, plan)))
-                    .map_err(|err| SplitRefused {
-                        ending: false,
-                        message: format!("{err:#}"),
-                    })
-                    .and_then(|(writers, plan)| {
-                        // Timed once the files exist, so none of them misses
-                        // the start.
-                        let now = platform.now();
-                        let current = takes.last().expect("a take");
-                        let rates: Vec<u32> = current
-                            .plans
-                            .iter()
-                            .chain(&plan.plans)
-                            .map(|plan| plan.spec.video.fps)
-                            .collect();
-                        let at = split_time(shared.epoch, current.epoch, &rates, timing, now);
-                        if at >= shared.end() {
-                            writers.into_iter().for_each(FileWriter::cancel);
-                            return Err(SplitRefused {
-                                ending: true,
-                                message: "the recording ends before a new take could start".into(),
-                            });
-                        }
-                        Ok((plan, writers, at, now))
-                    });
-                match next {
-                    Ok((plan, writers, at, now)) => {
-                        let files: Vec<PathBuf> =
-                            plan.plans.iter().map(|p| p.spec.path.clone()).collect();
-                        let manifest = plan.manifest_path.clone();
-                        let index = takes.len();
-                        let mut gone = Vec::new();
-                        for (i, ((split, writer), file)) in split_senders
-                            .iter()
-                            .zip(writers)
-                            .zip(plan.plans.clone())
-                            .enumerate()
-                        {
-                            let sent = split.send(Split {
-                                at,
-                                take: index,
-                                writer,
-                                plan: file,
-                            });
-                            // That file's writer thread has stopped (its
-                            // writer failed), so this take can't have it.
-                            if let Err(mpsc::SendError(split)) = sent {
-                                split.writer.cancel();
-                                gone.push(i);
-                            }
-                        }
-                        let started_at = Local::now() + at.saturating_since(now);
-                        takes.last_mut().expect("a take").end = Some(at);
-                        let mut take = Take::begin(plan, at, started_at);
-                        for i in gone {
-                            take.results[i] = Some(Err(anyhow::anyhow!(
-                                "{}: not recorded, because this source's file stopped in the \
-                                 previous take",
-                                take.plans[i].spec.path.display()
-                            )));
-                        }
-                        takes.push(take);
-                        control.begin_take(at);
-                        let _ = write(takes.last().expect("a take"), SessionStatus::Recording, &[]);
-                        all_started = false;
-                        let _ = reply.send(Ok(SplitTake {
-                            take: number,
-                            files,
-                            manifest,
-                            begins_at: started_at,
-                            begins_in: at.saturating_since(now),
-                        }));
-                    }
-                    Err(refused) => {
-                        control.state.lock().unwrap().splitting = false;
-                        let _ = reply.send(Err(refused));
-                    }
-                }
-            }
-            // Finished files of earlier takes; a take is done when all are.
-            for done in done_rx.try_iter() {
-                takes[done.take].results[done.index] = Some(done.result);
-            }
-            let earlier = takes.len() - 1;
-            for take in &mut takes[..earlier] {
-                if !take.finalized && take.results.iter().all(Option::is_some) {
-                    take.finalized = true;
-                    let errors = take.errors();
-                    let manifest =
-                        take_manifest(setup, take, take.status(&errors), &errors, Some(control));
-                    let _ = write_manifest(&take.manifest_path, &manifest);
-                    take.manifest = Some(manifest);
-                }
-            }
-            // Finished takes, in order. One whose split comes after the
-            // recording's end isn't: the end rewrites it.
-            while reported < earlier
-                && takes[reported].finalized
-                && takes[reported].end.is_some_and(|end| end <= shared.end())
-            {
-                let take = &takes[reported];
-                if let (Some(on_take), Some(manifest)) = (options.on_take, &take.manifest) {
-                    on_take(reported as u32 + 1, &take.manifest_path, manifest);
-                }
-                reported += 1;
-            }
-            // Stop when asked (a stop right after the start still gives
-            // every announced file a moment; checked again here for one
-            // asked for since the split above), or when every file has
-            // stopped (for example because the disk is full).
-            if options.stop.load(Ordering::SeqCst) {
-                shared.stop_at(now.max(shared.epoch + MIN_TAKE));
-            }
-            if writer_threads.iter().all(|t| t.is_finished()) {
-                shared.stop_at(now.max(shared.epoch));
-            }
-            // Markers and switches after the end are refused from now on
-            // (the files take a moment longer to finish).
-            let end = shared.end();
-            if end != Time::MAX {
-                control.end_recording(end);
-            }
-            if now >= end {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
+        });
+        if coordinator.is_err() {
+            shared.stop_at(platform.now().max(shared.epoch));
         }
         // No take begins from here on: a split asked for is refused at once.
         control.finish_recording();
@@ -2786,14 +2919,27 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
             thread::sleep(Duration::from_millis(2));
         }
         drop(std::mem::replace(&mut routes, Unroute(Vec::new())));
-        let mut errors = Vec::new();
+        let mut errors = coordinator.err().into_iter().collect::<Vec<_>>();
+        if inner.emergency.load(Ordering::SeqCst)
+            || inner.state.is_poisoned()
+            || inner.scenes.poisoned()
+        {
+            errors.push(
+                "recording interrupted: poisoned shared state; writers finalized by emergency stop"
+                    .into(),
+            );
+        }
         for thread in iso_threads {
-            if let Err(err) = thread.join().expect("ISO thread panicked") {
-                errors.push(format!("{err:#}"));
+            match thread.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => errors.push(format!("{err:#}")),
+                Err(_) => errors.push("ISO clock panicked; remaining writers finalized".into()),
             }
         }
         for thread in writer_threads {
-            thread.join().expect("writer thread panicked");
+            if thread.join().is_err() {
+                errors.push("writer panicked while finalizing; inspect recovered fragments".into());
+            }
         }
         control.mix_drain_until.store(0, Ordering::Release);
         if let Some(free) = disk_full {
@@ -2824,6 +2970,12 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
     let mut file_errors = Vec::new();
     for (i, take) in takes.iter_mut().enumerate() {
         let mut take_errors = take.errors();
+        if !take.finalized
+            && take.plans.iter().any(|p| p.source == PROGRAM)
+            && let Some(reason) = inner.program.stopped()
+        {
+            take_errors.push(format!("program: {reason}; program output failed"));
+        }
         file_errors.extend(take_errors.iter().cloned());
         if i == last {
             take_errors.extend(errors.iter().cloned());
@@ -2832,6 +2984,7 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
         // the report: the files it would list are finished all the same.
         if i == last || !take.finalized {
             let manifest = take_manifest(
+                platform,
                 setup,
                 take,
                 take.status(&take_errors),

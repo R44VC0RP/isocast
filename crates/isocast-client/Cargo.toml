@@ -13,6 +13,7 @@ shared = ["dep:isocast-surfaces"]
 wgpu = ["shared", "isocast-surfaces/wgpu", "dep:wgpu"]
 
 [dependencies]
+isocast-diagnostics = { path = "../isocast-diagnostics" }
 anyhow = "1.0.104"
 isocast-protocol = { path = "../isocast-protocol" }
 isocast-surfaces = { path = "../isocast-surfaces", optional = true }

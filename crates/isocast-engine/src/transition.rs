@@ -451,7 +451,9 @@ impl Transitions {
                     }
                     Ok(_) => None,
                     Err(err) => {
-                        eprintln!("isocastd: a luma wipe uses its pattern instead: {err:#}");
+                        isocast_diagnostics::diagnostic!("warn";
+                            "isocastd: a luma wipe uses its pattern instead: {err:#}"
+                        );
                         None
                     }
                 }

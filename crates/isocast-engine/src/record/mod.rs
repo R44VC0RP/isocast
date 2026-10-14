@@ -892,7 +892,12 @@ impl Take {
     }
 
     fn status(&self, errors: &[String]) -> SessionStatus {
-        if errors.is_empty() {
+        if errors.iter().any(|e| {
+            e.starts_with("recording interrupted:")
+                || e.starts_with("recording coordinator panicked:")
+        }) {
+            SessionStatus::Interrupted
+        } else if errors.is_empty() {
             SessionStatus::Complete
         } else {
             SessionStatus::Failed
@@ -1085,7 +1090,8 @@ fn live_status(
 
 /// A take's manifest as it stands: files that haven't finished have no
 /// duration or counts yet.
-fn take_manifest(
+fn take_manifest<P: Platform>(
+    platform: &P,
     setup: &Setup,
     take: &Take,
     status: SessionStatus,
@@ -1100,9 +1106,27 @@ fn take_manifest(
     let failed = |plan: &FilePlan| {
         let start = plan.start.load(Ordering::SeqCst);
         let end = take.end?;
+        // A failed writer may have closed long before the take ended. Read
+        // the finalized/durable media instead of inventing the missing tail.
+        let durable = platform
+            .media_info(&plan.spec.path)
+            .ok()
+            .map(|i| i.duration);
         (start != i64::MIN).then(|| {
             let start = Time::from_nanos(start);
             let fps = plan.spec.video.fps;
+            // Unreadable media: through its newest handled frame, never the
+            // take's end.
+            let newest = plan.newest.load(Ordering::SeqCst);
+            let duration = durable.unwrap_or_else(|| {
+                if newest == i64::MIN {
+                    Duration::ZERO
+                } else {
+                    Time::from_nanos(newest)
+                        .add_ticks(1, fps)
+                        .saturating_since(start)
+                }
+            });
             let end = file::file_end(start, mapped(end).max(start), fps);
             let frames = plan.frames.load(Ordering::SeqCst);
             FileReport {
@@ -1110,8 +1134,8 @@ fn take_manifest(
                 take: plan.take,
                 source: plan.source.clone(),
                 audio: plan.audio.clone(),
-                start_offset_seconds: 0.0,
-                duration_seconds: end.saturating_since(start).as_secs_f64(),
+                start_offset_seconds: start.saturating_since(mapped(take.epoch)).as_secs_f64(),
+                duration_seconds: duration.as_secs_f64(),
                 frames,
                 repeated_frames: 0,
                 dropped_frames: (end.ticks_since(start, fps).max(0) as u64).saturating_sub(frames),
@@ -1140,11 +1164,15 @@ fn take_manifest(
             .started_at
             .to_rfc3339_opts(SecondsFormat::Millis, false),
         host_time_ns: take.epoch.as_nanos(),
-        duration_seconds: finished.then(|| {
-            mapped(take.end.unwrap_or(take.epoch))
-                .saturating_since(mapped(take.epoch))
-                .as_secs_f64()
-        }),
+        duration_seconds: finished
+            .then(|| {
+                results
+                    .iter()
+                    .flatten()
+                    .map(|r| r.start_offset_seconds + r.duration_seconds)
+                    .reduce(f64::max)
+            })
+            .flatten(),
         markers,
         scenes,
         pauses: control.map_or_else(Vec::new, |c| {
@@ -1278,17 +1306,9 @@ pub fn interrupted_sessions(folder: &Path, mark: bool) -> Vec<PathBuf> {
                 return None;
             }
             if mark {
-                manifest.status = SessionStatus::Failed;
+                manifest.status = SessionStatus::Interrupted;
                 manifest.errors.push(INTERRUPTED.to_string());
-                if !manifest.pauses.is_empty() {
-                    manifest.errors.push(
-                        "this take contains pauses: pause/resume replies checkpoint the cut \
-                         clock and manifest, not committed media. Pre-pause samples may still \
-                         be queued or in an unfinished fragment, including after resume; \
-                         recovered and lost durations cannot be inferred from the pause times"
-                            .into(),
-                    );
-                }
+                annotate_interrupted_pauses(&mut manifest);
                 write_manifest(&path, &manifest).ok()?;
             }
             Some(path)
@@ -1329,12 +1349,135 @@ pub fn interrupted_note(interrupted: &[PathBuf], marked: bool) -> Option<String>
          Inspect each file's audio/video tracks; pause/resume replies do not confirm durability"
     );
     Some(match marked {
-        true => format!("{what}, and {its} {manifest} now {says} so (status \"failed\")"),
+        true => format!("{what}, and {its} {manifest} now {says} so (status \"interrupted\")"),
         false => format!(
             "{what}, but {its} {manifest} still {says} \"recording\" until the next recording \
              in this folder marks {it} as failed"
         ),
     })
+}
+
+/// Both launch-time and recording-start recovery use the pause policy. An
+/// open pause stays open: the crash time cannot be reconstructed from its cut.
+fn annotate_interrupted_pauses(manifest: &mut SessionManifest) {
+    if manifest.pauses.is_empty() {
+        return;
+    }
+    if manifest
+        .pauses
+        .last()
+        .is_some_and(|p| p.end_seconds.is_none())
+    {
+        manifest
+            .errors
+            .push("this take was interrupted while paused; recoverable duration unknown".into());
+    }
+    manifest.errors.push(
+        "this take contains pauses: pause/resume replies checkpoint the cut \
+         clock and manifest, not committed media. Pre-pause samples may still \
+         be queued or in an unfinished fragment, including after resume; \
+         recovered and lost durations cannot be inferred from the pause times"
+            .into(),
+    );
+}
+
+/// Repair orphaned manifests only under the recording folder's exclusive
+/// lock. Probe durable media for duration; never infer frame/drop counts.
+pub fn recover_interrupted<P: Platform>(
+    platform: &P,
+    folder: &Path,
+) -> Vec<isocast_protocol::manifest::InterruptedRecording> {
+    let Some(lock) = lock_file(folder) else {
+        return Vec::new();
+    };
+    if lock.try_lock().is_err() {
+        return Vec::new();
+    }
+    let mut recovered = Vec::new();
+    let mut paths = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name().is_some_and(|n| {
+                n.to_string_lossy().ends_with(".session.json")
+                    && !n.to_string_lossy().starts_with('.')
+            })
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths.into_iter().rev().take(100) {
+        if !path
+            .symlink_metadata()
+            .is_ok_and(|m| m.is_file() && m.len() <= (4 << 20))
+        {
+            continue;
+        }
+        let Some(mut manifest) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<SessionManifest>(&s).ok())
+        else {
+            continue;
+        };
+        let newly_detected = manifest.status == SessionStatus::Recording;
+        if newly_detected {
+            manifest.status = SessionStatus::Interrupted;
+            manifest.errors.push(INTERRUPTED.into());
+            annotate_interrupted_pauses(&mut manifest);
+            for file in &mut manifest.files {
+                let relative = Path::new(&file.path);
+                if relative
+                    .components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+                {
+                    continue;
+                }
+                match platform.media_info(&folder.join(relative)) {
+                    Ok(info) => file.duration_seconds = Some(info.duration.as_secs_f64()),
+                    Err(err) => manifest.errors.push(format!(
+                        "{}: durable media could not be probed: {err:#}",
+                        file.path
+                    )),
+                }
+            }
+            manifest.duration_seconds = manifest
+                .files
+                .iter()
+                .filter_map(|f| {
+                    f.duration_seconds
+                        .map(|d| d + f.start_offset_seconds.unwrap_or(0.0))
+                })
+                .reduce(f64::max);
+            if let Err(err) = write_manifest(&path, &manifest) {
+                manifest
+                    .errors
+                    .push(format!("could not persist interrupted marker: {err:#}"));
+            }
+        }
+        if manifest.status == SessionStatus::Interrupted {
+            recovered.push(isocast_protocol::manifest::InterruptedRecording {
+                newly_detected,
+                manifest: path,
+                recording: manifest,
+            });
+        }
+    }
+    recovered
+}
+
+/// A controlled emergency stop finished the media normally, but the take
+/// was interrupted by a critical-state failure, not ended by the operator.
+pub fn mark_interrupted(report: &Report, why: &str) {
+    for path in &report.takes {
+        if let Some(mut manifest) = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<SessionManifest>(&s).ok())
+        {
+            manifest.status = SessionStatus::Interrupted;
+            manifest.errors.push(why.into());
+            let _ = write_manifest(path, &manifest);
+        }
+    }
 }
 
 /// Fill in a file name template: {SOURCE}, {source}, {date}, {time}.

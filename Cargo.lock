@@ -290,6 +290,9 @@ name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
+dependencies = [
+ "derive_arbitrary",
+]
 
 [[package]]
 name = "arboard"
@@ -1326,6 +1329,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
+name = "derive_arbitrary"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b034bd7d5f032402a2479444dcc6f74e36a03f31854d41680fb240ef682a1ac"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.8",
+]
+
+[[package]]
 name = "derive_more"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1356,6 +1370,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -2272,6 +2287,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "htmlparser"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2905,6 +2929,7 @@ dependencies = [
  "block2 0.6.2",
  "dispatch2",
  "isocast-client",
+ "isocast-diagnostics",
  "isocast-protocol",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -2924,6 +2949,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "isocast-client",
+ "isocast-diagnostics",
  "isocast-engine",
  "isocast-platform-macos",
  "isocast-protocol",
@@ -2943,6 +2969,7 @@ name = "isocast-client"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "isocast-diagnostics",
  "isocast-protocol",
  "isocast-surfaces",
  "libc",
@@ -2959,6 +2986,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "ctrlc",
+ "isocast-diagnostics",
  "isocast-engine",
  "isocast-platform-macos",
  "isocast-protocol",
@@ -2969,6 +2997,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "isocast-diagnostics"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "getrandom 0.4.3",
+ "hmac",
+ "isocast-protocol",
+ "libc",
+ "regex",
+ "serde_json",
+ "sha2",
+ "zip",
+]
+
+[[package]]
 name = "isocast-engine"
 version = "0.0.1"
 dependencies = [
@@ -2976,6 +3019,7 @@ dependencies = [
  "chrono",
  "cosmic-text",
  "image",
+ "isocast-diagnostics",
  "isocast-protocol",
  "native-tls",
  "nnnoiseless",
@@ -2996,10 +3040,12 @@ dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
  "dispatch2",
+ "isocast-diagnostics",
  "isocast-engine",
  "isocast-protocol",
  "isocast-surfaces",
  "libc",
+ "mach2",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-audio-toolbox",
@@ -3018,6 +3064,7 @@ dependencies = [
  "objc2-video-toolbox",
  "objc2-web-kit",
  "security-framework",
+ "serde_json",
  "wgpu",
 ]
 
@@ -3052,6 +3099,7 @@ dependencies = [
  "anyhow",
  "i-slint-backend-testing",
  "isocast-client",
+ "isocast-diagnostics",
  "isocast-protocol",
  "libc",
  "objc2 0.6.5",
@@ -5581,6 +5629,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "subtle"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
 name = "svgtypes"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7638,6 +7692,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.8",
+]
+
+[[package]]
+name = "zip"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb2a05c7c36fde6c09b08576c9f7fb4cda705990f73b58fe011abf7dfb24168b"
+dependencies = [
+ "arbitrary",
+ "crc32fast",
+ "flate2",
+ "indexmap",
+ "memchr",
 ]
 
 [[package]]

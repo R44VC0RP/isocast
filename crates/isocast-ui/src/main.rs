@@ -170,6 +170,7 @@ fn parse() -> Result<Options> {
             }
             "-h" | "--help" => {
                 println!("{USAGE}");
+                isocast_diagnostics::clean_exit();
                 std::process::exit(0);
             }
             other => bail!("unknown option {other:?}\n{USAGE}"),
@@ -179,6 +180,7 @@ fn parse() -> Result<Options> {
 }
 
 fn main() {
+    let _logs = isocast_diagnostics::init("isocast-ui", true);
     let result = parse().and_then(|options| {
         if options.snapshot.is_some() || options.a11y || options.soak.is_some() {
             offscreen::run(&options)
@@ -189,7 +191,7 @@ fn main() {
     let code = match result {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("Error: {error:?}");
+            isocast_diagnostics::diagnostic!("error"; "Error: {error:?}");
             1
         }
     };
@@ -201,6 +203,7 @@ fn main() {
 /// after wgpu's own; a debug build then aborts at exit, and macOS shows a
 /// crash dialog that comes to the front over whatever Ryan is working in.
 fn exit(code: i32) -> ! {
+    isocast_diagnostics::clean_exit();
     use std::io::Write;
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();

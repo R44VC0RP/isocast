@@ -168,7 +168,7 @@ impl Library {
                     // An engine from before P.1 has none: the menus offer
                     // nothing.
                     if !error.is_unknown_method() {
-                        eprintln!("library: {error}");
+                        isocast_diagnostics::diagnostic!("error"; "library: {error}");
                     }
                     None
                 }

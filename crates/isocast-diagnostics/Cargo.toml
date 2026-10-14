@@ -1,0 +1,18 @@
+[package]
+name = "isocast-diagnostics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded, private, crash-safe diagnostics shared by Isocast processes."
+
+[dependencies]
+isocast-protocol = { path = "../isocast-protocol" }
+serde_json = "1.0.154"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+regex = "1"
+sha2 = "0.10"
+hmac = "0.12"
+getrandom = "0.4"
+libc = "0.2"
+zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }

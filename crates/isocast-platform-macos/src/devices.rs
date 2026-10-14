@@ -156,6 +156,20 @@ pub fn devices() -> Result<Devices> {
     })
 }
 
+/// Diagnostics inventory: never ask ScreenCaptureKit to enumerate windows,
+/// which can trigger a picker-consent prompt. Device formats need no capture.
+pub(crate) fn inventory() -> Result<Devices> {
+    Ok(Devices {
+        displays: displays()?.into_iter().map(|(_, d)| d).collect(),
+        windows: Vec::new(),
+        cameras: cameras()?,
+        microphones: microphones()?,
+        audio_outputs: crate::output::audio_outputs()?,
+        permissions: permissions()?,
+        notes: vec!["Window titles deliberately not collected by diagnostics".into()],
+    })
+}
+
 /// Ask macOS for screen recording, camera and microphone access where it
 /// hasn't been decided, showing its prompts, and wait up to `timeout` for
 /// the answers. Returns the permissions afterwards.
@@ -261,7 +275,7 @@ pub(crate) fn find_display(query: &str) -> Result<(CGDirectDisplayID, Display)> 
     }
 }
 
-fn display_uuid(id: CGDirectDisplayID) -> Option<String> {
+pub(crate) fn display_uuid(id: CGDirectDisplayID) -> Option<String> {
     let uuid = NonNull::new(unsafe { CGDisplayCreateUUIDFromDisplayID(id) })?;
     // SAFETY: the function follows the create rule, so we own this reference.
     let uuid: CFRetained<CFUUID> = unsafe { CFRetained::from_raw(uuid) };

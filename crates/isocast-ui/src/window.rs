@@ -123,7 +123,7 @@ pub fn run(options: &Options) -> Result<()> {
                 let now = shell.canvas.preview_stats().shown;
                 let fps = (now - shown) as f64 / seconds;
                 shown = now;
-                eprintln!(
+                isocast_diagnostics::diagnostic!(
                     "{:6.1}s  {fps:5.1} fps  {cpu:5.1}% CPU{}",
                     started.elapsed().as_secs_f64(),
                     if occluded.get() { "  (occluded)" } else { "" }
@@ -209,7 +209,7 @@ pub fn run(options: &Options) -> Result<()> {
                     })
                 );
                 if !occluded_time.get().is_zero() {
-                    eprintln!(
+                    isocast_diagnostics::diagnostic!("warn";
                         "the window was covered for part of the run (macOS reported it occluded), so it wasn't drawn then: this measurement is not valid"
                     );
                 }
@@ -277,7 +277,7 @@ fn setup_when_ready(weak: slint::Weak<AppWindow>, shell: Rc<App>, setup: Setup) 
                     });
             }
             Err(error) => {
-                eprintln!("preview: {error:#}");
+                isocast_diagnostics::diagnostic!("warn"; "preview: {error:#}");
                 shell.toast(crate::ToastKind::Error, "No preview", format!("{error:#}"));
             }
         }
@@ -327,7 +327,7 @@ fn start_drag_test(app: &AppWindow, seconds: f64) {
                     position: origin,
                     button: PointerEventButton::Left,
                 });
-                eprintln!("drag-test: dragging");
+                isocast_diagnostics::diagnostic!("drag-test: dragging");
                 phase = Phase::Dragging(Instant::now(), origin, span);
             }
             Phase::Dragging(start, origin, span) => {
@@ -341,7 +341,7 @@ fn start_drag_test(app: &AppWindow, seconds: f64) {
                         position,
                         button: PointerEventButton::Left,
                     });
-                    eprintln!("drag-test: done");
+                    isocast_diagnostics::diagnostic!("drag-test: done");
                     phase = Phase::Done;
                 }
             }

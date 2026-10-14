@@ -260,7 +260,7 @@ fn save_when_quiet(saving: &Saving, store: &DataStore) {
         match result {
             Ok(()) => state.error = None,
             Err(err) => {
-                eprintln!("isocastd: {err:#}");
+                isocast_diagnostics::diagnostic!("error"; "isocastd: {err:#}");
                 state.error = Some(format!("{err:#}"));
                 state.dirty = true;
                 drop(state);

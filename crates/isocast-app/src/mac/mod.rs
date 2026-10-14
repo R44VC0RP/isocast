@@ -554,6 +554,11 @@ define_class!(
     unsafe impl NSObjectProtocol for AppDelegate {}
 
     unsafe impl NSApplicationDelegate for AppDelegate {
+        #[unsafe(method(applicationWillTerminate:))]
+        fn will_terminate(&self, _notification: &NSNotification) {
+            isocast_diagnostics::clean_exit();
+        }
+
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window_closed(&self, _app: &NSApplication) -> bool {
             true

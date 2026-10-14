@@ -1207,7 +1207,7 @@ impl App {
             _ => {
                 let handled = self.areas().iter().any(|area| area.menu(self, id));
                 if !handled {
-                    eprintln!("menu: nothing handles {id:?} yet");
+                    isocast_diagnostics::diagnostic!("warn"; "menu: nothing handles {id:?} yet");
                 }
             }
         }

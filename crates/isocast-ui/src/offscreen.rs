@@ -166,7 +166,7 @@ pub fn run(options: &Options) -> Result<()> {
     }
     if let Some(path) = &options.snapshot {
         offscreen.snapshot(path)?;
-        eprintln!(
+        isocast_diagnostics::diagnostic!(
             "saved {} ({}x{} at {}x)",
             path.display(),
             width,

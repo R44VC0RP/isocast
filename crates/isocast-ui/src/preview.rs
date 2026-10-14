@@ -515,7 +515,9 @@ impl Preview {
                                 self.images.insert(key, image);
                             }
                             Err(error) => {
-                                eprintln!("preview: can't show a shared frame: {error:#}");
+                                isocast_diagnostics::diagnostic!("warn";
+                                    "preview: can't show a shared frame: {error:#}"
+                                );
                                 return;
                             }
                         }

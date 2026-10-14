@@ -120,6 +120,31 @@ struct Shared {
 }
 
 impl Shared {
+    fn fail(&self, message: String) {
+        self.stop.store(true, Ordering::SeqCst);
+        // Only stream-private state is discarded; recording routes are separate.
+        if self.queue.is_poisoned() {
+            *self.queue.lock().unwrap_or_else(|p| p.into_inner()) = SendQueue::default();
+            self.queue.clear_poison();
+        }
+        if self.status.is_poisoned() {
+            self.status.clear_poison();
+        }
+        *self.ended.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(Ended::Failed(message.clone()));
+        self.ended.clear_poison();
+        if let Some(socket) = self
+            .socket
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+        self.socket.clear_poison();
+        self.queued.notify_all();
+        self.set_state(StreamState::Failed, Some(message));
+    }
     fn stopping(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
@@ -128,6 +153,12 @@ impl Shared {
     fn set_state(&self, state: StreamState, error: Option<String>) {
         let status = {
             let mut status = self.status.lock().unwrap();
+            if status.state == StreamState::Failed
+                && state == StreamState::Offline
+                && error.is_none()
+            {
+                return;
+            }
             if status.state == state && error.is_none() {
                 return;
             }
@@ -192,6 +223,9 @@ pub fn redact(text: &str, key: &str) -> String {
 }
 
 impl Stream {
+    pub fn fail(&self, message: String) {
+        self.shared.fail(message);
+    }
     /// Its state and counters now.
     pub fn status(&self) -> StreamStatus {
         let mut status = self.shared.status.lock().unwrap().clone();
@@ -213,12 +247,17 @@ impl Stream {
             return;
         }
         let (finished, joined) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            for thread in threads {
-                let _ = thread.join();
-            }
-            let _ = finished.send(());
-        });
+        let failed = self.shared.clone();
+        let _ = isocast_diagnostics::spawn(
+            "stream join",
+            move || {
+                for thread in threads {
+                    let _ = thread.join();
+                }
+                let _ = finished.send(());
+            },
+            move |why| failed.fail(why),
+        );
         if joined.recv_timeout(STOP_GRACE).is_err() {
             if let Some(socket) = self.shared.socket.lock().unwrap().as_ref() {
                 let _ = socket.shutdown(std::net::Shutdown::Both);
@@ -325,9 +364,18 @@ pub(crate) fn run<P: Platform>(
             .name("stream encode".into())
             .spawn(move || {
                 platform.real_time_thread();
-                let ended = encode::<P>(video, audio, tap, &shared, &spec).unwrap_or_else(|err| {
-                    Ended::Failed(format!("the stream's encoder failed: {err:#}"))
+                let encoded = isocast_diagnostics::contain("stream encoder", || {
+                    encode::<P>(video, audio, tap, &shared, &spec)
                 });
+                let ended = match encoded {
+                    Ok(result) => result.unwrap_or_else(|err| {
+                        Ended::Failed(format!("the stream's encoder failed: {err:#}"))
+                    }),
+                    Err(message) => {
+                        shared.fail(message);
+                        return;
+                    }
+                };
                 *shared.ended.lock().unwrap() = Some(ended);
                 shared.queued.notify_all();
             })?
@@ -339,7 +387,11 @@ pub(crate) fn run<P: Platform>(
             .name("stream send".into())
             .spawn(move || {
                 platform.real_time_thread();
-                send(&shared, &spec, &server, &key)
+                if let Err(message) = isocast_diagnostics::contain("stream sender", || {
+                    send(&shared, &spec, &server, &key)
+                }) {
+                    shared.fail(message);
+                }
             })?
     };
     Ok(Stream {

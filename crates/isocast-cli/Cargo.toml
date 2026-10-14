@@ -11,6 +11,7 @@ name = "isocast"
 path = "src/main.rs"
 
 [dependencies]
+isocast-diagnostics = { path = "../isocast-diagnostics" }
 base64 = "0.22.1"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
