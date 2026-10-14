@@ -1110,19 +1110,25 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
     app/CLI/engine, Developer ID and hardened runtime, app and DMG separately
     notarized/stapled, checksums, dry-run/ad-hoc modes and draft-only upload
     of existing verified artifacts. Version from the workspace; one UI target.
-  - [ ] **8.2b First-install runtime and draft (needs Ryan).** The original
-    notarized app passed first launch, bundled daemon, CLI and synthetic
-    recording after the authorized Open click. The current native release
-    is signed and runtime-verified (8.2d); restore `isocast-notary`, then
-    `scripts/release.sh --notarize --draft-release --output /Volumes/IsocastBuild/release/scratch/morning-native`.
-    This resumes its verified binary bytes, staples, re-verifies and creates
-    one draft. See REPORT.md's Morning commands and Waiting on Ryan.
+  - [x] **8.2b First-install runtime and draft.** Rebuilt from main f6570b7:
+    app and DMG notarized/stapled, strict signatures and Gatekeeper accepted.
+    The mounted native app/engine/CLI and 4 s program+ISO recording pass on
+    isocast-m2-b. One unpublished v0.0.1 Alpha draft with verified DMG and
+    checksum assets; matching-draft reuse verified. URL/SHA-256 in the Draft
+    section of `/Volumes/IsocastBuild/release/scratch/REPORT.md`.
   - [ ] **8.2c Homebrew distribution.** After a release is ready to publish.
   - [x] **8.2d Morning-ready native release.** Main 85e2210 merged; Slint
     default with its plist, bundled CLI/engine, consistent build metadata,
     Developer ID-signed app/DMG without notarization. Native window, PATH
     CLI/restart and bundled-engine program/ISO take pass on isocast-m2-b.
     Resume-only notarization and idempotent draft stages are ready.
+  - [x] **8.2e GitHub release workflow.** Tag push/manual existing version,
+    hosted macos-15 arm64, protected release environment, SHA-pinned actions,
+    temporary keychain and API-key notarization, mounted bundled-runtime
+    gate and one refreshed draft with generated notes. Actionlint and local
+    dry/mock checks pass; real 720p30 bundle qualification passes on m2-b.
+    One-time environment/secrets setup and first hosted run await Ryan;
+    see docs/releasing.md and REPORT.md's Workflow section.
 - [x] **8.3** Docs: getting started, setup reference, MCP tools, plugins.
   (With the user-facing README and its screenshots, licences and
   THIRD_PARTY_NOTICES, and the .github templates.)
@@ -3008,6 +3014,25 @@ One line per finished task, newest last.
   retired web app is excluded. Resumable --notarize plus --draft-release
   finalizes saved bytes and reuses only a matching draft. No notary or GitHub
   write attempted; exact morning commands in REPORT.md.
+- 8.2b (2026-10-14): rebuilt current main f6570b7, notarized/stapled app and
+  DMG with the restored login-keychain profile; both Accepted. Strict code,
+  tickets, Gatekeeper and mounted binary hashes verified. Mounted native UI,
+  bundled CLI/restart/engine on m2-b: 2x120 frames/4 s HEVC/AAC program+ISO,
+  no drops/repeats/audio dropouts, equal A/V, clean decodes, timeline c1.
+  One unpublished draft (412748947), both uploaded digests match; repeat
+  lookup reuses it. Finalizer uses the OS-reported mount point after custom
+  nested mounting failed on macOS 27.2; short user-facing alpha notes.
+  fmt, release Clippy, 183 tests, notices and ShellCheck pass. Report: Draft.
+- 8.2e (2026-10-14): release.yml and opt-in finalizer CI modes ready; local
+  profile defaults retained. Protected release environment, pinned actions,
+  macos-15/Xcode 26.3, ephemeral signing keychain, API-key notarization and
+  generated-note draft replacement; no publication path. Actionlint/ShellCheck,
+  fmt/release Clippy/183 tests/notices pass. Exact version and signing/cleanup
+  blocks dry-run/mocked; API auth/redaction and draft update refusal checked
+  without service writes. Mounted signed bundle on m2-b: 3x5 s program+2 ISO,
+  9 files/1350 frames, 0 loss, full decodes, equal A/V, sync <=0.021 ms; final
+  take tightened to zero-drop after qualification. Setup/first hosted run
+  remain Ryan's steps; existing draft unchanged.
 - A.2 QA-3 R3 hotkeys (2026-10-14): focused input no longer disappears merely
   because native registration succeeded. Global/focused presses pair within
   100 ms in either order; repeats, rapid distinct presses and hold release/

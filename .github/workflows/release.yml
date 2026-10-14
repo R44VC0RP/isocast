@@ -1,0 +1,185 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Existing version tag (X.Y.Z or vX.Y.Z); must match Cargo.toml'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Serialize tag pushes and manual reruns together; never interrupt signing.
+concurrency:
+  group: isocast-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'R44VC0RP/isocast' && (github.event_name == 'push' || github.ref == 'refs/heads/main')
+    runs-on: macos-15
+    timeout-minutes: 90
+    # Configure Ryan as required reviewer BEFORE adding environment secrets.
+    environment: release
+    permissions:
+      contents: write
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      # The macos-15 image defaults to Xcode 16; Icon Composer needs Xcode 26.
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - name: Select and validate version tag
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          value = os.environ['REF_NAME'] if os.environ['EVENT'] == 'push' else os.environ['INPUT_VERSION']
+          if not re.fullmatch(r'v?[0-9]+\.[0-9]+\.[0-9]+', value):
+              sys.exit('version must be X.Y.Z or vX.Y.Z')
+          version = value.removeprefix('v')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'tag=v{version}\nversion={version}\n')
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write(f'ISOCAST_SCRATCH={os.environ["RUNNER_TEMP"]}\nRELEASE_OUTPUT={os.environ["RUNNER_TEMP"]}/isocast-release\n')
+          PY
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.version.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Check release source and architecture
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
+          python3 - <<'PY'
+          import os, tomllib
+          with open('Cargo.toml', 'rb') as file:
+              version = tomllib.load(file)['workspace']['package']['version']
+          if version != os.environ['VERSION']:
+              raise SystemExit('tag/input version does not match workspace.package.version')
+          PY
+          xcrun --find actool
+          xcrun --find notarytool
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-arm64
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: release-brew-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/release.yml') }}
+          restore-keys: release-brew-${{ runner.os }}-${{ runner.arch }}-
+      - name: Runtime verification tools
+        run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+      - name: Import signing identity and notarization key
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, re, secrets, shlex, subprocess, sys
+          from pathlib import Path
+          os.umask(0o077)
+          root = Path(os.environ['RUNNER_TEMP']) / 'isocast-release-signing'
+          root.mkdir()
+          team = os.environ['APPLE_TEAM_ID']
+          if not re.fullmatch(r'[A-Z0-9]{10}', team):
+              sys.exit('APPLE_TEAM_ID must be a 10-character team id')
+          def run(label, *args):
+              try:
+                  result = subprocess.run(args, capture_output=True, text=True, timeout=60)
+              except subprocess.TimeoutExpired:
+                  sys.exit(f'{label} timed out; signing data is not logged')
+              if result.returncode:
+                  sys.exit(f'{label} failed (exit {result.returncode}); signing data is not logged')
+              return result.stdout
+          original = shlex.split(run('keychain inventory', 'security', 'list-keychains', '-d', 'user'))
+          (root / 'search-list.json').write_text(json.dumps(original))
+          for name, secret in [('certificate.p12', 'DEVELOPER_ID_P12_BASE64'), ('AuthKey.p8', 'APPLE_API_KEY_P8_BASE64')]:
+              try:
+                  data = base64.b64decode(os.environ[secret], validate=True)
+                  if not data: raise ValueError()
+              except ValueError:
+                  sys.exit(f'{secret} must be nonempty single-line base64')
+              (root / name).write_bytes(data)
+          password = secrets.token_urlsafe(32)
+          print(f'::add-mask::{password}', flush=True)
+          keychain = str(root / 'signing.keychain-db')
+          run('keychain creation', 'security', 'create-keychain', '-p', password, keychain)
+          run('keychain settings', 'security', 'set-keychain-settings', '-lut', '21600', keychain)
+          run('keychain unlock', 'security', 'unlock-keychain', '-p', password, keychain)
+          run('certificate import', 'security', 'import', str(root / 'certificate.p12'), '-P', os.environ['DEVELOPER_ID_P12_PASSWORD'], '-t', 'cert', '-f', 'pkcs12', '-k', keychain, '-T', '/usr/bin/codesign', '-T', '/usr/bin/security')
+          run('key access', 'security', 'set-key-partition-list', '-S', 'apple-tool:,apple:', '-s', '-k', password, keychain)
+          run('keychain search list', 'security', 'list-keychains', '-d', 'user', '-s', keychain, *original)
+          identities = re.findall(r'([0-9A-F]{40}) "(Developer ID Application: [^"\n]+)"', run('signing identity', 'security', 'find-identity', '-v', '-p', 'codesigning', keychain))
+          identities = [fingerprint for fingerprint, name in identities if name.endswith(f'({team})')]
+          if len(identities) != 1: sys.exit('expected exactly one Developer ID Application identity for APPLE_TEAM_ID')
+          print(f'::add-mask::{identities[0]}', flush=True)
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write(f'ISOCAST_SIGN_KEYCHAIN={keychain}\nISOCAST_SIGN_IDENTITY={identities[0]}\nAPPLE_API_KEY_PATH={root / "AuthKey.p8"}\n')
+          (root / 'certificate.p12').unlink()
+          PY
+      - name: Build and Developer ID-sign native app and DMG
+        run: scripts/release.sh --output "$RELEASE_OUTPUT"
+      - name: Notarize, verify mounted runtime, create or refresh one draft
+        timeout-minutes: 40
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release.sh --notarize --verify-runtime --hosted \
+            --draft-release --verify-tag --generate-notes --replace-draft \
+            --output "$RELEASE_OUTPUT"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          draft = json.loads((Path(os.environ['RELEASE_OUTPUT']) / 'draft.json').read_text())
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write(f'## Unpublished release draft\n\n{draft["url"]}\n')
+          PY
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, shutil, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'isocast-release-signing'
+          if not root.exists(): raise SystemExit(0)
+          errors = []
+          try:
+              saved = root / 'search-list.json'
+              if saved.exists():
+                  result = subprocess.run(['security', 'list-keychains', '-d', 'user', '-s', *json.loads(saved.read_text())], capture_output=True, timeout=30)
+                  if result.returncode: errors.append('keychain search-list restore failed')
+              keychain = root / 'signing.keychain-db'
+              if keychain.exists():
+                  result = subprocess.run(['security', 'delete-keychain', str(keychain)], capture_output=True, timeout=30)
+                  if result.returncode: errors.append('temporary keychain deletion failed')
+          finally:
+              shutil.rmtree(root)
+          if errors: raise SystemExit('; '.join(errors))
+          print('Temporary keychain, API key and certificate removed')
+          PY

@@ -152,6 +152,19 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-14 (8.2e release workflow): after merging/publishing this branch's
+  clean snapshot, create GitHub environment `release`, require Ryan's user
+  as reviewer (self-review allowed so he can approve his own run), and allow
+  main plus v* tags. Add its six environment secrets: Developer ID .p12
+  base64/password, App Store Connect Developer-role team API .p8 base64,
+  key id, issuer id and Apple team id (names/commands in docs/releasing.md).
+  Then tag the matching Cargo version **in the public snapshot checkout**,
+  or retry an existing tag with `gh workflow run release.yml --repo
+  R44VC0RP/isocast --ref main -f version=X.Y.Z`, and approve the environment.
+  No environment/secret configuration, workflow dispatch, tag push or draft
+  update was performed during development. This first real hosted run is
+  the remaining signing/API-notary integration check. See REPORT.md Workflow.
+
 - 2026-10-14 (A.2 R3 hotkeys): exonbook's GUI qualification is blocked by its
   locked session (`lsappinfo front` names loginwindow; ScreenSaverEngine
   85539). All 13 non-GUI E2E scenarios passed there, including pause/marker
@@ -162,20 +175,6 @@ each section. Delete entries that stop being true.
   Gate to retry: `scripts/testmac.sh gui 'lsappinfo info -only name "$(lsappinfo front)"'`
   must no longer report loginwindow.
 
-- 2026-10-14 (8.2, morning): the native release built from merged main
-  85e2210 is Developer ID-signed and tested, ready at
-  `/Volumes/IsocastBuild/release/scratch/morning-native`. No build is needed
-  in the morning. Ryan restores the missing profile interactively:
-  `xcrun notarytool store-credentials isocast-notary --team-id 9G68SMNHEU --keychain "$HOME/Library/Keychains/login.keychain-db"`
-  (notarytool prompts for Apple ID and app-specific password; never put the
-  password in chat/files/arguments). Then one command:
-  `scripts/release.sh --notarize --draft-release --output /Volumes/IsocastBuild/release/scratch/morning-native`.
-  It finalizes copies under `notarized/`, checks exact binary hashes and the
-  mounted DMG, and creates/reuses one matching draft, never publishing.
-  Native UI/CLI/bundled engine and 2x120-frame HEVC/AAC program/ISO files
-  passed on isocast-m2-b. Gatekeeper says Unnotarized Developer ID until
-  the morning step. The older signed-1/signed-2 artifacts are not current.
-  Morning details: `/Volumes/IsocastBuild/release/scratch/REPORT.md`.
 - 2026-10-14 (ui/app-alpha): exonbook's desktop sits at the lock screen
   (a password half typed in the field), so real-window checks there can't
   run; this lane used isocast-m2-b between other agents' runs. To retry:
@@ -306,6 +305,17 @@ each section. Delete entries that stop being true.
 
 
 ## Ready for Ryan
+
+- 2026-10-14 (8.2): **Isocast 0.0.1 Alpha draft**, built from main f6570b7:
+  https://github.com/R44VC0RP/isocast/releases/tag/untagged-c889f52db0ccdfadb1d8
+  One draft, unpublished; DMG/checksum uploaded and digests verified. App
+  and DMG are notarized/stapled and Gatekeeper accepts both. Mounted native
+  app/CLI/bundled-engine take passes on isocast-m2-b (4 s, program+ISO,
+  120 frames each, zero drops/audio loss, equal A/V and clean decodes).
+  Latest artifact: `/Volumes/IsocastBuild/release/scratch/draft-20261014/notarized/Isocast-0.0.1-arm64.dmg`.
+  SHA-256 `baa7fcb7f9cd716c754d3f5c249016f8f800c21019b29dfeef2d540ce21bb74f`.
+  The older morning build is superseded. Full evidence in REPORT.md's Draft
+  section. The optional camera extension still needs its one-time install.
 
 - 2026-10-13 — The Slint app as Isocast.app (N.3, branch ui/app-alpha):
   `scripts/app-dev.sh --release` then `open ~/Applications/Isocast.app`
@@ -1471,6 +1481,35 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-14 (8.2e): release workflow builds an existing validated version
+  tag for both triggers (manual starts from main), serializes all releases,
+  and gates secrets on the release environment. Only its one hosted job has
+  contents:write. CI uses Xcode 26.3 because the macos-15 image still defaults
+  to Xcode 16, which cannot compile the Icon Composer asset. Signing keychain
+  and fingerprint are explicit overrides; the .p8 API auth trio selects
+  notarization without changing local profile defaults. Temporary keychain
+  password/identity masked, decoded files 0600, original search list restored
+  and keychain/key files removed in always(). No credentials enter the child
+  recorder. Explicit --replace-draft/--generate-notes/--verify-tag modes
+  refresh the same draft, never a published release. Runtime gate uses the
+  mounted signed executable and existing E2E validators (not a re-signed
+  copy): 720p30 hosted, two 5 s qualifications then one checked take; <=25%
+  accounted video loss per output only, tightened to zero if qualification
+  is clean; audio, integrity and pulse sync remain strict. Missing tools or
+  unavailable backends fail the release gate, never silently skip.
+
+- 2026-10-14 (8.2 draft): the restored isocast-notary profile works with
+  explicit login-keychain selection. Native app and DMG accepted on their
+  first submissions; saved-id finalization resumed without uploading again.
+  The local macOS 27.2 mount check refused a custom path inside IsocastBuild
+  (Permission denied), while the OS-selected mount succeeded. The finalizer
+  now parses hdiutil's plist for its exact mount point and detaches it in
+  finally; strict signatures/tickets and prepared binary hashes stay required.
+  Replace generated release notes with the requested short alpha feature
+  summary and virtual-camera installation link. Actual matching-draft reuse
+  confirms one release remains (id 412748947, draft=true). No engine/UI
+  implementation changes; no publication, settings changes or git push.
 
 - 2026-10-14 (QA-3 R1): every file's audio advances with its pause-mapped
   video clock, padding silence only behind a 500 ms input allowance (plus

@@ -114,8 +114,8 @@ also resume. A stale `.release-lock` after a hard kill requires checking that
 the previous process is gone before removing it.
 
 `--draft-release` uploads only verified notarized output and its checksum
-to a **draft** on `R44VC0RP/isocast`, with generated notes from that repo's
-main. It reuses a matching draft and verifies both GitHub asset digests;
+to a **draft** on `R44VC0RP/isocast`, with a short user-facing alpha summary
+and that repo's main as its tag target. It reuses a matching draft and verifies both GitHub asset digests;
 published releases or mismatched assets are refused. No git history is
 pushed, release published, or repository setting changed. The draft URL is
 saved in `OUTPUT/draft.json`. Use `--notarize` alone to stop before upload,
@@ -125,3 +125,8 @@ or `--draft-release` alone to resume after notarization. Both support
 Distribute `OUTPUT/notarized/Isocast-X.Y.Z-arm64.dmg` and its `.sha256` file.
 Verify a download with `shasum -a 256 -c Isocast-X.Y.Z-arm64.dmg.sha256`
 beside the DMG. App and DMG accepted receipts remain in `OUTPUT/notarized/`.
+
+For GitHub Actions, API-key notarization, temporary signing keychains and
+the protected release environment, see [Releasing Isocast](releasing.md).
+The CI-specific runtime, generated-notes and draft-replacement options are
+explicit; the local defaults above are unchanged.

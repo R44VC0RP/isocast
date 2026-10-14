@@ -6,14 +6,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 root="$PWD"
 app_target="${ISOCAST_APP_TARGET:-isocast-ui}" # Native default; one-line UI switch.
-identity='Developer ID Application: Ryan Vogel (9G68SMNHEU)'
-keychain="$HOME/Library/Keychains/login.keychain-db"
+identity="${ISOCAST_SIGN_IDENTITY:-Developer ID Application: Ryan Vogel (9G68SMNHEU)}"
+keychain="${ISOCAST_SIGN_KEYCHAIN:-$HOME/Library/Keychains/login.keychain-db}"
 target="${CARGO_TARGET_DIR:-$root/target}"
 dry_run=0
 ad_hoc=0
 draft=0
 notarize=0
 output=
+runtime=0
+extra=()
 
 usage() {
     cat <<'EOF'
@@ -34,12 +36,20 @@ upload. Output must be new; default: $CARGO_TARGET_DIR/dist/VERSION.
                  reuse a matching existing draft, refuse mismatched/published ones.
                  Combine with --notarize for the single morning command.
 --output DIR     Build into, or resume from, this directory. Test before drafting.
+--verify-runtime Run the mounted bundled CLI/engine and short synthetic takes.
+--hosted         With --verify-runtime: qualify the existing E2E 720p30 loss policy.
+--generate-notes With --draft-release: use GitHub-generated release notes.
+--replace-draft  With --draft-release: replace assets on an existing draft only.
+--verify-tag     With --draft-release: require the version tag to exist remotely.
 
 Requirements: Apple-silicon Mac, Rust, Xcode (actool/notarytool/stapler), Python 3;
 gh for drafts. Credentials stay in the login keychain's isocast-notary profile.
 ISOCAST_APP_TARGET selects isocast-ui (default) or isocast-app (retired web app).
 Notarization uses the login keychain profile isocast-notary. Waits report progress
 every 20s; submission ids are saved for safe resume. Never publishes or pushes git.
+CI: ISOCAST_SIGN_KEYCHAIN/ISOCAST_SIGN_IDENTITY select the temporary signing key;
+APPLE_API_KEY_PATH + APPLE_API_KEY_ID + APPLE_API_ISSUER_ID select API-key
+notarization instead of the local profile. APPLE_TEAM_ID defaults to 9G68SMNHEU.
 EOF
 }
 die() { echo "release: $*" >&2; exit 1; }
@@ -55,24 +65,28 @@ while [ $# -gt 0 ]; do
         --ad-hoc) ad_hoc=1; shift ;;
         --draft-release) draft=1; shift ;;
         --notarize) notarize=1; shift ;;
+        --verify-runtime) runtime=1; extra+=(--verify-runtime); shift ;;
+        --hosted|--generate-notes|--replace-draft|--verify-tag) extra+=("$1"); shift ;;
         --output) [ $# -ge 2 ] || die '--output needs a directory'; output="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown option: $1 (see --help)" ;;
     esac
 done
 case "$app_target" in isocast-app|isocast-ui) ;; *) die 'ISOCAST_APP_TARGET: choose isocast-app or isocast-ui' ;; esac
-[ "$ad_hoc" = 0 ] || { [ "$draft:$notarize" = 0:0 ] || die 'notarization/drafts refuse ad-hoc artifacts'; }
+[ "$ad_hoc" = 0 ] || { [ "$draft:$notarize:$runtime" = 0:0:0 ] || die 'finalization refuses ad-hoc artifacts'; }
 [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || die 'build on an Apple-silicon Mac'
 
 # Resume from the saved version/target, even if this checkout changes overnight.
-if [ "$notarize:$draft" != 0:0 ]; then
+if [ "$notarize:$draft:$runtime" != 0:0:0 ]; then
     [ -n "$output" ] || die '--notarize/--draft-release need --output with a prepared build'
     args=(--output "$output")
     if [ "$notarize" = 1 ]; then args+=(--notarize); fi
     if [ "$draft" = 1 ]; then args+=(--draft-release); fi
     if [ "$dry_run" = 1 ]; then args+=(--dry-run); fi
+    if [ "${#extra[@]}" -gt 0 ]; then args+=("${extra[@]}"); fi
     exec python3 scripts/release-finalize.py "${args[@]}"
 fi
+[ "${#extra[@]}" = 0 ] || die 'finalization options need --notarize, --draft-release or --verify-runtime'
 
 # One version source; reading it does not build or resolve dependencies in dry runs.
 version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
@@ -100,7 +114,7 @@ if [ "$dry_run" = 0 ]; then
     done
     xcrun --find actool >/dev/null || die 'Xcode actool is required (no app is launched to render an icon)'
     if [ "$ad_hoc" = 0 ]; then
-        security find-identity -v -p codesigning "$keychain" | grep -Fq "\"$identity\"" || die "missing signing identity: $identity"
+        security find-identity -v -p codesigning "$keychain" | grep -Fq "$identity" || die "missing signing identity: $identity"
     fi
 fi
 build_version="${ISOCAST_BUILD_VERSION:-$(date +%s)}"
