@@ -11,7 +11,33 @@ use crate::{AppWindow, Theme};
 
 pub fn apply_system_settings(window: &AppWindow) {
     window.global::<Theme>().set_reduce_motion(reduce_motion());
+    dark_appearance();
 }
+
+/// The app's system parts (open and save panels, the menu bar's menus) in
+/// the dark appearance, as the window is drawn, whatever the Mac's
+/// setting (the web app did the same).
+#[cfg(target_os = "macos")]
+fn dark_appearance() {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    // SAFETY: AppKit's shared objects on the main thread; the appearance
+    // name is a constant string NSAppearance knows.
+    unsafe {
+        let name = ns_string("NSAppearanceNameDarkAqua");
+        let appearance: Option<Retained<AnyObject>> =
+            msg_send![class!(NSAppearance), appearanceNamed: &*name];
+        if let Some(appearance) = appearance {
+            let app: Retained<AnyObject> = msg_send![class!(NSApplication), sharedApplication];
+            let _: () = msg_send![&*app, setAppearance: &*appearance];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn dark_appearance() {}
 
 #[cfg(target_os = "macos")]
 fn reduce_motion() -> bool {
@@ -185,6 +211,38 @@ pub fn reveal(path: &str) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn reveal(_path: &str) {}
+
+/// Open a web page in the browser (a prefilled GitHub issue to post).
+pub fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("/usr/bin/open").arg(url).spawn();
+    #[cfg(not(target_os = "macos"))]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(error) = result {
+        eprintln!("couldn’t open {url}: {error}");
+    }
+}
+
+/// Put `text` on the general pasteboard (a command to paste in Terminal).
+#[cfg(target_os = "macos")]
+pub fn copy_text(text: &str) {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
+    // SAFETY: NSPasteboard's shared object on the main thread; the type is
+    // the constant string NSPasteboardTypeString stands for.
+    unsafe {
+        let board: Retained<AnyObject> = msg_send![class!(NSPasteboard), generalPasteboard];
+        let _: isize = msg_send![&*board, clearContents];
+        let string = ns_string(text);
+        let kind = ns_string("public.utf8-plain-text");
+        let _: bool = msg_send![&*board, setString: &*string, forType: &*kind];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn copy_text(_text: &str) {}
 
 /// Window → Bring All to Front: the app's windows in front of others.
 #[cfg(target_os = "macos")]

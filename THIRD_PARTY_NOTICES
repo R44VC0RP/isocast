@@ -17,19 +17,12 @@ Isocast. Slint's crates are listed below with their licence expressions.
 Fonts
 =====
 
-- Instrument Sans (Regular, SemiBold): SIL Open Font License 1.1, see crates/isocast-ui/ui/fonts/LICENSE-instrument-sans
-- Instrument Sans (web app, latin and latin-ext): SIL Open Font License 1.1, see crates/isocast-app/ui/vendor/LICENSE-instrument-sans
-  https://github.com/Instrument/instrument-sans
-
-Bundled scripts (the web app)
-=============================
-
-- Preact and Preact hooks: MIT, see crates/isocast-app/ui/vendor/LICENSE-preact
-  https://github.com/preactjs/preact
-- htm: Apache-2.0, see crates/isocast-app/ui/vendor/LICENSE-htm
-  https://github.com/developit/htm
-- Lucide icons: ISC, see crates/isocast-app/ui/vendor/LICENSE-lucide
-  https://github.com/lucide-icons/lucide
+- Mona Sans (Light, Regular, Medium, SemiBold): SIL Open Font License 1.1, see crates/isocast-ui/ui/fonts/LICENSE-mona-sans
+  https://github.com/github/mona-sans
+- Hubot Sans (Medium): SIL Open Font License 1.1, see crates/isocast-ui/ui/fonts/LICENSE-hubot-sans
+  https://github.com/github/hubot-sans
+- Martian Mono (ExtraLight): SIL Open Font License 1.1, see crates/isocast-ui/ui/fonts/LICENSE-martian-mono
+  https://github.com/evilmartians/mono
 
 WebAssembly runtime
 ===================

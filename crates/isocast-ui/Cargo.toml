@@ -45,6 +45,8 @@ libc = "0.2"
 # under the window's interface (see src/layers.rs), so the interface isn't
 # redrawn for every video frame.
 [target.'cfg(target_os = "macos")'.dependencies]
+# The NSEvent key monitor's handler (src/keys.rs: focused hotkeys).
+block2 = "0.6.2"
 objc2 = "0.6.5"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
 # CGImage and CGContext: the Create view's clip thumbnails (src/thumbs.rs).

@@ -535,7 +535,7 @@ sending bug reports; then fixes, then the next phase. Everything not here
 waits (full workspaces, other themes, scenes 5.3+, plugin tiers 7.3/7.4b/5.7,
 layout editing, Windows, release prep).
 
-- [ ] **A.1 Native app by default.** The Console redesign (N.5) merged,
+- [x] **A.1 Native app by default.** The Console redesign (N.5) merged,
   then N.3: the Slint app is the app Ryan opens.
 - [ ] **A.2 OBS workflows in the native app.** Scenes, sources, filters,
   transitions, Studio Mode, mixer, program + ISO recording, streaming:
@@ -547,6 +547,8 @@ layout editing, Windows, release prep).
 - [ ] **A.5 Timeline MVP (C.1, C.2):** takes append, retake, remove,
   reorder, export one joined file; a simple Create view in the app.
 - [ ] **A.6 Log everything, report bugs in one click.**
+  - [x] **A.6 app:** Help > Report a Bug... in the Slint app: description,
+    preview of exactly what is shared, the zip, the prefilled GitHub issue.
   - [x] **A.6 review #1:** contain panics, emergency-finalize poisoned state,
     and surface/repair interrupted manifests; reviewer repro on m2-a passes.
   - [x] **A.6 review #2–4:** infallible logging startup, compact polling,
@@ -640,6 +642,8 @@ native app; each verified against OBS's behaviour on a test Mac.
     verification and an isolated AVFoundation frame check. Project generation,
     unsigned/ad-hoc Xcode build, strict signature checks and dry-runs verified;
     account provisioning and activation intentionally remain Ryan's steps.
+  - [x] **G.1 app.** Start/Stop Virtual Camera in the Slint app's
+    Controls dock with its output and size; install help, never installs.
   - [ ] **G.1b Installed camera qualification (needs Ryan).** Apple-team
     signing and explicit activation/approval, then actual camera clients,
     multi-client buffer lifetime, extension CPU/GPU and client latency.
@@ -656,6 +660,8 @@ native app; each verified against OBS's behaviour on a test Mac.
   ISOs) in memory; save on command or hotkey.
 - [x] **G.3 Pause recording.** Pause/resume a take without a new file;
   A/V stay in sync; the manifest records the pauses.
+  - [x] **G.3 app.** Pause/Resume in the Slint app's Controls dock and
+    control bar, PAUSED on the LCD, the pauses in the REC details.
   - [x] **G.3 R1/R2 recovery contract.** Unknown recoverable duration when
     writers cannot acknowledge committed fragments; no cut-derived durability
     claims or exact loss messages. Exact-boundary/immediate-kill/Resume matrix
@@ -692,6 +698,10 @@ native app; each verified against OBS's behaviour on a test Mac.
   - [x] **G.5 review-hardening.** Lenient/lossless hotkey loading with
     downgrade-safe profile storage, preserve bindings on setup replacement,
     protect typing/system shortcuts, bound diagnostics and complete CLI input.
+  - [x] **G.5 app.** Settings > Hotkeys in the Slint app (groups, click to
+    record, clear, the API's errors and warnings per row, `hotkeys_set`
+    patch + revision) and the focused-key bridge (`hotkeys_input` on one
+    connection, releases on blur).
   - [x] **G.5 follow-up 2.** Protect modified typing/common app shortcuts,
     archive orphaned sidecars before reusing profile ids, keep reads pure,
     and wire timeline hotkeys to the merged timeline/retake/export methods.
@@ -892,8 +902,8 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
     when recording or streaming stops, `--a11y` lists dialogs and menus,
     and the type spaced and leaded as the web app's (tracking and
     leading tokens). Left on purpose: notes.md Decisions, 2026-10-13.
-- [ ] **N.3 Switch.** The Slint app becomes Isocast.app; the web app is
-  retired.
+- [x] **N.3 Switch.** The Slint app becomes Isocast.app; the web app is
+  retired (kept out of the default build until after the alpha week).
 - [ ] **N.4 Windows (parked by Ryan, 2026-10-13: later).** Shared D3D12 textures for the preview, packaging
   (with the engine's Windows platform crate, separate work).
 - [x] **N.5 Console design (Ryan, 2026-10-13).** Ryan picked the Console
@@ -2596,6 +2606,31 @@ One line per finished task, newest last.
   and Undo; CPU vs main 9cda72d (medians) at rest 3.3 vs 3.1%, tones
   with the mixer shown 20.2 vs 20.0%, hidden 4.6 vs 4.0% (2f22005:
   18.0%). fmt, clippy --workspace -D warnings, 166 release tests clean.
+- N.3, A.1 (2026-10-13): scripts/app-dev.sh builds the Slint app as
+  Isocast.app (dev.isocast.app, Isocast.icon; `app_target` the one-line
+  switch, ui-dev.sh a wrapper); the web app's crate is out of
+  default-members (not built, tested or listed in THIRD_PARTY_NOTICES,
+  which now names the Slint app's fonts) but kept for the alpha week;
+  open/save panels dark. Verified: the bundle's plist, signature and
+  icon locally; offscreen 1440x900@2 and 900x600@2; on isocast-m2-b the
+  bundle built by app-dev.sh and opened with `open` shows "Isocast" in
+  the app menu, cua-driver lists it as dev.isocast.app, Profile ›
+  Import… opens a dark panel; fmt, release clippy, 178 tests (the web
+  app's own tests no longer run by default), e2e 11 pass / 2 skip.
+- G.1 app (2026-10-13): the Controls dock's Virtual Camera toggle and its
+  output popover (program, preview, a scene, a video source; canvas or
+  an advertised size; size and fps from virtual_camera_status, counts
+  while running), state from virtual_camera events, and the install
+  explanation with `scripts/vcam-install.sh` and Copy when a start finds
+  no extension. Verified: offscreen 1440x900@2 and 900x600@2 (stopped,
+  missing, running, failed; no clipping, Exit gives way under 240px),
+  `--a11y` names; on isocast-m2-b (real window, no extension installed)
+  Start got the daemon's real "not installed" error and opened the
+  explanation, Copy put the command on the pasteboard (cua-driver
+  clipboard_read), choosing "A scene" wrote virtual_camera {target:
+  scene, scene: main} (isocast get), Tab reaches the toggle and gear and
+  Return opens the popover; app CPU at rest (3 x 20 s, alternating with
+  main's build, benchmark lock) median 2.7% vs main 2.8%.
 - A.7 engine-e2e hosted follow-up (2026-10-13): inspected Actions run
   38493967068 and all ten retained MOVs (clean decode/equal A/V, 19–38%
   losses, some short files). Added real hardware/throughput tables, a
@@ -2629,6 +2664,20 @@ One line per finished task, newest last.
   into AVMutableComposition. E2E 12 pass/1 unavailable; fmt/clippy and 180
   tests pass. G.3b remains unchecked; full evidence and remaining work in
   /Volumes/IsocastBuild/g3b-segments/scratch/REPORT.md.
+- G.5 app (2026-10-14): Settings › Hotkeys lists the profile's bindings by
+  group (record, stream, scenes, Studio Mode, sources, timeline, other)
+  with click-to-record chords from AppKit key codes, ✕ to clear, the
+  API's refusals and OS warnings on the row; one `hotkeys_set` patch at
+  the shown revision per change; the focused-key bridge forwards edges
+  with `hotkeys_input` on one connection and releases on blur. Verified:
+  offscreen 1440x900@2 and 900x600@2 (sample bindings with a refusal and
+  a warning, a row recording), `--a11y` names; isocast-m2-b real window:
+  clicking "Start or stop recording" and pressing ⌃⌥⌘R wrote
+  recording-toggle (ctrl+alt+cmd+r, global) through `hotkeys_set`; ⌘S on
+  "Split the take" showed the API's refusal on the row; with cmd+F6 held
+  by another app (registration warning, focused fallback) ⌘F6 in the
+  window fired studio.toggle with source "focused" and the app followed
+  into Studio Mode.
 - C.2 (2026-10-14, branch ui/create-view): View → Create (⌘⇧C, or the
   Build/Create switch) puts Paper's clip bar where the docks are: takes in
   order on a Program track with thumbnail strips (AVFoundation, off the UI
@@ -2665,3 +2714,28 @@ One line per finished task, newest last.
   text redacted, concurrent 240-frame program/ISO files complete without drops.
   Reviewer 100000-line relay harness retains order and redaction; release
   fmt/clippy, 180 tests and all 13 engine-e2e scenarios pass.
+- G.3 app (2026-10-14): Pause/Resume in the Controls dock and the control
+  bar's transport, the LCD's PAUSED with the frozen take time, the status
+  line's pause length, the REC details' list of pauses. Verified:
+  offscreen 1440x900@2 and 900x600@2 (recording, paused, details with two
+  pauses), `--a11y` names (Pause/Resume Recording, PAUSED); isocast-m2-b
+  real window: started by the transport, paused by it (LCD PAUSED), resumed
+  by the dock's toggle, paused again by a recording.pause_toggle hotkey
+  through the focused-key bridge, stopped: program and camera ISO 53.3 s
+  with equal A/V (1599 and 3198 frames), manifest pauses 5.1-20.7 s and
+  65.3-89.8 s of the uncut clock.
+- A.6 app (2026-10-14): Help › Report a Bug… previews the report
+  (`bug_report` preview: ISSUE.md and every file with its size), writes the
+  zip, opens the prefilled new issue on R44VC0RP/isocast (bug_report.yml
+  fields) and shows the zip in the Finder; nothing is sent. Verified:
+  offscreen 1440x900@2 and 900x600@2 (preview with a typed description;
+  saved), `--a11y`; isocast-m2-b real window: Help › Report a Bug…, Create
+  Report wrote isocast-report-…zip beside the isolated engine's logs, Open
+  GitHub Issue opened Safari at GitHub's sign-in with return_to
+  …/R44VC0RP/isocast/issues/new?template=bug_report.yml&labels=bug&version=…
+  &mac=Apple M2 (Mac14,3), macOS 26.7 (25G229)&attachments=Attach isocast-
+  report-….zip…, and the Finder showed the reports folder.
+- Dark window chrome (2026-10-14): every Isocast window takes the dark
+  appearance (NSApp DarkAqua, set at launch since N.3), so title bar,
+  traffic lights, menus and panels match on a light Mac. Verified on
+  isocast-m2-b in light appearance: the real window's title bar is dark.

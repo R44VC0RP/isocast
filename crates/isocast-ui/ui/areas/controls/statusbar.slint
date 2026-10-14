@@ -171,6 +171,35 @@ component RecordingDetails inherits VerticalLayout {
             }
         }
     }
+    // The take's pauses.
+    if ControlsArea.pauses.length > 0: DetailsHeading { text: "PAUSES"; }
+    if ControlsArea.pauses.length > 0: VerticalLayout {
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-2;
+        spacing: 2px;
+        for p in ControlsArea.pauses: HorizontalLayout {
+            height: 24px;
+            spacing: Theme.space-2;
+            accessible-role: AccessibleRole.text;
+            accessible-label: p.label + ": " + p.value;
+            Text {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                text: p.label;
+                color: Theme.text;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
+            Figure {
+                width: 92px;
+                text: p.value;
+                color: p.tone == "warn" ? Theme.warning : Theme.text-2;
+            }
+        }
+    }
     // The separator: 1px, 4px above and below.
     VerticalLayout {
         padding-top: Theme.space-1;

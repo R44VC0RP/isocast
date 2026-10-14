@@ -369,7 +369,9 @@ export component LinkButton inherits Rectangle {
 // 30px circles. `record` idle is a red dot on `control`; running, a bone
 // stop square on red with a bone ring. `stream` idle is the broadcast
 // glyph on `control`; live, white on green. `stop` is a grey square.
-export enum TransportKind { record, stream, stop }
+// `pause` (while recording) is two bars on `control`; paused, the bars
+// turn into a play triangle on the yellow tint, as a toggle that is on.
+export enum TransportKind { record, stream, stop, pause }
 
 export component TransportButton inherits Rectangle {
     in property <TransportKind> kind: TransportKind.record;
@@ -393,6 +395,7 @@ export component TransportButton inherits Rectangle {
     border-radius: self.width / 2;
     background: root.kind == TransportKind.record && root.active ? (root.pressed ? Theme.danger-fill-active : root.hovered ? Theme.danger-fill-hover : Theme.danger-fill)
         : root.kind == TransportKind.stream && root.active ? Theme.onair-fill
+        : root.kind == TransportKind.pause && root.active ? Theme.accent-soft
         : root.pressed ? Theme.control-active : root.hovered ? Theme.control-hover : Theme.control;
     border-width: root.kind == TransportKind.record && root.active ? 2px : 0px;
     border-color: Theme.bone;
@@ -458,6 +461,26 @@ export component TransportButton inherits Rectangle {
         stroke: root.active ? Theme.on-onair : root.hovered ? Theme.text : Theme.text-2;
         stroke-width: 1.33px;
         fill: root.active ? Theme.on-onair : transparent;
+    }
+
+    // Pause: two 3x10 bars; paused, the play triangle.
+    if root.kind == TransportKind.pause && !root.active: HorizontalLayout {
+        width: 10px;
+        height: 10px;
+        spacing: 4px;
+        Rectangle {
+            border-radius: 1px;
+            background: root.hovered ? Theme.text : Theme.text-2;
+        }
+        Rectangle {
+            border-radius: 1px;
+            background: root.hovered ? Theme.text : Theme.text-2;
+        }
+    }
+    if root.kind == TransportKind.pause && root.active: Icon {
+        path: Icons.play;
+        size: Theme.icon-sm;
+        color: Theme.accent-text;
     }
 
     FocusRing {

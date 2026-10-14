@@ -3,7 +3,7 @@
 
     scripts/drag-lag.py [--work /Volumes/IsocastBuild/lag] [--seconds 6]
 
-Runs the real app (target/release/isocast-app) in a window on a test engine
+With --app web, runs the retired web app (target/release/isocast-app) in a window on a test engine
 of its own (never Ryan's setup or socket), with a copy of the interface
 that adds two test-only things: a pure magenta block to drag and a pure
 green selection outline, plus a script that drags the block back and forth
@@ -17,14 +17,15 @@ read frame by frame:
 - picture rate: how many times a second the block actually moved, against
   the outline's.
 
-With --app ui it runs the Slint app (isocast-ui --drag-test) instead,
+By default (--app ui) it runs the Slint app (isocast-ui --drag-test) instead,
 which drags the item with its own pointer events and draws its box as the
 same green outline; there the outline is drawn at the layout of the frame
 shown, so the expected lag is 0.
 
 The window shows on screen for about 15 s. The recording (synthetic
 content only) is kept in --work for watching. Needs the release binaries
-(`cargo build --release -p isocast-daemon -p isocast-cli -p isocast-app`)
+(`cargo build --release -p isocast-daemon -p isocast-cli -p isocast-ui`, or
+-p isocast-app for --app web)
 and numpy (it re-runs itself with /Volumes/IsocastBuild/main/venv if
 needed).
 """
@@ -336,8 +337,9 @@ def main():
     p.add_argument("--work", type=Path, default=SCRATCH / "lag")
     p.add_argument("--seconds", type=float, default=6)
     p.add_argument("--label", default=time.strftime("%Y%m%d-%H%M%S"))
-    p.add_argument("--app", choices=["web", "ui"], default="web",
-                   help="web: isocast-app (default); ui: the Slint app, isocast-ui")
+    p.add_argument("--app", choices=["web", "ui"], default="ui",
+                   help="ui: the Slint app, isocast-ui (default, Isocast.app since N.3); "
+                        "web: the retired web app, isocast-app")
     p.add_argument("--bin-dir", type=Path, default=REPO / "target/release",
                    help="where the release binaries are")
     p.add_argument("--analyse", type=Path, help="only analyse this existing window recording")

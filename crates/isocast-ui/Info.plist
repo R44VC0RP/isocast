@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>dev.isocast.ui</string>
+	<string>dev.isocast.app</string>
 	<key>CFBundleName</key>
 	<string>Isocast</string>
 	<key>CFBundleDisplayName</key>
@@ -12,13 +12,25 @@
 	<string>isocast-ui</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
-	<key>CFBundleIconName</key>
-	<string>Isocast</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.0.1</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleIconFile</key>
+	<string>Isocast</string>
+	<key>CFBundleIconName</key>
+	<string>Isocast</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.video</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Isocast contributors. MIT OR Apache-2.0.</string>
 </dict>
 </plist>

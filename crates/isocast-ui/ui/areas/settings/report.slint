@@ -1,0 +1,156 @@
+// Help › Report a Bug… (A.6): a sheet that says what happened, shows
+// exactly what the report holds (its ISSUE.md, summary and triage block,
+// and every file with its size) before anything is written, then writes
+// the zip and offers the prefilled GitHub issue and the zip in the
+// Finder. Nothing is sent: the issue page opens in the browser for you to
+// post, and the zip is yours to attach. src/areas/report.rs fills it.
+
+import { Theme } from "../../theme.slint";
+import { Icons } from "../../icons.slint";
+import { Ui } from "../../state.slint";
+import { Dialog, GroupHeading, GroupHint, ScrollArea, TextField } from "../../kit.slint";
+import { SettingsArea } from "state.slint";
+
+// A well that scrolls: `surface-inset`, 1px `line`, the compact corners.
+component Well inherits Rectangle {
+    background: Theme.surface-inset;
+    border-width: 1px;
+    border-color: Theme.line;
+    border-radius: Theme.r-compact;
+    clip: true;
+    @children
+}
+
+export component BugReportDialog inherits Dialog {
+    property <bool> saved: SettingsArea.report-archive != "";
+    title: "Report a Bug";
+    subtitle: root.saved ? "Saved: attach the zip to the issue. Nothing was sent." : "Made on this Mac and never uploaded: you see all of it first.";
+    icon: Icons.alert;
+    dialog-width: 640px;
+    dialog-height: 620px;
+    ok-text: root.saved ? "Open GitHub Issue" : "Create Report";
+    ok-enabled: !SettingsArea.report-busy;
+    apply-text: root.saved ? "Show in Finder" : "Update Preview";
+    apply-enabled: !SettingsArea.report-busy;
+    cancel-text: root.saved ? "Close" : "Cancel";
+    note: SettingsArea.report-busy ? "Collecting…" : "";
+    accepted => {
+        if root.saved {
+            SettingsArea.report-open-issue();
+        } else {
+            SettingsArea.report-create();
+        }
+    }
+    applied => {
+        if root.saved {
+            SettingsArea.report-reveal();
+        } else {
+            SettingsArea.report-preview();
+        }
+    }
+    cancelled => { Ui.close-dialog(); }
+
+    VerticalLayout {
+        vertical-stretch: 1;
+        padding-left: Theme.sheet-pad;
+        padding-right: Theme.sheet-pad;
+        spacing: Theme.space-2;
+
+        GroupHeading { title: "What happened"; }
+        // Made after the dialog takes focus, so the field keeps it.
+        // Made after the dialog takes focus, so the field keeps it. One
+        // line (Return previews it again; OK still creates the report).
+        if true: TextField {
+            text: SettingsArea.report-describe;
+            placeholder: "What you did, what you expected and what happened instead";
+            label: "What happened";
+            auto-focus: true;
+            submits: false;
+            enabled: !root.saved;
+            edited(text) => { SettingsArea.report-describe = text; }
+            accepted(text) => { SettingsArea.report-preview(); }
+        }
+
+        if SettingsArea.report-error != "": Text {
+            text: SettingsArea.report-error;
+            color: Theme.danger-text;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            wrap: word-wrap;
+        }
+
+        GroupHeading { title: "The issue’s text (ISSUE.md)"; }
+        Well {
+            vertical-stretch: 3;
+            min-height: 96px;
+            // Wrapped by the Rust side (wrapped text in a ScrollArea is a
+            // binding loop): one 14px line each.
+            ScrollArea {
+                content-height: SettingsArea.report-issue-lines * 14px + 2 * Theme.space-2;
+                Rectangle {
+                    height: SettingsArea.report-issue-lines * 14px + 2 * Theme.space-2;
+                    Text {
+                        x: Theme.space-2;
+                        y: Theme.space-2;
+                        text: SettingsArea.report-issue;
+                        color: Theme.text-2;
+                        font-family: Theme.font-mono;
+                        font-weight: Theme.weight-light;
+                        font-size: Theme.fs-xs;
+                        letter-spacing: Theme.tracking-mono;
+                        line-height-factor: 14 / 11;
+                        accessible-role: AccessibleRole.text;
+                        accessible-label: "The issue’s text";
+                        accessible-description: SettingsArea.report-issue-text;
+                    }
+                }
+            }
+        }
+
+        GroupHeading { title: "In the zip: " + SettingsArea.report-files-summary; }
+        Well {
+            vertical-stretch: 2;
+            min-height: 72px;
+            ScrollArea {
+                VerticalLayout {
+                    padding-left: Theme.space-2;
+                    padding-right: Theme.space-2;
+                    padding-top: Theme.space-1;
+                    padding-bottom: Theme.space-1;
+                    for f in SettingsArea.report-files: HorizontalLayout {
+                        height: 20px;
+                        spacing: Theme.space-2;
+                        accessible-role: AccessibleRole.text;
+                        accessible-label: f.name + ", " + f.size;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: f.name;
+                            color: Theme.text;
+                            font-family: Theme.font-mono;
+                            font-weight: Theme.weight-light;
+                            font-size: Theme.fs-xs;
+                            letter-spacing: Theme.tracking-mono;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            accessible-role: none;
+                        }
+                        Text {
+                            text: f.size;
+                            color: Theme.text-3;
+                            font-family: Theme.font-mono;
+                            font-weight: Theme.weight-light;
+                            font-size: Theme.fs-xs;
+                            letter-spacing: Theme.tracking-mono;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                            accessible-role: none;
+                        }
+                    }
+                }
+            }
+        }
+        GroupHint {
+            text: root.saved ? SettingsArea.report-archive : "Keys, tokens and stream URLs are redacted. No video or audio is included.";
+        }
+    }
+}

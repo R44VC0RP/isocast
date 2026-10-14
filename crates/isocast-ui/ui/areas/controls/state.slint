@@ -23,6 +23,43 @@ export global ControlsArea {
     in property <bool> busy-record;
     in property <bool> busy-stream;
 
+    // ---- Pause (G.3): the take is paused (its files stay open, its time
+    // stands still); how long this pause has lasted ("00:00:12"); the
+    // pauses of this take, for the REC details (label "Paused at
+    // 00:01:23", value "12 s" or "now").
+    in property <bool> paused;
+    in property <bool> busy-pause;
+    in property <string> pause-time: "00:00:00";
+    in property <[ToastRow]> pauses;
+
+    // ---- The virtual camera (G.1): stopped, starting, running, stopping,
+    // failed. Its output (the setup's `virtual_camera`) is chosen in its
+    // popover beside the Controls dock's button.
+    in property <string> vcam-state: "stopped";
+    in property <bool> busy-vcam;
+    // The camera extension isn't installed or approved (its last start
+    // said so): the button explains how to install it, never installs.
+    in property <bool> vcam-missing;
+    // Why the last start failed, when it isn't that ("" for none).
+    in property <string> vcam-error;
+    // program, preview, scene, source; the scene's or source's id; the
+    // size ("" for the canvas's, else "1920x1080").
+    in property <[DropdownOption]> vcam-targets;
+    in property <string> vcam-target: "program";
+    in property <[DropdownOption]> vcam-scenes;
+    in property <string> vcam-scene;
+    in property <[DropdownOption]> vcam-sources;
+    in property <string> vcam-source;
+    in property <[DropdownOption]> vcam-sizes;
+    in property <string> vcam-size;
+    // "1920×1080 at 30 fps": what it sends, or would send.
+    in property <string> vcam-format;
+    // "1,204 frames sent · 0 dropped" while it runs, else "".
+    in property <string> vcam-counts;
+    // Opens the popover from Rust when it changes (a start that found no
+    // extension).
+    in property <int> vcam-details-serial;
+
     // ---- Scene Transitions
     in property <[DropdownOption]> transitions;
     in property <string> transition: "cut";
@@ -107,6 +144,13 @@ export global ControlsArea {
 
     callback toggle-stream();
     callback toggle-record();
+    callback toggle-pause();
+    callback toggle-vcam();
+    // Change the camera's output: field "target", "scene", "source" or
+    // "size", and its new value.
+    callback set-vcam(string, string);
+    // Put text on the clipboard (the install command).
+    callback copy-text(string);
     // A marker with this label ("" for "Marker").
     callback marker(string);
     callback split();

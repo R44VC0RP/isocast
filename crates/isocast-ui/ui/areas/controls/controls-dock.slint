@@ -7,12 +7,23 @@
 // in the take's details (the status bar's REC): with the icon and the
 // words from the left, "Stop Recording" and two 28px buttons don't fit
 // the dock's 172px; with Marker beside it the words shorten ("Stop
-// Recor…") in a dock under ~210px rather than push Marker out.
+// Recor…") in a dock under ~210px rather than push Marker out. Pause
+// (G.3) sits between them while recording, a toggle lit while paused.
+//
+// Start/Stop Virtual Camera sits under recording, as OBS has it, with a
+// gear beside it that opens its output choice (program, preview, a scene
+// or a video source) and size in a popover. Six buttons need 208px under
+// the header, so they are 4px apart with 10px above and below (Paper's
+// board has five, 6px apart, 12px down); in a shorter dock Exit gives way
+// (Quit Isocast in the app menu does the same).
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
-import { Button, ButtonVariant, Dock } from "../../kit.slint";
+import {
+    Button, ButtonVariant, ControlSize, Dock, Dropdown, GroupHeading, GroupHint, GroupRow, IconButton, Popover,
+    PopoverPlacement, RowGroup, RowPlace, Viewport,
+} from "../../kit.slint";
 import { ControlsArea } from "state.slint";
 
 // A dock button: the label from the left, 10px in.
@@ -21,19 +32,166 @@ component DockButton inherits Button {
     inset: 10px;
 }
 
+// A control in the middle of its 30px grouped row.
+component Centred inherits VerticalLayout {
+    alignment: center;
+}
+
+// The virtual camera's output: what it sends and at what size, how it is
+// doing, and, when its extension isn't installed, how to install it.
+component VirtualCameraDetails inherits VerticalLayout {
+    property <bool> off: ControlsArea.vcam-state == "stopped" || ControlsArea.vcam-state == "failed";
+    padding: Theme.space-2;
+    spacing: 0;
+
+    if ControlsArea.vcam-missing: VerticalLayout {
+        spacing: 0;
+        GroupHeading { title: "Not installed"; }
+        // Wrapped to the popover's width (a layout sizes a wrapped Text's
+        // height for one line otherwise).
+        Rectangle {
+            preferred-height: why.preferred-height;
+            min-height: why.preferred-height;
+            why := Text {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                text: "Isocast Virtual Camera is a camera extension that macOS asks you to approve once. Isocast never installs it by itself: run this in Terminal, in the Isocast folder, then approve it in System Settings.";
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading-sm;
+                wrap: word-wrap;
+            }
+        }
+        HorizontalLayout {
+            padding-top: Theme.space-2;
+            padding-bottom: Theme.space-2;
+            spacing: Theme.space-1;
+            Rectangle {
+                horizontal-stretch: 1;
+                height: Theme.control-h-sm;
+                border-radius: Theme.r-compact;
+                background: Theme.control;
+                Text {
+                    x: Theme.space-2;
+                    width: parent.width - 2 * Theme.space-2;
+                    text: "scripts/vcam-install.sh";
+                    color: Theme.text;
+                    font-family: Theme.font-mono;
+                    font-weight: Theme.weight-light;
+                    font-size: Theme.fs-xs;
+                    letter-spacing: Theme.tracking-mono;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    accessible-role: AccessibleRole.text;
+                    accessible-label: "Install command: " + self.text;
+                }
+            }
+            Button {
+                horizontal-stretch: 0;
+                size: ControlSize.small;
+                text: "Copy";
+                icon: Icons.copy;
+                accessible-name: "Copy the install command";
+                clicked => { ControlsArea.copy-text("scripts/vcam-install.sh"); }
+            }
+        }
+    }
+
+    GroupHeading { title: "Output"; }
+    RowGroup {
+        GroupRow {
+            label: "Show";
+            place: RowPlace.first;
+            enabled: root.off;
+            Centred {
+                Dropdown {
+                    width: Theme.field-s;
+                    on-control: true;
+                    enabled: root.off;
+                    options: ControlsArea.vcam-targets;
+                    value: ControlsArea.vcam-target;
+                    label: "Virtual camera shows";
+                    selected(value) => { ControlsArea.set-vcam("target", value); }
+                }
+            }
+        }
+        if ControlsArea.vcam-target == "scene": GroupRow {
+            label: "Scene";
+            enabled: root.off;
+            Centred {
+                Dropdown {
+                    width: Theme.field-s;
+                    on-control: true;
+                    enabled: root.off;
+                    options: ControlsArea.vcam-scenes;
+                    value: ControlsArea.vcam-scene;
+                    placeholder: "Choose a scene";
+                    label: "Virtual camera scene";
+                    selected(value) => { ControlsArea.set-vcam("scene", value); }
+                }
+            }
+        }
+        if ControlsArea.vcam-target == "source": GroupRow {
+            label: "Source";
+            enabled: root.off;
+            Centred {
+                Dropdown {
+                    width: Theme.field-s;
+                    on-control: true;
+                    enabled: root.off;
+                    options: ControlsArea.vcam-sources;
+                    value: ControlsArea.vcam-source;
+                    placeholder: "Choose a source";
+                    label: "Virtual camera source";
+                    selected(value) => { ControlsArea.set-vcam("source", value); }
+                }
+            }
+        }
+        GroupRow {
+            label: "Size";
+            place: RowPlace.last;
+            enabled: root.off;
+            Centred {
+                Dropdown {
+                    width: Theme.field-s;
+                    on-control: true;
+                    enabled: root.off;
+                    options: ControlsArea.vcam-sizes;
+                    value: ControlsArea.vcam-size;
+                    label: "Virtual camera size";
+                    selected(value) => { ControlsArea.set-vcam("size", value); }
+                }
+            }
+        }
+    }
+    GroupHint {
+        text: (ControlsArea.vcam-counts != "" ? ControlsArea.vcam-format + " · " + ControlsArea.vcam-counts : ControlsArea.vcam-format + ", the canvas’s frame rate")
+            + (root.off ? "" : ". Stop the camera to change its output.")
+            + (ControlsArea.vcam-error != "" ? "\n" + ControlsArea.vcam-error : "");
+    }
+}
+
 export component ControlsDock inherits Dock {
     property <bool> streaming: ControlsArea.stream-state == "live" || ControlsArea.stream-state == "connecting" || ControlsArea.stream-state == "reconnecting";
     property <bool> recording: ControlsArea.record-state == "recording";
+    property <bool> vcam-on: ControlsArea.vcam-state == "running" || ControlsArea.vcam-state == "starting";
+    property <int> vcam-serial: ControlsArea.vcam-details-serial;
+    // The dock row's height as app.slint's Workspace sets it (read from
+    // the window, not this dock's layout, so it can't loop).
+    property <length> row-height: Ui.docks-height > 0 ? Ui.docks-height : round(min(320px, max(224px, Viewport.height * 4 / 15)) / 1px) * 1px;
+    changed vcam-serial => { vcam-details.show(); }
 
     title: "Controls";
 
     VerticalLayout {
         vertical-stretch: 1;
-        padding-top: Theme.space-3;
-        padding-bottom: Theme.space-3;
+        padding-top: 10px;
+        padding-bottom: 10px;
         padding-left: Theme.pane-x;
         padding-right: Theme.pane-x;
-        spacing: 6px;
+        spacing: Theme.space-1;
         alignment: start;
 
         DockButton {
@@ -60,10 +218,58 @@ export component ControlsDock inherits Dock {
             }
             if root.recording: Button {
                 width: Theme.control-h;
+                icon: ControlsArea.paused ? Icons.play : Icons.pause;
+                checked: ControlsArea.paused;
+                toggle: true;
+                accessible-name: ControlsArea.paused ? "Resume Recording" : "Pause Recording";
+                tooltip: ControlsArea.paused ? "Resume Recording (" + ControlsArea.pause-time + " paused)" : "Pause Recording: the take and its files stay open";
+                enabled: !ControlsArea.busy-pause && !ControlsArea.busy-record;
+                clicked => { ControlsArea.toggle-pause(); }
+            }
+            if root.recording: Button {
+                width: Theme.control-h;
                 icon: Icons.flag;
                 accessible-name: "Marker";
                 tooltip: "Add a marker at this moment";
                 clicked => { ControlsArea.marker(""); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-1;
+            DockButton {
+                horizontal-stretch: 1;
+                shrinks: true;
+                // OBS's words don't fit beside the gear in a 172px dock, so
+                // it is a toggle named as Studio Mode is (lit while on);
+                // screen readers and the tooltip get OBS's words.
+                tooltip: ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed: see how to install it" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
+                accessible-name: ControlsArea.vcam-missing ? "Virtual Camera (not installed)" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
+                text: ControlsArea.vcam-state == "starting" ? "Starting…" : ControlsArea.vcam-state == "stopping" ? "Stopping…" : "Virtual Camera";
+                icon: Icons.camera;
+                checked: root.vcam-on;
+                toggle: true;
+                enabled: Ui.has-setup && !ControlsArea.busy-vcam;
+                clicked => {
+                    if ControlsArea.vcam-missing && !root.vcam-on {
+                        vcam-details.show();
+                    } else {
+                        ControlsArea.toggle-vcam();
+                    }
+                }
+            }
+            vcam-gear := Button {
+                width: Theme.control-h;
+                icon: ControlsArea.vcam-missing ? Icons.warning : Icons.settings;
+                accessible-name: "Virtual Camera Settings";
+                tooltip: ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed" : "What the virtual camera shows, and its size";
+                menu-open: vcam-details.open;
+                enabled: Ui.has-setup;
+                clicked => { vcam-details.show(); }
+                vcam-details := Popover {
+                    placement: PopoverPlacement.above-right;
+                    panel-width: 300px;
+                    VirtualCameraDetails { }
+                }
             }
         }
         DockButton {
@@ -79,7 +285,7 @@ export component ControlsDock inherits Dock {
             icon: Icons.settings;
             clicked => { Ui.open-dialog("settings", ""); }
         }
-        DockButton {
+        if root.row-height >= 240px: DockButton {
             text: "Exit";
             icon: Icons.log-out;
             variant: ButtonVariant.quiet;

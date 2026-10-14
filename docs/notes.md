@@ -152,6 +152,11 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-14 (ui/app-alpha): exonbook's desktop sits at the lock screen
+  (a password half typed in the field), so real-window checks there can't
+  run; this lane used isocast-m2-b between other agents' runs. To retry:
+  unlock exonbook, then `ISOCAST_TESTMAC=exonbook scripts/testmac.sh gui
+  '<command>'`.
 - 2026-10-13 (G.3b investigation, compatibility check only): QuickTime on
   exonbook opens the one-second-rotation HEVC export and draws its picture,
   but its locked desktop exposes no AX window; playback-control routes are
@@ -256,6 +261,10 @@ each section. Delete entries that stop being true.
 
 
 ## Ready for Ryan
+
+- 2026-10-13 — The Slint app as Isocast.app (N.3, branch ui/app-alpha):
+  `scripts/app-dev.sh --release` then `open ~/Applications/Isocast.app`
+  (it replaces the web app's bundle there; same id and icon).
 
 - 2026-10-13 — **A.6 adversarial review fixes supersede the original
   handoff.** Panics are contained, poisoned-state emergency stops finalize
@@ -1339,6 +1348,16 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-14 (delegator): **media-clock pacing is adaptive.** The kqueue
+  critical-deadline fix (agent/hosted-pacing) removes 98-100% of the drops
+  seen when isocastd runs under launchd policy (CI, launch agents, agents),
+  but the review measured +9-12% daemon CPU while previewing in normal
+  contexts, where the defect never occurred (the app and `isocast restart`
+  inherit an interactive policy). Ordinary sleeps stay the default; a clock
+  switches to precise deadlines only when its wakes are measurably being
+  stretched. Performance against OBS is a goal; robustness for headless
+  launches shouldn't cost every user CPU.
+
 - 2026-10-14: **A.6 hardening supersedes lifetime/unbounded pinning.**
   `stream_key_set` pins after the Keychain write succeeds. Pins are keyed by
   service/account and retain current + previous two values, mirrored in the
@@ -1351,6 +1370,117 @@ each section. Delete entries that stop being true.
   evidence. Darwin returns ENOBUFS (not WouldBlock) for a full nonblocking
   local datagram receive buffer: this must retry, not be treated as peer death.
   No recording-engine files changed.
+- 2026-10-14: **Dark window chrome.** The app sets NSApp.appearance to
+  DarkAqua at launch (platform.rs `dark_appearance`, since the N.3 commit
+  98d790c), so on a Mac in light appearance the title bar, traffic lights,
+  menus and the open/save panels are dark like the Console window (the
+  sheets are Slint's and were always dark). Checked on isocast-m2-b, which
+  is in light appearance (no AppleInterfaceStyle): the real window's title
+  bar is dark (/Volumes/IsocastBuild/app-alpha/scratch/shots/chrome/).
+  docs/images/app.png still shows the old light bar: retake the README
+  shots (scripts/screenshots/take.sh) after this merges.
+
+- 2026-10-14: **Help › Report a Bug… (A.6 app, branch ui/app-alpha).** A
+  sheet: "What happened" (one line; Return or Update Preview previews it
+  again), the report's ISSUE.md (summary and triage block, hard-wrapped by
+  Rust to the well's 84 columns: wrapped text in a ScrollArea is a binding
+  loop; screen readers get it unwrapped) and every file with its size, all
+  from `bug_report` with `preview: true` (nothing written). Create Report
+  writes the zip (`bug_report`); then Open GitHub Issue opens
+  github.com/R44VC0RP/isocast/issues/new?template=bug_report.yml with the
+  form's fields (title, summary, triage, version, Mac and macOS from the
+  preview's environment.json, attachments naming the zip) and shows the zip
+  in the Finder; Show in Finder alone too. Nothing is sent: the issue page
+  is posted by hand, signed in. The protocol's ISSUE_REPOSITORY_URL is still
+  None, so the app falls back to R44VC0RP/isocast (the brief's). The triage
+  block is often too long for a link (it carries the last metrics record):
+  its largest keys are left out (named in `_left_out`) until the link is
+  under 7,500 characters; the zip's ISSUE.md has all of it. A multi-line
+  TextArea took no typing in this sheet (offscreen and real window); not
+  chased, the one-line TextField works.
+
+- 2026-10-14: **Pause in the app (G.3 app, branch ui/app-alpha).** While
+  recording: a pause transport button left of record in the control bar
+  (two bars; paused, a play triangle on the yellow tint: a new TransportKind,
+  plain, for a Paper pass), a Pause/Resume toggle between Stop Recording and
+  Marker in the Controls dock (so "Stop Recording" shortens further in a
+  narrow dock; the tooltip keeps the words), the LCD's first cell reads
+  PAUSED in the warning tone with the take's time standing still, the status
+  line says how long it has been paused, and the REC details list the take's
+  pauses (where each began, how long, the open one counting). The list
+  follows `recording_paused` events only; a Status reply can be older than
+  the events (it once duplicated pauses), so Status only seeds an open pause
+  for a window opened mid-pause. Pause hotkeys are rows in Settings ›
+  Hotkeys. Pause/Resume use `pause`/`resume`; nothing app-only.
+
+- 2026-10-14: **Settings → Hotkeys and the focused-key bridge (G.5 app,
+  branch ui/app-alpha).** The page lists the profile's bindings in OBS's
+  groups (Recording incl. pause, Streaming, Scenes: a switch per scene,
+  Studio Mode, Sources: mute/unmute/push-to-talk/push-to-mute per audio
+  source and show/hide per scene item, Timeline), then "Other" for
+  bindings no row matches (CLI/MCP ones with other arguments), then
+  Isocast's fixed keys. A row's chord field records on click (Space or
+  Return from the keyboard); each change is one `hotkeys_set` `patch` at
+  the `revision` shown (a stale revision is read again and retried once);
+  refusals and the OS's registration warnings show under the row, the
+  profile's `warnings` as a callout. Changes apply at once (not with the
+  sheet's OK), as the daemon owns them. New binding ids are
+  action-plus-arguments ("scene-switch-intro"), never reusing a configured
+  id. Chords come from AppKit key codes through an NSEvent local monitor
+  (src/keys.rs; Slint only gives characters, and the daemon's chords are
+  physical US positions); the same monitor is the focused bridge: every
+  press/release that `Chord::parse` accepts goes to `hotkeys_input` on one
+  persistent connection from its own thread, keys still held are released
+  when the app resigns active or the window loses focus. New dependency:
+  block2 (already in the lock through objc2) for the monitor's block.
+  Gotcha: a globally registered chord never reaches the app (Carbon takes
+  it), so the bridge only matters for media keys without Input Monitoring
+  and chords another app owns; and a key-up of a key pressed with Command
+  never arrives (AppKit), see the next entry. ISOCAST_DEBUG_KEYS=1 logs
+  every edge and the daemon's reply to stderr.
+
+- 2026-10-13: **Virtual camera in the app (G.1, branch ui/app-alpha).**
+  Controls dock: a "Virtual Camera" toggle under recording (OBS's place)
+  with a gear beside it; the gear opens a popover of grouped rows: Show
+  (Program, Preview, A scene, A source), the scene or video source, Size
+  (the canvas's, or one of the extension's six advertised sizes), and a
+  caption with the size and fps from `virtual_camera_status` (the next
+  start's while stopped, frames sent/dropped while running). Choices are
+  merge patches to the live setup's `virtual_camera`, disabled while the
+  camera runs (the engine wants it stopped). State comes from Status and
+  `virtual_camera` events (Session.vcam). The button is named as Studio
+  Mode is ("Virtual Camera", lit while on; screen readers and the tooltip
+  get OBS's "Start/Stop Virtual Camera"), because OBS's words don't fit
+  beside the gear in the 172px dock. The engine can't tell "not
+  installed" before a start, so the app reads it from a start's error
+  ("not installed"): the popover then opens itself, explains, shows
+  `scripts/vcam-install.sh` with a Copy button (NSPasteboard) and the
+  gear turns into a warning glyph; Start then opens the explanation
+  instead of failing again. Nothing is installed. Six buttons need 208px
+  under the header, so the dock's buttons are 4px apart with 10px above
+  and below (Paper: 6 and 12, five buttons), and Exit gives way when the
+  dock row is under 240px (Quit Isocast in the app menu stays): for a
+  Paper pass.
+
+- 2026-10-13: **N.3: the Slint app is Isocast.app (branch ui/app-alpha).**
+  `scripts/app-dev.sh` builds `crates/isocast-ui` into
+  `~/Applications/Isocast.app` with today's app's bundle id
+  (`dev.isocast.app`, crates/isocast-ui/Info.plist) and icon (Isocast.icon,
+  still in crates/isocast-app/bundle/ because the release branch's script
+  reads it there); the target is one line (`app_target`, or
+  `ISOCAST_APP_TARGET=isocast-app` for the web app), as in agent/release's
+  release.sh, whose `app_target` default should flip to `isocast-ui` when
+  it merges (it isn't on main). The binary keeps its name `isocast-ui`
+  inside the bundle. `scripts/ui-dev.sh` is a wrapper (bundle at
+  `$ISOCAST_UI_APP`). No CLI command opens the app today (no `isocast
+  open`), so nothing there changed. **The web app is retired but kept**:
+  `crates/isocast-app` is outside the workspace's `default-members`, so
+  `cargo build/clippy/test` and CI skip it and nothing ships it
+  (THIRD_PARTY_NOTICES no longer lists its scripts or crates; the fonts
+  are now the Slint app's real ones), but `cargo build -p isocast-app`
+  still works. Delete the crate after Ryan's alpha week with the Slint app.
+  The app's system parts (open/save panels, menus) are dark now
+  (NSApp.appearance DarkAqua; the notes' N.3 item).
 
 - 2026-10-13 (delegator, overnight): **G.3b (crash-safe takes) waits until
   after the alpha week.** The probes show it needs our own video/audio

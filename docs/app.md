@@ -1,6 +1,12 @@
-# The app
+# The web app (retired)
 
-`crates/isocast-app` is the desktop app: a native macOS window whose whole
+Since N.3 (2026-10-13), Isocast.app is the Slint app, `crates/isocast-ui`
+(docs/design.md, src/areas/mod.rs). This page describes the web app it
+replaced. Its crate stays in the workspace, outside the default build,
+until Ryan has used the Slint app for the alpha week; build it with
+`ISOCAST_APP_TARGET=isocast-app scripts/app-dev.sh`.
+
+`crates/isocast-app` was the desktop app: a native macOS window whose whole
 interface is a web page, a thin client of `isocastd`. It can do nothing
 the CLI and MCP can't: every change goes through the daemon's methods
 (`apply`, `switch_scene`, `preview`, `take`, `start`, `stop`, `frame`…).
@@ -167,9 +173,9 @@ privacy prompt on the user's screen.
 
 ## Packaging
 
-`scripts/app-dev.sh` builds `Isocast.app` (`dev.isocast.app`, the binary
-renamed from `isocast-app`, which can't be `Isocast` beside the CLI's
-`isocast` on a case-insensitive disk) with the icon drawn by
-`--route icon`, signed with the Apple Development identity (else ad hoc).
+`ISOCAST_APP_TARGET=isocast-app scripts/app-dev.sh` builds the web app as
+`Isocast.app` (`dev.isocast.app`, the binary renamed from `isocast-app`,
+which can't be `Isocast` beside the CLI's `isocast` on a case-insensitive
+disk) with the icon compiled by Xcode's actool, signed with the Apple Development identity (else ad hoc).
 `ISOCAST_APP` says where; `~/Applications/Isocast.app` by default. The
 daemon keeps its own signed bundle (`scripts/sign-dev.sh`).

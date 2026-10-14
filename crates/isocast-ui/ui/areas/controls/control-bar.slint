@@ -117,8 +117,10 @@ export component ControlBar inherits Rectangle {
                 }
                 if !root.shows-live: LcdTime {
                     seconds: ControlsArea.rec-seconds;
-                    label: "REC";
-                    tone: root.recording ? LcdTone.recording : LcdTone.normal;
+                    // Paused: the take's time stands still, and the cell
+                    // says so in the warning colour.
+                    label: ControlsArea.paused ? "PAUSED" : "REC";
+                    tone: ControlsArea.paused ? LcdTone.warning : root.recording ? LcdTone.recording : LcdTone.normal;
                     description: ControlsArea.rec-tooltip;
                     Tooltip {
                         Tip { text: ControlsArea.rec-tooltip; }
@@ -189,6 +191,18 @@ export component ControlBar inherits Rectangle {
                         enabled: Ui.has-setup && !ControlsArea.busy-stream;
                         label: ControlsArea.stream-state == "connecting" ? "Connecting…" : ControlsArea.stream-state == "reconnecting" ? "Reconnecting…" : root.streaming ? "Stop Streaming" : "Start Streaming";
                         clicked => { ControlsArea.toggle-stream(); }
+                    }
+                }
+                // Pause, while recording (as OBS shows it).
+                if root.recording: VerticalLayout {
+                    alignment: center;
+                    TransportButton {
+                        cache-rendering-hint: true;
+                        kind: TransportKind.pause;
+                        active: ControlsArea.paused;
+                        enabled: !ControlsArea.busy-pause && ControlsArea.record-state == "recording";
+                        label: ControlsArea.paused ? "Resume Recording" : "Pause Recording";
+                        clicked => { ControlsArea.toggle-pause(); }
                     }
                 }
                 VerticalLayout {

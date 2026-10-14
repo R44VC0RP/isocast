@@ -26,6 +26,7 @@ mod daemon;
 mod form;
 mod frames;
 mod gpu;
+mod keys;
 mod kit;
 #[cfg(target_os = "macos")]
 mod layers;

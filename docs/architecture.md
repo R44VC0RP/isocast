@@ -41,8 +41,8 @@
 | `isocast-daemon` | `isocastd`: the engine process and its control socket |
 | `isocast-client` | The client side of the socket, used by the CLI and apps |
 | `isocast-cli` | The `isocast` command and its MCP server |
-| `isocast-ui` | The native app, in Slint |
-| `isocast-app` | The earlier web-view app (being replaced by `isocast-ui`) |
+| `isocast-ui` | The app, Isocast.app, in Slint |
+| `isocast-app` | The retired web-view app (not built by default; removed after the alpha week) |
 | `isocast-surfaces` | Shared GPU surfaces between processes |
 
 Platform code lives in `isocast-platform-macos` behind traits defined in

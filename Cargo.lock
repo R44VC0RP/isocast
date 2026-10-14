@@ -3097,6 +3097,7 @@ name = "isocast-ui"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "block2 0.6.2",
  "i-slint-backend-testing",
  "isocast-client",
  "isocast-diagnostics",

@@ -8,10 +8,10 @@
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
 import {
-    Button, ButtonVariant, Callout, CalloutKind, ControlSize, Dropdown, GroupHint, GroupRow, IconButton,
+    Button, ButtonVariant, Callout, CalloutKind, ControlSize, Dropdown, FocusRing, GroupHint, GroupRow, IconButton,
     NumberField, RowPlace, Segmented, Switch, TextField,
 } from "../../kit.slint";
-import { SettingsArea } from "state.slint";
+import { BindingRow, SettingsArea } from "state.slint";
 import { Centred, SetGroup, SetPage, ShortcutKeys } from "parts.slint";
 
 // A place in a group of `count` rows, for row `i`.
@@ -807,9 +807,125 @@ export component VideoPage inherits SetPage {
 
 // ---------- Hotkeys ----------
 
+// A binding's chord: its keycaps (or "Record Shortcut"), a field you click
+// to type a new one (Escape cancels), and ✕ to clear it.
+component ChordField inherits Rectangle {
+    in property <BindingRow> binding;
+    in property <bool> enabled: true;
+    property <bool> keyboard;
+    width: Theme.field-m;
+    height: Theme.control-h-sm;
+    border-radius: Theme.r-compact;
+    background: root.binding.recording ? Theme.control-active : hit.has-hover && root.enabled ? Theme.control-hover : Theme.control-active;
+    border-width: root.binding.recording ? 1px : 0px;
+    border-color: Theme.accent;
+    accessible-role: button;
+    accessible-label: root.binding.label + ": " + (root.binding.recording ? "type the new shortcut, Escape to cancel" : root.binding.chord != "" ? root.binding.chord : "no shortcut");
+    accessible-description: root.binding.error != "" ? root.binding.error : root.binding.warning;
+    accessible-action-default => { SettingsArea.record-binding(root.binding.key); }
+
+    hit := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            keys.focus();
+            SettingsArea.record-binding(root.binding.key);
+        }
+    }
+    keys := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => {
+            root.keyboard = false;
+            if root.binding.recording {
+                SettingsArea.cancel-binding();
+            }
+        }
+        key-pressed(event) => {
+            if !root.binding.recording && (event.text == " " || event.text == "\n") {
+                SettingsArea.record-binding(root.binding.key);
+                return accept;
+            }
+            reject
+        }
+    }
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: Theme.space-1;
+        alignment: start;
+        if root.binding.recording: Text {
+            text: "Type a shortcut… (Esc cancels)";
+            color: Theme.accent-text;
+            font-size: Theme.fs-xs;
+            letter-spacing: Theme.tracking-xs;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if !root.binding.recording && root.binding.chord == "": Text {
+            text: "Record Shortcut";
+            color: Theme.text-3;
+            font-size: Theme.fs-xs;
+            letter-spacing: Theme.tracking-xs;
+            vertical-alignment: center;
+        }
+        if !root.binding.recording: ShortcutKeys {
+            keys: root.binding.caps;
+            alignment: start;
+        }
+    }
+    FocusRing {
+        radius: Theme.r-compact;
+        shown: keys.has-focus && root.keyboard;
+    }
+}
+
 export component HotkeysPage inherits SetPage {
     GroupHint {
-        text: "Isocast’s keys are fixed for now. They don’t fire while you type in a field.";
+        text: SettingsArea.bindings-note != "" ? SettingsArea.bindings-note : "Click a shortcut and type the keys: they work everywhere (or, when macOS keeps a key for itself, while Isocast is in front). Changes apply at once to this profile.";
+    }
+    for warning in SettingsArea.bindings-warnings: Callout {
+        kind: CalloutKind.info;
+        message: warning;
+    }
+    for group in SettingsArea.bindings: SetGroup {
+        title: group.title;
+        for row[i] in group.rows: GroupRow {
+            label: row.label;
+            place: Rows.place(i, group.rows.length);
+            tall: row.error != "" || row.warning != "";
+            VerticalLayout {
+                alignment: center;
+                spacing: 2px;
+                HorizontalLayout {
+                    spacing: Theme.space-1;
+                    alignment: end;
+                    ChordField {
+                        binding: row;
+                        enabled: !SettingsArea.bindings-busy;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        IconButton {
+                            compact: true;
+                            icon: Icons.x;
+                            label: "Clear the shortcut for " + row.label;
+                            enabled: row.chord != "" && !SettingsArea.bindings-busy;
+                            clicked => { SettingsArea.clear-binding(row.key); }
+                        }
+                    }
+                }
+                if row.error != "" || row.warning != "": Text {
+                    width: Theme.field-m + Theme.control-h-sm + Theme.space-1;
+                    text: row.error != "" ? row.error : row.warning;
+                    color: row.error != "" ? Theme.danger-text : Theme.warning;
+                    font-size: Theme.fs-xs;
+                    letter-spacing: Theme.tracking-xs;
+                    line-height-factor: Theme.leading-xs;
+                    wrap: word-wrap;
+                }
+            }
+        }
     }
     for group in SettingsArea.hotkeys: SetGroup {
         title: group.title;

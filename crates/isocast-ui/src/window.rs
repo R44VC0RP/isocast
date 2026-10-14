@@ -77,6 +77,9 @@ pub fn run(options: &Options) -> Result<()> {
             if background && matches!(event, winit::event::WindowEvent::Resized(_)) {
                 window.with_winit_window(background::keep_in_corner);
             }
+            if let winit::event::WindowEvent::Focused(false) = event {
+                crate::keys::release_all();
+            }
             if let winit::event::WindowEvent::Occluded(now) = event {
                 occluded.set(*now);
                 if *now {
@@ -91,6 +94,8 @@ pub fn run(options: &Options) -> Result<()> {
     }
 
     app.show()?;
+    // Keys pressed in the window go to the daemon's hotkeys too.
+    crate::keys::start();
     // The native window exists once the event loop runs: then float it
     // when measuring, and start the picture.
     setup_when_ready(

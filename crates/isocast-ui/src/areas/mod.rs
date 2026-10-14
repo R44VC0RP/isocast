@@ -58,8 +58,10 @@
 pub mod canvas;
 pub mod controls;
 pub mod create;
+pub mod hotkeys;
 pub mod library;
 pub mod mixer;
+pub mod report;
 pub mod settings;
 pub mod sources;
 

@@ -1,9 +1,10 @@
 #!/bin/bash
 # Writes THIRD_PARTY_NOTICES: every crate that ships in an Isocast build on
 # Apple silicon (normal and build dependencies of the workspace, not
-# dev-dependencies), with its licence and a link, plus the notices for the
-# things bundled outside Cargo (fonts, the web app's vendored scripts) and
-# Slint's royalty-free licence.
+# dev-dependencies, and not the retired web app, isocast-app, which no
+# longer ships since N.3), with its licence and a link, plus the notices
+# for the things bundled outside Cargo (the app's fonts) and Slint's
+# royalty-free licence.
 #
 #   scripts/third-party-notices.sh            # rewrite THIRD_PARTY_NOTICES
 #   scripts/third-party-notices.sh --check    # fail if it is out of date
@@ -33,11 +34,15 @@ root = Path(sys.argv[2])
 packages = {p["id"]: p for p in metadata["packages"]}
 nodes = {n["id"]: n for n in metadata["resolve"]["nodes"]}
 members = set(metadata["workspace_members"])
+# The retired web app's crate stays in the workspace until the alpha week
+# is over, but nothing of it ships.
+retired = {"isocast-app"}
+roots = {m for m in members if packages[m]["name"] not in retired}
 
 # Walk normal and build dependencies from every workspace member;
 # dev-dependencies (tests, benchmarks) never ship.
 shipped = set()
-stack = list(members)
+stack = list(roots)
 while stack:
     node = nodes[stack.pop()]
     for dep in node["deps"]:
@@ -82,21 +87,13 @@ Isocast. Slint's crates are listed below with their licence expressions.""")
 
 section("Fonts")
 fonts = [
-    ("Instrument Sans (Regular, SemiBold)", "crates/isocast-ui/ui/fonts/LICENSE-instrument-sans"),
-    ("Instrument Sans (web app, latin and latin-ext)", "crates/isocast-app/ui/vendor/LICENSE-instrument-sans"),
+    ("Mona Sans (Light, Regular, Medium, SemiBold)", "crates/isocast-ui/ui/fonts/LICENSE-mona-sans", "https://github.com/github/mona-sans"),
+    ("Hubot Sans (Medium)", "crates/isocast-ui/ui/fonts/LICENSE-hubot-sans", "https://github.com/github/hubot-sans"),
+    ("Martian Mono (ExtraLight)", "crates/isocast-ui/ui/fonts/LICENSE-martian-mono", "https://github.com/evilmartians/mono"),
 ]
-for name, path in fonts:
+for name, path, url in fonts:
+    assert (root / path).exists(), path
     print(f"- {name}: SIL Open Font License 1.1, see {path}")
-print("  https://github.com/Instrument/instrument-sans")
-
-section("Bundled scripts (the web app)")
-scripts = [
-    ("Preact and Preact hooks", "MIT", "crates/isocast-app/ui/vendor/LICENSE-preact", "https://github.com/preactjs/preact"),
-    ("htm", "Apache-2.0", "crates/isocast-app/ui/vendor/LICENSE-htm", "https://github.com/developit/htm"),
-    ("Lucide icons", "ISC", "crates/isocast-app/ui/vendor/LICENSE-lucide", "https://github.com/lucide-icons/lucide"),
-]
-for name, licence, path, url in scripts:
-    print(f"- {name}: {licence}, see {path}")
     print(f"  {url}")
 
 section("WebAssembly runtime")

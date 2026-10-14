@@ -16,6 +16,7 @@ import { Dialog, DialogFooter, GroupHint, NavList, ScrollArea, SheetHeader, Shee
 import { SettingsArea } from "state.slint";
 import { SetPage } from "parts.slint";
 import { AdvancedPage, AudioPage, GeneralPage, HotkeysPage, OutputPage, StreamPage, VideoPage } from "pages.slint";
+import { BugReportDialog } from "report.slint";
 
 export component SettingsDialogs inherits Rectangle {
     in property <string> version;
@@ -102,6 +103,8 @@ export component SettingsDialogs inherits Rectangle {
             }
         }
     }
+
+    if Ui.dialog == "bug-report": BugReportDialog { }
 
     if Ui.dialog == "about": Dialog {
         title: "About Isocast";

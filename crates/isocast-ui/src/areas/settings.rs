@@ -58,6 +58,11 @@ pub const STATES: &[&str] = &[
     "first-run-create",
     "open-setup:PATH",
     "import-obs:PATH",
+    "hotkeys-sample",
+    "bug-report",
+    "bug-report-describe:TEXT",
+    "bug-report-create",
+    "hotkey-record:INDEX",
 ];
 
 /// Settings' pages in the sidebar's order and groups (Paper's Settings
@@ -104,7 +109,7 @@ const TABS: &[(&str, &str, &str, &str, &str)] = &[
         "Hotkeys",
         "keys",
         "System",
-        "The keyboard shortcuts, in the window and its menus.",
+        "Keys for recording, streaming, scenes and sources, and the window’s own.",
     ),
     (
         "advanced",
@@ -367,6 +372,10 @@ pub struct Settings {
     /// Checks the permissions every few seconds while the first run's
     /// first step shows (granted in System Settings meanwhile).
     permissions_timer: slint::Timer,
+    /// The Hotkeys page (src/areas/hotkeys.rs).
+    pub hotkeys: super::hotkeys::HotkeysPage,
+    /// Help › Report a Bug… (src/areas/report.rs).
+    pub report: super::report::Report,
 }
 
 impl Area for Settings {
@@ -411,6 +420,8 @@ impl Area for Settings {
             })),
         })));
         area.on_server_valid(|text| server_valid(&text));
+        super::hotkeys::HotkeysPage::connect(app, &area);
+        super::report::Report::connect(app, &area);
 
         macro_rules! on {
             ($setter:ident, | $app:ident $(, $arg:ident)* | $body:expr) => {{
@@ -565,6 +576,11 @@ impl Area for Settings {
         {
             self.show(app);
         }
+        // Another client, a profile switch or our own change: the
+        // bindings at the new revision.
+        if open && changed.any(Changed::CONFIRMED) {
+            self.hotkeys.reload(app);
+        }
         let ui = window.global::<Ui>();
         if ui.get_onboarding() && changed.any(Changed::DEVICES | Changed::SETUP) {
             self.show_first_run(app);
@@ -575,6 +591,7 @@ impl Area for Settings {
         match id {
             "settings" => app.open_dialog("settings", ""),
             "hotkeys" => app.open_dialog("settings", "hotkeys"),
+            "report_bug" => app.open_dialog("bug-report", ""),
             "show_recordings" => {
                 let folder = app
                     .session
@@ -596,6 +613,10 @@ impl Area for Settings {
         if kind != "settings" {
             // Another dialog replaced Settings: its draft goes.
             *self.draft.borrow_mut() = None;
+            self.hotkeys.closed(app);
+            if kind == "bug-report" {
+                self.report.opened(app);
+            }
             return;
         }
         let Some(window) = app.window() else { return };
@@ -637,6 +658,17 @@ impl Area for Settings {
     ) -> Option<anyhow::Result<()>> {
         match name {
             "about" => app.open_dialog("about", ""),
+            // Help › Report a Bug… (a preview: nothing is written).
+            "bug-report" => app.open_dialog("bug-report", ""),
+            // ...with what happened, then written (a real zip, beside an
+            // isolated engine's logs).
+            "bug-report-describe" => {
+                window
+                    .global::<SettingsArea>()
+                    .set_report_describe(arg.into());
+                self.report.refresh(app);
+            }
+            "bug-report-create" => self.report.write(app),
             "settings" => app.open_dialog("settings", arg),
             // Settings → Stream as Start Streaming opens it without a key.
             "notice" => app.open_dialog("settings", &format!("stream:{arg}")),
@@ -656,6 +688,14 @@ impl Area for Settings {
                 }
             }
             "choose-service" => self.choose_service(app, arg),
+            // Settings → Hotkeys with sample bindings (no profile changes),
+            // and a row waiting for its keys.
+            "hotkeys-sample" => {
+                app.open_dialog("settings", "hotkeys");
+                app.flush();
+                self.hotkeys.sample(app);
+            }
+            "hotkey-record" => self.hotkeys.sample_record(app, arg.parse().unwrap_or(0)),
             "iso-source" => self.set_iso_source(app, arg, true),
             // Output's quality numbers, under Advanced.
             "advanced-quality" => {
@@ -711,6 +751,7 @@ impl Settings {
     /// Close Settings, dropping its draft and why it opened.
     fn close(&self, app: &Rc<App>) {
         *self.draft.borrow_mut() = None;
+        self.hotkeys.closed(app);
         if let Some(window) = app.window() {
             window
                 .global::<SettingsArea>()
@@ -731,6 +772,11 @@ impl Settings {
         }
         if tab == "audio" {
             app.load_devices(true);
+        }
+        if tab == "hotkeys" {
+            self.hotkeys.load(app);
+        } else {
+            self.hotkeys.closed(app);
         }
     }
 

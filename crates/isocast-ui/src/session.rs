@@ -48,6 +48,8 @@ impl Changed {
     pub const LINK: Self = Self(1 << 9);
     /// Recording or streaming is starting or stopping.
     pub const BUSY: Self = Self(1 << 10);
+    /// The virtual camera's state (`virtual_camera` events, Status).
+    pub const VCAM: Self = Self(1 << 11);
     pub const ALL: Self = Self(u32::MAX);
 
     /// Whether any of `other`'s changes are in this.
@@ -176,6 +178,10 @@ pub struct Session {
     pub selection: Option<Selection>,
     pub busy_record: bool,
     pub busy_stream: bool,
+    /// The virtual camera, from Status and `virtual_camera` events.
+    pub vcam: Option<isocast_protocol::virtual_camera::VirtualCameraStatus>,
+    /// Its start or stop is on its way.
+    pub busy_vcam: bool,
     /// When this window last switched scenes itself (a status read just
     /// after may predate the switch).
     pub(crate) switched_at: Option<Instant>,

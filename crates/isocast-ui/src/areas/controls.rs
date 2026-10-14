@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 
 use isocast_protocol::api::{EngineState, Event, LiveFile, Method};
 use isocast_protocol::stream::{StreamService, StreamState, StreamStatus};
+use isocast_protocol::virtual_camera::{
+    SIZES as VCAM_SIZES, Target as VcamTarget, VirtualCameraState, VirtualCameraStatus,
+};
 use serde_json::{Map, Value, json};
 use slint::{ComponentHandle, SharedString};
 
@@ -34,6 +37,9 @@ pub const STATES: &[&str] = &[
     "toasts",
     "toast-drops",
     "transition:KIND",
+    "vcam[:missing|running|failed]",
+    "pause",
+    "resume",
 ];
 
 /// The transition kinds, in the web app's order and words.
@@ -133,6 +139,14 @@ pub struct Controls {
     /// Transition Properties' rows (changed in place, so a number being
     /// scrubbed isn't rebuilt under the pointer).
     form: FormModel,
+    /// This take's pauses, from `recording_paused` events: where in the
+    /// take each began, and how long it lasted (`None`: still paused).
+    pauses: RefCell<Vec<(f64, Option<f64>)>>,
+    /// How long the take has been paused in all, by this computer's clock
+    /// while paused (from the daemon's `paused_seconds`).
+    paused_for: Since,
+    /// A pause or resume is on its way.
+    busy_pause: Cell<bool>,
 }
 
 impl Area for Controls {
@@ -150,6 +164,25 @@ impl Area for Controls {
                 toggle_stream(&app);
             }
         });
+        let weak = Rc::downgrade(app);
+        area.on_toggle_pause(move || {
+            if let Some(app) = weak.upgrade() {
+                toggle_pause(&app);
+            }
+        });
+        let weak = Rc::downgrade(app);
+        area.on_toggle_vcam(move || {
+            if let Some(app) = weak.upgrade() {
+                toggle_vcam(&app);
+            }
+        });
+        let weak = Rc::downgrade(app);
+        area.on_set_vcam(move |field, value| {
+            if let Some(app) = weak.upgrade() {
+                set_vcam(&app, &field, &value);
+            }
+        });
+        area.on_copy_text(|text| crate::platform::copy_text(&text));
         let weak = Rc::downgrade(app);
         area.on_marker(move |label| {
             if let Some(app) = weak.upgrade() {
@@ -219,6 +252,9 @@ impl Area for Controls {
         if changed.any(Changed::STREAM | Changed::BUSY) {
             self.show_stream(app, &area);
         }
+        if changed.any(Changed::VCAM | Changed::BUSY | Changed::SETUP | Changed::STATUS) {
+            show_vcam(app, &area);
+        }
         if changed.any(Changed::SETUP) {
             show_transition(app, &area);
             self.show_dialog(app, &area);
@@ -261,7 +297,27 @@ impl Area for Controls {
 
     fn event(&self, app: &Rc<App>, event: &Event) {
         match event {
-            Event::Started { .. } => self.drops.borrow_mut().files.clear(),
+            Event::Started { .. } => {
+                self.drops.borrow_mut().files.clear();
+                self.pauses.borrow_mut().clear();
+            }
+            Event::RecordingPaused { recording } => {
+                {
+                    let mut pauses = self.pauses.borrow_mut();
+                    let open = pauses.last().is_some_and(|(_, d)| d.is_none());
+                    if recording.paused && !open {
+                        pauses.push((recording.elapsed_seconds, None));
+                    } else if !recording.paused && open {
+                        let before: f64 = pauses.iter().filter_map(|(_, d)| *d).sum();
+                        if let Some(last) = pauses.last_mut() {
+                            last.1 = Some((recording.paused_seconds - before).max(0.0));
+                        }
+                    }
+                }
+                if let Some(window) = app.window() {
+                    self.show_pauses(&window.global::<ControlsArea>());
+                }
+            }
             Event::Status { live } => self.note_drops(app, Some(&live.files), None),
             Event::Stream { stream } => {
                 let on = matches!(
@@ -341,6 +397,36 @@ impl Area for Controls {
             "details" => {
                 app.flush();
                 open_details(app, arg);
+            }
+            // Pause or resume the recording through the Controls dock.
+            "pause" | "resume" => {
+                let paused = app
+                    .session
+                    .borrow()
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.live.as_ref())
+                    .is_some_and(|l| l.paused);
+                if paused == (name == "resume") {
+                    toggle_pause(app);
+                }
+            }
+            // The virtual camera's popover; with an argument, as the
+            // daemon reports that state (no extension to start offscreen).
+            "vcam" => {
+                if !arg.is_empty() {
+                    let status = match sample_vcam(app, arg) {
+                        Ok(status) => status,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    app.session.borrow_mut().vcam = Some(status);
+                    app.changed(Changed::VCAM);
+                }
+                app.flush();
+                if let Some(window) = app.window() {
+                    let area = window.global::<ControlsArea>();
+                    area.set_vcam_details_serial(area.get_vcam_details_serial() + 1);
+                }
             }
             "toasts" => {
                 // The web app's 42-toasts: four kinds; the oldest goes.
@@ -588,9 +674,30 @@ impl Controls {
         let live = s.status.as_ref().and_then(|x| x.live.as_ref());
         self.recording
             .set(recording.then(|| live.map_or(0.0, |l| l.elapsed_seconds)));
-        if recording && let Some(live) = live.filter(|l| l.paused) {
+        let paused = recording && live.is_some_and(|l| l.paused);
+        if let Some(live) = live.filter(|_| paused) {
             self.recording.pause(live.elapsed_seconds);
         }
+        // A window that opened mid-pause learns of it from the status (a
+        // status read can be older than the events, so the list otherwise
+        // follows `recording_paused` events only).
+        if let Some(live) = live.filter(|l| recording && l.paused) {
+            let mut pauses = self.pauses.borrow_mut();
+            if pauses.is_empty() {
+                pauses.push((live.elapsed_seconds, None));
+            }
+        }
+        // The pause's own clock: all pauses so far, less the closed ones.
+        self.paused_for.set(paused.then(|| {
+            let closed: f64 = self.pauses.borrow().iter().filter_map(|(_, d)| *d).sum();
+            live.map_or(0.0, |l| (l.paused_seconds - closed).max(0.0))
+        }));
+        if !recording {
+            self.pauses.borrow_mut().clear();
+        }
+        area.set_paused(paused);
+        area.set_busy_pause(self.busy_pause.get());
+        self.show_pauses(area);
         let files: &[LiveFile] = live.map_or(&[], |l| &l.files);
         let dropped: u64 = files.iter().map(|f| f.dropped_frames).sum();
         let gaps: u64 = files.iter().map(|f| f.audio_dropouts).sum();
@@ -600,7 +707,13 @@ impl Controls {
             SharedString::new()
         });
         area.set_rec_tooltip(
-            if recording {
+            if paused {
+                format!(
+                    "Paused: the take stands at this time, its {} file{} still open. Resume to carry on in the same files.",
+                    files.len(),
+                    if files.len() == 1 { "" } else { "s" }
+                )
+            } else if recording {
                 format!(
                     "Recording {} file{}: {dropped} frames dropped, {gaps} audio gaps. Click for details, markers and splits.",
                     files.len(),
@@ -656,6 +769,27 @@ impl Controls {
             }
             .into(),
         );
+    }
+
+    /// The take's pauses in the REC details: where each began and how
+    /// long it lasted, the open one counting.
+    fn show_pauses(&self, area: &ControlsArea) {
+        let pauses = self.pauses.borrow();
+        area.set_pauses(model(
+            pauses
+                .iter()
+                .map(|(at, length)| ToastRow {
+                    label: match length {
+                        Some(_) => format!("Paused at {}", clock(*at as u64)),
+                        None => format!("Paused at {} · now", clock(*at as u64)),
+                    }
+                    .into(),
+                    value: clock(length.map_or(self.paused_for.seconds(), |l| l.round() as u64))
+                        .into(),
+                    tone: if length.is_none() { "warn" } else { "" }.into(),
+                })
+                .collect::<Vec<_>>(),
+        ));
     }
 
     /// The stream's items in the status bar, its details and the Controls
@@ -716,6 +850,10 @@ impl Controls {
         area.set_rec_time(clock(self.recording.seconds()).into());
         area.set_live_time(clock(self.streaming.seconds()).into());
         area.set_rec_seconds(self.recording.seconds().min(i32::MAX as u64) as i32);
+        area.set_pause_time(clock(self.paused_for.seconds()).into());
+        if self.paused_for.0.get().is_some() {
+            self.show_pauses(&area);
+        }
         area.set_live_seconds(self.streaming.seconds().min(i32::MAX as u64) as i32);
         self.show_status_line(app, &area);
     }
@@ -787,6 +925,16 @@ impl Controls {
         let link = s.link_error.as_str();
         let line = if !link.is_empty() && s.status.is_none() {
             link.to_string()
+        } else if recording && live.is_some_and(|l| l.paused) {
+            format!(
+                "Paused for {} · the take’s files stay open in {folder}{}",
+                clock(self.paused_for.seconds()),
+                if streaming {
+                    " · the stream carries on"
+                } else {
+                    ""
+                }
+            )
         } else if recording && streaming {
             format!(
                 "Recording to {folder}{isos} · streaming for {}",
@@ -847,10 +995,14 @@ impl Controls {
 
     /// Tick just after each whole second of whichever timer runs.
     fn arm_ticker(&self, app: &Rc<App>) {
-        let next = [self.recording.next_tick(), self.streaming.next_tick()]
-            .into_iter()
-            .flatten()
-            .min();
+        let next = [
+            self.recording.next_tick(),
+            self.streaming.next_tick(),
+            self.paused_for.next_tick(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let Some(next) = next else {
             self.ticker.stop();
             return;
@@ -1408,6 +1560,273 @@ fn toggle_recording(app: &Rc<App>) {
             },
         );
     }
+}
+
+/// Pause the recording (its files stay open, a stream carries on) or
+/// resume it.
+fn toggle_pause(app: &Rc<App>) {
+    if app.controls.busy_pause.get() {
+        return;
+    }
+    let paused = app
+        .session
+        .borrow()
+        .status
+        .as_ref()
+        .and_then(|s| s.live.as_ref())
+        .is_some_and(|l| l.paused);
+    app.controls.busy_pause.set(true);
+    app.changed(Changed::BUSY);
+    let method = if paused {
+        Method::Resume
+    } else {
+        Method::Pause
+    };
+    app.call(method, move |app, result| {
+        app.controls.busy_pause.set(false);
+        if let Err(error) = result {
+            app.failed(
+                if paused {
+                    "Couldn’t resume the recording"
+                } else {
+                    "Couldn’t pause the recording"
+                },
+                &error,
+            );
+        }
+        app.refresh_status(true);
+        app.changed(Changed::BUSY);
+    });
+}
+
+/// The start that found no camera extension says so in these words
+/// (isocast-platform-macos virtual_camera/process.rs).
+fn vcam_missing(error: &str) -> bool {
+    error.contains("not installed")
+}
+
+/// The virtual camera's button and popover: its state, its output (the
+/// setup's `virtual_camera`) and size, and why it couldn't start.
+fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
+    let s = app.session.borrow();
+    let status = s.vcam.as_ref();
+    area.set_vcam_state(
+        match status.map(|x| x.state) {
+            Some(VirtualCameraState::Starting) => "starting",
+            Some(VirtualCameraState::Running) => "running",
+            Some(VirtualCameraState::Stopping) => "stopping",
+            Some(VirtualCameraState::Failed) => "failed",
+            _ => "stopped",
+        }
+        .into(),
+    );
+    area.set_busy_vcam(s.busy_vcam);
+    let error = status
+        .and_then(|x| x.last_error.clone())
+        .unwrap_or_default();
+    let missing = vcam_missing(&error);
+    area.set_vcam_missing(missing);
+    area.set_vcam_error(if missing { String::new() } else { error }.into());
+    let setup = s.setup.as_deref();
+    let settings = setup.map(|x| x.virtual_camera.clone()).unwrap_or_default();
+    area.set_vcam_targets(model(vec![
+        kit::option("program", "Program", ""),
+        kit::option("preview", "Preview", "Studio Mode"),
+        kit::option("scene", "A scene", ""),
+        kit::option("source", "A source", ""),
+    ]));
+    area.set_vcam_target(
+        match settings.target {
+            VcamTarget::Program => "program",
+            VcamTarget::Preview => "preview",
+            VcamTarget::Scene => "scene",
+            VcamTarget::Source => "source",
+        }
+        .into(),
+    );
+    area.set_vcam_scenes(model(setup.map_or(Vec::new(), |x| {
+        x.scenes
+            .iter()
+            .map(|scene| kit::option(&scene.id, crate::model::scene_name(scene), ""))
+            .collect()
+    })));
+    area.set_vcam_scene(settings.scene.clone().unwrap_or_default().into());
+    area.set_vcam_sources(model(setup.map_or(Vec::new(), |x| {
+        x.sources
+            .iter()
+            .filter(|src| src.kind.has_video())
+            .map(|src| kit::option(&src.id, src.name.as_deref().unwrap_or(&src.id), ""))
+            .collect()
+    })));
+    area.set_vcam_source(settings.source.clone().unwrap_or_default().into());
+    let canvas = setup.map(|x| (x.canvas.width, x.canvas.height));
+    let mut sizes = vec![kit::option(
+        "",
+        "Canvas",
+        &canvas.map_or(String::new(), |(w, h)| format!("{w}×{h}")),
+    )];
+    sizes.extend(
+        VCAM_SIZES
+            .iter()
+            .map(|(w, h)| kit::option(&format!("{w}x{h}"), &format!("{w}×{h}"), "")),
+    );
+    area.set_vcam_sizes(model(sizes));
+    area.set_vcam_size(
+        match (settings.width, settings.height) {
+            (Some(w), Some(h)) => format!("{w}x{h}"),
+            _ => String::new(),
+        }
+        .into(),
+    );
+    // What it sends (running), or would send (the next start's).
+    let (w, h, fps) = match status {
+        Some(x) if x.width > 0 => (x.width, x.height, x.fps),
+        _ => {
+            let (w, h) = setup.map_or((0, 0), |x| settings.size(x));
+            (w, h, setup.map_or(0, |x| x.canvas.fps))
+        }
+    };
+    area.set_vcam_format(format!("{w}×{h} at {fps} fps").into());
+    area.set_vcam_counts(
+        match status {
+            Some(x) if x.state == VirtualCameraState::Running => format!(
+                "{} frames sent · {} dropped",
+                count(x.frames_sent),
+                count(x.frames_dropped)
+            ),
+            _ => String::new(),
+        }
+        .into(),
+    );
+}
+
+/// Start or stop the virtual camera. Starting never installs anything:
+/// without its extension the start fails, and the popover says how to
+/// install it.
+fn toggle_vcam(app: &Rc<App>) {
+    let on = {
+        let mut s = app.session.borrow_mut();
+        if s.busy_vcam {
+            return;
+        }
+        s.busy_vcam = true;
+        let on = s.vcam.as_ref().is_some_and(|x| {
+            matches!(
+                x.state,
+                VirtualCameraState::Running | VirtualCameraState::Starting
+            )
+        });
+        let status = s.vcam.get_or_insert_with(VirtualCameraStatus::default);
+        status.state = if on {
+            VirtualCameraState::Stopping
+        } else {
+            VirtualCameraState::Starting
+        };
+        on
+    };
+    app.changed(Changed::BUSY | Changed::VCAM);
+    let method = if on {
+        Method::VirtualCameraStop
+    } else {
+        Method::VirtualCameraStart
+    };
+    app.call_as::<VirtualCameraStatus>(method, move |app, result| {
+        app.session.borrow_mut().busy_vcam = false;
+        match result {
+            Ok(status) => app.session.borrow_mut().vcam = Some(status),
+            Err(error) => {
+                let missing = vcam_missing(&error.message);
+                {
+                    let mut s = app.session.borrow_mut();
+                    let status = s.vcam.get_or_insert_with(VirtualCameraStatus::default);
+                    status.state = if on {
+                        VirtualCameraState::Running
+                    } else {
+                        VirtualCameraState::Failed
+                    };
+                    status.last_error = Some(error.message.clone());
+                }
+                if missing {
+                    // Say how to install it, where the button is.
+                    if let Some(window) = app.window() {
+                        let area = window.global::<ControlsArea>();
+                        area.set_vcam_details_serial(area.get_vcam_details_serial() + 1);
+                    }
+                } else {
+                    app.failed(
+                        if on {
+                            "Couldn’t stop the virtual camera"
+                        } else {
+                            "Couldn’t start the virtual camera"
+                        },
+                        &error,
+                    );
+                }
+                app.refresh_status(true);
+            }
+        }
+        app.changed(Changed::BUSY | Changed::VCAM);
+    });
+}
+
+/// Change the camera's output in the live setup (`virtual_camera`): the
+/// engine takes it while the camera is off.
+fn set_vcam(app: &Rc<App>, field: &str, value: &str) {
+    let first = |ids: Vec<String>| ids.into_iter().next();
+    let patch = {
+        let s = app.session.borrow();
+        let Some(setup) = s.setup.as_deref() else {
+            return;
+        };
+        let current = &setup.virtual_camera;
+        match field {
+            "target" => match value {
+                // A scene or source is needed with them: the one chosen
+                // before, else the first.
+                "scene" => json!({ "target": "scene", "source": null,
+                    "scene": current.scene.clone().or_else(|| first(setup.scenes.iter().map(|x| x.id.clone()).collect())) }),
+                "source" => json!({ "target": "source", "scene": null,
+                    "source": current.source.clone().or_else(|| first(setup.sources.iter().filter(|x| x.kind.has_video()).map(|x| x.id.clone()).collect())) }),
+                other => json!({ "target": other, "scene": null, "source": null }),
+            },
+            "scene" => json!({ "scene": value }),
+            "source" => json!({ "source": value }),
+            "size" => match value.split_once('x') {
+                Some((w, h)) => match (w.parse::<u32>(), h.parse::<u32>()) {
+                    (Ok(w), Ok(h)) => json!({ "width": w, "height": h }),
+                    _ => return,
+                },
+                None => json!({ "width": null, "height": null }),
+            },
+            _ => return,
+        }
+    };
+    app.edit(json!({ "virtual_camera": patch }), EditOptions::default());
+}
+
+/// The camera's status for snapshots: `missing` (a start found no
+/// extension), `running` (an hour of frames), `failed` (another reason).
+fn sample_vcam(app: &Rc<App>, which: &str) -> anyhow::Result<VirtualCameraStatus> {
+    let s = app.session.borrow();
+    let mut status = s.vcam.clone().unwrap_or_default();
+    match which {
+        "missing" => {
+            status.state = VirtualCameraState::Failed;
+            status.last_error = Some("virtual_camera: Isocast Virtual Camera is not installed/approved; run scripts/vcam-install.sh (Start never installs it)".into());
+        }
+        "running" => {
+            status.state = VirtualCameraState::Running;
+            status.frames_sent = 108_000;
+            status.frames_dropped = 0;
+            status.last_error = None;
+        }
+        "failed" => {
+            status.state = VirtualCameraState::Failed;
+            status.last_error = Some("virtual_camera.width: give an advertised size: 1920x1080, 1280x720, 2560x1440, 3840x2160, 1080x1920, 720x1280".into());
+        }
+        other => anyhow::bail!("vcam takes missing, running or failed, not {other:?}"),
+    }
+    Ok(status)
 }
 
 fn toggle_stream(app: &Rc<App>) {

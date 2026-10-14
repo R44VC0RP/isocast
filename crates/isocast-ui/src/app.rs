@@ -334,8 +334,26 @@ impl App {
             Event::TimelineChanged { .. }
             | Event::ExportProgress { .. }
             | Event::ExportFinished { .. } => {}
-            Event::HotkeyFired { .. } => {}
-            Event::VirtualCamera { .. } => self.refresh_status(true),
+            // Studio Mode is this window's view of the daemon's preview:
+            // follow a hotkey that turned it on or off.
+            Event::HotkeyFired { action, error, .. } => {
+                if action == "studio.toggle" && error.is_none() {
+                    self.call_as::<isocast_protocol::hotkeys::Hotkeys>(
+                        Method::HotkeysGet,
+                        |app, result| {
+                            if let Ok(hotkeys) = result
+                                && hotkeys.studio_mode != app.session.borrow().studio
+                            {
+                                app.set_studio(hotkeys.studio_mode);
+                            }
+                        },
+                    );
+                }
+            }
+            Event::VirtualCamera { camera } => {
+                self.session.borrow_mut().vcam = Some(camera.clone());
+                self.changed(Changed::VCAM);
+            }
             Event::Started { .. } => self.refresh_status(true),
             Event::RecordingPaused { .. } => self.refresh_status(true),
             Event::Status { live } => {
@@ -938,9 +956,18 @@ impl App {
                     if !s.busy_stream {
                         s.stream = status.stream.clone();
                     }
+                    if !s.busy_vcam {
+                        s.vcam = status.virtual_camera.clone();
+                    }
                     s.status = Some(status);
                 }
-                app.changed(Changed::STATUS | Changed::SCENES | Changed::RUNNING | Changed::STREAM);
+                app.changed(
+                    Changed::STATUS
+                        | Changed::SCENES
+                        | Changed::RUNNING
+                        | Changed::STREAM
+                        | Changed::VCAM,
+                );
             }
             Err(error) => {
                 let connected = app.session.borrow().link == Some(Link::Connected);
