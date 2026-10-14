@@ -1,0 +1,209 @@
+#!/bin/bash
+# Prepare a signed app/DMG; --notarize resumes those bytes without rebuilding.
+# No checkout history is pushed. --draft-release creates at most one draft.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+root="$PWD"
+app_target="${ISOCAST_APP_TARGET:-isocast-ui}" # Native default; one-line UI switch.
+identity='Developer ID Application: Ryan Vogel (9G68SMNHEU)'
+keychain="$HOME/Library/Keychains/login.keychain-db"
+target="${CARGO_TARGET_DIR:-$root/target}"
+dry_run=0
+ad_hoc=0
+draft=0
+notarize=0
+output=
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/release.sh [--dry-run] [--ad-hoc] [--output DIRECTORY]
+       scripts/release.sh --notarize [--draft-release] [--dry-run] --output DIRECTORY
+       scripts/release.sh --draft-release [--dry-run] --output DIRECTORY
+
+Default: build arm64 release binaries, package Isocast.app, sign inside out with
+Developer ID, make/sign a DMG and write its SHA-256 file. No notarization or
+upload. Output must be new; default: $CARGO_TARGET_DIR/dist/VERSION.
+
+--dry-run        Print every step without building, signing, writing or uploading.
+--ad-hoc         Local testing only; no Developer ID, notarization or Gatekeeper claim.
+--notarize       Resume prepared Developer ID output: notarize/staple app, repack
+                 its DMG, sign/notarize/staple/re-verify. No Cargo build or binary
+                 re-signing. Final artifacts go into OUTPUT/notarized/.
+--draft-release  Upload verified notarized DMG/checksum as ONE GitHub draft;
+                 reuse a matching existing draft, refuse mismatched/published ones.
+                 Combine with --notarize for the single morning command.
+--output DIR     Build into, or resume from, this directory. Test before drafting.
+
+Requirements: Apple-silicon Mac, Rust, Xcode (actool/notarytool/stapler), Python 3;
+gh for drafts. Credentials stay in the login keychain's isocast-notary profile.
+ISOCAST_APP_TARGET selects isocast-ui (default) or isocast-app (retired web app).
+Notarization uses the login keychain profile isocast-notary. Waits report progress
+every 20s; submission ids are saved for safe resume. Never publishes or pushes git.
+EOF
+}
+die() { echo "release: $*" >&2; exit 1; }
+run() {
+    printf '+'
+    printf ' %q' "$@"
+    printf '\n'
+    if [ "$dry_run" = 0 ]; then "$@"; fi
+}
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run) dry_run=1; shift ;;
+        --ad-hoc) ad_hoc=1; shift ;;
+        --draft-release) draft=1; shift ;;
+        --notarize) notarize=1; shift ;;
+        --output) [ $# -ge 2 ] || die '--output needs a directory'; output="$2"; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown option: $1 (see --help)" ;;
+    esac
+done
+case "$app_target" in isocast-app|isocast-ui) ;; *) die 'ISOCAST_APP_TARGET: choose isocast-app or isocast-ui' ;; esac
+[ "$ad_hoc" = 0 ] || { [ "$draft:$notarize" = 0:0 ] || die 'notarization/drafts refuse ad-hoc artifacts'; }
+[ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || die 'build on an Apple-silicon Mac'
+
+# Resume from the saved version/target, even if this checkout changes overnight.
+if [ "$notarize:$draft" != 0:0 ]; then
+    [ -n "$output" ] || die '--notarize/--draft-release need --output with a prepared build'
+    args=(--output "$output")
+    if [ "$notarize" = 1 ]; then args+=(--notarize); fi
+    if [ "$draft" = 1 ]; then args+=(--draft-release); fi
+    if [ "$dry_run" = 1 ]; then args+=(--dry-run); fi
+    exec python3 scripts/release-finalize.py "${args[@]}"
+fi
+
+# One version source; reading it does not build or resolve dependencies in dry runs.
+version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'workspace.package.version must be X.Y.Z'
+case "$target" in /*) ;; *) target="$root/$target" ;; esac
+output="${output:-$target/dist/$version}"
+case "$output" in /*) ;; *) output="$root/$output" ;; esac
+app="$output/Isocast.app"
+engine="$app/Contents/Helpers/Isocast Engine.app"
+dmg="$output/Isocast-$version-arm64.dmg"
+entitlements="$root/scripts/release-entitlements.plist"
+
+verify_app() {
+    run codesign --verify --deep --strict --verbose=2 "$app"
+}
+verify_dmg() {
+    run hdiutil verify "$dmg"
+    run codesign --verify --strict --verbose=2 "$dmg"
+}
+
+if [ "$dry_run" = 0 ]; then
+    [ ! -e "$output" ] || die "output exists: $output; choose a new --output (existing artifacts are never overwritten)"
+    for tool in cargo python3 codesign security xcrun hdiutil ditto shasum; do
+        command -v "$tool" >/dev/null || die "missing tool: $tool"
+    done
+    xcrun --find actool >/dev/null || die 'Xcode actool is required (no app is launched to render an icon)'
+    if [ "$ad_hoc" = 0 ]; then
+        security find-identity -v -p codesigning "$keychain" | grep -Fq "\"$identity\"" || die "missing signing identity: $identity"
+    fi
+fi
+build_version="${ISOCAST_BUILD_VERSION:-$(date +%s)}"
+[[ "$build_version" =~ ^[0-9]+$ ]] || die 'ISOCAST_BUILD_VERSION must be numeric'
+run mkdir -p "$output/work/dmg" "$app/Contents/MacOS" "$app/Contents/Resources" \
+    "$engine/Contents/MacOS" "$engine/Contents/Resources"
+run env CARGO_TARGET_DIR="$target" MACOSX_DEPLOYMENT_TARGET=14.0 ISOCAST_BUILD_VERSION="$build_version" \
+    nice -n 10 cargo build --locked --release --target aarch64-apple-darwin \
+    -p "$app_target" -p isocast-daemon -p isocast-cli
+binary_dir="$target/aarch64-apple-darwin/release"
+run cp "$binary_dir/$app_target" "$app/Contents/MacOS/$app_target"
+run cp "$binary_dir/isocast" "$app/Contents/MacOS/isocast"
+run cp "$binary_dir/isocastd" "$engine/Contents/MacOS/isocastd"
+run python3 -c 'import plistlib,sys
+from pathlib import Path
+app,engine,version,executable,build_version=sys.argv[1:]
+usage={"NSCameraUsageDescription":"Isocast records cameras and capture cards into your scenes and recordings.",
+       "NSMicrophoneUsageDescription":"Isocast records microphones and audio interfaces into your scenes and recordings.",
+       "NSScreenCaptureUsageDescription":"Isocast captures the displays, windows and desktop audio you select for scenes and recordings."}
+for source,dest,identifier,name,binary in [
+    ("crates/isocast-ui/Info.plist" if executable=="isocast-ui" else "crates/isocast-app/bundle/Info.plist",app,"dev.isocast.release","Isocast",executable),
+    ("crates/isocast-daemon/Info.plist",engine,"dev.isocast.isocastd","Isocast Engine","isocastd")]:
+    p=plistlib.loads(Path(source).read_bytes())
+    p.update(usage)
+    p.update(CFBundleIdentifier=identifier,CFBundleName=name,CFBundleDisplayName=name,
+             CFBundleExecutable=binary,CFBundleShortVersionString=version,CFBundleVersion=build_version,
+             LSMinimumSystemVersion="14.0",LSArchitecturePriority=["arm64"])
+    Path(dest,"Contents/Info.plist").write_bytes(plistlib.dumps(p))' "$app" "$engine" "$version" "$app_target" "$build_version"
+run xcrun actool "$root/crates/isocast-app/bundle/Isocast.icon" --compile "$app/Contents/Resources" \
+    --platform macosx --minimum-deployment-target 14.0 --app-icon Isocast \
+    --output-partial-info-plist "$output/work/icon.plist"
+run ditto "$app/Contents/Resources" "$engine/Contents/Resources"
+run cp docs/install.md "$app/Contents/Resources/INSTALL.md"
+run cp LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES "$app/Contents/Resources/"
+
+# Check every shipped Mach-O: arm64 only, and no Homebrew/build-machine dylibs.
+run python3 -c 'import subprocess,sys
+from pathlib import Path
+for p in Path(sys.argv[1]).rglob("*"):
+    if not p.is_file() or p.read_bytes()[:4] != b"\xcf\xfa\xed\xfe": continue
+    assert subprocess.check_output(["lipo","-archs",str(p)],text=True).strip()=="arm64",p
+    lines=subprocess.check_output(["otool","-L",str(p)],text=True).splitlines()[1:]
+    for line in lines:
+        dep=line.strip().split(" (",1)[0]
+        assert dep.startswith(("/System/Library/", "/usr/lib/")), (p,dep)
+    print("verified arm64 and system-only dependencies:",p)' "$app"
+
+sign() {
+    # A first Developer ID use can ask Ryan to unlock/allow the key. Do not
+    # hang a build indefinitely or attempt to answer that security prompt.
+    run python3 -c 'import subprocess,sys
+try: subprocess.run(sys.argv[1:],check=True,timeout=90)
+except subprocess.TimeoutExpired:
+    sys.exit("codesign waited 90s: approve the login-keychain prompt, then retry the printed signing command. No password was read or stored.")' codesign "$@"
+}
+if [ "$ad_hoc" = 1 ]; then
+    sign_args=(--force --sign - --timestamp=none --options runtime)
+else
+    sign_args=(--force --sign "$identity" --keychain "$keychain" --timestamp --options runtime)
+fi
+# Inside out. The UI has no entitlements: it only talks to the daemon. CLI
+# record runs the engine in-process, so it needs the same three as isocastd.
+sign "${sign_args[@]}" --entitlements "$entitlements" "$engine"
+sign "${sign_args[@]}" --entitlements "$entitlements" "$app/Contents/MacOS/isocast"
+sign "${sign_args[@]}" "$app"
+run codesign --verify --deep --strict --verbose=2 "$app"
+
+verify_app
+run ditto "$app" "$output/work/dmg/Isocast.app"
+run ln -s /Applications "$output/work/dmg/Applications"
+run cp docs/install.md "$output/work/dmg/Install.txt"
+run hdiutil create -volname "Isocast $version" -srcfolder "$output/work/dmg" -format UDZO -fs HFS+ "$dmg"
+if [ "$ad_hoc" = 1 ]; then
+    sign --force --sign - --timestamp=none "$dmg"
+else
+    sign --force --sign "$identity" --keychain "$keychain" --timestamp "$dmg"
+fi
+verify_dmg
+# This is the prepared-file hash; finalization writes a new one after stapling.
+run bash -c 'cd "$1" && shasum -a 256 "$2" > "$2.sha256" && shasum -a 256 -c "$2.sha256"' \
+    bash "$output" "$(basename "$dmg")"
+mode=developer-id
+if [ "$ad_hoc" = 1 ]; then mode=ad-hoc; fi
+run python3 -c 'import hashlib,json,subprocess,sys
+from pathlib import Path
+w=Path(sys.argv[1]); app=w/"Isocast.app"; target=sys.argv[4]
+paths=[f"Contents/MacOS/{target}","Contents/MacOS/isocast","Contents/Info.plist",
+       "Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd",
+       "Contents/Helpers/Isocast Engine.app/Contents/Info.plist"]
+hashes={p:hashlib.sha256((app/p).read_bytes()).hexdigest() for p in paths}
+r=dict(schema=1,version=sys.argv[2],signing=sys.argv[3],app_target=target,
+       build_version=sys.argv[5],source_commit=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),
+       app_files=hashes,dmg_sha256=hashlib.sha256(Path(sys.argv[6]).read_bytes()).hexdigest())
+(w/"release.json").write_text(json.dumps(r,indent=2)+"\n")' \
+    "$output" "$version" "$mode" "$app_target" "$build_version" "$dmg"
+if [ "$ad_hoc" = 0 ]; then
+    run python3 -c 'import subprocess,sys
+for args in [["--type","execute",sys.argv[1]],["--type","open","--context","context:primary-signature",sys.argv[2]]]:
+    p=subprocess.run(["spctl","--assess","--verbose=2",*args],capture_output=True,text=True,timeout=60)
+    print(p.stdout+p.stderr,end="")
+    if p.returncode and not (p.returncode==3 and "source=Unnotarized Developer ID" in p.stderr):
+        sys.exit("Unexpected Gatekeeper assessment failure")
+    print("Prepared Developer ID artifact; notarization is a separate step.")' "$app" "$dmg"
+fi
+echo "release: prepared $mode artifacts: $output"
+echo "Next, after testing: scripts/release.sh --notarize --draft-release --output '$output'"

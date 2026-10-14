@@ -1089,7 +1089,24 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
   lint and test gates.
   Write the workflow; don't create the GitHub repo or push.
 - [ ] **8.2** Release build script for signed, notarized Apple silicon
-  (arm64) builds and a Homebrew formula. **Needs Ryan** for signing credentials.
+  (arm64) builds and a Homebrew formula.
+  - [x] **8.2a Production packaging.** `scripts/release.sh`: self-contained
+    app/CLI/engine, Developer ID and hardened runtime, app and DMG separately
+    notarized/stapled, checksums, dry-run/ad-hoc modes and draft-only upload
+    of existing verified artifacts. Version from the workspace; one UI target.
+  - [ ] **8.2b First-install runtime and draft (needs Ryan).** The original
+    notarized app passed first launch, bundled daemon, CLI and synthetic
+    recording after the authorized Open click. The current native release
+    is signed and runtime-verified (8.2d); restore `isocast-notary`, then
+    `scripts/release.sh --notarize --draft-release --output /Volumes/IsocastBuild/release/scratch/morning-native`.
+    This resumes its verified binary bytes, staples, re-verifies and creates
+    one draft. See REPORT.md's Morning commands and Waiting on Ryan.
+  - [ ] **8.2c Homebrew distribution.** After a release is ready to publish.
+  - [x] **8.2d Morning-ready native release.** Main 85e2210 merged; Slint
+    default with its plist, bundled CLI/engine, consistent build metadata,
+    Developer ID-signed app/DMG without notarization. Native window, PATH
+    CLI/restart and bundled-engine program/ISO take pass on isocast-m2-b.
+    Resume-only notarization and idempotent draft stages are ready.
 - [x] **8.3** Docs: getting started, setup reference, MCP tools, plugins.
   (With the user-facing README and its screenshots, licences and
   THIRD_PARTY_NOTICES, and the .github templates.)
@@ -2514,6 +2531,14 @@ One line per finished task, newest last.
   unchanged; isocast-m2-b: an export at 965 MiB free beside a recording
   keeping 1 GB refused, the recording ran its full 30.0 s; with room, an
   export to the same disk while recording, 0 drops.
+- 8.2a (2026-10-13): production app/CLI/engine and DMG built with Developer
+  ID, hardened runtime, separate Accepted notarizations and stapled tickets;
+  strict codesign/spctl passed on the build Mac and installed test Mac.
+  Dry-run/ad-hoc/draft-only modes; workspace version and bundled daemon
+  precedence. fmt, release clippy and 179 tests passed. Ad-hoc hardened
+  runtime: two 4 s 640x360/30 HEVC/AAC files, 120 frames each, matching A/V,
+  no drops, clean decodes; Wasm -6 dB measured -5.9994 dB. Signed runtime
+  and the draft wait for Ryan's normal first-open confirmation (8.2b).
 - G.3 (2026-10-13): pause/resume on the method table, CLI, MCP and events;
   one sample/frame-aligned cut clock for every recording file, manifest
   pauses and compact marker/timeline times, stop during pause, frozen REC
@@ -2622,6 +2647,14 @@ One line per finished task, newest last.
   exports complete and decode (57 + 30 frames), removed takes retained,
   188 focus samples all Terminal. MCP schema/strict args and old id aliases
   verified; fmt, release all-target clippy and 179 tests pass.
+- 8.2 follow-up (2026-10-13): main 905d360 merged with product/build-version
+  metadata preserved, third-party notices bundled, and canonical engine
+  signing ID retained for virtual-camera producer admission. Original signed
+  first launch/CLI/recording passed after clicking Open; merged local-mode
+  program/ISO/timeline smoke passed (3 files, 120 frames/4 s each, 0 drops,
+  equal A/V and clean decodes). fmt, release clippy, 179 tests, notices and
+  ShellCheck passed. Re-notarization/draft blocked: isocast-notary is absent
+  from the keychain; the previous build is not drafted as the current one.
 - 8.4 (2026-10-13): .github/workflows/visual.yml (pull_request, read-only,
   no secrets) renders 5 views x 3 sizes (1440x900@2, 1920x1080@1,
   900x600@2) for merge base and head with scripts/visual-shots.sh and diffs
@@ -2941,3 +2974,12 @@ One line per finished task, newest last.
   0.6865, rect unchanged), stretch Test Pattern rect changed (Shift
   ratio 2.281); Edit Transform Width 640 → scale 0.5, Height shows 360;
   Controls dock "Stop" at 1024 px while recording.
+- 8.2d (2026-10-14): main 85e2210 merged, signed native Slint app/DMG prepared
+  at release/scratch/morning-native. Strict signatures and team/entitlement
+  checks pass; spctl reports Unnotarized Developer ID as expected. Native
+  window, bundled daemon after CLI restart, 4 s program+ISO: 120 frames each,
+  0 drops/repeats/audio dropouts, equal A/V and clean decodes, timeline c1.
+  fmt, release Clippy, 178 default-workspace tests and notices pass; the
+  retired web app is excluded. Resumable --notarize plus --draft-release
+  finalizes saved bytes and reuses only a matching draft. No notary or GitHub
+  write attempted; exact morning commands in REPORT.md.

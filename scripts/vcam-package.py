@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import socket
 import subprocess
@@ -131,6 +132,9 @@ def prepare(repo, stage):
     require(shutil.disk_usage(stage).free >= 20 * 1024**3,
             "build volume has less than 20 GiB free; free space before building")
     version = next_version(stage)
+    package = re.search(r"(?ms)^\[workspace\.package\]\n(.*?)(?=^\[|\Z)",
+                        (repo / "Cargo.toml").read_text()).group(1)
+    product_version = re.search(r'^version\s*=\s*"([^"]+)"', package, re.M).group(1)
     inputs = [(repo / "crates/isocast-daemon/Info.plist", "Host-Info.plist"),
               (repo / "camera-extension/Info.plist", "Extension-Info.plist"),
               (repo / "camera-extension/Host.entitlements", "Host.entitlements"),
@@ -144,6 +148,7 @@ def prepare(repo, stage):
             data["IsocastCameraInstallerVersion"] = 1
         if "CFBundleIdentifier" in data:
             data["CFBundleVersion"] = version
+            data["CFBundleShortVersionString"] = product_version
             expected = HOST if filename.startswith("Host") else EXTENSION
             require(data["CFBundleIdentifier"] == expected,
                     f"refusing changed bundle id in {source}; never reuse Studio NDI ids")

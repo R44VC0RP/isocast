@@ -20,8 +20,6 @@
 	<true/>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
-	<key>CFBundleShortVersionString</key>
-	<string>0.0.1</string>
 	<!-- Template fallback; Cargo and every packaging path stamp a build version. -->
 	<key>CFBundleVersion</key><string>1</string>
 	<key>NSSystemExtensionUsageDescription</key>

@@ -362,14 +362,25 @@ fn spawn_daemon(daemon: &Path, log: &Path) -> std::io::Result<()> {
         .map(|_| ())
 }
 
-/// The daemon to launch: `$ISOCAST_DAEMON`; else the signed development
-/// app from `scripts/sign-dev.sh`, which keeps its privacy permissions
-/// across rebuilds; else the `isocastd` built next to this binary.
+/// The daemon to launch: `$ISOCAST_DAEMON`; else this distribution's bundled
+/// helper; else the signed development app from `scripts/sign-dev.sh`, which
+/// keeps its privacy permissions across rebuilds; else the adjacent build.
 fn daemon_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("ISOCAST_DAEMON") {
         return Ok(PathBuf::from(path));
     }
     let exe = std::env::current_exe().context("could not find the isocast binary")?;
+    // Resolve a CLI symlink installed on PATH. A distribution must use its own
+    // engine, even on a developer's Mac with an older Isocast Dev.app present.
+    let exe = exe.canonicalize().unwrap_or(exe);
+    if let Some(contents) = exe.parent().and_then(Path::parent)
+        && contents.file_name().is_some_and(|name| name == "Contents")
+    {
+        let helper = contents.join("Helpers/Isocast Engine.app/Contents/MacOS/isocastd");
+        if helper.is_file() {
+            return Ok(helper);
+        }
+    }
     let built = exe.with_file_name("isocastd");
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     let app = std::env::var_os("ISOCAST_DEV_APP").map_or_else(

@@ -152,6 +152,20 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-14 (8.2, morning): the native release built from merged main
+  85e2210 is Developer ID-signed and tested, ready at
+  `/Volumes/IsocastBuild/release/scratch/morning-native`. No build is needed
+  in the morning. Ryan restores the missing profile interactively:
+  `xcrun notarytool store-credentials isocast-notary --team-id 9G68SMNHEU --keychain "$HOME/Library/Keychains/login.keychain-db"`
+  (notarytool prompts for Apple ID and app-specific password; never put the
+  password in chat/files/arguments). Then one command:
+  `scripts/release.sh --notarize --draft-release --output /Volumes/IsocastBuild/release/scratch/morning-native`.
+  It finalizes copies under `notarized/`, checks exact binary hashes and the
+  mounted DMG, and creates/reuses one matching draft, never publishing.
+  Native UI/CLI/bundled engine and 2x120-frame HEVC/AAC program/ISO files
+  passed on isocast-m2-b. Gatekeeper says Unnotarized Developer ID until
+  the morning step. The older signed-1/signed-2 artifacts are not current.
+  Morning details: `/Volumes/IsocastBuild/release/scratch/REPORT.md`.
 - 2026-10-14 (ui/app-alpha): exonbook's desktop sits at the lock screen
   (a password half typed in the field), so real-window checks there can't
   run; this lane used isocast-m2-b between other agents' runs. To retry:
@@ -1448,6 +1462,52 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-14 (8.2d): release preparation now stops after Developer ID signing
+  the native Slint app and DMG. One `app_target` line defaults to isocast-ui,
+  using its plist; the web app is opt-in. `--notarize` resumes a saved build
+  independently of the checkout's current version/target, never recompiles
+  or re-signs executables, preserves prepared originals, and repacks the DMG
+  only to include the stapled app. The Python finalizer persists notary ids
+  and archive hashes, waits at most 60 s per call with 20 s progress, and
+  fails closed if an upload returned no id. An output lock serializes it.
+  Drafts are looked up before creation and both asset digests checked; a
+  published/mismatched release is never changed. Staged app and app actually
+  mounted from the DMG must match prepared executable/plist hashes. Shared
+  version and camera-compatible helper ID retained; no new entitlement or
+  dependency. Main's notices were refreshed for four already-added crates.
+
+- 2026-10-13 (8.2 follow-up): merged main 905d360's virtual-camera, hotkey
+  and docs work. Keep the UI's one-line target switch and production ID;
+  the packaged helper now uses canonical `dev.isocast.isocastd` (replacing
+  `dev.isocast.release.engine`) because the camera extension admits that
+  exact signed producer. It remains a nested Isocast Engine.app; no system
+  extension is installed/activated by the DMG. Resolve version-stamping
+  conflicts by preserving camera build numbers while deriving product
+  versions from Cargo in embedded, dev, release and camera-host metadata.
+  Distribution app/helper share one numeric build version; ship main's
+  THIRD_PARTY_NOTICES. fmt, clippy, 179 tests, notices and ShellCheck pass;
+  merged ad-hoc UI/CLI/engine and hotkey/vcam/timeline methods work. Three
+  synthetic HEVC/AAC outputs (baseline, Wasm-filtered ISO and program) each
+  have 120 frames/4.000 s, 0 drops, equal A/V, clean decode; the program take
+  appears as timeline clip c1. This local-mode check does not replace the
+  current notarized-DMG check blocked on the keychain profile.
+
+- 2026-10-13 (8.2a): production bundles are `dev.isocast.release` and the
+  nested `dev.isocast.release.engine` (Isocast Engine.app), independent of
+  development privacy grants. The common client prefers its bundled helper
+  over a dev app, also through a CLI symlink; explicit ISOCAST_DAEMON still
+  wins. Distinct `isocast-app`/`isocast` filenames avoid case-insensitive-disk
+  collisions. UI has no hardened-runtime exceptions; engine and standalone
+  recording CLI have camera, audio-input and unsigned-executable-memory.
+  Wasmtime 49 uses mmap/mprotect(RX), not MAP_JIT, so allow-jit alone would
+  not cover it. An ad-hoc hardened-runtime recording with the Wasm gain
+  measured -5.9994 dB for -6 dB; two 4 s HEVC/AAC takes had 120/120 frames,
+  equal A/V durations, no drops and clean decodes on isocast-m2-b. This is
+  local-mode evidence, not a substitute for blocked signed first launch.
+  `--draft-release` uploads existing tested bytes, never rebuilds/publishes
+  or pushes this checkout's history; target is the public repo's main.
+  Version remains workspace 0.0.1; production, embedded and dev daemon
+  metadata derive from it. No dependency added. See docs/install.md.
 - 2026-10-14 (qa-app): **Resizing an item without bounds changes its
   scale.** Since qa-engine, new items have `fit: none`: the rect is the
   source's own size and `style.transform.scale` (one factor, about the

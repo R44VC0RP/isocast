@@ -18,10 +18,21 @@ fn main() {
         );
         let generated = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
             .join("isocastd-info.plist");
-        let content = std::fs::read_to_string(&plist).unwrap().replace(
-            "<key>CFBundleVersion</key><string>1</string>",
-            &format!("<key>CFBundleVersion</key><string>{version}</string>"),
-        );
+        // Preserve camera-extension build numbering while deriving the product
+        // version from Cargo, as the distribution and dev bundles do.
+        let content = std::fs::read_to_string(&plist)
+            .unwrap()
+            .replace(
+                "<key>CFBundleVersion</key><string>1</string>",
+                &format!("<key>CFBundleVersion</key><string>{version}</string>"),
+            )
+            .replace(
+                "</dict>",
+                &format!(
+                    "<key>CFBundleShortVersionString</key><string>{}</string></dict>",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            );
         std::fs::write(&generated, content).unwrap();
         println!(
             "cargo:rustc-link-arg-bin=isocastd=-Wl,-sectcreate,__TEXT,__info_plist,{}",

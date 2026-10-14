@@ -34,6 +34,9 @@ fi
 
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp crates/isocast-daemon/Info.plist "$app/Contents/Info.plist"
+# The same workspace version as the embedded plist and production bundle.
+version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+/usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $version" "$app/Contents/Info.plist"
 python3 scripts/vcam-package.py stamp "$app/Contents/Info.plist"
 cp "$binary" "$app/Contents/MacOS/isocastd"
 # The app's icon, which macOS shows in permission prompts and in Privacy &

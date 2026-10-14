@@ -31,7 +31,7 @@ WebAssembly plugins run in Wasmtime (https://wasmtime.dev) from the
 Bytecode Alliance, licensed under Apache-2.0 WITH LLVM-exception. Its crates
 (wasmtime, cranelift-*, wasmparser, wit-*, ...) are listed below.
 
-Rust crates (492)
+Rust crates (496)
 =================
 
 Crate, version, licence, link.
@@ -324,6 +324,9 @@ darling_macro 0.24.1
 data-url 0.3.2
   MIT OR Apache-2.0
   https://github.com/servo/rust-url
+derive_arbitrary 1.5.0
+  MIT OR Apache-2.0
+  https://github.com/rust-fuzz/arbitrary
 derive_more 2.1.1
   MIT
   https://github.com/JelteF/derive_more
@@ -522,6 +525,9 @@ hashbrown 0.17.1
 heck 0.5.0
   MIT OR Apache-2.0
   https://github.com/withoutboats/heck
+hmac 0.12.1
+  MIT OR Apache-2.0
+  https://github.com/RustCrypto/MACs
 htmlparser 0.2.1
   MIT OR Apache-2.0
   https://github.com/jdrouet/htmlparser.git
@@ -1182,6 +1188,9 @@ strum 0.28.0
 strum_macros 0.28.0
   MIT
   https://github.com/Peternator7/strum
+subtle 2.6.1
+  BSD-3-Clause
+  https://github.com/dalek-cryptography/subtle
 svgtypes 0.16.1
   Apache-2.0 OR MIT
   https://github.com/linebender/svgtypes
@@ -1500,6 +1509,9 @@ zerovec 0.11.8
 zerovec-derive 0.11.6
   Unicode-3.0
   https://github.com/unicode-org/icu4x
+zip 6.0.0
+  MIT
+  https://github.com/zip-rs/zip2.git
 zlib-rs 0.6.8
   Zlib
   https://github.com/trifectatechfoundation/zlib-rs

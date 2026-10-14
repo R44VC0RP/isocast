@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- AVFoundation camera/capture-card inputs in the engine and CLI record. -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
+    <!-- AVFoundation/Core Audio microphone and audio-interface inputs. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- Wasmtime 49 publishes code with mmap + mprotect(RX), not MAP_JIT.
+         allow-jit alone does not cover that allocation strategy. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>
