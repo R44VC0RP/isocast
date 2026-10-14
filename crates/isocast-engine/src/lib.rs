@@ -43,6 +43,10 @@ pub use time::Time;
 
 /// Audio inside the engine is 48 kHz, 32-bit float, interleaved.
 pub const SAMPLE_RATE: u32 = 48_000;
+/// Recordings are written in movie fragments of this many seconds of media
+/// time. A fragment reaches the disk only when a sample at or past its end is
+/// appended, so a crash loses the unfinished fragment (up to this long).
+pub const MOVIE_FRAGMENT_SECONDS: i64 = 2;
 
 /// What the engine needs from the operating system.
 /// Platforms are cheap handles (macOS: a unit struct), cloned into the

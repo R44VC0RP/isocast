@@ -333,6 +333,7 @@ impl App {
             Event::HotkeyFired { .. } => {}
             Event::VirtualCamera { .. } => self.refresh_status(true),
             Event::Started { .. } => self.refresh_status(true),
+            Event::RecordingPaused { .. } => self.refresh_status(true),
             Event::Status { live } => {
                 {
                     let mut s = self.session.borrow_mut();

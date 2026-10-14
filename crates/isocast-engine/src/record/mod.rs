@@ -35,6 +35,7 @@ mod frame_stream;
 mod iso_frames;
 mod mix;
 mod monitor;
+mod pause;
 mod program;
 mod scenes;
 mod shared_frames;
@@ -227,6 +228,11 @@ struct ControlState {
     split: Option<(SplitTiming, mpsc::Sender<SplitReply>)>,
     /// The recording has ended (or never ran): splits are refused at once.
     finished: bool,
+    clock: Option<Arc<pause::RecordingClock>>,
+    splitting: bool,
+    pause_generation: u64,
+    saved_pause_generation: u64,
+    manifest_error: Option<String>,
 }
 
 /// When a split's new take begins.
@@ -279,7 +285,14 @@ impl ControlState {
             .rposition(|start| *start <= at)
             .unwrap_or(0);
         let from = self.takes[i].max(first);
-        Some((i as u32 + 1, at.saturating_since(from).as_secs_f64()))
+        let seconds = match &self.clock {
+            Some(clock) => {
+                let cuts = clock.state.read().unwrap();
+                cuts.map(at).saturating_since(cuts.map(from)).as_secs_f64()
+            }
+            None => at.saturating_since(from).as_secs_f64(),
+        };
+        Some((i as u32 + 1, seconds))
     }
 
     /// An error with where the recording ended (take and time) if it ended
@@ -293,6 +306,72 @@ impl ControlState {
 }
 
 impl SessionControl {
+    /// Schedule a shared recording cut. Hotkeys: `recording.pause`
+    /// calls this with true, `recording.resume` with false; the
+    /// `recording.pause_toggle` action chooses the opposite of `pause_status`.
+    /// The daemon uses this same path for the Pause/Resume methods.
+    pub fn set_paused(&self, paused: bool, now: Time, epoch: Time) -> Result<(Time, u64), String> {
+        let mut state = self.state.lock().unwrap();
+        if state.epoch != Some(epoch) {
+            return Err(
+                "recording: the recording changed before pause/resume; retry on the current take"
+                    .into(),
+            );
+        }
+        if state.finished || state.end.is_some_and(|end| now >= end) {
+            return Err("recording: stopping or idle; valid action: start".into());
+        }
+        if state.splitting
+            || (state.takes.len() > 1 && state.takes.last().is_some_and(|at| *at > now))
+        {
+            return Err("recording: a take is starting; retry pause/resume after it begins".into());
+        }
+        let clock = state
+            .clock
+            .as_ref()
+            .ok_or("recording: still starting; wait for its first take")?;
+        let at = clock.change(paused, now, state.end)?;
+        state.changed = true;
+        state.pause_generation += 1;
+        Ok((at, state.pause_generation))
+    }
+
+    /// Identify the recording while a caller releases its own state lock.
+    pub fn recording_epoch(&self) -> Option<Time> {
+        self.state.lock().unwrap().epoch
+    }
+
+    /// A pause reply waits for its manifest checkpoint as well as its cut.
+    pub fn pause_saved(&self, generation: u64) -> Result<bool, String> {
+        let state = self.state.lock().unwrap();
+        if let Some(error) = &state.manifest_error {
+            return Err(format!(
+                "recording.pauses: the cut was applied, but its manifest could not be saved: {error}"
+            ));
+        }
+        Ok(state.saved_pause_generation >= generation)
+    }
+
+    pub fn pause_status(&self, now: Time) -> Option<isocast_protocol::api::RecordingPause> {
+        let state = self.state.lock().unwrap();
+        let clock = state.clock.as_ref()?;
+        Some(
+            clock
+                .state
+                .read()
+                .unwrap()
+                .status(now.min(state.end.unwrap_or(Time::MAX))),
+        )
+    }
+
+    fn recording_time(&self, at: Time) -> Time {
+        let state = self.state.lock().unwrap();
+        state
+            .clock
+            .as_ref()
+            .map_or(at, |clock| clock.state.read().unwrap().map(at))
+    }
+
     /// A control whose engine shows `data`'s values in bound text.
     pub fn with_data(data: Arc<crate::data::DataStore>) -> Self {
         Self {
@@ -434,12 +513,22 @@ impl SessionControl {
                 ending: true,
                 message: "the recording has stopped".into(),
             }));
-        } else if state.split.is_some() {
+        } else if state
+            .clock
+            .as_ref()
+            .is_some_and(|clock| clock.state.read().unwrap().requested_pause())
+        {
+            let _ = tx.send(Err(SplitRefused {
+                ending: false,
+                message: "recording.paused: resume before split or retake".into(),
+            }));
+        } else if state.splitting {
             let _ = tx.send(Err(SplitRefused {
                 ending: false,
                 message: "a split is already on its way".into(),
             }));
         } else {
+            state.splitting = true;
             state.split = Some((timing, tx));
         }
         rx
@@ -546,7 +635,7 @@ impl SessionControl {
     }
 
     /// A recording starts at `epoch`: its first take, with no markers yet.
-    fn begin_recording(&self, epoch: Time) {
+    fn begin_recording(&self, epoch: Time, clock: Arc<pause::RecordingClock>) {
         let mut state = self.state.lock().unwrap();
         state.epoch = Some(epoch);
         state.takes = vec![epoch];
@@ -554,6 +643,11 @@ impl SessionControl {
         state.end = None;
         state.split = None;
         state.finished = false;
+        state.clock = Some(clock);
+        state.splitting = false;
+        state.pause_generation = 0;
+        state.saved_pause_generation = 0;
+        state.manifest_error = None;
     }
 
     /// What the program shows at `at`: the scene of the last switch at or
@@ -588,18 +682,28 @@ impl SessionControl {
     }
 
     fn begin_take(&self, at: Time) {
-        self.state.lock().unwrap().takes.push(at);
+        let mut state = self.state.lock().unwrap();
+        state.takes.push(at);
+        state.splitting = false;
     }
 
-    fn take_changed(&self) -> bool {
-        std::mem::take(&mut self.state.lock().unwrap().changed)
+    fn take_changed(&self) -> Option<u64> {
+        let mut state = self.state.lock().unwrap();
+        std::mem::take(&mut state.changed).then_some(state.pause_generation)
     }
 
     /// Markers and scene switches of the take running from `from` until
     /// `until`, on its timeline. The scene on air when it starts is at 0.
     fn timeline(&self, from: Time, until: Time) -> (Vec<Marker>, Vec<SceneChange>) {
         let state = self.state.lock().unwrap();
-        let seconds = |at: Time| at.saturating_since(from).as_secs_f64();
+        let cuts = state
+            .clock
+            .as_ref()
+            .map(|clock| clock.state.read().unwrap());
+        let seconds = |at: Time| match &cuts {
+            Some(cuts) => cuts.map(at).saturating_since(cuts.map(from)).as_secs_f64(),
+            None => at.saturating_since(from).as_secs_f64(),
+        };
         let markers = state
             .markers
             .iter()
@@ -941,12 +1045,17 @@ fn live_status(
     levels: Vec<AudioLevel>,
     shared: &Shared,
     now: Time,
+    clock: &pause::RecordingClock,
 ) -> LiveStatus {
-    let overdue = (now - STALL_AFTER).min(shared.end());
+    let cuts = clock.state.read().unwrap();
+    let overdue = cuts.map((now - STALL_AFTER).min(shared.end()));
+    let status = cuts.status(now.min(shared.end()));
     LiveStatus {
         levels,
         monitor: None,
-        elapsed_seconds: now.saturating_since(shared.epoch).as_secs_f64(),
+        elapsed_seconds: status.elapsed_seconds,
+        paused: status.paused,
+        paused_seconds: status.paused_seconds,
         disk: None,
         files: plans
             .iter()
@@ -984,6 +1093,7 @@ fn take_manifest(
     control: Option<&SessionControl>,
 ) -> SessionManifest {
     let finished = status != SessionStatus::Recording;
+    let mapped = |at| control.map_or(at, |c| c.recording_time(at));
     let plans = &take.plans;
     // A file that failed has no report; its counters say what it holds and
     // what it lost up to the take's end.
@@ -993,7 +1103,7 @@ fn take_manifest(
         (start != i64::MIN).then(|| {
             let start = Time::from_nanos(start);
             let fps = plan.spec.video.fps;
-            let end = file::file_end(start, end.max(start), fps);
+            let end = file::file_end(start, mapped(end).max(start), fps);
             let frames = plan.frames.load(Ordering::SeqCst);
             FileReport {
                 path: plan.spec.path.clone(),
@@ -1031,13 +1141,22 @@ fn take_manifest(
             .to_rfc3339_opts(SecondsFormat::Millis, false),
         host_time_ns: take.epoch.as_nanos(),
         duration_seconds: finished.then(|| {
-            take.end
-                .unwrap_or(take.epoch)
-                .saturating_since(take.epoch)
+            mapped(take.end.unwrap_or(take.epoch))
+                .saturating_since(mapped(take.epoch))
                 .as_secs_f64()
         }),
         markers,
         scenes,
+        pauses: control.map_or_else(Vec::new, |c| {
+            let state = c.state.lock().unwrap();
+            state.clock.as_ref().map_or_else(Vec::new, |clock| {
+                clock
+                    .state
+                    .read()
+                    .unwrap()
+                    .manifest(take.epoch, take.end.unwrap_or(Time::MAX))
+            })
+        }),
         files: plans
             .iter()
             .zip(results)
@@ -1066,7 +1185,7 @@ fn take_manifest(
                         .collect(),
                     start_offset_seconds: (start != i64::MIN).then(|| {
                         Time::from_nanos(start)
-                            .saturating_since(take.epoch)
+                            .saturating_since(mapped(take.epoch))
                             .as_secs_f64()
                     }),
                     duration_seconds: result.as_ref().map(|r| r.duration_seconds),
@@ -1161,6 +1280,18 @@ pub fn interrupted_sessions(folder: &Path, mark: bool) -> Vec<PathBuf> {
             if mark {
                 manifest.status = SessionStatus::Failed;
                 manifest.errors.push(INTERRUPTED.to_string());
+                if let Some(pause) = manifest.pauses.last().filter(|p| p.end_seconds.is_none()) {
+                    let safe = pause.crash_safe_seconds.unwrap_or(0.0);
+                    manifest.errors.push(format!(
+                        "it was interrupted while paused at {:.2} s of recorded time: its files \
+                         hold up to about {safe:.2} s (the last completed {}-second fragment \
+                         before the pause); the {:.2} s recorded after that were still in an \
+                         unfinished fragment and are lost",
+                        pause.time_seconds,
+                        crate::MOVIE_FRAGMENT_SECONDS,
+                        (pause.time_seconds - safe).max(0.0)
+                    ));
+                }
                 write_manifest(&path, &manifest).ok()?;
             }
             Some(path)

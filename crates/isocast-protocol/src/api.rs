@@ -74,6 +74,11 @@ pub enum Method {
     /// new ones (with their own manifest) begin. Returns the new take's
     /// files as [`Started`].
     Split,
+    /// Cut a paused span out of every recording file; streaming continues.
+    /// Returns [`RecordingPause`] once the shared A/V boundary is reached.
+    Pause,
+    /// Resume the same take and files. Returns [`RecordingPause`].
+    Resume,
     /// Mark this moment in the running recording. Returns [`Marked`].
     Marker { label: String },
     /// Reload a browser source's page in the running recording, bypassing
@@ -856,6 +861,8 @@ pub enum Event {
         files: Vec<ExportFile>,
         error: Option<String>,
     },
+    /// A recording crossed a pause/resume boundary; its files stay open.
+    RecordingPaused { recording: RecordingPause },
     HotkeyFired {
         binding: String,
         action: String,
@@ -893,6 +900,7 @@ pub enum EventKind {
     TimelineChanged,
     ExportProgress,
     ExportFinished,
+    RecordingPaused,
     HotkeyFired,
     PreviewCleared,
     VirtualCamera,
@@ -900,7 +908,7 @@ pub enum EventKind {
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 21] = [
+    pub const NAMES: [&str; 22] = [
         "setup_changed",
         "started",
         "status",
@@ -919,6 +927,7 @@ impl EventKind {
         "timeline_changed",
         "export_progress",
         "export_finished",
+        "recording_paused",
         "hotkey_fired",
         "preview_cleared",
         "virtual_camera",
@@ -951,6 +960,7 @@ impl Event {
             Self::TimelineChanged { .. } => EventKind::TimelineChanged,
             Self::ExportProgress { .. } => EventKind::ExportProgress,
             Self::ExportFinished { .. } => EventKind::ExportFinished,
+            Self::RecordingPaused { .. } => EventKind::RecordingPaused,
             Self::HotkeyFired { .. } => EventKind::HotkeyFired,
             Self::PreviewCleared => EventKind::PreviewCleared,
             Self::VirtualCamera { .. } => EventKind::VirtualCamera,
@@ -1805,6 +1815,12 @@ pub enum SourceRun {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LiveStatus {
     pub elapsed_seconds: f64,
+    /// True while recording is paused; elapsed time excludes all pauses.
+    #[serde(default)]
+    pub paused: bool,
+    /// Total time cut out so far, including the current pause.
+    #[serde(default)]
+    pub paused_seconds: f64,
     pub files: Vec<LiveFile>,
     /// Each audio source's level since the last status, as captured
     /// (before gain), and the program mix's ("program").
@@ -1816,6 +1832,14 @@ pub struct LiveStatus {
     /// How the disk holding the files keeps up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<LiveDisk>,
+}
+
+/// Recording-only clock, independent of the live engine and stream clock.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RecordingPause {
+    pub paused: bool,
+    pub elapsed_seconds: f64,
+    pub paused_seconds: f64,
 }
 
 /// How the disk holding a running session's files keeps up.

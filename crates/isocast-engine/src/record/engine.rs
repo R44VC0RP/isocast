@@ -2434,6 +2434,10 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
         epoch,
         end: AtomicI64::new(i64::MAX),
     };
+    let clock = Arc::new(super::pause::RecordingClock::new(
+        epoch,
+        plans.iter().map(|plan| plan.spec.video.fps),
+    ));
     if let Some(duration) = options.duration {
         shared.stop_at(shared.epoch + duration);
     }
@@ -2492,7 +2496,10 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
 
     // Before the start is announced, so a split asked for as soon as it
     // is goes to this recording.
-    control.begin_recording(epoch);
+    control.begin_recording(epoch, clock.clone());
+    if let Some(duration) = options.duration {
+        control.end_recording(epoch + duration);
+    }
     // However the recording ends, a split asked for meanwhile is answered.
     let _finish = FinishRecording(control);
     if let Some(on_start) = options.on_start {
@@ -2524,9 +2531,10 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
                 let (split_tx, split_rx) = mpsc::channel();
                 split_senders.push(split_tx);
                 let done = done_tx.clone();
+                let clock = clock.clone();
                 scope.spawn(move || {
                     platform.real_time_thread();
-                    write_files(writer, plan, index, packets, split_rx, done, shared)
+                    write_files(writer, plan, index, packets, split_rx, done, shared, clock)
                 })
             })
             .collect();
@@ -2573,7 +2581,7 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
                         channels: None,
                     })
                     .collect();
-                let mut status = live_status(&current.plans, levels, shared, now);
+                let mut status = live_status(&current.plans, levels, shared, now, &clock);
                 status.monitor = inner.monitor.lock().unwrap().status();
                 // While frames or audio are being lost, see whether the
                 // disk is why.
@@ -2590,8 +2598,13 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
                 on_status(&status);
             }
             // Markers and scene switches go into the manifest right away.
-            if control.take_changed() {
-                let _ = write(current, SessionStatus::Recording, &[]);
+            if let Some(generation) = control.take_changed() {
+                let result = write(current, SessionStatus::Recording, &[]);
+                let mut state = control.state.lock().unwrap();
+                state.manifest_error = result.err().map(|e| format!("{e:#}"));
+                if state.manifest_error.is_none() {
+                    state.saved_pause_generation = generation;
+                }
             }
             if !all_started
                 && current
@@ -2691,6 +2704,7 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
                         }));
                     }
                     Err(refused) => {
+                        control.state.lock().unwrap().splitting = false;
                         let _ = reply.send(Err(refused));
                     }
                 }
@@ -2852,7 +2866,13 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
         },
         manifest: manifests.last().cloned().unwrap_or_default(),
         takes: manifests,
-        duration_seconds: shared.end().saturating_since(shared.epoch).as_secs_f64(),
+        duration_seconds: clock
+            .state
+            .read()
+            .unwrap()
+            .map(shared.end())
+            .saturating_since(shared.epoch)
+            .as_secs_f64(),
         files,
         captures: counted
             .into_iter()

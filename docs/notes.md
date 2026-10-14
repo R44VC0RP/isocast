@@ -248,6 +248,17 @@ each section. Delete entries that stop being true.
 
 ## Ready for Ryan
 
+- 2026-10-13 — Pause recording (G.3, branch `agent/g3-pause`): while
+  recording, `isocast pause --json`, then `isocast resume --json`. The take
+  and every file stay the same, REC time freezes, and a concurrent stream
+  continues. `live.paused` and `live.paused_seconds` explain the state;
+  stop while paused finalizes, and split/retake ask you to resume first.
+  MCP: `pause_recording` / `resume_recording`. The native app's timer follows
+  the pause state; adding its pause button belongs to the controls work.
+  Hotkeys: `isocast hotkeys set pause 'ctrl+alt+cmd+p' recording.pause_toggle`
+  (also `recording.pause`, `recording.resume`). A crash while paused keeps
+  only whole 2 s fragments before the pause (manifest `crash_safe_seconds`).
+
 - 2026-10-13 — Repo docs and release files (8.1, 8.3, branch
   agent/docs-release): read README.md as a visitor would (the screenshots
   are real, from the Console redesign), then `git diff main --stat`. To
@@ -479,6 +490,22 @@ each section. Delete entries that stop being true.
   Evidence, hardware source and exact retry commands: the **Hosted run**
   section of `/Volumes/IsocastBuild/e2e/scratch/REPORT.md`.
 
+- 2026-10-13: **G.3 pause**, exonbook M4 Max, synthetic only, common
+  benchmark lock and no screen sharing. Final build: 39 finalized lifecycle
+  files and 3 SIGKILL fragments decode cleanly; every finalized file has
+  matching A/V duration and zero reported video/audio drops. Burnt-in
+  frame counters in 21 files show no unexpected repeats/skips, including
+  all 300 joins from 100 pause/resume pairs (9.965 s). Beep/flash edges are
+  within 0.667 ms; 60/30 fps, split after pause, stop during pause, and
+  +/-80 ms audio offsets pass. A concurrent stream retains 1,623 frames,
+  zero drops/reconnects, monotonic PTS with <=17 ms video / <=22 ms audio
+  gaps. One 21.133333 s paused/resumed take becomes one timeline clip.
+  Four interleaved flagship pairs versus frozen main ace7e0a: median daemon
+  CPU 27.9 -> 27.9%, retired instructions 570.539 -> 569.766 M/s, Stop
+  84.5 -> 82.5 ms, zero video/audio drops both; all 24 MOVs match durations,
+  counts and decode. Footprint 351.5 -> 362.5 MiB, overlapping ranges
+  351–385 / 351–376; no memory-saving claim. Evidence and full numbers:
+  `/Volumes/IsocastBuild/g3-pause/scratch/REPORT.md`.
 - 2026-10-13 (engine-e2e): local M5 Max and isocast-m2-a each pass 11/11
   available scenarios, with explicit pause/bug_report skips on a619986.
   Program and two ISO files: each 300 frames, 5.000 s video/audio, zero
@@ -1139,6 +1166,40 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-13: **G.3 recording-only cut clock.** All writers share one
+  clock; capture, composition, mix and streaming keep host time. Cuts land
+  on 1/gcd(1e9, 48000, every recorded fps), after the newest inspected
+  packet plus a 5 ms fade allowance. The writer read lock and change write
+  lock prevent retroactive edits even with future-stamped audio. Audio
+  chunks straddling cuts are sliced on the same sample boundary, with 5 ms
+  fades in place; no native encoder, fragment or crash-safety policy changes.
+  Markers/switches map onto the compact take clock; paused markers share the
+  frozen playhead. Split/retake are refused while paused; stop closes an
+  open manifest pause. `--seconds` keeps its existing wall-clock timeout.
+  Pauses are additive in manifest v1 (old files default to an empty list).
+  A pause/resume reply waits for the manifest checkpoint and its cut time.
+  `state: recording` continues to mean an active take; `live.paused` says
+  whether its clock is frozen. The UI timer hook consumes that same state.
+
+- 2026-10-13: **G.3 review fixes.** (F2) The G.5 ids `recording.pause`,
+  `recording.resume`, `recording.pause_toggle` are wired to `Method::Pause` /
+  `Method::Resume`; toggle reads the recording clock's `paused`. (F3) A pause
+  is no longer clamped to 1 s after the start nor refused while the first
+  take's epoch is still ahead (only a later take still starting, from a
+  split/retake, is refused). (F5) The daemon state mutex is released before
+  taking the cut lock (a recording-epoch check guards against a new
+  recording in between), and writers drop the cut read guard before native
+  appends (cut-touching audio is staged first; the common path still borrows).
+  (F1) Kept the 2 s fragment bound and documented it: the open pause carries
+  `crash_safe_seconds` and an interrupted manifest says how much was lost.
+  Rejected alternatives, measured: AVAssetWriter can't change
+  `movieFragmentInterval` after writing starts ("Cannot call method when
+  status is 1"), `flushSegment` only works in delegate segment mode (which is
+  passthrough-only, so it would mean replacing the encoder pipeline), and
+  padding past the fragment boundary would put paused time back into the
+  file. A real fix needs a writer that encodes itself and writes segments.
+  (F4) Documented the cut steps and the pending-boundary refusal; no
+  coalescing. (F6) Pre-existing 30 fps ISO duplicate/skip, not G.3: below.
 - 2026-10-13: **Visual check on pull requests (8.4).** Split in two
   workflows because one can't both run untrusted code and hold write
   tokens or secrets: visual.yml (`pull_request`, read-only token, no
@@ -3088,6 +3149,32 @@ each section. Delete entries that stop being true.
   sessions mid-run, so every call now gets a fresh session label. Images
   are quantized with libimagequant (via uv) to about a third of their size
   without visible banding.
+- 2026-10-13 (G.3 review): AVAssetWriter writes a movie fragment only when
+  a sample at or past the fragment's end (on media time) is appended, never
+  on wall time. Native probe on exonbook, H.264, 2 s interval, real-time
+  input: appending through 3.7 s or exactly 4.0 s then idling 8 s leaves
+  120 frames recoverable; appending one frame at 4.0 s writes the 2–4 s
+  fragment at once (240 frames). So any idle writer (a pause, a stalled
+  source) holds up to one fragment in memory. Probe source:
+  /Volumes/IsocastBuild/g3-pause/scratch/f1probe.
+- 2026-10-13 (G.3 review, F6, owner: iso_frames): a 30 fps ISO on a 60 fps
+  engine sometimes alternates duplicated and skipped source frames (counter
+  steps 0, 2, 0, 2…) while reporting 0 dropped and 0 repeated. Reproduced on
+  frozen main ace7e0a without pauses (reviewer: 2 of 4 takes); likely a
+  phase tie in ISO frame selection. It also blurs pause-join counter checks
+  on 30 fps files (a join can read expected+1), so G.3 join checks use the
+  60 fps files.
+- 2026-10-13 (G.3 verification): a looping 997 Hz WAV with `offset_ms =
+  -80` has short silences in the **program mix**, although both ISO audio
+  tracks are continuous and reports say zero dropouts. Reproduced with no
+  pauses on frozen main ace7e0a and G.3: roughly six 15–57 ms quiet spans/s
+  in each program, e.g. 4.016–4.062 s in both. This is upstream of the new
+  recording cut/fade (which begins only 5 ms before the cut), not introduced
+  or repaired by G.3. Don't interpret zero reported dropouts as proof of
+  continuous media audio with a negative offset. Baseline/candidate files
+  and results: exonbook `~/isocast-scratch/g3-pause/offset-control/`;
+  summary `/Volumes/IsocastBuild/g3-pause/scratch/offset-control.log`.
+
 - 2026-10-13 (engine-e2e): `start`/`split` return media paths, not the
   manifest; match its files. A split reply precedes `begins_at`: a Stop
   before that boundary cancels the pending take. Pixel averages need FFmpeg

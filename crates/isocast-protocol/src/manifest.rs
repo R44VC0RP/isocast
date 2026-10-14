@@ -34,8 +34,26 @@ pub struct SessionManifest {
     /// start of the session.
     #[serde(default)]
     pub scenes: Vec<SceneChange>,
+    /// Spans cut out of this take. Old manifests have no pauses.
+    #[serde(default)]
+    pub pauses: Vec<Pause>,
     /// Problems during recording.
     pub errors: Vec<String>,
+}
+
+/// One pause: start/end on the uncut take clock, and the resulting join on
+/// the saved media timeline. An open pause has no end until resume or stop.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Pause {
+    pub start_seconds: f64,
+    pub end_seconds: Option<f64>,
+    pub time_seconds: f64,
+    /// While the pause is open: the saved-timeline time up to which the
+    /// files are crash-safe. Content between this and `time_seconds` sits in
+    /// an unfinished movie fragment until recording resumes or stops, so a
+    /// crash during the pause loses it (at most one 2-second fragment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crash_safe_seconds: Option<f64>,
 }
 
 /// A labelled moment on the session timeline.

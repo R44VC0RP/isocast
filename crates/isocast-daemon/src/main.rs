@@ -1105,6 +1105,8 @@ impl Daemon {
         let shutdown = request.method == Method::Shutdown;
         let result = match request.method {
             Method::Status => to_json(self.status()),
+            Method::Pause => self.set_paused(true).and_then(to_json),
+            Method::Resume => self.set_paused(false).and_then(to_json),
             Method::Devices => devices().map_err(failed).and_then(to_json),
             Method::Get(params) => to_json(self.get(params.unwrap_or_default())),
             Method::Plan(change) => {
@@ -1745,6 +1747,62 @@ impl Daemon {
         }
     }
 
+    /// Shared handler for CLI/MCP Pause and Resume, and the hotkey
+    /// actions recording.pause / recording.resume / recording.pause_toggle.
+    fn set_paused(&self, paused: bool) -> Result<isocast_protocol::api::RecordingPause, RpcError> {
+        let wrong = |message: String| RpcError {
+            code: RpcError::WRONG_STATE,
+            message,
+        };
+        let (control, stop, id, epoch) = {
+            let state = self.state.lock().unwrap();
+            let session = state
+                .session
+                .as_ref()
+                .ok_or_else(|| wrong("recording: idle; valid action: start".into()))?;
+            if session.stop.load(Ordering::SeqCst) || session.files.lock().unwrap().is_none() {
+                return Err(wrong(
+                    "recording: starting or stopping; wait for recording state".into(),
+                ));
+            }
+            let control = state.control().expect("recording engine");
+            let epoch = control
+                .recording_epoch()
+                .expect("announced recording clock");
+            (control, session.stop.clone(), session.id, epoch)
+        };
+        // Never hold the daemon state while waiting for the recording clock.
+        // Stop/status and unrelated outputs must remain independently usable.
+        let (at, generation) = control.set_paused(paused, now(), epoch).map_err(wrong)?;
+        thread::sleep(at.saturating_since(now()));
+        let deadline = std::time::Instant::now() + START_TIMEOUT;
+        while !control
+            .pause_saved(generation)
+            .map_err(|message| RpcError {
+                code: RpcError::FAILED,
+                message,
+            })?
+        {
+            if stop.load(Ordering::SeqCst) || std::time::Instant::now() >= deadline {
+                return Err(wrong(
+                    "recording.pauses: stopped or timed out waiting for the manifest checkpoint"
+                        .into(),
+                ));
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        let state = self.state.lock().unwrap();
+        if stop.load(Ordering::SeqCst) || state.session.as_ref().is_none_or(|s| s.id != id) {
+            return Err(wrong("recording: stopped during pause/resume".into()));
+        }
+        let recording = control.pause_status(now()).expect("recording clock");
+        drop(state);
+        self.publish(Event::RecordingPaused {
+            recording: recording.clone(),
+        });
+        Ok(recording)
+    }
+
     /// Split the running recording into a new take (at `timing`).
     fn split_take(&self, timing: SplitTiming) -> Result<SplitTake, SplitFailed> {
         let refused = |ending: bool, code: i64, message: &str| SplitFailed {
@@ -1988,7 +2046,7 @@ impl Daemon {
 
     fn status(&self) -> Status {
         let state = self.state.lock().unwrap();
-        let (engine, live, files) = match &state.session {
+        let (engine, mut live, files) = match &state.session {
             None => (EngineState::Idle, None, Vec::new()),
             Some(session) => match session.files.lock().unwrap().clone() {
                 None => (EngineState::Starting, None, Vec::new()),
@@ -1999,6 +2057,13 @@ impl Daemon {
                 ),
             },
         };
+        if let (Some(live), Some(control)) = (&mut live, state.control())
+            && let Some(recording) = control.pause_status(now())
+        {
+            live.paused = recording.paused;
+            live.elapsed_seconds = recording.elapsed_seconds;
+            live.paused_seconds = recording.paused_seconds;
+        }
         let info = engine_info(&state);
         let (collection, profile) = state.file.current_names(state.setup.as_ref());
         // With no setup yet, the folder a new one records to (`setup

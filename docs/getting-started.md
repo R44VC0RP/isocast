@@ -80,6 +80,44 @@ Files are written in 2-second fragments, so even a crash leaves them
 playable. `isocast split` starts a new take without stopping anything;
 `isocast marker "intro done"` marks a moment.
 
+`isocast pause` and `isocast resume` keep the same take and files. The paused
+span is removed from the program and every ISO, including their audio;
+streaming and preview continue. `isocast status --json` reports `live.paused`,
+`live.paused_seconds` and recorded `live.elapsed_seconds` (excluding pauses).
+Both commands support `--json`; MCP exposes `pause_recording` and
+`resume_recording`. Watchers receive `recording_paused` on either change.
+
+A marker during a pause lands at the frozen recording playhead. Resume
+before splitting or retaking; stopping while paused finalizes the existing
+files. An explicit `start --seconds N` remains a wall-clock deadline, so it
+can stop a paused recording. A paused/resumed take adds one timeline clip,
+with only its recorded duration. The manifest's `pauses` list gives each
+pause's uncut `start_seconds` / `end_seconds` and its `time_seconds` join on
+the saved take; an unfinished pause has a null end until resume or stop.
+
+Cuts share an exact frame/sample boundary across all files: the smallest
+step every file's frame rate and the 48 kHz audio share, so 50 ms when all
+files are 60 fps, 100 ms with a 30 fps file, 250 ms with 24 fps and up to
+1 s with unusual rates. Pause and resume return after that boundary and the
+manifest checkpoint, so a pause can take up to one step to land and 100
+pause/resume pairs take about 10 s at 60 fps (20 s with a 30 fps file). A
+second pause or resume sent before the previous one has replied is refused
+("a pause/resume boundary is pending"); retry after the reply. Pausing works
+from the take's first frames: one asked for right as `start` returns cuts at
+about 0.1 s. Audio fades to and from silence over 5 ms at the join to avoid
+clicks, without shifting samples or changing the duration.
+
+**Crash safety while paused.** Files are written in 2-second fragments of
+recorded time, and a fragment reaches the disk only when recording passes
+its end. While paused, nothing new is recorded, so the last fragment before
+the pause stays unfinished: if isocastd is killed or the Mac loses power
+during a pause, the files keep everything up to the last whole 2 s of
+recorded time before the pause, not the up-to-2 s after it. The open pause in
+the manifest says exactly how much is safe (`crash_safe_seconds`, for example
+2.0 for a pause at 3.7 s), and when the next recording in that folder marks
+the take as failed, its `errors` say how much was lost. Resuming or stopping
+makes that tail safe again as usual.
+
 To build one video from takes, open a timeline first:
 `isocast timeline new "My video"`. Every take that finishes (`isocast stop`,
 or a split) then lands at its end. `isocast retake` records the last take

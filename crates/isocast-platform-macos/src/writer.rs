@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use block2::RcBlock;
-use isocast_engine::{FileWriter, SAMPLE_RATE, Time, VideoTrackSpec, WriterSpec};
+use isocast_engine::{
+    FileWriter, MOVIE_FRAGMENT_SECONDS, SAMPLE_RATE, Time, VideoTrackSpec, WriterSpec,
+};
 use isocast_protocol::{Codec, Container};
 use objc2::Message;
 use objc2::exception;
@@ -60,7 +62,7 @@ const KEYFRAME_INTERVAL_SECONDS: f64 = 1.0;
 /// Files are written in fragments of this many seconds, so a crash or a
 /// killed process loses at most about this much: everything before the
 /// last fragment stays playable.
-const FRAGMENT_SECONDS: i64 = 2;
+const FRAGMENT_SECONDS: i64 = MOVIE_FRAGMENT_SECONDS;
 
 static PRIORITY_OUTPUTS: AtomicUsize = AtomicUsize::new(0);
 static PRIORITY_PRESSURE: AtomicUsize = AtomicUsize::new(0);

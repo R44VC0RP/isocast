@@ -1266,6 +1266,32 @@ impl Isocast {
     }
 
     #[tool(
+        description = "Pause the same recording files on a shared video/audio boundary. Streaming continues. Markers land at the paused playhead; resume before split or retake.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn pause_recording(&self) -> Result<Json<isocast_protocol::api::RecordingPause>, String> {
+        self.call(Method::Pause).await
+    }
+
+    #[tool(
+        description = "Resume a paused recording into its existing files. Paused time is cut out of the files and recorded in the manifest.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn resume_recording(
+        &self,
+    ) -> Result<Json<isocast_protocol::api::RecordingPause>, String> {
+        self.call(Method::Resume).await
+    }
+
+    #[tool(
         description = "Split the recording into a new take at the next whole second without \
                        stopping any device: the current files end there and new files, with \
                        their own manifest, begin. Returns the new take's files.",

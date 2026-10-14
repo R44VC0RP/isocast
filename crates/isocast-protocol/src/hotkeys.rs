@@ -395,11 +395,6 @@ pub fn catalogue() -> Catalogue {
     fn action<T: JsonSchema>(id: &str, label: &str, group: &str) -> Action {
         let unavailable = if id == "timeline.clear" {
             Some("no timeline_clear method yet; remove individual clips or create a new timeline")
-        } else if matches!(
-            id,
-            "recording.pause" | "recording.resume" | "recording.pause_toggle"
-        ) {
-            Some("reserved for G.3 pause recording")
         } else {
             None
         };

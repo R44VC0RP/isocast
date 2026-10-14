@@ -609,7 +609,7 @@ native app; each verified against OBS's behaviour on a test Mac.
     camera clients, full provisioned-host capture and replacement stay in G.1b.
 - [ ] **G.2 Replay buffer.** Keep the last N seconds of the program (and
   ISOs) in memory; save on command or hotkey.
-- [ ] **G.3 Pause recording.** Pause/resume a take without a new file;
+- [x] **G.3 Pause recording.** Pause/resume a take without a new file;
   A/V stay in sync; the manifest records the pauses.
 - [ ] **G.4 Projectors and multiview.** Fullscreen or windowed preview,
   program, scene or source on any display; a multiview grid.
@@ -2267,6 +2267,26 @@ One line per finished task, newest last.
   unchanged; isocast-m2-b: an export at 965 MiB free beside a recording
   keeping 1 GB refused, the recording ran its full 30.0 s; with room, an
   export to the same disk while recording, 0 drops.
+- G.3 (2026-10-13): pause/resume on the method table, CLI, MCP and events;
+  one sample/frame-aligned cut clock for every recording file, manifest
+  pauses and compact marker/timeline times, stop during pause, frozen REC
+  status/timer. M4 synthetic verification: 39 finalized lifecycle MOVs and
+  3 killed fragments decode; frame counters exact at every join (including
+  100 pause/resume pairs in 9.965 s), beep/flash within 0.667 ms, concurrent
+  stream zero drops. Four flagship A/B pairs vs ace7e0a: CPU 27.9/27.9%,
+  zero drops both, all 24 files duration/count/decode matched. fmt, release
+  clippy all-targets and 179 existing tests pass. G.5 reserved action hooks
+  documented; report at /Volumes/IsocastBuild/g3-pause/scratch/REPORT.md.
+- G.3 review fixes (2026-10-13, after merging main): pause hotkeys wired
+  (recording.pause/resume/pause_toggle, fired through real focused input on
+  exonbook); first pause allowed from the take's start (cut at 0.1 s, was
+  refused then 1.0 s); daemon state not held while waiting for the cut lock
+  (status p99 3.3 ms during 4K-overload cuts). Crash-while-paused keeps the
+  2 s fragment bound (AVAssetWriter can't flush or change its interval in
+  file mode; probed), now stated in the manifest (`crash_safe_seconds`) and
+  the interruption note: kill -9 10 s into a pause at 3.7 s recovers 2.0 s,
+  as the manifest says. Overhead A/B vs the merge, 3 runs: CPU 29.7 → 28.8%,
+  same MB/min. e2e 12 pass (pause included), 1 skip (bug_report not on main).
 - G.5 engine (2026-10-13): 35 typed actions, per-profile hotkeys, Carbon
   global press/release and permission-aware media fallback, CLI/MCP and
   events. Test Mac: recording/split (60+5 frames), PTT audio (110 frames;

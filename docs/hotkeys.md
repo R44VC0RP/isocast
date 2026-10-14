@@ -166,11 +166,20 @@ each screenshot). Failed actions emit a warning and a `hotkey_fired` event
 with `error`; successful ones have `error: null`. Events include binding id,
 action id, `source` (`global` or `focused`) and `phase` (`press` or `release`).
 
-Pause ids remain bindable but explicitly unavailable: `recording.pause`,
-`recording.resume`, `recording.pause_toggle` (G.3). `timeline.clear` is also
-still reserved because there is no matching method; remove individual clips
-or create a new timeline instead. Catalogue entries and firing errors state
-the reason.
+`recording.pause` and `recording.resume` call the `pause` / `resume`
+methods; `recording.pause_toggle` resumes when the recording is paused and
+pauses otherwise (read from the recording's own clock, as `status` reports
+`live.paused`). All take `{}`. They act only on a running recording: idle,
+starting or stopping, a duplicate pause, or a toggle pressed while the
+previous cut is still pending (at most one cut step: 50 ms when every file
+is 60 fps, 100 ms with a 30 fps file, up to 1 s with odd rates) fails like
+the method does, with a warning and a `hotkey_fired` error. The streaming
+output is never paused. See [getting-started.md](getting-started.md) for what
+a pause does to the files.
+
+`timeline.clear` is still reserved because there is no matching method;
+remove individual clips or create a new timeline instead. Its catalogue entry
+and firing error state the reason.
 
 ## API and client integration
 

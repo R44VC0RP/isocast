@@ -188,6 +188,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Pause this take without closing its files; streaming continues.
+    Pause {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resume the paused take into the same files.
+    Resume {
+        #[arg(long)]
+        json: bool,
+    },
     /// Show whether isocastd is recording, with live counters.
     Status {
         #[arg(long)]
@@ -738,6 +748,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             json,
         } => start(setup.as_deref(), &sources, seconds, folder, json),
         Command::Stop { json } => stop(json),
+        Command::Pause { json } => pause(true, json),
+        Command::Resume { json } => pause(false, json),
         Command::Status { json } => status(json),
         Command::Get { resolved, json } => get(resolved, json),
         Command::Permissions {
@@ -1628,7 +1640,16 @@ fn status(json: bool) -> Result<ExitCode> {
         (EngineState::Starting, _) => println!("Starting"),
         (EngineState::Recording, None) => println!("Recording"),
         (EngineState::Recording, Some(live)) => {
-            println!("Recording for {:.0} s", live.elapsed_seconds);
+            println!(
+                "{} for {:.2} s; {:.2} s paused",
+                if live.paused {
+                    "Paused; recorded"
+                } else {
+                    "Recording"
+                },
+                live.elapsed_seconds,
+                live.paused_seconds
+            );
             for file in &live.files {
                 println!(
                     "  {}  {} frames, {} dropped, {} audio dropouts",
@@ -1653,6 +1674,32 @@ fn status(json: bool) -> Result<ExitCode> {
         for file in &status.files {
             println!("  {}", file.display());
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn pause(paused: bool, json: bool) -> Result<ExitCode> {
+    let Some(mut client) = Client::connect()? else {
+        bail!("recording: idle; start a recording first");
+    };
+    let recording: isocast_protocol::api::RecordingPause = client.call(if paused {
+        Method::Pause
+    } else {
+        Method::Resume
+    })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&recording)?);
+    } else {
+        println!(
+            "{} at {:.2} s; {:.2} s paused",
+            if recording.paused {
+                "Paused"
+            } else {
+                "Resumed"
+            },
+            recording.elapsed_seconds,
+            recording.paused_seconds
+        );
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -2647,6 +2694,16 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                 );
             }
             Event::Warning { message } => println!("warning: {message}"),
+            Event::RecordingPaused { recording } => println!(
+                "{} at {:.2} s; {:.2} s paused",
+                if recording.paused {
+                    "paused"
+                } else {
+                    "resumed"
+                },
+                recording.elapsed_seconds,
+                recording.paused_seconds
+            ),
             Event::Stream { stream } => {
                 print!("stream: ");
                 print_stream_lines(&stream);

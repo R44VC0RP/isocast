@@ -537,6 +537,19 @@ impl Daemon {
                     seconds: None,
                 })),
                 "recording.stop" => Method::Stop,
+                "recording.pause" => Method::Pause,
+                "recording.resume" => Method::Resume,
+                "recording.pause_toggle" => {
+                    let control = self.state.lock().unwrap().control();
+                    if control
+                        .and_then(|control| control.pause_status(crate::now()))
+                        .is_some_and(|recording| recording.paused)
+                    {
+                        Method::Resume
+                    } else {
+                        Method::Pause
+                    }
+                }
                 "recording.toggle" => {
                     if self.state.lock().unwrap().session.is_some() {
                         Method::Stop

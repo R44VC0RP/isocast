@@ -69,10 +69,11 @@ struct TransitionDialog {
 /// elapsed seconds: kept between readings (unless it moves by more than
 /// 1.5 s), so the timer ticks on its own and doesn't jump.
 #[derive(Default)]
-struct Since(Cell<Option<Instant>>);
+struct Since(Cell<Option<Instant>>, Cell<Option<f64>>);
 
 impl Since {
     fn set(&self, elapsed: Option<f64>) {
+        self.1.set(None);
         let Some(elapsed) = elapsed else {
             self.0.set(None);
             return;
@@ -90,7 +91,15 @@ impl Since {
     }
 
     fn seconds(&self) -> u64 {
+        if let Some(seconds) = self.1.get() {
+            return seconds.max(0.0) as u64;
+        }
         self.0.get().map_or(0, |at| at.elapsed().as_secs())
+    }
+
+    fn pause(&self, elapsed: f64) {
+        self.0.set(None);
+        self.1.set(Some(elapsed));
     }
 
     /// Until just after its next whole second.
@@ -579,6 +588,9 @@ impl Controls {
         let live = s.status.as_ref().and_then(|x| x.live.as_ref());
         self.recording
             .set(recording.then(|| live.map_or(0.0, |l| l.elapsed_seconds)));
+        if recording && let Some(live) = live.filter(|l| l.paused) {
+            self.recording.pause(live.elapsed_seconds);
+        }
         let files: &[LiveFile] = live.map_or(&[], |l| &l.files);
         let dropped: u64 = files.iter().map(|f| f.dropped_frames).sum();
         let gaps: u64 = files.iter().map(|f| f.audio_dropouts).sum();

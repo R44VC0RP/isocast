@@ -9,6 +9,7 @@ use std::thread;
 
 use anyhow::{Context, Result, anyhow};
 
+use super::pause::RecordingClock;
 use super::{
     AUDIO_CHUNK, AUDIO_JITTER, FilePlan, MAX_PENDING_AUDIO, Packet, SPLIT_AUDIO_WAIT, Shared,
 };
@@ -42,6 +43,7 @@ pub(super) fn write_files<W: FileWriter>(
     splits: Receiver<Split<W>>,
     done: Sender<Done>,
     shared: &Shared,
+    clock: Arc<RecordingClock>,
 ) {
     thread::scope(|scope| {
         // Finishing a file can take a while (writing its final movie
@@ -59,7 +61,7 @@ pub(super) fn write_files<W: FileWriter>(
             });
         };
         let mut take = 0;
-        let mut file = OpenFile::new(writer, plan);
+        let mut file = OpenFile::new(writer, plan, clock.clone());
         let mut next: Option<(Time, usize, OpenFile<W>)> = None;
         // The file a split ended, kept open for its audio up to the split,
         // which can arrive after the next take's first frame.
@@ -72,7 +74,7 @@ pub(super) fn write_files<W: FileWriter>(
                 next = Some((
                     split.at,
                     split.take,
-                    OpenFile::new(split.writer, split.plan),
+                    OpenFile::new(split.writer, split.plan, clock.clone()),
                 ));
             }
             let end = shared.end();
@@ -146,7 +148,8 @@ pub(super) fn write_files<W: FileWriter>(
                     // adding one to the last PTS can be 1 ns short of the
                     // same boundary computed from the file's start.
                     pts.ticks_since(start, file.fps()) + 1
-                        >= file_end(start, end, file.fps()).ticks_since(start, file.fps())
+                        >= file_end(start, clock.state.read().unwrap().map(end), file.fps())
+                            .ticks_since(start, file.fps())
                 })
                 && file.audio_complete(end)
             {
@@ -199,10 +202,11 @@ struct OpenFile<W: FileWriter> {
     /// Latest video delivery, including a frame the encoder refused. Once
     /// the final slot was handled, waiting cannot recover that dropped slot.
     last_video: Option<Time>,
+    clock: Arc<RecordingClock>,
 }
 
 impl<W: FileWriter> OpenFile<W> {
-    fn new(writer: W, plan: Arc<FilePlan>) -> Self {
+    fn new(writer: W, plan: Arc<FilePlan>, clock: Arc<RecordingClock>) -> Self {
         let tracks = plan
             .spec
             .audio
@@ -222,6 +226,7 @@ impl<W: FileWriter> OpenFile<W> {
             frames: 0,
             recent: VecDeque::new(),
             last_video: None,
+            clock,
         }
     }
 
@@ -232,6 +237,18 @@ impl<W: FileWriter> OpenFile<W> {
     /// Append a frame; frames at or after `end`, or before the file's start,
     /// are left out.
     fn video(&mut self, frame: &W::Frame, pts: Time, end: Time) -> Result<()> {
+        let clock = self.clock.clone();
+        let cuts = clock.state.read().unwrap();
+        clock.inspected(pts.add_ticks(1, self.fps()));
+        if cuts.paused(pts) {
+            return Ok(());
+        }
+        let (pts, end) = (cuts.map(pts), cuts.map(end));
+        drop(cuts);
+        self.video_mapped(frame, pts, end)
+    }
+
+    fn video_mapped(&mut self, frame: &W::Frame, pts: Time, end: Time) -> Result<()> {
         self.last_video = Some(pts);
         if pts >= end || self.start.is_some_and(|start| pts < start) {
             return Ok(());
@@ -262,11 +279,35 @@ impl<W: FileWriter> OpenFile<W> {
 
     /// Append audio to `track`, up to `end`.
     fn audio(&mut self, track: usize, samples: &Arc<[f32]>, pts: Time, end: Time) -> Result<()> {
+        let clock = self.clock.clone();
+        let cuts = clock.state.read().unwrap();
+        let channels = self.tracks[track].channels;
+        let frames = (samples.len() / channels) as u64;
+        clock.inspected(pts.add_ticks(frames, SAMPLE_RATE));
+        let end = cuts.map(end);
+        if let Some(pts) = cuts.audio_passthrough(pts, frames) {
+            drop(cuts);
+            return self.audio_mapped(track, samples, pts, end);
+        }
+        let mut parts = Vec::new();
+        cuts.audio(samples, channels, pts, |samples, pts, cut_end| {
+            parts.push((samples.to_vec(), pts, end.min(cut_end)));
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .expect("staging audio cannot fail");
+        drop(cuts);
+        for (samples, pts, end) in parts {
+            self.audio_mapped(track, &samples, pts, end)?;
+        }
+        Ok(())
+    }
+
+    fn audio_mapped(&mut self, track: usize, samples: &[f32], pts: Time, end: Time) -> Result<()> {
         let Some(start) = self.start else {
             if self.pending_audio.len() == MAX_PENDING_AUDIO {
                 self.pending_audio.remove(0);
             }
-            self.pending_audio.push((track, samples.clone(), pts));
+            self.pending_audio.push((track, samples.into(), pts));
             return Ok(());
         };
         let end = file_end(start, end, self.fps());
@@ -280,6 +321,7 @@ impl<W: FileWriter> OpenFile<W> {
     /// `Time::MAX`, after its last frame. `failure` is an earlier error,
     /// reported after finishing so that what was written stays playable.
     fn finish(mut self, end: Time, failure: Result<()>) -> Result<FileReport> {
+        let end = self.clock.state.read().unwrap().map(end);
         let path = self.plan.spec.path.clone();
         let fps = self.fps();
         let Some(start) = self.start else {
@@ -333,7 +375,12 @@ impl<W: FileWriter> OpenFile<W> {
         })?;
         padded.with_context(|| format!("recording {} stopped early", path.display()))?;
 
-        let epoch = Time::from_nanos(self.plan.epoch.load(Ordering::SeqCst));
+        let epoch = self
+            .clock
+            .state
+            .read()
+            .unwrap()
+            .map(Time::from_nanos(self.plan.epoch.load(Ordering::SeqCst)));
         Ok(FileReport {
             path,
             take: self.plan.take,
@@ -351,6 +398,7 @@ impl<W: FileWriter> OpenFile<W> {
     /// Every audio track has reached `end` (rounded up to a frame
     /// boundary).
     fn audio_complete(&self, end: Time) -> bool {
+        let end = self.clock.state.read().unwrap().map(end);
         let Some(start) = self.start else {
             return false;
         };
