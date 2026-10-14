@@ -1153,6 +1153,12 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
   - [x] **8.2f Designed installer DMG** (Ryan, 2026-10-14: "ship it"). The
     Paper "G · Simple" background (black, amber arrow, cropped wordmark) via
     pinned dmgbuild in release.sh and release-finalize.py; no Install.txt.
+  - [x] **8.2h Auto-update (GitHub #40).** Sparkle 2.10.0 (pinned, hash
+    verified, not vendored): Isocast › Check for Updates…, daily check with
+    a Settings › General toggle, EdDSA-signed appcast beside the notarized
+    DMG in the draft; never installs during a recording/stream/export.
+    Proved end to end on isocast-m2-a with a throwaway key; the real key is
+    Ryan's (docs/releasing.md step 5).
 - [x] **8.3** Docs: getting started, setup reference, MCP tools, plugins.
   (With the user-facing README and its screenshots, licences and
   THIRD_PARTY_NOTICES, and the .github templates.)
@@ -3164,3 +3170,21 @@ One line per finished task, newest last.
   invisible black ones); rebuilt with release.sh and checked in Finder on
   isocast-m2-a, Light and Dark: centred under each icon (x 180/459, y
   293-304), no overlap with Finder's labels, selection pill or wordmark.
+- 8.2h (2026-10-14): Sparkle 2 auto-update. On isocast-m2-a, update-test
+  builds 0.0.90 -> 0.0.91 (Developer ID, throwaway key, local feed):
+  offered, downloaded, EdDSA-verified, installed and relaunched; the new
+  app's engine reports 0.0.91 build 91. A scheduled check waited while
+  recording and ran 1 s after stop; Install and Relaunch waited 30-78 s of
+  recording and installed within 1 s of stop; Keep Recording quit replaced
+  the bundle under a recording engine and the next launch restarted it once
+  idle. All 5 takes decode fully with frame counts matching duration at 30
+  fps. Tampered feed and tampered DMG refused; user-defaults feed override
+  cleared and never fetched. Screenshots and REPORT in
+  /Volumes/IsocastBuild/auto-update/scratch.
+- 8.2h fix round 1 (2026-10-14): review findings fixed: engine method
+  shutdown_if_idle (atomic; restart and updates use it; race repro 3 cuts in
+  122 restarts before, 0 in 220 after), abort recovery (induced installer
+  death recovered the engine in 60-63 s), virtual camera counts as busy, no
+  error toast on the stale-engine restart, quit question names a staged
+  update, docs: EdDSA key as sole root of trust, full releases only, dry run
+  without the key. Re-checked on isocast-m2-a; 6 takes intact.

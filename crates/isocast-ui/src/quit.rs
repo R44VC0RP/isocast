@@ -106,25 +106,30 @@ fn show(app: &Rc<App>, now: Running) {
         _ => ("streaming", "Keep Streaming"),
     };
     prompt.set_heading(format!("You are currently {what}.").into());
-    prompt.set_detail(
-        match (now.recording, now.streaming) {
-            (true, true) => {
-                "Stop and Quit saves the recording, ends the stream and closes Isocast. \
+    let detail: &str = match (now.recording, now.streaming) {
+        (true, true) => {
+            "Stop and Quit saves the recording, ends the stream and closes Isocast. \
                  Keep Both Going closes the window and isocastd carries on; open Isocast \
                  again to see them and stop."
-            }
-            (true, false) => {
-                "Stop and Quit saves the recording and closes Isocast. Keep Recording \
+        }
+        (true, false) => {
+            "Stop and Quit saves the recording and closes Isocast. Keep Recording \
                  closes the window and isocastd carries on recording; open Isocast again \
                  to see it and stop."
-            }
-            _ => {
-                "Stop and Quit ends the stream and closes Isocast. Keep Streaming closes \
-                 the window and isocastd stays live; open Isocast again to see it and stop."
-            }
         }
-        .into(),
-    );
+        _ => {
+            "Stop and Quit ends the stream and closes Isocast. Keep Streaming closes \
+                 the window and isocastd stays live; open Isocast again to see it and stop."
+        }
+    };
+    let mut detail = detail.to_string();
+    if crate::update::staged() {
+        detail.push_str(
+            " A downloaded Isocast update installs as Isocast closes; isocastd keeps \
+             going on the version it runs, and the next launch restarts it once it is idle.",
+        );
+    }
+    prompt.set_detail(detail.into());
     prompt.set_keep_text(keep.into());
     prompt.set_stopping(false);
     if window.global::<Ui>().get_dialog() != "quit" {

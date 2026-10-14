@@ -882,7 +882,9 @@ impl Isocast {
                        fps opened at, received_fps measured), isocastd's CPU use \
                        (cpu_percent, of all cores), the recording disk's free space \
                        (recording_free_bytes) and how fast the program file fills it at most \
-                       (program_bytes_per_second).",
+                       (program_bytes_per_second), and which isocastd answered (daemon: \
+                       version, build, commit, executable, pid; an engine left running from \
+                       before an app update reports the old build).",
         annotations(read_only_hint = true)
     )]
     async fn get_status(&self) -> Result<Json<Status>, String> {
@@ -1201,7 +1203,8 @@ impl Isocast {
     #[tool(
         description = "Restart isocastd, which only sees a permission granted in System \
                        Settings (screen recording, above all) once restarted; the live setup \
-                       is kept. Refused while recording.",
+                       is kept. Refused, atomically by isocastd, while it records, streams, \
+                       exports or feeds the virtual camera.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,

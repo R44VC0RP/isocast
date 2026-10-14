@@ -152,6 +152,14 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-14 (8.2h auto-update, #40): the Sparkle update key. Until
+  `scripts/sparkle/public-ed-key.txt` holds the real public key, every
+  Developer ID `release.sh` build (and the Release workflow's source check)
+  stops with "no Sparkle public key"; `--ad-hoc` builds still work, without
+  an updater. Ryan runs docs/releasing.md step 5 once (generate_keys,
+  commit the public key, `gh secret set SPARKLE_ED_PRIVATE_KEY`), which
+  blocks the first hosted run (step 6). Retry check:
+  `scripts/sparkle/sparkle.sh public-key && gh secret list --repo R44VC0RP/isocast --env release`.
 - 2026-10-14 (8.2e release workflow): the `release` environment exists
   (reviewer R44VC0RP, main and v* only). Remaining: its six secrets
   (docs/releasing.md steps 2–4), then one real hosted run. Tracked in GitHub
@@ -293,6 +301,12 @@ each section. Delete entries that stop being true.
 
 ## Ready for Ryan
 
+- 2026-10-14 (8.2h auto-update, #40): branch `ui/auto-update`. Testers
+  on 0.0.1 have no updater: they install 0.0.2 from its DMG once; from
+  then on each published release reaches them (daily check or Isocast ›
+  Check for Updates…). Before the first 0.0.2 run, do docs/releasing.md
+  step 5 (Sparkle key). Evidence and screenshots:
+  `/Volumes/IsocastBuild/auto-update/scratch/REPORT.md`.
 - 2026-10-14 (8.2): **Isocast 0.0.1 Alpha is published** (prerelease, at
   Ryan's request): https://github.com/R44VC0RP/isocast/releases/tag/v0.0.1
   Built from main 70933b7 (Send Report and the live report service
@@ -1423,6 +1437,81 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-14 (8.2h fix round 1, review findings): **Trust and safety
+  corrections.**
+  - *The EdDSA private key is the sole root of trust for installed copies.*
+    With a valid EdDSA signature Sparkle 2.10 only checks that the new app
+    is validly code signed, not that team 9G68SMNHEU signed it (the review
+    installed an ad-hoc-signed build through a correctly signed appcast);
+    the team is compared only in the key-rotation fallback. Developer ID
+    and notarization are what the release pipeline guarantees, not
+    something installed apps enforce. Custody of SPARKLE_ED_PRIVATE_KEY
+    (release environment with Ryan as reviewer, 1Password) is the control.
+  - *Full releases only.* `releases/latest` skips drafts and pre-releases.
+    v0.0.1 is a full release now, so `latest` resolves (no appcast in it,
+    so 0.0.1 finds nothing, and it has no updater anyway); 0.0.2 and every
+    release meant for testers must be published as full releases.
+  - *Atomic idle shutdown.* New method `shutdown_if_idle` (API; CLI and MCP
+    through `isocast restart`/`restart_isocastd`; app updates): one call
+    that refuses while a take (incl. paused), stream, export, virtual camera
+    or encoder benchmark runs. A `starting` RwLock read-held by every
+    starting call and write-held by the check makes a racing start either
+    finish first (then refused shutdown) or see `shutting_down` (then
+    refused start). Replaces the status-then-shutdown pair, which cut an
+    accepted start in 3 of 122 restarts under a client delay
+    (scratch/race/race.py).
+  - *Virtual camera is busy* for updates and restart. Install on quit still
+    happens when the app quits while only the camera runs (no quit
+    question for the camera); the engine keeps feeding it from the old
+    binary and the next launch restarts it only once the camera stops.
+  - *Abort recovery.* Sparkle reports some aborts (didAbortWithError,
+    didFinishUpdateCycle with an error) and the app then lets the link
+    start isocastd again; it does not report an installer that dies after
+    the go-ahead, so a one-minute safety net does the same (proved).
+- 2026-10-14 (8.2h auto-update, #40): **Sparkle 2.10.0** updates the
+  native app. Decisions:
+  - *App packaging, not a method.* Updating replaces the bundle the GUI,
+    CLI and engine run from; Sparkle needs AppKit, the user's consent in its
+    window and the GUI process's lifetime (it installs when that process
+    terminates). The engine's capabilities are unchanged by it, so "no
+    GUI-only capabilities" isn't touched; a CLI `update` would be a CLI
+    inside the bundle it replaces, run by agents that shouldn't install
+    software. What agents do need is on the API: `status.daemon` (version,
+    build, commit, executable, pid) says which engine runs.
+  - *Bridge in the UI crate* (`crates/isocast-ui/src/update.rs`, objc2
+    msg_send like platform.rs/quit.rs), not isocast-platform-macos, which
+    links the engine, wgpu and capture: the thin client must not. Sparkle
+    is loaded at run time only when Info.plist has SUFeedURL and
+    SUPublicEDKey, so dev builds have no updater and need no framework.
+  - *Archive: the notarized, stapled DMG*, not a zip: Sparkle installs from
+    DMGs, it is the artifact already shipped and verified, and with
+    `SUVerifyUpdateBeforeExtraction` a Developer ID-signed DMG is the only
+    way to rotate the EdDSA key (Sparkle docs, "Rotating keys").
+  - *Info.plist*: SUEnableAutomaticChecks (daily, toggle in Settings ›
+    General), SUAllowsAutomaticUpdates=NO and SUAutomaticallyUpdate=NO (no
+    silent install-on-quit; every install is asked), SUVerifyUpdateBeforeExtraction
+    and SURequireSignedFeed. Sparkle reads those security keys from
+    Info.plist only (SUHost boolForInfoDictionaryKey); the feed URL it would
+    take from user defaults first, so the delegate returns Info.plist's
+    and `clearFeedURLFromUserDefaults` runs at start (proved: a defaults
+    SUFeedURL was cleared and never fetched; SURequireSignedFeed=NO in
+    defaults was ignored).
+  - *Never during a take*: scheduled checks are refused while recording
+    (or paused), streaming or exporting and run when idle; Install and
+    Relaunch is always postponed, then isocastd is stopped like `isocast
+    restart` (status re-checked; refused if busy) before Sparkle relaunches.
+    Quit › Keep Recording with a staged update lets Sparkle replace the
+    bundle on termination while the old engine records (unlinked binary,
+    take intact, proved); the next launch restarts that engine once idle.
+  - *Embedding*: arm64-thinned, XPC services removed (only sandboxed apps
+    use them), Autoupdate/Updater.app/framework signed with hardened runtime
+    and no entitlements before the app (Sparkle's sandboxing guide's order).
+  - *Camera extension*: out of scope. The released Isocast.app doesn't
+    carry it (a separate, one-time `scripts/vcam-install.sh` install), so a
+    Sparkle update never replaces or deactivates it: the activated system
+    extension keeps its installed version, and installing a newer one stays
+    vcam-install.sh's job. If a later release changes the extension's
+    protocol, its release notes must say to run vcam-install.sh again.
 - 2026-10-14 (Ryan): **exonbook's "'Python' is requesting to bypass the
   system private window picker" alert stays unanswered.** Ryan doesn't use
   exonbook and leaves it open; it blocks nothing (the engine is already
@@ -4098,6 +4187,24 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-14 (8.2h): Slint's macOS menu bar (muda) rebuilds the whole
+  application menu whenever a tracked property changes, so an NSMenuItem
+  added once disappears. update.rs re-adds Check for Updates… on every
+  NSMenuDidAddItemNotification (tagged, so it is added once per rebuild).
+- 2026-10-14 (8.2h): an app relaunched through LaunchServices (Sparkle's
+  relaunch, `open`) gets none of the shell's ISOCAST_* variables, so a test
+  app would talk to the default engine. `release.sh --update-test` writes
+  ISOCAST_UPDATE_TEST_ENV into the test bundle's LSEnvironment instead.
+- 2026-10-14 (8.2h): on isocast-m2-a, `screencapture` from the bridge fails
+  ("could not create image from display"); cua-driver's get_desktop_state
+  works. Two stuck system notification banners there cover the window's
+  top-right corner, exactly where toasts draw: use a window-only capture
+  (get_window_state's screenshot) to see toasts. Sparkle's error alert has
+  no AX tree for cua (window unresolved); click it with desktop coordinates.
+  cua-driver CLI calls need one `session` label across calls (snapshot
+  tokens are per session) and a session ends after idling; use a new label.
+- 2026-10-14 (8.2h): macOS 27 prints a deprecation warning for `hdiutil
+  attach/detach` (use `diskutil image attach`); it still works.
 - 2026-10-14 (#41, iso-drops, BLOCKED): the presumed stale ISO-share toggle
   is not the cause of bad independent takes. Temporary guards log new
   outputs=1/pressure=0/share=1000 every time and outputs=0/pressure=0 on Drop.

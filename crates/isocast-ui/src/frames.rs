@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use isocast_client::Client;
 use isocast_client::shared::{SharedController, SharedFrame};
 use isocast_protocol::api::SharedFramesParams;
 
@@ -107,7 +106,7 @@ impl Feed {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             };
-            let stream = Client::connect_or_launch().and_then(|client| {
+            let stream = crate::daemon::connect().and_then(|client| {
                 client.shared_frames(SharedFramesParams {
                     target: target.clone(),
                     max_width: Some(want.width.max(16)),

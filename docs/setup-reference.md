@@ -16,6 +16,7 @@ A complete session description.
 |---|---|---|
 | `audio` | [AudioSetup](#audiosetup) | How sources' balance pans them, and where monitored sources play. |
 | `canvas` (required) | [Canvas](#canvas) | The composited output canvas. |
+| `hotkeys` | [Config](#config) | Profile hotkeys. Absent/empty keeps legacy profiles unchanged. |
 | `keyframes` | list of [Keyframes](#keyframes) | Keyframe sets, by id, that scene items' `animations` play (CSS's `@keyframes`). |
 | `name` (required) | string | Human-readable name of this setup. |
 | `recording` (required) | [Recording](#recording) | How recordings are written. |
@@ -24,6 +25,7 @@ A complete session description.
 | `stream` | [StreamSettings](#streamsettings) (optional) | Live streaming of the program, if set up. The stream key is never part of a setup: `isocast stream key set` keeps it in the Keychain. |
 | `transition` | [Transition](#transition) | How the program changes scenes unless a switch says otherwise. |
 | `version` (required) | integer | Setup format version. Must be 1. |
+| `virtual_camera` | [VirtualCameraSettings](#virtualcamerasettings) | |
 
 ## AudioSetup
 
@@ -51,6 +53,10 @@ One of:
 | `fps` (required) | integer | Frames per second, from 1 to 240. |
 | `height` (required) | integer | An even number of pixels from 16 to 8192. |
 | `width` (required) | integer | An even number of pixels from 16 to 8192. |
+
+## Config
+
+Lossless, non-critical configuration on a setup/profile. Unknown or invalid entries survive interchange but never execute. Only hotkeys_set uses the strict Binding type directly. None distinguishes omission from explicit {}.
 
 ## Keyframes
 
@@ -180,7 +186,7 @@ One of:
 | Field | Type | Description |
 |---|---|---|
 | `folder` (required) | string | Folder recordings are written to. `~` expands to the home folder. |
-| `iso` | [IsoRecording](#isorecording) | Separate recordings of individual sources. Default `{"audio": [], "enabled": false, "encoder": {"bit_depth": 8, "codec": "hevc", "container": "mov", "quality": "high"}, "filename": "{SOURCE}-{date} {time}", "sources": []}`. |
+| `iso` | [IsoRecording](#isorecording) | Separate recordings of individual sources. Default `{"enabled": false, "encoder": {"bit_depth": 8, "codec": "hevc", "container": "mov", "quality": "high"}, "filename": "{SOURCE}-{date} {time}", "sources": []}`. |
 | `keep_free_gb` | number | Free space, in GB, a recording never uses: it won't start without room for its estimated size plus this, and it stops cleanly, finishing every file, when free space falls below it (or below about 10 s of its files, at least 64 MB, if that is more). Default `1.0`. |
 | `program` (required) | [ProgramRecording](#programrecording) | The composited program recording. |
 
@@ -190,7 +196,7 @@ ISO ("isolated") recording: each listed source is written to its own file at its
 
 | Field | Type | Description |
 |---|---|---|
-| `audio` | list of string | Audio sources written into every ISO file. Default `[]`. |
+| `audio` | list of string (optional) | Audio sources written into every ISO file. Omitted: each ISO uses its own source's sound. An explicit list (including []) preserves the chosen shared routing. A source's audio.iso can override its own sound. |
 | `enabled` | boolean |  Default `false`. |
 | `encoder` | [Encoder](#encoder) |  Default `{"bit_depth": 8, "codec": "hevc", "container": "mov", "quality": "high"}`. |
 | `filename` | string | File name without extension. Tokens: {SOURCE} (upper-case id), {source}, {date}, {time}. Default `"{SOURCE}-{date} {time}"`. |
@@ -260,7 +266,7 @@ Something drawn in a scene: a video source, a scene, content (text or an image m
 | `children` | list of [SceneItem](#sceneitem) | Items drawn on top of this one, back to front, placed relative to its rect and moved, scaled, rotated and faded with it. |
 | `content` | [Content](#content) (optional) | Or text or an image the engine makes from these settings, without a source: `{ kind = "text", text = "Hi", size = 48 }` (the text source's settings; `data = "key"` shows a data key's value) or `{ kind = "image", path = "logo.png" }`. Give it an `id` to patch it. |
 | `crop` | [Crop](#crop) | Pixels cut from each edge of the source before it is scaled. |
-| `fit` | [Fit](#fit) | How the picture fills the rect: stretched to it (the default) or keeping its shape (OBS's bounding box types). |
+| `fit` | [Fit](#fit) | How the picture fills the rect. New API items use `none` (native size times transform scale). Omission in old files retains legacy stretch; explicitly chosen `stretch` is always saved. |
 | `hide_transition` | [ItemTransition](#itemtransition) (optional) | How it disappears when hidden (OBS's hide transition). |
 | `id` | string (optional) | Identifies the item for patches and transitions; its source's id if absent. Unique within its scene. |
 | `layout` | [Layout](#layout) (optional) | Or where layout places it in its parent (a scene, or an item whose `layout` arranges its children), and how its own children are laid out: CSS's flexbox, grid, block and absolute positioning. Its size can come from what it shows: a source's picture size, or the canvas for a scene. |
@@ -755,7 +761,9 @@ How an audio source sounds in the program mix, and its sync offset. ISO files ke
 |---|---|---|
 | `balance` | number | Where it sits between left (−1) and right (1) in the program mix; 0, the centre, keeps both sides as captured. `audio.pan_law` says how the far side is lowered. Mono sources start centred. Default `0.0`. |
 | `gain_db` | number | Volume change in the program mix, in dB (0 keeps it as captured). Default `0.0`. |
+| `iso` | boolean (optional) | Include this source's own sound in its ISO. Absent follows the ISO audio policy; false is an explicit opt-out, true an explicit opt-in. |
 | `monitor` | [Monitoring](#monitoring) | Whether it is heard through the monitoring device (`audio.monitoring_device`) while recording, after gain, mute and balance. Default `"off"`. |
+| `mono` | boolean | Downmix stereo to mono in the program and monitoring, before balance: (left + right) / 2 in both channels. Raw ISO audio stays as captured. |
 | `muted` | boolean | Left out of the program mix. Default `false`. |
 | `offset_ms` | integer | Shift the audio later (positive) or earlier, in milliseconds, in every file, to line it up with the video. Default `0`. |
 
@@ -1249,3 +1257,17 @@ One of:
 - `"twitch"` \| `"youtube"` \| `"facebook"`
 - `"custom"`: Any RTMP or RTMPS server, given as `server`.
 - `"kick"`: Kick: give your channel's Stream URL (Creator Dashboard → Channel → Stream URL and Key) as `server`.
+
+## VirtualCameraSettings
+
+| Field | Type | Description |
+|---|---|---|
+| `height` | integer (optional) | |
+| `scene` | string (optional) | |
+| `source` | string (optional) | |
+| `target` | [Target](#target) | Program, studio preview, or an explicit scene/source id. Default `"program"`. |
+| `width` | integer (optional) | Output dimensions; both absent uses the canvas. Other aspect ratios are letterboxed. These are the camera extension's advertised modes. |
+
+## Target
+
+One of: `"program"`, `"preview"`, `"scene"`, `"source"`.

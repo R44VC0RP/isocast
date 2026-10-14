@@ -2,7 +2,7 @@
 //! and MCP's helpers on top of it.
 
 use anyhow::{Result, bail};
-use isocast_protocol::api::{Applied, ApplyParams, EngineState, Live, Method, Status};
+use isocast_protocol::api::{Applied, ApplyParams, Live, Method};
 use isocast_protocol::change::Change;
 
 pub use isocast_client::Client;
@@ -61,31 +61,12 @@ pub fn set_audio(client: &mut Client, source: &str, change: &AudioChange) -> Res
 }
 
 /// Stop isocastd and start it again (after permissions change, it only
-/// sees them once restarted). Refused while it records, streams or exports.
+/// sees them once restarted). The daemon refuses, atomically, while it
+/// records, streams, exports or feeds the virtual camera
+/// (`shutdown_if_idle`), so a start racing the restart is never cut short.
 pub fn restart() -> Result<()> {
     if let Some(mut client) = Client::connect()? {
-        let status: Status = client.call(Method::Status)?;
-        if status.state != EngineState::Idle {
-            bail!("isocastd is recording; stop it first (`isocast stop`, or MCP's stop_recording)");
-        }
-        if let Some(export) = &status.export {
-            bail!(
-                "isocastd is exporting timeline {:?} ({:.0}%); wait for it to finish (`isocast \
-                 watch --kinds export_finished`), then restart",
-                export.timeline,
-                export.progress * 100.0
-            );
-        }
-        if status
-            .stream
-            .as_ref()
-            .is_some_and(|stream| stream.is_active())
-        {
-            bail!(
-                "isocastd is streaming; stop it first (`isocast stream stop`, or MCP's stop_stream)"
-            );
-        }
-        let _: serde_json::Value = client.call(Method::Shutdown)?;
+        let _: serde_json::Value = client.call(Method::ShutdownIfIdle)?;
         // Wait for the old daemon to let go of the socket.
         for _ in 0..100 {
             if Client::connect()?.is_none() {

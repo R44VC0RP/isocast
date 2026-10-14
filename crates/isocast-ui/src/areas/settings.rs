@@ -103,7 +103,7 @@ const TABS: &[(&str, &str, &str, &str, &str)] = &[
         "General",
         "sun",
         "System",
-        "This setup's name, snapping in the preview, and how often the preview draws.",
+        "This setup's name, snapping in the preview, how often the preview draws, and app updates.",
     ),
     (
         "hotkeys",
@@ -282,6 +282,8 @@ struct Prefs {
     snapping: bool,
     distance: i32,
     preview_rate: String,
+    /// Check for app updates about once a day (Sparkle keeps it).
+    auto_updates: bool,
 }
 
 impl Default for Prefs {
@@ -290,6 +292,7 @@ impl Default for Prefs {
             snapping: true,
             distance: 8,
             preview_rate: "canvas".into(),
+            auto_updates: true,
         }
     }
 }
@@ -300,6 +303,7 @@ impl Prefs {
             snapping: ui.get_snap_enabled(),
             distance: ui.get_snap_distance().round() as i32,
             preview_rate: ui.get_preview_rate().into(),
+            auto_updates: crate::update::automatic(),
         }
     }
 }
@@ -595,6 +599,7 @@ impl Area for Settings {
             "settings" => app.open_dialog("settings", ""),
             "hotkeys" => app.open_dialog("settings", "hotkeys"),
             "report_bug" => app.open_dialog("bug-report", ""),
+            "check_updates" => crate::update::check_now(),
             "show_recordings" => {
                 let folder = app
                     .session
@@ -911,6 +916,7 @@ impl Settings {
     fn set_flag(&self, app: &Rc<App>, field: &str, on: bool) {
         let patch = match field {
             "snapping" => return self.set_prefs(app, |p| p.snapping = on),
+            "auto_updates" => return self.set_prefs(app, |p| p.auto_updates = on),
             // Turn off streaming.
             "stream" if !on => json!({"stream": null}),
             "program" => json!({"recording": {"program": {"enabled": on}}}),
@@ -1055,6 +1061,9 @@ impl Settings {
                 if !app.mode.offscreen {
                     crate::prefs::save(&window);
                 }
+                if d.prefs.auto_updates != d.prefs_base.auto_updates {
+                    crate::update::set_automatic(d.prefs.auto_updates);
+                }
                 d.prefs_base = d.prefs.clone();
             }
             let s = app.session.borrow();
@@ -1170,6 +1179,8 @@ impl Settings {
         area.set_snapping(d.prefs.snapping);
         area.set_snap_distance(d.prefs.distance as f32);
         area.set_preview_rate(d.prefs.preview_rate.as_str().into());
+        area.set_updates_available(crate::update::available());
+        area.set_auto_updates(d.prefs.auto_updates);
 
         // Stream
         let stream = &draft["stream"];

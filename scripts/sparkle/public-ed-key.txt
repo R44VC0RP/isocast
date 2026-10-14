@@ -1,0 +1,6 @@
+# Isocast's Sparkle update key: the base64 EdDSA (ed25519) public key that
+# release builds put in Info.plist as SUPublicEDKey. Only the public half
+# belongs here; the private key is the release environment's
+# SPARKLE_ED_PRIVATE_KEY secret (docs/releasing.md, "Sparkle update key").
+# The key line below is the one `generate_keys -p` printed (docs/releasing.md step 5).
+veNU60mzD2xNMti9YtgZW3nyPchj2BGUXQp+vC9t+UM=

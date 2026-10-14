@@ -320,6 +320,11 @@ pub enum Method {
     EncoderOptions,
     /// Leave Studio Mode by clearing the staged preview. Returns Switched.
     ClearPreview,
+    /// Exit the daemon only if nothing is running: refused, atomically,
+    /// while it records (or pauses), streams, exports, feeds the virtual
+    /// camera or benchmarks encoders; a start racing it is refused instead.
+    /// `isocast restart` and app updates use it. Returns null.
+    ShutdownIfIdle,
 }
 
 /// Every method's name, as requests and plugin grants spell it
@@ -1087,6 +1092,22 @@ pub struct Status {
     /// setup, or when the program isn't recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_bytes_per_second: Option<f64>,
+    /// Which isocastd answered: its version and build, so a client can
+    /// tell an engine left running from before an app update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon: Option<DaemonBuild>,
+}
+
+/// An isocastd build: `version` is the product version (`0.0.2`), `build`
+/// the bundle build number that updates compare (`CFBundleVersion`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DaemonBuild {
+    pub version: String,
+    pub build: String,
+    pub commit: String,
+    /// The running executable, as it was when the daemon started.
+    pub executable: String,
+    pub pid: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

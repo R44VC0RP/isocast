@@ -16,6 +16,7 @@ fn main() {
             !version.is_empty() && version.bytes().all(|c| c.is_ascii_digit()),
             "ISOCAST_BUILD_VERSION must be numeric"
         );
+        println!("cargo:rustc-env=ISOCAST_BUILD_NUMBER={version}");
         let generated = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
             .join("isocastd-info.plist");
         // Preserve camera-extension build numbering while deriving the product

@@ -34,12 +34,23 @@ existing installation before changing it. Keep the app in Applications:
 the symlink follows app updates and the CLI launches its bundled engine.
 
 Run `isocast --help` for commands, `isocast mcp` for the MCP server. Normal
-app, CLI and MCP sessions share the same engine and setup. An update needs
-the app and engine restarted after any recording, stream or export finishes.
+app, CLI and MCP sessions share the same engine and setup.
+
+Isocast updates itself (from 0.0.2 on): it checks once a day and asks
+before installing; **Isocast › Check for Updates…** checks now, and
+Settings › General › Updates turns the daily check off. An update never
+installs while isocastd records (or is paused), streams, exports or feeds
+the virtual camera: it waits, then stops the engine and relaunches the
+app on the new version. If you quit with **Keep Recording** while an update
+is downloaded, it installs as the app closes and the engine finishes on
+the old version; the next launch restarts it once it is idle.
+`isocast status` shows which engine runs (`Engine: isocastd 0.0.3 (build …)`).
 
 ## Release maintainers
 
-`scripts/release.sh --dry-run` prints the local build/sign/DMG workflow.
+`scripts/release.sh --dry-run` prints the local build/sign/DMG workflow
+(until the Sparkle public key is committed it says it skips that check;
+real Developer ID builds stop on it, docs/releasing.md step 5).
 Run without that flag to prepare a Developer ID-signed app and DMG. This
 step requires the signing identity but no notarization credential or upload.
 Gatekeeper should report **Unnotarized Developer ID** until finalization.

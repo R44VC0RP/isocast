@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-53 tools. Arguments marked required must be given; ids, not names,
+67 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -44,6 +44,20 @@ Make a change to the live setup, atomically, if it is still at `revision` and th
 | `revision` (required) | integer | The revision from plan_change or get_setup (0 when there is no live setup yet). The change is refused if the live setup has moved on. |
 | `setup` | object (optional) | A whole new setup to replace the live one (the shape get_setup returns; get_setup_schema has its JSON Schema). |
 
+## bug_report
+
+Generate a sanitized offline bug-report zip or preview every included file. Includes environment, logs, metrics, crashes and manifests, never media. Nothing is uploaded unless submit is true: then ISSUE.md becomes a public GitHub issue and the zip is kept privately for maintainers (pass preview_id to send exactly a reviewed preview). Only submit when the user asked to send the report; on failure the zip is kept and submit_error says why.
+
+| Argument | Type | Description |
+|---|---|---|
+| `describe` | string (optional) |  |
+| `hash_paths` | boolean | Strict privacy: per-report HMAC pseudonyms for paths, titles and device identities. |
+| `launches` | integer (optional) | Last launches of each process to collect (1..10; default 3). |
+| `out` | string (optional) | Absolute or ~/ output directory; defaults to Downloads/Isocast Reports (isolated engines: beside their logs). |
+| `preview` | boolean | Return the file index, ISSUE and redaction report without writing a zip. Use report_file with the returned preview_id to page through contents. |
+| `preview_id` | string (optional) | With `submit`: send exactly this preview (from an earlier `preview`) instead of collecting again. |
+| `submit` | boolean | Also send the report: the zip is written, then its ISSUE.md becomes a public GitHub issue and the zip is kept privately for maintainers. Never implied; if sending fails the zip is kept and `submit_error` says why. |
+
 ## check_setup
 
 Check this Mac against a setup (the live setup if none is given): permissions, hardware encoders, whether each source's device is connected and what format it would record, and the recording disk's free space and speed. Each check has a status and, if needed, a fix.
@@ -52,6 +66,10 @@ Check this Mac against a setup (the live setup if none is given): permissions, h
 |---|---|---|
 | `folder` | string (optional) | Check this folder instead of the setup's recording.folder. |
 | `setup` | object (optional) | The setup to check; the live setup if absent (the shape get_setup returns; get_setup_schema has its JSON Schema). |
+
+## clear_preview
+
+Leave Studio Mode by clearing its staged preview. Program stays on air.
 
 ## clear_stream_key
 
@@ -125,6 +143,17 @@ What happened since you last looked: warnings (like a file dropping frames), rec
 | `limit` | integer (optional) | The most events to return (1 to 500, default 50). |
 | `wait_seconds` | number (optional) | If no event matches yet, wait up to this many seconds (at most 30) for one. |
 
+## get_logs
+
+Read structured engine/client logs with severity/component filters and a cursor for subsequent reads.
+
+| Argument | Type | Description |
+|---|---|---|
+| `component` | string (optional) | Component substring. |
+| `cursor` | object (optional) | Opaque per-file byte offsets returned by the previous call. |
+| `level` | string (optional) | Minimum severity: debug, info, warn, error. |
+| `limit` | integer (optional) | Maximum returned records (1..1000; default 200). |
+
 ## get_permissions
 
 The screen recording, camera and microphone permissions, without asking, with the next step for each that isn't granted: request it, or turn it on in System Settings (which app, which pane, and whether isocastd must restart afterwards).
@@ -143,7 +172,7 @@ The JSON Schema of a setup document (what get_setup returns and plan_change, app
 
 ## get_status
 
-Whether Isocast is idle or recording, with live frame and drop counters, the files being written, the scene on air, the last session's report, the stream (state, bitrates, dropped frames, congestion, reconnects, whether a key is set), the live engine's frame rate (engine.fps of canvas.fps), each live source's size and frame rate (engine.sources: fps opened at, received_fps measured) and isocastd's CPU use (cpu_percent, of all cores).
+Whether Isocast is idle or recording, with live frame and drop counters, the files being written, the scene on air, the last session's report, the stream (state, bitrates, dropped frames, congestion, reconnects, whether a key is set), the live engine's frame rate (engine.fps of canvas.fps), each live source's size and frame rate (engine.sources: fps opened at, received_fps measured), isocastd's CPU use (cpu_percent, of all cores), the recording disk's free space (recording_free_bytes) and how fast the program file fills it at most (program_bytes_per_second), and which isocastd answered (daemon: version, build, commit, executable, pid; an engine left running from before an app update reports the old build).
 
 ## get_timeline
 
@@ -152,6 +181,33 @@ A timeline (the current one unless `timeline` gives an id): its clips in order, 
 | Argument | Type | Description |
 |---|---|---|
 | `timeline` | string (optional) | A timeline's id (`timeline_list` has them); the current one if absent. |
+
+## hotkeys_actions
+
+List bindable action ids, labels, groups, strict argument schemas, reserved actions, key names and opt-in defaults.
+
+## hotkeys_get
+
+Get current profile hotkeys, global registration warnings, held audio overrides and Studio Mode state.
+
+## hotkeys_input
+
+Forward focused key input: keys and phase (press or release), including globally registered chords. Matching native and focused press edges within 100 ms fire once. Send releases on blur; persistent clients use the same socket for both edges.
+
+| Argument | Type | Description |
+|---|---|---|
+| `keys` (required) | string |  |
+| `phase` (required) | Phase |  |
+
+## hotkeys_set
+
+Replace all profile bindings with bindings, or patch by binding id (null removes). Keys use ctrl+alt+shift+cmd+key syntax. hotkeys_actions lists typed arguments, key names and defaults. Invalid/conflicting chords change nothing.
+
+| Argument | Type | Description |
+|---|---|---|
+| `bindings` | object (optional) | Replace all bindings, including an empty map to disable them all. |
+| `patch` | object (optional) | Or replace bindings by id; null removes one. Exactly one of bindings/patch. |
+| `revision` | integer (optional) | Optional optimistic concurrency check, from hotkeys_get. |
 
 ## import_collection_or_profile
 
@@ -216,6 +272,10 @@ The scene collections (scenes, sources, transitions and the canvas size) and pro
 
 Displays, windows, cameras (capture cards, Continuity Camera, iPhone screens over USB), microphones with their ids and formats, audio outputs (for audio.monitoring_device), and the screen/camera/microphone permissions.
 
+## list_encoder_options
+
+List recording encoders with their display labels and supported containers. Use this before changing program or ISO encoder settings.
+
 ## list_plugins
 
 The installed plugins: id, version, what they provide (a process, and kinds like twitch-chat/glow), state (ok, disabled, incompatible or failed, and why), their process (running or restarting, restarts, how it last ended, its log) and the permissions they were granted.
@@ -275,6 +335,10 @@ Make a timeline current (by id), so finished takes are added to it.
 |---|---|---|
 | `timeline` (required) | string | The id of the timeline to make current. |
 
+## pause_recording
+
+Pause the same recording files on a shared video/audio boundary. Streaming continues. Markers land at the paused playhead; resume before split or retake.
+
 ## plan_change
 
 Work out what a change to the live setup would do, without making it: the differences (paths use ids) and any problems. Give either a whole setup or a patch.
@@ -302,6 +366,17 @@ Stage a scene in preview, by id, without changing what is on air; take_preview t
 | Argument | Type | Description |
 |---|---|---|
 | `scene` (required) | string | The id of a scene in the setup. |
+
+## read_bug_report_file
+
+Read a UTF-8 page (default 4096 bytes, max 16384) from a redacted bug-report preview. Use its preview_id and a file-index name; next_offset continues. Preview expires after five idle minutes.
+
+| Argument | Type | Description |
+|---|---|---|
+| `file` (required) | string |  |
+| `limit` | integer (optional) | UTF-8 bytes, 1..16384; default 4096. Responses end at a character boundary. |
+| `offset` | integer |  |
+| `preview_id` (required) | string |  |
 
 ## refresh_browser
 
@@ -345,7 +420,11 @@ Ask macOS for screen recording, camera and microphone access where it hasn't bee
 
 ## restart_isocastd
 
-Restart isocastd, which only sees a permission granted in System Settings (screen recording, above all) once restarted; the live setup is kept. Refused while recording.
+Restart isocastd, which only sees a permission granted in System Settings (screen recording, above all) once restarted; the live setup is kept. Refused, atomically by isocastd, while it records, streams, exports or feeds the virtual camera.
+
+## resume_recording
+
+Resume a paused recording into its existing files. Paused time is cut out of the files and recorded in the manifest.
 
 ## retake
 
@@ -365,6 +444,7 @@ Change an audio source's program mix in the live setup: gain, mute, sync offset,
 | `balance` | number (optional) | Where it sits between left (-1) and right (1) in the program mix; 0 is the centre. |
 | `gain_db` | number (optional) | Volume change in the program mix, in dB (-60 to 24; 0 is as captured). |
 | `monitor` | Monitoring | Hear it through the setup's monitoring device: "monitor_only" (heard, but left out of the program mix), "monitor_and_output", or "off". |
+| `mono` | boolean (optional) | Downmix stereo to mono before balance in the program and monitoring. |
 | `muted` | boolean (optional) | Leave it out of the program mix (true) or put it back (false). |
 | `offset_ms` | integer (optional) | Shift its audio later (positive) or earlier, in ms, in every file; applies from the next recording. |
 | `source` (required) | string | The id of an audio source in the live setup. |
@@ -448,3 +528,15 @@ Benchmark the hardware encoders on a setup's video files (the live setup if none
 |---|---|---|
 | `folder` | string (optional) | Check this folder instead of the setup's recording.folder. |
 | `setup` | object (optional) | The setup to check; the live setup if absent (the shape get_setup returns; get_setup_schema has its JSON Schema). |
+
+## virtual_camera_start
+
+Start Isocast Virtual Camera. Takes no arguments: configure virtual_camera.target/scene/source/width/height through plan_change and apply_change first. Requires its signed/approved extension; never installs it. Recording and streaming stay independent.
+
+## virtual_camera_status
+
+Read virtual camera state, output format, sent/dropped frame counts, enqueue latency and last error. diagnostic-iosurface means a development probe, not an installed camera.
+
+## virtual_camera_stop
+
+Stop feeding Isocast Virtual Camera. Other applications see the extension's Isocast waiting card.

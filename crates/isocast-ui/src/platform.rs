@@ -299,7 +299,7 @@ pub fn bring_all_to_front() {}
 
 /// An NSString with `text`.
 #[cfg(target_os = "macos")]
-unsafe fn ns_string(text: &str) -> objc2::rc::Retained<objc2::runtime::AnyObject> {
+pub(crate) unsafe fn ns_string(text: &str) -> objc2::rc::Retained<objc2::runtime::AnyObject> {
     use objc2::{class, msg_send};
     let text = std::ffi::CString::new(text.replace('\0', "")).expect("no NULs left");
     // SAFETY: a valid C string, copied by NSString.
@@ -308,7 +308,7 @@ unsafe fn ns_string(text: &str) -> objc2::rc::Retained<objc2::runtime::AnyObject
 
 /// An NSString's text.
 #[cfg(target_os = "macos")]
-unsafe fn rust_string(string: &objc2::runtime::AnyObject) -> String {
+pub(crate) unsafe fn rust_string(string: &objc2::runtime::AnyObject) -> String {
     use objc2::msg_send;
     // SAFETY: UTF8String lives as long as the string, which outlives this.
     unsafe {

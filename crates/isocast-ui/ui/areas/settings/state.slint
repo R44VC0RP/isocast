@@ -150,6 +150,9 @@ export global SettingsArea {
     in-out property <bool> snapping;
     in-out property <float> snap-distance;
     in-out property <string> preview-rate;
+    // App updates (Sparkle, src/update.rs): only a released app has them.
+    in-out property <bool> updates-available;
+    in-out property <bool> auto-updates;
 
     // ---- Stream
     in-out property <bool> has-stream;

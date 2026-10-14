@@ -7,6 +7,17 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
 
 ## Commands
 
+- [`isocast report-file`](#isocast-report-file)
+- [`isocast report`](#isocast-report)
+- [`isocast logs`](#isocast-logs)
+- [`isocast hotkeys`](#isocast-hotkeys)
+  - [`isocast hotkeys list`](#isocast-hotkeys-list)
+  - [`isocast hotkeys set`](#isocast-hotkeys-set)
+  - [`isocast hotkeys unset`](#isocast-hotkeys-unset)
+  - [`isocast hotkeys actions`](#isocast-hotkeys-actions)
+  - [`isocast hotkeys defaults`](#isocast-hotkeys-defaults)
+  - [`isocast hotkeys input`](#isocast-hotkeys-input)
+- [`isocast encoders`](#isocast-encoders)
 - [`isocast setup`](#isocast-setup)
   - [`isocast setup check`](#isocast-setup-check)
   - [`isocast setup schema`](#isocast-setup-schema)
@@ -54,6 +65,8 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
 - [`isocast record`](#isocast-record)
 - [`isocast start`](#isocast-start)
 - [`isocast stop`](#isocast-stop)
+- [`isocast pause`](#isocast-pause)
+- [`isocast resume`](#isocast-resume)
 - [`isocast status`](#isocast-status)
 - [`isocast split`](#isocast-split)
 - [`isocast marker`](#isocast-marker)
@@ -77,6 +90,10 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast stream key`](#isocast-stream-key)
     - [`isocast stream key set`](#isocast-stream-key-set)
     - [`isocast stream key clear`](#isocast-stream-key-clear)
+- [`isocast vcam`](#isocast-vcam)
+  - [`isocast vcam start`](#isocast-vcam-start)
+  - [`isocast vcam stop`](#isocast-vcam-stop)
+  - [`isocast vcam status`](#isocast-vcam-status)
 - [`isocast watch`](#isocast-watch)
 - [`isocast frame`](#isocast-frame)
 - [`isocast frames`](#isocast-frames)
@@ -93,6 +110,11 @@ Isocast: scene-based recording with per-source ISO files, controlled from the co
 Usage: isocast <COMMAND>
 
 Commands:
+  report-file  Read a bounded page from a redacted report preview
+  report       Create a private, redacted bug-report zip. Nothing is uploaded unless you pass --submit
+  logs         Read structured logs (also works when the daemon is stopped)
+  hotkeys      Customize profile hotkeys, including global keys and push-to-talk
+  encoders     List recording codecs and the containers each supports
   setup        Work with setup files
   collection   Scene collections, as in OBS: named sets of scenes, sources, transitions and the canvas size, swapped as a whole. The one in use is the live setup's (with the profile in use)
   profile      Profiles, as in OBS: named frame rate, recording, stream and audio settings, swapped as a whole. The one in use is the live setup's (with the scene collection in use)
@@ -104,6 +126,8 @@ Commands:
   record       Record a setup's ISO sources, each to its own file, until --seconds runs out or Ctrl-C. Without a setup file, record --source specs
   start        Start recording in the background (in isocastd, launched if needed) and return once every file is created. Same options as `record`; with neither a setup nor --source, records the live setup. A setup or --source given here becomes the live setup
   stop         Stop the background recording and print its report
+  pause        Pause this take without closing its files; streaming continues
+  resume       Resume the paused take into the same files
   status       Show whether isocastd is recording, with live counters
   split        Split the background recording into a new take at the next whole second, without stopping any device
   marker       Mark this moment in the background recording, with a label
@@ -115,12 +139,13 @@ Commands:
   tune         Benchmark the encoders on a setup's files (the live setup if none is given), all at once as in a recording, and say whether this Mac keeps up (fits, keeps up with no margin, or can't keep up). If it doesn't fit, try changes closest first (a smaller program file, a lower quality preset, half the frame rate, one ISO file fewer) and recommend the closest that fits, as a patch for `plan` and `apply`. `start` warns when a setup exceeds what this measured. Runs in isocastd
   snapshot     Save one frame as a PNG: of a video source (an id of the live setup, or a quick source like `screen` or `camera:NAME`), of --scene ID, of --preview, or with none of them the program (while recording, the exact frame it recorded last). Runs in isocastd
   audio        Change an audio source's program mix in the live setup: gain in dB, mute, sync offset in ms (positive is later), balance (-1 left to 1 right) and monitoring (hearing it through `audio.monitoring_device`). A running recording follows all but the offset at once
-  restart      Restart isocastd, for example after granting it screen recording permission. Refused while recording
+  restart      Restart isocastd, for example after granting it screen recording permission. Refused, atomically by isocastd, while it records, streams, exports or feeds the virtual camera
   permissions  Show the screen recording, camera and microphone permissions and what to do about each that isn't granted; with --request, ask macOS for the ones not decided yet (its prompts appear) and wait up to a minute for the answers; with --open, open the System Settings pane where one is turned on
   get          Print the live setup (TOML, or JSON with --json) and its revision; with --resolved, also where layout put every item (each item's rect in its parent and its box on the canvas)
   plan         Show what a change to the live setup would do, without doing it: a whole setup FILE, or --patch with a JSON merge patch (lists of sources, scenes and items merge by id)
   apply        Make a change to the live setup, if it is still at --revision (from `plan` or `get`; 0 when there is no live setup yet)
   stream       Stream the program live over RTMP or RTMPS to the live setup's [stream] service, and keep its stream key in the Keychain
+  vcam         Feed a picture to Isocast Virtual Camera (extension approval required once)
   watch        Print events from isocastd as they happen, until Ctrl-C
   frame        Save the live engine's newest frame of the program (the default), studio mode's preview, or a video source as a JPEG. Starts the engine if it isn't running
   frames       Record what a monitor shows: the live engine's low-latency H.264 stream of the program (the default), studio mode's preview or a video source, saved as an H.264 elementary stream (Annex B, which ffprobe and ffplay read). Starts the engine if it isn't running
@@ -133,6 +158,177 @@ Options:
   -V, --version  Print version
 
 Getting started: `isocast permissions` shows what macOS allows, `isocast setup init --apply` makes a setup from this Mac's devices, `isocast frame` saves a picture of the program, `isocast start --seconds 10` records a test, and `isocast status` shows how it went. Agents: `isocast mcp`.
+```
+
+## isocast report-file
+
+```text
+Read a bounded page from a redacted report preview
+
+Usage: isocast report-file [OPTIONS] <PREVIEW_ID> <FILE>
+
+Arguments:
+  <PREVIEW_ID>  
+  <FILE>        
+
+Options:
+      --offset <OFFSET>  [default: 0]
+      --limit <LIMIT>    
+      --json             
+  -h, --help             Print help
+```
+
+## isocast report
+
+```text
+Create a private, redacted bug-report zip. Nothing is uploaded unless you pass --submit
+
+Usage: isocast report [OPTIONS]
+
+Options:
+      --out <OUT>                
+      --describe <DESCRIBE>      
+      --preview                  
+      --private                  Pseudonymize paths, titles, device names and device IDs per report [alias: --hash-paths]
+      --launches <LAUNCHES>      
+      --submit                   Also send it: ISSUE.md becomes a public GitHub issue, and the zip is kept privately for the maintainers. Prints the issue URL
+      --preview-id <PREVIEW_ID>  With --submit: send exactly this preview (from --preview)
+      --json                     
+  -h, --help                     Print help
+```
+
+## isocast logs
+
+```text
+Read structured logs (also works when the daemon is stopped)
+
+Usage: isocast logs [OPTIONS]
+
+Options:
+      --follow                 
+      --level <LEVEL>          
+      --component <COMPONENT>  
+      --json                   
+  -h, --help                   Print help
+```
+
+## isocast hotkeys
+
+```text
+Customize profile hotkeys, including global keys and push-to-talk
+
+Usage: isocast hotkeys <COMMAND>
+
+Commands:
+  list      Current profile bindings and native registration warnings
+  set       Bind an id to a chord and action (replace that binding only)
+  unset     Remove a binding by id
+  actions   Stable action catalogue, schemas, key names and suggested defaults
+  defaults  Add defaults without replacing custom ids or occupied chords
+  input     Forward focused fallback input. A one-shot press pulses; --hold-ms keeps the connection open and sends a release after the hold
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## isocast hotkeys list
+
+```text
+Current profile bindings and native registration warnings
+
+Usage: isocast hotkeys list [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast hotkeys set
+
+```text
+Bind an id to a chord and action (replace that binding only)
+
+Usage: isocast hotkeys set [OPTIONS] <ID> <KEYS> <ACTION>
+
+Arguments:
+  <ID>      
+  <KEYS>    
+  <ACTION>  
+
+Options:
+      --args <ARGS>  Typed action arguments as JSON; see `hotkeys actions --json` [default: {}]
+      --json         
+  -h, --help         Print help
+```
+
+## isocast hotkeys unset
+
+```text
+Remove a binding by id
+
+Usage: isocast hotkeys unset [OPTIONS] <ID>
+
+Arguments:
+  <ID>  
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast hotkeys actions
+
+```text
+Stable action catalogue, schemas, key names and suggested defaults
+
+Usage: isocast hotkeys actions [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast hotkeys defaults
+
+```text
+Add defaults without replacing custom ids or occupied chords
+
+Usage: isocast hotkeys defaults [OPTIONS]
+
+Options:
+      --replace  Explicitly replace the whole set with defaults
+      --json     
+  -h, --help     Print help
+```
+
+## isocast hotkeys input
+
+```text
+Forward focused fallback input. A one-shot press pulses; --hold-ms keeps the connection open and sends a release after the hold
+
+Usage: isocast hotkeys input [OPTIONS] <KEYS>
+
+Arguments:
+  <KEYS>  
+
+Options:
+      --phase <PHASE>      [default: press] [possible values: press, release]
+      --hold-ms <HOLD_MS>  
+      --json               
+  -h, --help               Print help
+```
+
+## isocast encoders
+
+```text
+List recording codecs and the containers each supports
+
+Usage: isocast encoders [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
 ```
 
 ## isocast setup
@@ -232,7 +428,7 @@ Commands:
   duplicate  Copy one (by id) under a new name
   rename     Rename one (its id stays)
   delete     Delete one that isn't in use; its file is kept in the library's `deleted` folder
-  switch     Use it: the live setup becomes it at once, and the live engine follows (a new collection goes on air from its first scene). Refused while recording or streaming
+  switch     Use it: the live setup becomes it at once, and the live engine follows (a collection restores its last program/preview selection). Refused while recording or streaming
   import     Add one from a file: one exported with `export` (.toml or .json), or a whole setup file, which adds its collection and its profile. With --obs, from OBS Studio instead: a scene collection (its name or .json file) or a profile (its name, folder or basic.ini)
   export     Write one (the one in use if no id is given) to a file, .toml or .json, or print it as TOML; `import` adds it back, here or on another Mac
   help       Print this message or the help of the given subcommand(s)
@@ -322,7 +518,7 @@ Options:
 ## isocast collection switch
 
 ```text
-Use it: the live setup becomes it at once, and the live engine follows (a new collection goes on air from its first scene). Refused while recording or streaming
+Use it: the live setup becomes it at once, and the live engine follows (a collection restores its last program/preview selection). Refused while recording or streaming
 
 Usage: isocast collection switch [OPTIONS] <ID>
 
@@ -384,7 +580,7 @@ Commands:
   duplicate  Copy one (by id) under a new name
   rename     Rename one (its id stays)
   delete     Delete one that isn't in use; its file is kept in the library's `deleted` folder
-  switch     Use it: the live setup becomes it at once, and the live engine follows (a new collection goes on air from its first scene). Refused while recording or streaming
+  switch     Use it: the live setup becomes it at once, and the live engine follows (a collection restores its last program/preview selection). Refused while recording or streaming
   import     Add one from a file: one exported with `export` (.toml or .json), or a whole setup file, which adds its collection and its profile. With --obs, from OBS Studio instead: a scene collection (its name or .json file) or a profile (its name, folder or basic.ini)
   export     Write one (the one in use if no id is given) to a file, .toml or .json, or print it as TOML; `import` adds it back, here or on another Mac
   help       Print this message or the help of the given subcommand(s)
@@ -474,7 +670,7 @@ Options:
 ## isocast profile switch
 
 ```text
-Use it: the live setup becomes it at once, and the live engine follows (a new collection goes on air from its first scene). Refused while recording or streaming
+Use it: the live setup becomes it at once, and the live engine follows (a collection restores its last program/preview selection). Refused while recording or streaming
 
 Usage: isocast profile switch [OPTIONS] <ID>
 
@@ -897,6 +1093,30 @@ Options:
   -h, --help  Print help
 ```
 
+## isocast pause
+
+```text
+Pause this take without closing its files; streaming continues
+
+Usage: isocast pause [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast resume
+
+```text
+Resume the paused take into the same files
+
+Usage: isocast resume [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
 ## isocast status
 
 ```text
@@ -975,14 +1195,15 @@ Options:
 ```text
 Stage a scene in preview, by id, to put on air with `take`
 
-Usage: isocast preview [OPTIONS] <SCENE>
+Usage: isocast preview [OPTIONS] [SCENE]
 
 Arguments:
-  <SCENE>  
+  [SCENE]  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --clear  Leave Studio Mode (clear its staged preview)
+      --json   
+  -h, --help   Print help
 ```
 
 ## isocast take
@@ -1063,6 +1284,8 @@ Arguments:
   <SOURCE>  
 
 Options:
+      --mono               Downmix to mono (before balance) in the program and monitor
+      --stereo             Keep the source's stereo channels in the program and monitor
       --gain <GAIN>        
       --mute               
       --unmute             
@@ -1076,7 +1299,7 @@ Options:
 ## isocast restart
 
 ```text
-Restart isocastd, for example after granting it screen recording permission. Refused while recording
+Restart isocastd, for example after granting it screen recording permission. Refused, atomically by isocastd, while it records, streams, exports or feeds the virtual camera
 
 Usage: isocast restart
 
@@ -1241,6 +1464,59 @@ Options:
       --server <SERVER>    For custom: the server the key belongs to (rtmp://host/app)
       --json               
   -h, --help               Print help
+```
+
+## isocast vcam
+
+```text
+Feed a picture to Isocast Virtual Camera (extension approval required once)
+
+Usage: isocast vcam <COMMAND>
+
+Commands:
+  start   Start the live setup's virtual_camera selection. Never installs anything
+  stop    Stop feeding the camera, restoring the Isocast waiting card
+  status  Output state, format, counters, enqueue latency and last error
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## isocast vcam start
+
+```text
+Start the live setup's virtual_camera selection. Never installs anything
+
+Usage: isocast vcam start [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast vcam stop
+
+```text
+Stop feeding the camera, restoring the Isocast waiting card
+
+Usage: isocast vcam stop [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast vcam status
+
+```text
+Output state, format, counters, enqueue latency and last error
+
+Usage: isocast vcam status [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
 ```
 
 ## isocast watch

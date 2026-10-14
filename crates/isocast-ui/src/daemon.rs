@@ -5,6 +5,7 @@
 //! replies and events go back to the window's thread as [`Update`]s, where
 //! `App` hands each reply to the closure that asked for it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::Duration;
@@ -76,6 +77,18 @@ pub enum Update {
 
 /// Start the worker and the watcher. `deliver` runs on their threads and
 /// must hand the update to the window's thread.
+/// Set while an app update finishes (src/update.rs): isocastd was stopped
+/// so the new app starts its own, so this one doesn't launch it again.
+pub static NO_LAUNCH: AtomicBool = AtomicBool::new(false);
+
+pub fn connect() -> anyhow::Result<Client> {
+    if NO_LAUNCH.load(Ordering::SeqCst) {
+        Client::connect()?.ok_or_else(|| anyhow::anyhow!("isocastd was stopped for an update"))
+    } else {
+        Client::connect_or_launch()
+    }
+}
+
 pub fn start(deliver: impl Fn(Update) + Send + Clone + 'static) -> Sender<Request> {
     let (tx, rx) = channel();
     let worker_deliver = deliver.clone();
@@ -95,7 +108,7 @@ fn worker(rx: Receiver<Request>, deliver: impl Fn(Update)) {
     while let Ok(request) = rx.recv() {
         let connection = match client.take() {
             Some(c) => Ok(c),
-            None => Client::connect_or_launch(),
+            None => connect(),
         };
         let mut c = match connection {
             Ok(c) => c,
@@ -144,7 +157,7 @@ fn watcher(deliver: impl Fn(Update)) {
     let mut ever_connected = false;
     deliver(Update::Link(Link::Connecting, String::new()));
     loop {
-        let result = Client::connect_or_launch().and_then(|client| {
+        let result = connect().and_then(|client| {
             let (live, events) = client.watch()?;
             delay = Duration::from_millis(250);
             ever_connected = true;

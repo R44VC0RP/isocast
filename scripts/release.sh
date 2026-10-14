@@ -15,7 +15,11 @@ draft=0
 notarize=0
 output=
 runtime=0
+update_test=
 extra=()
+# Sparkle (#40): the released app's update feed; its EdDSA public key is in
+# scripts/sparkle/public-ed-key.txt and the private key never touches a build.
+feed_url=https://github.com/R44VC0RP/isocast/releases/latest/download/appcast.xml
 
 usage() {
     cat <<'EOF'
@@ -41,10 +45,18 @@ upload. Output must be new; default: $CARGO_TARGET_DIR/dist/VERSION.
 --generate-notes With --draft-release: use GitHub-generated release notes.
 --replace-draft  With --draft-release: replace assets on an existing draft only.
 --verify-tag     With --draft-release: require the version tag to exist remotely.
+--update-test FEED  Local update proofs only: a separate dev.isocast.update-test
+                 app whose Sparkle feed is FEED and public key is
+                 ISOCAST_SPARKLE_PUBLIC_KEY. Finalization refuses it.
+                 ISOCAST_UPDATE_TEST_ENV (KEY=VALUE lines, e.g. ISOCAST_SOCKET)
+                 becomes its LSEnvironment, so relaunches stay isolated.
 
 Requirements: Apple-silicon Mac, Rust, Xcode (actool/notarytool/stapler), Python 3,
 dmgbuild (scripts/dmg/requirements.txt; or uv runs the pin);
-gh for drafts. Credentials stay in the login keychain's isocast-notary profile.
+gh for drafts. Developer ID builds embed Sparkle (scripts/sparkle/sparkle.sh: pinned,
+hash-verified download) and need the real key in scripts/sparkle/public-ed-key.txt;
+--ad-hoc builds have no updater. Drafts sign the appcast with SPARKLE_ED_PRIVATE_KEY
+(CI) or the login keychain's Sparkle key (local). Credentials stay in the login keychain's isocast-notary profile.
 ISOCAST_APP_TARGET selects isocast-ui (default) or isocast-app (retired web app).
 Notarization uses the login keychain profile isocast-notary. Waits report progress
 every 20s; submission ids are saved for safe resume. Never publishes or pushes git.
@@ -69,6 +81,7 @@ while [ $# -gt 0 ]; do
         --verify-runtime) runtime=1; extra+=(--verify-runtime); shift ;;
         --hosted|--generate-notes|--replace-draft|--verify-tag) extra+=("$1"); shift ;;
         --output) [ $# -ge 2 ] || die '--output needs a directory'; output="$2"; shift 2 ;;
+        --update-test) [ $# -ge 2 ] || die '--update-test needs a feed URL'; update_test="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown option: $1 (see --help)" ;;
     esac
@@ -76,6 +89,10 @@ done
 case "$app_target" in isocast-app|isocast-ui) ;; *) die 'ISOCAST_APP_TARGET: choose isocast-app or isocast-ui' ;; esac
 [ "$ad_hoc" = 0 ] || { [ "$draft:$notarize:$runtime" = 0:0:0 ] || die 'finalization refuses ad-hoc artifacts'; }
 [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || die 'build on an Apple-silicon Mac'
+if [ -n "$update_test" ]; then
+    [ "$ad_hoc:$draft:$notarize:$runtime" = 0:0:0:0 ] || die '--update-test builds are Developer ID signed and never finalized'
+    [[ "$update_test" =~ ^https?://[^[:space:]]+$ ]] || die '--update-test needs an http(s) feed URL'
+fi
 
 # Resume from the saved version/target, even if this checkout changes overnight.
 if [ "$notarize:$draft:$runtime" != 0:0:0 ]; then
@@ -119,6 +136,26 @@ if [ "$dry_run" = 0 ]; then
         security find-identity -v -p codesigning "$keychain" | grep -Fq "$identity" || die "missing signing identity: $identity"
     fi
 fi
+# The update key before anything is built: a release without it can't ship.
+bundle_id=dev.isocast.release
+sparkle_key=
+if [ -n "$update_test" ]; then
+    bundle_id=dev.isocast.update-test
+    feed_url="$update_test"
+    sparkle_key="${ISOCAST_SPARKLE_PUBLIC_KEY:?--update-test needs ISOCAST_SPARKLE_PUBLIC_KEY (a throwaway test key)}"
+elif [ "$ad_hoc" = 0 ]; then
+    if ! sparkle_key="$(scripts/sparkle/sparkle.sh public-key 2>/dev/null)"; then
+        [ "$dry_run" = 1 ] || { scripts/sparkle/sparkle.sh public-key >/dev/null || true; die 'no Sparkle public key; see docs/releasing.md'; }
+        echo "release: dry run: skipping the Sparkle public key check (scripts/sparkle/public-ed-key.txt is still the placeholder; a real build stops here)"
+        sparkle_key=DRY-RUN-PLACEHOLDER-KEY
+    fi
+fi
+if [ -n "$sparkle_key" ]; then
+    echo "release: Sparkle feed $feed_url"
+    if [ "$dry_run" = 0 ]; then scripts/sparkle/sparkle.sh path >/dev/null; fi
+else
+    echo "release: ad-hoc build without an updater (Sparkle needs Developer ID signing)"
+fi
 build_version="${ISOCAST_BUILD_VERSION:-$(date +%s)}"
 [[ "$build_version" =~ ^[0-9]+$ ]] || die 'ISOCAST_BUILD_VERSION must be numeric'
 run mkdir -p "$output/work" "$app/Contents/MacOS" "$app/Contents/Resources" \
@@ -132,25 +169,38 @@ run cp "$binary_dir/isocast" "$app/Contents/MacOS/isocast"
 run cp "$binary_dir/isocastd" "$engine/Contents/MacOS/isocastd"
 run python3 -c 'import plistlib,sys
 from pathlib import Path
-app,engine,version,executable,build_version=sys.argv[1:]
+app,engine,version,executable,build_version,bundle_id,feed,key,lsenv=sys.argv[1:]
 usage={"NSCameraUsageDescription":"Isocast records cameras and capture cards into your scenes and recordings.",
        "NSMicrophoneUsageDescription":"Isocast records microphones and audio interfaces into your scenes and recordings.",
        "NSScreenCaptureUsageDescription":"Isocast captures the displays, windows and desktop audio you select for scenes and recordings."}
 for source,dest,identifier,name,binary in [
-    ("crates/isocast-ui/Info.plist" if executable=="isocast-ui" else "crates/isocast-app/bundle/Info.plist",app,"dev.isocast.release","Isocast",executable),
+    ("crates/isocast-ui/Info.plist" if executable=="isocast-ui" else "crates/isocast-app/bundle/Info.plist",app,bundle_id,"Isocast",executable),
     ("crates/isocast-daemon/Info.plist",engine,"dev.isocast.isocastd","Isocast Engine","isocastd")]:
     p=plistlib.loads(Path(source).read_bytes())
     p.update(usage)
     p.update(CFBundleIdentifier=identifier,CFBundleName=name,CFBundleDisplayName=name,
              CFBundleExecutable=binary,CFBundleShortVersionString=version,CFBundleVersion=build_version,
              LSMinimumSystemVersion="14.0",LSArchitecturePriority=["arm64"])
-    Path(dest,"Contents/Info.plist").write_bytes(plistlib.dumps(p))' "$app" "$engine" "$version" "$app_target" "$build_version"
+    if dest==app and key:
+        # Sparkle (src/update.rs): a daily check, asking before every install
+        # (no silent install-on-quit), EdDSA-verified archive and feed.
+        p.update(SUFeedURL=feed,SUPublicEDKey=key,SUEnableAutomaticChecks=True,
+                 SUScheduledCheckInterval=86400,SUAllowsAutomaticUpdates=False,
+                 SUAutomaticallyUpdate=False,SUVerifyUpdateBeforeExtraction=True,
+                 SURequireSignedFeed=True)
+    if dest==app and lsenv:
+        p["LSEnvironment"]=dict(line.split("=",1) for line in lsenv.splitlines() if "=" in line)
+    Path(dest,"Contents/Info.plist").write_bytes(plistlib.dumps(p))' "$app" "$engine" "$version" "$app_target" "$build_version" "$bundle_id" "$feed_url" "$sparkle_key" \
+    "${update_test:+${ISOCAST_UPDATE_TEST_ENV:-}}"
 run xcrun actool "$root/crates/isocast-app/bundle/Isocast.icon" --compile "$app/Contents/Resources" \
     --platform macosx --minimum-deployment-target 14.0 --app-icon Isocast \
     --output-partial-info-plist "$output/work/icon.plist"
 run ditto "$app/Contents/Resources" "$engine/Contents/Resources"
 run cp docs/install.md "$app/Contents/Resources/INSTALL.md"
 run cp LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES "$app/Contents/Resources/"
+if [ -n "$sparkle_key" ]; then
+    run scripts/sparkle/sparkle.sh embed "$app"
+fi
 
 # Check every shipped Mach-O: arm64 only, and no Homebrew/build-machine dylibs.
 run python3 -c 'import subprocess,sys
@@ -159,9 +209,10 @@ for p in Path(sys.argv[1]).rglob("*"):
     if not p.is_file() or p.read_bytes()[:4] != b"\xcf\xfa\xed\xfe": continue
     assert subprocess.check_output(["lipo","-archs",str(p)],text=True).strip()=="arm64",p
     lines=subprocess.check_output(["otool","-L",str(p)],text=True).splitlines()[1:]
+    own=subprocess.check_output(["otool","-D",str(p)],text=True).splitlines()[1:]
     for line in lines:
         dep=line.strip().split(" (",1)[0]
-        assert dep.startswith(("/System/Library/", "/usr/lib/")), (p,dep)
+        assert dep in own or dep.startswith(("/System/Library/", "/usr/lib/")), (p,dep)
     print("verified arm64 and system-only dependencies:",p)' "$app"
 
 sign() {
@@ -179,6 +230,14 @@ else
 fi
 # Inside out. The UI has no entitlements: it only talks to the daemon. CLI
 # record runs the engine in-process, so it needs the same three as isocastd.
+# Sparkle's helpers as its docs sign them: hardened runtime, no entitlements,
+# no --deep (the app's signature then seals the framework).
+if [ -n "$sparkle_key" ]; then
+    sparkle="$app/Contents/Frameworks/Sparkle.framework"
+    sign "${sign_args[@]}" "$sparkle/Versions/B/Autoupdate"
+    sign "${sign_args[@]}" "$sparkle/Versions/B/Updater.app"
+    sign "${sign_args[@]}" "$sparkle"
+fi
 sign "${sign_args[@]}" --entitlements "$entitlements" "$engine"
 sign "${sign_args[@]}" --entitlements "$entitlements" "$app/Contents/MacOS/isocast"
 sign "${sign_args[@]}" "$app"
@@ -198,6 +257,7 @@ run bash -c 'cd "$1" && shasum -a 256 "$2" > "$2.sha256" && shasum -a 256 -c "$2
     bash "$output" "$(basename "$dmg")"
 mode=developer-id
 if [ "$ad_hoc" = 1 ]; then mode=ad-hoc; fi
+if [ -n "$update_test" ]; then mode=update-test; fi
 run python3 -c 'import hashlib,json,subprocess,sys
 from pathlib import Path
 w=Path(sys.argv[1]); app=w/"Isocast.app"; target=sys.argv[4]
@@ -208,8 +268,9 @@ hashes={p:hashlib.sha256((app/p).read_bytes()).hexdigest() for p in paths}
 r=dict(schema=1,version=sys.argv[2],signing=sys.argv[3],app_target=target,
        build_version=sys.argv[5],source_commit=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),
        app_files=hashes,dmg_sha256=hashlib.sha256(Path(sys.argv[6]).read_bytes()).hexdigest())
+if sys.argv[7]: r["sparkle"]=dict(feed=sys.argv[7],public_key=sys.argv[8])
 (w/"release.json").write_text(json.dumps(r,indent=2)+"\n")' \
-    "$output" "$version" "$mode" "$app_target" "$build_version" "$dmg"
+    "$output" "$version" "$mode" "$app_target" "$build_version" "$dmg" "${sparkle_key:+$feed_url}" "$sparkle_key"
 if [ "$ad_hoc" = 0 ]; then
     run python3 -c 'import subprocess,sys
 for args in [["--type","execute",sys.argv[1]],["--type","open","--context","context:primary-signature",sys.argv[2]]]:

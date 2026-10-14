@@ -43,6 +43,7 @@ mod quit;
 mod session;
 mod thumbs;
 mod toasts;
+mod update;
 mod usage;
 mod window;
 

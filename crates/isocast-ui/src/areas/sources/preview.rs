@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use isocast_client::Client;
 use isocast_client::shared::SharedFrame;
 use isocast_protocol::api::SharedFramesParams;
 use slint::wgpu_30::wgpu;
@@ -136,7 +135,7 @@ fn tick(
 fn receive(target: &str, stop: &AtomicBool, newest: &Slot) {
     let mut delay = Duration::from_millis(250);
     while !stop.load(Ordering::Relaxed) {
-        let result = Client::connect_or_launch().and_then(|client| {
+        let result = crate::daemon::connect().and_then(|client| {
             let mut frames = client.shared_frames(SharedFramesParams {
                 target: target.into(),
                 max_width: Some(1280),

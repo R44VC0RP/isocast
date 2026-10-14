@@ -7,6 +7,7 @@
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
+import { Ui } from "../../state.slint";
 import {
     Button, ButtonVariant, Callout, CalloutKind, ControlSize, Dropdown, FocusRing, GroupHint, GroupRow, IconButton,
     NumberField, RowPlace, Segmented, Switch, TextField,
@@ -40,6 +41,7 @@ component SwitchRow inherits GroupRow {
     Centred {
         Switch {
             on <=> root.on;
+            enabled: root.enabled;
             label: root.label;
             toggled(on) => { root.toggled(on); }
         }
@@ -122,6 +124,33 @@ export component GeneralPage inherits SetPage {
                     value <=> SettingsArea.preview-rate;
                     label: "Preview Frame Rate";
                     selected(value) => { SettingsArea.set-text("preview_rate", value); }
+                }
+            }
+        }
+    }
+    SetGroup {
+        title: "Updates";
+        hint: SettingsArea.updates-available
+            ? "Isocast checks once a day and asks before installing. An update never installs during a recording or stream; it waits until they stop."
+            : "This build doesn't update itself. Released copies of Isocast check for updates.";
+        SwitchRow {
+            label: "Check Automatically";
+            place: RowPlace.first;
+            enabled: SettingsArea.updates-available;
+            on <=> SettingsArea.auto-updates;
+            toggled(on) => { SettingsArea.set-flag("auto_updates", on); }
+        }
+        GroupRow {
+            label: "Check Now";
+            place: RowPlace.last;
+            trailing-pad: Theme.space-2;
+            Centred {
+                Button {
+                    text: "Check for Updates…";
+                    size: ControlSize.small;
+                    on-control: true;
+                    enabled: SettingsArea.updates-available;
+                    clicked => { Ui.menu("check_updates"); }
                 }
             }
         }

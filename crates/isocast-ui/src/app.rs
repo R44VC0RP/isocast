@@ -995,7 +995,8 @@ impl App {
             }
             Err(error) => {
                 let connected = app.session.borrow().link == Some(Link::Connected);
-                if !quiet && connected {
+                // Not while an update stops the engine on purpose.
+                if !quiet && connected && !crate::update::stopping_engine() {
                     app.failed("Couldn’t read the engine’s status", &error);
                 }
             }

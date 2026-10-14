@@ -435,8 +435,9 @@ fn handle(
             },
             Ok(request) => {
                 let shutdown = request.method == Method::Shutdown;
+                let if_idle = request.method == Method::ShutdownIfIdle;
                 let response = daemon.call(request);
-                if shutdown {
+                if shutdown || (if_idle && response.error.is_none()) {
                     daemon.graceful_shutdown();
                     writeln!(writer, "{}", serde_json::to_string(&response)?)?;
                     audit.response(&response);
@@ -794,6 +795,10 @@ struct Daemon {
     hotkeys: hotkeys::HotkeyRuntime,
     shutting_down: AtomicBool,
     shutdown_lock: Mutex<()>,
+    /// Read-held by every call that starts something (a take, a stream,
+    /// an export, the virtual camera); `shutdown_if_idle` write-holds it,
+    /// so no start can slip between its idle check and the shutdown.
+    starting: std::sync::RwLock<()>,
 }
 
 /// isocastd's processor use, as `status` reports it: the share of all the
@@ -1152,8 +1157,70 @@ impl Daemon {
         isocast_diagnostics::clean_exit();
     }
 
+    /// Agree to shut down only while nothing runs. Leaves `shutting_down`
+    /// set on success (the connection then runs `graceful_shutdown`).
+    fn shutdown_if_idle(&self) -> Result<(), RpcError> {
+        let _gate = self.starting.write().unwrap_or_else(|e| e.into_inner());
+        if self.shutting_down.swap(true, Ordering::SeqCst) {
+            return Err(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: "the daemon is already shutting down".into(),
+            });
+        }
+        if let Some(busy) = self.busy() {
+            self.shutting_down.store(false, Ordering::SeqCst);
+            return Err(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: format!("isocastd is {busy}, so it keeps running"),
+            });
+        }
+        Ok(())
+    }
+
+    /// What a shutdown would interrupt, with how to end it.
+    fn busy(&self) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        if state.session.is_some() {
+            return Some(
+                "recording; stop it first (`isocast stop`, or MCP's stop_recording)".into(),
+            );
+        }
+        if stream_status(&state).is_some_and(|stream| stream.is_active()) {
+            return Some(
+                "streaming; stop it first (`isocast stream stop`, or MCP's stop_stream)".into(),
+            );
+        }
+        if state.camera.active() {
+            return Some(
+                "feeding the virtual camera (a call may be using it); stop it first (`isocast vcam stop`, or MCP's virtual_camera_stop)".into(),
+            );
+        }
+        if state.tuning {
+            return Some("benchmarking the encoders (`tune`); wait for it to finish".into());
+        }
+        drop(state);
+        self.export_running().map(|export| {
+            format!(
+                "exporting timeline {:?} ({:.0}%); wait for it to finish (`isocast watch \
+                 --kinds export_finished`)",
+                export.timeline,
+                export.progress * 100.0
+            )
+        })
+    }
+
     fn call(self: &Arc<Self>, request: Request) -> Response {
         let id = request.id;
+        let _starting = matches!(
+            request.method,
+            Method::Start(_)
+                | Method::StreamStart
+                | Method::TimelineExport(_)
+                | Method::VirtualCameraStart
+                | Method::Resume
+                | Method::Tune(_)
+        )
+        .then(|| self.starting.read().unwrap_or_else(|e| e.into_inner()));
         if self.shutting_down.load(Ordering::SeqCst)
             && !matches!(
                 request.method,
@@ -1311,6 +1378,7 @@ impl Daemon {
                 code: RpcError::WRONG_STATE,
                 message: "hotkeys_input needs a client connection".into(),
             }),
+            Method::ShutdownIfIdle => self.shutdown_if_idle().and_then(to_json),
             Method::Stop | Method::Shutdown => match self.stop() {
                 // Shutting down while idle is fine.
                 Err(err) if shutdown && err.code == RpcError::WRONG_STATE => {
@@ -2252,6 +2320,7 @@ impl Daemon {
                 .as_ref()
                 .map(|setup| setup.recording.program.bytes_per_second(&setup.canvas))
                 .filter(|rate| *rate > 0.0),
+            daemon: Some(daemon_build()),
         };
         // Measured without the lock (a slow disk can't hold up the rest).
         drop(state);
@@ -3107,6 +3176,27 @@ impl Daemon {
             Err(error) => state.last_error = Some(error),
         }
         self.ended.notify_all();
+    }
+}
+
+/// This isocastd's build, for `status` (an engine left running from
+/// before an app update reports the old one).
+fn daemon_build() -> isocast_protocol::api::DaemonBuild {
+    static EXECUTABLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    isocast_protocol::api::DaemonBuild {
+        version: env!("CARGO_PKG_VERSION").into(),
+        build: option_env!("ISOCAST_BUILD_NUMBER")
+            .unwrap_or("unknown")
+            .into(),
+        commit: env!("ISOCAST_BUILD_COMMIT").into(),
+        executable: EXECUTABLE
+            .get_or_init(|| {
+                std::env::current_exe()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default()
+            })
+            .clone(),
+        pid: std::process::id(),
     }
 }
 

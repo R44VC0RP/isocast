@@ -7,6 +7,7 @@ Only a verified final DMG may reach a draft, and an existing tag is never replac
 """
 
 import argparse
+import base64
 import hashlib
 import fcntl
 import json
@@ -29,6 +30,15 @@ REQUIREMENT = f'=anchor apple generic and certificate leaf[subject.OU] = "{TEAM}
 PROFILE = "isocast-notary"
 KEYCHAIN = os.environ.get("ISOCAST_SIGN_KEYCHAIN", str(Path.home() / "Library/Keychains/login.keychain-db"))
 REPO = "R44VC0RP/isocast"
+DEFAULT_NOTES = ("Isocast's first alpha for Apple-silicon Macs (macOS 14+).\n\n"
+                 "- Native macOS app with scenes, sources and Studio Mode.\n"
+                 "- Program and per-source ISO recording, streaming, and pause/resume.\n"
+                 "- Virtual camera (requires the one-time installation) and customizable hotkeys.\n"
+                 "- Create view for recording, retaking and arranging takes.\n"
+                 "- Report a Bug with diagnostic previews and a shareable report.\n\n"
+                 "Open the DMG and drag Isocast to Applications. The CLI is bundled inside the app. "
+                 "See the [virtual-camera installation guide](https://github.com/R44VC0RP/isocast/blob/main/docs/virtual-camera.md) "
+                 "for its one-time setup.")
 
 
 def require(condition, message):
@@ -214,7 +224,7 @@ def runtime_check(app, output, hosted):
     daemon = app / "Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd"
     # Signing/notary/GitHub credentials never enter the recorded application.
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("ISOCAST_", "APPLE_", "DEVELOPER_"))
+           if not k.startswith(("ISOCAST_", "APPLE_", "DEVELOPER_", "SPARKLE_"))
            and k not in ("GH_TOKEN", "GITHUB_TOKEN")}
     env.update(ISOCAST_SOCKET=str(sock), ISOCAST_SETUP=str(root / "setup.toml"),
                ISOCAST_TIMELINES=str(root / "timelines"), ISOCAST_PLUGINS=str(root / "plugins"),
@@ -353,6 +363,130 @@ def verify_final(output, metadata, runtime=False, hosted=False):
     return dmg, checksum
 
 
+# Ed25519 verification (RFC 8032), to check the appcast's archive signature
+# against the SUPublicEDKey the shipped app actually carries.
+_P = 2 ** 255 - 19
+_Q = 2 ** 252 + 27742317777372353535851937790883648493
+_D = -121665 * pow(121666, _P - 2, _P) % _P
+
+
+def _x(y, sign):
+    if y >= _P:
+        return None
+    x2 = (y * y - 1) * pow(_D * y * y + 1, _P - 2, _P) % _P
+    if x2 == 0:
+        return None if sign else 0
+    x = pow(x2, (_P + 3) // 8, _P)
+    if (x * x - x2) % _P:
+        x = x * pow(2, (_P - 1) // 4, _P) % _P
+    if (x * x - x2) % _P:
+        return None
+    return _P - x if (x & 1) != sign else x
+
+
+def _add(a, b):
+    e, f = (a[1] - a[0]) * (b[1] - b[0]) % _P, (a[1] + a[0]) * (b[1] + b[0]) % _P
+    g, h = 2 * a[3] * b[3] * _D % _P, 2 * a[2] * b[2] % _P
+    e, f, g, h = f - e, h - g, h + g, f + e
+    return e * f % _P, g * h % _P, f * g % _P, e * h % _P
+
+
+def _mul(scalar, point):
+    result = (0, 1, 1, 0)
+    while scalar:
+        if scalar & 1:
+            result = _add(result, point)
+        point, scalar = _add(point, point), scalar >> 1
+    return result
+
+
+def _point(data):
+    y = int.from_bytes(data, "little")
+    x = _x(y & ((1 << 255) - 1), y >> 255)
+    return None if x is None else (x, y & ((1 << 255) - 1), 1, x * (y & ((1 << 255) - 1)) % _P)
+
+
+def ed25519_verify(public, path, signature):
+    gy = 4 * pow(5, _P - 2, _P) % _P
+    base = (_x(gy, 0), gy, 1, _x(gy, 0) * gy % _P)
+    a, r, s = _point(public), _point(signature[:32]), int.from_bytes(signature[32:], "little")
+    if len(public) != 32 or len(signature) != 64 or a is None or r is None or s >= _Q:
+        return False
+    digest = hashlib.sha512(signature[:32] + public)
+    with path.open("rb") as file:
+        for block in iter(lambda: file.read(1 << 20), b""):
+            digest.update(block)
+    h = int.from_bytes(digest.digest(), "little") % _Q
+    left, right = _mul(s, base), _add(r, _mul(h, a))
+    return all((left[i] * right[2] - right[i] * left[2]) % _P == 0 for i in (0, 1))
+
+
+def sparkle_tool(name):
+    dist = command(Path(__file__).with_name("sparkle") / "sparkle.sh", "path", capture=True).strip()
+    return Path(dist) / "bin" / name
+
+
+def sparkle_run(*args):
+    """Run a Sparkle tool with the private key: SPARKLE_ED_PRIVATE_KEY on its
+    stdin (CI), else the login keychain's (generate_keys). Never printed."""
+    key = os.environ.get("SPARKLE_ED_PRIVATE_KEY")
+    args = [str(a) for a in args]
+    if key:
+        args[1:1] = ["--ed-key-file", "-"]
+    print("+", shlex.join(args), "(EdDSA key from", "SPARKLE_ED_PRIVATE_KEY)" if key else "login keychain)", flush=True)
+    process = subprocess.run(args, input=(key.strip() + "\n") if key else None,
+                             capture_output=True, text=True, timeout=600)
+    output = (process.stdout + process.stderr).replace(key.strip(), "<redacted>") if key else process.stdout + process.stderr
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, args, output)
+    return output
+
+
+def appcast(final, metadata, dmg, notes, prefix):
+    """Write and verify final/appcast.xml: one EdDSA-signed item for this DMG,
+    release notes embedded, the feed itself signed (SURequireSignedFeed).
+    Reused while the DMG and notes are unchanged, so reruns upload the same bytes."""
+    sparkle = metadata.get("sparkle")
+    require(sparkle and sparkle.get("public_key"), "prepared build has no Sparkle key; rebuild with release.sh")
+    out, state = final / "appcast.xml", final / "appcast.json"
+    key = {"dmg_sha256": sha(dmg), "notes_sha256": hashlib.sha256(notes.encode()).hexdigest(), "prefix": prefix}
+    if not (out.exists() and state.exists() and json.loads(state.read_text()) == key):
+        work = final / "appcast-work"
+        if work.exists():
+            command("rm", "-rf", work)
+        work.mkdir()
+        os.link(dmg, work / dmg.name)
+        (work / dmg.name).with_suffix(".md").write_text(notes + "\n")
+        sparkle_run(sparkle_tool("generate_appcast"), "--download-url-prefix", prefix,
+                    "--embed-release-notes", "--link", f"https://github.com/{REPO}", work)
+        (work / "appcast.xml").replace(out)
+        command("rm", "-rf", work)
+        save(state, key)
+    verify_appcast(out, metadata, dmg, prefix)
+    return out
+
+
+def verify_appcast(out, metadata, dmg, prefix):
+    import xml.etree.ElementTree as ET
+    ns = {"sparkle": "http://www.andymatuschak.org/xml-namespaces/sparkle"}
+    items = ET.parse(out).getroot().findall("./channel/item")
+    require(len(items) == 1, f"appcast should have exactly one item, has {len(items)}")
+    item = items[0]
+    enclosure = item.find("enclosure")
+    sp = "{" + ns["sparkle"] + "}"
+    require(item.findtext("sparkle:version", namespaces=ns) == metadata["build_version"], "appcast build differs from the app's CFBundleVersion")
+    require(item.findtext("sparkle:shortVersionString", namespaces=ns) == metadata["version"], "appcast version differs")
+    require(enclosure is not None and enclosure.get("url") == prefix + dmg.name, "appcast URL is not this release's DMG")
+    require(int(enclosure.get("length", -1)) == dmg.stat().st_size, "appcast length differs from the DMG")
+    signature = base64.b64decode(enclosure.get(sp + "edSignature", ""))
+    public = base64.b64decode(metadata["sparkle"]["public_key"])
+    require(ed25519_verify(public, dmg, signature),
+            "the DMG's EdDSA signature doesn't match the app's SUPublicEDKey: wrong SPARKLE_ED_PRIVATE_KEY or public key")
+    require("sparkle-signatures" in out.read_text(), "appcast is not signed (SURequireSignedFeed)")
+    sparkle_run(sparkle_tool("sign_update"), "--verify", out)
+    print(f"Verified appcast: build {metadata['build_version']}, {dmg.name}, EdDSA signature matches SUPublicEDKey", flush=True)
+
+
 def draft_release(output, metadata, files, replace=False, generated=False, verify_tag=False):
     tag = "v" + metadata["version"]
     if verify_tag:
@@ -371,21 +505,19 @@ def draft_release(output, metadata, files, replace=False, generated=False, verif
 
     release = lookup()  # A failed/auth-denied read aborts; never assume absence.
     existed = release is not None
+    if notes is None:
+        notes = release["body"] if existed and release.get("body") else DEFAULT_NOTES
+    # Sparkle's feed beside the DMG: what the published release's
+    # releases/latest/download/appcast.xml serves to installed apps.
+    files = [*files, appcast(output / "notarized", metadata, files[0], notes,
+                             f"https://github.com/{REPO}/releases/download/{tag}/")]
     if release is None:
         flags = ["--verify-tag"] if verify_tag else []
         if generated:
             flags += ["--generate-notes"]
         command("gh", "release", "create", tag, *files, "--draft", "--repo", REPO,
                 "--target", "main", "--title", f"Isocast {metadata['version']} Alpha", *flags,
-                *([] if generated else ["--notes", "Isocast's first alpha for Apple-silicon Macs (macOS 14+).\n\n"
-                "- Native macOS app with scenes, sources and Studio Mode.\n"
-                "- Program and per-source ISO recording, streaming, and pause/resume.\n"
-                "- Virtual camera (requires the one-time installation) and customizable hotkeys.\n"
-                "- Create view for recording, retaking and arranging takes.\n"
-                "- Report a Bug with diagnostic previews and a shareable report.\n\n"
-                "Open the DMG and drag Isocast to Applications. The CLI is bundled inside the app. "
-                "See the [virtual-camera installation guide](https://github.com/R44VC0RP/isocast/blob/main/docs/virtual-camera.md) "
-                "for its one-time setup."]))
+                *([] if generated else ["--notes", notes]))
         release = lookup()
     require(release is not None and release["draft"], f"{tag} is absent or published; refusing to change it")
     if replace and existed:
@@ -456,8 +588,11 @@ def main():
                 print("Replace assets/notes on an existing DRAFT; never alter a published release.")
             print(f"gh api repos/{REPO}/releases: find v{metadata['version']}; reuse only a matching draft.")
             notes_flag = "--generate-notes" if args.generate_notes else "--notes <alpha summary>"
-            print(f"If absent: gh release create v{metadata['version']} <notarized DMG> <checksum> --draft --repo {REPO} --target main {notes_flag}")
-            print("Verify draft=true and both uploaded asset SHA-256 digests; save draft.json URL. Never publish.")
+            print("Sparkle generate_appcast (key: SPARKLE_ED_PRIVATE_KEY on stdin, else login keychain): one item, "
+                  f"notes embedded, URL https://github.com/{REPO}/releases/download/v{metadata['version']}/<DMG>; feed signed.")
+            print("Verify appcast build/version/URL/length, the DMG's EdDSA signature against the app's SUPublicEDKey, and the feed signature.")
+            print(f"If absent: gh release create v{metadata['version']} <notarized DMG> <checksum> <appcast.xml> --draft --repo {REPO} --target main {notes_flag}")
+            print("Verify draft=true and all three uploaded asset SHA-256 digests; save draft.json URL. Never publish.")
         return
     lock = output / ".release-lock"
     lock.mkdir()  # Serialize finalization/draft operations for these artifacts.

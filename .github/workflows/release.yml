@@ -148,6 +148,8 @@ jobs:
           PY
           xcrun --find actool
           xcrun --find notarytool
+          # The app's Sparkle public key must be the real one (not the placeholder).
+          scripts/sparkle/sparkle.sh public-key >/dev/null
       - name: Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -213,6 +215,21 @@ jobs:
               out.write(f'ISOCAST_SIGN_KEYCHAIN={keychain}\nISOCAST_SIGN_IDENTITY={identities[0]}\nAPPLE_API_KEY_PATH={root / "AuthKey.p8"}\n')
           (root / 'certificate.p12').unlink()
           PY
+      - name: Check the Sparkle update signing key
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import base64, binascii, os, sys
+          try:
+              key = base64.b64decode(os.environ.get('SPARKLE_ED_PRIVATE_KEY', '').strip(), validate=True)
+          except (binascii.Error, ValueError):
+              key = b''
+          # generate_keys -x: a 32-byte seed (current) or 96 bytes (older keys).
+          if len(key) not in (32, 96):
+              sys.exit('SPARKLE_ED_PRIVATE_KEY is missing or not a Sparkle EdDSA private key (generate_keys -x); its value is not logged')
+          print('Sparkle signing key present')
+          PY
       - name: Build and Developer ID-sign native app and DMG
         run: scripts/release.sh --output "$RELEASE_OUTPUT"
       - name: Notarize, verify mounted runtime, create or refresh one draft
@@ -221,6 +238,7 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: |
           scripts/release.sh --notarize --verify-runtime --hosted \

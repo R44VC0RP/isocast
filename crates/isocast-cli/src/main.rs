@@ -381,7 +381,8 @@ enum Command {
         json: bool,
     },
     /// Restart isocastd, for example after granting it screen recording
-    /// permission. Refused while recording.
+    /// permission. Refused, atomically by isocastd, while it records,
+    /// streams, exports or feeds the virtual camera.
     Restart,
     /// Show the screen recording, camera and microphone permissions and
     /// what to do about each that isn't granted; with --request, ask macOS
@@ -1799,6 +1800,7 @@ fn status(json: bool) -> Result<ExitCode> {
             virtual_camera: None,
             recording_free_bytes: None,
             program_bytes_per_second: None,
+            daemon: None,
         },
     };
     if json {
@@ -1869,6 +1871,12 @@ fn status(json: bool) -> Result<ExitCode> {
     }
     if let Some(rate) = status.program_bytes_per_second {
         println!("Program file: up to ~{:.1} GB an hour", rate * 3600.0 / 1e9);
+    }
+    if let Some(daemon) = &status.daemon {
+        println!(
+            "Engine: isocastd {} (build {}, pid {})",
+            daemon.version, daemon.build, daemon.pid
+        );
     }
     if let Some(data) = status.data.as_ref().filter(|data| data.keys > 0) {
         println!(

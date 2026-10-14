@@ -31,6 +31,18 @@ WebAssembly plugins run in Wasmtime (https://wasmtime.dev) from the
 Bytecode Alliance, licensed under Apache-2.0 WITH LLVM-exception. Its crates
 (wasmtime, cranelift-*, wasmparser, wit-*, ...) are listed below.
 
+Self-update
+===========
+
+Released copies of the app update themselves with Sparkle 2.10.0
+(https://sparkle-project.org), embedded as Contents/Frameworks/Sparkle.framework
+and downloaded at a pinned version and SHA-256 by scripts/sparkle/sparkle.sh.
+Sparkle is under the MIT License (Copyright (c) 2006-2013 Andy Matuschak and
+its other authors) and includes bsdiff 4.3 (BSD 2-clause, Colin Percival),
+sais-lite (MIT, Yuta Mori) and orlp/ed25519 (zlib, Orson Peters). The full
+texts ship in the app as Contents/Resources/LICENSE-Sparkle and are at
+https://github.com/sparkle-project/Sparkle/blob/2.10.0/LICENSE.
+
 Rust crates (496)
 =================
 

@@ -2,9 +2,13 @@
 
 The **Release** workflow builds an existing `vX.Y.Z` tag on GitHub-hosted
 `macos-15` (arm64), signs with Developer ID, notarizes/staples the app and
-DMG, runs the mounted CLI/engine recording checks, and creates **one draft**.
-Rerunning a version replaces that draft's assets and generated notes.
-Published releases are refused. Only Ryan publishes a draft.
+DMG, runs the mounted CLI/engine recording checks, and creates **one draft**
+with the DMG, its checksum and Sparkle's `appcast.xml` (the self-update
+feed, EdDSA-signed). Rerunning a version replaces that draft's assets and
+generated notes. Published releases are refused. Only Ryan publishes a
+draft, and publishing is what ships the update: installed copies read
+`releases/latest/download/appcast.xml`, which only a published, non-
+prerelease release serves.
 
 No pull requests or self-hosted machines run this job. Actions are pinned
 to commit SHAs. The job has `contents: write`; workflow defaults are read-only.
@@ -102,7 +106,7 @@ Key ID and Issuer ID; Apple offers the `.p8` for download only once) in
 1Password, then delete the certificate export with
 `rm "$HOME/.config/isocast-release-secrets/developer-id.p12"`; the login
 keychain still holds the identity. Delete `AuthKey.p8` the same way,
-unless you intend to take step 6's API-key alternative: then leave it at
+unless you intend to take step 7's API-key alternative: then leave it at
 `$HOME/.config/isocast-release-secrets/AuthKey.p8` (mode 600) until that
 step has run; `notarytool store-credentials` copies the key's contents
 into the keychain item, after which the file can go. Do not upload any of
@@ -115,7 +119,45 @@ Credentials are not placed in Cargo/Homebrew caches or passed to the
 recording daemon. Rotate/revoke the certificate and API key in Apple's
 portals and replace the environment secrets when necessary.
 
-### 5. First hosted run
+### 5. Sparkle update key
+
+Updates are signed with an EdDSA key that only you hold: its public half is
+built into every app, its private half signs each release's DMG and
+appcast. **That private key is the sole root of trust for installed
+copies**: Sparkle installs any archive with a valid EdDSA signature and
+only checks that the app inside is validly code signed, not that it is
+signed by team 9G68SMNHEU (the team is compared only when the EdDSA check
+fails, Sparkle's key-rotation fallback). Developer ID signing and
+notarization are what this pipeline guarantees for the releases it makes;
+whoever holds the private key can ship anything to every tester. Keep it
+only in the `release` environment (Ryan as required reviewer) and
+1Password. Make it once, on your Mac, then never again (a lost key means
+updates can only change keys through a Developer ID-signed DMG; keep the
+1Password copy). `generate_keys` stores the key in your login keychain
+(allow its prompt) and prints only the public key; the private key goes
+from a mode-600 file straight into the secret and the file is deleted:
+
+```sh
+cd "$HOME/dev/isocast" &&
+  dist="$(scripts/sparkle/sparkle.sh path)" &&
+  "$dist/bin/generate_keys" >/dev/null &&
+  key="$("$dist/bin/generate_keys" -p)" &&
+  { grep '^#' scripts/sparkle/public-ed-key.txt; printf '%s\n' "$key"; } > scripts/sparkle/public-ed-key.new &&
+  mv scripts/sparkle/public-ed-key.new scripts/sparkle/public-ed-key.txt &&
+  scripts/sparkle/sparkle.sh public-key &&
+  rm -f "$HOME/.config/isocast-release-secrets/sparkle-ed.key" &&
+  ( umask 077 && "$dist/bin/generate_keys" -x "$HOME/.config/isocast-release-secrets/sparkle-ed.key" ) &&
+  gh secret set SPARKLE_ED_PRIVATE_KEY --repo R44VC0RP/isocast --env release < "$HOME/.config/isocast-release-secrets/sparkle-ed.key" &&
+  rm "$HOME/.config/isocast-release-secrets/sparkle-ed.key" &&
+  git commit scripts/sparkle/public-ed-key.txt -m 'Sparkle: the release update key (public half)'
+```
+
+The printed line is the public key (fine to share). Save the keychain item
+"Private key for signing Sparkle updates" to 1Password. Until the public
+key is committed, Developer ID builds stop at once with "no Sparkle public
+key"; `gh secret list` must now show seven names.
+
+### 6. First hosted run
 
 A published version (0.0.1 today) ends the run in preflight, so the first
 real run needs the next version. Three blocks, each chained with `&&` so
@@ -171,14 +213,19 @@ spctl --assess --type open --context context:primary-signature -v Isocast-0.0.2-
 open Isocast-0.0.2-arm64.dmg
 ```
 
-Expect `isDraft: true`, two assets, `OK` from shasum and `accepted
+Expect `isDraft: true`, three assets (DMG, checksum, `appcast.xml`), `OK` from shasum and `accepted
 source=Notarized Developer ID` from spctl. Publishing the draft stays
-manual. If you prefer not to cut 0.0.2 yet, a manual run for 0.0.1
+manual. **Publish it as a full release, never with "Set as a pre-release"**:
+installed apps read `releases/latest/download/appcast.xml`, and GitHub's
+`latest` skips drafts and pre-releases (v0.0.1 is a full release today, so
+`latest` resolves; it has no appcast, so 0.0.1 finds no update until 0.0.2
+is published, and 0.0.1 has no updater anyway). Every release meant to reach
+testers must be published the same way. If you prefer not to cut 0.0.2 yet, a manual run for 0.0.1
 (`gh workflow run release.yml --repo R44VC0RP/isocast --ref main -f version=0.0.1`)
 only demonstrates the clean "already published" exit; it does not exercise
 the secrets.
 
-### 6. After the first green run: retire the app-specific password
+### 7. After the first green run: retire the app-specific password
 
 Local notarizing (`scripts/release.sh --notarize` without the API-key
 variables) uses the login keychain profile **isocast-notary**, which holds
@@ -252,6 +299,20 @@ Checked 2026-10-14: the `macos-15` arm64 image (20260907.0337.1) ships Xcode
 26.3 at `/Applications/Xcode_26.3.app` with 16.4 as default; the current
 inventory is `images/macos/macos-15-arm64-Readme.md` in
 `actions/runner-images`, under the latest `macos-15-arm64/*` release.
+
+Self-update (Sparkle 2, #40): `release.sh` downloads Sparkle at a pinned
+version and SHA-256 (`scripts/sparkle/sparkle.sh`), embeds it arm64-only
+without the XPC services (non-sandboxed app), signs its helpers inside out,
+and writes `SUFeedURL`/`SUPublicEDKey` plus the locked-down settings
+(daily check, ask before every install, archive verified before extraction,
+signed feed) into Info.plist. At draft time the finalizer runs Sparkle's
+`generate_appcast` on the notarized DMG with the release notes embedded,
+then checks the item's build, version, URL and length, verifies the DMG's
+EdDSA signature against the app's own `SUPublicEDKey` (a wrong secret fails
+here, before anything ships) and verifies the feed signature. The update
+archive is the notarized, stapled DMG itself: Sparkle installs from DMGs,
+and a Developer ID-signed DMG is the only way to rotate the EdDSA key later
+with `SUVerifyUpdateBeforeExtraction` on.
 
 The finalizer checks strict/deep signatures, Apple team, notarization
 receipts and stapled tickets, Gatekeeper, the checksum, and executable/plist
