@@ -775,6 +775,8 @@ struct FilePlan {
     newest: AtomicI64,
     audio_dropouts: AtomicU64,
     audio: Vec<String>,
+    /// Source timing policy for each audio track (the program is continuous).
+    audio_timing: Vec<file::AudioTiming>,
     spec: WriterSpec,
 }
 
@@ -981,6 +983,10 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
                     newest: AtomicI64::new(i64::MIN),
                     audio_dropouts: AtomicU64::new(0),
                     audio: audio.clone(),
+                    audio_timing: audio
+                        .iter()
+                        .map(|id| file::AudioTiming::new(setup.source(id)))
+                        .collect(),
                     spec: WriterSpec {
                         path,
                         container: encoder.container,

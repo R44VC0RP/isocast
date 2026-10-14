@@ -1462,6 +1462,17 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-14 (QA-3 R1): every file's audio advances with its pause-mapped
+  video clock, padding silence only behind a 500 ms input allowance (plus
+  any negative audio offset). This also covers an audio source that never
+  emits during the take or stops at EOF. Media/browser gaps are legitimate;
+  their refused routing packets, samples arriving after committed silence,
+  and encoder refusals still count as losses. Continuous capture/program
+  input retains timestamp-gap detection against received audio, separately
+  from padded audio. No mixer/source-playback/encoder changes. Local 48 s
+  repro and exonbook browser/edge checks pass; R1-REPORT.md in qa-engine
+  scratch holds the evidence, plus strict 13/13 E2E and 178 release tests.
+
 - 2026-10-14 (8.2d): release preparation now stops after Developer ID signing
   the native Slint app and DMG. One `app_target` line defaults to isocast-ui,
   using its plist; the web app is opt-in. `--notarize` resumes a saved build
@@ -3972,6 +3983,14 @@ each section. Delete entries that stop being true.
   not one tool per API call.
 
 ## Gotchas
+
+- 2026-10-14 (QA-3 R1): filling an off-air ISO's entire audio gap only when
+  its next sample arrives (or at Stop) bursts 10 ms silence blocks into the
+  native writer's bounded 64-buffer queue. Rejections advanced the logical
+  sample count anyway, and AAC concatenated the remaining audio: 48 s video
+  became 28.91 s audio after a 32 s gap. An 18 s take with shorter gaps did
+  not shorten audio, only falsely counted gaps as dropouts. Pad progressively;
+  extending only the MOV end time does not restore the missing audio/sync.
 
 - 2026-10-14 (adaptive verification): don't reuse workspace artifacts blindly
   after `git archive main` into a different source folder with the same

@@ -2652,6 +2652,7 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
     let mut routes = Unroute(Vec::new());
     for plan in plans {
         let (tx, rx) = sync_channel(QUEUE_DEPTH);
+        let missed_audio = Arc::new(AtomicU64::new(0));
         if plan.source == PROGRAM {
             let key = inner.program_video.add(tx.clone(), 0, epoch, None);
             routes.0.push((inner.program_video.clone(), key));
@@ -2680,10 +2681,21 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
                         control.audio_filters.clone(),
                     )
                 });
-            let key = reader.add(tx.clone(), track, epoch, filter);
+            // Sparse sources legitimately leave timestamp gaps, so count their
+            // actual queue losses instead of treating every silent gap as loss.
+            let key = reader.add_counted(
+                tx.clone(),
+                track,
+                epoch,
+                filter,
+                plan.audio_timing[track]
+                    .sparse
+                    .then(|| missed_audio.clone()),
+                false,
+            );
             routes.0.push((reader.clone(), key));
         }
-        receivers.push(rx);
+        receivers.push((rx, missed_audio));
     }
     // Frames captured before the recording don't count in its report.
     let mut counted: Vec<(String, Arc<FrameSlot<P::Frame>>)> = plans
@@ -2732,14 +2744,24 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
             .zip(receivers)
             .zip(takes[0].plans.clone())
             .enumerate()
-            .map(|(index, ((writer, packets), plan))| {
+            .map(|(index, ((writer, (packets, missed_audio)), plan))| {
                 let (split_tx, split_rx) = mpsc::channel();
                 split_senders.push(split_tx);
                 let done = done_tx.clone();
                 let clock = clock.clone();
                 scope.spawn(move || {
                     platform.real_time_thread();
-                    write_files(writer, plan, index, packets, split_rx, done, shared, clock)
+                    write_files(
+                        writer,
+                        plan,
+                        index,
+                        packets,
+                        split_rx,
+                        done,
+                        shared,
+                        clock,
+                        missed_audio,
+                    )
                 })
             })
             .collect();

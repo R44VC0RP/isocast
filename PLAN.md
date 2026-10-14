@@ -578,6 +578,8 @@ layout editing, Windows, release prep).
     apply/start; encoder/container catalogue on API, CLI, MCP and schema.
   - [x] **A.2 QA-2 #4 engine:** omitted ISO audio uses each source's own
     sound; explicit routing and per-source opt-outs persist.
+  - [x] **A.2 QA-3 R1 engine:** clock silent ISO audio through off-air gaps;
+    preserve end-of-take beep/flash sync and count only actual audio losses.
   - [x] **A.2 QA-2 #5 engine:** collection switches restore program and
     Studio preview; API/CLI/MCP can clear preview and app follows it.
   - [x] **A.2 QA-2 #7 engine:** imported names are distinguishable;
@@ -1126,6 +1128,15 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- A.2 QA-3 R1 (2026-10-14): fill ISO audio gaps progressively on the
+  pause-mapped video clock, retaining the late-input/negative-offset allowance;
+  media/browser silence no longer counts as loss. Reproduced 48 s video with
+  28.91/28.93 s audio and 1894/1892 dropouts; fixed files are 48 s A/V,
+  zero drops, final beep/flash error 0.021 ms. Browser unload/reload and 18
+  leading/trailing/EOF/pause/split/multitrack/offset files also pass. Program
+  retains its audio, strict E2E 13/13, fmt/release clippy and 178 tests pass.
+  Evidence: `/Volumes/IsocastBuild/qa-engine/scratch/R1-REPORT.md`.
 
 - A.7 process-wide escalation (2026-10-14): share measured timer stretching
   across clock creation and subsequent waits, without an admission barrier or

@@ -3,11 +3,12 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 
 use anyhow::{Context, Result, anyhow};
+use isocast_protocol::{Source, SourceKind};
 
 use super::pause::RecordingClock;
 use super::{
@@ -15,6 +16,27 @@ use super::{
 };
 use crate::record::FileReport;
 use crate::{FileWriter, SAMPLE_RATE, Time};
+
+#[derive(Clone, Copy)]
+pub(super) struct AudioTiming {
+    /// Media/browser output may legitimately stop, including while on air.
+    pub sparse: bool,
+    /// Allow late capture/decoding and negative sync offsets before padding.
+    wait: std::time::Duration,
+}
+
+impl AudioTiming {
+    pub(super) fn new(source: Option<&Source>) -> Self {
+        Self {
+            sparse: source
+                .is_some_and(|s| matches!(s.kind, SourceKind::Media(_) | SourceKind::Browser(_))),
+            wait: SPLIT_AUDIO_WAIT
+                + std::time::Duration::from_millis(
+                    source.map_or(0, |s| (-i64::from(s.audio.offset_ms)).max(0)) as u64,
+                ),
+        }
+    }
+}
 
 /// Switch a writer thread to a new take's file at `at`.
 pub(super) struct Split<W> {
@@ -44,6 +66,7 @@ pub(super) fn write_files<W: FileWriter>(
     done: Sender<Done>,
     shared: &Shared,
     clock: Arc<RecordingClock>,
+    missed_audio: Arc<AtomicU64>,
 ) {
     thread::scope(|scope| {
         // Finishing a file can take a while (writing its final movie
@@ -72,6 +95,7 @@ pub(super) fn write_files<W: FileWriter>(
         let mut failure = Ok(());
         let written = isocast_diagnostics::contain("file writer", || {
             for packet in packets {
+                file.lost_packets += missed_audio.swap(0, Ordering::Relaxed);
                 if next.is_none()
                     && let Ok(split) = splits.try_recv()
                 {
@@ -129,6 +153,10 @@ pub(super) fn write_files<W: FileWriter>(
                         (result, pts)
                     }
                 };
+                file.plan.audio_dropouts.store(
+                    file.lost_packets + file.tracks.iter().map(|t| t.dropouts).sum::<u64>(),
+                    Ordering::Relaxed,
+                );
                 if let Some(c) = &closing
                     && (c.failure.is_err()
                         || c.file.audio_complete(c.at)
@@ -181,6 +209,7 @@ pub(super) fn write_files<W: FileWriter>(
                 result: Err(anyhow!("the recording ended before this take started")),
             });
         }
+        file.lost_packets += missed_audio.swap(0, Ordering::Relaxed);
         finish(file, shared.end(), take, failure);
     });
 }
@@ -211,6 +240,8 @@ struct OpenFile<W: FileWriter> {
     /// the final slot was handled, waiting cannot recover that dropped slot.
     last_video: Option<Time>,
     clock: Arc<RecordingClock>,
+    /// Sparse-source packets actually refused by this file's input queue.
+    lost_packets: u64,
 }
 
 impl<W: FileWriter> OpenFile<W> {
@@ -219,9 +250,12 @@ impl<W: FileWriter> OpenFile<W> {
             .spec
             .audio
             .iter()
-            .map(|t| AudioTrack {
+            .zip(&plan.audio_timing)
+            .map(|(t, timing)| AudioTrack {
                 channels: t.channels as usize,
+                timing: *timing,
                 written: 0,
+                received: 0,
                 dropouts: 0,
             })
             .collect();
@@ -235,6 +269,7 @@ impl<W: FileWriter> OpenFile<W> {
             recent: VecDeque::new(),
             last_video: None,
             clock,
+            lost_packets: 0,
         }
     }
 
@@ -282,7 +317,16 @@ impl<W: FileWriter> OpenFile<W> {
         // Published after the count, so live status never sees a frame
         // that is still being appended as dropped.
         self.plan.newest.store(pts.as_nanos(), Ordering::Release);
-        appended.map(|_| ())
+        appended?;
+        // A silent/off-air source still has a clocked ISO picture. Fill behind
+        // that clock instead of bursting minutes of silence into the bounded
+        // encoder queue on reactivation or Stop. Work on the pause-mapped
+        // timeline and retain the input's late-arrival/sync-offset allowance.
+        let start = self.start.expect("started");
+        for (i, track) in self.tracks.iter_mut().enumerate() {
+            track.pad_to(&mut self.writer, i, start, pts - track.timing.wait)?;
+        }
+        Ok(())
     }
 
     /// Append audio to `track`, up to `end`.
@@ -320,8 +364,6 @@ impl<W: FileWriter> OpenFile<W> {
         };
         let end = file_end(start, end, self.fps());
         self.tracks[track].append(&mut self.writer, track, samples, pts, start, end)?;
-        let dropouts = self.tracks.iter().map(|t| t.dropouts).sum();
-        self.plan.audio_dropouts.store(dropouts, Ordering::Relaxed);
         Ok(())
     }
 
@@ -367,7 +409,7 @@ impl<W: FileWriter> OpenFile<W> {
             }
             Ok(())
         });
-        let dropouts = self.tracks.iter().map(|t| t.dropouts).sum();
+        let dropouts = self.lost_packets + self.tracks.iter().map(|t| t.dropouts).sum::<u64>();
         // A failed file isn't in the report, so its error says what it holds
         // and what it lost: every frame due up to the end that it lacks.
         let expected = end.ticks_since(start, fps).max(0) as u64;
@@ -431,9 +473,12 @@ pub(super) fn file_end(start: Time, end: Time, fps: u32) -> Time {
 /// One audio track of a file, kept continuous and aligned with the video.
 struct AudioTrack {
     channels: usize,
+    timing: AudioTiming,
     /// Sample frames written since the file's start.
     written: u64,
-    /// Gaps filled with silence and chunks the encoder dropped.
+    /// End of received audio, separate from clock-driven silence.
+    received: u64,
+    /// Missing continuous input, late sparse input and encoder refusals.
     dropouts: u64,
 }
 
@@ -463,11 +508,19 @@ impl AudioTrack {
         // The first audio is placed exactly; after that, small timestamp
         // jitter is ignored to keep the track continuous.
         let tolerance = if written == 0 { 0 } else { AUDIO_JITTER };
+        // Clock-driven padding must not hide an actual gap in a capture
+        // or program track. Media/browser silence is expected instead.
+        if !self.timing.sparse && self.received > 0 && at > self.received as i64 + tolerance {
+            self.dropouts += 1;
+        } else if at < written - tolerance
+            && (at + frames as i64).min(written) > at.max(self.received as i64)
+        {
+            // Samples delivered after their silence was committed really were
+            // lost; don't relabel those (or refused packets) as normal silence.
+            self.dropouts += 1;
+        }
         let mut skip = 0;
         if at > written + tolerance {
-            if written > 0 {
-                self.dropouts += 1;
-            }
             self.write_silence(writer, track, start, (at - written) as u64)?;
         } else if at < written - tolerance {
             skip = ((written - at) as usize).min(frames);
@@ -482,6 +535,11 @@ impl AudioTrack {
             }
             self.written += take as u64;
         }
+        self.received = self.received.max(if take > 0 {
+            self.written
+        } else {
+            (at + frames as i64).clamp(0, limit) as u64
+        });
         Ok(())
     }
 
@@ -567,7 +625,9 @@ mod tests {
         let mut writer = Count::default();
         let mut track = AudioTrack {
             channels: 1,
+            timing: AudioTiming::new(None),
             written: 0,
+            received: 0,
             dropouts: 0,
         };
         for &start in starts {
