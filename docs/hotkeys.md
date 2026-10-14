@@ -155,6 +155,12 @@ they are released on rebinding, profile/collection switching or focused
 client disconnect. They affect the normal source mix/filter paths, just as
 the source's mute control does; raw, unfiltered ISOs retain their raw audio.
 Key repeat never retriggers an action; both press and release edges are used.
+When native and focused input report the same chord's press within 100 ms,
+they count as one press in either arrival order (also if the first path has
+already sent its release). One release or focused-client disconnect ends a
+paired hold. Distinct presses on the same path remain distinct, including
+rapid marker presses. The time is captured on arrival, so a slow recording
+action cannot make queued events look simultaneous.
 Distinct press/release pairs remain distinct commands, including recording
 toggle: there is no time-based debounce that would silently drop intentional
 commands. Use dedicated `recording.start` / `.stop` bindings when preferred.
@@ -247,17 +253,33 @@ daemon rather than guessing which old settings to restore.
 {"method":"hotkeys_set","params":{"patch":{"record":{"keys":"f13","action":"recording.toggle","args":{}},"old-binding":null}}}
 ```
 
-The Settings > Hotkeys page and the native app's custom focused-key bridge
-belong to the subsequent app integration. The engine/client interface is
-ready for both: a focused client forwards `hotkeys_input` with
+Settings > Hotkeys edits the current profile and records physical key chords.
+The native app's focused-key bridge forwards `hotkeys_input` with
 `{"keys":"media_play_pause","phase":"press"}` and then `release`, on
 the **same persistent socket**. Send releases on window blur too. Closing
 that socket releases its holds. The shared Rust client's `hotkey_input`
-helper preserves this lifetime. A globally registered chord is ignored on
-this path to prevent double-firing. MCP's one-shot focused input produces
+helper preserves this lifetime. Globally registered chords are accepted too:
+`global: true` means registration succeeded, not that the OS delivered this
+press. The first delivery fires immediately; the other path's matching press
+within 100 ms is suppressed by the shared edge tracker. `queued: true` means
+accepted for that processing, not a promise of a second action/event.
+MCP's one-shot focused input produces
 a pulse; it isn't a persistent keyboard client for holding push-to-talk.
 Clients can read `hotkeys_get.studio_mode` after a `hotkey_fired` event to
-present the daemon's state. Old apps' fixed shortcuts are not edited here.
+present the daemon's state.
+
+For automation on macOS, Cua's **desktop-targeted** hotkey route reaches
+Carbon; its **window-targeted, foreground** route can deliver the chord to
+the app without a Carbon callback, despite both reporting `global_input`.
+The focused bridge covers that case inside Isocast. A window-targeted press
+into Finder cannot be observed by Isocast's local bridge; test unfocused
+hotkeys with the desktop target while Finder is frontmost. This distinction
+was reproduced on macOS 27 using the unchanged QA daemon; desktop delivery
+also succeeded in a minimal Carbon receiver. A physical-keyboard check remains useful for keyboard layout,
+Stream Deck and media-key behavior; no permission is added to intercept keys.
+`ISOCAST_DEBUG_KEYS=1` on the daemon logs registration results and native
+Carbon edges; on the app it logs forwarded key edges and API replies. Use
+these only while diagnosing input (the app log contains typed chords).
 
 ## macOS permissions
 

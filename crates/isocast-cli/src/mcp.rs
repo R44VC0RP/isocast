@@ -359,7 +359,7 @@ impl Isocast {
     }
 
     #[tool(
-        description = "Forward focused fallback key input: keys and phase (press or release). Globally registered chords are ignored to avoid duplicates. Send releases on blur. Intended for focused clients when global registration is unavailable.",
+        description = "Forward focused key input: keys and phase (press or release), including globally registered chords. Matching native and focused press edges within 100 ms fire once. Send releases on blur; persistent clients use the same socket for both edges.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn hotkeys_input(

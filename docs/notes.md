@@ -152,6 +152,16 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-14 (A.2 R3 hotkeys): exonbook's GUI qualification is blocked by its
+  locked session (`lsappinfo front` names loginwindow; ScreenSaverEngine
+  85539). All 13 non-GUI E2E scenarios passed there, including pause/marker
+  through focused hotkeys_input. Real-window keyboard checks passed on
+  isocast-m2-a. Once unlocked, repeat the m2-a focused/desktop keyboard check
+  from `/Volumes/IsocastBuild/hotkeys-fire/scratch/final-binary.log`'s evidence
+  on exonbook; no unlock or permission prompt was bypassed.
+  Gate to retry: `scripts/testmac.sh gui 'lsappinfo info -only name "$(lsappinfo front)"'`
+  must no longer report loginwindow.
+
 - 2026-10-14 (8.2, morning): the native release built from merged main
   85e2210 is Developer ID-signed and tested, ready at
   `/Volumes/IsocastBuild/release/scratch/morning-native`. No build is needed
@@ -1472,6 +1482,25 @@ each section. Delete entries that stop being true.
   from padded audio. No mixer/source-playback/encoder changes. Local 48 s
   repro and exonbook browser/edge checks pass; R1-REPORT.md in qa-engine
   scratch holds the evidence, plus strict 13/13 E2E and 178 release tests.
+- 2026-10-14 (A.2 QA-3 R3): hotkeys_input now accepts registered-global chords.
+  A single worker pairs opposite global/focused press edges of a binding and
+  generation within 100 ms, using enqueue time rather than slow action time.
+  It fires the first path immediately, pairs at most one counterpart, retains
+  release history for delayed duplicates, suppresses repeat-down, and keeps
+  fast same-path press/release pairs distinct. Either release or focused
+  disconnect ends a paired push hold once. No app bridge change is necessary.
+  Five edge-tracker cases plus a real-recording regression in scripts/e2e.py
+  cover this; 183 tests and release all-target clippy pass.
+- 2026-10-14 (A.2 R3 native delivery): the QA 301e404 daemon on macOS 27
+  receives Cua desktop-targeted Ctrl-Opt-P/M globally with Finder frontmost;
+  the same Cua hotkey with pid/window_id and delivery_mode foreground goes
+  to the target window with no Carbon callback. Both tool replies misleadingly
+  label their route global_input. A minimal Carbon/AppKit receiver confirms
+  desktop delivery. No native registration/event-loop defect or new permission
+  is needed; focused fallback repairs the window-targeted Isocast case.
+  Optional ISOCAST_DEBUG_KEYS on isocastd records registration and native edges
+  in diagnostics; the app's existing switch records its forwarding. Use a
+  desktop target for unfocused automation, not a window-targeted Finder event.
 
 - 2026-10-14 (8.2d): release preparation now stops after Developer ID signing
   the native Slint app and DMG. One `app_target` line defaults to isocast-ui,
@@ -1729,9 +1758,10 @@ each section. Delete entries that stop being true.
   persistent connection from its own thread, keys still held are released
   when the app resigns active or the window loses focus. New dependency:
   block2 (already in the lock through objc2) for the monitor's block.
-  Gotcha: a globally registered chord never reaches the app (Carbon takes
-  it), so the bridge only matters for media keys without Input Monitoring
-  and chords another app owns; and a key-up of a key pressed with Command
+  Gotcha (updated by QA-3 R3): a registered chord can still reach the app,
+  especially for window-targeted posted events; the daemon accepts both
+  paths and pairs their press edges instead of trusting registration alone.
+  A key-up of a key pressed with Command
   never arrives (AppKit), see the next entry. ISOCAST_DEBUG_KEYS=1 logs
   every edge and the daemon's reply to stderr.
 

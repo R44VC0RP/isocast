@@ -2,12 +2,13 @@
 //! native callbacks only send edges to one worker. Holds overlay the setup in
 //! memory, so a crash/restart never saves a momentary unmute into the profile.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 #[cfg(target_os = "macos")]
@@ -48,8 +49,86 @@ pub(crate) struct HotkeyRuntime {
 }
 
 enum Input {
-    Key(Edge, InputSource, u64),
+    Key(Edge, InputSource, u64, Instant),
     Disconnect(u64),
+}
+
+/// Match the two delivery paths, not two intentional presses on one path.
+/// Times are stamped when enqueued, before a slow action can delay the worker.
+const DEDUPE_WINDOW: Duration = Duration::from_millis(100);
+type PressToken = (u64, String, InputSource, u64);
+
+struct RecentPress {
+    token: PressToken,
+    at: Instant,
+    id: u64,
+    paired: bool,
+}
+
+#[derive(Default)]
+struct Presses {
+    down: HashMap<PressToken, u64>,
+    active: HashSet<u64>,
+    recent: VecDeque<RecentPress>,
+    next: u64,
+    generation: u64,
+}
+
+impl Presses {
+    fn press(&mut self, token: PressToken, at: Instant) -> Option<u64> {
+        if self.generation != token.0 {
+            self.down.clear();
+            self.active.clear();
+            self.recent.clear();
+            self.generation = token.0;
+        }
+        if self.down.contains_key(&token) {
+            return None;
+        }
+        self.recent
+            .retain(|p| at.saturating_duration_since(p.at) <= DEDUPE_WINDOW);
+        if let Some(previous) = self.recent.iter_mut().find(|p| {
+            !p.paired && p.token.0 == token.0 && p.token.1 == token.1 && p.token.2 != token.2
+        }) {
+            previous.paired = true;
+            self.down.insert(token, previous.id);
+            return None;
+        }
+        self.next += 1;
+        let id = self.next;
+        self.down.insert(token.clone(), id);
+        self.active.insert(id);
+        self.recent.push_back(RecentPress {
+            token,
+            at,
+            id,
+            paired: false,
+        });
+        // A bounded history even under input bursts; holds live separately.
+        if self.recent.len() > 256 {
+            self.recent.pop_front();
+        }
+        Some(id)
+    }
+
+    fn release(&mut self, token: &PressToken) -> Option<u64> {
+        let id = self.down.remove(token)?;
+        self.down.retain(|_, stroke| *stroke != id);
+        self.active.remove(&id).then_some(id)
+    }
+
+    fn disconnect(&mut self, owner: u64) -> Vec<u64> {
+        let ids: HashSet<_> = self
+            .down
+            .iter()
+            .filter(|(token, _)| token.3 == owner)
+            .map(|(_, id)| *id)
+            .collect();
+        self.down.retain(|_, id| !ids.contains(id));
+        ids.into_iter()
+            .filter(|id| self.active.remove(id))
+            .collect()
+    }
 }
 
 /// Focused push keys belong to the socket delivering them. Losing a client
@@ -133,27 +212,27 @@ impl Daemon {
         let _ = self.hotkeys.sender.set(tx);
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
-            let mut pressed = HashSet::new();
+            let mut pressed = Presses::default();
             while let Ok(input) = rx.recv() {
                 let Some(daemon) = weak.upgrade() else {
                     break;
                 };
                 if daemon.hotkeys.overflow.swap(false, Ordering::AcqRel) {
                     for _ in rx.try_iter() {}
-                    pressed.clear();
+                    pressed = Presses::default();
                     daemon.clear_hotkey_holds();
                     daemon.publish(Event::Warning { message: "hotkey input queue overflowed; pending actions cancelled and push keys released".into() });
                     continue;
                 }
-                let (edge, source, owner) = match input {
-                    Input::Key(edge, source, owner) => (edge, source, owner),
+                let (edge, source, owner, at) = match input {
+                    Input::Key(edge, source, owner, at) => (edge, source, owner, at),
                     Input::Disconnect(owner) => {
-                        pressed.retain(|(_, _, _, client)| *client != owner);
+                        let released = pressed.disconnect(owner);
                         let mut state = daemon.state.lock().unwrap();
                         let count = state.hotkey_holds.len();
-                        state
-                            .hotkey_holds
-                            .retain(|id, _| !id.starts_with(&format!("{owner}:")));
+                        for id in released {
+                            state.hotkey_holds.remove(&format!("press:{id}"));
+                        }
                         if count != state.hotkey_holds.len()
                             && let (Some(engine), Some(setup)) = (&state.engine, &state.setup)
                             && let Err(message) =
@@ -175,15 +254,14 @@ impl Daemon {
                     continue;
                 };
                 let token = (edge.generation, edge.binding.clone(), source, owner);
-                match edge.phase {
-                    Phase::Press if !pressed.insert(token.clone()) => continue,
-                    Phase::Release if !pressed.remove(&token) => continue,
-                    Phase::Release if !binding.hold() => continue,
-                    _ => {}
-                }
-                // Forget old generations (e.g. a profile-switch action).
-                pressed.retain(|(generation, _, _, _)| *generation == edge.generation);
-                let hold_id = format!("{owner}:{}:{}", edge.generation, edge.binding);
+                let stroke = match edge.phase {
+                    Phase::Press => pressed.press(token, at),
+                    Phase::Release => pressed.release(&token).filter(|_| binding.hold()),
+                };
+                let Some(stroke) = stroke else {
+                    continue;
+                };
+                let hold_id = format!("press:{stroke}");
                 let result = daemon.fire_hotkey(&hold_id, &binding, edge.phase);
                 let error = result.err().map(|e| {
                     let field = if e.message.starts_with("args") || e.message.starts_with("action:")
@@ -275,7 +353,7 @@ impl Daemon {
             // The queue fits a whole profile's edges. A full queue is handled
             // below by the same enqueue path for focused input.
             if sender
-                .try_send(Input::Key(edge, InputSource::Global, 0))
+                .try_send(Input::Key(edge, InputSource::Global, 0, Instant::now()))
                 .is_err()
             {
                 overflow.store(true, Ordering::Release);
@@ -421,13 +499,6 @@ impl Daemon {
         let Some((id, _)) = binding else {
             return Ok(json!({"queued":false}));
         };
-        if registered
-            .registrations
-            .iter()
-            .any(|r| r.binding == *id && r.global)
-        {
-            return Ok(json!({"queued":false, "reason":"registered globally"}));
-        }
         let sender = self
             .hotkeys
             .sender
@@ -442,6 +513,7 @@ impl Daemon {
                 },
                 InputSource::Focused,
                 owner,
+                Instant::now(),
             ))
             .is_err()
         {
@@ -810,5 +882,115 @@ fn item_ids(items: &Value, ids: &mut Vec<String>) {
             ids.push(id.into());
         }
         item_ids(&item["children"], ids);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn token(source: InputSource, owner: u64) -> PressToken {
+        (1, "marker".into(), source, owner)
+    }
+
+    #[test]
+    fn both_delivery_orders_fire_and_release_once() {
+        let at = Instant::now();
+        let global = token(InputSource::Global, 0);
+        let focused = token(InputSource::Focused, 7);
+        for (first, second) in [(&global, &focused), (&focused, &global)] {
+            for release_first in [true, false] {
+                let mut presses = Presses::default();
+                let id = presses.press(first.clone(), at).unwrap();
+                assert_eq!(
+                    presses.press(second.clone(), at + Duration::from_millis(20)),
+                    None
+                );
+                let (release, other) = if release_first {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                assert_eq!(presses.release(release), Some(id));
+                assert_eq!(presses.release(other), None);
+            }
+        }
+    }
+
+    #[test]
+    fn delayed_other_path_after_release_does_not_reactivate_a_hold() {
+        let at = Instant::now();
+        let global = token(InputSource::Global, 0);
+        let focused = token(InputSource::Focused, 1);
+        let mut presses = Presses::default();
+        let id = presses.press(global.clone(), at).unwrap();
+        assert_eq!(presses.release(&global), Some(id));
+        assert_eq!(
+            presses.press(focused.clone(), at + Duration::from_millis(50)),
+            None
+        );
+        assert_eq!(presses.release(&focused), None);
+    }
+
+    #[test]
+    fn repeats_are_ignored_but_rapid_distinct_presses_are_kept() {
+        let at = Instant::now();
+        let focused = token(InputSource::Focused, 1);
+        let global = token(InputSource::Global, 0);
+        let mut presses = Presses::default();
+        for n in 0..3 {
+            let time = at + Duration::from_millis(n * 15);
+            let id = presses.press(focused.clone(), time).unwrap();
+            assert_eq!(presses.press(focused.clone(), time), None);
+            assert_eq!(presses.release(&focused), Some(id));
+        }
+        // The second delivery path gets one counterpart per original press.
+        for n in 0..3 {
+            assert_eq!(
+                presses.press(global.clone(), at + Duration::from_millis(50 + n)),
+                None
+            );
+            assert_eq!(presses.release(&global), None);
+        }
+    }
+
+    #[test]
+    fn cross_path_after_window_and_other_clients_remain_independent() {
+        let at = Instant::now();
+        let global = token(InputSource::Global, 0);
+        let focused = token(InputSource::Focused, 1);
+        let mut presses = Presses::default();
+        let first = presses.press(global.clone(), at).unwrap();
+        assert_eq!(presses.release(&global), Some(first));
+        assert!(
+            presses
+                .press(focused.clone(), at + Duration::from_millis(101))
+                .is_some()
+        );
+        assert!(
+            presses
+                .press(
+                    token(InputSource::Focused, 2),
+                    at + Duration::from_millis(110)
+                )
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn disconnect_releases_paired_hold_and_old_generation_cannot_release_new_one() {
+        let at = Instant::now();
+        let global = token(InputSource::Global, 0);
+        let focused = token(InputSource::Focused, 9);
+        let mut presses = Presses::default();
+        let first = presses.press(global.clone(), at).unwrap();
+        assert_eq!(presses.press(focused, at), None);
+        assert_eq!(presses.disconnect(9), vec![first]);
+        assert_eq!(presses.release(&global), None);
+        let new = (2, "marker".into(), InputSource::Global, 0);
+        let next = presses.press(new.clone(), at).unwrap();
+        assert_ne!(next, first);
+        assert_eq!(presses.release(&global), None);
+        assert_eq!(presses.release(&new), Some(next));
     }
 }

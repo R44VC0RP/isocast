@@ -722,6 +722,49 @@ def scenario_hotkeys(e, cfg, evidence):
     require(not e.rpc("hotkeys_get")["bindings"], "hotkey removal did not persist")
     evidence["action_count"] = len(catalogue["actions"])
 
+    # A successful native registration does not guarantee delivery to the
+    # daemon (window-targeted posted events can reach only the app). Focused
+    # edges must remain usable, including repeat suppression and rapid presses.
+    bindings = {
+        "pause": {"keys": "ctrl+alt+p", "action": "recording.pause_toggle"},
+        "marker": {"keys": "ctrl+alt+m", "action": "recording.marker", "args": {"label": "focused"}},
+    }
+    evidence["registrations"] = e.rpc("hotkeys_set", {"bindings": bindings})["registrations"]
+    started = e.rpc("start", {})
+    until(lambda: e.rpc("status").get("live"), description="live recording status")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(10)
+        sock.connect(str(e.sock))
+        with sock.makefile("rb") as reader:
+            def edge(keys, phase):
+                request = {"jsonrpc": "2.0", "id": 1, "method": "hotkeys_input",
+                           "params": {"keys": keys, "phase": phase}}
+                sock.sendall((json.dumps(request) + "\n").encode())
+                reply = json.loads(reader.readline())
+                require(reply.get("result", {}).get("queued"), f"focused edge was ignored: {reply}")
+
+            edge("ctrl+alt+p", "press")
+            edge("ctrl+alt+p", "press")  # key repeat must not toggle back
+            edge("ctrl+alt+p", "release")
+            until(lambda: e.rpc("status")["live"]["paused"], description="hotkey pause")
+            time.sleep(0.2)
+            edge("ctrl+alt+m", "press")
+            edge("ctrl+alt+m", "release")
+            edge("ctrl+alt+p", "press")
+            edge("ctrl+alt+p", "release")
+            until(lambda: not e.rpc("status")["live"]["paused"], description="hotkey resume")
+            for _ in range(2):  # distinct fast presses aren't debounce noise
+                edge("ctrl+alt+m", "press")
+                edge("ctrl+alt+m", "release")
+    until(lambda: len(read_json(started["manifest"])["markers"]) == 3,
+          description="three focused markers")
+    e.rpc("stop")
+    manifest = read_json(started["manifest"])
+    require(len(manifest["pauses"]) == 1, "focused pause fired more than once")
+    evidence["focused_markers"] = len(manifest["markers"])
+    evidence["focused_pauses"] = manifest["pauses"]
+    evidence["files"] = check_take(Path(started["manifest"]), manifest, evidence=evidence)
+
 
 def scenario_shutdown(e, cfg, evidence):
     e.apply(cfg)

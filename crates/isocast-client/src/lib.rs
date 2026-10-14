@@ -61,8 +61,8 @@ impl Client {
     }
 
     /// Forward a focused fallback key edge. Reuse this connection for both
-    /// edges; disconnecting releases its push keys. Globally registered keys
-    /// are ignored to avoid double-firing when a window is focused.
+    /// edges; disconnecting releases its push keys. The daemon accepts even
+    /// globally registered chords and deduplicates matching native press edges.
     pub fn hotkey_input(
         &mut self,
         keys: String,

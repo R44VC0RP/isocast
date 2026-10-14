@@ -32,6 +32,13 @@ struct EventType {
 const SIGNATURE: u32 = u32::from_be_bytes(*b"isoh");
 const KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
 
+fn debug(message: std::fmt::Arguments<'_>) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var_os("ISOCAST_DEBUG_KEYS").is_some()) {
+        eprintln!("isocastd hotkeys: {message}");
+    }
+}
+
 #[link(name = "Carbon", kind = "framework")]
 unsafe extern "C" {
     fn GetEventDispatcherTarget() -> Ref;
@@ -229,6 +236,7 @@ impl Native {
                     let modifiers = ((bits & 1 != 0) as u32 * 4096) | ((bits & 2 != 0) as u32 * 2048)
                         | ((bits & 4 != 0) as u32 * 512) | ((bits & 8 != 0) as u32 * 256);
                     let status = RegisterEventHotKey(code, modifiers, HotKeyId { signature: SIGNATURE, id }, target, 1, &mut registered);
+                    debug(format_args!("register {} id={id} code={code} modifiers={modifiers} status={status}", key.binding));
                     if status == 0 {
                         self.refs.push(registered);
                         self.keys.insert(id, key.binding);
@@ -269,6 +277,12 @@ unsafe extern "C" fn carbon_event(_: Ref, event: Ref, _: Ref) -> i32 {
             (&mut id as *mut HotKeyId).cast(),
         )
     };
+    debug(format_args!(
+        "Carbon edge kind={} parameter_status={status} signature={} id={}",
+        unsafe { GetEventKind(event) },
+        id.signature,
+        id.id
+    ));
     if status != 0 || id.signature != SIGNATURE {
         return -9874;
     }

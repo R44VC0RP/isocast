@@ -540,6 +540,9 @@ layout editing, Windows, release prep).
 - [ ] **A.2 OBS workflows in the native app.** Scenes, sources, filters,
   transitions, Studio Mode, mixer, program + ISO recording, streaming:
   one scripted pass in real windows on the test Macs, every finding fixed.
+  - [x] **A.2 QA-3 R3 hotkeys:** accept focused input even when registered
+    globally; pair matching native/focused press edges, preserve repeats and
+    hold cleanup. Verify pause/marker on m2-a and identify Cua routing limits.
   - [x] **A.2 app #1 (QA-2 #2):** Quit, Close Window, Exit and the close
     button ask "You are currently recording. Stop and quit?" while
     recording or streaming (Stop and Quit / Keep Recording / Cancel).
@@ -2994,3 +2997,13 @@ One line per finished task, newest last.
   retired web app is excluded. Resumable --notarize plus --draft-release
   finalizes saved bytes and reuses only a matching draft. No notary or GitHub
   write attempted; exact morning commands in REPORT.md.
+- A.2 QA-3 R3 hotkeys (2026-10-14): focused input no longer disappears merely
+  because native registration succeeded. Global/focused presses pair within
+  100 ms in either order; repeats, rapid distinct presses and hold release/
+  disconnect are preserved. m2-a: four focused and four Finder-frontmost
+  pause/resume pairs, exact markers, eight dual-path pairs with no double fire;
+  final binary also verifies both UI/global paths (116 frames, equal A/V,
+  complete, zero drops). Unchanged QA daemon proves desktop Cua events reach
+  Carbon; window-targeted foreground ones bypass it. 13/13 E2E cases pass on
+  exonbook (GUI locked); hotkey E2E also passes on m2-a. fmt, release clippy
+  and 183 tests pass; report: g5-hotkeys/scratch/R3-REPORT.md on build volume.

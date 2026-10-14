@@ -303,8 +303,9 @@ pub enum Method {
     HotkeysSet(Box<crate::hotkeys::SetParams>),
     /// Bindable actions, labels, groups, argument schemas and suggested defaults.
     HotkeysActions,
-    /// Focused client's fallback key input (press AND release). A globally
-    /// registered chord is ignored here to avoid firing twice.
+    /// Focused client's key input (press AND release), including globally
+    /// registered chords. Matching global/focused presses within 100 ms fire
+    /// once; registration alone is not evidence of native delivery.
     HotkeysInput(crate::hotkeys::InputParams),
     /// Feed the configured picture to the installed macOS camera extension.
     /// Returns [`crate::virtual_camera::VirtualCameraStatus`]. Does not install it.
