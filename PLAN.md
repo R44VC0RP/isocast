@@ -602,9 +602,19 @@ layout editing, Windows, release prep).
   recording (G.3), virtual camera (G.1). Replay buffer and projectors wait.
 - [x] **A.4 Graceful overload (S.3 round 3):** the program and stream stay
   whole while ISOs drop first; A/V durations equal (S.2c); stop stays fast.
+- [ ] **A.4 ISO take loss (GitHub #41, blocked investigation):** current
+  main reproduces 57–60% ISO loss with clean program files. Native traces
+  show slow VT submissions before shared admission cuts; the globals reset
+  correctly. Zero-relative-time and three native-setting controls failed.
+  No throughput fix ships; stop this hypothesis and revisit native-session
+  initialization/scheduling. Evidence: iso-drops scratch REPORT.md.
 - [x] **A.5 Timeline MVP (C.1, C.2):** takes append, retake, remove,
   reorder, export one joined file; a simple Create view in the app.
 - [x] **A.6 Log everything, report bugs in one click.**
+  - [x] **A.6 dropped-file stop summaries (GitHub #42):** one warning per
+    lossy file/take on the shared report, including percentage and path.
+    API/CLI/MCP verified on six 30 s takes and a ten-minute split recording;
+    13/13 strict e2e scenarios pass. The underlying ISO loss (#41) remains.
   - [x] **A.6 app:** Help > Report a Bug... in the Slint app: description,
     preview of exactly what is shared, the zip, the prefilled GitHub issue.
   - [x] **A.6 review #1:** contain panics, emergency-finalize poisoned state,
@@ -1162,6 +1172,25 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- A.4 / #41 (2026-10-14, blocked): baseline six-take repro lost 9,416 ISO
+  frames, zero program frames. Native submission stalls precede the shared
+  controller's 1000→132 cut; independent takes reset all priority counters.
+  Relative timestamps, late look-ahead=0, power-efficiency=false and explicit
+  maximum real-time fps=60 did not solve it; all trials/instrumentation
+  removed. #42-only build still loses ISO frames; do not call this fixed.
+- A.6 / #42 M2 qualification (2026-10-14): three interleaved baseline/head
+  pairs per scenario. Healthy flagship-1080: 0 drops both builds. Overloaded
+  flagship+stream: protected program/stream video/audio drops 0 both; median
+  total ISO drops per run unchanged at 2,562. All 36 MOVs ffprobe matched;
+  strict M2 e2e 13/13, zero drops. No recording-path/admission changes.
+
+- A.6 / #42 (2026-10-14): stop and status.last now summarize each file's
+  dropped pictures; tail repeats do not inflate the percentage denominator.
+  Six quiet takes plus four ten-minute-session splits: 9 affected files all
+  warned, 31 clean files not warned; CLI text and MCP stop/status checked.
+  Release fmt/clippy, 182 unit tests + one doctest and 13/13 zero-drop e2e
+  pass on exonbook. All 204 investigation files ffprobe count/duration matched.
 
 - A.2 QA-3 R1 (2026-10-14): fill ISO audio gaps progressively on the
   pause-mapped video clock, retaining the late-input/negative-offset allowance;

@@ -483,6 +483,18 @@ each section. Delete entries that stop being true.
 
 ## Benchmarks
 
+- 2026-10-14 (iso-drops, #42-only qualification): baseline 63be94c versus
+  10fc1a8 on isocast-m2-a, SSH, synthetic benchmark clips, 3 interleaved
+  pairs/scenario, both common locks, no screen sharing. Healthy flagship-1080:
+  zero video/audio drops in 18 files, daemon CPU median 47.8→49.5% of one
+  core (ranges overlap), instructions 563.1→559.8 M/s. Flagship+stream:
+  program and stream remain zero-drop; ISO losses per run [2562,2560,2566]
+  → [2567,2562,2552], median 2562 both, daemon CPU 53.2→53.2%. All 36 files
+  ffprobe packet-count/A-V-duration matched before benchmark cleanup. Normal
+  e2e 13/13 zero-drop on both M4 and M2. This validates summary-only behavior,
+  not a #41 fix. Original six-take/ten-minute #41 M2 qualification is deferred
+  until a real throughput candidate exists. Logs in iso-drops scratch.
+
 - 2026-10-14 (process-wide escalation, supersedes the adaptive blocker): same
   reviewer tools, three interleaved ten-second program+two-ISO pairs per cell
   on exonbook and m2-a, compared with e7b4531 merged onto the same main.
@@ -1410,6 +1422,20 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-14 (Ryan): **exonbook's "'Python' is requesting to bypass the
+  system private window picker" alert stays unanswered.** Ryan doesn't use
+  exonbook and leaves it open; it blocks nothing (the engine is already
+  allowed as dev.isocast.isocastd). Agents never answer it. Lanes on
+  exonbook prefer SSH runs without display capture; a GUI run there must
+  expect the alert on screen. Root cause: GitHub #44.
+- 2026-10-14 (#42, iso-drops): summary warnings are assembled once from the
+  completed `FileReport`s in record/engine.rs, after all split writers join.
+  Source id, take number, count, percentage and path identify every affected
+  file on Stop and status.last (including MCP). Expected original pictures =
+  frames - repeated_frames + dropped_frames; a tail repeat is stored but is
+  not an extra original picture. Existing warnings/errors remain intact and
+  a clean file adds no warning. The native admission policy is unchanged.
 
 - 2026-10-14 (release-secrets): the release workflow gets a **preflight job**
   (ubuntu, no environment, read-only token) ahead of the macOS job. It
@@ -4071,6 +4097,27 @@ each section. Delete entries that stop being true.
   not one tool per API call.
 
 ## Gotchas
+
+- 2026-10-14 (#41, iso-drops, BLOCKED): the presumed stale ISO-share toggle
+  is not the cause of bad independent takes. Temporary guards log new
+  outputs=1/pressure=0/share=1000 every time and outputs=0/pressure=0 on Drop.
+  Before a bad take's first admission cut, a VT interposer sees 4K encode
+  submissions taking ~18–24 ms, eight frames in flight, callbacks ~170–180 ms
+  behind. Three pending raw program pictures trigger cuts from 1000 to 132
+  in ~0.53 s; all ISOs follow that common fraction. Recovery is +10 per
+  500 ms per guard (1.2 fps/s at 60 fps for one guard), not independently
+  measured 2.4 fps/s. Split guards overlap and can carry pressure forward.
+  The upstream reason identical native sessions sometimes slow down is
+  still unknown. Relative AVAssetWriter media times failed the split test;
+  late explicit look-ahead=0, power-efficiency=false and max real-time fps=60
+  each still had bad takes. After three native-setting trials, stop that
+  hypothesis. All trials/logging were removed, overload behavior unchanged.
+  Next useful control: identical prerecorded inputs and controlled native
+  session initialization/ordering, tracing actual submitted/completed PTS.
+  Full commands, raw traces and reports are in
+  `/Volumes/IsocastBuild/iso-drops/scratch/REPORT.md`. Keep the soak's failing
+  files on exonbook until #41 is genuinely fixed; do not weaken admission
+  or move its globals and infer success from a few lucky clean takes.
 
 - 2026-10-14 (8.2g review): Ryan's interactive zsh has `interactivecomments`
   off (zsh's default; `[[ -o interactivecomments ]]` in `zsh -i` on his

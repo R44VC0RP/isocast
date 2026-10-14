@@ -2344,6 +2344,32 @@ impl<F: Clone> Drop for Unroute<F> {
 }
 
 /// Record the engine's setup until the recording ends.
+/// 16601 -> "16,601", for the per-file drop warnings.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// One decimal, but never "0.0%" for a real drop or "100.0%" while some
+/// frames survived.
+fn drop_percent(dropped: u64, expected: u64) -> String {
+    let percent = 100.0 * dropped as f64 / expected.max(1) as f64;
+    if percent < 0.1 {
+        "<0.1%".into()
+    } else if percent > 99.9 && dropped < expected {
+        ">99.9%".into()
+    } else {
+        format!("{percent:.1}%")
+    }
+}
+
 fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result<Report> {
     let platform = &inner.platform;
     let control = &inner.control;
@@ -3119,6 +3145,29 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
         files.extend(take.results.iter_mut().filter_map(|r| r.take()?.ok()));
     }
     errors.extend(file_errors);
+    for file in &files {
+        if file.dropped_frames > 0 {
+            // Tail repeats are stored frames, but do not replace a missing
+            // original picture in the expected-frame denominator.
+            let expected = file
+                .frames
+                .saturating_sub(file.repeated_frames)
+                .saturating_add(file.dropped_frames);
+            warnings.push(format!(
+                "{} take {}: {} {} dropped ({}); {}",
+                file.source,
+                file.take,
+                thousands(file.dropped_frames),
+                if file.dropped_frames == 1 {
+                    "frame"
+                } else {
+                    "frames"
+                },
+                drop_percent(file.dropped_frames, expected),
+                file.path.display()
+            ));
+        }
+    }
     if let Some(on_take) = options.on_take {
         for (i, take) in takes.iter().enumerate().skip(reported) {
             if let Some(manifest) = &take.manifest {
