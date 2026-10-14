@@ -158,6 +158,16 @@ each section. Delete entries that stop being true.
   #11. Note: the v0.0.1 tag push queued a Release run waiting for approval;
   it was cancelled (the release was already published, which the workflow
   refuses to touch).
+- 2026-10-14 (8.2g release-secrets, #11): readiness checked, nothing blocks
+  the first hosted run except Ryan's part. The copy-paste sequence is
+  docs/releasing.md steps 2–6: export the .p12, create the team API key,
+  `gh secret set` ×6 (secrets still 0 on 2026-10-14), then the first run.
+  Since 0.0.1 is published, a run for it now ends green in preflight
+  ("nothing to build or draft"); the first real run is a v0.0.2 tag after
+  bumping Cargo.toml and publishing the snapshot (step 5). Afterwards
+  rotate the app-specific password behind the local `isocast-notary`
+  profile (step 6). Full readiness table and dry-run evidence in
+  `/Volumes/IsocastBuild/release-secrets/scratch/REPORT.md`.
 - 2026-10-14 (A.2 R3 hotkeys): the focused/desktop keyboard check passed on
   isocast-m2-a but not yet on exonbook, which was locked then and stays
   unlocked since 2026-10-14 (handoff §7). Repeat the m2-a check from
@@ -1401,6 +1411,43 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-14 (release-secrets): the release workflow gets a **preflight job**
+  (ubuntu, no environment, read-only token) ahead of the macOS job. It
+  validates the version, resolves the tag, compares Cargo.toml at the tag,
+  and asks `releases/tags/<tag>` (published releases only; drafts are
+  invisible to a read token and stay the finalizer's business). Published
+  → `proceed=false`, the release job is skipped, the run is green with a
+  notice and summary, and no approval is requested. Before, a tag push or
+  manual run for a published version waited for approval, built, signed,
+  notarized twice and only then failed red in `draft_release` ("absent or
+  published; refusing"). The macOS job re-checks after checkout (published
+  while waiting for approval → stops before any secret is decoded) and the
+  finalizer's guard stays as the last word. Chosen over a verify-only mode
+  for published versions because a rebuild that can't draft proves little
+  and would need artifact uploads; the real first-run test is a new
+  version. Runner scratch paths moved to a one-line step because `runner.*`
+  is not available in job-level `env`.
+- 2026-10-14: **Installer DMG via dmgbuild (8.2f).** dmgbuild 1.6.7
+  (MIT, with ds_store 1.3.3 and mac_alias 2.2.3, hash-pinned in
+  scripts/dmg/requirements.txt) writes the window's .DS_Store directly, so
+  it runs on headless CI with no Finder/AppleScript. One layout file,
+  scripts/dmg/settings.py, used by release.sh and release-finalize.py
+  through scripts/dmg/make-dmg.sh (python3 if it has the exact pin, as in
+  CI; otherwise a private venv keyed by requirements.txt's SHA-256 under
+  ISOCAST_DMGBUILD_CACHE, default ~/Library/Caches/isocast/dmgbuild,
+  installed with `uv pip install --require-hashes --no-deps` or Python
+  3.10+ venv/pip; never the system Python). Installs for a key are
+  serialized with /usr/bin/lockf; an invalid entry is set aside and the new
+  venv renamed in, and staging is removed on exit. HFS+/UDZO as
+  before; dmgbuild finds background@2x.png itself and runs `tiffutil
+  -cathidpicheck` into /.background.tiff (not a .background/ folder).
+  Labels: Finder draws icon labels black on a picture background in Light
+  and Dark (macOS 26.7/27.0), invisible on the black art, and no .DS_Store
+  setting changes that. So the art carries "Isocast" and "Applications" in
+  #BBBBBB at content y 290-306, under Finder's own (~270-286 at 13 pt).
+  Delegator's call; Ryan can overrule. Selecting an icon shows Finder's
+  blue name pill (y 274-291) just above ours (from y 293): no overlap, the
+  name just appears twice while selected.
 - 2026-10-14 (Ryan): **GitHub issues are the work tracker now.** Known
   issues, follow-ups and roadmap items are filed on R44VC0RP/isocast
   (#2–#23), with milestones "Alpha week" (freeze: docs and fixes only) and
@@ -4025,6 +4072,49 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-14 (8.2g review): Ryan's interactive zsh has `interactivecomments`
+  off (zsh's default; `[[ -o interactivecomments ]]` in `zsh -i` on his
+  rc files says off), so a `# comment` at the end of a pasted command line
+  becomes arguments (`gh secret set … # paste` → "accepts at most 1 arg",
+  `sed … Cargo.toml # [workspace.package]` → "no matches found", a line
+  that is only a comment → "command not found: #"). `bash -n`, `zsh -n`
+  and `zsh -ic '…'` all accept comments and miss this; only typed or
+  pasted input into `zsh -i` on a pty shows it. Rule for docs: no comments
+  inside command blocks, explanations in prose, and chain the lines of a
+  block with `&&` so a failed guard stops the rest. The harness that
+  pastes blocks into a real interactive zsh (Ryan's rc files, scratch HOME,
+  stub gh/git) is `/Volumes/IsocastBuild/release-secrets/scratch/pty_paste.py`.
+- 2026-10-14 (release-secrets): `gh secret set` reads stdin with
+  `bytes.TrimRight(body, "\r\n")` (cli v2.96.0 `pkg/cmd/secret/set/set.go`),
+  so an editor's trailing newline is harmless; with a TTY and no redirect it
+  shows a hidden "Paste your secret:" prompt, which keeps the .p12 password
+  and both API ids out of files and history. `GET releases/tags/<tag>`
+  returns published releases only (404 for a draft or none), which is what
+  makes a read-only preflight safe. The macos-15 arm64 image is published
+  as `macos-15-arm64/<date>` in actions/runner-images; the plain `macos-15`
+  readme on `main` describes the Intel image and lags behind. On macOS 27
+  `hdiutil create -srcfolder` prints a deprecation warning (use `diskutil
+  image create`); the macos-15 runner (15.7.9) does not, and the dmg-design
+  lane is replacing that step anyway. `xcrun notarytool store-credentials
+  <profile>` updates an existing profile in place and validates first.
+- 2026-10-14 (DMG window): Finder's .DS_Store WindowBounds is the whole
+  window frame, so a 640x400 background needs 640x432 (32 pt title bar of a
+  toolbar-less window on macOS 26.7/27.0; older macOS may differ by a few
+  points). dmgbuild treats a background path that starts with a colour word
+  (`grey/…`, `gray…`, `rgb…`) as a colour; pass absolute paths. hdiutil on
+  macOS 27 prints deprecation warnings (create/attach/convert); harmless.
+  `uv run --with-requirements` ignores `--hash` lines (a zeroed hash
+  installs fine, even with a cold cache); use `uv pip install
+  --require-hashes` into a venv. `mv dir existing-dir` nests rather than
+  replaces: move an invalid cache entry aside before publishing. Package
+  metadata can outlive a deleted package, so the cache check also starts
+  `python -m dmgbuild --help` and imports ds_store/mac_alias. Enlarging the installer window shows white
+  beyond the 640x400 picture: Finder ignores icvp backgroundColor* when a
+  picture background is set (black values tested on isocast-m2-a, Light
+  and Dark), so there is no .DS_Store fix.
+  Over SSH, a test Mac's appearance can be switched without osascript via
+  SkyLight's SLSSetAppearanceThemeLegacy (dlsym; tiny Swift tool in
+  ~/isocast-scratch/dmg-design/appearance on isocast-m2-a/-b).
 - 2026-10-14 (report worker): a Worker module may export only handlers;
   `export const` beside `export default` fails at startup ("Incorrect type
   for map entry"). Local `wrangler dev` honors a client-sent

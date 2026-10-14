@@ -42,7 +42,8 @@ upload. Output must be new; default: $CARGO_TARGET_DIR/dist/VERSION.
 --replace-draft  With --draft-release: replace assets on an existing draft only.
 --verify-tag     With --draft-release: require the version tag to exist remotely.
 
-Requirements: Apple-silicon Mac, Rust, Xcode (actool/notarytool/stapler), Python 3;
+Requirements: Apple-silicon Mac, Rust, Xcode (actool/notarytool/stapler), Python 3,
+dmgbuild (scripts/dmg/requirements.txt; or uv runs the pin);
 gh for drafts. Credentials stay in the login keychain's isocast-notary profile.
 ISOCAST_APP_TARGET selects isocast-ui (default) or isocast-app (retired web app).
 Notarization uses the login keychain profile isocast-notary. Waits report progress
@@ -113,13 +114,14 @@ if [ "$dry_run" = 0 ]; then
         command -v "$tool" >/dev/null || die "missing tool: $tool"
     done
     xcrun --find actool >/dev/null || die 'Xcode actool is required (no app is launched to render an icon)'
+    scripts/dmg/make-dmg.sh --check >/dev/null || die 'pinned dmgbuild is required for the installer DMG (see scripts/dmg/requirements.txt)'
     if [ "$ad_hoc" = 0 ]; then
         security find-identity -v -p codesigning "$keychain" | grep -Fq "$identity" || die "missing signing identity: $identity"
     fi
 fi
 build_version="${ISOCAST_BUILD_VERSION:-$(date +%s)}"
 [[ "$build_version" =~ ^[0-9]+$ ]] || die 'ISOCAST_BUILD_VERSION must be numeric'
-run mkdir -p "$output/work/dmg" "$app/Contents/MacOS" "$app/Contents/Resources" \
+run mkdir -p "$output/work" "$app/Contents/MacOS" "$app/Contents/Resources" \
     "$engine/Contents/MacOS" "$engine/Contents/Resources"
 run env CARGO_TARGET_DIR="$target" MACOSX_DEPLOYMENT_TARGET=14.0 ISOCAST_BUILD_VERSION="$build_version" \
     nice -n 10 cargo build --locked --release --target aarch64-apple-darwin \
@@ -183,10 +185,8 @@ sign "${sign_args[@]}" "$app"
 run codesign --verify --deep --strict --verbose=2 "$app"
 
 verify_app
-run ditto "$app" "$output/work/dmg/Isocast.app"
-run ln -s /Applications "$output/work/dmg/Applications"
-run cp docs/install.md "$output/work/dmg/Install.txt"
-run hdiutil create -volname "Isocast $version" -srcfolder "$output/work/dmg" -format UDZO -fs HFS+ "$dmg"
+# Designed window (scripts/dmg/settings.py): the app beside an Applications link.
+run scripts/dmg/make-dmg.sh "$app" "Isocast $version" "$dmg"
 if [ "$ad_hoc" = 1 ]; then
     sign --force --sign - --timestamp=none "$dmg"
 else

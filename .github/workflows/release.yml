@@ -19,8 +19,78 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  # Decide before the approval gate and without secrets: a missing tag or a
+  # version mismatch fails here, and an already published version ends the
+  # run green with nothing to do instead of asking for an approval.
+  preflight:
     if: github.repository == 'R44VC0RP/isocast' && (github.event_name == 'push' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      proceed: ${{ steps.version.outputs.proceed }}
+    steps:
+      - name: Validate the version, its tag and its release state
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, re, subprocess, sys, tomllib
+          value = os.environ['REF_NAME'] if os.environ['EVENT'] == 'push' else os.environ['INPUT_VERSION']
+          if not re.fullmatch(r'v?[0-9]+\.[0-9]+\.[0-9]+', value):
+              sys.exit('version must be X.Y.Z or vX.Y.Z')
+          version = value.removeprefix('v')
+          tag = f'v{version}'
+          repo = os.environ['REPO']
+          def api(path):
+              result = subprocess.run(['gh', 'api', f'repos/{repo}/{path}'], capture_output=True, text=True, timeout=60)
+              if result.returncode == 0:
+                  return 200, json.loads(result.stdout)
+              try:
+                  status = int(json.loads(result.stdout)['status'])
+              except (ValueError, KeyError, TypeError):
+                  sys.exit(f'GitHub API call failed for {path}: {result.stderr.strip()}')
+              return status, None
+          status, _ = api(f'git/ref/tags/{tag}')
+          if status == 404:
+              sys.exit(f'{tag} does not exist in {repo}; push the tag from the public snapshot checkout first')
+          if status != 200:
+              sys.exit(f'could not resolve {tag} (HTTP {status})')
+          status, cargo = api(f'contents/Cargo.toml?ref=refs/tags/{tag}')
+          if status != 200:
+              sys.exit(f'could not read Cargo.toml at {tag} (HTTP {status})')
+          try:
+              crate = tomllib.loads(base64.b64decode(cargo['content']).decode())['workspace']['package']['version']
+          except (tomllib.TOMLDecodeError, KeyError, TypeError, UnicodeDecodeError):
+              sys.exit(f'Cargo.toml at {tag} has no [workspace.package] version')
+          if crate != version:
+              sys.exit(f'{tag} does not match workspace.package.version {crate} at that tag')
+          # This endpoint lists published releases only; drafts stay the
+          # finalizer's business, which reuses a matching draft.
+          status, release = api(f'releases/tags/{tag}')
+          if status not in (200, 404):
+              sys.exit(f'could not read the release state of {tag} (HTTP {status})')
+          proceed = status == 404
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'tag={tag}\nversion={version}\nproceed={str(proceed).lower()}\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              if proceed:
+                  out.write(f'## {tag}\n\nNot published yet; the release job builds it after approval.\n')
+              else:
+                  out.write(f'## {tag}\n\nAlready published: {release["html_url"]}\n\nNothing to build or draft; a published release is never changed.\n')
+          if not proceed:
+              print(f'::notice::{tag} is already published; nothing to build or draft')
+          PY
+
+  release:
+    needs: preflight
+    if: needs.preflight.outputs.proceed == 'true'
     runs-on: macos-15
     timeout-minutes: 90
     # Configure Ryan as required reviewer BEFORE adding environment secrets.
@@ -33,36 +103,23 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       # The macos-15 image defaults to Xcode 16; Icon Composer needs Xcode 26.
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      TAG: ${{ needs.preflight.outputs.tag }}
+      VERSION: ${{ needs.preflight.outputs.version }}
     steps:
-      - name: Select and validate version tag
-        id: version
-        env:
-          EVENT: ${{ github.event_name }}
-          INPUT_VERSION: ${{ inputs.version }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          python3 - <<'PY'
-          import os, re, sys
-          value = os.environ['REF_NAME'] if os.environ['EVENT'] == 'push' else os.environ['INPUT_VERSION']
-          if not re.fullmatch(r'v?[0-9]+\.[0-9]+\.[0-9]+', value):
-              sys.exit('version must be X.Y.Z or vX.Y.Z')
-          version = value.removeprefix('v')
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              out.write(f'tag=v{version}\nversion={version}\n')
-          with open(os.environ['GITHUB_ENV'], 'a') as out:
-              out.write(f'ISOCAST_SCRATCH={os.environ["RUNNER_TEMP"]}\nRELEASE_OUTPUT={os.environ["RUNNER_TEMP"]}/isocast-release\n')
-          PY
+      - name: Scratch locations
+        run: printf 'ISOCAST_SCRATCH=%s\nRELEASE_OUTPUT=%s/isocast-release\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ steps.version.outputs.tag }}
+          ref: ${{ needs.preflight.outputs.tag }}
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - name: Check release source and architecture
+      - name: Installer DMG tool (pinned dmgbuild)
+        run: python3 -m pip install --disable-pip-version-check --no-deps --require-hashes -r scripts/dmg/requirements.txt
+      - name: Check release source, architecture and release state
         env:
-          VERSION: ${{ steps.version.outputs.version }}
-          TAG: ${{ steps.version.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           test "$(uname -m)" = arm64
           test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
@@ -72,6 +129,22 @@ jobs:
               version = tomllib.load(file)['workspace']['package']['version']
           if version != os.environ['VERSION']:
               raise SystemExit('tag/input version does not match workspace.package.version')
+          PY
+          # Published since preflight (for example while waiting for approval):
+          # stop before any secret is decoded. Only a 404 (no published
+          # release) continues; an API failure is not "unpublished".
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          tag, repo = os.environ['TAG'], os.environ['GITHUB_REPOSITORY']
+          result = subprocess.run(['gh', 'api', f'repos/{repo}/releases/tags/{tag}'], capture_output=True, text=True, timeout=60)
+          if result.returncode == 0:
+              sys.exit(f'{tag} is already published ({json.loads(result.stdout).get("html_url", "")}); a published release is never changed')
+          try:
+              status = int(json.loads(result.stdout)['status'])
+          except (ValueError, KeyError, TypeError):
+              sys.exit(f'could not read the release state of {tag}: {result.stderr.strip()}')
+          if status != 404:
+              sys.exit(f'could not read the release state of {tag} (HTTP {status})')
           PY
           xcrun --find actool
           xcrun --find notarytool

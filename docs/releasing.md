@@ -12,6 +12,12 @@ It waits at the **release** environment before receiving its secrets. A
 workflow-wide concurrency group serializes tag pushes and manual reruns.
 The camera extension remains a separate, one-time installation.
 
+A small **preflight** job runs first, without secrets or approval: it
+checks the version, that the tag exists, that Cargo.toml at the tag matches,
+and whether that version is already published. A published version ends
+the run green with "nothing to build or draft" and never asks for an
+approval; a missing tag or a mismatch fails there with the reason.
+
 ## One-time setup (Ryan)
 
 ### 1. Publish the workflow and protect its environment
@@ -32,62 +38,173 @@ In GitHub: **R44VC0RP/isocast → Settings → Environments → New environment*
   dispatch is allowed only from main; it still builds the requested tag.
 
 Configure the reviewer **before adding secrets**. Referencing an environment
-in YAML alone does not configure its protection rules.
+in YAML alone does not configure its protection rules. Done on 2026-10-14
+(reviewer R44VC0RP, branch main and tags v*); steps 2–6 remain.
 
 ### 2. Export the Developer ID certificate
 
-In **Keychain Access → login → My Certificates**, expand
-**Developer ID Application: Ryan Vogel (9G68SMNHEU)**. Export the certificate
-**and its private key** as a password-protected `.p12`. A `.cer` alone cannot
-sign. Save the `.p12` and its export password in a private folder outside
-the repository. Put the password in a protected text file without a trailing
-newline, using your password manager/editor; never put it in a command.
+First `mkdir -m 700 -p ~/.config/isocast-release-secrets`. In **Keychain
+Access → login → My Certificates**, select the row
+**Developer ID Application: Ryan Vogel (9G68SMNHEU)** (the certificate
+itself, which carries its private key and chain), then **File → Export
+Items…**, format **Personal Information Exchange (.p12)**. Save it as
+`~/.config/isocast-release-secrets/developer-id.p12` (⇧⌘G in the save
+dialog reaches the hidden folder) and give it a non-empty export password;
+macOS then asks for the login keychain password to allow the export. A
+`.cer` alone cannot sign. Keep the export password in your password
+manager; never put it in a command line.
 
 ### 3. Create an App Store Connect API key
 
 In **App Store Connect → Users and Access → Integrations → App Store
-Connect API → Team Keys**, create a key with the **Developer** role. An
-Account Holder/Admin may first need to enable API access. Download its `.p8`
-private key (available once), and save its **Key ID** and **Issuer ID** into
-separate protected text files. Use a **team** key: this workflow passes both
-`--key-id` and `--issuer`. It does not need an Apple ID password or local
-notarytool profile. Team ID is **9G68SMNHEU**.
+Connect API → Team Keys** (`https://appstoreconnect.apple.com/access/integrations/api`),
+generate a key named `isocast-release` with the **Developer** role. An
+Account Holder/Admin may first need to enable API access. Download its
+`.p8` private key (offered once) to
+`~/.config/isocast-release-secrets/AuthKey.p8`, and note the **Key ID**
+(10 characters, on the key's row) and the **Issuer ID** (the UUID at the
+top of the page). Use a **team** key: this workflow passes both `--key-id`
+and `--issuer`. It does not need an Apple ID password or local notarytool
+profile. Team ID is **9G68SMNHEU**.
 
-### 4. Add the six environment secrets from files
+### 4. Add the six environment secrets
 
-Example private folder: `$HOME/.config/isocast-release-secrets` (directory
-mode 700, files 600). The following assumes the exports/text files are
-already there; adjust filenames to your exports. Run with shell tracing off.
-None of these commands print the contents:
+Private folder: `$HOME/.config/isocast-release-secrets` (directory mode
+700, files 600). The two files are encoded inside a subshell (so the
+`umask` does not outlive the block) and read from disk. The three `gh
+secret set` lines without a file show gh's hidden **Paste your secret:**
+prompt; paste, in that order, the `.p12` export password, the Key ID and
+the Issuer ID, so they never exist as files or in shell history. The last
+command must list all six names. Run with shell tracing off; nothing here
+prints a secret (`gh secret set` also trims a trailing newline from piped
+input). The command blocks in this document have no comments and are
+meant to be pasted whole into an interactive zsh with default options.
 
 ```sh
-umask 077
 secrets="$HOME/.config/isocast-release-secrets"
-chmod 700 "$secrets"
-chmod 600 "$secrets/developer-id.p12" "$secrets/p12-password.txt" \
-  "$secrets/AuthKey.p8" "$secrets/key-id.txt" "$secrets/issuer-id.txt"
-base64 < "$secrets/developer-id.p12" | tr -d '\n' > "$secrets/p12.base64"
-base64 < "$secrets/AuthKey.p8" | tr -d '\n' > "$secrets/p8.base64"
-printf '%s' '9G68SMNHEU' > "$secrets/team-id.txt"
-
+( umask 077 && chmod 700 "$secrets" &&
+  chmod 600 "$secrets/developer-id.p12" "$secrets/AuthKey.p8" &&
+  base64 < "$secrets/developer-id.p12" | tr -d '\n' > "$secrets/p12.base64" &&
+  base64 < "$secrets/AuthKey.p8" | tr -d '\n' > "$secrets/p8.base64" )
 gh secret set DEVELOPER_ID_P12_BASE64 --repo R44VC0RP/isocast --env release < "$secrets/p12.base64"
-gh secret set DEVELOPER_ID_P12_PASSWORD --repo R44VC0RP/isocast --env release < "$secrets/p12-password.txt"
+gh secret set DEVELOPER_ID_P12_PASSWORD --repo R44VC0RP/isocast --env release
 gh secret set APPLE_API_KEY_P8_BASE64 --repo R44VC0RP/isocast --env release < "$secrets/p8.base64"
-gh secret set APPLE_API_KEY_ID --repo R44VC0RP/isocast --env release < "$secrets/key-id.txt"
-gh secret set APPLE_API_ISSUER_ID --repo R44VC0RP/isocast --env release < "$secrets/issuer-id.txt"
-gh secret set APPLE_TEAM_ID --repo R44VC0RP/isocast --env release < "$secrets/team-id.txt"
+gh secret set APPLE_API_KEY_ID --repo R44VC0RP/isocast --env release
+gh secret set APPLE_API_ISSUER_ID --repo R44VC0RP/isocast --env release
+gh secret set APPLE_TEAM_ID --repo R44VC0RP/isocast --env release --body 9G68SMNHEU
 gh secret list --repo R44VC0RP/isocast --env release
+rm "$secrets/p12.base64" "$secrets/p8.base64"
 ```
 
-Keep the exports in your credential store and remove transient plaintext
-copies when finished. Do not upload them as workflow artifacts or commit
-them. The workflow decodes them only under RUNNER_TEMP with restrictive
-permissions, masks its random keychain password/identity, and imports into
-a temporary keychain. `always()` restores the original search list, deletes
-that keychain, and removes the certificate/API-key files, including after
-failures. Credentials are not placed in Cargo/Homebrew caches or passed to
-the recording daemon. Rotate/revoke the certificate and API key in Apple's
+Then clean the folder: the two `.base64` files are already gone. Store
+`developer-id.p12` (with its export password) and `AuthKey.p8` (with its
+Key ID and Issuer ID; Apple offers the `.p8` for download only once) in
+1Password, then delete the certificate export with
+`rm "$HOME/.config/isocast-release-secrets/developer-id.p12"`; the login
+keychain still holds the identity. Delete `AuthKey.p8` the same way,
+unless you intend to take step 6's API-key alternative: then leave it at
+`$HOME/.config/isocast-release-secrets/AuthKey.p8` (mode 600) until that
+step has run; `notarytool store-credentials` copies the key's contents
+into the keychain item, after which the file can go. Do not upload any of
+them as workflow artifacts or commit them. The workflow decodes the
+secrets only under RUNNER_TEMP with restrictive permissions, masks its
+random keychain password/identity, and imports into a temporary keychain.
+`always()` restores the original search list, deletes that keychain, and
+removes the certificate/API-key files, including after failures.
+Credentials are not placed in Cargo/Homebrew caches or passed to the
+recording daemon. Rotate/revoke the certificate and API key in Apple's
 portals and replace the environment secrets when necessary.
+
+### 5. First hosted run
+
+A published version (0.0.1 today) ends the run in preflight, so the first
+real run needs the next version. Three blocks, each chained with `&&` so
+that a failed line stops the rest of its block. First bump
+`[workspace.package].version` in the source checkout on `main` (with this
+workflow merged) and look at the result:
+
+```sh
+cd "$HOME/dev/isocast" &&
+  sed -i '' 's/^version = "0.0.1"$/version = "0.0.2"/' Cargo.toml &&
+  cargo update --workspace --offline &&
+  grep -n '^version = ' Cargo.toml
+```
+
+The last line must print exactly one line, `20:version = "0.0.2"`, and
+`git status --short` must show only `Cargo.toml` and `Cargo.lock`. If
+not, stop here. The next block checks the version again before it
+commits only those two files and publishes the snapshot:
+
+```sh
+cd "$HOME/dev/isocast" &&
+  grep -q '^version = "0.0.2"$' Cargo.toml &&
+  git commit Cargo.toml Cargo.lock -m 'Version 0.0.2' &&
+  scripts/publish-snapshot.sh --push 'Isocast 0.0.2'
+```
+
+The tag is created in the **public snapshot checkout**, only after the
+pulled snapshot itself says 0.0.2:
+
+```sh
+cd "$HOME/dev/isocast-public" &&
+  git pull --ff-only &&
+  grep -q '^version = "0.0.2"$' Cargo.toml &&
+  git tag -a v0.0.2 -m 'Isocast 0.0.2 alpha' &&
+  git push origin v0.0.2 &&
+  sleep 20 &&
+  gh run list --repo R44VC0RP/isocast --workflow release.yml -L 1
+```
+
+The tag push starts the run; the last line shows it with its id.
+Preflight passes, then the release job waits for your approval under
+**Actions → Release → Review deployments** (`gh run view <id> --repo
+R44VC0RP/isocast --web` opens that page). Approve it; `gh run watch <id>
+--repo R44VC0RP/isocast --exit-status` follows it. 30–60 minutes later
+(cold Rust build, two notarizations, three recording takes), the job
+summary links the draft. Check it like a user would:
+
+```sh
+gh release view v0.0.2 --repo R44VC0RP/isocast --json isDraft,assets --jq '{isDraft, assets: [.assets[]|{name,size}]}'
+gh release download v0.0.2 --repo R44VC0RP/isocast --dir "$HOME/Downloads/isocast-0.0.2"
+cd "$HOME/Downloads/isocast-0.0.2" && shasum -a 256 -c Isocast-0.0.2-arm64.dmg.sha256
+spctl --assess --type open --context context:primary-signature -v Isocast-0.0.2-arm64.dmg
+open Isocast-0.0.2-arm64.dmg
+```
+
+Expect `isDraft: true`, two assets, `OK` from shasum and `accepted
+source=Notarized Developer ID` from spctl. Publishing the draft stays
+manual. If you prefer not to cut 0.0.2 yet, a manual run for 0.0.1
+(`gh workflow run release.yml --repo R44VC0RP/isocast --ref main -f version=0.0.1`)
+only demonstrates the clean "already published" exit; it does not exercise
+the secrets.
+
+### 6. After the first green run: retire the app-specific password
+
+Local notarizing (`scripts/release.sh --notarize` without the API-key
+variables) uses the login keychain profile **isocast-notary**, which holds
+an Apple ID app-specific password. Rotate it once the hosted run works:
+
+1. At `https://account.apple.com/account/manage` → **Sign-In and Security →
+   App-Specific Passwords**, revoke the password used for isocast-notary and
+   generate a new one named `isocast-notary`. Copy it from that page only.
+2. Update the profile in place (it prompts for the new password; nothing
+   is typed on the command line) and prove it works with a read-only call:
+
+   ```sh
+   xcrun notarytool store-credentials isocast-notary --apple-id '<your Apple ID email>' \
+     --team-id 9G68SMNHEU --keychain "$HOME/Library/Keychains/login.keychain-db"
+   xcrun notarytool history --keychain-profile isocast-notary \
+     --keychain "$HOME/Library/Keychains/login.keychain-db" | head -5
+   ```
+
+   `--validate` is the default, so a wrong password is refused before the
+   old one is replaced. Alternatively store the same team API key locally
+   and keep no app-specific password at all: revoke the app-specific
+   password as above, then run step 2's commands with
+   `--key "$HOME/.config/isocast-release-secrets/AuthKey.p8" --key-id <Key ID> --issuer <Issuer ID>`
+   in place of `--apple-id … --team-id …`. notarytool copies the key's
+   contents into the keychain item, so `AuthKey.p8` can be deleted from
+   disk afterwards (it stays in 1Password).
 
 ## Cut a release
 
@@ -97,15 +214,17 @@ portals and replace the environment secrets when necessary.
    only that tag. For example, after updating Cargo.toml to `0.0.2`:
 
    ```sh
-   cd "$HOME/dev/isocast-public"
-   git pull --ff-only
-   git tag -a v0.0.2 -m 'Isocast 0.0.2 alpha'
-   git push origin v0.0.2
+   cd "$HOME/dev/isocast-public" &&
+     git pull --ff-only &&
+     grep -q '^version = "0.0.2"$' Cargo.toml &&
+     git tag -a v0.0.2 -m 'Isocast 0.0.2 alpha' &&
+     git push origin v0.0.2
    ```
 
 3. In **Actions → Release**, review the tag/commit and approve the waiting
    **release** environment job. The version must match Cargo.toml exactly;
-   a malformed/missing tag or mismatch fails before secrets are imported.
+   a malformed/missing tag or mismatch fails in preflight, before the
+   approval and before any secret is read.
 4. Inspect the job summary's draft link, checksum and results. Download the
    DMG for the final human check. Publication is manual, outside the workflow.
 
@@ -118,7 +237,10 @@ gh workflow run release.yml --repo R44VC0RP/isocast --ref main -f version=0.0.2
 Both `0.0.2` and `v0.0.2` are accepted. This builds the tag's code, not
 whatever main happens to contain later. It refreshes the same draft, never
 makes another or replaces a published release. Do not publish it while its
-workflow is still updating assets.
+workflow is still updating assets. Once a version is published, a tag push
+or manual run for it stops in preflight (green, "nothing to build or
+draft"); if it is published while the job waits for approval, the job stops
+before importing secrets, and the finalizer refuses as a last resort.
 
 ## Verification and local use
 
@@ -126,6 +248,10 @@ The workflow selects Xcode 26.3 from the hosted image (its default Xcode 16
 cannot compile the Icon Composer asset), installs stable Rust and Python
 3.12, and caches Rust/Homebrew separately from ordinary CI. If GitHub removes
 that Xcode version, update DEVELOPER_DIR to an installed Xcode 26+ version.
+Checked 2026-10-14: the `macos-15` arm64 image (20260907.0337.1) ships Xcode
+26.3 at `/Applications/Xcode_26.3.app` with 16.4 as default; the current
+inventory is `images/macos/macos-15-arm64-Readme.md` in
+`actions/runner-images`, under the latest `macos-15-arm64/*` release.
 
 The finalizer checks strict/deep signatures, Apple team, notarization
 receipts and stapled tickets, Gatekeeper, the checksum, and executable/plist

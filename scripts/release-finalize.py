@@ -157,6 +157,9 @@ def finalize(output, metadata):
     if finished.exists():
         require(json.loads(finished.read_text()) == metadata, "finalized metadata mismatch")
         return
+    make_dmg = Path(__file__).with_name("dmg") / "make-dmg.sh"
+    if not (final / dmg_name).exists():
+        command(make_dmg, "--check")  # Fail before any notary submission.
     final_app = final / "Isocast.app"
     if not final_app.exists():
         command("ditto", app, final_app)
@@ -168,16 +171,11 @@ def finalize(output, metadata):
     command("xcrun", "stapler", "staple", final_app)
     command("xcrun", "stapler", "validate", final_app)
     verify_app(final_app, metadata)
-    stage = final / "work" / "dmg"
-    stage.mkdir(parents=True, exist_ok=True)
-    command("ditto", final_app, stage / "Isocast.app")
-    if not (stage / "Applications").is_symlink():
-        (stage / "Applications").symlink_to("/Applications")
-    command("cp", app / "Contents/Resources/INSTALL.md", stage / "Install.txt")
     dmg = final / dmg_name
     if not dmg.exists():
-        command("hdiutil", "create", "-volname", f"Isocast {metadata['version']}",
-                "-srcfolder", stage, "-format", "UDZO", "-fs", "HFS+", dmg)
+        # Same designed layout as release.sh (scripts/dmg/settings.py).
+        command(make_dmg, final_app,
+                f"Isocast {metadata['version']}", dmg, timeout=600)
     signed = final / "dmg-signed.json"
     if not signed.exists():
         command("codesign", "--force", "--sign", IDENTITY, "--keychain", KEYCHAIN,
@@ -442,7 +440,7 @@ def main():
             mode = "API-key env (path/id/issuer)" if any(os.environ.get(k) for k in ("APPLE_API_KEY_PATH", "APPLE_API_KEY_ID", "APPLE_API_ISSUER_ID")) else "isocast-notary/keychain profile"
             print(f"Copy app to notarized/; ditto ZIP; notarytool submit --no-wait with {mode}.")
             print("Save submission id/hash; notarytool wait --timeout 60s (20s progress); require Accepted.")
-            print("Staple app; validate ticket/signature; repack DMG with stapled app and Applications link.")
+            print("Staple app; validate ticket/signature; repack designed DMG (scripts/dmg) with stapled app and Applications link.")
             print("Developer ID-sign DMG; submit/wait/require Accepted; staple DMG; hdiutil/codesign/stapler/spctl checks.")
             print("Verify executable/plist hashes unchanged; write notarized DMG SHA-256 and completion metadata.")
         print("Re-verify final signatures, tickets, accepted receipts and checksum.")

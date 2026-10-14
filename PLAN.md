@@ -1134,6 +1134,15 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
     dry/mock checks pass; real 720p30 bundle qualification passes on m2-b.
     One-time environment/secrets setup and first hosted run await Ryan;
     see docs/releasing.md and REPORT.md's Workflow section.
+  - [x] **8.2g Release readiness (GitHub #11).** Workflow, scripts and docs
+    checked against the current macos-15 arm64 image and today's hosted
+    e2e evidence; a preflight job ends runs for published versions green
+    without approval or secrets; Ryan's copy-paste checklist (secrets,
+    first v0.0.2 run, app-specific password rotation) is docs/releasing.md
+    steps 2–6. The six secrets and the first hosted run remain Ryan's.
+  - [x] **8.2f Designed installer DMG** (Ryan, 2026-10-14: "ship it"). The
+    Paper "G · Simple" background (black, amber arrow, cropped wordmark) via
+    pinned dmgbuild in release.sh and release-finalize.py; no Install.txt.
 - [x] **8.3** Docs: getting started, setup reference, MCP tools, plugins.
   (With the user-facing README and its screenshots, licences and
   THIRD_PARTY_NOTICES, and the .github templates.)
@@ -3096,3 +3105,33 @@ One line per finished task, newest last.
   prerelease, tag v0.0.1 on the public snapshot 77ceb13, DMG SHA-256
   16a86d30…7d917 (notarized, stapled, Gatekeeper accepted; downloaded
   asset re-hashed to match).
+- 8.2g (2026-10-14): release workflow readiness for #11. Secret names
+  match docs/workflow (6/6; environment has reviewer R44VC0RP, main + v*,
+  0 secrets); Xcode 26.3 present on macos-15-arm64 image 20260907.0337.1;
+  hosted e2e run 38585167425 on that image: 0 drops in 2 qualification
+  takes + 2 streams and 13/13 scenarios at 720p30, inside the release
+  gate's 25%-then-zero bound. A run for a published version used to go red
+  after a full build and two notarizations; a preflight job now ends it
+  green without approval (12 local cases against the real repository and
+  canned API replies). Dry runs: release.sh default and CI-override, the
+  workflow's exact finalizer command (API-key mode), and a real ad-hoc
+  build at e9753d4 (6 m 11 s warm, 4 Mach-Os arm64/system-only, DMG
+  verified, checksum OK); actionlint clean. Rust tree untouched. Review
+  fix round: the doc's command blocks lost their inline comments (Ryan's
+  interactive zsh passes them as arguments) and gained `&&` guards that
+  check 0.0.2 before any commit, publish or tag; all nine blocks were
+  pasted into a real interactive zsh (typed lines and bracketed paste,
+  stub gh/git, scratch copies) with the guards stopping on 0.0.1; the
+  macOS job's re-check now fails closed (38 preflight/re-check cases).
+- 8.2f (2026-10-14): release DMG has the designed 640x400 window (dmgbuild
+  1.6.7, scripts/dmg/): Isocast.app and the Applications link either side of
+  the arrow, HiDPI .background.tiff (640x400@72 + 1280x800@144), volume icon,
+  no Install.txt. Verified with a Developer ID-signed (not notarized)
+  release.sh build: hdiutil verify, mounted listing, .DS_Store dump, and real
+  Finder windows on isocast-m2-a in Light and Dark (content 640x400, pixels
+  match the art, icons centred at 180/460, y 200). Finder labels are black
+  on the black art in both appearances (unreadable): waiting on Ryan.
+- 8.2f (2026-10-14): labels drawn in the art (#BBBBBB, under Finder's
+  invisible black ones); rebuilt with release.sh and checked in Finder on
+  isocast-m2-a, Light and Dark: centred under each icon (x 180/459, y
+  293-304), no overlap with Finder's labels, selection pill or wordmark.
