@@ -315,6 +315,10 @@ pub enum Method {
     VirtualCameraStatus,
     /// Stop recording if needed, then exit the daemon.
     Shutdown,
+    /// Recording codec labels and supported containers; returns EncoderOption[].
+    EncoderOptions,
+    /// Leave Studio Mode by clearing the staged preview. Returns Switched.
+    ClearPreview,
 }
 
 /// Every method's name, as requests and plugin grants spell it
@@ -1246,7 +1250,12 @@ impl Request {
         if let Some(params) = params {
             full["params"] = params.clone();
         }
-        crate::located::from_value::<Method>(&full).err()
+        crate::located::from_value::<Method>(&full)
+            .err()
+            .map(|mut err| {
+                crate::located::identify_source(&mut err, &request["params"]["setup"]);
+                err
+            })
     }
 }
 
@@ -1822,6 +1831,9 @@ pub enum SourceRun {
     /// It couldn't open, or its device went away; retried when the setup
     /// next changes.
     Failed,
+    /// Opening protected data or a device whose permission is not granted.
+    /// `error` names the permission and the next step; cleared on success.
+    WaitingForPermission,
 }
 
 /// A snapshot of a running session.

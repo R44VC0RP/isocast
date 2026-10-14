@@ -147,7 +147,7 @@ impl Monitor {
 
     /// Queue `samples` of source `id` (interleaved, `channels` per frame),
     /// scaled by left and right `gains`.
-    fn push(&self, id: &str, samples: &[f32], channels: usize, gains: [f32; 2]) {
+    fn push(&self, id: &str, samples: &[f32], channels: usize, gains: [f32; 2], mono: bool) {
         let channels = channels.max(1);
         let mut state = self.state.lock().unwrap();
         let request = state.request;
@@ -160,6 +160,10 @@ impl Monitor {
             .frames
             .extend(samples.chunks_exact(channels).map(|frame| match frame {
                 [mono] => [mono * gains[0], mono * gains[1]],
+                [left, right, ..] if mono => {
+                    let mono = (left + right) * 0.5;
+                    [mono * gains[0], mono * gains[1]]
+                }
                 [left, right, ..] => [left * gains[0], right * gains[1]],
                 [] => [0.0; 2],
             }));
@@ -317,7 +321,7 @@ impl Tap {
                 );
             }
             let gains = self.settings.gains(self.law);
-            monitor.push(&self.id, samples, self.channels, gains);
+            monitor.push(&self.id, samples, self.channels, gains, self.settings.mono);
             self.playing = Some(monitor);
         } else if self.heard {
             monitor.remove(&self.id);
@@ -344,10 +348,10 @@ mod tests {
         monitor.render(&mut out);
         let target = 480 + 128 + FIRST_MARGIN;
         let chunk = vec![0.5; 480];
-        monitor.push("m", &chunk, 1, [1.0, 0.5]);
+        monitor.push("m", &chunk, 1, [1.0, 0.5], false);
         monitor.render(&mut out);
         assert!(out.iter().all(|&s| s == 0.0), "not enough in hand yet");
-        monitor.push("m", &chunk, 1, [1.0, 0.5]);
+        monitor.push("m", &chunk, 1, [1.0, 0.5], false);
         assert!(960 >= target);
         monitor.render(&mut out);
         assert!(out.chunks(2).all(|f| f == [0.5, 0.25]), "{:?}", &out[..4]);
@@ -364,6 +368,20 @@ mod tests {
         let buffer = &state.inputs["m"];
         assert!(buffer.waiting && buffer.frames.is_empty());
         assert_eq!(buffer.margin, FIRST_MARGIN + MARGIN_STEP);
+        drop(state);
+        monitor.remove("m");
+        // A stereo source explicitly downmixed: average before balancing,
+        // so both the positive and negative channel contribute to playback.
+        let stereo = [0.75, -0.25].repeat(480);
+        monitor.push("stereo", &stereo, 2, [1.0, 0.5], true);
+        monitor.push("stereo", &stereo, 2, [1.0, 0.5], true);
+        monitor.render(&mut out);
+        assert!(
+            out.as_chunks::<2>()
+                .0
+                .iter()
+                .all(|frame| *frame == [0.25, 0.125])
+        );
     }
 
     #[test]
@@ -376,7 +394,7 @@ mod tests {
         let mut out = vec![0.0; 2 * 512];
         monitor.render(&mut out);
         for _ in 0..100 {
-            monitor.push("m", &[0.1; 960], 2, [1.0, 1.0]);
+            monitor.push("m", &[0.1; 960], 2, [1.0, 1.0], false);
         }
         let state = monitor.state.lock().unwrap();
         let buffer = &state.inputs["m"];

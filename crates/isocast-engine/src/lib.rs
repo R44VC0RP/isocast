@@ -93,6 +93,12 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// next step for each that isn't granted. Never prompts.
     fn permissions(&self) -> anyhow::Result<PermissionsReport>;
 
+    /// Permission a pending source open may be waiting for. Must not prompt
+    /// or perform protected I/O; a successful open clears this provisional state.
+    fn source_permission(&self, _source: &SourceKind) -> Option<String> {
+        None
+    }
+
     /// Ask the OS for screen recording, camera and microphone access where
     /// it hasn't been decided, showing its prompts, and wait a while for
     /// the answers. Returns the permissions afterwards.

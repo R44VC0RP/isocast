@@ -86,6 +86,39 @@ pub fn from_value<T: DeserializeOwned>(value: &Value) -> Result<T, Located> {
     read(value, |de| T::deserialize(de))
 }
 
+/// Resolve a positional source path to the stable id and optional label
+/// the user sees. Also handles a setup nested in API params.
+pub(crate) fn identify_source(error: &mut Located, setup: &Value) {
+    let Some((prefix, rest)) = error.path.split_once("sources[") else {
+        return;
+    };
+    let Some((index, field)) = rest.split_once(']') else {
+        return;
+    };
+    let Some(source) = index
+        .parse::<usize>()
+        .ok()
+        .and_then(|i| setup.get("sources")?.get(i))
+    else {
+        return;
+    };
+    let Some(id) = source
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| crate::is_valid_id(id))
+    else {
+        return;
+    };
+    error.path = format!("{prefix}sources.{id}{field}");
+    if let Some(name) = source
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty() && *name != id)
+    {
+        error.message = format!("{name:?} ({id}): {}", error.message);
+    }
+}
+
 /// Read `value` with `read` (like a `remote = "Self"` derived
 /// `deserialize`); an error names the field it is about.
 pub fn read<T>(

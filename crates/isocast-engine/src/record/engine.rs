@@ -7,7 +7,7 @@
 //! sources it records (and the canvas) as they were when it started, and
 //! changes to them apply once it ends.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
@@ -301,6 +301,9 @@ struct Inner<P: Platform> {
     state: Mutex<State<P>>,
     /// The newest setup the reconciler hasn't opened sources for yet.
     wanted: Mutex<Option<Arc<Setup>>>,
+    /// Native opens cannot be cancelled while macOS presents a prompt.
+    /// Keep one in flight per source (including removed/changed sources).
+    opening: Mutex<HashSet<String>>,
     wake: Condvar,
     /// The program's newest canvases.
     program: Arc<FrameSlot<P::Frame>>,
@@ -544,6 +547,7 @@ impl<P: Platform> Engine<P> {
                 revision: 0,
             }),
             wanted: Mutex::new(None),
+            opening: Mutex::new(HashSet::new()),
             wake: Condvar::new(),
             preview_scene: Mutex::new(None),
             camera_source: Mutex::new(None),
@@ -1124,7 +1128,12 @@ fn needed_sources(setup: &Setup) -> Vec<String> {
     ids.extend(sidechain_sources(setup));
     let iso = &setup.recording.iso;
     if iso.enabled {
-        ids.extend(iso.sources.iter().chain(&iso.audio).map(String::as_str));
+        ids.extend(
+            iso.sources
+                .iter()
+                .chain(iso.audio.iter().flatten())
+                .map(String::as_str),
+        );
     }
     ids.extend(
         setup
@@ -1219,12 +1228,12 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
     }
     let mut opening = Vec::new();
     let mut closed = Vec::new();
-    // Sources that failed before, tried again quietly: only a different
-    // outcome is news.
-    let mut retrying: HashMap<String, Option<String>> = HashMap::new();
     {
         let mut state = inner.state.lock().unwrap();
         for id in &needed {
+            if inner.opening.lock().unwrap().contains(id) {
+                continue;
+            }
             let definition = definition_of(&setup, id);
             match state.sources.get(id) {
                 Some(live) if state.pins.contains(id) => {
@@ -1235,9 +1244,8 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
                         )));
                     }
                 }
-                Some(live) if live.definition == definition && live.run != SourceRun::Failed => {}
+                Some(live) if live.definition == definition && live.run == SourceRun::Running => {}
                 Some(live) if live.definition == definition => {
-                    retrying.insert(id.clone(), live.error.clone());
                     opening.push((id.clone(), definition));
                 }
                 _ => opening.push((id.clone(), definition)),
@@ -1257,17 +1265,112 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
         }
     }
     drop(closed);
-    for (id, _) in opening.iter().filter(|(id, _)| !retrying.contains_key(id)) {
-        inner.event(EngineEvent::Source(SourceStatus {
-            source: id.clone(),
-            state: SourceRun::Opening,
-            error: None,
-            width: None,
-            height: None,
-            fps: None,
-            received_fps: None,
-            channels: None,
-        }));
+    for (id, definition) in opening {
+        inner.opening.lock().unwrap().insert(id.clone());
+        let permission = setup
+            .source(&id)
+            .and_then(|s| inner.platform.source_permission(&s.kind));
+        let mut pending = Live::failed(definition.clone(), String::new());
+        pending.run = if permission.is_some() {
+            SourceRun::WaitingForPermission
+        } else {
+            SourceRun::Opening
+        };
+        pending.error = permission.as_ref().map(|p| format!("waiting for permission: {p}; check macOS Privacy & Security or its permission prompt"));
+        let event = pending.status(&id);
+        let old = {
+            let mut state = inner.state.lock().unwrap();
+            let old = state.sources.insert(id.clone(), pending);
+            publish(inner, &mut state);
+            old
+        };
+        drop(old);
+        inner.event(event);
+        let inner = inner.clone();
+        let setup = setup.clone();
+        // Publish each result independently: one hidden permission prompt
+        // must not withhold the other sources, edits, or engine shutdown.
+        thread::spawn(move || {
+            let result = inner
+                .worker("source open", || {
+                    source::open(
+                        &inner.platform,
+                        &setup,
+                        &id,
+                        &inner.timeline,
+                        inner.control.data(),
+                    )
+                })
+                .map_err(anyhow::Error::msg)
+                .and_then(|r| r);
+            let mut state = inner.state.lock().unwrap();
+            let current = state.setup.clone();
+            let wanted = !inner.stopping.load(Ordering::SeqCst)
+                && definition_of(&current, &id) == definition
+                && (needed_sources(&current).contains(&id)
+                    || inner.camera_source.lock().unwrap().as_ref() == Some(&id));
+            let mut replaced = None;
+            let event = if wanted {
+                let live = match result {
+                    Ok(opened) => Live::running(&inner, &current, &id, definition, opened),
+                    Err(err) => {
+                        let mut live = Live::failed(definition, format!("source {id:?}: {err:#}"));
+                        let message = format!("{err:#}").to_lowercase();
+                        let device_permission = setup.source(&id).is_some_and(|s| {
+                            matches!(
+                                s.kind,
+                                SourceKind::Camera(_)
+                                    | SourceKind::Microphone(_)
+                                    | SourceKind::Display(_)
+                                    | SourceKind::Window(_)
+                                    | SourceKind::Application(_)
+                                    | SourceKind::SystemAudio(_)
+                                    | SourceKind::ApplicationAudio(_)
+                            )
+                        });
+                        if let Some(permission) = permission
+                            && (device_permission
+                                || message.contains("permission")
+                                || message.contains("not permitted")
+                                || message.contains("not authorized")
+                                || message.contains("access denied")
+                                || err.chain().any(|e| {
+                                    e.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                                        e.kind() == std::io::ErrorKind::PermissionDenied
+                                    })
+                                }))
+                        {
+                            live.run = SourceRun::WaitingForPermission;
+                            live.error = Some(format!(
+                                "waiting for permission: {permission}; source {id:?}: {err:#}"
+                            ));
+                        }
+                        live
+                    }
+                };
+                let event = live.status(&id);
+                replaced = state.sources.insert(id.clone(), live);
+                publish(&inner, &mut state);
+                Some(event)
+            } else {
+                // Drop an obsolete native capture outside the state lock.
+                if let Ok(opened) = result {
+                    replaced = Some(Live::closed(opened));
+                }
+                state.sources.remove(&id);
+                None
+            };
+            inner.opening.lock().unwrap().remove(&id);
+            if !wanted && !inner.stopping.load(Ordering::SeqCst) {
+                *inner.wanted.lock().unwrap() = Some(current);
+                inner.wake.notify_all();
+            }
+            drop(state);
+            drop(replaced);
+            if let Some(event) = event {
+                inner.event(event);
+            }
+        });
     }
 
     // Stinger videos the setup's transitions play.
@@ -1283,17 +1386,7 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
     let missing: Vec<&String> = files.iter().filter(|f| !loaded.contains(f)).collect();
 
     let platform = &inner.platform;
-    let (opened, stingers) = thread::scope(|scope| {
-        let sources: Vec<_> = opening
-            .iter()
-            .map(|(id, _)| {
-                let setup = &setup;
-                scope.spawn(move || {
-                    source::open(platform, setup, id, &inner.timeline, inner.control.data())
-                        .with_context(|| format!("could not start source {id:?}"))
-                })
-            })
-            .collect();
+    let stingers = thread::scope(|scope| {
         let stingers: Vec<_> = missing
             .iter()
             .map(|file| {
@@ -1304,10 +1397,7 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
                 })
             })
             .collect();
-        (
-            sources.into_iter().map(joined).collect::<Vec<_>>(),
-            stingers.into_iter().map(joined).collect::<Vec<_>>(),
-        )
+        stingers.into_iter().map(joined).collect::<Vec<_>>()
     });
 
     let mut replaced = Vec::new();
@@ -1315,42 +1405,6 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
     {
         let mut state = inner.state.lock().unwrap();
         let current = state.setup.clone();
-        for ((id, definition), result) in opening.into_iter().zip(opened) {
-            // The setup changed again while it opened: the next pass sees to
-            // it.
-            if definition_of(&current, &id) != definition
-                || (!needed_sources(&current).contains(&id)
-                    && inner.camera_source.lock().unwrap().as_ref() != Some(&id))
-            {
-                if let Ok(opened) = result {
-                    replaced.push(Live::<P>::closed(opened));
-                }
-                continue;
-            }
-            if state.pins.contains(&id) && state.sources.contains_key(&id) {
-                if let Ok(opened) = result {
-                    replaced.push(Live::<P>::closed(opened));
-                }
-                continue;
-            }
-            let live = match result {
-                Ok(opened) => Live::running(inner, &current, &id, definition, opened),
-                Err(err) => {
-                    let message = format!("{err:#}");
-                    if retrying.get(&id) == Some(&Some(message.clone())) {
-                        // Still failing the same way.
-                        if let Some(old) = state.sources.get_mut(&id) {
-                            old.error = Some(message);
-                        }
-                        continue;
-                    }
-                    isocast_diagnostics::diagnostic!("warn"; "isocastd: {message}");
-                    Live::failed(definition, message)
-                }
-            };
-            events.push(live.status(&id));
-            replaced.extend(state.sources.insert(id, live));
-        }
         let attempted: Vec<String> = missing.iter().map(|file| (*file).clone()).collect();
         let mut failed = HashMap::new();
         for (file, result) in missing.into_iter().zip(stingers) {
@@ -2019,10 +2073,12 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
             let now = inner.platform.now();
             if now >= next_retry {
                 next_retry = now + RETRY_INTERVAL;
-                let failed = state
-                    .sources
-                    .iter()
-                    .any(|(id, live)| live.run == SourceRun::Failed && !state.pins.contains(id));
+                let failed = state.sources.iter().any(|(id, live)| {
+                    matches!(
+                        live.run,
+                        SourceRun::Failed | SourceRun::WaitingForPermission
+                    ) && !state.pins.contains(id)
+                });
                 let mut wanted = inner.wanted.lock().unwrap();
                 if failed && wanted.is_none() {
                     *wanted = Some(state.setup.clone());
@@ -2301,7 +2357,12 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
     // permission fails here, before any file exists).
     let mut required: Vec<&str> = Vec::new();
     if iso_enabled {
-        required.extend(iso.sources.iter().chain(&iso.audio).map(String::as_str));
+        required.extend(
+            iso.sources
+                .iter()
+                .chain(iso.audio.iter().flatten())
+                .map(String::as_str),
+        );
     }
     if program.enabled {
         required.extend(program.audio.iter().map(String::as_str));
@@ -2314,10 +2375,12 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
         // keep the old one to the end.
         let reopening = |id: &str, live: &Live<P>| live.definition != definition_of(setup, id);
         let pending = required.iter().any(|id| {
-            state
-                .sources
-                .get(*id)
-                .is_none_or(|live| live.run == SourceRun::Opening || reopening(id, live))
+            state.sources.get(*id).is_none_or(|live| {
+                matches!(
+                    live.run,
+                    SourceRun::Opening | SourceRun::WaitingForPermission
+                ) || reopening(id, live)
+            })
         });
         if !pending || platform.now().saturating_since(waiting_since) >= SOURCE_WAIT {
             for id in &required {
@@ -2325,7 +2388,7 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
                 let has = |list: &[String]| list.iter().any(|s| s == id);
                 let list = if iso_enabled && has(&iso.sources) {
                     "recording.iso.sources"
-                } else if iso_enabled && has(&iso.audio) {
+                } else if iso_enabled && has(iso.audio.as_deref().unwrap_or(&[])) {
                     "recording.iso.audio"
                 } else {
                     "recording.program.audio"
@@ -2401,9 +2464,12 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
         }
         // Keep the recorded sources as they are until the recording ends.
         if iso_enabled {
-            state
-                .pins
-                .extend(iso.sources.iter().chain(&iso.audio).cloned());
+            state.pins.extend(
+                iso.sources
+                    .iter()
+                    .chain(iso.audio.iter().flatten())
+                    .cloned(),
+            );
         }
     }
     let first = plan_take(setup, &formats, &folder, 1)?;

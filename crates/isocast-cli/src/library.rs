@@ -65,7 +65,7 @@ pub enum LibraryCommand {
         json: bool,
     },
     /// Use it: the live setup becomes it at once, and the live engine
-    /// follows (a new collection goes on air from its first scene). Refused
+    /// follows (a collection restores its last program/preview selection). Refused
     /// while recording or streaming.
     Switch {
         id: String,

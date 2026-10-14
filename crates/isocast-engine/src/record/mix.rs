@@ -421,6 +421,12 @@ impl<F: Clone> Mixer<F> {
                         .ok()
                         .and_then(|index| input.frames.get(index))
                     {
+                        let (left, right) = if input.settings.mono {
+                            let mono = (left + right) * 0.5;
+                            (mono, mono)
+                        } else {
+                            (*left, *right)
+                        };
                         frame[0] += left * gains[0];
                         frame[1] += right * gains[1];
                     }

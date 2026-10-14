@@ -1169,6 +1169,7 @@ impl Daemon {
         let shutdown = request.method == Method::Shutdown;
         let result = match request.method {
             Method::Status => to_json(self.status()),
+            Method::EncoderOptions => to_json(isocast_protocol::Codec::options()),
             Method::BugReport(params) => diagnostics::bug_report(self, &params).and_then(to_json),
             Method::ReportFile(params) => isocast_diagnostics::preview::read(&params)
                 .map_err(diagnostics::error)
@@ -1229,6 +1230,7 @@ impl Daemon {
                 self.switch_scene(scene, transition).and_then(to_json)
             }
             Method::Preview { scene } => self.preview(scene).and_then(to_json),
+            Method::ClearPreview => to_json(self.clear_preview()),
             Method::Take { transition } => self.take(transition).and_then(to_json),
             // Handled by the connection, which turns into an event stream.
             Method::Watch(_) => Err(RpcError {
@@ -1426,7 +1428,23 @@ impl Daemon {
                     "isocastd: loaded the setup from {}",
                     path.display()
                 );
-                state.scene = setup.scenes.first().map(|scene| scene.id.clone());
+                let view = state
+                    .file
+                    .current()
+                    .map(|current| {
+                        let file = state.file.path(
+                            isocast_protocol::library::LibraryKind::Collection,
+                            &current.collection,
+                        );
+                        store::read_view(&file).unwrap_or_else(|err| {
+                            isocast_diagnostics::diagnostic!("warn"; "isocastd: {err:#}");
+                            store::CollectionView::default()
+                        })
+                    })
+                    .unwrap_or_default()
+                    .restore(&setup);
+                state.scene = view.scene;
+                state.preview = view.preview;
                 state.setup = Some(setup);
                 state.revision = first_revision();
             }
@@ -2062,6 +2080,24 @@ impl Daemon {
             time_seconds: None,
             transition: None,
         })
+    }
+
+    fn clear_preview(&self) -> Switched {
+        let mut state = self.state.lock().unwrap();
+        state.preview = None;
+        if let Some(engine) = &state.engine {
+            engine.set_preview(None);
+        }
+        let scene = state.scene.clone().unwrap_or_default();
+        drop(state);
+        self.publish(Event::PreviewCleared);
+        Switched {
+            scene,
+            preview: None,
+            take: None,
+            time_seconds: None,
+            transition: None,
+        }
     }
 
     /// Put the preview scene on air; the scene that was on air moves to
@@ -3156,6 +3192,7 @@ fn key_label(service: StreamService, account: &str) -> String {
 /// What a change would do to the live setup (with its uses of plugins'
 /// kinds checked against the installed plugins).
 fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Plan, RpcError> {
+    let new_items = matches!(&change, Change::Patch(_));
     let mut notes: Vec<String> = Vec::new();
     let current = match &state.setup {
         Some(setup) => to_json(setup)?,
@@ -3189,6 +3226,23 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
     let mut changes = diff(&current, &proposed);
     let (mut setup, mut problems) = match Setup::from_value(proposed) {
         Ok(mut setup) => {
+            if let Some(previous) = &state.setup {
+                let sizes = state
+                    .engine
+                    .as_ref()
+                    .map(|e| {
+                        e.info()
+                            .sources
+                            .into_iter()
+                            .filter_map(|s| Some((s.source, (s.width?, s.height?))))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                isocast_engine::layout::follow_source_sizes(
+                    previous, &mut setup, &sizes, new_items,
+                );
+                changes = diff(&current, &to_json(&setup)?);
+            }
             if setup.hotkeys.is_absent()
                 && let Some(current) = &state.setup
                 && current.hotkeys.load_warning.is_some()
@@ -3274,7 +3328,10 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
             ));
         }
         let (plugin_problems, plugin_notes) = plugins.check_kinds(setup);
-        problems.extend(plugin_problems);
+        problems.extend(plugin_problems.into_iter().map(|mut issue| {
+            setup.identify_source_issue(&mut issue);
+            issue
+        }));
         notes.extend(plugin_notes);
     }
     if state.session.is_some() {

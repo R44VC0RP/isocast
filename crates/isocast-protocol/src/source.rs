@@ -112,7 +112,14 @@ impl Kind for CameraSource {
     fn check(&self, path: &str, issues: &mut Issues) {
         if self.width.is_some() != self.height.is_some() {
             issues.add(
-                path,
+                format!(
+                    "{path}.{}",
+                    if self.width.is_none() {
+                        "width"
+                    } else {
+                        "height"
+                    }
+                ),
                 "give both width and height, or neither for the camera's best size",
             );
         }
@@ -544,8 +551,24 @@ fn check_size(path: &str, width: Option<u32>, height: Option<u32>, issues: &mut 
     match (width, height) {
         (Some(w), Some(h)) if (1..=8192).contains(&w) && (1..=8192).contains(&h) => {}
         (None, None) => {}
-        (Some(_), Some(_)) => issues.add(path, "width and height must be from 1 to 8192"),
-        _ => issues.add(path, "give both width and height, or neither"),
+        (Some(w), Some(_)) => issues.add(
+            format!(
+                "{path}.{}",
+                if !(1..=8192).contains(&w) {
+                    "width"
+                } else {
+                    "height"
+                }
+            ),
+            "width and height must be from 1 to 8192",
+        ),
+        _ => issues.add(
+            format!(
+                "{path}.{}",
+                if width.is_none() { "width" } else { "height" }
+            ),
+            "give both width and height in one source patch, or neither",
+        ),
     }
 }
 

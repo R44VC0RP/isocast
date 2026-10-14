@@ -666,10 +666,10 @@ mod tests {
         .unwrap();
         let found = setup.validate();
         let at = |path: &str| found.iter().find(|i| i.path == path).map(|i| &i.message);
-        assert!(at("sources[0].audio_filters").is_some(), "{found:?}");
-        let sidechain = at("sources[1].audio_filters[0].sidechain_source").unwrap();
+        assert!(at("sources.pattern.audio_filters").is_some(), "{found:?}");
+        let sidechain = at("sources.music.audio_filters[0].sidechain_source").unwrap();
         assert!(sidechain.ends_with("valid: voice"), "{sidechain}");
-        assert!(at("sources[1].audio_filters[1].ratio").is_some());
+        assert!(at("sources.music.audio_filters[1].ratio").is_some());
         assert_eq!(found.len(), 3, "{found:?}");
     }
 }

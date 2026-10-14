@@ -208,6 +208,14 @@ const SOURCE_FIELDS: &[&str] = &["id", "name", "kind", "audio", "filters", "audi
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AudioSettings {
+    /// Downmix stereo to mono in the program and monitoring, before balance:
+    /// (left + right) / 2 in both channels. Raw ISO audio stays as captured.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mono: bool,
+    /// Include this source's own sound in its ISO. Absent follows the ISO
+    /// audio policy; false is an explicit opt-out, true an explicit opt-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iso: Option<bool>,
     /// Volume change in the program mix, in dB (0 keeps it as captured).
     #[serde(default)]
     pub gain_db: f64,
@@ -392,9 +400,10 @@ pub struct SceneItem {
     /// Pixels cut from each edge of the source before it is scaled.
     #[serde(default, skip_serializing_if = "Crop::is_none")]
     pub crop: Crop,
-    /// How the picture fills the rect: stretched to it (the default) or
-    /// keeping its shape (OBS's bounding box types).
-    #[serde(default, skip_serializing_if = "Fit::is_stretch")]
+    /// How the picture fills the rect. New API items use `none` (native
+    /// size times transform scale). Omission in old files retains legacy
+    /// stretch; explicitly chosen `stretch` is always saved.
+    #[serde(default, skip_serializing_if = "Fit::is_legacy")]
     pub fit: Fit,
     /// Where the picture sits in the rect when it doesn't fill it, and
     /// which part shows when it overflows (OBS's alignment in the bounding
@@ -456,8 +465,12 @@ impl SceneItem {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Fit {
-    /// Stretched to the rect, whatever its shape (OBS: stretch to bounds).
+    /// An omitted fit in a legacy setup. Kept distinct from an explicitly
+    /// chosen stretch so native-sized legacy boxes can safely follow edits.
     #[default]
+    #[serde(skip)]
+    Legacy,
+    /// Stretched to the rect, whatever its shape (OBS: stretch to bounds).
     Stretch,
     /// As large as fits inside the rect, keeping its shape (OBS: scale to
     /// inner bounds).
@@ -480,8 +493,12 @@ pub enum Fit {
 }
 
 impl Fit {
+    pub fn is_legacy(&self) -> bool {
+        *self == Self::Legacy
+    }
+
     pub fn is_stretch(&self) -> bool {
-        *self == Self::Stretch
+        matches!(self, Self::Legacy | Self::Stretch)
     }
 }
 
@@ -895,9 +912,11 @@ pub struct IsoRecording {
     pub filename: String,
     #[serde(default)]
     pub encoder: Encoder,
-    /// Audio sources written into every ISO file.
-    #[serde(default)]
-    pub audio: Vec<String>,
+    /// Audio sources written into every ISO file. Omitted: each ISO uses
+    /// its own source's sound. An explicit list (including []) preserves
+    /// the chosen shared routing. A source's audio.iso can override its own sound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<Vec<String>>,
     /// Record sources with filters as filtered (as the program shows them)
     /// rather than as captured, and audio with its audio filters (all but
     /// sidechain ducking). Keyed-out areas come out black, since the files
@@ -913,9 +932,25 @@ impl Default for IsoRecording {
             sources: Vec::new(),
             filename: default_iso_filename(),
             encoder: Encoder::default(),
-            audio: Vec::new(),
+            audio: None,
             filtered: false,
         }
+    }
+}
+
+impl IsoRecording {
+    /// Effective tracks for one file. `has_audio` comes from the opened
+    /// source, since a media file or browser can have no audio stream.
+    pub fn audio_for(&self, source: &Source, has_audio: bool) -> Vec<String> {
+        let mut audio = self.audio.clone().unwrap_or_default();
+        let own = source.audio.iso.unwrap_or(self.audio.is_none());
+        if !own && source.audio.iso == Some(false) {
+            audio.retain(|id| id != &source.id);
+        }
+        if own && has_audio && !audio.contains(&source.id) {
+            audio.push(source.id.clone());
+        }
+        audio
     }
 }
 
@@ -1056,6 +1091,77 @@ pub enum Codec {
     Prores4444,
 }
 
+/// Recording encoder choices, shared by the API, schema and validation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EncoderOption {
+    pub codec: Codec,
+    pub label: String,
+    pub containers: Vec<Container>,
+}
+
+impl Codec {
+    pub const ALL: [Self; 7] = [
+        Self::H264,
+        Self::Hevc,
+        Self::Prores422Proxy,
+        Self::Prores422Lt,
+        Self::Prores422,
+        Self::Prores422Hq,
+        Self::Prores4444,
+    ];
+
+    pub fn containers(self) -> &'static [Container] {
+        match self {
+            Self::H264 | Self::Hevc => &[Container::Mov, Container::Mp4],
+            _ => &[Container::Mov],
+        }
+    }
+
+    pub fn container_problem(self, container: Container) -> Option<String> {
+        (!self.containers().contains(&container)).then(|| {
+            let codec = serde_json::to_value(self).unwrap();
+            let format = serde_json::to_value(container).unwrap();
+            let valid = self
+                .containers()
+                .iter()
+                .map(|c| {
+                    serde_json::to_value(c)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{} cannot be recorded in {}; valid containers: {valid}; mp4 supports h264, hevc",
+                codec.as_str().unwrap(),
+                format.as_str().unwrap()
+            )
+        })
+    }
+
+    pub fn options() -> Vec<EncoderOption> {
+        Self::ALL
+            .into_iter()
+            .map(|codec| EncoderOption {
+                codec,
+                label: match codec {
+                    Self::H264 => "H.264",
+                    Self::Hevc => "HEVC",
+                    Self::Prores422Proxy => "ProRes 422 Proxy",
+                    Self::Prores422Lt => "ProRes 422 LT",
+                    Self::Prores422 => "ProRes 422",
+                    Self::Prores422Hq => "ProRes 422 HQ",
+                    Self::Prores4444 => "ProRes 4444",
+                }
+                .into(),
+                containers: codec.containers().to_vec(),
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Container {
@@ -1119,18 +1225,22 @@ impl Setup {
     /// Parse a setup from JSON; an error names the path of what's wrong.
     pub fn from_json(text: &str) -> Result<Self, LoadError> {
         let mut deserializer = serde_json::Deserializer::from_str(text);
-        let setup = serde_path_to_error::deserialize(&mut deserializer).map_err(LoadError::json)?;
+        let setup: serde_json::Value =
+            serde_path_to_error::deserialize(&mut deserializer).map_err(LoadError::json)?;
         deserializer.end().map_err(|error| LoadError::Json {
             path: String::new(),
             message: error.to_string(),
         })?;
-        Ok(setup)
+        Self::from_value(setup)
     }
 
     /// A setup from parsed JSON (as the API and MCP send it); an error
     /// names the path of what's wrong.
     pub fn from_value(value: serde_json::Value) -> Result<Self, LoadError> {
-        Ok(located::from_value(&value)?)
+        located::from_value(&value).map_err(|mut err| {
+            located::identify_source(&mut err, &value);
+            err.into()
+        })
     }
 
     /// The setup as TOML, as `isocast get` and setup files write it.
@@ -1140,7 +1250,12 @@ impl Setup {
 
     /// The JSON Schema of the setup document.
     pub fn json_schema() -> schemars::Schema {
-        schemars::schema_for!(Setup)
+        let mut schema = schemars::schema_for!(Setup);
+        schema.insert(
+            "x-encoder-options".into(),
+            serde_json::to_value(Codec::options()).unwrap(),
+        );
+        schema
     }
 
     pub fn source(&self, id: &str) -> Option<&Source> {
@@ -1311,7 +1426,7 @@ impl Setup {
                 iso: IsoRecording {
                     enabled: true,
                     sources: video,
-                    audio,
+                    audio: Some(audio),
                     ..IsoRecording::default()
                 },
                 keep_free_gb: default_keep_free_gb(),
@@ -1525,9 +1640,12 @@ impl Setup {
             );
         }
         for (path, ids) in [
-            ("recording.program.audio", &rec.program.audio),
+            ("recording.program.audio", rec.program.audio.as_slice()),
             ("recording.iso.sources", &rec.iso.sources),
-            ("recording.iso.audio", &rec.iso.audio),
+            (
+                "recording.iso.audio",
+                rec.iso.audio.as_deref().unwrap_or(&[]),
+            ),
         ] {
             let mut seen = HashSet::new();
             for (i, id) in ids.iter().enumerate() {
@@ -1542,7 +1660,7 @@ impl Setup {
         for (i, id) in rec.iso.sources.iter().enumerate() {
             issues.check_ref(format!("recording.iso.sources[{i}]"), id, &video, "video");
         }
-        for (i, id) in rec.iso.audio.iter().enumerate() {
+        for (i, id) in rec.iso.audio.iter().flatten().enumerate() {
             issues.check_ref(format!("recording.iso.audio[{i}]"), id, &audio, "audio");
         }
         if rec.iso.enabled
@@ -1606,6 +1724,9 @@ impl Setup {
             ("recording.program.encoder", &rec.program.encoder),
             ("recording.iso.encoder", &rec.iso.encoder),
         ] {
+            if let Some(problem) = encoder.codec.container_problem(encoder.container) {
+                issues.add(format!("{path}.container"), problem);
+            }
             if !(1..=100).contains(&encoder.quality.value()) {
                 issues.add(
                     format!("{path}.quality"),
@@ -1629,7 +1750,40 @@ impl Setup {
             }
         }
 
+        // Paths are positional while checking so every checker can share
+        // the same helpers; only the public result names stable sources.
+        for issue in &mut issues.0 {
+            self.identify_source_issue(issue);
+        }
         issues.0
+    }
+
+    /// Add a source's stable identity to a checker/plugin issue.
+    pub fn identify_source_issue(&self, issue: &mut Issue) {
+        let Some(rest) = issue.path.strip_prefix("sources[") else {
+            return;
+        };
+        let Some((index, field)) = rest.split_once(']') else {
+            return;
+        };
+        let Some(source) = index
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| self.sources.get(i))
+        else {
+            return;
+        };
+        if !is_valid_id(&source.id) {
+            return;
+        }
+        issue.path = format!("sources.{}{field}", source.id);
+        if let Some(name) = source
+            .name
+            .as_ref()
+            .filter(|name| !name.is_empty() && **name != source.id)
+        {
+            issue.message = format!("{name:?} ({}): {}", source.id, issue.message);
+        }
     }
 
     /// The chain of scenes by which `scene` shows itself, if it does.
@@ -1963,12 +2117,12 @@ mod tests {
         assert_eq!(path(&|v| v["canvas"]["fps"] = "fast".into()), "canvas.fps");
         assert_eq!(
             path(&|v| v["sources"][0]["kind"] = "camra".into()),
-            "sources[0].kind"
+            "sources.test-pattern.kind"
         );
         // Inside a source's kind, which serde reads through `flatten`.
         assert_eq!(
             path(&|v| v["sources"][0]["width"] = "wide".into()),
-            "sources[0].width"
+            "sources.test-pattern.width"
         );
         assert!(Setup::from_json(&format!("{setup} x")).is_err());
     }

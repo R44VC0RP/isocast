@@ -1290,7 +1290,7 @@ pub fn place(fit: Fit, align: Align, size: [f32; 2], picture: [f32; 2]) -> [f32;
     let [width, height] = size;
     let (across, down) = (width / picture[0], height / picture[1]);
     let scale = match fit {
-        Fit::Stretch => return [0.0, 0.0, width, height],
+        Fit::Legacy | Fit::Stretch => return [0.0, 0.0, width, height],
         Fit::Contain => across.min(down),
         Fit::Cover => across.max(down),
         Fit::Width => across,

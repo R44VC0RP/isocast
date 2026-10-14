@@ -114,6 +114,10 @@ impl Platform for MacPlatform {
         write_latency(probe).ok()
     }
 
+    fn source_permission(&self, source: &SourceKind) -> Option<String> {
+        permissions::source_permission(source, || self.permissions().ok())
+    }
+
     fn permissions(&self) -> anyhow::Result<PermissionsReport> {
         Ok(permissions::report(devices::permissions()?))
     }

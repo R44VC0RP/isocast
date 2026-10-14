@@ -172,6 +172,8 @@ struct LiveEngine {
 struct SetAudioParams {
     /// The id of an audio source in the live setup.
     source: String,
+    /// Downmix stereo to mono before balance in the program and monitoring.
+    mono: Option<bool>,
     /// Volume change in the program mix, in dB (-60 to 24; 0 is as
     /// captured).
     gain_db: Option<f64>,
@@ -315,6 +317,16 @@ struct StreamKeyTargetParams {
 
 #[tool_router]
 impl Isocast {
+    #[tool(
+        description = "List recording encoders with their display labels and supported containers. Use this before changing program or ISO encoder settings.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_encoder_options(
+        &self,
+    ) -> Result<Json<Vec<isocast_protocol::EncoderOption>>, String> {
+        self.call(Method::EncoderOptions).await
+    }
+
     #[tool(
         description = "Get current profile hotkeys, global registration warnings, held audio overrides and Studio Mode state.",
         annotations(read_only_hint = true)
@@ -1367,6 +1379,7 @@ impl Isocast {
             events.ensure_watching();
             let mut client = Client::connect_or_launch()?;
             let change = crate::client::AudioChange {
+                mono: params.mono,
                 gain_db: params.gain_db,
                 muted: params.muted,
                 offset_ms: params.offset_ms,
@@ -1420,6 +1433,18 @@ impl Isocast {
             scene: params.scene,
         })
         .await
+    }
+
+    #[tool(
+        description = "Leave Studio Mode by clearing its staged preview. Program stays on air.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn clear_preview(&self) -> Result<Json<Switched>, String> {
+        self.call(Method::ClearPreview).await
     }
 
     #[tool(

@@ -540,6 +540,20 @@ layout editing, Windows, release prep).
 - [ ] **A.2 OBS workflows in the native app.** Scenes, sources, filters,
   transitions, Studio Mode, mixer, program + ISO recording, streaming:
   one scripted pass in real windows on the test Macs, every finding fixed.
+  - [x] **A.2 QA-1 #1 engine:** native-size source items; preserve explicit
+    bounds and custom legacy boxes; API/CLI, round-trip and offscreen checks.
+  - [x] **A.2 QA-1 #3 engine:** publish pending opens and permission hints;
+    native opens/snapshots time out, independent sources keep opening.
+  - [x] **A.2 QA-1 #4 engine:** validation identifies source/field; atomic
+    paired width/height source patch verified through CLI.
+  - [x] **A.2 QA-2 #1 engine:** reject invalid codec/container pairs at
+    apply/start; encoder/container catalogue on API, CLI, MCP and schema.
+  - [x] **A.2 QA-2 #4 engine:** omitted ISO audio uses each source's own
+    sound; explicit routing and per-source opt-outs persist.
+  - [x] **A.2 QA-2 #5 engine:** collection switches restore program and
+    Studio preview; API/CLI/MCP can clear preview and app follows it.
+  - [x] **A.2 QA-2 #7 engine:** imported names are distinguishable;
+    source mono downmix is available on the shared audio control surface.
 - [ ] **A.3 OBS gaps for daily use:** custom hotkeys (G.5), pause
   recording (G.3), virtual camera (G.1). Replay buffer and projectors wait.
 - [ ] **A.4 Graceful overload (S.3 round 3):** the program and stream stay
@@ -1040,6 +1054,46 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
 ## Log
 
 One line per finished task, newest last.
+
+- A.2 QA engine integration (2026-10-14): seven focused finding commits;
+  existing e2e assertion follows stable source paths and collection CLI help
+  describes restored selections. Final m2-a run 13 PASS / 0 FAIL / 0 SKIP,
+  strict zero drops. Report: /Volumes/IsocastBuild/qa-engine/scratch/REPORT.md.
+
+- A.2 QA-2 #7 (2026-10-14): repeated imports produce QA Show / (2) / (3),
+  verified in CLI and offscreen menu across restart. Stereo/mono/stereo
+  recordings: channel-difference RMS 0.149967 / 0 / 0.149995, each 90 frames,
+  3 s and zero drops; monitor render checked before balance. Release gates
+  pass (180 tests); final engine e2e 13/13, no skips or drops on m2-a.
+
+- A.2 QA-2 #5 (2026-10-14): QA Show returns to Main/BRB preview instead
+  of Bars/no preview; profile switches, restart, removed-scene fallback
+  verified. Offscreen Studio restore and real Studio-off button pass;
+  CLI/MCP clear_preview, fmt/clippy and 180 tests pass.
+
+- A.2 QA-2 #4 (2026-10-14): QA clip on m2-a now has its own AAC in its
+  default ISO; six before/after/explicit routing cases, 18 decoded files,
+  90 frames and 3.000 s each, zero drops/dropouts, nonzero audio, restart
+  persistence. Release gates and Advanced Audio snapshot pass.
+
+- A.2 QA-2 #1 (2026-10-14): 14 codec/container combinations checked;
+  ProRes/MP4 apply/start errors name encoder.container and MOV. Seven
+  encoder options agree across API/CLI/MCP/schema; release gates pass.
+
+- A.2 QA-1 #4 (2026-10-14): QA source index 7 now reports
+  sources.colour.height and "Colour Source" rather than sources[7];
+  one CLI apply sets 400×300 atomically. Typed error, offscreen app,
+  fmt/clippy and 180 tests pass.
+
+- A.2 QA-1 #3 (2026-10-14): blocked native read is present in status and
+  source_changed, snapshot errors after 8 s (8.718 s CLI wall time), duplicate
+  request fails promptly, healthy edits and shutdown continue. Actual QA
+  Documents clip opens (access already granted). Release gates: 180 tests.
+
+- A.2 QA-1 #1 (2026-10-14): exact Headline edit grows 178×116 to 741×87,
+  pattern 1920×1080 to 1280×720; explicit stretch/custom boxes preserved.
+  New API item uses no bounds; 0.5 scale resolves 640×360. TOML/JSON
+  round-trip, offscreen selection boxes, fmt/clippy and 180 tests pass.
 
 - 0.1 (2026-10-11): skeleton, setup format and checker, example rig.
 - 1.1 (2026-10-11): `isocast record --source test-pattern --source tone

@@ -152,14 +152,14 @@ pub struct CollectionIso {
     /// `recording.iso.enabled`).
     #[serde(default)]
     pub sources: Vec<String>,
-    /// Audio sources written into every ISO file.
-    #[serde(default)]
-    pub audio: Vec<String>,
+    /// Explicit shared ISO tracks; omitted uses each source's own sound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<Vec<String>>,
 }
 
 impl CollectionIso {
     fn is_empty(&self) -> bool {
-        self.sources.is_empty() && self.audio.is_empty()
+        self.sources.is_empty() && self.audio.is_none()
     }
 }
 

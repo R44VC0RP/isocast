@@ -157,6 +157,15 @@ each section. Delete entries that stop being true.
   run; this lane used isocast-m2-b between other agents' runs. To retry:
   unlock exonbook, then `ISOCAST_TESTMAC=exonbook scripts/testmac.sh gui
   '<command>'`.
+- 2026-10-14 (A.2 QA-1 #3): the QA Documents clip now has access on m2-a,
+  including the isolated QA bundle, so a fresh pending TCC prompt could not
+  be reproduced without changing grants. No grants reset or prompts answered.
+  On a Mac with fresh grants, run an isolated engine with a media source
+  pointing into Documents, then `ISOCAST_SOCKET=<scratch>/d.sock isocast
+  snapshot clip-b -o <scratch>/clip.png` while leaving the prompt pending.
+  FIFO-blocked native I/O verifies the timeout/status path; this is not a
+  claim of a newly denied device/folder grant check.
+
 - 2026-10-13 (G.3b investigation, compatibility check only): QuickTime on
   exonbook opens the one-second-rotation HEVC export and draws its picture,
   but its locked desktop exposes no AX window; playback-control routes are
@@ -518,6 +527,15 @@ each section. Delete entries that stop being true.
   items removed. Reviewer relay harness: 100000/100000 native lines ordered,
   no seed leaks, expected 100 redactions; peer-close idle CPU 0.0 s/5 s.
   Evidence: a6-diagnostics/scratch/hardening and matching m2-a a6-hardening.
+- 2026-10-14 (A.2 QA engine): final synthetic engine suite on m2-a,
+  release build, common benchmark lock and no screensharingd: 13/13 PASS,
+  no skips, strict 1080p60 zero-drop policy, zero video/audio loss reported.
+  Additional actual QA clip routing matrix: 18 complete decoded 3 s files,
+  90 frames each, matched A/V and zero drops. Mono round-trip: 3 more files,
+  L−R RMS 0.149967 → 0 → 0.149995. This is functional qualification, not
+  a performance comparison. Report/evidence at
+  /Volumes/IsocastBuild/qa-engine/scratch/REPORT.md; app API integration and
+  the unqualified fresh TCC-prompt/device check are listed there.
 
 - 2026-10-13: **G.3b feasibility, not a delivered crash-safe writer.** Main
   runtime f6f287d on exonbook M4 Max/macOS 26.6.2, synthetic inputs, common
@@ -1481,6 +1499,67 @@ each section. Delete entries that stop being true.
   still works. Delete the crate after Ryan's alpha week with the Slint app.
   The app's system parts (open/save panels, menus) are dark now
   (NSApp.appearance DarkAqua; the notes' N.3 item).
+- 2026-10-14 (A.2 QA-2 #7): only newly added/imported collections/profiles
+  get numbered display names on collision, under the library write lock;
+  existing names/ids are untouched. `sources.<id>.audio.mono` averages L/R
+  before balance in the program and monitoring, retaining raw ISO audio.
+  CLI `audio ID --mono|--stereo --json`, MCP `set_audio {source,mono:true}`,
+  and ordinary apply patches share the setting. The Advanced Audio checkbox
+  is for the app lane to expose; this finding changes no UI source.
+
+- 2026-10-14 (A.2 QA-2 #5): save the departing collection's program and
+  preview ids in `<collection>.view.json`, outside the v1 scene document.
+  Restore on collection switches, not profile-only switches; absent/deleted
+  scene ids fall back to the first scene (invalid preview to program,
+  preserving Studio Mode). Sidecar follows deletion into the archive.
+  `clear_preview`, CLI `preview --clear`, MCP `clear_preview` let the native
+  Studio-off button clear engine state. App hooks adopt preview presence
+  from events/status instead of leaving a stale local Studio toggle.
+
+- 2026-10-14 (A.2 QA-2 #4): omitted `recording.iso.audio` means each
+  ISO's own audio, if the opened source actually has sound. Explicit lists,
+  including `[]`, keep legacy shared routing exactly; omission remains
+  omitted across TOML/collection/restart round-trips. Per-source
+  `audio.iso = false/true` overrides own-audio inclusion, never duplicates
+  the same track. Cameras with separate microphones still use the explicit
+  shared microphone list (no guessed device pairing). Minimal mixer hooks
+  display effective routing and patch the per-source choice in auto mode.
+
+- 2026-10-14 (A.2 QA-2 #1): `encoder_options` returns
+  `[{codec,label,containers}]`; CLI `isocast encoders --json`, MCP
+  `list_encoder_options`, and setup schema `x-encoder-options` share it.
+  H.264/HEVC allow mov/mp4; all five ProRes codecs require mov. Both program
+  and ISO pairs validate even while disabled. Native writer repeats the
+  compatibility guard before file creation; generic AVFoundation rejection
+  no longer falsely asserts the Mac cannot encode that codec.
+
+- 2026-10-14 (A.2 QA-1 #4): source validation paths now use stable ids
+  (`sources.colour.height`), with the display name in the message. Paired
+  fields use the existing atomic merge patch, not a new API:
+  `apply {revision:N,patch:{sources:[{id:"colour",width:400,height:300}]}}`.
+  The app must buffer paired inputs and send both in one call; a lone width
+  still correctly names the missing height. Existing tests updated for the
+  public path change; no test files added.
+
+- 2026-10-14 (A.2 QA-1 #3): each source publishes its opening/result
+  independently; native opening has an 8 s deadline and one outstanding
+  native call per source id (32 total). Timed-out native calls retain their
+  slots until the OS returns, preventing retry thread accumulation.
+  `waiting_for_permission` plus `error` reaches status/events/CLI/source row.
+  Device hints use non-prompting permission status. macOS has no public file
+  TCC preflight: Documents/Desktop/Downloads/Volumes hints are provisional
+  while access is attempted and clear on success. Source rows show the
+  warning/tooltip; full state is available to the app via SourceStatus.
+
+- 2026-10-14 (A.2 QA-1 #1): new merge-patch source/scene items default to
+  `fit = "none"`; their box follows cropped native size and
+  `style.transform.scale` controls scaling. Rect-based legacy files retain
+  their sizes. Omitted legacy fit is distinguished internally from explicit
+  stretch (which now survives serialization); on source edits only unchanged
+  legacy boxes equal to the previous native size migrate. CSS layout keeps
+  its own sizing rules. App hooks only: initial placement uses native rect
+  plus scale, Reset chooses none, explicit Stretch is saved. The app's
+  canvas-resize owner must patch scale for no-bounds items, not rect size.
 
 - 2026-10-13 (delegator, overnight): **G.3b (crash-safe takes) waits until
   after the alpha week.** The probes show it needs our own video/audio

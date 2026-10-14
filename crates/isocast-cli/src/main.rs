@@ -120,6 +120,11 @@ enum Command {
         #[command(subcommand)]
         command: hotkeys::HotkeysCommand,
     },
+    /// List recording codecs and the containers each supports.
+    Encoders {
+        #[arg(long)]
+        json: bool,
+    },
     /// Work with setup files.
     Setup {
         #[command(subcommand)]
@@ -273,7 +278,11 @@ enum Command {
     },
     /// Stage a scene in preview, by id, to put on air with `take`.
     Preview {
-        scene: String,
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        scene: Option<String>,
+        /// Leave Studio Mode (clear its staged preview).
+        #[arg(long)]
+        clear: bool,
         #[arg(long)]
         json: bool,
     },
@@ -339,6 +348,12 @@ enum Command {
     /// A running recording follows all but the offset at once.
     Audio {
         source: String,
+        /// Downmix to mono (before balance) in the program and monitor.
+        #[arg(long, conflicts_with = "stereo")]
+        mono: bool,
+        /// Keep the source's stereo channels in the program and monitor.
+        #[arg(long)]
+        stereo: bool,
         #[arg(long, allow_hyphen_values = true)]
         gain: Option<f64>,
         #[arg(long, conflicts_with = "unmute")]
@@ -877,6 +892,30 @@ fn run(cli: Cli) -> Result<ExitCode> {
             json,
         } => timeline::retake(folder, seconds, json),
         Command::Hotkeys { command } => hotkeys::run(command),
+        Command::Encoders { json } => {
+            let options = Client::connect_or_launch()?.encoder_options()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&options)?);
+            } else {
+                for option in options {
+                    println!(
+                        "{}: {}",
+                        option.label,
+                        option
+                            .containers
+                            .iter()
+                            .map(|c| serde_json::to_value(c)
+                                .unwrap()
+                                .as_str()
+                                .unwrap()
+                                .to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Devices { json } => devices(json),
         Command::Record {
             setup,
@@ -905,6 +944,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Restart => restart(),
         Command::Audio {
             source,
+            mono,
+            stereo,
             gain,
             mute,
             unmute,
@@ -914,6 +955,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             json,
         } => {
             let change = client::AudioChange {
+                mono: (mono || stereo).then_some(mono),
                 gain_db: gain,
                 muted: (mute || unmute).then_some(mute),
                 offset_ms: offset,
@@ -970,7 +1012,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let transition = transition.get()?;
             switched(Method::SwitchScene { scene, transition }, json)
         }
-        Command::Preview { scene, json } => switched(Method::Preview { scene }, json),
+        Command::Preview { scene, clear, json } => switched(
+            if clear {
+                Method::ClearPreview
+            } else {
+                Method::Preview {
+                    scene: scene.expect("required by clap"),
+                }
+            },
+            json,
+        ),
         Command::Take { transition, json } => {
             let transition = transition.get()?;
             switched(Method::Take { transition }, json)
@@ -2549,6 +2600,9 @@ fn print_engine(engine: &EngineInfo) {
             (None, None) => String::new(),
         };
         match (&source.state, &source.error) {
+            (SourceRun::WaitingForPermission, Some(error)) => {
+                println!("  {}  {error}", source.source)
+            }
             (SourceRun::Failed, Some(error)) => println!("  {}  failed: {error}", source.source),
             (state, _) => println!("  {}  {state:?} {what}", source.source),
         }

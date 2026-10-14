@@ -381,7 +381,73 @@ impl Drop for Generator {
 
 /// Open the setup's source `id`, on the timeline that starts at `timeline`;
 /// text showing a data key shows `data`'s value.
+/// Bound native opening, including time spent behind macOS prompts. A
+/// timed-out native call cannot be cancelled; keep its slot until it exits
+/// so repeated requests cannot accumulate another opener for that source.
+fn bounded_open<T: Send + 'static>(
+    key: String,
+    permission: Option<String>,
+    run: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    static PENDING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let pending = PENDING.get_or_init(Default::default);
+    let context = permission.map(|p| format!("waiting for permission: {p}; check the macOS permission prompt or Privacy & Security"))
+        .unwrap_or_else(|| "source is still opening; check its file/device".into());
+    {
+        let mut slots = pending.lock().unwrap();
+        if slots.contains(&key) {
+            bail!("{key}: {context}; previous open is still pending (8 s timeout)");
+        }
+        if slots.len() >= 32 {
+            bail!("{key}: too many pending source opens (maximum 32); check permissions/devices");
+        }
+        slots.insert(key.clone());
+    }
+    struct Pending(&'static Mutex<HashSet<String>>, String);
+    impl Drop for Pending {
+        fn drop(&mut self) {
+            self.0
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.1);
+        }
+    }
+    let guard = Pending(pending, key.clone());
+    let (tx, rx) = sync_channel(1);
+    thread::spawn(move || {
+        let _guard = guard;
+        let result = isocast_diagnostics::contain("native source open", run)
+            .map_err(anyhow::Error::msg)
+            .and_then(|r| r);
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(Duration::from_secs(8))
+        .with_context(|| format!("{key}: timed out opening after 8 s; {context}"))?
+}
+
 pub(crate) fn open<P: Platform>(
+    platform: &P,
+    setup: &Setup,
+    id: &str,
+    timeline: &Arc<Timeline>,
+    data: &Arc<DataStore>,
+) -> Result<Opened<P>> {
+    let permission = setup
+        .source(id)
+        .and_then(|s| platform.source_permission(&s.kind));
+    let (platform, setup, id, timeline, data) = (
+        platform.clone(),
+        setup.clone(),
+        id.to_string(),
+        timeline.clone(),
+        data.clone(),
+    );
+    bounded_open(format!("source {id:?}"), permission, move || {
+        open_native(&platform, &setup, &id, &timeline, &data)
+    })
+}
+
+fn open_native<P: Platform>(
     platform: &P,
     setup: &Setup,
     id: &str,
@@ -1302,6 +1368,31 @@ fn media<P: Platform>(
 /// plays from its start each time `id` comes on air (when a stinger
 /// begins), video only. Returns it and how long the video lasts.
 pub(crate) fn stinger<P: Platform>(
+    platform: &P,
+    setup: &Setup,
+    id: &str,
+    file: &str,
+    timeline: &Arc<Timeline>,
+) -> Result<(Opened<P>, Duration)> {
+    let permission = platform.source_permission(&SourceKind::Media(MediaSource {
+        files: vec![file.to_string()],
+        repeat: false,
+        speed: 1.0,
+        restart_on_activate: true,
+    }));
+    let (platform, setup, id, file, timeline) = (
+        platform.clone(),
+        setup.clone(),
+        id.to_string(),
+        file.to_string(),
+        timeline.clone(),
+    );
+    bounded_open(format!("stinger {id:?}"), permission, move || {
+        stinger_native(&platform, &setup, &id, &file, &timeline)
+    })
+}
+
+fn stinger_native<P: Platform>(
     platform: &P,
     setup: &Setup,
     id: &str,

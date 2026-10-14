@@ -222,8 +222,8 @@ mod tests {
         assert_eq!(
             paths,
             [
-                "sources[1].filters[0].spil",
-                "sources[0].audio_filters[0].db",
+                "sources.pattern.filters[0].spil",
+                "sources.mic.audio_filters[0].db",
                 "transition.directon",
             ]
         );

@@ -381,7 +381,7 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
             iso: IsoRecording {
                 enabled: !iso.is_empty(),
                 sources: iso,
-                audio,
+                audio: Some(audio),
                 ..IsoRecording::default()
             },
             keep_free_gb: 1.0,
@@ -729,7 +729,7 @@ mod tests {
         assert_eq!(scenes, ["screen-and-camera", "camera", "screen"]);
         assert_eq!(setup.recording.iso.sources, ["screen", "camera"]);
         assert_eq!(setup.recording.program.audio, ["mic", "desktop-audio"]);
-        assert_eq!(setup.recording.iso.audio, ["mic"]);
+        assert_eq!(setup.recording.iso.audio.as_deref().unwrap(), ["mic"]);
         let pip = setup.scenes[0].items[1].rect.unwrap();
         assert_eq!((pip.x, pip.y, pip.width, pip.height), (1400, 770, 480, 270));
         // It survives being written and read as TOML.

@@ -5,6 +5,53 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use isocast_protocol::SourceKind;
+
+/// A non-prompting hint before native opening. macOS has no public TCC
+/// preflight for files/folders: protected file opens carry a provisional
+/// waiting state until access succeeds (or an actual I/O error is returned).
+pub(crate) fn source_permission(
+    source: &SourceKind,
+    permissions: impl FnOnce() -> Option<PermissionsReport>,
+) -> Option<String> {
+    let device = match source {
+        SourceKind::Camera(_) => Some(PermissionKind::Camera),
+        SourceKind::Microphone(_) => Some(PermissionKind::Microphone),
+        SourceKind::Display(_)
+        | SourceKind::Window(_)
+        | SourceKind::Application(_)
+        | SourceKind::SystemAudio(_)
+        | SourceKind::ApplicationAudio(_) => Some(PermissionKind::ScreenRecording),
+        _ => None,
+    };
+    if let Some(kind) = device {
+        return permissions()
+            .filter(|p| p.permissions.get(kind) != Permission::Granted)
+            .map(|_| pane(kind).to_string());
+    }
+    let paths: Vec<&str> = match source {
+        SourceKind::Media(s) => s.files.iter().map(String::as_str).collect(),
+        SourceKind::Image(s) => vec![&s.path],
+        SourceKind::Slideshow(s) => s.files.iter().map(String::as_str).collect(),
+        SourceKind::Text(s) => s.file.as_deref().into_iter().collect(),
+        SourceKind::Browser(s) => s.file.as_deref().into_iter().collect(),
+        _ => Vec::new(),
+    };
+    for path in paths {
+        let path = isocast_engine::record::expand_home(path);
+        for folder in ["Documents", "Desktop", "Downloads"] {
+            if std::env::var_os("HOME")
+                .is_some_and(|home| path.starts_with(Path::new(&home).join(folder)))
+            {
+                return Some(folder.into());
+            }
+        }
+        if path.starts_with("/Volumes") {
+            return Some("removable volumes".into());
+        }
+    }
+    None
+}
 use isocast_protocol::devices::{
     Permission, PermissionAction, PermissionDetail, PermissionKind, Permissions, PermissionsReport,
 };

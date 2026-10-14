@@ -73,6 +73,47 @@ pub struct CurrentFile {
     pub legacy: Option<String>,
 }
 
+/// Last on-air/Studio preview selection when a collection was left.
+/// Kept outside the scene document so older engines can still load it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CollectionView {
+    pub scene: Option<String>,
+    pub preview: Option<String>,
+}
+
+impl CollectionView {
+    pub fn restore(self, setup: &Setup) -> Self {
+        let exists = |id: &String| setup.scenes.iter().any(|s| &s.id == id);
+        let scene = self
+            .scene
+            .filter(exists)
+            .or_else(|| setup.scenes.first().map(|s| s.id.clone()));
+        // Retain Studio Mode if its old preview was removed.
+        let preview = self
+            .preview
+            .and_then(|id| if exists(&id) { Some(id) } else { scene.clone() });
+        Self { scene, preview }
+    }
+}
+
+pub fn view_path(collection: &Path) -> PathBuf {
+    collection.with_extension("view.json")
+}
+
+pub fn read_view(collection: &Path) -> Result<CollectionView> {
+    let path = view_path(collection);
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("couldn't read {}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(CollectionView::default()),
+        Err(err) => Err(err).with_context(|| format!("couldn't read {}", path.display())),
+    }
+}
+
+pub fn write_view(collection: &Path, view: &CollectionView) -> Result<()> {
+    write_document(&view_path(collection), view, "").map(|_| ())
+}
+
 /// Where a change to the live setup is saved: the files of the pair that
 /// was current when it was applied.
 #[derive(Debug, Clone)]
@@ -910,6 +951,15 @@ pub fn delete(root: &Path, kind: LibraryKind, id: &str) -> Result<PathBuf> {
             sibling(&data, ".bak"),
             sibling(&crate::data::data_path(&kept), ".bak"),
         );
+    }
+    if kind == LibraryKind::Collection {
+        let view = view_path(&path);
+        if view.exists() {
+            fs::rename(&view, view_path(&kept))?;
+            if sibling(&view, ".bak").exists() {
+                fs::rename(sibling(&view, ".bak"), sibling(&view_path(&kept), ".bak"))?;
+            }
+        }
     }
     if kind == LibraryKind::Profile {
         let hotkeys = hotkeys_path(&path);

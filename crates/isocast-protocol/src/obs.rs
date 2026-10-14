@@ -1252,6 +1252,8 @@ impl<'a, 'v> Importer<'a, 'v> {
             (monitor, _) => monitor,
         };
         AudioSettings {
+            mono: false,
+            iso: None,
             gain_db: (gain_db * 10.0).round() / 10.0,
             muted: obs.json.get("muted") == Some(&Value::Bool(true)),
             offset_ms,
@@ -2901,7 +2903,7 @@ impl<'a, 'v> Importer<'a, 'v> {
                     container,
                     ..Encoder::default()
                 }),
-                audio: std::mem::take(&mut self.iso_audio),
+                audio: Some(std::mem::take(&mut self.iso_audio)),
                 ..IsoRecording::default()
             },
             keep_free_gb: default_keep_free_gb(),
@@ -3804,7 +3806,7 @@ mod tests {
         let iso = &imported.setup.recording.iso;
         assert!(iso.enabled);
         assert_eq!(iso.sources, ["cam"]);
-        assert_eq!(iso.audio, ["mic"]);
+        assert_eq!(iso.audio.as_deref().unwrap(), ["mic"]);
         assert_eq!(
             (iso.encoder.codec, iso.encoder.quality),
             (Codec::Prores422, 80.into())

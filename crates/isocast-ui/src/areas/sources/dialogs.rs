@@ -354,11 +354,9 @@ fn place_new(app: &Rc<App>, scene: String, key: String, tries: u32) {
             .map(|s| (s.canvas.width as f64, s.canvas.height as f64))
             .unwrap_or((1920.0, 1080.0));
         let scale = 1f64.min(cw / w).min(ch / h);
-        let width = (w * scale).round().max(1.0);
-        let height = (h * scale).round().max(1.0);
         let rect = json!({
-            "x": items::int((cw - width) / 2.0), "y": items::int((ch - height) / 2.0),
-            "width": items::whole(width), "height": items::whole(height),
+            "x": items::int((cw - w) / 2.0), "y": items::int((ch - h) / 2.0),
+            "width": items::whole(w), "height": items::whole(h),
         });
         let still = app
             .session
@@ -369,7 +367,7 @@ fn place_new(app: &Rc<App>, scene: String, key: String, tries: u32) {
             .is_some_and(|sc| sc.items.iter().any(|i| setup_model::key(i) == key));
         if still {
             app.edit(
-                json!({ "scenes": [{ "id": scene, "items": [{ "id": key, "rect": rect }] }] }),
+                json!({ "scenes": [{ "id": scene, "items": [{ "id": key, "rect": rect, "fit": "none", "style": { "transform": { "scale": scale } } }] }] }),
                 EditOptions::default(),
             );
         }
@@ -1436,11 +1434,7 @@ impl Dialogs {
                     .global::<SourcesArea>()
                     .set_transform_anchor(value.into());
             }
-            "fit" => items::update_selected(
-                app,
-                json!({ "fit": if value == "stretch" { Value::Null } else { json!(value) } }),
-                None,
-            ),
+            "fit" => items::update_selected(app, json!({ "fit": value }), None),
             "align" => items::update_selected(
                 app,
                 json!({ "align": if value == "center" { Value::Null } else { json!(value) } }),

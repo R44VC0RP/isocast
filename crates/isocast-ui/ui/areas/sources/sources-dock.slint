@@ -146,7 +146,7 @@ export component SourcesDock inherits Dock {
                 selected: parent.chosen;
                 dim: !item.visible;
                 depth: item.depth;
-                description: item.state == "failed" ? item.error : item.visible ? "" : "Hidden";
+                description: item.state == "failed" || item.state == "waiting for permission" ? item.error : item.visible ? "" : "Hidden";
                 index: i;
                 count: SourcesArea.items.length;
                 focus-shown: list.keyboard-focus && parent.chosen;
@@ -174,7 +174,7 @@ export component SourcesDock inherits Dock {
                     root.drop-at = -1;
                 }
 
-                if item.state == "failed": Rectangle {
+                if item.state == "failed" || item.state == "waiting for permission": Rectangle {
                     width: Theme.control-h-sm;
                     Icon {
                         path: Icons.warning;

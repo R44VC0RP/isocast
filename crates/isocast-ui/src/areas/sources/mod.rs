@@ -1033,6 +1033,9 @@ fn show_lists(app: &Rc<App>) {
                 let state = match run.map(|r| r.state) {
                     Some(isocast_protocol::api::SourceRun::Opening) => "opening",
                     Some(isocast_protocol::api::SourceRun::Failed) => "failed",
+                    Some(isocast_protocol::api::SourceRun::WaitingForPermission) => {
+                        "waiting for permission"
+                    }
                     _ => "",
                 };
                 let group = !item.children.is_empty();
@@ -1041,6 +1044,19 @@ fn show_lists(app: &Rc<App>) {
                 let mut name = setup_model::item_label(w.setup, item);
                 if missing {
                     name.push_str(" · missing");
+                }
+                if let Some(run) = run
+                    .filter(|r| r.state == isocast_protocol::api::SourceRun::WaitingForPermission)
+                {
+                    name.push_str(" · ");
+                    name.push_str(
+                        run.error
+                            .as_deref()
+                            .unwrap_or("waiting for permission")
+                            .split(';')
+                            .next()
+                            .unwrap_or("waiting for permission"),
+                    );
                 }
                 rows.push(ItemRow {
                     path: path.as_str().into(),

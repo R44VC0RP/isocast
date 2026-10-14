@@ -941,7 +941,10 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
                 setup.source(id).expect("validated").kind.label(),
                 (width, height, fps),
                 &iso.encoder,
-                &iso.audio,
+                iso.audio_for(
+                    setup.source(id).expect("validated"),
+                    formats.audio.contains_key(id),
+                ),
             ));
         }
     }
@@ -954,7 +957,7 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
             PROGRAM,
             (width, height, setup.canvas.fps),
             &program.encoder,
-            &program_audio,
+            program_audio.clone(),
         ));
     }
     let names: Vec<(String, &str)> = files
@@ -987,7 +990,7 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
                             fps,
                             encoder: encoder.clone(),
                         },
-                        audio: audio_tracks(audio),
+                        audio: audio_tracks(&audio),
                     },
                 })
             },

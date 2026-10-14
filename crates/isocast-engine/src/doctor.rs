@@ -170,7 +170,12 @@ pub fn doctor<P: Platform>(platform: &P, setup: Option<&Setup>, folder: Option<&
     let iso_on = iso.enabled && !iso.sources.is_empty();
     let mut needed: Vec<&str> = Vec::new();
     if iso_on {
-        needed.extend(iso.sources.iter().chain(&iso.audio).map(String::as_str));
+        needed.extend(
+            iso.sources
+                .iter()
+                .chain(iso.audio.iter().flatten())
+                .map(String::as_str),
+        );
     }
     if program.enabled {
         needed.extend(program.audio.iter().map(String::as_str));
@@ -278,7 +283,11 @@ pub fn doctor<P: Platform>(platform: &P, setup: Option<&Setup>, folder: Option<&
     if iso_on {
         for id in &iso.sources {
             if let Some((_, Some(video), _)) = formats.iter().find(|(f, ..)| f == id) {
-                rate += file(*video, &iso.encoder, channels(&iso.audio));
+                let source = setup.source(id).expect("validated source");
+                let own = formats
+                    .iter()
+                    .any(|(f, _, audio)| f == id && audio.is_some());
+                rate += file(*video, &iso.encoder, channels(&iso.audio_for(source, own)));
             }
         }
     }

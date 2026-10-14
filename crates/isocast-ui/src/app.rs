@@ -315,11 +315,19 @@ impl App {
                 self.changed(Changed::SCENES);
             }
             Event::PreviewChanged { scene } => {
-                self.session.borrow_mut().preview = Some(scene.clone());
+                {
+                    let mut s = self.session.borrow_mut();
+                    s.preview = Some(scene.clone());
+                    s.studio = true;
+                }
                 self.changed(Changed::SCENES);
             }
             Event::PreviewCleared => {
-                self.session.borrow_mut().preview = None;
+                {
+                    let mut s = self.session.borrow_mut();
+                    s.preview = None;
+                    s.studio = false;
+                }
                 self.changed(Changed::SCENES);
             }
             // A scene collection or profile was created, switched, renamed or
@@ -952,6 +960,7 @@ impl App {
                     if fresh {
                         s.scene = status.scene.clone();
                         s.preview = status.preview.clone();
+                        s.studio = status.preview.is_some();
                     }
                     if !s.busy_stream {
                         s.stream = status.stream.clone();
@@ -1055,6 +1064,10 @@ impl App {
         let stage = {
             let mut s = self.session.borrow_mut();
             s.studio = on;
+            s.switched_at = Some(Instant::now());
+            if !on {
+                s.preview = None;
+            }
             s.selection = None;
             (on && s.preview.is_none())
                 .then(|| s.scene.clone())
@@ -1072,6 +1085,12 @@ impl App {
             self.call(Method::Preview { scene }, |app, result| {
                 if let Err(error) = result {
                     app.failed("Couldn’t start studio mode", &error);
+                }
+            });
+        } else if !on {
+            self.call(Method::ClearPreview, |app, result| {
+                if let Err(error) = result {
+                    app.failed("Couldn’t leave studio mode", &error);
                 }
             });
         }

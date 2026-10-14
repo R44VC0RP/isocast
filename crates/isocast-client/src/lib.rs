@@ -52,6 +52,14 @@ impl DaemonError {
 }
 
 impl Client {
+    pub fn clear_preview(&mut self) -> Result<isocast_protocol::api::Switched> {
+        self.call(Method::ClearPreview)
+    }
+
+    pub fn encoder_options(&mut self) -> Result<Vec<isocast_protocol::EncoderOption>> {
+        self.call(Method::EncoderOptions)
+    }
+
     /// Forward a focused fallback key edge. Reuse this connection for both
     /// edges; disconnecting releases its push keys. Globally registered keys
     /// are ignored to avoid double-firing when a window is focused.

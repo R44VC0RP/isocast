@@ -242,7 +242,15 @@ impl Mixer {
                     offset_ms: audio.offset_ms as f32,
                     monitor: monitoring_value(audio.monitor).into(),
                     program: setup.recording.program.audio.contains(&source.id),
-                    iso: setup.recording.iso.audio.contains(&source.id),
+                    iso: setup
+                        .recording
+                        .iso
+                        .audio_for(
+                            source,
+                            source.kind.has_audio()
+                                && setup.recording.iso.sources.contains(&source.id),
+                        )
+                        .contains(&source.id),
                 }
             })
             .collect();
@@ -591,14 +599,26 @@ fn live(id: &str, field: &str) -> EditOptions {
 /// Put `id` in, or take it out of, a track list: the program mix
 /// ("program") or every ISO file ("iso").
 fn set_track(app: &Rc<App>, track: &str, id: &str, on: bool) {
+    if track == "iso"
+        && app.session.borrow().setup.as_ref().is_some_and(|s| {
+            s.recording.iso.audio.is_none()
+                && s.source(id).is_some_and(|source| source.kind.has_video())
+        })
+    {
+        app.edit(
+            json!({"sources": [{"id": id, "audio": {"iso": on}}]}),
+            EditOptions::default(),
+        );
+        return;
+    }
     let list = {
         let s = app.session.borrow();
         let Some(setup) = s.setup.as_ref() else {
             return;
         };
         let list = match track {
-            "program" => &setup.recording.program.audio,
-            _ => &setup.recording.iso.audio,
+            "program" => setup.recording.program.audio.as_slice(),
+            _ => setup.recording.iso.audio.as_deref().unwrap_or(&[]),
         };
         let mut list: Vec<String> = list.iter().filter(|x| *x != id).cloned().collect();
         if on {

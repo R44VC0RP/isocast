@@ -165,6 +165,9 @@ impl AssetWriter {
     }
 
     fn make(spec: &WriterSpec) -> Result<Self> {
+        if let Some(problem) = spec.video.encoder.codec.container_problem(spec.container) {
+            bail!("encoder.container: {problem}");
+        }
         let path = spec
             .path
             .to_str()
@@ -184,11 +187,12 @@ impl AssetWriter {
         let settings = video_settings(&spec.video);
         if !unsafe { writer.canApplyOutputSettings_forMediaType(Some(&settings), video_type) } {
             bail!(
-                "this Mac can't encode {:?} at {}×{} {} fps",
+                "AVAssetWriter rejected {:?} recording settings at {}×{} {} fps in {:?}; check encoder size, rate, bit depth and container compatibility",
                 spec.video.encoder.codec,
                 spec.video.width,
                 spec.video.height,
-                spec.video.fps
+                spec.video.fps,
+                spec.container
             );
         }
         let (video, adaptor) = catch(|| unsafe {

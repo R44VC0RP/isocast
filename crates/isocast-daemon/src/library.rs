@@ -400,6 +400,27 @@ impl Daemon {
     fn add(&self, root: &Path, document: &Document, id: Option<&str>) -> Result<String, RpcError> {
         let kind = document.kind();
         let _files = self.saved.lock().unwrap();
+        // Imports/copies can keep the same display name while receiving a
+        // fresh id. Give only the incoming document a distinguishable label.
+        let mut document = document.clone();
+        let entries = store::list(root, kind, None);
+        let taken_name = |name: &str| {
+            entries
+                .iter()
+                .any(|entry| entry.name.eq_ignore_ascii_case(name))
+        };
+        if taken_name(document.name()) {
+            let base = document.name().to_string();
+            let name = (2..)
+                .map(|n| {
+                    let suffix = format!(" ({n})");
+                    let base: String = base.chars().take(120 - suffix.chars().count()).collect();
+                    format!("{base}{suffix}")
+                })
+                .find(|name| !taken_name(name))
+                .expect("an unused numbered name");
+            document.set_name(&name);
+        }
         let id = match id {
             Some(id) if !library::valid_id(id) => {
                 return Err(invalid(format!(
@@ -634,10 +655,11 @@ impl Daemon {
         let same = current
             .as_ref()
             .is_some_and(|c| c.collection == collection_id && c.profile == profile_id);
-        let collection_changed = current
-            .as_ref()
-            .is_none_or(|c| c.collection != collection_id);
         let mut state = self.state.lock().unwrap();
+        let collection_changed = state
+            .file
+            .current()
+            .is_none_or(|c| c.collection != collection_id);
         if same && state.setup.is_some() {
             drop(state);
             let mut change = self.change(vec![
@@ -650,6 +672,38 @@ impl Daemon {
         if let Some(message) = switch_refusal(&state, what) {
             return Err(wrong_state(message));
         }
+        let leaving = collection_changed
+            .then(|| {
+                state.file.current().map(|c| {
+                    (
+                        store::document_path(&root, LibraryKind::Collection, &c.collection),
+                        store::CollectionView {
+                            scene: state.scene.clone(),
+                            preview: state.preview.clone(),
+                        },
+                    )
+                })
+            })
+            .flatten();
+        let mut notes = Vec::new();
+        let view = if collection_changed {
+            let file = store::document_path(&root, LibraryKind::Collection, &collection_id);
+            match store::read_view(&file) {
+                Ok(view) => view,
+                Err(err) => {
+                    notes.push(format!(
+                        "couldn't restore the collection's last scene: {err:#}"
+                    ));
+                    store::CollectionView::default()
+                }
+            }
+        } else {
+            store::CollectionView {
+                scene: state.scene.clone(),
+                preview: state.preview.clone(),
+            }
+        }
+        .restore(&setup);
         // The live engine runs the new pair from its next frame: sources
         // open and close as for any change.
         if let Some(engine) = &state.engine {
@@ -657,7 +711,6 @@ impl Daemon {
                 .update(&setup, state.revision + 1)
                 .map_err(wrong_state)?;
         }
-        let scene_ids: Vec<String> = setup.scenes.iter().map(|s| s.id.clone()).collect();
         state.setup = Some(setup);
         state.hotkey_holds.clear();
         state.revision += 1;
@@ -665,25 +718,31 @@ impl Daemon {
         let written = state
             .file
             .set_current((&collection_id, &profile_id), (&names.0, &names.1));
-        // Another collection goes on air from its first scene.
+        // Each collection remembers its own on-air and Studio preview ids.
         let mut on_air = None;
-        let keeps_scene = state.scene.as_ref().is_some_and(|s| scene_ids.contains(s));
-        if collection_changed || !keeps_scene {
-            state.scene = scene_ids.first().cloned();
+        if collection_changed || state.scene != view.scene {
+            state.scene = view.scene;
             if let (Some(control), Some(scene)) = (state.control(), &state.scene) {
                 let _ = control.switch_scene(now(), scene.clone(), Transition::default());
             }
             on_air = state.scene.clone();
-            if state.preview.take().is_some()
-                && let Some(engine) = &state.engine
-            {
-                engine.set_preview(None);
-            }
         }
+        let preview_changed = collection_changed || state.preview != view.preview;
+        state.preview = view.preview;
+        if let Some(engine) = &state.engine {
+            engine.set_preview(state.preview.clone());
+        }
+        let preview = state.preview.clone();
         drop(state);
-        let mut notes = Vec::new();
         {
             let _files = self.saved.lock().unwrap();
+            if let Some((file, view)) = leaving
+                && let Err(err) = store::write_view(&file, &view)
+            {
+                notes.push(format!(
+                    "switched, but couldn't remember the previous collection's scene: {err:#}"
+                ));
+            }
             if let Err(err) = store::write_current(&root, &written) {
                 notes.push(format!(
                     "switched, but couldn't save which ones are in use ({err:#}); isocastd \
@@ -697,6 +756,12 @@ impl Daemon {
             notes.extend(self.data.load_collection(&file));
         }
         self.publish(Event::SetupChanged { revision });
+        if preview_changed {
+            self.publish(match preview {
+                Some(scene) => Event::PreviewChanged { scene },
+                None => Event::PreviewCleared,
+            });
+        }
         if let Some(scene) = on_air {
             self.publish(Event::SceneChanged {
                 scene,

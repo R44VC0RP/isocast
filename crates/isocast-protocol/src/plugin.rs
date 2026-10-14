@@ -1447,8 +1447,8 @@ program = { enabled = false, encoder = { codec = "hevc" } }
         assert_eq!(
             paths,
             [
-                "sources[0].audio_filters[1].sidechain_source",
-                "sources[0].audio_filters[4].kind"
+                "sources.music.audio_filters[1].sidechain_source",
+                "sources.music.audio_filters[4].kind"
             ],
             "{issues:?}"
         );

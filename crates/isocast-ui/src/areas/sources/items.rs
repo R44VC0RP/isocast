@@ -958,7 +958,7 @@ pub fn reset_transform(app: &Rc<App>) {
         ));
         let mut fields = json!({
             "rect": { "x": 0, "y": 0, "width": whole(w), "height": whole(h) },
-            "crop": null, "fit": null, "align": null,
+            "crop": null, "fit": "none", "align": null,
         });
         if !item["style"]["transform"].is_null() {
             fields["style"] = json!({ "transform": null });

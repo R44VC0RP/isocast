@@ -20,7 +20,7 @@ use isocast_protocol::layout::{
     JustifyContent, LayoutDisplay, Length, LengthValue, Overflow, Position, TrackMax, TrackMin,
     TrackSize,
 };
-use isocast_protocol::{Content, Layout, Rect, Scene, SceneItem, Setup, SourceKind};
+use isocast_protocol::{Content, Fit, Layout, Rect, Scene, SceneItem, Setup, SourceKind};
 use taffy::prelude::{
     AvailableSpace, Dimension, LengthPercentage, LengthPercentageAuto, NodeId as TaffyNode, Size,
     Style, TaffyTree,
@@ -132,6 +132,7 @@ impl Layouter {
         used: &mut Vec<(String, Option<(u32, u32)>)>,
     ) {
         for scene in scenes.iter_mut() {
+            native_rects(&mut scene.items, canvas, size_of, used);
             if !uses_layout(scene) {
                 continue;
             }
@@ -291,6 +292,129 @@ impl Layouter {
     }
 }
 
+/// No-bounds source items have a native (cropped) box. CSS layout retains
+/// its explicitly authored sizing rules; transforms supply the item scale.
+fn native_rects(
+    items: &mut [SceneItem],
+    canvas: (u32, u32),
+    size_of: SizeOf<'_>,
+    used: &mut Vec<(String, Option<(u32, u32)>)>,
+) {
+    for item in items {
+        if item.fit == Fit::None && item.layout.is_none() {
+            let size = if let Some(id) = &item.source {
+                let size = size_of(id);
+                if !used.iter().any(|(key, _)| key == id) {
+                    used.push((id.clone(), size));
+                }
+                size
+            } else {
+                item.scene.as_ref().map(|_| canvas)
+            };
+            if let (Some(rect), Some((w, h))) = (&mut item.rect, size) {
+                rect.width = w
+                    .saturating_sub(item.crop.left)
+                    .saturating_sub(item.crop.right)
+                    .max(1);
+                rect.height = h
+                    .saturating_sub(item.crop.top)
+                    .saturating_sub(item.crop.bottom)
+                    .max(1);
+            }
+        }
+        native_rects(&mut item.children, canvas, size_of, used);
+    }
+}
+
+/// Normalize new API items and source-size edits without changing authored
+/// bounds. An omitted legacy fit follows only if its unchanged box was the
+/// previous native size. Explicit stretch never migrates.
+pub fn follow_source_sizes(
+    previous: &Setup,
+    setup: &mut Setup,
+    live: &[(String, (u32, u32))],
+    new_items: bool,
+) {
+    fn walk(
+        old: &[SceneItem],
+        items: &mut [SceneItem],
+        previous: &Setup,
+        setup: &Setup,
+        live: &[(String, (u32, u32))],
+        new_items: bool,
+    ) {
+        for item in items {
+            let before = old.iter().find(|old| old.key() == item.key());
+            if new_items
+                && before.is_none()
+                && item.fit.is_legacy()
+                && item.layout.is_none()
+                && (item.source.is_some() || item.scene.is_some())
+            {
+                item.fit = Fit::None;
+            }
+            if let Some(id) = &item.source {
+                let a = previous.source(id);
+                let b = setup.source(id);
+                if let (Some(a), Some(b), Some(before), Some(rect)) = (a, b, before, item.rect)
+                    && a.kind != b.kind
+                    && item.fit.is_legacy()
+                    && before.fit.is_legacy()
+                    && before.rect == item.rect
+                    && item.layout.is_none()
+                {
+                    let native =
+                        settings_size(&a.kind, (previous.canvas.width, previous.canvas.height))
+                            .or_else(|| {
+                                live.iter()
+                                    .find(|(key, _)| key == id)
+                                    .map(|(_, size)| *size)
+                            });
+                    if native == Some((rect.width, rect.height)) && item.crop == Default::default()
+                    {
+                        item.fit = Fit::None;
+                    }
+                }
+            }
+            walk(
+                before.map_or(&[], |i| i.children.as_slice()),
+                &mut item.children,
+                previous,
+                setup,
+                live,
+                new_items,
+            );
+        }
+    }
+    let sizes = setup.clone();
+    for scene in &mut setup.scenes {
+        let old = previous.scenes.iter().find(|s| s.id == scene.id);
+        walk(
+            old.map_or(&[], |s| s.items.as_slice()),
+            &mut scene.items,
+            previous,
+            &sizes,
+            live,
+            new_items,
+        );
+        native_rects(
+            &mut scene.items,
+            (sizes.canvas.width, sizes.canvas.height),
+            &|id| {
+                let source = sizes.source(id)?;
+                settings_size(&source.kind, (sizes.canvas.width, sizes.canvas.height)).or_else(
+                    || {
+                        live.iter()
+                            .find(|(key, _)| key == id)
+                            .map(|(_, size)| *size)
+                    },
+                )
+            },
+            &mut Vec::new(),
+        );
+    }
+}
+
 /// Whether `scene` or any of its items has a layout.
 pub(crate) fn uses_layout(scene: &Scene) -> bool {
     fn any(items: &[SceneItem]) -> bool {
@@ -330,7 +454,10 @@ pub(crate) fn settings_size(kind: &SourceKind, canvas: (u32, u32)) -> Option<(u3
         SourceKind::Color(color) => Some(pair(color.width, color.height).unwrap_or(canvas)),
         SourceKind::Image(image) => pair(image.width, image.height),
         SourceKind::Slideshow(slideshow) => pair(slideshow.width, slideshow.height),
-        SourceKind::Text(text) => pair(text.width, text.height),
+        SourceKind::Text(text) => pair(text.width, text.height).or_else(|| {
+            (text.file.is_none() && text.data.is_none())
+                .then(|| crate::text::size(text, text.text.as_deref().unwrap_or_default()))
+        }),
         SourceKind::Browser(browser) => Some((browser.width, browser.height)),
         _ => None,
     }

@@ -447,7 +447,7 @@ def scenario_setup(e, cfg, evidence):
     require(e.rpc("get")["setup"]["name"] == cfg["name"], "valid setup was not applied")
     errors = []
     for field, change in (("canvas.width", lambda c: c["canvas"].update(width=0)),
-                          ("sources[0].fps", lambda c: c["sources"][0].update(fps=0)),
+                          (f"sources.{cfg['sources'][0]['id']}.fps", lambda c: c["sources"][0].update(fps=0)),
                           ("canvas.fsp", lambda c: c["canvas"].update(fsp=60))):
         bad = copy.deepcopy(cfg)
         change(bad)

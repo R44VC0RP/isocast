@@ -15,6 +15,8 @@ pub use isocast_client::Client;
 #[derive(Debug, Default, serde::Serialize)]
 pub struct AudioChange {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub mono: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gain_db: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub muted: Option<bool>,
@@ -46,7 +48,7 @@ pub fn set_audio(client: &mut Client, source: &str, change: &AudioChange) -> Res
     let settings = serde_json::to_value(change)?;
     if settings.as_object().is_none_or(|fields| fields.is_empty()) {
         bail!(
-            "nothing to change: give a gain, mute or unmute, an offset, a balance or a \
+            "nothing to change: give mono/stereo, a gain, mute or unmute, an offset, a balance or a \
              monitoring type"
         );
     }
