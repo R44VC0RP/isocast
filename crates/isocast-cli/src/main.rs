@@ -31,6 +31,7 @@ mod plugin;
 #[cfg(target_os = "macos")]
 mod shared_frames;
 mod timeline;
+mod virtual_camera;
 
 #[cfg(target_os = "macos")]
 fn shared_frames(options: shared_frames::Options) -> Result<ExitCode> {
@@ -363,6 +364,11 @@ enum Command {
     Stream {
         #[command(subcommand)]
         command: StreamCommand,
+    },
+    /// Feed a picture to Isocast Virtual Camera (extension approval required once).
+    Vcam {
+        #[command(subcommand)]
+        command: virtual_camera::Command,
     },
     /// Print events from isocastd as they happen, until Ctrl-C.
     Watch {
@@ -861,6 +867,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             false => frames(target, output, width, fps, seconds, json),
         },
         Command::Engine { command, json } => engine(command, json),
+        Command::Vcam { command } => virtual_camera::run(command),
         Command::Stream { command } => match command {
             StreamCommand::Start { json } => {
                 let status: StreamStatus =
@@ -1528,6 +1535,7 @@ fn status(json: bool) -> Result<ExitCode> {
             timeline: None,
             timeline_problem: None,
             export: None,
+            virtual_camera: None,
         },
     };
     if json {
@@ -2635,6 +2643,7 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                 print!("stream: ");
                 print_stream_lines(&stream);
             }
+            Event::VirtualCamera { camera } => virtual_camera::print(&camera),
             Event::SceneChanged {
                 scene,
                 take,

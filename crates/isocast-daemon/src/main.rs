@@ -87,8 +87,41 @@ mod library;
 mod plugins;
 mod store;
 mod timeline;
+mod virtual_camera;
 
 fn main() -> ExitCode {
+    #[cfg(target_os = "macos")]
+    if let Some(mode) = std::env::args().nth(1) {
+        use isocast_platform_macos::virtual_camera;
+        if mode == "--virtual-camera-sink-child" {
+            let args = std::env::args().skip(2).collect::<Vec<_>>();
+            isocast_platform_macos::will_run_main_queue();
+            thread::spawn(move || {
+                let code = match virtual_camera::run_child(&args) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        eprintln!("virtual_camera helper: {error:#}");
+                        1
+                    }
+                };
+                std::process::exit(code);
+            });
+            // Framework callbacks retain a real main run loop, as in the
+            // host, while every potentially blocking CMIO call is on a worker.
+            // The helper holds no recordings, so a quit request just exits.
+            isocast_platform_macos::run_main_queue(|| std::process::exit(0));
+        }
+        let result = match mode.as_str() {
+            "--install-camera-extension" => Some(virtual_camera::activate()),
+            "--uninstall-camera-extension" => Some(virtual_camera::deactivate()),
+            "--list-virtual-camera" => Some(virtual_camera::camera_probe(false)),
+            "--check-virtual-camera" => Some(virtual_camera::camera_probe(true)),
+            _ => None,
+        };
+        if let Some(result) = result {
+            return ExitCode::from(result as u8);
+        }
+    }
     let socket = socket_path();
     match hold_instance_lock().and_then(|lock| Ok((lock, listen(&socket)?))) {
         // The lock is held until the process exits.
@@ -189,7 +222,14 @@ fn listen(socket: &Path) -> Result<UnixListener> {
             .with_context(|| format!("could not create {}", folder.display()))?;
     }
     let _ = std::fs::remove_file(socket);
-    UnixListener::bind(socket).with_context(|| format!("could not listen on {}", socket.display()))
+    // listen runs before daemon threads start: umask makes the socket private
+    // at creation, eliminating the bind→chmod connection window.
+    let mask = unsafe { libc::umask(0o177) };
+    let listener = UnixListener::bind(socket);
+    unsafe {
+        libc::umask(mask);
+    }
+    listener.with_context(|| format!("could not listen on {}", socket.display()))
 }
 
 /// Keep the main thread serving the main queue, which macOS needs for
@@ -208,6 +248,19 @@ fn run_main_queue(_daemon: Arc<Daemon>) -> ExitCode {
 
 fn serve(listener: UnixListener, daemon: Arc<Daemon>) {
     for connection in listener.incoming().flatten() {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd;
+            let mut uid = 0;
+            let mut gid = 0;
+            // Darwin does not provide a security boundary from socket mode
+            // alone. Check the kernel peer uid before any RPC/plugin dispatch.
+            if unsafe { libc::getpeereid(connection.as_raw_fd(), &mut uid, &mut gid) } != 0
+                || uid != unsafe { libc::geteuid() }
+            {
+                continue;
+            }
+        }
         let daemon = daemon.clone();
         // A plugin's process (unsandboxed, so it could reach this socket)
         // is held to its grant here too.
@@ -737,6 +790,7 @@ fn process_cpu_seconds() -> Option<f64> {
 
 #[derive(Default)]
 struct State {
+    camera: virtual_camera::CameraOutput,
     /// The recording, if one runs (on the live engine).
     session: Option<Session>,
     /// The live engine, while something needs it.
@@ -877,6 +931,10 @@ trait LiveEngine: Send + Sync {
     fn canvas_refusal(&self, canvas: &Canvas) -> Option<String>;
     /// Stream the program with `settings` under `key`.
     fn stream(&self, settings: StreamSettings, key: String, on_change: OnChange) -> Result<Stream>;
+    fn virtual_camera(
+        &self,
+        on_change: isocast_engine::record::OnCameraChange,
+    ) -> Result<isocast_engine::record::VirtualCamera>;
     fn stop(&self);
 }
 
@@ -941,6 +999,13 @@ impl<P: Platform<SharedSurface = Surface>> LiveEngine for LiveEngineOf<P> {
 
     fn stop(&self) {
         LiveEngineOf::stop(self);
+    }
+
+    fn virtual_camera(
+        &self,
+        on_change: isocast_engine::record::OnCameraChange,
+    ) -> Result<isocast_engine::record::VirtualCamera> {
+        LiveEngineOf::virtual_camera(self, on_change)
     }
 }
 
@@ -1100,6 +1165,9 @@ impl Daemon {
             Method::Start(params) => self.start(*params).and_then(to_json),
             Method::StreamStart => self.stream_start().and_then(to_json),
             Method::StreamStop => self.stream_stop().and_then(to_json),
+            Method::VirtualCameraStart => self.virtual_camera_start().and_then(to_json),
+            Method::VirtualCameraStop => to_json(self.virtual_camera_stop()),
+            Method::VirtualCameraStatus => to_json(self.virtual_camera_status()),
             Method::StreamKeySet(params) => self.stream_key_set(*params).and_then(to_json),
             Method::StreamKeyClear(target) => self.stream_key_clear(*target).and_then(to_json),
             Method::Library => to_json(self.library()),
@@ -1533,10 +1601,10 @@ impl Daemon {
     fn tune(&self, params: TuneParams) -> Result<Tuning, RpcError> {
         check_folder(params.folder.as_deref())?;
         let mut state = self.state.lock().unwrap();
-        if state.session.is_some() || state.tuning {
+        if state.session.is_some() || state.tuning || state.camera.active() {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
-                message: "not while recording or tuning: the benchmark would compete for the \
+                message: "not while recording, tuning or using the virtual camera: the benchmark would compete for the \
                           encoders"
                     .into(),
             });
@@ -1959,6 +2027,7 @@ impl Daemon {
                 .current_problem()
                 .map(str::to_string),
             export: self.export_running(),
+            virtual_camera: Some(state.camera.status_for(state.setup.as_ref())),
         }
     }
 
@@ -2662,6 +2731,7 @@ impl Daemon {
 
     /// Stop the live engine (after the recording, if one runs).
     fn stop_engine(&self) {
+        self.virtual_camera_stop();
         let engine = self.state.lock().unwrap().engine.take();
         if let Some(engine) = engine {
             engine.stop();
@@ -2675,6 +2745,7 @@ impl Daemon {
         let engine = {
             let mut state = self.state.lock().unwrap();
             let idle = state.session.is_none()
+                && !state.camera.active()
                 && !state.streaming()
                 && state.streams_starting == 0
                 && !state.hold
@@ -2766,6 +2837,9 @@ fn engine_info(state: &State) -> Option<EngineInfo> {
     if state.streaming() {
         info.outputs.push("stream".into());
     }
+    if state.camera.active() {
+        info.outputs.push("virtual_camera".into());
+    }
     Some(info)
 }
 
@@ -2837,7 +2911,7 @@ fn key_label(service: StreamService, account: &str) -> String {
 /// What a change would do to the live setup (with its uses of plugins'
 /// kinds checked against the installed plugins).
 fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Plan, RpcError> {
-    let mut notes = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
     let current = match &state.setup {
         Some(setup) => to_json(setup)?,
         None => serde_json::Value::Object(Default::default()),
@@ -2876,12 +2950,52 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
             {
                 setup.hotkeys = current.hotkeys.clone();
             }
+            if !state.camera.active()
+                && let Some(previous) = &state.setup
+            {
+                use isocast_protocol::virtual_camera::Target;
+                let before = &previous.virtual_camera;
+                let after = &setup.virtual_camera;
+                let removed = before.target == after.target
+                    && match after.target {
+                        Target::Scene => {
+                            before.scene == after.scene
+                                && before.scene.as_ref().is_some_and(|id| {
+                                    previous.scenes.iter().any(|s| &s.id == id)
+                                        && !setup.scenes.iter().any(|s| &s.id == id)
+                                })
+                        }
+                        Target::Source => {
+                            before.source == after.source
+                                && before.source.as_ref().is_some_and(|id| {
+                                    previous.source(id).is_some_and(|s| s.kind.has_video())
+                                        && !setup.source(id).is_some_and(|s| s.kind.has_video())
+                                })
+                        }
+                        _ => false,
+                    };
+                if removed {
+                    notes.push("virtual_camera: its selected scene/video source was removed while stopped; falling back to program".into());
+                    setup.virtual_camera.target = Target::Program;
+                    setup.virtual_camera.scene = None;
+                    setup.virtual_camera.source = None;
+                    changes = diff(&current, &to_json(&setup)?);
+                }
+            }
             let mut problems = setup.validate();
             if let Some(message) = relative_folder(&setup.recording.folder) {
                 problems.push(Issue {
                     path: "recording.folder".into(),
                     message,
                 });
+            }
+            // The camera's negotiated format stays fixed until Stop.
+            if state.camera.active()
+                && state.setup.as_ref().is_some_and(|current| {
+                    current.canvas != setup.canvas || current.virtual_camera != setup.virtual_camera
+                })
+            {
+                problems.push(Issue { path: "virtual_camera".into(), message: "stop the virtual camera before changing its settings or canvas; scene contents can be edited live".into() });
             }
             // The live engine refuses a new canvas while the program is
             // recorded or streamed; say so here, before `apply`.

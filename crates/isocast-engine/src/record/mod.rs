@@ -39,6 +39,8 @@ mod program;
 mod scenes;
 mod shared_frames;
 mod timings;
+mod virtual_camera;
+pub use virtual_camera::{CameraSink, OnCameraChange, VirtualCamera};
 
 pub use engine::{Engine, EngineEvent, JpegFrame, OnEngineEvent, ProgramTap};
 pub use frame_stream::{FeedRate, FrameFeed};

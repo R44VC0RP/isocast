@@ -100,6 +100,11 @@ pub struct Collection {
     /// Which of the collection's sources the recordings take.
     #[serde(default, skip_serializing_if = "CollectionRecording::is_empty")]
     pub recording: CollectionRecording,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::virtual_camera::VirtualCameraSettings::is_default"
+    )]
+    pub virtual_camera: crate::virtual_camera::VirtualCameraSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -256,6 +261,7 @@ impl Setup {
     /// The live setup made of a scene collection and a profile.
     pub fn from_parts(collection: Collection, profile: Profile) -> Setup {
         let Collection {
+            virtual_camera,
             version,
             name,
             canvas: CollectionCanvas { width, height },
@@ -305,6 +311,7 @@ impl Setup {
             hotkeys,
         } = profile;
         Setup {
+            virtual_camera,
             version,
             name,
             canvas: Canvas { width, height, fps },
@@ -343,6 +350,7 @@ impl Setup {
     /// destructuring is exhaustive, so a new setup field must be placed).
     pub fn into_parts(self, profile_name: &str) -> (Collection, Profile) {
         let Setup {
+            virtual_camera,
             version,
             name,
             canvas: Canvas { width, height, fps },
@@ -378,6 +386,7 @@ impl Setup {
             hotkeys,
         } = self;
         let collection = Collection {
+            virtual_camera,
             version,
             name,
             canvas: CollectionCanvas { width, height },
@@ -482,6 +491,7 @@ impl Collection {
             // OBS's default transition.
             transition: Transition::fade(300),
             recording: CollectionRecording::default(),
+            virtual_camera: Default::default(),
         }
     }
 }

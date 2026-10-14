@@ -164,6 +164,38 @@ each section. Delete entries that stop being true.
   while another app is frontmost. Cua Driver 0.34 cannot synthesize media
   keys or F13–F20: F13–F20 and numpad were registration-checked, ordinary
   modifier chords were physically dispatched through Cua's desktop route.
+- 2026-10-13: **G.1 review fixes, remaining installed checks.** Use the
+  updated `scripts/vcam-install.sh`, not older ad-hoc/manual packages. The
+  host now preserves camera/audio-input and Wasmtime executable-memory
+  exceptions, and each package has a fresh host/extension build version.
+  Approval requests exit 2 with instructions instead of waiting forever;
+  complete approval then run `scripts/vcam-install.sh --check`. This run
+  did not provision, sign with Ryan's identities, copy to /Applications or
+  activate/deactivate an extension. Still required: real provisioned host
+  launch/activation, camera/mic/screen capture with TCC, installed consumers
+  in both open orders, slow-consumer IOSurface lifetime, and an actual
+  version replacement. Signature policy and negotiation state were verified
+  without publishing a camera; this does not qualify the extension sandbox.
+
+- 2026-10-13: **G.1b / Follow-up 1 — Ryan's one-command installation:** from
+  this worktree run **`scripts/vcam-install.sh`**. Accept the terminal's
+  separate account-provisioning, /Applications-copy and activation steps,
+  then enable **Isocast Virtual Camera** in System Settings → General →
+  Login Items & Extensions → Camera Extensions. It builds with Xcode
+  automatic Apple Development signing, team **9G68SMNHEU**, and verifies
+  exact-id profiles for `dev.isocast.isocastd` and `.camera` before copying.
+  Bare codesigning without those profiles is no longer the install recipe.
+  The command then checks AVFoundation discovery and changing frames using
+  an isolated synthetic engine; no default daemon/setup is restarted.
+  If a restart/ordinary Camera permission is needed, follow the message
+  and run `scripts/vcam-install.sh --check`. Preview with `--dry-run`;
+  removal is `scripts/vcam-uninstall.sh` (each system step confirmed).
+  Account updates, real-identity signing, /Applications copy and activation
+  remain **unexecuted**, per this follow-up's limits. The unsigned/ad-hoc
+  Xcode build and dry-run are the completed preparation; G.1b/A.3 and true
+  installed-client latency/multi-client retention still need Ryan. See
+  docs/virtual-camera.md and REPORT.md's Follow-up 1. Studio NDI is not an
+  install/removal target and its exact ids/groups are refused.
 
 - 2026-10-12: isocast-m2-b shows several "Isocast Dev is requesting to
   bypass the system private window picker" prompts (macOS 26 direct
@@ -455,6 +487,38 @@ each section. Delete entries that stop being true.
   /Volumes/IsocastBuild/timeline-mvp/scratch (e2e2.sh, e2e3.sh,
   verify.py, snap.py, m2-export.sh, mcp_smoke.py); bench results in
   ~/isocast-scratch/timeline-mvp/bench/results.jsonl on isocast-m2-b.
+- 2026-10-13: **G.1a virtual camera**, base M2/macOS 27, isolated release
+  engines on isocast-m2-a, synthetic benchmark clips, common lock, no
+  screensharingd. Base d6c8aec vs this branch, three interleaved rounds per
+  mode (20 s measured, 24 s takes); **on = diagnostic IOSurface receiver,
+  not installed CMIO**. Medians (CPU = % of one core):
+
+  | Scenario | Build | Daemon CPU | M instructions/s | GPU ms/s | Recording drops (3 runs) |
+  |---|---|---:|---:|---:|---:|
+  | flagship-1080 | base | 40.4 | 559.7 | 71.6 | 0 |
+  | flagship-1080 | camera off | 41.7 | 557.7 | 74.9 | 0 |
+  | flagship-1080 | probe on | 49.9 | 643.1 | 138.4 | 0 |
+  | flagship 4K | base | 41.2 | 580.7 | 148.6 | 3,459 |
+  | flagship 4K | camera off | 40.6 | 579.8 | 134.1 | 3,470 |
+  | flagship 4K | probe on | 45.8 | 643.7 | 274.7 | 3,427 |
+
+  Follow-up four 1080p base/off pairs (the first round's CPU difference
+  needed checking): **40.65 → 40.2%**, instructions **559.51 → 559.92 M/s**,
+  GPU **71.44 → 69.03 ms/s**, all 24 files' manifests 1,440 frames/zero
+  drops. All seven base/off pairs: mean CPU **41.06 → 41.17%**, median
+  instructions **559.648 → 559.815 M/s (+0.03%)**. No consistent off-state
+  regression; neither a CPU speedup nor a literal zero-cost proof.
+  Probe-on adds ~8.2 CPU points/~63.5 GPU ms/s at 1080p; its separate reader
+  costs 2.74% CPU (3.24% at 4K). 1080p camera sustained **60 fps**, PTS to
+  reader p50 **24.2–27.6 ms**, p99 **28.5–31.6 ms**. At overloaded 4K it
+  receives **46.8–46.9 fps**, p50 **29.1–30.4 ms**, and records drops
+  honestly; the baseline's encoder/pool limitation remains. Cold starts
+  count ~9–11 unavailable ticks during engine warm-up; not an all-zero-drop
+  camera claim. Program PTS precedes drawing by about a frame, so these
+  numbers are not program-ready-to-camera-client latency.
+  Evidence and exact binary hashes:
+  `/Volumes/IsocastBuild/g1-vcam/scratch/REPORT.md`; raw results in
+  `remote/bench-1791913544/` and `remote/bench-1791914367/` beside it.
 
 - 2026-10-13: **S.3 round 2, final comparison** (`28ddad1` main versus
   runtime `3a047b9`, OBS 32.2.2 OpenGL; four interleaved rounds for every
@@ -1046,6 +1110,32 @@ each section. Delete entries that stop being true.
   desktop (a Gatekeeper "IsocastReleaseCheck" prompt and a python3.14
   screen-recording prompt sat on isocast-m2-b's screen). The window keeps
   the shot clean and still records a TERMINAL ISO file.
+- 2026-10-13 (G.5 follow-up 2, after ff5ea77): regular keys require Ctrl or
+  Cmd, never Shift/Option alone or together. Common Command editing/tab/
+  navigation/screenshot and Control terminal/editor chords are refused, as
+  are known qualified system chords; unused Ctrl/Cmd combinations and
+  F13–F20/keypad/media remain available. Reviewer's t_type: before A/Option-L/!
+  were swallowed (3 fires); after rejection they reach TextEdit, no fires.
+- 2026-10-13 (G.5 follow-up 2 storage): read_profile is now pure. Legacy
+  inline metadata takes precedence until an explicit profile write migrates
+  it, sidecar first; listing/get/switch/start leave the TOML and .bak bytes
+  and mtimes alone. This supersedes the review-hardening migration-on-read
+  choice. Creating any new profile archives orphan .hotkeys.json/.bak files
+  under deleted/profiles/orphan … before writing, so old-daemon deletion and
+  id reuse cannot restore old keys. Blank profiles get none; copies/imports
+  get their own supplied bindings. Reviewer t_store2 passes: 10 no-hotkey
+  library files remain byte-identical to d6c8aec's operation sequence.
+- 2026-10-13 (G.5 timeline hotkeys): 39 catalogue ids now include real
+  timeline new/open/close, retake, remove/move/export and marker (an alias of
+  the recording marker, not a standalone timeline marker). Reuse the one
+  dispatcher, no timeline/recording implementation changes. Move index is
+  zero-based as on the API; old reserved `id` is an alias for clip on
+  remove/move and timeline on export. Pause ids remain reserved; timeline.clear
+  stays unavailable because there is no such method. Test Mac global input
+  exercised idle/live retake and kept original files, reorder/removal,
+  two completed exports (57 frames/1.9 s and 30/1 s, equal A/V, full decode),
+  and 188 focus samples all Terminal. Release fmt/clippy and 179 tests pass.
+
 - 2026-10-13: **Themes design revised after two critiques
   (docs/themes.md section 14).** A built-in theme is a *preview* until
   every signature piece in Ryan's pitch draws (a per-theme checklist,
@@ -1238,7 +1328,7 @@ each section. Delete entries that stop being true.
   hotkeys_set validates the resulting map. Stored bindings moved to
   `profiles/<id>.hotkeys.json`: immutable old binaries reject a hotkeys field
   in v1 TOML, so merely making the new reader tolerant would not fix downgrade.
-  Inline a4e3945 profiles migrate on read, writing the sidecar before removing
+  Inline a4e3945 profiles now migrate on explicit writes (follow-up 2 above), writing the sidecar before removing
   the field and retaining the original TOML .bak. Older daemons ignore and
   preserve the sidecar; unknown future entries also survive an old-daemon
   save and new-daemon restart. Corrupt JSON sidecars remain untouched on
@@ -1301,6 +1391,59 @@ each section. Delete entries that stop being true.
   review rerun on exonbook (three 20 s windows each): d6c8aec 0.00302%, new
   empty 0.00306%, new 35-key 0.00277% of one core; all 1 interrupt wakeup/s,
   0 idle wakeups. No measurable regression or CPU-improvement claim.
+- 2026-10-13: **G.1 adversarial review.** CoreMediaIO has no cancellable
+  synchronous-call API, so isolate every sink call in a private authenticated
+  re-exec of isocastd. Open/frame/close exchanges have 2 s/250 ms/500 ms
+  deadlines; expiry kills only the child. A watchdog handles parent death;
+  an unreaped child prevents spawning more. Keep a main run loop in the
+  child, with native work on a separate thread. Camera worker start/stop
+  waits are bounded at 3 s; no daemon state lock crosses setup, stop or a
+  join, and no extra worker is started while an old one is unfinished.
+  Control socket: atomic 0600 creation plus Darwin peer-euid check. Helper
+  channel: anonymous socketpair, audit token and matching designated code
+  requirement. Extension: CMIO signingID plus live Apple-anchored team/id
+  requirement, and a single reservation keyed by clientID. CMIO exposes
+  pid/signingID, not a client audit token in this SDK.
+- 2026-10-13: Camera negotiation now keeps consumer preferences separately
+  from sink input. Valid consumer requests (including 30/29.97 fps) are
+  accepted in either order; a connected producer wins and effective values
+  are notified. Standby resumes the consumer choice. A pure production
+  negotiation/clock model separates this policy from CMIO delivery (which
+  cannot notify from an unpublished standalone device). Card→live retiming
+  preserves monotonic PTS and original program PTS without copying pixels.
+  Empty reads wait one input frame instead of 2 ms. Diagnostics are behind
+  `isocast-daemon/vcam-diagnostics`; ordinary release builds refuse their
+  environment overrides. Native child faults have a diagnostic-only label.
+
+- 2026-10-13: **G.1 Follow-up 1 installer.** `scripts/vcam-install.sh`
+  wraps Cargo's actual daemon in the XcodeGen app target (a declared
+  script output, no stub), embeds its system-extension dependency, and
+  uses Xcode Automatic/Apple Development signing for team 9G68SMNHEU.
+  Keep the original dev.isocast.isocastd[.camera] ids so engine identity,
+  activation and handoff stay aligned, distinct from Studio NDI. Inspect
+  resolved target ids/groups before confirming `-allowProvisioningUpdates`;
+  verify exact-id embedded profiles before copying. `sign-dev.sh` real-key
+  camera embedding is replaced by this provisioned path; its ad-hoc option
+  remains for scratch only. Native maintenance switches add deactivation,
+  readonly AVFoundation discovery and a moving-frame probe. Reboot-pending
+  requests return 2 so uninstall keeps the host. Only bootstrap/platform
+  camera code changed; recording and frame-delivery paths did not.
+
+- 2026-10-13: **G.1a** uses a CMIO sink stream, not a shared-memory file
+  opened by the extension (CMIO extensions run as a different user).
+  Program/preview/source frames are converted/scaled into a bounded BGRA
+  IOSurface pool in one GPU pass, then passed by reference through CMIO;
+  the extension forwards the sample as-is. A selected named scene uses
+  the existing compiled compositor on its own worker. Camera-only sources
+  are runtime demands, removed on all stop/failure paths, not persistent
+  capture demands while off. The source-opening recheck must include this
+  demand too. Minimal hooks in record/engine.rs and record/mod.rs; no
+  recording queue, writer, encoder or A/V scheduling changes. One native
+  app event arm refreshes status; native UI controls are not part of this
+  brief. No new Cargo dependencies. Settings stay with the collection
+  because they reference its ids; stop before settings/canvas/library
+  switches. Six advertised dimensions, optional letterboxed output size,
+  integer canvas fps 1–240. Details in docs/virtual-camera.md.
 
 - 2026-10-13: **S.2 scale repairs ported onto main after 5.0
   (stress/scale-port).** Ported: c1e3d40 + 9f40df8 (ISO frames that
@@ -2620,6 +2763,69 @@ each section. Delete entries that stop being true.
   joined AAC segment (priming skipped in each) ~20 ms off from where
   AVFoundation plays it (silencedetect vs an AVAssetReader decode of the
   same file). Check joined audio with both.
+- 2026-10-13: **Hardened host capture (review #2).** The current dev app's
+  signature has flags=0 (no hardened runtime); the new camera host enables
+  runtime protection. It needs device.camera and device.audio-input, with
+  capture usage strings. Screen capture uses TCC, not an invented entitlement.
+  Wasmtime 49's actual mmap implementation publishes ordinary pages with
+  mprotect(RX), so allow-jit alone is insufficient: the old hardened subset
+  died at plugin add. Add allow-unsigned-executable-memory (retain allow-jit);
+  no disable-library-validation exception was needed. With the corrected
+  capture/runtime subset, the signed scratch host launches, runs wasm gain
+  with 0 failures, and records 240/240 HEVC frames with A/V both 4.000 s,
+  bt709 tags and full decode. This omits restricted install/group entitlements
+  because real profiles are unavailable; do not call it a deployed-host test.
+- 2026-10-13: **Review repro measurements**, M2 synthetic/isolated/common
+  lock. Original reader-stall Stop 156.6 ms blocked status for 139.8 ms;
+  fixed Stop 159.6 ms leaves status at 2.21 ms. Native child faults: open
+  2.009 s, close 0.517 s, frame exchange 250 ms budget; concurrent status
+  <=4.15 ms; recordings unaffected, child gone after parent kill. Reviewer
+  42-cycle lifecycle and 3-pair churn repeated: all six MOVs 1800 frames,
+  A/V 30.000 s, all MOV/FLV decodes clean, 0 recording/stream drops.
+  Lifecycle vmmap phases still pause the process (~0.53 s); they are not
+  latency/drop qualification. Evidence: REPORT.md → Review fixes under
+  `/Volumes/IsocastBuild/g1-vcam/scratch/review-fixes/`.
+
+- 2026-10-13: **G.1 Follow-up 1 build checks.** The XcodeGen output parent
+  directory must exist before `generate --project`; use `--no-env` so it
+  preserves the Rust-copy phase's shell variables. An application target
+  with no compiled sources works: its script supplies isocastd before final
+  signing. The wrapped and Cargo binaries' `__text` bytes match. Ad-hoc
+  strict/deep signature verification does **not** prove deployability:
+  the restricted-entitlement host receives SIGKILL on isocast-m2-a without
+  profiles; the raw daemon's AVFoundation discovery runs and correctly
+  reports Isocast absent. The normal verifier rejects the ad-hoc product.
+  Xcode's ordinary build logs scratch-product Launch Services/execution-policy
+  registration; no system-extension activation is involved. No Apple
+  account update, real-identity signing or /Applications copy was performed.
+  `AVCaptureSessionPresetInputPriority` is unavailable on macOS in the
+  actual SDK (some indexed docs say otherwise); the probe requests the
+  supported 1920x1080 preset. Full moving-camera capture and provisioning
+  remain unverified until Ryan runs the installer.
+
+- 2026-10-13: **G.1a verification limits.** All four targets, live edits,
+  60 fps PTS, Rec.709 sample tags, portrait letterboxing, collection
+  persistence, CLI/MCP/events and an intentionally stalled reader were
+  exercised with a real separate-process Mach/IOSurface reader. CMIO's
+  native queue ownership, sandbox and actual consumer retention still need
+  installed-extension verification. Program-only 1080p recording + local
+  720p RTMP + portrait camera: file **480/480 frames, A/V both 8.000 s**;
+  stream **541 frames, 0 video/audio drops**; camera **289 frames, 60 fps**.
+  MOV and received FLV fully decode and retain bt709 tags. A heavier
+  flagship-1080 + extra stream run was overloaded: program **295/480**
+  frames, video **7.966667 s** vs audio **8 s**, stream **190 video/221 audio**
+  drops, camera **44.2 fps**. Preserved as a limit, not qualified as clean
+  coexistence; S.2c/A.4 owns overload. Raw outputs under
+  `~/isocast-scratch/g1-vcam/coexist-1791914609` (heavy) and
+  `coexist-1791914842` (program-only) on isocast-m2-a; JSON/decode logs
+  copied beside the report. `vcam-probe` is explicitly diagnostic and
+  labels its status `diagnostic-iosurface`; never claim it registered a
+  camera. A cached Mach import keeps a CVPixelBuffer pool surface in use:
+  the probe drops each import before acknowledging it.
+  Final lifecycle check: after an induced reader failure, retry without
+  Stop reports the new missing-reader error; restoring the reader restarts
+  cleanly (121 frames, no drops). Start joins the finished output before
+  establishing new source demand, avoiding stale status/late cleanup.
 
 - 2026-10-13: Never hand VideoToolbox's H.264/HEVC encoders BGRA. Its
   own BGRA to Y'CbCr transfer runs inside the encoder service, and with

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleIdentifier</key><string>dev.isocast.isocastd.camera</string>
+    <key>CFBundleExecutable</key><string>IsocastCamera</string>
+    <key>CFBundleName</key><string>Isocast Virtual Camera</string>
+    <key>CFBundlePackageType</key><string>SYSX</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <!-- Template only: prepare/build-camera-extension replace this per build. -->
+    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.0.1</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSSystemExtensionUsageDescription</key><string>Isocast makes your selected program, preview, scene or source available as a camera in other apps.</string>
+    <key>CMIOExtension</key><dict>
+        <key>CMIOExtensionMachServiceName</key><string>TEAMID.dev.isocast.isocastd.camera</string>
+    </dict>
+</dict></plist>

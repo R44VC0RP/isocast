@@ -1,0 +1,84 @@
+name: IsocastCamera
+options:
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    ARCHS: arm64
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: 9G68SMNHEU
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: Apple Development
+    ENABLE_HARDENED_RUNTIME: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    # Installer passes these absolute locations. Generated projects/builds
+    # live in scratch; Xcode never changes the Rust checkout or its binary.
+    ISOCAST_REPO_ROOT: ""
+    ISOCAST_RUST_BINARY: ""
+    ISOCAST_VCAM_STAGE: ""
+targets:
+  IsocastCameraHost:
+    type: application
+    platform: macOS
+    settings:
+      base:
+        PRODUCT_NAME: Isocast Camera Host
+        PRODUCT_BUNDLE_IDENTIFIER: dev.isocast.isocastd
+        EXECUTABLE_NAME: isocastd
+        INFOPLIST_FILE: $(ISOCAST_VCAM_STAGE)/Host-Info.plist
+        CODE_SIGN_ENTITLEMENTS: $(ISOCAST_VCAM_STAGE)/Host.entitlements
+        ENABLE_APP_SANDBOX: NO
+    attributes:
+      SystemCapabilities:
+        com.apple.SystemExtension:
+          enabled: 1
+        com.apple.ApplicationGroups.Mac:
+          enabled: 1
+    # No stub executable: this phase supplies the target's main executable
+    # before Xcode embeds its provisioning profile and signs the whole app.
+    postBuildScripts:
+      - name: Wrap the Cargo-built engine
+        showEnvVars: false
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          test -x "${ISOCAST_RUST_BINARY:?Pass ISOCAST_RUST_BINARY to xcodebuild}"
+          mkdir -p "$TARGET_BUILD_DIR/$EXECUTABLE_FOLDER_PATH"
+          /usr/bin/ditto "$ISOCAST_RUST_BINARY" "$TARGET_BUILD_DIR/$EXECUTABLE_PATH"
+          if /usr/bin/codesign -d "$TARGET_BUILD_DIR/$EXECUTABLE_PATH" >/dev/null 2>&1; then
+            /usr/bin/codesign --remove-signature "$TARGET_BUILD_DIR/$EXECUTABLE_PATH"
+          fi
+        inputFiles:
+          - $(ISOCAST_RUST_BINARY)
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)
+    dependencies:
+      - target: IsocastCameraExtension
+        embed: true
+        link: false
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/SystemExtensions
+    scheme: {}
+  IsocastCameraExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - Camera.swift
+      - main.swift
+    settings:
+      base:
+        PRODUCT_NAME: dev.isocast.isocastd.camera
+        PRODUCT_BUNDLE_IDENTIFIER: dev.isocast.isocastd.camera
+        EXECUTABLE_NAME: IsocastCamera
+        INFOPLIST_FILE: $(ISOCAST_VCAM_STAGE)/Extension-Info.plist
+        CODE_SIGN_ENTITLEMENTS: $(ISOCAST_VCAM_STAGE)/Camera.entitlements
+        ENABLE_APP_SANDBOX: YES
+        SKIP_INSTALL: YES
+    attributes:
+      SystemCapabilities:
+        com.apple.ApplicationGroups.Mac:
+          enabled: 1

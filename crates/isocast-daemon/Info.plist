@@ -22,10 +22,18 @@
 	<string>6.0</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.0.1</string>
+	<!-- Template fallback; Cargo and every packaging path stamp a build version. -->
+	<key>CFBundleVersion</key><string>1</string>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>Isocast makes your selected picture available as a virtual camera in other apps.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Isocast records your cameras, capture cards and iPhone to files.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Isocast records your microphones to files.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Isocast captures the displays and windows you choose for your scenes.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Isocast captures the system or application audio you choose for your scenes.</string>
 	<key>CFBundleIconFile</key>
 	<string>Isocast</string>
 	<key>CFBundleIconName</key>

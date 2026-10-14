@@ -67,6 +67,16 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// (on macOS an IOSurface): monitors in native clients' windows.
     type SharedSurface: Clone + Send + Sync + 'static;
 
+    /// Open the installed virtual camera's bounded, IOSurface-backed sink.
+    fn virtual_camera_sink(
+        &self,
+        _width: u32,
+        _height: u32,
+        _fps: u32,
+    ) -> anyhow::Result<Box<dyn record::CameraSink<Self::Frame>>> {
+        anyhow::bail!("virtual_camera: no camera extension backend on this platform")
+    }
+
     /// The current time on the host clock, the session's master clock.
     fn now(&self) -> Time;
 

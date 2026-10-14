@@ -58,6 +58,12 @@ unsafe impl Send for Surface {}
 unsafe impl Sync for Surface {}
 
 impl Surface {
+    /// Keep an existing surface alive for a Mach handoff. Its pixel format
+    /// is unchanged; `texture` is only for RGBA surfaces, not camera BGRA.
+    pub fn from_io_surface(surface: CFRetained<IOSurfaceRef>) -> Self {
+        Self(surface)
+    }
+
     /// A new `width`×`height` surface of 8-bit RGBA (`Rgba8Unorm` on the
     /// GPU), its contents undefined.
     pub fn rgba(width: u32, height: u32) -> Result<Self> {

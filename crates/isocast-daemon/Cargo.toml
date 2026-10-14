@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 description = "isocastd: the headless Isocast engine behind a local control socket."
 
+[features]
+vcam-diagnostics = ["isocast-platform-macos/vcam-diagnostics"]
+
 [[bin]]
 name = "isocastd"
 path = "src/main.rs"

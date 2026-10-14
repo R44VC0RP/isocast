@@ -295,6 +295,8 @@ struct Inner<P: Platform> {
     /// Studio mode's preview scene, drawn while someone wants it.
     preview: Arc<FrameSlot<P::Frame>>,
     preview_scene: Mutex<Option<Arc<str>>>,
+    /// A camera-only source is needed only while that output is running.
+    camera_source: Mutex<Option<String>>,
     /// The highest rate the preview was asked for since the program last
     /// looked (0: nobody).
     preview_wanted: AtomicU32,
@@ -491,6 +493,7 @@ impl<P: Platform> Engine<P> {
             wanted: Mutex::new(None),
             wake: Condvar::new(),
             preview_scene: Mutex::new(None),
+            camera_source: Mutex::new(None),
             preview_wanted: AtomicU32::new(0),
             scenes,
             program_video: Arc::default(),
@@ -849,6 +852,83 @@ impl<P: Platform> Engine<P> {
         frame_stream::highest_rate(&self.inner.frame_streams)
     }
 
+    /// An independent camera output; no change to recording routes or clocks.
+    pub fn virtual_camera(&self, on_change: super::OnCameraChange) -> Result<super::VirtualCamera> {
+        use isocast_protocol::virtual_camera::{Target, VirtualCameraStatus};
+        let setup = self.setup();
+        let settings = setup.virtual_camera.clone();
+        settings.check_start(&setup).map_err(anyhow::Error::msg)?;
+        let (width, height) = settings.size(&setup);
+        let fps = setup.canvas.fps;
+        if settings.target == Target::Preview && self.inner.preview_scene.lock().unwrap().is_none()
+        {
+            bail!(
+                "virtual_camera.target: preview is empty; stage a scene with isocast preview ID, or choose program, scene or source"
+            );
+        }
+        let status = VirtualCameraStatus {
+            settings: settings.clone(),
+            width,
+            height,
+            fps,
+            ..Default::default()
+        };
+        let inner = self.inner.clone();
+        let source_guard = if settings.target == Target::Source {
+            *inner.camera_source.lock().unwrap() = settings.source.clone();
+            let guard = CameraSourceGuard(inner.clone());
+            *inner.wanted.lock().unwrap() = Some(setup.clone());
+            inner.wake.notify_all();
+            Some(guard)
+        } else {
+            None
+        };
+        let began = std::time::Instant::now();
+        super::virtual_camera::start(
+            &self.inner.platform,
+            status,
+            move |after| {
+                let _keep_source_open = &source_guard;
+                if inner.stopping.load(Ordering::SeqCst) {
+                    bail!("virtual_camera: the engine stopped");
+                }
+                if settings.target == Target::Scene {
+                    return Ok(inner.scenes.latest().map(|scenes| {
+                        super::virtual_camera::Input::Scene(scenes, settings.scene.clone().unwrap())
+                    }));
+                }
+                let target = match settings.target {
+                    Target::Program => PROGRAM,
+                    Target::Preview => "preview",
+                    Target::Source => settings.source.as_deref().unwrap(),
+                    Target::Scene => unreachable!(),
+                };
+                let slot = match slot_of(&inner, target, fps) {
+                    Ok(slot) => slot,
+                    Err(_)
+                        if settings.target == Target::Source
+                            && began.elapsed() < FIRST_FRAME_TIMEOUT =>
+                    {
+                        return Ok(None);
+                    }
+                    Err(message) => return Err(anyhow::Error::msg(message)),
+                };
+                let frame = if settings.target == Target::Source {
+                    // Still/slow sources repeat on the output clock, as cameras do.
+                    slot.newest_timed()
+                        .map(|(frame, _)| (frame, inner.platform.now()))
+                } else {
+                    slot.wait_from(
+                        Time::from_nanos(after.as_nanos() + 1),
+                        Duration::from_millis(50),
+                    )
+                };
+                Ok(frame.map(|(frame, time)| super::virtual_camera::Input::Frame(frame, time)))
+            },
+            on_change,
+        )
+    }
+
     /// The program's frames and mix for an output like a stream, from the
     /// next frame on, queueing up to `depth` packets.
     pub fn tap_program(&self, depth: usize) -> ProgramTap<P::Frame> {
@@ -909,6 +989,21 @@ impl<P: Platform> Engine<P> {
         inner.wake.notify_all();
         inner.recording.store(false, Ordering::SeqCst);
         result
+    }
+}
+
+/// Returning a camera-only source to the ordinary source lifecycle happens
+/// on every exit, including failed native startup or a disconnected camera.
+struct CameraSourceGuard<P: Platform>(Arc<Inner<P>>);
+
+impl<P: Platform> Drop for CameraSourceGuard<P> {
+    fn drop(&mut self) {
+        *self.0.camera_source.lock().unwrap() = None;
+        if !self.0.stopping.load(Ordering::SeqCst) {
+            let setup = self.0.state.lock().unwrap().setup.clone();
+            *self.0.wanted.lock().unwrap() = Some(setup);
+            self.0.wake.notify_all();
+        }
     }
 }
 
@@ -1034,7 +1129,12 @@ fn reconciler<P: Platform>(inner: &Arc<Inner<P>>) {
 /// ones (all at once, outside the lock), close those no longer used
 /// (unless a recording uses them), and retry those that failed.
 fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
-    let needed = needed_sources(&setup);
+    let mut needed = needed_sources(&setup);
+    if let Some(id) = inner.camera_source.lock().unwrap().clone()
+        && !needed.contains(&id)
+    {
+        needed.push(id);
+    }
     let mut opening = Vec::new();
     let mut closed = Vec::new();
     // Sources that failed before, tried again quietly: only a different
@@ -1136,7 +1236,9 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
         for ((id, definition), result) in opening.into_iter().zip(opened) {
             // The setup changed again while it opened: the next pass sees to
             // it.
-            if definition_of(&current, &id) != definition || !needed_sources(&current).contains(&id)
+            if definition_of(&current, &id) != definition
+                || (!needed_sources(&current).contains(&id)
+                    && inner.camera_source.lock().unwrap().as_ref() != Some(&id))
             {
                 if let Ok(opened) = result {
                     replaced.push(Live::<P>::closed(opened));

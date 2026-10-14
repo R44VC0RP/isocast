@@ -39,6 +39,10 @@ use crate::client::Client;
 
 mod events;
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CameraNoArgs {}
+
 use events::{Events, EventsRead, GetEventsParams};
 
 /// Run the MCP server on stdin and stdout until the client disconnects.
@@ -770,6 +774,47 @@ impl Isocast {
     )]
     async fn stop_stream(&self) -> Result<Json<StreamStatus>, String> {
         self.call(Method::StreamStop).await
+    }
+
+    #[tool(
+        description = "Start Isocast Virtual Camera. Takes no arguments: configure virtual_camera.target/scene/source/width/height through plan_change and apply_change first. Requires its signed/approved extension; never installs it. Recording and streaming stay independent.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn virtual_camera_start(
+        &self,
+        Parameters(Strict(_)): Parameters<Strict<CameraNoArgs>>,
+    ) -> Result<Json<isocast_protocol::virtual_camera::VirtualCameraStatus>, String> {
+        self.call(Method::VirtualCameraStart).await
+    }
+
+    #[tool(
+        description = "Stop feeding Isocast Virtual Camera. Other applications see the extension's Isocast waiting card.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn virtual_camera_stop(
+        &self,
+        Parameters(Strict(_)): Parameters<Strict<CameraNoArgs>>,
+    ) -> Result<Json<isocast_protocol::virtual_camera::VirtualCameraStatus>, String> {
+        self.call(Method::VirtualCameraStop).await
+    }
+
+    #[tool(
+        description = "Read virtual camera state, output format, sent/dropped frame counts, enqueue latency and last error. diagnostic-iosurface means a development probe, not an installed camera.",
+        annotations(read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn virtual_camera_status(
+        &self,
+        Parameters(Strict(_)): Parameters<Strict<CameraNoArgs>>,
+    ) -> Result<Json<isocast_protocol::virtual_camera::VirtualCameraStatus>, String> {
+        self.call(Method::VirtualCameraStatus).await
     }
 
     #[tool(

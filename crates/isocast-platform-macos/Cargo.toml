@@ -6,6 +6,13 @@ license.workspace = true
 repository.workspace = true
 description = "macOS back end for Isocast: host clock, CoreVideo frames, AVFoundation file writing."
 
+[features]
+vcam-diagnostics = []
+
+[[example]]
+name = "vcam-probe"
+required-features = ["vcam-diagnostics"]
+
 [target.'cfg(target_os = "macos")'.dependencies]
 anyhow = "1.0.104"
 block2 = "0.6.2"

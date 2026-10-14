@@ -574,6 +574,28 @@ native app; each verified against OBS's behaviour on a test Mac.
 
 - [ ] **G.1 Virtual camera.** The program as a macOS camera (CoreMediaIO
   camera extension), selectable in other apps; start/stop from the API.
+  - [x] **G.1a Engine and extension build.** Isocast-only CMIO extension,
+    IOSurface output, program/preview/scene/source selection, API/CLI/MCP,
+    events, waiting card and opt-in host embedding. Separate-process
+    IOSurface reader, colour/timing, recording/stream coexistence and
+    camera-off/on flagship measurements on isocast-m2-a.
+  - [x] **G.1 installer (Follow-up 1).** One-command, confirmation-gated
+    Xcode automatic-signing installer and uninstaller; exact-id profile
+    verification and an isolated AVFoundation frame check. Project generation,
+    unsigned/ad-hoc Xcode build, strict signature checks and dry-runs verified;
+    account provisioning and activation intentionally remain Ryan's steps.
+  - [ ] **G.1b Installed camera qualification (needs Ryan).** Apple-team
+    signing and explicit activation/approval, then actual camera clients,
+    multi-client buffer lifetime, extension CPU/GPU and client latency.
+    Commands/entitlements/team in docs/virtual-camera.md; no extension was
+    installed by G.1a. See Waiting on Ryan in docs/notes.md.
+  - [x] **G.1 review fixes.** Reproduce and resolve the twelve findings:
+    bounded, authenticated native sink subprocess; no lifecycle waits under
+    daemon state; capture/JIT entitlements and build versions; producer-first
+    format negotiation, signed-producer admission, API validation/defaults,
+    off-state selection cleanup and developer-only diagnostics. Reviewer
+    lifecycle/churn repros and installer dry-run rerun; actual installed
+    camera clients, full provisioned-host capture and replacement stay in G.1b.
 - [ ] **G.2 Replay buffer.** Keep the last N seconds of the program (and
   ISOs) in memory; save on command or hotkey.
 - [ ] **G.3 Pause recording.** Pause/resume a take without a new file;
@@ -582,13 +604,17 @@ native app; each verified against OBS's behaviour on a test Mac.
   program, scene or source on any display; a multiview grid.
 - [x] **G.5 Custom hotkeys (engine side).** Bindable action catalogue,
   per-profile bindings, CLI/MCP, and global press/release registration where
-  macOS allows. Pause/timeline ids reserved. Native Settings > Hotkeys and
+  macOS allows. Timeline actions are wired; pause and timeline-clear remain
+  reserved. Native Settings > Hotkeys and
   focused-key/Studio Mode presentation integration follow the app redesign.
   - [x] **G.5 review-quit.** Route AppKit quit events through graceful
     recording finalization, like signals and API shutdown; verify t_quit.py.
   - [x] **G.5 review-hardening.** Lenient/lossless hotkey loading with
     downgrade-safe profile storage, preserve bindings on setup replacement,
     protect typing/system shortcuts, bound diagnostics and complete CLI input.
+  - [x] **G.5 follow-up 2.** Protect modified typing/common app shortcuts,
+    archive orphaned sidecars before reusing profile ids, keep reads pure,
+    and wire timeline hotkeys to the merged timeline/retake/export methods.
 - [ ] **G.6 Small parity items.** Item flip (horizontal/vertical), stinger
   audio, media source play/pause/seek/restart on the API, floating docks
   in the native app.
@@ -2204,3 +2230,43 @@ One line per finished task, newest last.
   pr_checks_test.py 15/15), scripts/ui-screenshots.sh (5 views at
   2880x1800 in ~9 s), CODEOWNERS, SAVED_REPLIES; repository URL, private
   reporting links and the benchmark caption fixed. actionlint clean.
+- G.1a (2026-10-13): virtual-camera API/CLI/MCP, events and persisted
+  program/preview/scene/source selection; bounded IOSurface output, CMIO
+  extension with waiting card and opt-in host embedding. Separate-process
+  reader verified pixels, Rec.709 and 60 fps; recording + local stream +
+  camera verified (480-frame/8 s MOV, 541 stream frames, no A/V drops).
+  Flagship base/off/on: 18 runs plus 8 off-state confirmation runs on M2;
+  no consistent camera-off regression, 1080p probe adds ~8.2 CPU points.
+  fmt/clippy clean, 164 unit tests + 1 doctest pass, Swift and ad-hoc nested
+  bundle verify. G.1b remains blocked on Ryan's Apple signing/approval;
+  native camera-client latency/cost is not yet measured. Full evidence:
+  `/Volumes/IsocastBuild/g1-vcam/scratch/REPORT.md`.
+- G.1 installer / Follow-up 1 (2026-10-13): `scripts/vcam-install.sh`
+  prepares exact-id Xcode automatic signing/profiles, verifies the envelope,
+  confirms account/copy/activation separately, then checks a private
+  test-pattern feed through AVFoundation; matching confirmed uninstaller.
+  XcodeGen + unsigned/ad-hoc Xcode build and deep/strict verification pass;
+  wrapped executable code matches Cargo, dry-runs work with no executable
+  PATH, shellcheck/fmt/clippy and 165 existing tests pass. Actual account
+  updates, real signing, installation and moving-camera checks remain Ryan's
+  step. Details and build-tool registration caveat in REPORT.md Follow-up 1.
+- G.1 review fixes (2026-10-13): reproduce reviewer findings before changes;
+  bound/authenticate native sink work in an isolated child, release state
+  before lifecycle waits, restore hardened capture/JIT permissions, accept
+  consumer negotiation, stamp package versions, clear removed inactive
+  selections, reject MCP extras and gate diagnostics. Reviewer stall's
+  concurrent status 139.8 → 2.21 ms; child open/close faults 2.009/0.517 s
+  with RPC <=4.15 ms. All 6 churn MOVs 1800 frames/30 s A/V, 0 recording or
+  stream drops; hardened wasm take 240 frames/4 s. fmt/clippy/default tests
+  and diagnostic clippy pass, Swift builds and installer dry-run verified.
+  Full provisioned-host/device/installed-client acceptance still needs Ryan.
+- G.5 follow-up 2 (2026-10-13, after merging ff5ea77): reject modified typing
+  and common app shortcuts; reviewer t_type now delivers A/Option-L/! with no
+  hotkey fires. Old-daemon orphan sidecars are archived before id reuse;
+  reads leave profile/backup bytes and mtimes unchanged, migration waits for
+  a write. Reviewer t_store2: 10 no-hotkey files byte-identical to d6c8aec.
+  Eight timeline actions call real methods (including idle/live retake,
+  marker and export); pause/clear remain unavailable. Global input: both
+  exports complete and decode (57 + 30 frames), removed takes retained,
+  188 focus samples all Terminal. MCP schema/strict args and old id aliases
+  verified; fmt, release all-target clippy and 179 tests pass.

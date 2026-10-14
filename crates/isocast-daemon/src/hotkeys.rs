@@ -23,6 +23,7 @@ use isocast_protocol::hotkeys::{
     Registration, SetParams,
 };
 use isocast_protocol::library::LibrarySwitchParams;
+use isocast_protocol::timeline::{TimelineExportParams, TimelineMoveParams, TimelineRemoveParams};
 use serde_json::{Value, json};
 
 use crate::{Daemon, State, failed};
@@ -558,6 +559,7 @@ impl Daemon {
                     }
                 }
                 "transition.take" => Method::Take { transition: None },
+                "timeline.close" => Method::TimelineClose,
                 "studio.toggle" => {
                     let mut state = self.state.lock().unwrap();
                     if state.preview.is_some() {
@@ -688,10 +690,37 @@ impl Daemon {
                     .map_err(|e| failed(e.into()))?;
                 return Ok(());
             }
-            Arguments::Move(_) => return Err(invalid("action: timeline.move is reserved")),
+            Arguments::Retake(params) => Method::Retake(Some(params)),
+            Arguments::TimelineNew(params) => Method::TimelineNew(Some(params)),
+            Arguments::TimelineOpen(params) => Method::TimelineOpen(params),
+            Arguments::TimelineRemove(params) => Method::TimelineRemove(TimelineRemoveParams {
+                clip: params.clip,
+                timeline: params.timeline,
+            }),
+            Arguments::TimelineMove(params) => Method::TimelineMove(TimelineMoveParams {
+                clip: params.clip,
+                index: params.index,
+                timeline: params.timeline,
+            }),
+            Arguments::TimelineExport(params) => {
+                Method::TimelineExport(Some(TimelineExportParams {
+                    timeline: params.timeline,
+                    folder: params.folder,
+                }))
+            }
         };
         let response = self.call(Request::new(0, method));
         response.error.map_or(Ok(()), |mut error| {
+            if action.starts_with("timeline.")
+                && let Some((field, _)) = error.message.split_once(':')
+                && matches!(
+                    field,
+                    "timeline" | "clip" | "index" | "folder" | "seconds" | "name"
+                )
+            {
+                error.message = format!("args.{}", hotkeys::bounded(&error.message, 2048));
+                return Err(error);
+            }
             let field = match action {
                 "scene.switch" | "scene.preview" => "args.scene",
                 "scene.switch_index" | "scene.preview_index" => "args.index",

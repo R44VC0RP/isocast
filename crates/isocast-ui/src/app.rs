@@ -331,6 +331,7 @@ impl App {
             | Event::ExportProgress { .. }
             | Event::ExportFinished { .. } => {}
             Event::HotkeyFired { .. } => {}
+            Event::VirtualCamera { .. } => self.refresh_status(true),
             Event::Started { .. } => self.refresh_status(true),
             Event::Status { live } => {
                 {

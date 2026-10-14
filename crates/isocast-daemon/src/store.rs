@@ -743,16 +743,10 @@ pub fn hotkeys_path(profile: &Path) -> PathBuf {
 
 pub fn read_profile(path: &Path) -> Result<Profile, (String, bool)> {
     let mut profile = read_document::<Profile>(path)?;
-    if !profile.hotkeys.is_absent() {
-        // Upgrade the original G.5 inline format without discarding unknown
-        // bindings. The sidecar is durable before removing the inline field;
-        // write_document retains the original profile as .bak.
-        if let Err(error) = write_profile(path, &profile) {
-            profile.hotkeys.load_warning = Some(format!(
-                "could not migrate inline hotkeys to a downgrade-safe sidecar: {error:#}; recording settings still loaded"
-            ));
-        }
-    } else {
+    // Inline metadata takes precedence until an explicit write migrates it.
+    // Listing, exporting, switching or loading must not rewrite this file or
+    // rotate its backup just to inspect it.
+    if profile.hotkeys.is_absent() {
         let sidecar = hotkeys_path(path);
         match fs::read(&sidecar) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
@@ -777,6 +771,9 @@ pub fn read_profile(path: &Path) -> Result<Profile, (String, bool)> {
 }
 
 pub fn write_profile(path: &Path, profile: &Profile) -> Result<bool> {
+    if !path.try_exists()? {
+        archive_orphan_hotkeys(path)?;
+    }
     let mut disk = profile.clone();
     let config = std::mem::take(&mut disk.hotkeys);
     // Unreadable sidecars have no parsed value and survive unrelated saves.
@@ -792,6 +789,32 @@ pub fn write_profile(path: &Path, profile: &Profile) -> Result<bool> {
         }
     }
     write_document(path, &disk, PROFILE_HEADER)
+}
+
+/// Old daemons move only the TOML when deleting a profile. A fresh profile
+/// (blank, imported or duplicated) must never adopt its predecessor's sidecar.
+/// Preserve orphaned data outside the live namespace instead of deleting it.
+fn archive_orphan_hotkeys(profile: &Path) -> Result<()> {
+    let sidecar = hotkeys_path(profile);
+    for source in [&sidecar, &sibling(&sidecar, ".bak")] {
+        if !source.try_exists()? {
+            continue;
+        }
+        let root = profile
+            .parent()
+            .and_then(Path::parent)
+            .context("profile has no library folder")?;
+        let deleted = root.join("deleted/profiles");
+        fs::create_dir_all(&deleted)?;
+        let name = source
+            .file_name()
+            .context("sidecar has no file name")?
+            .to_string_lossy();
+        let kept = unused(&deleted.join(format!("orphan {} {name}", stamp())));
+        fs::rename(source, &kept)
+            .with_context(|| format!("could not archive orphaned hotkeys {}", source.display()))?;
+    }
+    Ok(())
 }
 
 /// Write a collection or profile to `path` atomically, keeping the previous

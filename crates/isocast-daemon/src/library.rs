@@ -166,6 +166,11 @@ fn check_exists(root: &Path, kind: LibraryKind, field: &str, id: &str) -> Result
 
 /// Why the pair in use can't be swapped now, if it can't.
 fn switch_refusal(state: &State, what: &str) -> Option<String> {
+    if state.camera.active() {
+        return Some(format!(
+            "can't switch {what} while the virtual camera runs; isocast vcam stop, then switch"
+        ));
+    }
     if state.session.is_some() {
         return Some(format!(
             "can't switch {what} while recording: the recording's files belong to the live \

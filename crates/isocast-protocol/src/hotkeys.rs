@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+use crate::timeline::{RetakeParams, TimelineNewParams, TimelineOpenParams};
 use crate::{Issue, Transition};
 
 pub type Bindings = BTreeMap<String, Binding>;
@@ -256,10 +257,33 @@ arguments!(TransitionArgs {
     transition: Transition
 });
 arguments!(IdArgs { id: String });
-arguments!(MoveArgs {
-    id: String,
-    index: u32
-});
+/// The old reserved actions used `id`; retain that spelling as an alias while
+/// exposing the real timeline method's `clip`/`timeline` fields in the schema.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineRemoveArgs {
+    #[serde(alias = "id")]
+    pub clip: String,
+    pub timeline: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineMoveArgs {
+    #[serde(alias = "id")]
+    pub clip: String,
+    /// Zero-based position, as on timeline_move (the CLI's positions are one-based).
+    pub index: usize,
+    pub timeline: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineExportArgs {
+    #[serde(alias = "id")]
+    pub timeline: Option<String>,
+    pub folder: Option<std::path::PathBuf>,
+}
 arguments!(ScreenshotArgs {
     path: std::path::PathBuf
 });
@@ -275,7 +299,12 @@ pub enum Arguments {
     Marker(MarkerArgs),
     Transition(TransitionArgs),
     Id(IdArgs),
-    Move(MoveArgs),
+    Retake(RetakeParams),
+    TimelineNew(TimelineNewParams),
+    TimelineOpen(TimelineOpenParams),
+    TimelineRemove(TimelineRemoveArgs),
+    TimelineMove(TimelineMoveArgs),
+    TimelineExport(TimelineExportArgs),
     Screenshot(ScreenshotArgs),
 }
 
@@ -301,9 +330,15 @@ impl Binding {
             | "streaming.toggle"
             | "studio.toggle"
             | "transition.take"
-            | "timeline.retake"
+            | "timeline.close"
             | "timeline.clear" => parse::<Empty>(&self.args).map(|_| Arguments::Empty),
-            "recording.marker" => parse(&self.args).map(Arguments::Marker),
+            "recording.marker" | "timeline.marker" => parse(&self.args).map(Arguments::Marker),
+            "timeline.retake" => parse(&self.args).map(Arguments::Retake),
+            "timeline.new" => parse(&self.args).map(Arguments::TimelineNew),
+            "timeline.open" => parse(&self.args).map(Arguments::TimelineOpen),
+            "timeline.remove" => parse(&self.args).map(Arguments::TimelineRemove),
+            "timeline.move" => parse(&self.args).map(Arguments::TimelineMove),
+            "timeline.export" => parse(&self.args).map(Arguments::TimelineExport),
             "scene.switch" | "scene.preview" => parse(&self.args).map(Arguments::Scene),
             "scene.switch_index" | "scene.preview_index" => {
                 let args: IndexArgs = parse(&self.args)?;
@@ -334,10 +369,7 @@ impl Binding {
                 }
                 Ok(Arguments::Screenshot(args))
             }
-            "profile.switch" | "collection.switch" | "timeline.remove" | "timeline.export" => {
-                parse(&self.args).map(Arguments::Id)
-            }
-            "timeline.move" => parse(&self.args).map(Arguments::Move),
+            "profile.switch" | "collection.switch" => parse(&self.args).map(Arguments::Id),
             _ => Err(format!(
                 "action: unknown {:?}; valid actions: {}",
                 self.action,
@@ -361,8 +393,8 @@ impl Binding {
 
 pub fn catalogue() -> Catalogue {
     fn action<T: JsonSchema>(id: &str, label: &str, group: &str) -> Action {
-        let unavailable = if id.starts_with("timeline.") {
-            Some("reserved for the timeline MVP")
+        let unavailable = if id == "timeline.clear" {
+            Some("no timeline_clear method yet; remove individual clips or create a new timeline")
         } else if matches!(
             id,
             "recording.pause" | "recording.resume" | "recording.pause_toggle"
@@ -424,10 +456,14 @@ pub fn catalogue() -> Catalogue {
         action::<ScreenshotArgs>("program.screenshot", "Save program screenshot", "Program"),
         action::<IdArgs>("profile.switch", "Switch profile", "Library"),
         action::<IdArgs>("collection.switch", "Switch scene collection", "Library"),
-        action::<Empty>("timeline.retake", "Retake", "Timeline"),
-        action::<IdArgs>("timeline.remove", "Remove take", "Timeline"),
-        action::<MoveArgs>("timeline.move", "Reorder take", "Timeline"),
-        action::<IdArgs>("timeline.export", "Export timeline", "Timeline"),
+        action::<RetakeParams>("timeline.retake", "Retake", "Timeline"),
+        action::<TimelineRemoveArgs>("timeline.remove", "Remove clip (keep files)", "Timeline"),
+        action::<TimelineMoveArgs>("timeline.move", "Reorder clip", "Timeline"),
+        action::<TimelineExportArgs>("timeline.export", "Export timeline", "Timeline"),
+        action::<TimelineNewParams>("timeline.new", "Create and select timeline", "Timeline"),
+        action::<TimelineOpenParams>("timeline.open", "Select timeline", "Timeline"),
+        action::<Empty>("timeline.close", "Close current timeline", "Timeline"),
+        action::<MarkerArgs>("timeline.marker", "Mark current recording take", "Timeline"),
         action::<Empty>("timeline.clear", "Clear timeline", "Timeline"),
     ]);
     for (id, label) in [
@@ -580,29 +616,77 @@ impl Chord {
                 .strip_prefix('f')
                 .and_then(|n| n.parse::<u32>().ok())
                 .is_some_and(|n| (13..=20).contains(&n));
-        if modifiers == 0 && !bare_allowed {
-            return Err("add a modifier (ctrl, alt, shift or cmd); only f13–f20, numpad and media keys may be bare".into());
+        if modifiers & (1 | 8) == 0 && !bare_allowed {
+            return Err("this key needs ctrl or cmd; shift/alt alone or together are reserved for typing and navigation. Bare f13–f20, numpad and media keys are allowed".into());
         }
-        if matches!(modifiers, 8 | 12)
-            && matches!(
-                key,
-                "c" | "v"
-                    | "x"
-                    | "q"
-                    | "w"
-                    | "tab"
-                    | "space"
-                    | "a"
-                    | "s"
-                    | "z"
-                    | "h"
-                    | "m"
-                    | "o"
-                    | "n"
-            )
-        {
+        let letter = key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic();
+        let digit = key.len() == 1 && key.as_bytes()[0].is_ascii_digit();
+        let navigation = matches!(
+            key,
+            "space"
+                | "tab"
+                | "return"
+                | "backspace"
+                | "delete"
+                | "left"
+                | "right"
+                | "up"
+                | "down"
+                | "home"
+                | "end"
+                | "pageup"
+                | "pagedown"
+        );
+        // Command letters/digits cover editing, Find, tabs, reload, windows
+        // and screenshots. Control letters are terminal/editor control keys.
+        // Qualifying a chord is still allowed unless that exact combination
+        // is a common macOS command (full screen, lock, force quit, etc.).
+        let command_shortcut = matches!(modifiers, 8 | 12)
+            && (letter
+                || digit
+                || navigation
+                || matches!(
+                    key,
+                    "comma"
+                        | "grave"
+                        | "period"
+                        | "minus"
+                        | "equal"
+                        | "left_bracket"
+                        | "right_bracket"
+                        | "semicolon"
+                        | "slash"
+                        | "backslash"
+                ));
+        let control_shortcut = matches!(modifiers, 1 | 5) && (letter || navigation);
+        let system_shortcut = (matches!(modifiers, 9 | 13) && matches!(key, "f" | "q" | "space"))
+            || (modifiers == 13 && matches!(key, "3" | "4" | "5"))
+            || (matches!(modifiers, 10 | 14)
+                && matches!(
+                    key,
+                    "escape"
+                        | "q"
+                        | "h"
+                        | "m"
+                        | "w"
+                        | "d"
+                        | "space"
+                        | "c"
+                        | "v"
+                        | "f"
+                        | "r"
+                        | "t"
+                        | "i"
+                        | "j"
+                        | "l"
+                        | "n"
+                        | "p"
+                        | "s"
+                        | "u"
+                ));
+        if command_shortcut || control_shortcut || system_shortcut {
             return Err(
-                "reserved macOS shortcut; add ctrl or alt, or choose f13–f20/a keypad key".into(),
+                "reserved system/app shortcut; choose an unused ctrl+alt or ctrl+cmd chord, or f13–f20/a keypad/media key".into(),
             );
         }
         Ok(Self {

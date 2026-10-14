@@ -26,6 +26,7 @@ mod source;
 pub mod stream;
 pub mod timeline;
 mod transition;
+pub mod virtual_camera;
 
 pub use animation::*;
 pub use audio_filter::*;
@@ -79,6 +80,11 @@ pub struct Setup {
     /// Profile hotkeys. Absent/empty keeps legacy profiles unchanged.
     #[serde(default, skip_serializing_if = "hotkeys::Config::is_absent")]
     pub hotkeys: hotkeys::Config,
+    #[serde(
+        default,
+        skip_serializing_if = "virtual_camera::VirtualCameraSettings::is_default"
+    )]
+    pub virtual_camera: virtual_camera::VirtualCameraSettings,
 }
 
 /// Audio settings for the whole setup.
@@ -1261,6 +1267,7 @@ impl Setup {
             },
             stream: None,
             hotkeys: Default::default(),
+            virtual_camera: Default::default(),
         })
     }
 
@@ -1449,6 +1456,9 @@ impl Setup {
         self.transition.check("transition", &mut issues);
         if let Some(stream) = &self.stream {
             stream.check(&mut issues);
+        }
+        for issue in self.virtual_camera.issues(self) {
+            issues.add(issue.path, issue.message);
         }
         for (i, scene) in self.scenes.iter().enumerate() {
             if let Some(transition) = &scene.transition {

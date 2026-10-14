@@ -295,6 +295,13 @@ pub enum Method {
     /// Focused client's fallback key input (press AND release). A globally
     /// registered chord is ignored here to avoid firing twice.
     HotkeysInput(crate::hotkeys::InputParams),
+    /// Feed the configured picture to the installed macOS camera extension.
+    /// Returns [`crate::virtual_camera::VirtualCameraStatus`]. Does not install it.
+    VirtualCameraStart,
+    /// Stop feeding the camera; applications see its Isocast waiting card.
+    VirtualCameraStop,
+    /// Camera state, output format, counters and any failure.
+    VirtualCameraStatus,
     /// Stop recording if needed, then exit the daemon.
     Shutdown,
 }
@@ -859,6 +866,9 @@ pub enum Event {
     },
     /// Studio preview was cleared; absence is not an empty scene id.
     PreviewCleared,
+    VirtualCamera {
+        camera: crate::virtual_camera::VirtualCameraStatus,
+    },
 }
 
 /// The kind of an [`Event`], as its `type` says it.
@@ -885,11 +895,12 @@ pub enum EventKind {
     ExportFinished,
     HotkeyFired,
     PreviewCleared,
+    VirtualCamera,
 }
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 20] = [
+    pub const NAMES: [&str; 21] = [
         "setup_changed",
         "started",
         "status",
@@ -910,6 +921,7 @@ impl EventKind {
         "export_finished",
         "hotkey_fired",
         "preview_cleared",
+        "virtual_camera",
     ];
 
     /// The kind's name, as events and `watch` spell it.
@@ -941,6 +953,7 @@ impl Event {
             Self::ExportFinished { .. } => EventKind::ExportFinished,
             Self::HotkeyFired { .. } => EventKind::HotkeyFired,
             Self::PreviewCleared => EventKind::PreviewCleared,
+            Self::VirtualCamera { .. } => EventKind::VirtualCamera,
         }
     }
 }
@@ -1033,6 +1046,9 @@ pub struct Status {
     /// The timeline export running, if one is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export: Option<ExportRunning>,
+    /// Camera output state (installation is explicit, never automatic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_camera: Option<crate::virtual_camera::VirtualCameraStatus>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

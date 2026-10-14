@@ -37,13 +37,21 @@ A chord is modifiers followed by **one** key, separated with
 errors. These are **physical US key positions**, independent of keyboard
 layout (not the characters an input method would type).
 
-Printable/navigation keys and F1–F12 require a modifier: bare letters,
-Space, Return, arrows, Escape and Delete cannot swallow typing globally.
-Only F13–F20, keypad and media keys may be bare. Command-only and
-Shift–Command variants of C/V/X/Q/W/Tab/Space/A/S/Z/H/M/O/N are reserved;
-choose another key or add Control/Option. Other OS-owned shortcuts report
-a native registration warning. The same checks disable unsafe hand-edited
-bindings at load time.
+Printable/navigation keys and F1–F12 require **Control or Command**. Shift,
+Option, or Shift+Option alone are text input (capitals, symbols, dead keys),
+so they cannot be grabbed globally. Only F13–F20, keypad and media keys may
+be bare.
+
+Known system/app shortcuts are refused too: Command(+Shift) letters, digits,
+editing/navigation keys and common punctuation shortcuts (Find, new tab,
+reload, screenshots, preferences, zoom and window switching), and Control
+(+Shift) letters/navigation used by editors and terminals (including Ctrl-C).
+Known qualified system chords such as Ctrl-Cmd-F/Q/Space and Option-Cmd
+Force Quit, Dock, clipboard, Find and reload shortcuts are also refused.
+Unused combinations remain available, for example `cmd+f8`, `ctrl+f10`,
+`ctrl+alt+r`, `ctrl+cmd+r`, and `ctrl+shift+1`. Other OS-owned shortcuts
+report a native registration warning. The same policy disables unsafe
+hand-edited bindings at load time; it cannot know every app's custom keys.
 
 - Modifiers: `ctrl`, `alt` (Option), `shift`, `cmd` (Command).
 - Keys: `a`–`z`, `0`–`9`, `f1`–`f20`, including Stream Deck's F13–F20.
@@ -98,6 +106,37 @@ rejected, including typos inside a transition.
 | `program.screenshot` | `{"path":"/absolute/new-file.png"}` |
 | `profile.switch`, `collection.switch` | `{"id":"library-id"}` |
 
+### Timeline actions
+
+These dispatch the existing timeline methods, with the same safety checks:
+
+| Action | Arguments |
+|---|---|
+| `timeline.new` | `{}` or `{"name":"My video"}`; creates and selects it |
+| `timeline.open` | `{"timeline":"timeline-id"}` |
+| `timeline.close` | `{}`; finished takes stop appending to a timeline |
+| `timeline.retake` | `{}`; optional `folder` and `seconds` as on `retake` |
+| `timeline.marker` | `{"label":"Intro"}`; alias of `recording.marker` on the current recording take, not a standalone timeline marker |
+| `timeline.remove` | `{"clip":"c2"}`; optional `timeline`, else current |
+| `timeline.move` | `{"clip":"c3","index":0}`; optional `timeline` |
+| `timeline.export` | `{}` or `{"timeline":"timeline-id","folder":"/absolute/output"}` |
+
+Move positions are **zero-based**, matching `timeline_move` (the separate
+`isocast timeline move` command presents one-based positions). Original
+reserved bindings' `id` argument remains an alias for `clip` on remove/move,
+and for `timeline` on export; new bindings should use the canonical names.
+Retake works both idle and during a recording, retaining replaced takes'
+files. Remove also keeps the files. Exports run asynchronously: watch
+`export_progress` / `export_finished` for completion, not just `hotkey_fired`.
+
+```sh
+isocast hotkeys set retake 'ctrl+alt+cmd+t' timeline.retake
+isocast hotkeys set new-timeline 'ctrl+alt+cmd+n' timeline.new --args '{"name":"My video"}'
+isocast hotkeys set export 'ctrl+alt+cmd+e' timeline.export
+```
+
+### Action behavior
+
 `scene.switch` selects the preview when Studio Mode is on; otherwise it
 changes program. The daemon's preview being present means Studio Mode is
 on. Disabling Studio Mode clears preview and emits `preview_cleared`, never
@@ -127,11 +166,11 @@ each screenshot). Failed actions emit a warning and a `hotkey_fired` event
 with `error`; successful ones have `error: null`. Events include binding id,
 action id, `source` (`global` or `focused`) and `phase` (`press` or `release`).
 
-Reserved ids are bindable but explicitly unavailable until their owning
-features land: `recording.pause`, `recording.resume`,
-`recording.pause_toggle` (G.3); `timeline.retake`, `.remove`, `.move`,
-`.export`, `.clear` (timeline MVP). Their catalogue entries say why; firing
-one reports that reason. They do not masquerade as implemented actions.
+Pause ids remain bindable but explicitly unavailable: `recording.pause`,
+`recording.resume`, `recording.pause_toggle` (G.3). `timeline.clear` is also
+still reserved because there is no matching method; remove individual clips
+or create a new timeline instead. Catalogue entries and firing errors state
+the reason.
 
 ## API and client integration
 
@@ -166,13 +205,24 @@ newer daemon, not silently discarded. `hotkeys_set` remains strict and
 atomic; fix/remove invalid entries or explicitly replace the whole map.
 
 The profile TOML keeps its original v1 settings, so both pre-G.5 and
-original G.5 daemons can read/write it and leave the sidecar alone. On first
-read, original G.5 **inline** hotkeys are moved to the sidecar before the
-profile field is removed; the original TOML is kept as `.bak`. A malformed
+original G.5 daemons can read/write it and leave the sidecar alone.
+Original G.5 **inline** hotkeys are read without changing any file or backup;
+they take precedence over a sidecar until the next explicit profile write
+(such as a rename, settings edit or hotkey update). That write saves the
+sidecar before removing the inline field and keeps the original TOML as
+`.bak`. Merely listing, getting, switching or loading a profile never performs
+this migration. Before downgrading an inline profile, write it once with the
+new daemon. A malformed
 sidecar is preserved on unrelated saves and only an explicit update replaces
 it (also keeping `.bak`). Older daemons simply do not run these bindings.
 Exports/imports through the current API still carry inline `hotkeys` to
 transfer the profile as one document; use the new daemon for those exports.
+
+Deleting a profile moves its sidecar and backup with it. If an old daemon
+deleted only the TOML, creating a profile with that id archives the orphaned
+sidecar/backup under `deleted/profiles/orphan …` before writing the new
+profile. Blank profiles inherit no old bindings; duplicates/imports receive
+only the bindings of the supplied profile.
 
 If an older daemon already parked an inline profile as `.broken.toml`, that
 archive remains untouched: import the desired archived profile with the new

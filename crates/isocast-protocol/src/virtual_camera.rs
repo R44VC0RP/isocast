@@ -1,0 +1,189 @@
+//! Virtual camera settings. The selection belongs to the scene collection,
+//! because scene/source ids have meaning only in that collection.
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::{Issue, Setup};
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VirtualCameraSettings {
+    /// Program, studio preview, or an explicit scene/source id.
+    #[serde(default)]
+    pub target: Target,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Output dimensions; both absent uses the canvas. Other aspect ratios
+    /// are letterboxed. These are the camera extension's advertised modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Target {
+    #[default]
+    Program,
+    Preview,
+    Scene,
+    Source,
+}
+
+/// Keep in the same order as camera-extension/Camera.swift.
+pub const SIZES: [(u32, u32); 6] = [
+    (1920, 1080),
+    (1280, 720),
+    (2560, 1440),
+    (3840, 2160),
+    (1080, 1920),
+    (720, 1280),
+];
+
+impl VirtualCameraSettings {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub fn size(&self, setup: &Setup) -> (u32, u32) {
+        (
+            self.width.unwrap_or(setup.canvas.width),
+            self.height.unwrap_or(setup.canvas.height),
+        )
+    }
+
+    pub fn issues(&self, setup: &Setup) -> Vec<Issue> {
+        let mut issues = Vec::new();
+        let mut add = |path: &str, message: String| {
+            issues.push(Issue {
+                path: format!("virtual_camera.{path}"),
+                message,
+            })
+        };
+        if self.target == Target::Scene
+            && !setup
+                .scenes
+                .iter()
+                .any(|s| Some(&s.id) == self.scene.as_ref())
+        {
+            add(
+                "scene",
+                format!(
+                    "give a scene id: {}",
+                    setup
+                        .scenes
+                        .iter()
+                        .map(|s| s.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
+        if self.target == Target::Source
+            && !setup
+                .sources
+                .iter()
+                .any(|s| Some(&s.id) == self.source.as_ref() && s.kind.has_video())
+        {
+            add(
+                "source",
+                format!(
+                    "give a video source id: {}",
+                    setup
+                        .sources
+                        .iter()
+                        .filter(|s| s.kind.has_video())
+                        .map(|s| s.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
+        if self.target != Target::Scene && self.scene.is_some() {
+            add(
+                "scene",
+                "only valid with target = scene; otherwise omit scene".into(),
+            );
+        }
+        if self.target != Target::Source && self.source.is_some() {
+            add(
+                "source",
+                "only valid with target = source; otherwise omit source".into(),
+            );
+        }
+        if self.width.is_some() != self.height.is_some() {
+            add(
+                if self.width.is_none() {
+                    "width"
+                } else {
+                    "height"
+                },
+                "give width and height together, or omit both for the canvas size".into(),
+            );
+        } else if self.width.is_some() && !SIZES.contains(&self.size(setup)) {
+            add("width", size_error());
+        }
+        issues
+    }
+
+    /// The default remains valid in any setup, but a camera can only start
+    /// in a mode it advertises to applications.
+    pub fn check_start(&self, setup: &Setup) -> Result<(), String> {
+        let issues = self.issues(setup);
+        if !issues.is_empty() {
+            return Err(issues
+                .iter()
+                .map(|i| format!("{}: {}", i.path, i.message))
+                .collect::<Vec<_>>()
+                .join("; "));
+        }
+        if !SIZES.contains(&self.size(setup)) {
+            return Err(format!(
+                "virtual_camera.width: {}; set virtual_camera.width and height",
+                size_error()
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn size_error() -> String {
+    format!(
+        "give an advertised size: {}",
+        SIZES
+            .iter()
+            .map(|(w, h)| format!("{w}x{h}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualCameraState {
+    #[default]
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+    Failed,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct VirtualCameraStatus {
+    pub state: VirtualCameraState,
+    pub settings: VirtualCameraSettings,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    /// cmio-iosurface, or diagnostic-iosurface (explicit development probe).
+    pub transport: String,
+    pub frames_sent: u64,
+    pub frames_dropped: u64,
+    pub last_error: Option<String>,
+    /// Host-clock picture timestamp to sink enqueue, not camera-client latency.
+    pub enqueue_latency_us: crate::api::Percentiles,
+}

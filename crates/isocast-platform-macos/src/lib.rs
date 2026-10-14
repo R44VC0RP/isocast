@@ -36,6 +36,7 @@ pub mod plugin;
 mod stream;
 mod system;
 mod termination;
+pub mod virtual_camera;
 mod writer;
 
 use isocast_engine::{
@@ -86,6 +87,15 @@ impl Platform for MacPlatform {
     type VideoEncoder = H264Encoder;
     type AudioEncoder = AacEncoder;
     type SharedSurface = isocast_surfaces::Surface;
+
+    fn virtual_camera_sink(
+        &self,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> anyhow::Result<Box<dyn isocast_engine::record::CameraSink<PixelBuffer>>> {
+        virtual_camera::open(width, height, fps)
+    }
 
     fn now(&self) -> Time {
         host_time()
