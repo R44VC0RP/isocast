@@ -1,0 +1,283 @@
+// A sheet's parts beyond its frame (Paper's Properties and Settings
+// sheets; dialog.slint has the frame, header and footer):
+//
+// PreviewWell   the Properties sheet's picture of a source: a black well
+//               (`surface-monitor`, a `line` edge, 8px corners) with its
+//               viewer line on top (28px, 12px in: the format on the left
+//               in 11px `text-3`, the name in the middle in 11px medium
+//               `text-2`, a time on the right in 11px Martian Mono Light
+//               with its unused leading zeros dimmed to 35%) and the
+//               picture centred under it, 12px clear of the well's bottom.
+// SheetSummary  Settings' summary (Final Cut's export summary): a `line`
+//               rule above, 12px above and below, 24px in; what the
+//               settings make (a 12px `text-3` glyph, 5px, 11px `text-2`)
+//               12px apart on the left, and a disk badge on the right (an
+//               18px `control` capsule, 8px in: an 11px glyph and 10px
+//               semibold `text-2`, 5px apart).
+// SheetSidebar  a sheet's full-height sidebar column (Settings', Filters'):
+//               200px of `surface-panel` with a `line` edge on its right,
+//               14px above and below, 8px in; SidebarHeading is its 22px
+//               group heading (11px semibold `text-3`, 10px in), as
+//               NavList draws its own.
+
+import { Theme } from "../theme.slint";
+import { Icon, Icons } from "../icons.slint";
+
+export component PreviewWell inherits Rectangle {
+    // The viewer line: the source's format ("1920×1080 · 30p · Stereo"),
+    // its name, and a time ("00:00:" dimmed, then "30").
+    in property <string> format;
+    in property <string> name;
+    in property <string> lead;
+    in property <string> time;
+    in property <image> picture;
+    in property <bool> picture-shown;
+    // The picture's width over its height.
+    in property <float> aspect: 16 / 9;
+    // Said where the picture would be, when there is none.
+    in property <string> note;
+    // The room under the viewer line (the picture fits in it, 12px clear of
+    // its bottom; Paper: 288px).
+    in property <length> area-height: 288px;
+
+    property <length> line-h: 28px;
+    property <float> ratio: max(0.1, root.aspect);
+    // Paper's 488×275 in a 596×288 room: the room less its 12px foot and
+    // a pixel, at most the well's width less 12px each side.
+    property <length> fit-w: min(root.width - 2px - 2 * Theme.space-3, (root.area-height - Theme.space-3 - 1px) * root.ratio);
+    property <length> fit-h: root.fit-w / root.ratio;
+
+    height: 2px + root.line-h + root.area-height;
+    background: Theme.surface-monitor;
+    border-width: 1px;
+    border-color: Theme.line;
+    border-radius: Theme.r-menu;
+    clip: true;
+    accessible-role: image;
+    accessible-label: root.note != "" ? root.note : root.name != "" ? "The picture of " + root.name : "The source’s picture";
+
+    HorizontalLayout {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: root.line-h;
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        Text {
+            horizontal-stretch: 1;
+            preferred-width: 0px;
+            text: root.format;
+            color: Theme.text-3;
+            font-size: Theme.fs-xs;
+            letter-spacing: Theme.tracking-xs;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+        Text {
+            text: root.name;
+            color: Theme.text-2;
+            font-size: Theme.fs-xs;
+            font-weight: Theme.weight-medium;
+            letter-spacing: Theme.tracking-xs;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            preferred-width: 0px;
+            alignment: end;
+            Text {
+                text: root.lead;
+                color: Theme.text;
+                opacity: Theme.lcd-dim-opacity;
+                font-family: Theme.font-mono;
+                font-weight: Theme.weight-light;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-mono;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+            Text {
+                text: root.time;
+                color: Theme.text;
+                font-family: Theme.font-mono;
+                font-weight: Theme.weight-light;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-mono;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+        }
+    }
+
+    if root.note != "": Text {
+        x: Theme.space-3;
+        y: 1px + root.line-h;
+        width: parent.width - 2 * Theme.space-3;
+        height: root.area-height - Theme.space-3;
+        text: root.note;
+        color: Theme.text-3;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        line-height-factor: Theme.leading-sm;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: word-wrap;
+        accessible-role: none;
+    }
+    if root.note == "": Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: 1px + root.line-h + (root.area-height - Theme.space-3 - self.height) / 2;
+        width: root.fit-w;
+        height: root.fit-h;
+        background: Theme.surface-monitor;
+        if root.picture-shown: Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.picture;
+            image-fit: contain;
+            accessible-role: none;
+        }
+    }
+}
+
+// One thing a sheet's summary says (an icon by name, `Icons.named`).
+export struct SummaryItem {
+    icon: string,
+    text: string,
+}
+
+export component SheetSummary inherits Rectangle {
+    in property <[SummaryItem]> items;
+    // The disk badge on the right ("" for none): its icon by name, and text.
+    in property <string> badge-icon;
+    in property <string> badge;
+    in property <length> inset: Theme.sheet-pad-wide;
+
+    // The rule, 12px, the 18px badge's line, 12px.
+    height: 1px + 2 * Theme.space-3 + Theme.badge-h;
+    accessible-role: AccessibleRole.text;
+    accessible-label: "Summary";
+
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.line;
+    }
+    HorizontalLayout {
+        y: 1px;
+        height: parent.height - 1px;
+        padding-left: root.inset;
+        padding-right: root.inset;
+        spacing: Theme.space-3;
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            alignment: start;
+            spacing: Theme.space-3;
+            for item in root.items: HorizontalLayout {
+                spacing: 5px;
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        path: Icons.named(item.icon);
+                        size: Theme.icon-xs;
+                        // Paper's 1.5 units of 16 at 12px.
+                        stroke-width: 1.125px;
+                        color: Theme.text-3;
+                    }
+                }
+                Text {
+                    text: item.text;
+                    color: Theme.text-2;
+                    font-size: Theme.fs-xs;
+                    letter-spacing: Theme.tracking-xs;
+                    vertical-alignment: center;
+                    accessible-role: AccessibleRole.text;
+                    accessible-label: item.text;
+                }
+            }
+        }
+        if root.badge != "": VerticalLayout {
+            alignment: center;
+            Rectangle {
+                height: Theme.badge-h;
+                width: badge-row.preferred-width;
+                border-radius: self.height / 2;
+                background: Theme.control;
+                accessible-role: AccessibleRole.text;
+                accessible-label: root.badge;
+                badge-row := HorizontalLayout {
+                    padding-left: Theme.space-2;
+                    padding-right: Theme.space-2;
+                    spacing: 5px;
+                    if root.badge-icon != "": VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            path: Icons.named(root.badge-icon);
+                            size: 11px;
+                            // Paper's 1.6 units of 16 at 11px.
+                            stroke-width: 1.1px;
+                            color: Theme.text-2;
+                        }
+                    }
+                    Text {
+                        text: root.badge;
+                        color: Theme.text-2;
+                        font-size: Theme.fs-micro;
+                        font-weight: Theme.weight-semibold;
+                        letter-spacing: Theme.tracking-micro;
+                        vertical-alignment: center;
+                        accessible-role: none;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A sheet's full-height sidebar column: its children (SidebarHeadings,
+// rows, a toolbar) top to bottom.
+export component SheetSidebar inherits Rectangle {
+    in property <string> label;
+    width: Theme.sidebar-w;
+    background: Theme.surface-panel;
+    accessible-role: groupbox;
+    accessible-label: root.label;
+
+    VerticalLayout {
+        width: parent.width - 1px;
+        padding-top: 14px;
+        padding-bottom: 14px;
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-2;
+        spacing: 2px;
+        @children
+    }
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.line;
+    }
+}
+
+// A sidebar's group heading: 22px, 11px semibold `text-3`, 10px in.
+export component SidebarHeading inherits Rectangle {
+    in property <string> text;
+    height: 22px;
+    accessible-role: none;
+    Text {
+        x: 10px;
+        width: parent.width - 10px;
+        text: root.text;
+        color: Theme.text-3;
+        font-size: Theme.fs-xs;
+        font-weight: Theme.weight-semibold;
+        letter-spacing: Theme.tracking-xs;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: AccessibleRole.text;
+        accessible-label: root.text;
+    }
+}

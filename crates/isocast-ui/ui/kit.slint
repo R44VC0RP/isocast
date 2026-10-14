@@ -1,72 +1,128 @@
-// Isocast's widget kit: our own controls, drawn to docs/design.md (no
-// std-widgets except AboutSlint). Import everything from here:
+// Isocast's widget kit: our own controls, drawn to the Console design
+// (Paper file "C. Console", Components page; values in theme.slint), no
+// std-widgets except AboutSlint. Import everything from here:
 //
-//     import { Button, ButtonVariant, ListRow, Dock, … } from "../../kit.slint";
+//     import { Button, ButtonVariant, ListRow, Dock, Lcd, … } from "../../kit.slint";
 //
-// Each file in widgets/ says how its parts look and behave. In short:
+// Areas build with these and never draw a signature piece themselves: a
+// later theme (Daylight, Workbench, Blender…) may swap a component's look
+// as long as its interface (below) stays. Each file in widgets/ says how
+// its parts look and behave. Interactive components take `shown`
+// (ShownState: live, hover, pressed, focus) so the gallery can draw every
+// state; the app leaves it alone.
+//
+// Signature pieces (Console):
+//
+// lcd        Lcd { LcdCell… } — Logic's display in the control bar: 36px
+//            inset window; LcdCell (`lead` dimmed leading zeros, `value`,
+//            `label`, `tone` normal/recording/live/warning, `idle`, `last`,
+//            `standalone`), LcdTime (`seconds` → HH:MM:SS, unused zeros
+//            dimmed), LcdHero (Welcome's 44px readout: lead, value, label,
+//            dot-color)
+// buttons    Capsule { CapsuleButton, CapsuleDivider… } — Tower's toolbar
+//            clusters (24px in dock toolbars, 30px `large` in the control
+//            bar; CapsuleButton icon/label/on/menu-open/toggle/clicked);
+//            TransportButton (30px round: kind record/stream/stop, `active`,
+//            label, clicked); MiniToggle (the mixer's 18px M and
+//            headphones: text or icon, on, solid)
+// nav        NavList — the macOS sidebar list (Settings): tabs [NavTab {id,
+//            label, icon, group}], `current`, selected(id); headings where
+//            the group changes
+// dialog     Dialog — the sheet: title (`accessible-name` when screen
+//            readers need more), subtitle (one line), icon +
+//            icon-accent (the glyph tile), header/footer on or off
+//            (`drag-height` lets a header-less sheet be moved by its top),
+//            OK/Cancel/Apply/extra, accepted/cancelled/applied/extra; its
+//            parts SheetGlyph, SheetHeader (`one-line`: "…" instead of
+//            wrapping), DialogFooter (`pad-top`: 4px
+//            under a summary), SheetFrame (in place)
+// sheets     PreviewWell — Properties' picture: the black well with its
+//            viewer line (format, name, `lead` + `time`), picture, aspect,
+//            note, area-height; SheetSummary — Settings' summary footer:
+//            items [SummaryItem {icon, text}], badge-icon + badge (the
+//            disk); SheetSidebar + SidebarHeading — a sheet's full-height
+//            sidebar column (Filters' lists) and its group headings
+// meter      Meter (a strip's 3px bar: rms, peak, hold in dB, muted,
+//            show-scale), MeterBar (one bar, any size), MasterMeter (the
+//            control bar's stereo capsule: left-/right-rms/peak/hold)
+// lists      ListRow — 30px pill rows: text, icon, selected, dim (hidden),
+//            depth, trailing children (badges, toggles), icon-color,
+//            trailing-pad, drag and context-menu callbacks; List (keyboard
+//            ↑ ↓ Home End → navigate), ScrollArea, PickList,
+//            DropLine
+// fields     NumberField — scrub `prefix` ("W"), `unit`, `suffix` ("1.00×":
+//            right after the value), `fixed` (every decimal of the step),
+//            `stepper` (▲▼, the value in Martian Mono), `small` (22px), step/min/max,
+//            scrubbing(v) then changed(v); TextField (committed on Return or
+//            focus loss; small, mono, invalid, auto-focus, bare, a leading
+//            `icon`), TextArea, ColorField (`small`), FieldFrame
+// choices    Segmented — the capsule tabs: options [Segment {value,
+//            label}], value, selected(value), small (22px, in grouped rows);
+//            Checkbox, Radio, Switch
+// forms      the inspector: RowGroup { GroupRow… } (Paper's sheet rows:
+//            label, place first/middle/last/only, trailing-pad, tall,
+//            clickable + clicked (a row that leads on), indent),
+//            GroupHeading (title, resettable, reset()), GroupHint, Band (a
+//            dock or inspector band: label, enabled, trailing-pad),
+//            Inspector (title band + Bands, resettable), QuickList {
+//            QuickRow… } (Studio Mode's transitions: text, detail, last,
+//            selected); and the label-column Form, FormRow, FormSection,
+//            FormSeparator, SubForm, Hint, Callout (error, info)
+// popover    Popover (anchored floating panel; PopoverPlacement)
+// toast      Toasts (global), ToastStack, Toast, ToastData, ToastRow,
+//            ToastKind (info, success, warning, error)
+// tooltip    Tip (the look; widgets take a `tooltip` string)
+// menus      Menus (global: request/show/activated), MenuHost (one per
+//            window), MenuPanel (the floating surface), MenuView (a menu's
+//            entries drawn in place), MenuEntry, MenuList, MenuEntryKind
+//
+// The rest:
 //
 // buttons    Button (variants secondary, primary, quiet, danger, live,
-//            live-warn; sizes small 24, regular 28, large 32; `checked` for
-//            a toggle that is on; `icon`; `footer` for dialog footers;
-//            `menu-open`), IconButton (28, or 24 `small`; `on`, `danger`,
-//            `spinning`, `menu-open`; its `label` is the tooltip),
-//            LinkButton
-// fields     TextField (`committed` on Return or focus loss, Escape
-//            restores; `small`, `mono`, `invalid`, `auto-focus`, `bare`),
-//            TextArea, NumberField (`prefix` scrub label, `unit`, step,
-//            ↑ ↓, `scrubbing` then `changed`), ColorField (swatch + hex,
-//            `pick`), FieldFrame
+//            live-warn; sizes small 22, regular 28, large 34; `checked`
+//            toggle; `icon` or `dot`; `footer`; `capsule`; `subdued`;
+//            `content-alignment`, `inset`; `menu-open`), IconButton (28
+//            square, 24 round `small`, 22 square `compact`; `on`,
+//            `danger`, `spinning`, `menu-open`, `icon-size`; its `label` is
+//            the tooltip), LinkButton
 // dropdown   Dropdown (options with label + dim `detail`, keyboard,
-//            `show-detail`), DropdownOption
-// choices    Checkbox, Radio (`step` for arrow keys in a group), Switch,
-//            Segmented (Segment options, ← →)
-// slider     Slider (neutral; `origin` for a bipolar fill; `moved` while
-//            dragging, `changed` when final; arrows, Home, End) — also the
-//            mixer's fader
-// meter      Meter (rms, peak, hold in dB; zones; the scale)
-// lists      List (keyboard ↑ ↓ Home End → `navigate`, other keys →
-//            `unhandled-key`), ListRow (selected marker, `dim`, depth,
-//            trailing children, `context-menu(x, y)`), ScrollArea (thin
-//            scroll bar), PickList, ListEmpty, DropLine
+//            `show-detail`, `small`, `on-control` on a grey row),
+//            DropdownOption
+// slider     Slider (yellow fill; `fill` green for faders; `thin` for
+//            inspector bands; `origin` for a bipolar fill; moved, changed)
+// misc       Kbd, Badge (BadgeTone neutral/live/rec, `dot`, `status`),
+//            Tag (TagTone preview/program/neutral: Hubot caps), Dot,
+//            Spinner, EmptyState (glyph + caption), Rule (a short upright
+//            line), TextMenuButton (the viewer's "Fit 64% ⌄")
 // panels     Dock (header band + content + DockToolbar), PanelHeader,
 //            DockToolbar, ToolbarGap, ToolbarSeparator, ColumnSplitter,
 //            RowSplitter, Hairline
-// forms      Form, FormRow (label column 168 + hint), FormSection,
-//            FormSeparator, SubForm, Hint, Callout (error, info)
 // settings-form  SettingsForm (a source's, filter's or transition's
 //            settings from the setup's schema: rows built and edits
 //            routed by src/form/), SettingsForms (global: every form's
 //            edits, by form id), FormField, FormGroup
-// menus      Menus (global: request/show/activated), MenuHost (one per
-//            window), MenuPanel, MenuEntry, MenuList, MenuEntryKind
-// popover    Popover (anchored floating panel; PopoverPlacement)
-// dialog     Dialog (modal; title bar; footer OK/Cancel/Apply/extra;
-//            Escape cancels, Return accepts), DialogFooter
-// nav        NavList (Settings' sidebar tabs), NavTab
-// toast      Toasts (global), ToastStack, Toast, ToastData, ToastRow,
-//            ToastKind
-// tooltip    Tip (the look; widgets take a `tooltip` string)
-// misc       Kbd, Spinner, Dot
-// focus      FocusRing (keyboard focus, outer or inset)
+// focus      FocusRing (keyboard focus, outer or inset), ShownState
 // globals    EditCommands (Edit menu → focused field), DialogKeys,
 //            Viewport (the window's size)
 
-export { Button, IconButton, LinkButton, ButtonVariant, ControlSize } from "widgets/buttons.slint";
+export { Button, IconButton, LinkButton, ButtonVariant, ControlSize, TransportButton, TransportKind, Capsule, CapsuleButton, CapsuleDivider, MiniToggle } from "widgets/buttons.slint";
 export { TextField, TextArea, NumberField, ColorField, FieldFrame } from "widgets/fields.slint";
 export { Dropdown, DropdownOption } from "widgets/dropdown.slint";
 export { Checkbox, Radio, Switch, Segmented, Segment } from "widgets/choices.slint";
 export { Slider } from "widgets/slider.slint";
-export { Meter } from "widgets/meter.slint";
-export { List, ListRow, ListEmpty, ScrollArea, PickList, DropLine } from "widgets/lists.slint";
+export { Meter, MeterBar, MasterMeter } from "widgets/meter.slint";
+export { Lcd, LcdCell, LcdTime, LcdHero, LcdTone } from "widgets/lcd.slint";
+export { List, ListRow, ScrollArea, PickList, DropLine } from "widgets/lists.slint";
 export { Dock, PanelHeader, DockToolbar, ToolbarGap, ToolbarSeparator, ColumnSplitter, RowSplitter, Hairline } from "widgets/panels.slint";
-export { Form, FormRow, FormSection, FormSeparator, SubForm, Hint, Callout, CalloutKind } from "widgets/forms.slint";
+export { Form, FormRow, FormSection, FormSeparator, SubForm, Hint, Callout, CalloutKind, RowGroup, GroupRow, RowPlace, GroupHeading, GroupHint, Band, Inspector, QuickList, QuickRow } from "widgets/forms.slint";
 export { SettingsForm, SettingsForms, FormField, FormGroup } from "widgets/settings-form.slint";
-export { Menus, MenuHost, MenuPanel, MenuEntry, MenuList, MenuEntryKind } from "widgets/menus.slint";
+export { Menus, MenuHost, MenuPanel, MenuEntry, MenuList, MenuEntryKind, MenuEntries as MenuView } from "widgets/menus.slint";
 export { Popover, PopoverPlacement } from "widgets/popover.slint";
-export { Dialog, DialogFooter } from "widgets/dialog.slint";
+export { Dialog, DialogFooter, SheetGlyph, SheetHeader, SheetFrame } from "widgets/dialog.slint";
+export { PreviewWell, SheetSummary, SummaryItem, SheetSidebar, SidebarHeading } from "widgets/sheets.slint";
 export { NavList, NavTab } from "widgets/nav.slint";
 export { Toasts, ToastStack, Toast, ToastData, ToastRow, ToastKind } from "widgets/toast.slint";
 export { Tip } from "widgets/tooltip.slint";
-export { Kbd, Spinner, Dot } from "widgets/misc.slint";
-export { FocusRing } from "widgets/focus.slint";
+export { Kbd, Spinner, Dot, Badge, BadgeTone, Tag, TagTone, EmptyState, Rule, TextMenuButton } from "widgets/misc.slint";
+export { FocusRing, ShownState } from "widgets/focus.slint";
 export { EditCommands, DialogKeys, Viewport } from "widgets/globals.slint";

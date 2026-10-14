@@ -467,6 +467,7 @@ impl App {
             if let Some(setup) = &s.setup {
                 ui.set_canvas_width(setup.canvas.width as i32);
                 ui.set_canvas_height(setup.canvas.height as i32);
+                ui.set_canvas_fps(setup.canvas.fps as i32);
             }
         }
         if changed.any(Changed::SCENES | Changed::SETUP) {
@@ -476,15 +477,14 @@ impl App {
             ui.set_studio(s.studio);
         }
         if changed.any(Changed::STATUS | Changed::STREAM) {
-            let recording = s
-                .status
-                .as_ref()
-                .is_some_and(|x| x.state == EngineState::Recording);
+            // Green is for the program and live: the LIVE badge and the
+            // program's green ring follow the stream only (Paper's Studio
+            // Mode board); recording alone lights the LCD's red.
             let streaming = s
                 .stream
                 .as_ref()
                 .is_some_and(|x| matches!(x.state, StreamState::Live | StreamState::Reconnecting));
-            ui.set_live(recording || streaming);
+            ui.set_live(streaming);
         }
         if changed.any(Changed::SELECTION | Changed::SETUP | Changed::SCENES) {
             let path = s
@@ -517,6 +517,31 @@ impl App {
             ui.set_selected_name(name.into());
             ui.set_selected_kind(kind.into());
             ui.set_selected_icon(icon.into());
+        }
+        if changed.any(Changed::SELECTION | Changed::SETUP | Changed::SCENES | Changed::RUNNING) {
+            let source = ui.get_selected_source();
+            ui.set_selected_meta(
+                s.running
+                    .get(source.as_str())
+                    .map(model::source_format)
+                    .unwrap_or_default()
+                    .into(),
+            );
+            let scene = s.editing_scene().and_then(|id| {
+                let scene = model::find_scene(s.setup.as_ref()?, &id)?;
+                let n = scene.items.len();
+                Some(format!(
+                    "{} · {n} source{}",
+                    model::scene_name(scene),
+                    if n == 1 { "" } else { "s" }
+                ))
+            });
+            // Nothing to edit (no setup, no scenes): Paper's Welcome board.
+            ui.set_scene_meta(
+                scene
+                    .unwrap_or_else(|| "No scene · 0 sources".to_string())
+                    .into(),
+            );
         }
     }
 
@@ -1117,6 +1142,10 @@ impl App {
             }
             "status_bar" => {
                 ui.set_show_status_bar(!ui.get_show_status_bar());
+                saved(self);
+            }
+            "docks_pane" => {
+                ui.set_show_docks(!ui.get_show_docks());
                 saved(self);
             }
             "lock_preview" => {

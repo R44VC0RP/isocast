@@ -1,10 +1,21 @@
-// Forms (docs/design.md 3.11, 3.12): one label column everywhere
-// (Settings, Properties, Filters, Edit Transform): labels right-aligned in
-// 168px, 12px from the value; hints under their control, 180px in;
-// sections titled with a hairline filling the rest of their line.
+// Forms. Two kinds:
+//
+// The label column (Form, FormRow, FormSection, SubForm, Hint): labels
+// right-aligned in 156px, 12px from the value; hints under their control,
+// 168px in.
+//
+// Console's inspector (Final Cut's bands, Paper's sheets and docks):
+// RowGroup with GroupRows (30px `control` rows 1px apart, the first and
+// last with 6px corners, the label left in 12px `text-2`, its control on
+// the right), titled by a GroupHeading (with an optional reset), captioned
+// by a GroupHint; Band rows in docks (30px on `hover`, 14px in); an
+// Inspector panel of bands; a QuickList (Studio Mode's transitions).
 
-import { Theme } from "../theme.slint";
+import { Theme, Motion } from "../theme.slint";
 import { Icon, Icons } from "../icons.slint";
+import { FocusRing, ShownState } from "focus.slint";
+import { Tip } from "tooltip.slint";
+import { IconButton } from "buttons.slint";
 
 // A form's body: 16px top and bottom, 20px sides, rows 8px apart.
 export component Form inherits VerticalLayout {
@@ -92,29 +103,18 @@ export component FormRow inherits VerticalLayout {
     }
 }
 
-// A section title ("Appearance", "Recording") with a hairline filling the
-// rest of its line, 8px above it.
+// A section title ("Appearance", "Recording"): 12px semibold in `text`,
+// as a sheet's section headings (Paper's settings sheet), 8px above it.
 export component FormSection inherits VerticalLayout {
     in property <string> title;
     padding-top: Theme.space-2;
-    HorizontalLayout {
-        spacing: Theme.space-2;
-        Text {
-            text: root.title;
-            color: Theme.text-2;
-            font-size: Theme.fs-sm;
-            letter-spacing: Theme.tracking-sm;
-            font-weight: Theme.weight-semibold;
-            vertical-alignment: center;
-        }
-        VerticalLayout {
-            alignment: center;
-            horizontal-stretch: 1;
-            Rectangle {
-                height: 1px;
-                background: Theme.line;
-            }
-        }
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        font-weight: Theme.weight-semibold;
+        vertical-alignment: center;
     }
 }
 
@@ -192,5 +192,450 @@ export component Callout inherits Rectangle {
                 wrap: word-wrap;
             }
         }
+    }
+}
+
+// ---- Console's inspector: grouped rows, bands, the inspector panel.
+
+// Where a GroupRow sits in its group: its corners follow (6px on the
+// group's outer corners only).
+export enum RowPlace { only, first, middle, last }
+
+// Rows of one group, 1px apart (the sheet behind shows between them). 20px
+// in from a sheet's edges is the caller's.
+export component RowGroup inherits VerticalLayout {
+    spacing: 1px;
+    alignment: start;
+}
+
+// One grouped row (Paper's sheets: "Keep free", "Recording Quality"): 30px
+// on `control`, its label 12px `text-2` 12px in, its controls (children)
+// on the right `trailing-pad` from the edge (4px; 8px beside a switch).
+// A `tall` row (a file list) grows with its controls, 4px above and 6px
+// below them, its label on the first line. A `clickable` row is a button
+// (a choice that leads on, like a streaming service): `control-hover`
+// under the pointer, Space or Return when focused. `indent` moves the
+// label in (an object's own settings under its switch).
+export component GroupRow inherits Rectangle {
+    in property <string> label;
+    in property <RowPlace> place: RowPlace.middle;
+    in property <length> trailing-pad: Theme.space-1;
+    in property <bool> tall;
+    in property <bool> enabled: true;
+    in property <bool> clickable;
+    in property <length> indent;
+    // What screen readers hear about a clickable row, besides its label.
+    in property <string> description;
+    // A 12px `text-3` glyph before the label, 4px from it, the row 8px in
+    // (Paper's "› Advanced" disclosure row); with `expandable`, a
+    // clickable row says whether what it shows is `expanded`.
+    in property <string> lead-icon;
+    in property <bool> expandable;
+    in property <bool> expanded;
+    callback clicked();
+    property <length> top-r: root.place == RowPlace.first || root.place == RowPlace.only ? Theme.r : 0px;
+    property <length> bottom-r: root.place == RowPlace.last || root.place == RowPlace.only ? Theme.r : 0px;
+
+    min-height: root.tall ? row.min-height : Theme.row;
+    preferred-height: root.tall ? row.preferred-height : Theme.row;
+    max-height: root.tall ? 100000px : Theme.row;
+    background: Theme.control;
+    border-top-left-radius: root.top-r;
+    border-top-right-radius: root.top-r;
+    border-bottom-left-radius: root.bottom-r;
+    border-bottom-right-radius: root.bottom-r;
+    accessible-role: none;
+
+    // A clickable row: its hover fill, the pointer and the keyboard.
+    if root.clickable: Rectangle {
+        property <bool> keyboard;
+        border-top-left-radius: root.top-r;
+        border-top-right-radius: root.top-r;
+        border-bottom-left-radius: root.bottom-r;
+        border-bottom-right-radius: root.bottom-r;
+        background: hit.has-hover && root.enabled ? Theme.control-hover : transparent;
+        animate background { duration: Theme.fast; easing: Motion.ease; }
+        accessible-role: button;
+        accessible-label: root.label;
+        accessible-description: root.description;
+        accessible-enabled: root.enabled;
+        accessible-expandable: root.expandable;
+        accessible-expanded: root.expanded;
+        accessible-action-default => {
+            if root.enabled {
+                root.clicked();
+            }
+        }
+        accessible-action-expand => {
+            if root.enabled && root.expandable {
+                root.clicked();
+            }
+        }
+        hit := TouchArea {
+            enabled: root.enabled;
+            clicked => { root.clicked(); }
+        }
+        keys := FocusScope {
+            enabled: root.enabled;
+            focus-on-click: false;
+            focus-gained(reason) => { parent.keyboard = reason == FocusReason.tab-navigation; }
+            focus-lost => { parent.keyboard = false; }
+            key-pressed(event) => {
+                if event.text == " " || event.text == "\n" {
+                    root.clicked();
+                    return accept;
+                }
+                reject
+            }
+        }
+        FocusRing {
+            inset: true;
+            radius: max(root.top-r, root.bottom-r);
+            shown: keys.has-focus && parent.keyboard;
+        }
+    }
+
+    row := HorizontalLayout {
+        padding-left: (root.lead-icon != "" ? Theme.space-2 : Theme.space-3) + root.indent;
+        padding-right: root.trailing-pad;
+        padding-top: root.tall ? Theme.space-1 : 0px;
+        padding-bottom: root.tall ? 6px : 0px;
+        spacing: Theme.space-3;
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            spacing: Theme.space-1;
+            if root.lead-icon != "": VerticalLayout {
+                alignment: root.tall ? LayoutAlignment.start : LayoutAlignment.center;
+                padding-top: root.tall ? 7px : 0px;
+                Icon {
+                    path: root.lead-icon;
+                    size: Theme.icon-xs;
+                    color: Theme.text-3;
+                }
+            }
+            VerticalLayout {
+                alignment: root.tall ? LayoutAlignment.start : LayoutAlignment.center;
+                padding-top: root.tall ? 5px : 0px;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.label;
+                    color: root.enabled ? Theme.text-2 : Theme.text-disabled;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    height: Theme.lh-sm;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: Theme.space-1;
+            @children
+        }
+    }
+}
+
+// A group's heading (32px): its title 12px semibold `text`, 2px in, and a
+// reset glyph on the right (14px `text-3`, 4px in) when `resettable`.
+export component GroupHeading inherits Rectangle {
+    in property <string> title;
+    in property <bool> resettable;
+    // What screen readers and the tooltip call the reset.
+    in property <string> reset-label: "Reset to defaults";
+    callback reset();
+
+    height: Theme.header;
+    accessible-role: none;
+
+    Text {
+        x: 2px;
+        width: parent.width - 2px - Theme.icon-button-xs - 4px;
+        text: root.title;
+        color: Theme.text;
+        font-size: Theme.fs-sm;
+        font-weight: Theme.weight-semibold;
+        letter-spacing: Theme.tracking-sm;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: AccessibleRole.text;
+    }
+    // The kit's icon button (a Tab stop, Space and Return press it).
+    if root.resettable: IconButton {
+        x: parent.width - 4px - (self.width + Theme.icon-sm) / 2;
+        y: (parent.height - self.height) / 2;
+        compact: true;
+        icon: Icons.reset;
+        rest-color: Theme.text-3;
+        label: root.reset-label;
+        clicked => { root.reset(); }
+    }
+}
+
+// The caption under a group: 11px `text-3`, 6px below it, 12px in.
+export component GroupHint inherits Rectangle {
+    in property <string> text;
+    min-height: label.preferred-height + 6px;
+    preferred-height: label.preferred-height + 6px;
+    accessible-role: none;
+    label := Text {
+        x: Theme.space-3;
+        y: 6px;
+        width: parent.width - 2 * Theme.space-3;
+        text: root.text;
+        color: Theme.text-3;
+        font-size: Theme.fs-xs;
+        letter-spacing: Theme.tracking-xs;
+        line-height-factor: Theme.leading-xs;
+        wrap: word-wrap;
+    }
+}
+
+// A band (Final Cut's inspector; the Transitions dock): 30px on `hover`,
+// its label 12px `text-2` (`text-disabled` when not `enabled`) 14px in,
+// its control (children) on the right, `trailing-pad` in (6px beside a
+// popup or stepper, 10px beside a slider or switch).
+export component Band inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    // Nothing to set yet (no setup): the whole band at 40%, label and
+    // field as they are (Paper's Welcome board).
+    in property <bool> dimmed;
+    in property <length> trailing-pad: 6px;
+
+    height: Theme.row;
+    background: Theme.hover;
+    opacity: root.dimmed ? Theme.disabled-opacity : 1;
+    accessible-role: none;
+
+    HorizontalLayout {
+        padding-left: Theme.pane-x;
+        padding-right: root.trailing-pad;
+        spacing: Theme.space-3;
+        // The label keeps its whole width: in a narrow band the field
+        // gives way (down to its own minimum) before the words do.
+        Text {
+            min-width: self.preferred-width;
+            horizontal-stretch: 1;
+            text: root.label;
+            color: root.enabled ? Theme.text-2 : Theme.text-disabled;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: Theme.space-3;
+            @children
+        }
+    }
+}
+
+// The inspector panel (Final Cut's): `surface-panel` with a `line` edge; a
+// 32px `surface-header` title band (12px semibold `text`, 14px in) with a
+// reset button on its right; then its Bands, 1px apart.
+export component Inspector inherits Rectangle {
+    in property <string> title;
+    in property <bool> resettable;
+    in property <string> reset-label: "Reset";
+    callback reset();
+
+    background: Theme.surface-panel;
+    border-width: 1px;
+    border-color: Theme.line;
+    min-height: column.min-height;
+    preferred-height: column.preferred-height;
+    accessible-role: groupbox;
+    accessible-label: root.title;
+
+    column := VerticalLayout {
+        padding: 1px;
+        spacing: 1px;
+        Rectangle {
+            height: Theme.header;
+            background: Theme.surface-header;
+            Text {
+                x: Theme.pane-x;
+                width: parent.width - Theme.pane-x - 10px - Theme.icon-button-xs;
+                text: root.title;
+                color: Theme.text;
+                font-size: Theme.fs-sm;
+                font-weight: Theme.weight-semibold;
+                letter-spacing: Theme.tracking-sm;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: AccessibleRole.text;
+            }
+            if root.resettable: Rectangle {
+                x: parent.width - 10px - self.width;
+                y: (parent.height - self.height) / 2;
+                width: Theme.icon-button-xs;
+                height: Theme.icon-button-xs;
+                border-radius: Theme.r;
+                background: inspector-reset.has-hover ? Theme.control-hover : transparent;
+                accessible-role: button;
+                accessible-label: root.reset-label;
+                accessible-action-default => { root.reset(); }
+                Icon {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    path: Icons.reset;
+                    size: 13px;
+                    color: inspector-reset.has-hover ? Theme.text : Theme.text-3;
+                }
+                inspector-reset := TouchArea {
+                    clicked => { root.reset(); }
+                }
+            }
+        }
+        @children
+    }
+}
+
+// A short list of choices in a rounded box (Studio Mode's quick
+// transitions): `surface-panel`, a `line-strong` edge, 8px corners; its
+// QuickRows 28px, split by hairlines. One Tab stop: ↑ ↓ Home End move
+// through its `count` rows (the `current` one wears the ring), Space or
+// Return chooses it (`activated`). Disabled (`enabled` false) it fades
+// and leaves the Tab order.
+export component QuickList inherits Rectangle {
+    in property <string> label;
+    in property <int> count;
+    in property <bool> enabled: true;
+    in-out property <int> current;
+    // The row with the keyboard: its rows show their ring for this.
+    out property <bool> keyboard-focus: fs.has-focus && root.keyboard;
+    callback activated(int);
+
+    forward-focus: fs;
+    property <bool> keyboard;
+
+    background: Theme.surface-panel;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    border-radius: Theme.r-menu;
+    clip: true;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    min-height: rows.min-height;
+    preferred-height: rows.preferred-height;
+    accessible-role: list;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.modifiers.meta || event.modifiers.control || event.modifiers.alt || root.count == 0 {
+                return reject;
+            }
+            root.keyboard = true;
+            if event.text == Key.UpArrow {
+                root.current = max(0, root.current - 1);
+                return accept;
+            }
+            if event.text == Key.DownArrow {
+                root.current = min(root.count - 1, root.current + 1);
+                return accept;
+            }
+            if event.text == Key.Home {
+                root.current = 0;
+                return accept;
+            }
+            if event.text == Key.End {
+                root.current = root.count - 1;
+                return accept;
+            }
+            if event.text == " " || event.text == "\n" {
+                root.activated(max(0, min(root.count - 1, root.current)));
+                return accept;
+            }
+            reject
+        }
+    }
+
+    rows := VerticalLayout {
+        padding: 1px;
+        spacing: 0;
+        @children
+    }
+}
+
+// One row of a QuickList: its name (12px medium `text`, 10px in) and a
+// detail on the right (10px Martian Mono Light `text-3`: "300 ms"); a
+// hairline under it unless `last`; `hover` under the pointer, `selected`
+// when chosen.
+export component QuickRow inherits Rectangle {
+    in property <string> text;
+    in property <string> detail;
+    in property <bool> last;
+    in property <bool> selected;
+    in property <int> index;
+    in property <int> count;
+    // Chosen by the keyboard in its QuickList: the ring inside the row.
+    in property <bool> focus-shown;
+    in property <bool> enabled: true;
+    // Draw a state regardless of the pointer (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
+    callback clicked();
+
+    height: Theme.control-h;
+    background: root.selected ? Theme.selected : (quick-ta.has-hover && root.enabled) || root.shown == ShownState.hover ? Theme.hover : transparent;
+    accessible-role: list-item;
+    accessible-label: root.text;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.selected;
+    accessible-item-index: root.index;
+    accessible-item-count: root.count;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    quick-ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        height: parent.height - (root.last ? 0px : 1px);
+        Text {
+            horizontal-stretch: 1;
+            text: root.text;
+            color: Theme.text;
+            font-size: Theme.fs-sm;
+            font-weight: Theme.weight-medium;
+            letter-spacing: Theme.tracking-sm;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+        if root.detail != "": Text {
+            text: root.detail;
+            color: Theme.text-3;
+            font-family: Theme.font-mono;
+            font-size: Theme.fs-micro;
+            font-weight: Theme.weight-light;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+    if !root.last: Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.line;
+    }
+    FocusRing {
+        inset: true;
+        radius: 0px;
+        shown: root.focus-shown || root.shown == ShownState.focus;
     }
 }

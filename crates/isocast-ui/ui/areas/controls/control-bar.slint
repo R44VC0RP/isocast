@@ -1,0 +1,281 @@
+// The control bar between the preview and the docks (Paper "C. Console",
+// Main window and Studio Mode boards; Logic's control bar in Final Cut's
+// frame): 44px of `surface-chrome` edged in black, 14px in. On the left
+// the selected source (area A's part of it, OBS's source toolbar); in the
+// middle the LCD (the take's time, frames per second, frames dropped, the
+// engine's CPU); on the right the transport (stream, record), the master
+// level, the Properties and Filters capsule and the pane toggles (the
+// dock row; the program beside the preview, which is Studio Mode).
+// The left and right slots are 440px when the window has room, so the
+// LCD sits in the middle; they give way (the left first) when it hasn't.
+
+import { Theme } from "../../theme.slint";
+import { Icons } from "../../icons.slint";
+import { Ui } from "../../state.slint";
+import {
+    Capsule, CapsuleButton, CapsuleDivider, IconButton, Lcd, LcdCell, LcdTime, LcdTone, MasterMeter,
+    Tip, TransportButton, TransportKind,
+} from "../../kit.slint";
+import { MixerArea } from "../mixer/state.slint";
+import { SelectedSource } from "../sources/source-toolbar.slint";
+import { ControlsArea } from "state.slint";
+
+export component ControlBar inherits Rectangle {
+    // The master level's inside, in window points, for the native layer
+    // that draws it (MixerArea.master-native).
+    out property <length> meter-x: meter.absolute-position.x + 1px;
+    out property <length> meter-y: meter.absolute-position.y + 1px;
+    out property <length> meter-width: meter.width - 2px;
+    out property <length> meter-height: meter.height - 2px;
+    property <bool> native: MixerArea.master-native;
+    // The hole, in the bar's own coordinates.
+    property <length> hole-x: meter.absolute-position.x - root.absolute-position.x + 1px;
+    property <length> hole-y: meter.absolute-position.y - root.absolute-position.y + 1px;
+
+    property <bool> recording: ControlsArea.record-state == "recording" || ControlsArea.record-state == "stopping";
+    property <bool> streaming: ControlsArea.stream-state == "live" || ControlsArea.stream-state == "reconnecting" || ControlsArea.stream-state == "connecting";
+    // The LCD's first cell: the take's time while recording, else the
+    // stream's while streaming, else the idle recording time.
+    property <bool> shows-live: !root.recording && (ControlsArea.stream-state == "live" || ControlsArea.stream-state == "reconnecting");
+
+    height: Theme.source-toolbar;
+    background: root.native ? transparent : Theme.surface-chrome;
+    border-width: 1px;
+    border-color: Theme.frame-line;
+    accessible-role: groupbox;
+    accessible-label: "Control bar";
+
+    // With a native master level: the bar's fill around its inside (four
+    // pieces inside the black edge), so the layer under the window shows
+    // through there and nowhere else; whatever is drawn over the bar (a
+    // menu, a sheet's scrim) still covers it.
+    if root.native: Rectangle {
+        x: 1px;
+        y: 1px;
+        width: root.width - 2px;
+        height: max(0px, root.hole-y - 1px);
+        background: Theme.surface-chrome;
+    }
+    if root.native: Rectangle {
+        x: 1px;
+        y: root.hole-y + root.meter-height;
+        width: root.width - 2px;
+        height: max(0px, root.height - 1px - self.y);
+        background: Theme.surface-chrome;
+    }
+    if root.native: Rectangle {
+        x: 1px;
+        y: root.hole-y;
+        width: max(0px, root.hole-x - 1px);
+        height: root.meter-height;
+        background: Theme.surface-chrome;
+    }
+    if root.native: Rectangle {
+        x: root.hole-x + root.meter-width;
+        y: root.hole-y;
+        width: max(0px, root.width - 1px - self.x);
+        height: root.meter-height;
+        background: Theme.surface-chrome;
+    }
+
+    HorizontalLayout {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        // Inside the 1px black edge: 14px, and 10px on the right.
+        padding-left: Theme.pane-x;
+        padding-right: Theme.bar-gap;
+        spacing: 0;
+
+        // The selected source (hidden with View → Source Toolbar).
+        Rectangle {
+            min-width: 0px;
+            preferred-width: Theme.bar-slot;
+            horizontal-stretch: 1;
+            if Ui.show-source-toolbar: SelectedSource {
+                cache-rendering-hint: true;
+                x: 0;
+                width: parent.width - Theme.space-3;
+                height: parent.height;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            // Kept as a layer: it changes once a second at most, the
+            // master level beside it with every meter step.
+            lcd := Lcd {
+                cache-rendering-hint: true;
+                if root.shows-live: LcdTime {
+                    seconds: ControlsArea.live-seconds;
+                    label: "LIVE";
+                    tone: LcdTone.live;
+                    Tooltip {
+                        Tip { text: "Streaming for this long"; }
+                    }
+                }
+                if !root.shows-live: LcdTime {
+                    seconds: ControlsArea.rec-seconds;
+                    label: "REC";
+                    tone: root.recording ? LcdTone.recording : LcdTone.normal;
+                    description: ControlsArea.rec-tooltip;
+                    Tooltip {
+                        Tip { text: ControlsArea.rec-tooltip; }
+                    }
+                }
+                LcdCell {
+                    lead: ControlsArea.lcd-fps-lead;
+                    value: ControlsArea.lcd-fps;
+                    template: "00.00";
+                    label: "FPS";
+                    idle: !ControlsArea.engine-running;
+                    tone: ControlsArea.fps-lagging ? LcdTone.warning : LcdTone.normal;
+                    // The target rate too ("29.93 / 30.00 FPS"), as the
+                    // tooltip says it.
+                    description: ControlsArea.fps-text + ". " + ControlsArea.fps-tooltip;
+                    Tooltip {
+                        Tip { text: ControlsArea.fps-tooltip; }
+                    }
+                }
+                LcdCell {
+                    value: ControlsArea.lcd-dropped;
+                    label: "DROPPED";
+                    idle: !ControlsArea.engine-running;
+                    tone: ControlsArea.lcd-dropping ? LcdTone.warning : LcdTone.normal;
+                    description: "Frames dropped in this take (or, streaming only, by the stream)";
+                    Tooltip {
+                        Tip { text: "Frames dropped in this take (or, streaming only, by the stream)"; }
+                    }
+                }
+                LcdCell {
+                    value: ControlsArea.lcd-cpu;
+                    template: "00.0%";
+                    label: "CPU";
+                    idle: !ControlsArea.engine-running || !ControlsArea.lcd-cpu-known;
+                    last: true;
+                    description: "The engine’s share of this Mac’s processor (all cores)";
+                    Tooltip {
+                        Tip { text: "The engine’s share of this Mac’s processor (all cores)"; }
+                    }
+                }
+            }
+        }
+
+        // The right slot: as wide as its cluster at least.
+        Rectangle {
+            min-width: cluster.preferred-width;
+            preferred-width: Theme.bar-slot;
+            horizontal-stretch: 1;
+
+          cluster := HorizontalLayout {
+            x: parent.width - self.width;
+            width: self.preferred-width;
+            height: parent.height;
+            spacing: Theme.space-3;
+
+            // The transport: Start/Stop Streaming, Start/Stop Recording.
+            HorizontalLayout {
+                spacing: 6px;
+                VerticalLayout {
+                    alignment: center;
+                    TransportButton {
+                        // Each persistent piece of the bar is its own
+                        // layer: the window redraws for every meter step,
+                        // and Skia re-strokes uncached paths each time.
+                        cache-rendering-hint: true;
+                        kind: TransportKind.stream;
+                        active: root.streaming;
+                        enabled: Ui.has-setup && !ControlsArea.busy-stream;
+                        label: ControlsArea.stream-state == "connecting" ? "Connecting…" : ControlsArea.stream-state == "reconnecting" ? "Reconnecting…" : root.streaming ? "Stop Streaming" : "Start Streaming";
+                        clicked => { ControlsArea.toggle-stream(); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    TransportButton {
+                        cache-rendering-hint: true;
+                        kind: TransportKind.record;
+                        active: root.recording || ControlsArea.record-state == "starting";
+                        enabled: Ui.has-setup && !ControlsArea.busy-record;
+                        label: ControlsArea.record-state == "starting" ? "Starting…" : ControlsArea.record-state == "stopping" ? "Stopping…" : root.recording ? "Stop Recording" : "Start Recording";
+                        clicked => { ControlsArea.toggle-record(); }
+                    }
+                }
+            }
+
+            // The program's level, left and right.
+            VerticalLayout {
+                alignment: center;
+                meter := MasterMeter {
+                    native: root.native;
+                    label: "Program level";
+                    left-rms: MixerArea.master-left.rms;
+                    left-peak: MixerArea.master-left.peak;
+                    left-hold: MixerArea.master-left.hold;
+                    right-rms: MixerArea.master-right.rms;
+                    right-peak: MixerArea.master-right.peak;
+                    right-hold: MixerArea.master-right.hold;
+                }
+            }
+
+            // The selected source's Properties and Filters.
+            if Ui.show-source-toolbar: VerticalLayout {
+                alignment: center;
+                Capsule {
+                    cache-rendering-hint: true;
+                    large: true;
+                    CapsuleButton {
+                        large: true;
+                        icon: Icons.settings;
+                        label: "Properties";
+                        enabled: Ui.selected-source != "";
+                        clicked => { Ui.menu("properties"); }
+                    }
+                    CapsuleDivider { large: true; }
+                    CapsuleButton {
+                        large: true;
+                        icon: Icons.sliders;
+                        label: "Filters";
+                        enabled: Ui.selected-source != "";
+                        clicked => { Ui.menu("filters"); }
+                    }
+                }
+            }
+
+            // The pane toggles (Final Cut's): the dock row below, and the
+            // program beside the preview (Studio Mode).
+            HorizontalLayout {
+                spacing: Theme.space-1;
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        cache-rendering-hint: true;
+                        small: true;
+                        icon: Icons.panel-bottom;
+                        icon-size: Theme.icon-sm;
+                        on: Ui.show-docks;
+                        toggle: true;
+                        label: Ui.show-docks ? "Hide the docks" : "Show the docks";
+                        clicked => { Ui.menu("docks_pane"); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        cache-rendering-hint: true;
+                        small: true;
+                        icon: Icons.panel-right;
+                        icon-size: Theme.icon-sm;
+                        on: Ui.studio;
+                        toggle: true;
+                        enabled: Ui.has-setup;
+                        label: Ui.studio ? "Studio Mode: hide the program" : "Studio Mode: show the program beside the preview";
+                        clicked => { Ui.set-studio(!Ui.studio); }
+                    }
+                }
+            }
+          }
+        }
+    }
+}

@@ -1,16 +1,18 @@
-// The Scenes dock (the web app's scenes.js): the setup's scenes; a click
-// puts one on air (in Studio Mode, into preview, and the one on air shows
-// the program dot), 1–9 switch, double-click or F2 renames inline (Return
-// doesn't: in Studio Mode it takes the preview to air), a drag
-// reorders. The toolbar adds, removes and moves scenes; right-click opens
-// the scene's menu (or, away from the scenes, Add).
+// The Scenes dock (Paper "C. Console", Main window board; the web app's
+// scenes.js): the setup's scenes as 30px pill rows with the scene glyph;
+// a click puts one on air (in Studio Mode, into preview), and the one on
+// air wears a green PGM badge (LIVE while streaming); 1–9
+// switch, double-click or F2 renames inline (Return doesn't: in Studio
+// Mode it takes the preview to air), a drag reorders. The toolbar's
+// capsules add and remove, and move scenes; right-click opens the scene's
+// menu (or, away from the scenes, Add).
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
 import {
-    Dock, DockToolbar, Dot, DropLine, IconButton, List, ListEmpty, ListRow, Menus, TextField,
-    Tip, ToolbarGap,
+    Badge, BadgeTone, Capsule, CapsuleButton, CapsuleDivider, Dock, DockToolbar, DropLine, List,
+    ListRow, Menus, TextField, Tip,
 } from "../../kit.slint";
 import { SourcesArea } from "state.slint";
 
@@ -26,6 +28,8 @@ export component ScenesDock inherits Dock {
     list := List {
         label: "Scenes";
         count: SourcesArea.scenes.length;
+        empty-text: "No scenes yet";
+        empty-icon: Icons.empty-scenes;
         current: root.current;
         navigate(index) => { SourcesArea.choose-scene(SourcesArea.scenes[index].id); }
         unhandled-key(event) => {
@@ -53,6 +57,9 @@ export component ScenesDock inherits Dock {
 
             ListRow {
                 text: scene.name;
+                icon: Icons.scene-card;
+                icon-color: Theme.text-3;
+                trailing-pad: 6px;
                 selected: parent.chosen;
                 description: scene.on-air ? "On air" : scene.in-preview ? "In preview" : "";
                 index: i;
@@ -81,12 +88,11 @@ export component ScenesDock inherits Dock {
                     root.drop-at = -1;
                 }
 
-                if Ui.studio && scene.on-air: VerticalLayout {
-                    alignment: center;
-                    padding-right: Theme.space-2;
-                    Dot {
-                        dot-color: Theme.onair-text;
-                    }
+                // On air: PGM, or LIVE while it is streamed (green is
+                // program and live; recording is the LCD's red).
+                if scene.on-air: Badge {
+                    text: Ui.live ? "LIVE" : "PGM";
+                    tone: BadgeTone.live;
                 }
             }
 
@@ -104,9 +110,9 @@ export component ScenesDock inherits Dock {
             }
 
             if SourcesArea.renaming-scene == scene.id: TextField {
-                x: Theme.pane-x - 5px;
+                x: Theme.list-inset + Theme.space-2 + Theme.icon + Theme.space-2 - 5px;
                 y: (parent.height - self.height) / 2;
-                width: parent.width - Theme.pane-x + 5px - Theme.space-1;
+                width: parent.width - self.x - Theme.list-inset - Theme.space-1;
                 small: true;
                 font-size: Theme.fs;
                 text: scene.name;
@@ -126,40 +132,39 @@ export component ScenesDock inherits Dock {
                 cancelled => { SourcesArea.renaming-scene = ""; }
             }
         }
-        if SourcesArea.scenes.length == 0: ListEmpty {
-            text: "No scenes. Click + below to add one.";
-        }
     }
 
     DockToolbar {
-        IconButton {
-            small: true;
-            icon: Icons.plus;
-            label: "Add a scene";
-            enabled: Ui.has-setup;
-            clicked => { Ui.menu("new_scene_rename"); }
+        alignment: space-between;
+        Capsule {
+            CapsuleButton {
+                icon: Icons.plus;
+                label: "Add a scene";
+                enabled: Ui.has-setup;
+                clicked => { Ui.menu("new_scene_rename"); }
+            }
+            CapsuleDivider { }
+            CapsuleButton {
+                icon: Icons.minus;
+                label: "Remove the scene";
+                enabled: root.current >= 0;
+                clicked => { Ui.menu("remove_scene"); }
+            }
         }
-        IconButton {
-            small: true;
-            icon: Icons.minus;
-            label: "Remove the scene";
-            enabled: root.current >= 0;
-            clicked => { Ui.menu("remove_scene"); }
-        }
-        ToolbarGap { }
-        IconButton {
-            small: true;
-            icon: Icons.chevron-up;
-            label: "Move up";
-            enabled: root.current > 0;
-            clicked => { Ui.menu("scene_up"); }
-        }
-        IconButton {
-            small: true;
-            icon: Icons.chevron-down;
-            label: "Move down";
-            enabled: root.current >= 0 && root.current < SourcesArea.scenes.length - 1;
-            clicked => { Ui.menu("scene_down"); }
+        Capsule {
+            CapsuleButton {
+                icon: Icons.chevron-up;
+                label: "Move up";
+                enabled: root.current > 0;
+                clicked => { Ui.menu("scene_up"); }
+            }
+            CapsuleDivider { }
+            CapsuleButton {
+                icon: Icons.chevron-down;
+                label: "Move down";
+                enabled: root.current >= 0 && root.current < SourcesArea.scenes.length - 1;
+                clicked => { Ui.menu("scene_down"); }
+            }
         }
     }
 }

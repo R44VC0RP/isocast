@@ -1,6 +1,9 @@
-// Lists (docs/design.md 3.4): rows run edge to edge, 28px, the name in
-// body type with a 16px kind icon; hover is grey, the selected row is g9
-// with a 3px copper marker (and doesn't change on hover). A list owns the
+// Lists (Paper "Components" › Dock, list rows, toolbar; Tower's sidebar
+// manners): 30px rows inset 6px from the dock's edges as 6px-cornered
+// pills, the name in 13px Mona Sans with a 16px kind icon; hover is
+// `hover`, the selected row is `selected` (the yellow-tinted black) with a
+// yellow icon and a medium name (and doesn't change on hover); a hidden
+// item's name is `text-3` and its icon `text-disabled`. A list owns the
 // keyboard: ↑ ↓ Home End move through its rows (the owner selects), and
 // keys it doesn't use go to `unhandled-key` (F2 to rename, Delete…).
 // Screen readers get a list of selectable items with their position and
@@ -8,7 +11,8 @@
 
 import { Theme, Motion } from "../theme.slint";
 import { Icon } from "../icons.slint";
-import { FocusRing } from "focus.slint";
+import { FocusRing, ShownState } from "focus.slint";
+import { EmptyState } from "misc.slint";
 
 // A scrolling area with the thin scroll bar (3.15): 8px, a 4px thumb at
 // 14% bone that turns g10 on hover; only while the content is taller.
@@ -115,8 +119,10 @@ export component ListRow inherits Rectangle {
     in property <bool> dragging;
     // Group depth: 16px per level.
     in property <int> depth;
-    // Selected rows show the copper marker; picks and actions can turn it off.
+    // Kept for callers; Console rows have no marker bar.
     in property <bool> marker: true;
+    // The kind icon at rest (`text-2`; the Scenes list's are `text-3`).
+    in property <color> icon-color: Theme.text-2;
     // The list has keyboard focus on this row.
     in property <bool> focus-shown;
     // What screen readers hear about it, besides its name.
@@ -126,6 +132,8 @@ export component ListRow inherits Rectangle {
     in property <length> trailing-pad: Theme.space-1;
     // Rows can be dragged to a new place (the list draws where it lands).
     in property <bool> draggable;
+    // Draw a state regardless of the pointer (the kit gallery): `hover`.
+    in property <ShownState> shown: ShownState.live;
     out property <bool> has-hover: ta.has-hover;
     callback clicked();
     callback double-clicked();
@@ -142,10 +150,10 @@ export component ListRow inherits Rectangle {
     // the row's menu, whose popup takes the release).
     property <bool> left-press;
 
-    property <color> ink: root.dim && !(root.selected || ta.has-hover) ? Theme.text-3 : root.dim ? Theme.text-2 : Theme.text;
+    property <bool> hovered: ta.has-hover || root.shown == ShownState.hover;
+    property <color> ink: root.dim && !(root.selected || root.hovered) ? Theme.text-3 : root.dim ? Theme.text-2 : Theme.text;
 
     height: Theme.row;
-    background: root.selected ? Theme.selected : ta.has-hover ? Theme.hover : transparent;
     opacity: root.dragging ? Theme.dragging-opacity : 1;
     accessible-role: list-item;
     accessible-label: root.text;
@@ -155,6 +163,14 @@ export component ListRow inherits Rectangle {
     accessible-item-index: root.index;
     accessible-item-count: root.count;
     accessible-action-default => { root.clicked(); }
+
+    // The row's pill, 6px in from the list's edges.
+    pill := Rectangle {
+        x: Theme.list-inset;
+        width: parent.width - 2 * Theme.list-inset;
+        border-radius: Theme.r;
+        background: root.selected ? Theme.selected : root.hovered ? Theme.hover : transparent;
+    }
 
     ta := TouchArea {
         clicked => {
@@ -190,15 +206,15 @@ export component ListRow inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: Theme.pane-x + root.depth * 16px;
-        padding-right: root.trailing-pad;
+        padding-left: Theme.list-inset + Theme.space-2 + root.depth * 16px;
+        padding-right: Theme.list-inset + root.trailing-pad;
         spacing: Theme.space-2;
 
         if root.icon != "": VerticalLayout {
             alignment: center;
             Icon {
                 path: root.icon;
-                color: root.selected ? Theme.accent-text : root.dim && !ta.has-hover ? Theme.text-3 : Theme.text-2;
+                color: root.selected ? Theme.accent-text : root.dim ? Theme.text-disabled : root.icon-color;
             }
         }
         Text {
@@ -206,38 +222,44 @@ export component ListRow inherits Rectangle {
             text: root.text;
             color: root.ink;
             font-size: Theme.fs;
+            font-weight: root.selected ? Theme.weight-medium : Theme.weight-regular;
             letter-spacing: Theme.tracking;
             vertical-alignment: center;
             overflow: elide;
             accessible-role: none;
         }
-        // Trailing controls sit side by side, no gap between them.
-        HorizontalLayout {
-            spacing: 0;
-            @children
+        // Trailing controls (a 40px badge lane, 22px toggles), 8px apart,
+        // in the middle of the row (a layout puts a shorter item at the
+        // top of its row).
+        VerticalLayout {
+            alignment: center;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                @children
+            }
         }
     }
 
-    // The ring, then the marker over it (design.md 2.10).
+    // Keyboard focus: the ring inside the pill.
     FocusRing {
+        x: pill.x;
+        width: pill.width;
         inset: true;
-        radius: 0;
-        shown: root.focus-shown;
-    }
-
-    if root.selected && root.marker: Rectangle {
-        x: 0;
-        width: 3px;
-        background: Theme.accent-hover;
+        radius: Theme.r;
+        shown: root.focus-shown || root.shown == ShownState.focus;
     }
 }
 
 // A list that fills its pane: its rows (ListRow) as children, scrolling,
-// with 2px above and below. Give it `count` and the `current` row (the
-// selected one, or -1); arrows ask for another with `navigate`.
+// with 6px above and below. Give it `count` and the `current` row (the
+// selected one, or -1); arrows ask for another with `navigate`. With no
+// rows it shows `empty-text` under `empty-icon` (EmptyState) in the
+// middle of the pane.
 export component List inherits Rectangle {
     in property <string> label;
     in property <int> count;
+    in property <string> empty-text;
+    in property <string> empty-icon;
     in property <int> current: -1;
     in property <length> row-height: Theme.row;
     // Rows with keyboard focus show their ring.
@@ -254,7 +276,7 @@ export component List inherits Rectangle {
 
     // Scroll so the row shows (call after selecting it from outside).
     public function show-row(index: int) {
-        scroll.show-range(2px + index * root.row-height, root.row-height);
+        scroll.show-range(Theme.list-inset + index * root.row-height, root.row-height);
     }
 
     forward-focus: fs;
@@ -300,30 +322,21 @@ export component List inherits Rectangle {
         }
 
         scroll := ScrollArea {
-            gutter: 4px + root.count * root.row-height > self.height + 0.5px;
+            gutter: 2 * Theme.list-inset + root.count * root.row-height > self.height + 0.5px;
             background-clicked => { root.background-clicked(); }
             background-menu(x, y) => { root.background-menu(x, y); }
-            Rectangle { height: 2px; }
+            Rectangle { height: Theme.list-inset; }
             @children
-            Rectangle { height: 2px; }
+            Rectangle { height: Theme.list-inset; }
         }
-    }
-}
-
-// The caption under an empty list ("No scenes yet").
-export component ListEmpty inherits Rectangle {
-    in property <string> text;
-    height: label.preferred-height + 2 * Theme.space-2;
-    label := Text {
-        x: Theme.pane-x;
-        y: Theme.space-2;
-        width: parent.width - 2 * Theme.pane-x;
-        text: root.text;
-        color: Theme.text-3;
-        font-size: Theme.fs-sm;
-        letter-spacing: Theme.tracking-sm;
-        line-height-factor: Theme.leading-sm;
-        wrap: word-wrap;
+        // Over the list, letting clicks through to it (its menu).
+        if root.count == 0 && root.empty-text != "": EmptyState {
+            width: parent.width;
+            height: parent.height;
+            icon: root.empty-icon;
+            text: root.empty-text;
+            gap: Theme.empty-gap-dock;
+        }
     }
 }
 

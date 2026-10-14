@@ -51,6 +51,49 @@ impl Meter {
     }
 }
 
+/// The program mix's meter: interleaved stereo, each channel on its own
+/// as well as both together (as `Meter` measures them).
+#[derive(Default)]
+pub(super) struct StereoMeter(Mutex<([f32; 2], [f64; 2], u64)>);
+
+impl StereoMeter {
+    /// Add interleaved stereo frames (left, right, left, right…).
+    pub(super) fn add(&self, samples: &[f32]) {
+        let mut state = self.0.lock().unwrap();
+        for frame in samples.as_chunks::<2>().0 {
+            for (channel, sample) in frame.iter().enumerate() {
+                state.0[channel] = state.0[channel].max(sample.abs());
+                state.1[channel] += f64::from(*sample) * f64::from(*sample);
+            }
+            state.2 += 1;
+        }
+    }
+
+    /// Peak and RMS in dBFS since the last call, both channels together
+    /// and each (left, right), and reset.
+    pub(super) fn take(&self) -> ((f64, f64), [(f64, f64); 2]) {
+        let (peak, power, frames) = std::mem::take(&mut *self.0.lock().unwrap());
+        let rms = |power: f64, count: u64| {
+            if count == 0 {
+                0.0
+            } else {
+                (power / count as f64).sqrt()
+            }
+        };
+        let both = (
+            decibels(f64::from(peak[0].max(peak[1]))),
+            decibels(rms(power[0] + power[1], frames * 2)),
+        );
+        let each = [0, 1].map(|c| {
+            (
+                decibels(f64::from(peak[c])),
+                decibels(rms(power[c], frames)),
+            )
+        });
+        (both, each)
+    }
+}
+
 fn decibels(level: f64) -> f64 {
     if level <= 1e-6 {
         -120.0
@@ -194,7 +237,7 @@ pub(super) struct Mixer<F> {
     law: PanLaw,
     /// Audio from the inputs, `track` being the input's index.
     packets: Receiver<Packet<F>>,
-    meter: Arc<Meter>,
+    meter: Arc<StereoMeter>,
     /// Every source's audio filters, and the revision the inputs have.
     filters: Option<(Arc<LiveAudioFilters>, Option<u64>)>,
 }
@@ -206,7 +249,7 @@ impl<F: Clone> Mixer<F> {
         inputs: Vec<(String, u32, AudioSettings)>,
         law: PanLaw,
         packets: Receiver<Packet<F>>,
-        meter: Arc<Meter>,
+        meter: Arc<StereoMeter>,
     ) -> Self {
         Self {
             inputs: inputs
@@ -551,5 +594,16 @@ mod tests {
             "{peak} {rms}"
         );
         assert_eq!(meter.take(), (-120.0, -120.0));
+    }
+
+    #[test]
+    fn stereo_meter_reports_each_channel_and_both() {
+        let meter = StereoMeter::default();
+        meter.add(&[0.5, 0.0, -0.5, 0.0]);
+        let ((peak, rms), [left, right]) = meter.take();
+        assert!((peak - -6.02).abs() < 0.01);
+        assert!((rms - -9.03).abs() < 0.01);
+        assert!((left.0 - -6.02).abs() < 0.01 && (left.1 - -6.02).abs() < 0.01);
+        assert_eq!(right, (-120.0, -120.0));
     }
 }

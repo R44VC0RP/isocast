@@ -1,9 +1,14 @@
-// An audio meter (docs/design.md 3.16): dBFS from −60 to 0, an 8px bar on
-// a neutral track, lit green below −18, amber to −6 and red above, the
-// peak at half strength over the RMS, a 2px hold line, and the scale under
-// it (its minor and mid labels make way on narrow meters). The levels are
-// the caller's, already smoothed (rise at once, fall ~24 dB/s for RMS, ~32
-// for peak, hold 1.5 s): this only draws them.
+// Audio meters (Paper "Components" › Sliders and meters, and the control
+// bar): dBFS from −60 to 0, lit green to −12, yellow to −3 and red above
+// (Theme.meter-*). A mixer strip's meter is a 3px bar on the inset black
+// under its fader (Meter); the control bar's master level is two 4px bars
+// in an inset capsule (MasterMeter). The level is the RMS; the peak shows
+// at half strength past it (Theme.meter-*-peak) and the hold as a 1px
+// tick (Paper draws a still level only; these keep the mixer's peak and
+// hold). A muted source's meter still shows what it hears, all in
+// `meter-muted` (Paper's muted strip). The levels are the
+// caller's, already smoothed (rise at once, fall ~24 dB/s for RMS, ~32 for
+// peak, hold 1.5 s): this only draws them.
 
 import { Theme } from "../theme.slint";
 
@@ -15,13 +20,47 @@ component Zone inherits Rectangle {
     in property <color> zone-color;
     // The whole bar's width (−60 to 0 dB).
     in property <length> span;
+    // A gap before it (not the first zone).
+    in property <length> gap;
     property <float> top: min(root.to, root.level);
-    x: root.span * (root.from + 60) / 60;
-    width: max(0px, root.span * (root.top - root.from) / 60);
+    x: root.span * (root.from + 60) / 60 + (root.from > -60 ? root.gap : 0px);
+    width: max(0px, root.span * (root.top - root.from) / 60 - (root.from > -60 ? root.gap : 0px));
     visible: root.top > root.from;
     background: root.zone-color;
 }
 
+// One channel's bar: zones for the peak (half strength) under the RMS,
+// and the hold tick.
+export component MeterBar inherits Rectangle {
+    in property <float> rms: -60;
+    in property <float> peak: -60;
+    in property <float> hold: -60;
+    // Muted: every zone in `meter-muted`.
+    in property <bool> muted;
+    in property <color> track: Theme.meter-track;
+    // A gap between the colours (the split master meter's 1px).
+    in property <length> zone-gap;
+    clip: true;
+    background: root.track;
+    accessible-role: none;
+
+    Zone { span: root.width; height: root.height; gap: root.zone-gap; from: -60; to: Theme.meter-warn-db; level: root.peak; zone-color: root.muted ? Theme.meter-muted-peak : Theme.meter-ok-peak; }
+    Zone { span: root.width; height: root.height; gap: root.zone-gap; from: Theme.meter-warn-db; to: Theme.meter-clip-db; level: root.peak; zone-color: root.muted ? Theme.meter-muted-peak : Theme.meter-warn-peak; }
+    Zone { span: root.width; height: root.height; gap: root.zone-gap; from: Theme.meter-clip-db; to: 0; level: root.peak; zone-color: root.muted ? Theme.meter-muted-peak : Theme.meter-clip-peak; }
+    Zone { span: root.width; height: root.height; gap: root.zone-gap; from: -60; to: Theme.meter-warn-db; level: root.rms; zone-color: root.muted ? Theme.meter-muted : Theme.meter-ok; }
+    Zone { span: root.width; height: root.height; gap: root.zone-gap; from: Theme.meter-warn-db; to: Theme.meter-clip-db; level: root.rms; zone-color: root.muted ? Theme.meter-muted : Theme.meter-warn; }
+    Zone { span: root.width; height: root.height; gap: root.zone-gap; from: Theme.meter-clip-db; to: 0; level: root.rms; zone-color: root.muted ? Theme.meter-muted : Theme.meter-clip; }
+
+    if root.hold > -59.5: Rectangle {
+        x: max(0px, parent.width * (min(0, root.hold) + 60) / 60 - 1px);
+        width: 1px;
+        background: root.muted ? Theme.meter-muted : root.hold > Theme.meter-clip-db ? Theme.meter-clip : root.hold > Theme.meter-warn-db ? Theme.meter-warn : Theme.meter-ok;
+    }
+}
+
+// A mixer strip's meter: the 3px bar (2px corners), and optionally the
+// scale under it (10px `text-3`; its minor and mid labels make way on
+// narrow meters).
 export component Meter inherits Rectangle {
     in property <float> rms: -60;
     in property <float> peak: -60;
@@ -31,44 +70,31 @@ export component Meter inherits Rectangle {
     in property <bool> show-scale: true;
     in property <string> label;
 
-    height: root.show-scale ? Theme.meter : Theme.meter-bar + 2px;
+    height: root.show-scale ? Theme.meter : Theme.meter-bar;
     accessible-role: progress-indicator;
     accessible-label: root.label;
     accessible-value: round(max(-60, root.rms)) + " dB";
 
-    bar := Rectangle {
-        y: 2px;
+    MeterBar {
+        y: 0;
         height: Theme.meter-bar;
-        border-radius: 1px;
-        clip: true;
-        background: Theme.meter-track;
-        opacity: root.muted ? Theme.muted-meter-opacity : 1;
-
-        Zone { span: bar.width; height: bar.height; from: -60; to: -18; level: root.peak; zone-color: Theme.meter-ok.with-alpha(0.5); }
-        Zone { span: bar.width; height: bar.height; from: -18; to: -6; level: root.peak; zone-color: Theme.meter-warn.with-alpha(0.5); }
-        Zone { span: bar.width; height: bar.height; from: -6; to: 0; level: root.peak; zone-color: Theme.meter-clip.with-alpha(0.5); }
-        Zone { span: bar.width; height: bar.height; from: -60; to: -18; level: root.rms; zone-color: Theme.meter-ok; }
-        Zone { span: bar.width; height: bar.height; from: -18; to: -6; level: root.rms; zone-color: Theme.meter-warn; }
-        Zone { span: bar.width; height: bar.height; from: -6; to: 0; level: root.rms; zone-color: Theme.meter-clip; }
-
-        if root.hold > -59.5: Rectangle {
-            x: max(0px, parent.width * (min(0, root.hold) + 60) / 60 - 1px);
-            width: 2px;
-            background: root.hold > -6 ? Theme.meter-clip : root.hold > -18 ? Theme.meter-warn : Theme.meter-ok;
-        }
+        border-radius: 2px;
+        rms: root.rms;
+        peak: root.peak;
+        hold: root.hold;
+        muted: root.muted;
     }
 
     if root.show-scale: Rectangle {
-        y: 12px;
-        height: 10px;
+        y: Theme.meter-bar + 3px;
+        height: Theme.lh-micro;
         for tick in [
             { db: -60, rank: 0 },
             { db: -48, rank: 2 },
             { db: -36, rank: 0 },
             { db: -24, rank: 2 },
-            { db: -18, rank: 1 },
             { db: -12, rank: 0 },
-            { db: -6, rank: 1 },
+            { db: -3, rank: 1 },
             { db: 0, rank: 0 },
         ]: Text {
             // Minor labels (rank 1) go below 360px, mid ones (2) below 200px.
@@ -77,8 +103,89 @@ export component Meter inherits Rectangle {
             text: tick.db == 0 ? "0" : "−" + (-tick.db);
             color: Theme.text-3;
             font-size: Theme.fs-micro;
+            letter-spacing: Theme.tracking-micro;
             vertical-alignment: top;
             accessible-role: none;
+        }
+    }
+}
+
+// The control bar's master level: left and right as 4px bars (2px corners
+// on `line`), 2px apart, in a 120px capsule of the inset black with a
+// `line-strong` edge and 6px corners, 3px in. `split` (the Components
+// board's "Master level"): each channel its own 8px capsule (4px corners,
+// 1px in), 3px apart, its colours 1px apart.
+export component MasterMeter inherits Rectangle {
+    in property <float> left-rms: -60;
+    in property <float> left-peak: -60;
+    in property <float> left-hold: -60;
+    in property <float> right-rms: -60;
+    in property <float> right-peak: -60;
+    in property <float> right-hold: -60;
+    in property <bool> muted;
+    in property <bool> split;
+    in property <string> label: "Master level";
+    // Its inside is drawn by the app under the window (a native layer:
+    // the level moves without redrawing the window): this draws only the
+    // edge, and its owner leaves the inside unpainted.
+    in property <bool> native;
+
+    width: Theme.master-meter-w;
+    height: root.split ? 2 * (Theme.master-meter-bar + 4px) + 3px : 2 * Theme.master-meter-bar + 2px + 6px + 2px;
+    background: root.split || root.native ? transparent : Theme.surface-inset;
+    border-width: root.split ? 0px : 1px;
+    border-color: Theme.line-strong;
+    border-radius: Theme.r;
+    accessible-role: progress-indicator;
+    accessible-label: root.label;
+    accessible-value: round(max(-60, max(root.left-rms, root.right-rms))) + " dB";
+
+    if root.split: VerticalLayout {
+        spacing: 3px;
+        for channel in [
+            { rms: root.left-rms, peak: root.left-peak, hold: root.left-hold },
+            { rms: root.right-rms, peak: root.right-peak, hold: root.right-hold },
+        ]: Rectangle {
+            height: Theme.master-meter-bar + 4px;
+            background: Theme.surface-inset;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            border-radius: Theme.r-mini;
+            MeterBar {
+                x: 2px;
+                y: 2px;
+                width: parent.width - 4px;
+                height: Theme.master-meter-bar;
+                border-radius: 2px;
+                track: transparent;
+                zone-gap: 1px;
+                rms: channel.rms;
+                peak: channel.peak;
+                hold: channel.hold;
+                muted: root.muted;
+            }
+        }
+    }
+    if !root.split && !root.native: VerticalLayout {
+        padding: 4px;
+        spacing: 2px;
+        MeterBar {
+            height: Theme.master-meter-bar;
+            border-radius: 2px;
+            track: Theme.meter-capsule-track;
+            rms: root.left-rms;
+            peak: root.left-peak;
+            hold: root.left-hold;
+            muted: root.muted;
+        }
+        MeterBar {
+            height: Theme.master-meter-bar;
+            border-radius: 2px;
+            track: Theme.meter-capsule-track;
+            rms: root.right-rms;
+            peak: root.right-peak;
+            hold: root.right-hold;
+            muted: root.muted;
         }
     }
 }

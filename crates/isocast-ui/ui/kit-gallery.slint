@@ -1,27 +1,303 @@
 // The widget kit on one page, for snapshots only (`--state kit`, with
-// `kit-menu`, `kit-dialog` and `kit-dropdown` to open those): every control
-// in its states, so a change to the kit can be checked against
-// docs/design.md at a glance. Not reachable from the app's interface.
+// `kit-menu`, `kit-dialog` and `kit-dropdown` to open those): every token
+// and every component in its states, laid out band by band as Paper's
+// Components board (file "C. Console", Components page, 1440 wide), so a
+// snapshot at 1440×3060 sits beside the board's export and a change to
+// the kit can be checked at a glance. Interactive controls draw their
+// states with `shown` (ShownState). Not reachable from the app's
+// interface.
 
 import { Theme } from "theme.slint";
-import { Icons, BrandMark } from "icons.slint";
+import { Icon, Icons } from "icons.slint";
 import {
-    Button, IconButton, LinkButton, ButtonVariant, ControlSize,
+    Button, IconButton, ButtonVariant, ControlSize, TransportButton, TransportKind, Capsule, CapsuleButton, CapsuleDivider, MiniToggle,
     TextField, TextArea, NumberField, ColorField,
     Dropdown, DropdownOption,
-    Checkbox, Radio, Switch, Segmented, Segment,
-    Slider, Meter,
-    List, ListRow, ListEmpty, PickList,
-    Dock, DockToolbar, ToolbarGap, ToolbarSeparator,
-    Form, FormRow, FormSection, FormSeparator, SubForm, Hint, Callout, CalloutKind,
-    Dialog, NavList, NavTab, Toast, ToastKind,
-    Kbd, Spinner, Dot,
+    Checkbox, Radio, Switch, Segmented,
+    Slider, Meter, MasterMeter, MeterBar,
+    Lcd, LcdCell, LcdTime, LcdTone,
+    List, ListRow,
+    Dock, DockToolbar,
+    Form, PickList, PanelHeader, MenuEntryKind, Callout, CalloutKind, Spinner,
+    NavList, GroupHeading, GroupHint, QuickList, QuickRow, LcdHero, TextMenuButton, RowGroup, GroupRow, RowPlace, Band, Inspector,
+    MenuPanel, MenuView, Dialog, SheetFrame, Toast, ToastKind, Tip,
+    Kbd, Badge, BadgeTone, Tag, TagTone, Dot, EmptyState, Rule,
+    ShownState,
 } from "kit.slint";
 
-component Caption inherits Text {
+// ---- The board's own type (not kit components: the gallery's captions).
+
+// A band's or column's title: 12px semibold `text-2`.
+component Title inherits Text {
+    color: Theme.text-2;
+    font-size: Theme.fs-sm;
+    font-weight: Theme.weight-semibold;
+    letter-spacing: Theme.tracking-sm;
+    height: Theme.lh-sm;
+    vertical-alignment: center;
+}
+
+// A caption: 11px `text-3`.
+component Note inherits Text {
     color: Theme.text-3;
     font-size: Theme.fs-xs;
-    font-weight: Theme.weight-semibold;
+    letter-spacing: Theme.tracking-xs;
+    // 14px lines (Mona Sans's own are 1.41em).
+    in property <int> lines: 1;
+    min-height: root.lines * Theme.lh-xs;
+    preferred-height: root.lines * Theme.lh-xs;
+    line-height-factor: Theme.leading-xs;
+    vertical-alignment: center;
+}
+
+// A token's name: 11px Martian Mono, tracked −0.02em.
+component Token inherits Text {
+    color: Theme.text;
+    font-family: Theme.font-mono;
+    font-weight: Theme.weight-light;
+    font-size: Theme.fs-xs;
+    letter-spacing: -0.22px;
+    // 14px lines.
+    in property <int> lines: 1;
+    min-height: root.lines * Theme.lh-xs;
+    preferred-height: root.lines * Theme.lh-xs;
+    line-height-factor: Theme.leading-mono-xs;
+    vertical-alignment: center;
+}
+
+// A band: a `line` rule on top, 24px, then its content, `gap` apart.
+component BandBox inherits Rectangle {
+    in property <length> gap;
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Theme.line;
+    }
+    VerticalLayout {
+        padding-top: 1px + Theme.space-6;
+        spacing: root.gap;
+        @children
+    }
+}
+
+// A title row: the title on the left, a caption on the right.
+component TitleRow inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> note;
+    Title {
+        text: root.title;
+        horizontal-stretch: 1;
+    }
+    Note {
+        text: root.note;
+    }
+}
+
+// A colour swatch row: 40×28 with 6px corners and the inset `line-soft`
+// ring, the token's name and what it is for.
+component Swatch inherits HorizontalLayout {
+    in property <color> fill;
+    in property <string> name;
+    in property <string> purpose;
+    // "Aa" in this colour on the inset black, instead of a fill.
+    in property <color> ink: transparent;
+    in property <bool> ink-on-fill;
+    in property <bool> ring: true;
+    spacing: Theme.space-3;
+    alignment: start;
+    Rectangle {
+        width: 40px;
+        height: 28px;
+        border-radius: Theme.r;
+        background: root.ink != transparent && !root.ink-on-fill ? Theme.surface-inset : root.fill;
+        Rectangle {
+            visible: root.ring;
+            border-radius: Theme.r;
+            border-width: 1px;
+            border-color: Theme.line-soft;
+        }
+        if root.ink != transparent: Text {
+            text: "Aa";
+            color: root.ink;
+            font-size: Theme.fs-lead;
+            font-weight: Theme.weight-semibold;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 1;
+        Token { text: root.name; }
+        Note { text: root.purpose; }
+    }
+}
+
+// A column of swatches with its heading.
+component SwatchColumn inherits VerticalLayout {
+    in property <string> heading;
+    spacing: Theme.space-2;
+    alignment: start;
+    horizontal-stretch: 1;
+    min-width: 0px;
+    preferred-width: 0px;
+    VerticalLayout {
+        padding-bottom: Theme.space-1;
+        Note { text: root.heading; }
+    }
+    @children
+}
+
+// A heading inside a swatch column (8px above it).
+component SubHeading inherits VerticalLayout {
+    in property <string> text;
+    padding-top: Theme.space-2;
+    padding-bottom: Theme.space-1;
+    Note { text: root.text; }
+}
+
+// A type specimen row: the role, the sample, the spec.
+component TypeRow inherits Rectangle {
+    in property <string> role;
+    in property <string> spec;
+    in property <int> spec-lines: 1;
+    in property <bool> first;
+    in property <bool> last;
+    min-height: row.min-height;
+    preferred-height: row.preferred-height;
+    row := HorizontalLayout {
+        padding-top: root.first ? Theme.space-3 : Theme.space-2;
+        padding-bottom: root.first ? Theme.space-3 : Theme.space-2;
+        spacing: Theme.space-4;
+        VerticalLayout {
+            alignment: center;
+            width: 96px;
+            Note { text: root.role; }
+        }
+        HorizontalLayout {
+            horizontal-stretch: 1;
+            alignment: start;
+            @children
+        }
+        VerticalLayout {
+            alignment: center;
+            width: 272px;
+            Token {
+                text: root.spec;
+                lines: root.spec-lines;
+                color: Theme.text-3;
+                wrap: word-wrap;
+            }
+        }
+    }
+    if !root.last: Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.line-soft;
+    }
+}
+
+// A labelled row of the state matrices (Buttons, Icon buttons).
+component StateRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <length> label-width: 112px;
+    height: Theme.control-h-lg;
+    alignment: start;
+    VerticalLayout {
+        alignment: center;
+        width: root.label-width;
+        Text {
+            text: root.label;
+            color: Theme.text-2;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+        }
+    }
+    @children
+}
+
+// A cell of the state matrices: its child on the left, vertically centred.
+component Cell inherits VerticalLayout {
+    in property <length> cell-width: 128px;
+    in property <length> gap;
+    width: root.cell-width;
+    alignment: center;
+    HorizontalLayout {
+        alignment: start;
+        spacing: root.gap;
+        @children
+    }
+}
+
+// A field row of the Fields column: a 96px caption, then the field.
+component FieldRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <bool> top;
+    spacing: 0;
+    alignment: start;
+    VerticalLayout {
+        width: 96px;
+        alignment: root.top ? LayoutAlignment.start : LayoutAlignment.center;
+        padding-top: root.top ? 6px : 0px;
+        Note { text: root.label; }
+    }
+    @children
+}
+
+// A source row's trailing toggle: 22px, a 15px glyph.
+component RowToggle inherits Rectangle {
+    in property <string> icon;
+    in property <color> ink: Theme.text-3;
+    width: Theme.icon-button-xs;
+    height: Theme.icon-button-xs;
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        path: root.icon;
+        size: Theme.icon-row;
+        color: root.ink;
+    }
+}
+
+// A row's 40px badge lane (ISO, LIVE), right-aligned.
+component BadgeLane inherits HorizontalLayout {
+    width: 40px;
+    alignment: end;
+    @children
+}
+
+// A transport state with its caption.
+component Labelled inherits HorizontalLayout {
+    in property <string> caption;
+    spacing: Theme.space-2;
+    alignment: start;
+    VerticalLayout {
+        alignment: center;
+        @children
+    }
+    Note { text: root.caption; }
+}
+
+// An inspector band's readout pair: "X 120.0".
+component Pair inherits HorizontalLayout {
+    in property <string> axis;
+    in property <string> value;
+    spacing: 6px;
+    Text {
+        text: root.axis;
+        color: Theme.text-3;
+        font-size: Theme.fs-micro;
+        font-weight: Theme.weight-semibold;
+        vertical-alignment: center;
+    }
+    Text {
+        text: root.value;
+        color: Theme.text;
+        font-family: Theme.font-mono;
+        font-weight: Theme.weight-light;
+        font-size: Theme.fs-xs;
+        vertical-alignment: center;
+    }
 }
 
 export component KitGallery inherits Rectangle {
@@ -37,7 +313,7 @@ export component KitGallery inherits Rectangle {
     ];
 
     // Opened when asked, or when the gallery appears already asked. (The
-    // gallery's menu, `kit-menu`, comes from Rust: src/kit.rs
+    // gallery's live menu, `kit-menu`, comes from Rust: src/kit.rs
     // `sample_menu`.)
     init => {
         if root.open-dropdown > 0 {
@@ -46,200 +322,1492 @@ export component KitGallery inherits Rectangle {
     }
     changed open-dropdown => { dropdown.show-list(); }
 
-    background: Theme.surface-stage;
+    background: Theme.surface-panel;
 
-    HorizontalLayout {
-        padding: Theme.space-4;
-        spacing: Theme.space-4;
+    VerticalLayout {
+        padding: Theme.space-8;
+        spacing: Theme.space-8;
+        alignment: start;
 
-        // Column 1: buttons, choices, sliders
-        VerticalLayout {
-            spacing: Theme.space-2;
-            alignment: start;
-            width: 330px;
-
-            Caption { text: "BUTTONS"; }
-            HorizontalLayout {
-                spacing: Theme.space-2;
-                alignment: start;
-                Button { text: "Secondary"; }
-                Button { text: "Primary"; variant: ButtonVariant.primary; }
-                Button { text: "Quiet"; variant: ButtonVariant.quiet; icon: Icons.settings; }
+        // ---- Header
+        HorizontalLayout {
+            spacing: Theme.space-8;
+            VerticalLayout {
+                spacing: Theme.space-1;
+                horizontal-stretch: 1;
+                Text {
+                    text: "Components";
+                    color: Theme.text;
+                    font-family: Theme.font-brand;
+                    font-size: Theme.fs-display;
+                    font-weight: Theme.weight-semibold;
+                    letter-spacing: Theme.tracking-display;
+                    height: Theme.lh-display;
+                }
+                Text {
+                    text: "Console direction: Final Cut's inspector, Logic's instrument bar and Tower's Mac manners, drawn only with the app's tokens.";
+                    color: Theme.text-2;
+                    font-size: Theme.fs-lead;
+                    letter-spacing: Theme.tracking-lead;
+                    line-height-factor: Theme.leading-lead;
+                    wrap: word-wrap;
+                    width: 840px;
+                }
             }
-            HorizontalLayout {
-                spacing: Theme.space-2;
-                alignment: start;
-                Button { text: "Remove"; variant: ButtonVariant.danger; }
-                Button { text: "Stop Recording"; variant: ButtonVariant.live; }
-                Button { text: "Reconnecting…"; variant: ButtonVariant.live-warn; }
-            }
-            HorizontalLayout {
-                spacing: Theme.space-2;
-                alignment: start;
-                Button { text: "Studio Mode"; checked: true; toggle: true; }
-                Button { text: "Disabled"; enabled: false; }
-                Button { text: "Small"; size: ControlSize.small; }
-                Button { text: "Large"; size: ControlSize.large; variant: ButtonVariant.primary; }
-            }
-            HorizontalLayout {
-                spacing: 2px;
-                alignment: start;
-                IconButton { icon: Icons.plus; label: "Add"; }
-                IconButton { icon: Icons.settings; label: "Settings"; menu-open: true; }
-                IconButton { icon: Icons.eye; label: "On"; on: true; small: true; }
-                IconButton { icon: Icons.speaker; label: "Muted"; danger: true; small: true; }
-                IconButton { icon: Icons.refresh; label: "Busy"; small: true; }
-                IconButton { icon: Icons.minus; label: "Disabled"; enabled: false; small: true; }
-                LinkButton { text: "Open System Settings"; }
-            }
-
-            Caption { text: "CHOICES"; }
-            HorizontalLayout {
-                spacing: Theme.space-4;
-                alignment: start;
-                Checkbox { text: "Visible"; checked: true; }
-                Checkbox { text: "Off"; }
-                Checkbox { text: "Disabled"; enabled: false; }
-            }
-            HorizontalLayout {
-                spacing: Theme.space-4;
-                alignment: start;
-                Radio { text: "Create new"; checked: true; }
-                Radio { text: "Add existing"; }
-                Switch { on: true; label: "On"; }
-                Switch { label: "Off"; }
-            }
-            Segmented {
-                options: [{ value: "mov", label: "MOV" }, { value: "mp4", label: "MP4" }, { value: "mkv", label: "MKV" }];
-                value: "mov";
-                label: "Format";
-            }
-
-            Caption { text: "SLIDERS AND METERS"; }
-            Slider { value: 0.7; label: "Volume"; }
-            Slider { value: 0.25; minimum: -1; maximum: 1; origin: 0; label: "Balance"; }
-            Meter { rms: -24; peak: -14; hold: -9; label: "Quiet"; }
-            Meter { rms: -12; peak: -4; hold: -2; label: "Loud"; }
-            Meter { rms: -30; peak: -20; hold: -18; muted: true; label: "Muted"; }
-
-            Caption { text: "SMALL THINGS"; }
-            HorizontalLayout {
-                spacing: Theme.space-2;
-                alignment: start;
-                Kbd { text: "⌘"; }
-                Kbd { text: "S"; }
-                Spinner { }
-                VerticalLayout { alignment: center; Dot { dot-color: Theme.danger; } }
-                VerticalLayout { alignment: center; Dot { dot-color: Theme.onair-text; square: true; } }
-                BrandMark { size: 24px; }
+            VerticalLayout {
+                alignment: end;
+                width: 320px;
+                Text {
+                    text: "Mona Sans, Hubot Sans, Martian Mono. One yellow LED; green for program, red for record.";
+                    color: Theme.text-3;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    line-height-factor: Theme.leading-sm;
+                    wrap: word-wrap;
+                }
             }
         }
 
-        // Column 2: a dock, fields, a dropdown
-        VerticalLayout {
-            spacing: Theme.space-2;
-            alignment: start;
-            width: 300px;
-
-            Caption { text: "DOCK, LIST, ROWS"; }
-            Dock {
-                title: "Sources";
-                height: 200px;
-                List {
-                    label: "Sources";
-                    count: 4;
-                    current: 1;
-                    ListRow { text: "Lower Third"; icon: Icons.text; index: 0; count: 4;
-                        IconButton { small: true; icon: Icons.eye; label: "Hide"; }
-                        IconButton { small: true; icon: Icons.unlock; label: "Lock"; }
-                    }
-                    ListRow { text: "Intro Clip"; icon: Icons.media; selected: true; index: 1; count: 4;
-                        IconButton { small: true; icon: Icons.record; label: "ISO"; on: true; on-color: Theme.accent-hover; }
-                        IconButton { small: true; icon: Icons.eye; label: "Hide"; }
-                        IconButton { small: true; icon: Icons.lock; label: "Unlock"; }
-                    }
-                    ListRow { text: "Hidden Title"; icon: Icons.text; dim: true; index: 2; count: 4; }
-                    ListRow { text: "Grouped"; icon: Icons.color; depth: 1; index: 3; count: 4; focus-shown: true; }
-                }
-                DockToolbar {
-                    IconButton { small: true; icon: Icons.plus; label: "Add Source"; }
-                    IconButton { small: true; icon: Icons.minus; label: "Remove Source"; }
-                    IconButton { small: true; icon: Icons.settings; label: "Properties"; }
-                    ToolbarGap { }
-                    IconButton { small: true; icon: Icons.chevron-up; label: "Move Up"; }
-                    IconButton { small: true; icon: Icons.chevron-down; label: "Move Down"; }
-                }
+        // ---- Colour
+        BandBox {
+            gap: Theme.space-4;
+            TitleRow {
+                title: "Colour";
+                note: "Neutral blacks with no tint, white text, one yellow LED, green for program, red for record";
             }
-            ListEmpty { text: "No sources yet. Add one with +."; }
-
-            Caption { text: "FIELDS"; }
-            TextField { text: "Intro Clip"; label: "Name"; }
-            TextField { placeholder: "Type a name"; label: "Empty"; }
-            TextField { text: "Bad value"; invalid: true; label: "Invalid"; }
-            TextField { text: "~/Movies/Isocast"; mono: true; small: true; label: "Path"; }
             HorizontalLayout {
-                spacing: Theme.space-2;
-                NumberField { value: 1920; prefix: "W"; unit: "px"; label: "Width"; }
-                NumberField { value: 300; unit: "ms"; label: "Duration"; enabled: false; }
-            }
-            ColorField { value: "#1f3a4a"; swatch: #1f3a4a; label: "Colour"; }
-            dropdown := Dropdown {
-                options: root.cameras;
-                value: "c";
-                label: "Camera";
-                show-detail: true;
-            }
-            TextArea { text: "Isocast design review\nSecond line"; label: "Text"; }
-        }
-
-        // Column 3: forms, nav, toast
-        VerticalLayout {
-            spacing: Theme.space-2;
-            alignment: start;
-            horizontal-stretch: 1;
-
-            Caption { text: "FORM"; }
-            Rectangle {
-                background: Theme.surface-panel;
-                border-width: 1px;
-                border-color: Theme.line-strong;
-                height: form-body.preferred-height;
-                form-body := VerticalLayout {
-                    Callout { title: "The file can't be read"; message: "/Volumes/IsocastBuild/clip.mp4 is missing."; }
-                    Form {
-                        FormSection { title: "Recording"; }
-                        FormRow { label: "Recording Path"; TextField { text: "~/Movies/Isocast"; mono: true; } Button { text: "Browse"; } }
-                        FormRow { label: "Keep Free"; hint: "A recording won’t start without room for it plus this."; NumberField { value: 1; unit: "GB"; } }
-                        FormRow { label: "Encoder"; Dropdown { options: [{ value: "h264", label: "H.264" }, { value: "hevc", label: "HEVC", detail: "smaller files" }]; value: "hevc"; show-detail: true; } }
-                        FormRow { label: "Record Program"; Switch { on: true; } }
-                        SubForm {
-                            FormRow { label: "Format"; label-width: 120px; Segmented { options: [{ value: "mov", label: "MOV" }, { value: "mp4", label: "MP4" }]; value: "mp4"; } }
+                spacing: Theme.space-6;
+                SwatchColumn {
+                    heading: "Surfaces, dark to light";
+                    Swatch { fill: Theme.surface-monitor; name: "--surface-monitor"; purpose: "Behind the picture"; }
+                    Swatch { fill: Theme.surface-stage; name: "--surface-stage"; purpose: "Preview surround"; }
+                    Swatch { fill: Theme.surface-chrome; name: "--surface-chrome"; purpose: "Status bar, title bars, nav"; }
+                    Swatch { fill: Theme.surface-inset; name: "--surface-inset"; purpose: "Fields, pick lists"; }
+                    Swatch { fill: Theme.surface-header; name: "--surface-header"; purpose: "Dock header band"; }
+                    Swatch { fill: Theme.surface-panel; name: "--surface-panel"; purpose: "Docks, toolbars, dialogs"; }
+                    Swatch { fill: Theme.surface-overlay; name: "--surface-overlay"; purpose: "Menus, popovers, toasts"; }
+                }
+                SwatchColumn {
+                    heading: "Lines and borders";
+                    Swatch { fill: Theme.line; name: "--line"; purpose: "Every structural hairline"; }
+                    Swatch { fill: Theme.line-soft; name: "--line-soft"; purpose: "Between items of one list"; }
+                    Swatch { fill: Theme.line-strong; name: "--line-strong"; purpose: "Control and popover borders"; }
+                    Swatch { fill: Theme.field-border; name: "--field-border"; purpose: "Field at rest"; }
+                    Swatch { fill: Theme.field-border-hover; name: "--field-border-hover"; purpose: "Field on hover, scroll thumb"; }
+                    SubHeading { text: "Control and row states"; }
+                    Swatch { fill: Theme.hover; name: "--hover"; purpose: "Row and quiet-button hover"; }
+                    Swatch { fill: Theme.control; name: "--control"; purpose: "Secondary button at rest"; }
+                    Swatch { fill: Theme.control-hover; name: "--control-hover"; purpose: "Button hover"; }
+                    Swatch { fill: Theme.overlay-hover; name: "--overlay-hover"; purpose: "Menu item hover"; }
+                    Swatch { fill: Theme.control-active; name: "--control-active"; purpose: "Pressed"; }
+                    Swatch { fill: Theme.selected; name: "--selected"; purpose: "Selected row"; }
+                }
+                SwatchColumn {
+                    heading: "Text, on any surface";
+                    Swatch { ink: Theme.text; name: "--text"; purpose: "Names, values, titles"; }
+                    Swatch { ink: Theme.text-2; name: "--text-2"; purpose: "Labels, idle icons"; }
+                    Swatch { ink: Theme.text-3; name: "--text-3"; purpose: "Hints, units, placeholders"; }
+                    Swatch { ink: Theme.text-disabled; name: "--text-disabled"; purpose: "Disabled labels only"; }
+                    HorizontalLayout {
+                        spacing: Theme.space-3;
+                        alignment: start;
+                        Rectangle {
+                            width: 40px;
+                            height: 28px;
+                            border-radius: Theme.r;
+                            background: Theme.surface-inset;
+                            Rectangle {
+                                border-radius: Theme.r;
+                                border-width: 1px;
+                                border-color: Theme.line-soft;
+                            }
+                            Rectangle {
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                                width: 14px;
+                                height: 14px;
+                                border-radius: Theme.r;
+                                border-width: 1px;
+                                border-color: Theme.outline;
+                            }
                         }
-                        FormSeparator { }
-                        FormRow { label: "Opacity"; Slider { value: 0.8; } }
+                        VerticalLayout {
+                            alignment: center;
+                            Token { text: "--outline"; }
+                            Note { text: "Checkbox and radio edges"; }
+                        }
                     }
-                    Callout { kind: CalloutKind.info; title: "Streaming"; message: "Add your stream key first."; }
+                    SubHeading { text: "Brand"; }
+                    Swatch { fill: Theme.slate; name: "--slate"; purpose: "Brand mark ground"; }
+                    Swatch { fill: Theme.limestone; name: "--limestone"; purpose: "Onboarding pictures"; ring: false; }
+                    Swatch { fill: Theme.bone; name: "--bone"; purpose: "Slider thumbs, switch knob"; ring: false; }
+                    HorizontalLayout {
+                        spacing: Theme.space-3;
+                        alignment: start;
+                        Rectangle {
+                            width: 40px;
+                            height: 28px;
+                            border-radius: Theme.r;
+                            border-width: 2px;
+                            border-color: Theme.focus-ring;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Token { text: "--focus-ring"; }
+                            Note { text: "Keyboard focus, 1px gap"; }
+                        }
+                    }
+                }
+                SwatchColumn {
+                    heading: "Accent, yellow LED: active and selected only";
+                    Swatch { fill: Theme.accent; name: "--accent"; purpose: "Strokes: selection, switch on"; ring: false; }
+                    Swatch { fill: Theme.accent-hover; name: "--accent-hover"; purpose: "Row bar, ISO on"; ring: false; }
+                    Swatch { ink: Theme.accent-text; name: "--accent-text"; purpose: "On or chosen: text, icons"; }
+                    Swatch { fill: Theme.accent-soft; name: "--accent-soft"; purpose: "Checked toggle, info callout"; ring: false; }
+                    SubHeading { text: "Filled: the one primary button"; }
+                    Swatch { fill: Theme.accent-fill; ink: Theme.on-accent; ink-on-fill: true; name: "--accent-fill"; purpose: "With --on-accent text"; ring: false; }
+                    Swatch { fill: Theme.accent-fill-hover; name: "--accent-fill-hover"; purpose: "Hover"; ring: false; }
+                    Swatch { fill: Theme.accent-fill-active; name: "--accent-fill-active"; purpose: "Pressed"; ring: false; }
+                    Swatch { fill: Theme.on-accent; name: "--on-accent"; purpose: "Near-black text on yellow fill"; ring: false; }
+                }
+                SwatchColumn {
+                    heading: "Status: on air, live, warning";
+                    Swatch { fill: Theme.onair; name: "--onair"; purpose: "Program ring, dots"; ring: false; }
+                    Swatch { ink: Theme.onair-text; name: "--onair-text"; purpose: "PROGRAM tag, success"; }
+                    Swatch { fill: Theme.onair-fill; name: "--onair-fill"; purpose: "Filled, white text"; ring: false; }
+                    Swatch { fill: Theme.onair-soft; name: "--onair-soft"; purpose: "Done step, soft band"; ring: false; }
+                    Swatch { fill: Theme.danger; name: "--danger"; purpose: "REC dot, invalid border"; ring: false; }
+                    Swatch { ink: Theme.danger-text; name: "--danger-text"; purpose: "Remove, dropped counts"; }
+                    HorizontalLayout {
+                        spacing: Theme.space-3;
+                        alignment: start;
+                        Rectangle {
+                            width: 40px;
+                            height: 28px;
+                            border-radius: Theme.r;
+                            clip: true;
+                            HorizontalLayout {
+                                Rectangle { background: Theme.danger-fill; }
+                                Rectangle { background: Theme.danger-fill-hover; }
+                                Rectangle { background: Theme.danger-fill-active; }
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Token { text: "--danger-fill, -hover, -active"; }
+                            Note { text: "Stop Recording at rest, hover, pressed"; }
+                        }
+                    }
+                    Swatch { fill: Theme.danger-soft; name: "--danger-soft"; purpose: "Error callout, danger hover"; ring: false; }
+                    Swatch { fill: Theme.warning; ink: Theme.on-warning; ink-on-fill: true; name: "--warning, --on-warning"; purpose: "Lagging, reconnecting"; ring: false; }
+                    Swatch { fill: Theme.warning-soft; name: "--warning-soft"; purpose: "Warning callout"; ring: false; }
+                }
+            }
+        }
+
+        // ---- Type, spacing and sizes
+        BandBox {
+            HorizontalLayout {
+                spacing: Theme.space-8;
+                // Type
+                VerticalLayout {
+                    width: 640px;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    TitleRow {
+                        title: "Type";
+                        note: "Mona Sans for UI, Hubot Sans for titles and caps, Martian Mono Light for every live number";
+                    }
+                    VerticalLayout {
+                        spacing: 0;
+                        TypeRow {
+                            first: true;
+                            role: "Display, brand";
+                            spec: "--font-brand · --fs-display/--lh-display\n600 · --tracking-display";
+                            spec-lines: 3;
+                            Text {
+                                text: "Set up your first scene";
+                                color: Theme.text;
+                                font-family: Theme.font-brand;
+                                font-size: Theme.fs-display;
+                                font-weight: Theme.weight-semibold;
+                                letter-spacing: Theme.tracking-display;
+                                line-height-factor: Theme.leading-display;
+                                wrap: word-wrap;
+                                width: 240px;
+                            }
+                        }
+                        TypeRow {
+                            role: "Lead";
+                            spec: "--fs-lead/--lh-lead · 400 · --text-2";
+                            Text { text: "Record every source to its own file."; color: Theme.text-2; font-size: Theme.fs-lead; letter-spacing: Theme.tracking-lead; height: Theme.lh-lead; vertical-alignment: center; }
+                        }
+                        TypeRow {
+                            role: "Heading";
+                            spec: "--fs/--lh · 600 · --text";
+                            Text { text: "Dropping frames"; color: Theme.text; font-size: Theme.fs; font-weight: Theme.weight-semibold; letter-spacing: Theme.tracking; height: Theme.lh; vertical-alignment: center; }
+                        }
+                        TypeRow {
+                            role: "Body";
+                            spec: "--fs/--lh · 400 · --text";
+                            Text { text: "Intro Clip, Desk Camera"; color: Theme.text; font-size: Theme.fs; letter-spacing: Theme.tracking; height: Theme.lh; vertical-alignment: center; }
+                        }
+                        TypeRow {
+                            role: "Control";
+                            spec: "--fs-sm/--lh-sm · 500 · --text";
+                            Text { text: "Start Recording"; color: Theme.text; font-size: Theme.fs-sm; font-weight: Theme.weight-medium; letter-spacing: Theme.tracking-sm; height: Theme.lh-sm; vertical-alignment: center; }
+                        }
+                        TypeRow {
+                            role: "Label";
+                            spec: "--fs-sm/--lh-sm · 400 · --text-2";
+                            Text { text: "Recording Path"; color: Theme.text-2; font-size: Theme.fs-sm; letter-spacing: Theme.tracking-sm; height: Theme.lh-sm; vertical-alignment: center; }
+                        }
+                        TypeRow {
+                            role: "Panel title";
+                            spec: "--fs-sm/--lh-sm · 600 · --text-2";
+                            Text { text: "Audio Mixer"; color: Theme.text-2; font-size: Theme.fs-sm; font-weight: Theme.weight-semibold; letter-spacing: Theme.tracking-sm; height: Theme.lh-sm; vertical-alignment: center; }
+                        }
+                        TypeRow {
+                            role: "Caption";
+                            spec: "--fs-sm/--lh-sm · 400 · --text-3";
+                            Text { text: "Leave room for the next take."; color: Theme.text-3; font-size: Theme.fs-sm; letter-spacing: Theme.tracking-sm; height: Theme.lh-sm; vertical-alignment: center; }
+                        }
+                        TypeRow {
+                            role: "Meta";
+                            spec: "--font-mono 300 · --fs-xs · --text-2";
+                            Text { text: "29.93 fps · 2.4% · 00:12:48"; color: Theme.text-2; font-family: Theme.font-mono; font-weight: Theme.weight-light; font-size: Theme.fs-xs; height: Theme.lh-xs; vertical-alignment: center; }
+                        }
+                        TypeRow {
+                            role: "Tag";
+                            spec: "--font-brand · --fs-micro · 600 · --\ntracking-tag";
+                            spec-lines: 2;
+                            HorizontalLayout {
+                                spacing: Theme.space-4;
+                                Tag { text: "PREVIEW"; tone: TagTone.preview; height: Theme.lh-xs; }
+                                Tag { text: "PROGRAM"; tone: TagTone.program; height: Theme.lh-xs; }
+                            }
+                        }
+                        TypeRow {
+                            role: "Meter scale";
+                            spec: "--fs-micro · 400 · --text-3";
+                            Text { text: "−60      −48      −36      −24      −12      0"; color: Theme.text-3; font-size: Theme.fs-micro; letter-spacing: Theme.tracking-micro; height: Theme.lh-xs; vertical-alignment: center; }
+                        }
+                        TypeRow {
+                            last: true;
+                            role: "Mono";
+                            spec: "--font-mono 300 · --fs-xs";
+                            Text { text: "~/Movies/Isocast/Desk.mov"; color: Theme.text; font-family: Theme.font-mono; font-weight: Theme.weight-light; font-size: Theme.fs-xs; height: Theme.lh-sm; vertical-alignment: center; }
+                        }
+                    }
+                }
+                // Spacing
+                VerticalLayout {
+                    width: 232px;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    Title { text: "Spacing"; }
+                    VerticalLayout {
+                        spacing: Theme.space-2;
+                        padding-top: Theme.space-2;
+                        for sp in [
+                            { name: "--space-1", value: Theme.space-1 },
+                            { name: "--space-2", value: Theme.space-2 },
+                            { name: "--space-3", value: Theme.space-3 },
+                            { name: "--space-4", value: Theme.space-4 },
+                            { name: "--space-5", value: Theme.space-5 },
+                            { name: "--space-6", value: Theme.space-6 },
+                            { name: "--space-8", value: Theme.space-8 },
+                        ]: HorizontalLayout {
+                            height: 16px;
+                            spacing: Theme.space-3;
+                            alignment: start;
+                            Token { text: sp.name; width: 84px; }
+                            Note { text: round(sp.value / 1px); width: 28px; }
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle { width: sp.value; height: 12px; background: Theme.field-border-hover; }
+                            }
+                        }
+                        VerticalLayout {
+                            padding-top: Theme.space-3;
+                            Note { text: "Layout"; }
+                        }
+                        for sp in [
+                            { name: "--pane-x", value: Theme.pane-x, purpose: "Dock inset" },
+                            { name: "--label-gap", value: Theme.label-gap, purpose: "Label to control" },
+                            { name: "--label-col", value: Theme.label-col, purpose: "Form labels" },
+                        ]: HorizontalLayout {
+                            height: 16px;
+                            spacing: Theme.space-3;
+                            alignment: start;
+                            Token { text: sp.name; width: 84px; }
+                            Note { text: round(sp.value / 1px); width: 28px; }
+                            Note { text: sp.purpose; }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: Theme.space-2;
+                        padding-top: Theme.space-3;
+                        Note { text: "Radius and elevation"; }
+                        HorizontalLayout {
+                            spacing: Theme.space-4;
+                            alignment: start;
+                            VerticalLayout {
+                                spacing: Theme.space-2;
+                                Rectangle {
+                                    width: 48px;
+                                    height: 32px;
+                                    background: Theme.control;
+                                    border-width: 1px;
+                                    border-color: Theme.line-strong;
+                                    border-radius: Theme.r;
+                                }
+                                Token { text: "--r"; }
+                                Note { text: "Controls"; }
+                            }
+                            VerticalLayout {
+                                spacing: Theme.space-2;
+                                Rectangle {
+                                    width: 48px;
+                                    height: 32px;
+                                    background: Theme.surface-overlay;
+                                    border-width: 1px;
+                                    border-color: Theme.line-strong;
+                                    border-radius: Theme.r-panel;
+                                    drop-shadow-color: #00000073;
+                                    drop-shadow-blur: 32px;
+                                    drop-shadow-offset-y: 12px;
+                                }
+                                Token { text: "--r-panel"; }
+                                Note { text: "Floating, with shadow"; }
+                            }
+                        }
+                    }
+                }
+                // Sizes
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    Title { text: "Sizes"; }
+                    HorizontalLayout {
+                        spacing: Theme.space-6;
+                        padding-top: Theme.space-2;
+                        VerticalLayout {
+                            width: 200px;
+                            spacing: Theme.space-2;
+                            alignment: start;
+                            Note { text: "Heights"; }
+                            for hs in [
+                                { name: "--control-h-sm", h: Theme.control-h-sm, kind: 0 },
+                                { name: "--control-h", h: Theme.control-h, kind: 0 },
+                                { name: "--control-h-lg", h: Theme.control-h-lg, kind: 0 },
+                                { name: "--row", h: Theme.row, kind: 1 },
+                                { name: "--header", h: Theme.header, kind: 2 },
+                                { name: "--menu-item", h: Theme.menu-item, kind: 3 },
+                                { name: "--toolbar", h: Theme.toolbar, kind: 4 },
+                                { name: "--source-toolbar", h: Theme.source-toolbar, kind: 4 },
+                                { name: "--statusbar", h: Theme.statusbar, kind: 5 },
+                            ]: HorizontalLayout {
+                                spacing: Theme.space-3;
+                                Rectangle {
+                                    width: 24px;
+                                    height: hs.h;
+                                    background: hs.kind == 0 ? Theme.control : hs.kind == 1 ? Theme.hover : hs.kind == 2 ? Theme.surface-header : hs.kind == 3 ? Theme.overlay-hover : hs.kind == 4 ? Theme.surface-panel : Theme.surface-chrome;
+                                    border-width: hs.kind == 0 || hs.kind == 4 ? 1px : 0px;
+                                    border-color: hs.kind == 4 ? Theme.line-soft : Theme.line-strong;
+                                    border-radius: hs.kind <= 1 || hs.kind == 3 ? Theme.r : 0px;
+                                    if hs.kind >= 4: Rectangle { y: 0; height: 1px; background: Theme.line; }
+                                    if hs.kind == 2: Rectangle { y: parent.height - 1px; height: 1px; background: Theme.line; }
+                                }
+                                Token { text: hs.name; horizontal-stretch: 1; }
+                                Note { text: round(hs.h / 1px); }
+                            }
+                        }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: Theme.space-2;
+                            alignment: start;
+                            Note { text: "Icons and dots"; }
+                            for ic in [
+                                { name: "--icon-xs", size: Theme.icon-xs },
+                                { name: "--icon-sm", size: Theme.icon-sm },
+                                { name: "--icon", size: Theme.icon },
+                                { name: "--icon-lg", size: Theme.icon-lg },
+                            ]: HorizontalLayout {
+                                height: 20px;
+                                spacing: Theme.space-3;
+                                Rectangle {
+                                    width: 20px;
+                                    Rectangle {
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        width: ic.size;
+                                        height: ic.size;
+                                        border-radius: Theme.r;
+                                        border-width: 1px;
+                                        border-color: Theme.text-2;
+                                    }
+                                }
+                                Token { text: ic.name; horizontal-stretch: 1; }
+                                Note { text: round(ic.size / 1px); }
+                            }
+                            HorizontalLayout {
+                                height: 20px;
+                                spacing: Theme.space-3;
+                                Rectangle {
+                                    width: 20px;
+                                    Dot {
+                                        x: (parent.width - self.width) / 2;
+                                        y: (parent.height - self.height) / 2;
+                                        dot-color: Theme.danger;
+                                    }
+                                }
+                                Token { text: "--dot"; horizontal-stretch: 1; }
+                                Note { text: round(Theme.dot / 1px); }
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: Theme.space-2;
+                        padding-top: Theme.space-3;
+                        Note { text: "Field widths"; }
+                        for fw in [
+                            { name: "--field-xs", w: Theme.field-xs },
+                            { name: "--field-s", w: Theme.field-s },
+                            { name: "--field-m", w: Theme.field-m },
+                            { name: "--field-l", w: Theme.field-l },
+                        ]: HorizontalLayout {
+                            spacing: Theme.space-3;
+                            alignment: start;
+                            Token { text: fw.name; min-width: 72px; }
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: fw.w;
+                                    height: 8px;
+                                    background: Theme.surface-inset;
+                                    border-width: 1px;
+                                    border-color: Theme.field-border;
+                                    border-radius: Theme.r;
+                                }
+                            }
+                            Note { text: round(fw.w / 1px); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- Buttons, icon buttons, keys, badges and tags
+        BandBox {
+            HorizontalLayout {
+                spacing: Theme.space-8;
+                VerticalLayout {
+                    width: 752px;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    Title { text: "Buttons"; }
+                    HorizontalLayout {
+                        height: Theme.lh-xs;
+                        Rectangle { width: 112px; }
+                        Note { text: "Rest"; width: 128px; }
+                        Note { text: "Hover"; width: 128px; }
+                        Note { text: "Pressed"; width: 128px; }
+                        Note { text: "Keyboard focus"; width: 128px; }
+                        Note { text: "Disabled"; width: 128px; }
+                    }
+                    StateRow {
+                        label: "Secondary";
+                        Cell { Button { text: "Settings"; } }
+                        Cell { Button { text: "Settings"; shown: ShownState.hover; } }
+                        Cell { Button { text: "Settings"; shown: ShownState.pressed; } }
+                        Cell { Button { text: "Settings"; shown: ShownState.focus; } }
+                        Cell { Button { text: "Settings"; enabled: false; } }
+                    }
+                    StateRow {
+                        label: "Primary";
+                        Cell { Button { text: "Continue"; variant: ButtonVariant.primary; } }
+                        Cell { Button { text: "Continue"; variant: ButtonVariant.primary; shown: ShownState.hover; } }
+                        Cell { Button { text: "Continue"; variant: ButtonVariant.primary; shown: ShownState.pressed; } }
+                        Cell { Button { text: "Continue"; variant: ButtonVariant.primary; shown: ShownState.focus; } }
+                        Cell { Button { text: "Continue"; variant: ButtonVariant.primary; enabled: false; } }
+                    }
+                    StateRow {
+                        label: "Quiet";
+                        Cell { Button { text: "Properties"; icon: Icons.settings; variant: ButtonVariant.quiet; } }
+                        Cell { Button { text: "Properties"; icon: Icons.settings; variant: ButtonVariant.quiet; shown: ShownState.hover; } }
+                        Cell { Button { text: "Properties"; icon: Icons.settings; variant: ButtonVariant.quiet; shown: ShownState.pressed; } }
+                        Cell { Button { text: "Properties"; icon: Icons.settings; variant: ButtonVariant.quiet; shown: ShownState.focus; } }
+                        Cell { Button { text: "Properties"; icon: Icons.settings; variant: ButtonVariant.quiet; enabled: false; } }
+                    }
+                    StateRow {
+                        label: "Destructive";
+                        Cell { Button { text: "Remove"; variant: ButtonVariant.danger; } }
+                        Cell { Button { text: "Remove"; variant: ButtonVariant.danger; shown: ShownState.hover; } }
+                        Cell { Button { text: "Remove"; variant: ButtonVariant.danger; shown: ShownState.pressed; } }
+                        Cell { Button { text: "Remove"; variant: ButtonVariant.danger; shown: ShownState.focus; } }
+                        Cell { Button { text: "Remove"; variant: ButtonVariant.danger; enabled: false; } }
+                    }
+                    StateRow {
+                        label: "Live (running)";
+                        Cell { Button { text: "Stop Recording"; variant: ButtonVariant.live; } }
+                        Cell { Button { text: "Stop Recording"; variant: ButtonVariant.live; shown: ShownState.hover; } }
+                        Cell { Button { text: "Stop Recording"; variant: ButtonVariant.live; shown: ShownState.pressed; } }
+                        Cell { Button { text: "Stop Recording"; variant: ButtonVariant.live; shown: ShownState.focus; } }
+                        Cell { Button { text: "Stop Recording"; variant: ButtonVariant.live; enabled: false; } }
+                    }
+                    StateRow {
+                        label: "On / warning";
+                        Cell { Button { text: "Studio Mode"; checked: true; toggle: true; } }
+                        Cell { Button { text: "Reconnecting…"; variant: ButtonVariant.live-warn; } }
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Note { text: "Checked toggle, and the live control while reconnecting"; }
+                        }
+                    }
+                    StateRow {
+                        label: "Sizes";
+                        Cell {
+                            gap: Theme.space-2;
+                            Button { text: "Mark"; size: ControlSize.small; }
+                            Note { text: "22"; }
+                        }
+                        Cell {
+                            gap: Theme.space-2;
+                            Button { text: "Browse"; }
+                            Note { text: "28"; }
+                        }
+                        Cell {
+                            cell-width: 256px;
+                            gap: Theme.space-2;
+                            Button { text: "Create setup"; variant: ButtonVariant.primary; size: ControlSize.large; }
+                            Note { text: "34"; }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    width: 316px;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    Title { text: "Icon buttons"; }
+                    HorizontalLayout {
+                        height: Theme.lh-xs;
+                        Rectangle { width: 56px; }
+                        Note { text: "Rest"; width: 52px; }
+                        Note { text: "Hover"; width: 52px; }
+                        Note { text: "Pressed"; width: 52px; }
+                        Note { text: "On"; width: 52px; }
+                        Note { text: "Disabled"; width: 52px; }
+                    }
+                    StateRow {
+                        label: "28";
+                        label-width: 56px;
+                        Cell { cell-width: 52px; IconButton { icon: Icons.eye; label: "Hide"; show-tooltip: false; } }
+                        Cell { cell-width: 52px; IconButton { icon: Icons.eye; label: "Hide"; show-tooltip: false; shown: ShownState.hover; } }
+                        Cell { cell-width: 52px; IconButton { icon: Icons.eye; label: "Hide"; show-tooltip: false; shown: ShownState.pressed; } }
+                        Cell { cell-width: 52px; IconButton { icon: Icons.eye; label: "Hide"; show-tooltip: false; on: true; } }
+                        Cell { cell-width: 52px; IconButton { icon: Icons.eye; label: "Hide"; show-tooltip: false; enabled: false; } }
+                    }
+                    StateRow {
+                        label: "24 round";
+                        label-width: 56px;
+                        Cell { cell-width: 52px; IconButton { small: true; icon: Icons.eye; label: "Hide"; show-tooltip: false; } }
+                        Cell { cell-width: 52px; IconButton { small: true; icon: Icons.eye; label: "Hide"; show-tooltip: false; shown: ShownState.hover; } }
+                        Cell { cell-width: 52px; IconButton { small: true; icon: Icons.eye; label: "Hide"; show-tooltip: false; shown: ShownState.pressed; } }
+                        Cell { cell-width: 52px; IconButton { small: true; icon: Icons.eye; label: "Hide"; show-tooltip: false; on: true; } }
+                        Cell { cell-width: 52px; IconButton { small: true; icon: Icons.eye; label: "Hide"; show-tooltip: false; enabled: false; } }
+                    }
+                    VerticalLayout {
+                        spacing: Theme.space-2;
+                        padding-top: Theme.space-2;
+                        Note {
+                            text: "Icons: SF-Symbols-like outlines, 1.5px stroke, round caps and joins, at 12, 14, 16 and 22px";
+                            lines: 2;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            height: Theme.control-h-sm;
+                            spacing: Theme.space-3;
+                            alignment: start;
+                            for ic in [Icons.plus, Icons.minus, Icons.chevron-up, Icons.chevron-down, Icons.eye-off, Icons.unlock, Icons.lock, Icons.text]: VerticalLayout {
+                                alignment: center;
+                                Icon { path: ic; }
+                            }
+                        }
+                        HorizontalLayout {
+                            height: Theme.control-h-sm;
+                            spacing: Theme.space-3;
+                            alignment: start;
+                            for ic in [
+                                { path: Icons.media, ink: Theme.text-2 },
+                                { path: Icons.test-pattern, ink: Theme.text-2 },
+                                { path: Icons.speaker, ink: Theme.text-2 },
+                                { path: Icons.muted, ink: Theme.danger-text },
+                                { path: Icons.more-vertical, ink: Theme.text-2 },
+                                { path: Icons.flag, ink: Theme.text-2 },
+                                { path: Icons.scissors, ink: Theme.text-2 },
+                                { path: Icons.record, ink: Theme.accent-hover },
+                            ]: VerticalLayout {
+                                alignment: center;
+                                Icon { path: ic.path; color: ic.ink; }
+                            }
+                        }
+                        HorizontalLayout {
+                            height: Theme.control-h-sm;
+                            spacing: Theme.space-3;
+                            alignment: start;
+                            for ic in [
+                                { path: Icons.live, ink: Theme.text-2 },
+                                { path: Icons.filters, ink: Theme.text-2 },
+                                { path: Icons.headphones, ink: Theme.accent-text },
+                                { path: Icons.info, ink: Theme.text-2 },
+                                { path: Icons.warning, ink: Theme.warning },
+                                { path: Icons.alert, ink: Theme.danger-text },
+                                { path: Icons.check, ink: Theme.onair-text },
+                                { path: Icons.x, ink: Theme.text-2 },
+                            ]: VerticalLayout {
+                                alignment: center;
+                                Icon { path: ic.path; color: ic.ink; }
+                            }
+                        }
+                        HorizontalLayout {
+                            height: Theme.control-h-sm;
+                            spacing: Theme.space-4;
+                            alignment: start;
+                            for sz in [Theme.icon-xs, Theme.icon-sm, Theme.icon, 20px]: HorizontalLayout {
+                                spacing: Theme.space-1;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Icon { path: Icons.settings; size: sz; }
+                                }
+                                Note { text: round(sz / 1px); }
+                            }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    Title { text: "Keys, badges and tags"; }
+                    Note { text: "Kbd"; }
+                    HorizontalLayout {
+                        height: Theme.control-h-sm;
+                        spacing: 6px;
+                        alignment: start;
+                        for k in ["⇧", "⌘", "R", "Esc"]: VerticalLayout {
+                            alignment: center;
+                            Kbd { text: k; }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: Theme.space-3;
+                        padding-top: Theme.space-2;
+                        Note { text: "Badges, 18px capsules"; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            Badge { text: "ISO"; }
+                            Badge { text: "1080p60"; }
+                            Badge { text: "LIVE"; tone: BadgeTone.live; dot: true; }
+                            Badge { text: "REC"; tone: BadgeTone.rec; dot: true; }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: Theme.space-2;
+                        padding-top: Theme.space-2;
+                        Note { text: "Status dots, 7px"; }
+                        HorizontalLayout {
+                            height: Theme.lh-sm;
+                            spacing: Theme.space-2;
+                            alignment: start;
+                            VerticalLayout { alignment: center; Dot { dot-color: Theme.danger; } }
+                            Text { text: "REC"; width: 96px; color: Theme.text-2; font-size: Theme.fs-xs; vertical-alignment: center; }
+                            VerticalLayout { alignment: center; Dot { dot-color: Theme.onair; } }
+                            Text { text: "Program"; color: Theme.text-2; font-size: Theme.fs-xs; vertical-alignment: center; }
+                        }
+                        HorizontalLayout {
+                            height: Theme.lh-sm;
+                            spacing: 6px;
+                            alignment: start;
+                            VerticalLayout { alignment: center; Dot { dot-color: Theme.onair; } }
+                            VerticalLayout { alignment: center; Dot { dot-color: Theme.warning; } }
+                            VerticalLayout { alignment: center; Dot { dot-color: Theme.danger; } }
+                            VerticalLayout { alignment: center; Dot { dot-color: Theme.text-disabled; } }
+                            HorizontalLayout {
+                                padding-left: Theme.space-1;
+                                Text { text: "Health: ok, lagging, bad, off"; color: Theme.text-2; font-size: Theme.fs-xs; vertical-alignment: center; }
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: Theme.space-1;
+                        padding-top: Theme.space-2;
+                        VerticalLayout {
+                            padding-bottom: 4px;
+                            Note { text: "Viewer line tags, Hubot Sans caps"; }
+                        }
+                        HorizontalLayout {
+                            height: 24px;
+                            spacing: Theme.space-2;
+                            alignment: start;
+                            Tag { text: "PREVIEW"; tone: TagTone.preview; }
+                            Text { text: "Main"; color: Theme.text; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        }
+                        HorizontalLayout {
+                            height: 24px;
+                            spacing: Theme.space-2;
+                            alignment: start;
+                            Tag { text: "PROGRAM"; tone: TagTone.program; }
+                            Text { text: "Main"; color: Theme.text; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- Fields, choices, sliders and meters
+        BandBox {
+            HorizontalLayout {
+                spacing: Theme.space-8;
+                VerticalLayout {
+                    width: 416px;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    Title { text: "Fields"; }
+                    VerticalLayout {
+                        spacing: Theme.space-2;
+                        FieldRow { label: "Rest"; TextField { text: "Intro Clip"; width: Theme.field-l; label: "Rest"; } }
+                        FieldRow { label: "Placeholder"; TextField { placeholder: "Type a name"; width: Theme.field-l; label: "Placeholder"; } }
+                        FieldRow { label: "Hover"; TextField { text: "Intro Clip"; width: Theme.field-l; shown: ShownState.hover; label: "Hover"; } }
+                        FieldRow { label: "Editing"; TextField { text: "Intro Clip"; width: Theme.field-l; shown: ShownState.focus; label: "Editing"; } }
+                        FieldRow { label: "Invalid"; TextField { text: "Bad value"; invalid: true; width: Theme.field-l; label: "Invalid"; } }
+                        FieldRow {
+                            label: "Number, stepper";
+                            HorizontalLayout {
+                                spacing: Theme.space-2;
+                                NumberField { value: 1920; prefix: "W"; unit: "px"; width: Theme.field-s; label: "Width"; }
+                                NumberField { value: 300; unit: "ms"; stepper: true; width: Theme.field-xs; label: "Duration"; }
+                                Note { text: "Stepper"; }
+                            }
+                        }
+                        FieldRow {
+                            label: "Path";
+                            HorizontalLayout {
+                                width: Theme.field-l;
+                                spacing: Theme.space-2;
+                                TextField { text: "~/Movies/Isocast"; mono: true; horizontal-stretch: 1; label: "Path"; }
+                                Button { text: "Browse"; font-size: Theme.fs-sm; }
+                            }
+                        }
+                        FieldRow {
+                            label: "Dropdown";
+                            dropdown := Dropdown {
+                                width: Theme.field-l;
+                                options: root.cameras;
+                                value: "c";
+                                label: "Camera";
+                                show-detail: true;
+                            }
+                        }
+                        FieldRow { label: "Colour"; ColorField { value: "#1f3a4a"; swatch: #1f3a4a; width: Theme.field-s; label: "Colour"; } }
+                        FieldRow { label: "Text area"; top: true; TextArea { text: "Isocast design review\nSecond line"; width: Theme.field-l; label: "Text"; } }
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    Title { text: "Choices"; }
+                    VerticalLayout {
+                        spacing: Theme.space-2;
+                        FieldRow {
+                            label: "Checkbox";
+                            height: Theme.control-h;
+                            HorizontalLayout {
+                                spacing: Theme.space-6;
+                                Checkbox { text: "Visible"; checked: true; width: 112px; }
+                                Checkbox { text: "Locked"; width: 112px; }
+                                Checkbox { text: "Disabled"; enabled: false; width: 112px; }
+                            }
+                        }
+                        FieldRow {
+                            label: "Radio";
+                            height: Theme.control-h;
+                            HorizontalLayout {
+                                spacing: Theme.space-6;
+                                Radio { text: "Create new"; checked: true; width: 112px; }
+                                Radio { text: "Add existing"; width: 112px; }
+                                Radio { text: "Disabled"; enabled: false; width: 112px; }
+                            }
+                        }
+                        FieldRow {
+                            label: "Switch";
+                            height: Theme.control-h;
+                            HorizontalLayout {
+                                spacing: Theme.space-6;
+                                for sw in [
+                                    { on: true, label: "On", focus: false },
+                                    { on: false, label: "Off", focus: false },
+                                    { on: true, label: "Focus", focus: true },
+                                ]: HorizontalLayout {
+                                    width: 112px;
+                                    spacing: Theme.space-2;
+                                    alignment: start;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Switch { on: sw.on; label: sw.label; shown: sw.focus ? ShownState.focus : ShownState.live; }
+                                    }
+                                    Text { text: sw.label; color: Theme.text; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                        FieldRow {
+                            label: "Segmented";
+                            height: Theme.control-h;
+                            VerticalLayout {
+                                alignment: center;
+                                Segmented {
+                                    options: [{ value: "mov", label: "MOV" }, { value: "mp4", label: "MP4" }, { value: "mkv", label: "MKV" }];
+                                    value: "mov";
+                                    label: "Format";
+                                }
+                            }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    Title { text: "Sliders and meters"; }
+                    VerticalLayout {
+                        spacing: Theme.space-2;
+                        FieldRow {
+                            label: "Slider";
+                            height: Theme.control-h;
+                            HorizontalLayout {
+                                spacing: Theme.space-3;
+                                Slider { value: 0.65; label: "Opacity"; width: 240px; horizontal-stretch: 0; }
+                                Text {
+                                    text: "65%";
+                                    color: Theme.accent-text;
+                                    font-family: Theme.font-mono;
+                                    font-weight: Theme.weight-light;
+                                    font-size: Theme.fs-xs;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-top: Theme.space-2;
+                            alignment: start;
+                            VerticalLayout {
+                                width: 96px;
+                                padding-top: Theme.space-2;
+                                alignment: start;
+                                Note { text: "Mixer strip"; }
+                            }
+                            VerticalLayout {
+                                width: 344px;
+                                spacing: 1px;
+                                for strip in [
+                                    { name: "Desk Mic", muted: false, monitor: true, gain: 0.72, rms: -15, peak: -9, hold: -6, db: "−9.0 dB" },
+                                    { name: "Camera Audio", muted: true, monitor: false, gain: 0.5, rms: -36, peak: -30, hold: -26, db: "−24.5 dB" },
+                                ]: Rectangle {
+                                    height: 44px;
+                                    background: Theme.hover;
+                                    HorizontalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        spacing: Theme.space-2;
+                                        Text {
+                                            width: 96px;
+                                            text: strip.name;
+                                            color: strip.muted ? Theme.text-2 : Theme.text;
+                                            font-weight: Theme.weight-medium;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            MiniToggle { text: "M"; solid: true; on: strip.muted; label: "Mute"; }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            MiniToggle { icon: Icons.headphones; on: strip.monitor; label: "Monitor"; }
+                                        }
+                                        VerticalLayout {
+                                            width: 100px;
+                                            alignment: center;
+                                            spacing: 5px;
+                                            padding-top: 2px;
+                                            Slider { thin: false; height: 12px; value: strip.gain; fill: strip.muted ? Theme.text-disabled : Theme.onair; label: strip.name; }
+                                            Meter { rms: strip.rms; peak: strip.peak; hold: strip.hold; muted: strip.muted; show-scale: false; label: strip.name; }
+                                        }
+                                        Text {
+                                            width: 62px;
+                                            text: strip.db;
+                                            color: strip.muted ? Theme.text-3 : Theme.text;
+                                            font-family: Theme.font-mono;
+                                            font-weight: Theme.weight-light;
+                                            font-size: Theme.fs-xs;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        FieldRow {
+                            label: "Master level";
+                            height: Theme.control-h + 12px;
+                            HorizontalLayout {
+                                padding-top: 12px;
+                                spacing: Theme.space-3;
+                                VerticalLayout {
+                                    alignment: center;
+                                    MasterMeter { split: true; left-rms: -15; left-peak: -15; left-hold: -60; right-rms: -17; right-peak: -17; right-hold: -60; }
+                                }
+                                Note { text: "Green to −12, yellow to −3, red above"; }
+                            }
+                        }
+                        FieldRow {
+                            label: "Meter scale";
+                            Meter { width: 240px; rms: -18; peak: -10; hold: -4; label: "Scale"; }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- Dock and list rows, menu, toasts and tooltip
+        BandBox {
+            HorizontalLayout {
+                spacing: Theme.space-8;
+                alignment: start;
+                VerticalLayout {
+                    width: 336px;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    TitleRow { title: "Dock, list rows, toolbar"; note: "Rest, hover, selected, hidden"; }
+                    Rectangle {
+                        height: 300px;
+                        border-width: 1px;
+                        border-color: Theme.line;
+                        background: Theme.surface-panel;
+                        VerticalLayout {
+                            x: 1px;
+                            y: 1px;
+                            width: parent.width - 2px;
+                            height: parent.height - 2px;
+                            PanelHeader {
+                                title: "Sources";
+                                VerticalLayout { alignment: center; IconButton { compact: true; icon: Icons.plus; label: "Add Source"; show-tooltip: false; } }
+                                VerticalLayout { alignment: center; IconButton { compact: true; icon: Icons.more; label: "More"; show-tooltip: false; } }
+                            }
+                            List {
+                                label: "Sources";
+                                count: 5;
+                                current: 2;
+                                ListRow {
+                                    text: "Lower Third";
+                                    icon: Icons.text;
+                                    index: 0;
+                                    count: 5;
+                                    BadgeLane { }
+                                    RowToggle { icon: Icons.eye; }
+                                    RowToggle { icon: Icons.unlock; }
+                                }
+                                ListRow {
+                                    text: "Desk Camera";
+                                    icon: Icons.camera;
+                                    shown: ShownState.hover;
+                                    index: 1;
+                                    count: 5;
+                                    BadgeLane { VerticalLayout { alignment: center; Badge { text: "ISO"; } } }
+                                    RowToggle { icon: Icons.eye; ink: Theme.text-2; }
+                                    RowToggle { icon: Icons.unlock; ink: Theme.text-2; }
+                                }
+                                ListRow {
+                                    text: "Intro Clip";
+                                    icon: Icons.media;
+                                    selected: true;
+                                    index: 2;
+                                    count: 5;
+                                    BadgeLane { VerticalLayout { alignment: center; Badge { text: "ISO"; } } }
+                                    RowToggle { icon: Icons.eye; ink: Theme.text-2; }
+                                    RowToggle { icon: Icons.unlock; ink: Theme.text-2; }
+                                }
+                                ListRow {
+                                    text: "Hidden Title";
+                                    icon: Icons.text;
+                                    dim: true;
+                                    index: 3;
+                                    count: 5;
+                                    BadgeLane { }
+                                    RowToggle { icon: Icons.eye-off; ink: Theme.text-2; }
+                                    RowToggle { icon: Icons.unlock; }
+                                }
+                                ListRow {
+                                    text: "Main (scene row)";
+                                    icon: Icons.scene-card;
+                                    index: 4;
+                                    count: 5;
+                                    BadgeLane { VerticalLayout { alignment: center; Badge { text: "LIVE"; tone: BadgeTone.live; } } }
+                                    Rectangle { width: Theme.icon-button-xs; }
+                                    Rectangle { width: Theme.icon-button-xs; }
+                                }
+                            }
+                            DockToolbar {
+                                alignment: LayoutAlignment.space-between;
+                                Capsule {
+                                    CapsuleButton { icon: Icons.plus; label: "Add Source"; }
+                                    CapsuleDivider { }
+                                    CapsuleButton { icon: Icons.minus; label: "Remove Source"; }
+                                    CapsuleDivider { }
+                                    CapsuleButton { icon: Icons.settings; label: "Properties"; }
+                                }
+                                Capsule {
+                                    CapsuleButton { icon: Icons.chevron-up; label: "Move Up"; }
+                                    CapsuleDivider { }
+                                    CapsuleButton { icon: Icons.chevron-down; label: "Move Down"; }
+                                }
+                            }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    width: 232px;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    TitleRow { title: "Menu"; note: "Copy is hovered"; }
+                    MenuPanel {
+                        width: 208px;
+                        height: menu-view.preferred-height + 2px;
+                        menu-view := MenuView {
+                            x: 1px;
+                            y: 1px;
+                            width: parent.width - 2px;
+                            list: {
+                                lane: true,
+                                entries: [
+                                    { id: "add", label: "Add", has-submenu: true },
+                                    { kind: MenuEntryKind.separator },
+                                    { id: "copy", label: "Copy", hint: "⌘C" },
+                                    { id: "paste", label: "Paste (Reference)", hint: "⌘V", disabled: true },
+                                    { kind: MenuEntryKind.separator },
+                                    { label: "Scene", kind: MenuEntryKind.heading },
+                                    { id: "visible", label: "Visible", checked: true },
+                                    { id: "lock", label: "Lock", icon: "lock" },
+                                    { kind: MenuEntryKind.separator },
+                                    { id: "remove", label: "Remove", hint: "⌫", danger: true },
+                                ],
+                            };
+                            active: 2;
+                        }
+                    }
+                }
+                VerticalLayout {
+                    width: 360px;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    TitleRow { title: "Toasts"; note: "Stack top right, 360 wide"; }
+                    Toast { toast: { id: 1, kind: ToastKind.info, title: "Removed “Intro Clip”", action: "Undo" }; }
+                    Toast { toast: { id: 2, kind: ToastKind.warning, title: "Dropping frames", message: "The recording carries on.", action: "Details", rows: [{ label: "Program", value: "12 dropped", tone: "bad" }, { label: "Camera audio", value: "2 gaps", tone: "warn" }] }; }
+                    VerticalLayout {
+                        spacing: Theme.space-3;
+                        padding-top: Theme.space-3;
+                        TitleRow { title: "Tooltip"; note: "Native, sentence case, under 80 characters"; }
+                        VerticalLayout {
+                            spacing: Theme.space-1;
+                            alignment: start;
+                            HorizontalLayout {
+                                alignment: start;
+                                IconButton { icon: Icons.eye; label: "Hide"; show-tooltip: false; shown: ShownState.hover; }
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                Tip { text: "Hide this source in the preview and recording"; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- Control bar, inspector, status bar and sheets
+        BandBox {
+            gap: Theme.space-6;
+            TitleRow { title: "Control bar, inspector, status bar and sheets"; note: "Logic's instrument, Final Cut's bands, Tower's sheets"; }
+
+            // The control bar: the selection, the LCD, the transport.
+            Rectangle {
+                height: Theme.source-toolbar;
+                background: Theme.surface-chrome;
+                border-width: 1px;
+                border-color: Theme.frame-line;
+                HorizontalLayout {
+                    padding-left: Theme.pane-x;
+                    padding-right: 10px;
+                    HorizontalLayout {
+                        width: 440px;
+                        spacing: 10px;
+                        alignment: start;
+                        VerticalLayout {
+                            alignment: center;
+                            Icon { path: Icons.media; color: Theme.accent-text; }
+                        }
+                        Text { text: "Intro Clip"; color: Theme.text; font-weight: Theme.weight-semibold; vertical-alignment: center; }
+                        Text { text: "1920×1080 · 30p · Stereo"; color: Theme.text-3; font-size: Theme.fs-xs; vertical-alignment: center; }
+                    }
+                    HorizontalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        VerticalLayout {
+                            alignment: center;
+                            Lcd {
+                                LcdTime { seconds: 761; label: "REC"; tone: LcdTone.recording; }
+                                LcdCell { value: "29.93"; label: "FPS"; }
+                                LcdCell { value: "0"; label: "DROPPED"; }
+                                LcdCell { value: "2.4%"; label: "CPU"; last: true; }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        width: 440px;
+                        spacing: Theme.space-3;
+                        alignment: end;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            VerticalLayout { alignment: center; TransportButton { kind: TransportKind.stream; label: "Start Streaming"; } }
+                            VerticalLayout { alignment: center; TransportButton { kind: TransportKind.record; active: true; label: "Stop Recording"; } }
+                            VerticalLayout { alignment: center; TransportButton { kind: TransportKind.stop; label: "Stop"; } }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            MasterMeter { left-rms: -21; left-peak: -14; left-hold: -9; right-rms: -22; right-peak: -16; right-hold: -12; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Capsule {
+                                large: true;
+                                CapsuleButton { large: true; icon: Icons.settings; label: "Properties"; }
+                                CapsuleDivider { large: true; }
+                                CapsuleButton { large: true; icon: Icons.filters; label: "Filters"; }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: Theme.space-1;
+                            VerticalLayout { alignment: center; IconButton { small: true; icon: Icons.panel-bottom; icon-size: Theme.icon-sm; on: true; label: "Docks"; show-tooltip: false; } }
+                            VerticalLayout { alignment: center; IconButton { small: true; icon: Icons.panel-right; icon-size: Theme.icon-sm; label: "Studio column"; show-tooltip: false; } }
+                        }
+                    }
                 }
             }
 
-            Caption { text: "NAV, TOAST"; }
+            // The transport's states and the LCD's.
             HorizontalLayout {
-                spacing: Theme.space-4;
+                spacing: 28px;
+                alignment: start;
+                Labelled { caption: "Record idle"; TransportButton { kind: TransportKind.record; label: "Start Recording"; } }
+                Labelled { caption: "Recording (stop)"; TransportButton { kind: TransportKind.record; active: true; label: "Stop Recording"; } }
+                Labelled { caption: "Stream idle"; TransportButton { kind: TransportKind.stream; label: "Start Streaming"; } }
+                Labelled { caption: "Streaming"; TransportButton { kind: TransportKind.stream; active: true; label: "Stop Streaming"; } }
+                Labelled { caption: "LCD cell when frames drop"; LcdCell { standalone: true; value: "12"; label: "DROPPED"; tone: LcdTone.warning; } }
+                Labelled { caption: "Idle, fully dimmed"; LcdTime { standalone: true; seconds: 0; label: "REC"; } }
+            }
+
+            // The inspector, a sheet, an empty dock.
+            HorizontalLayout {
+                spacing: Theme.space-8;
+                VerticalLayout {
+                    alignment: start;
+                    Inspector {
+                        width: 400px;
+                        title: "Transform";
+                        resettable: true;
+                        Band {
+                            label: "Position";
+                            trailing-pad: 10px;
+                            HorizontalLayout {
+                                spacing: 14px;
+                                Pair { axis: "X"; value: "120.0"; }
+                                Pair { axis: "Y"; value: "64.0"; }
+                                Text { text: "px"; color: Theme.text-3; font-size: Theme.fs-xs; vertical-alignment: center; }
+                            }
+                        }
+                        Band {
+                            label: "Scale";
+                            trailing-pad: 10px;
+                            VerticalLayout {
+                                alignment: center;
+                                Slider { thin: true; value: 0.65; width: 120px; horizontal-stretch: 0; label: "Scale"; }
+                            }
+                            Text {
+                                width: 48px;
+                                text: "64%";
+                                color: Theme.accent-text;
+                                font-family: Theme.font-mono;
+                                font-weight: Theme.weight-light;
+                                font-size: Theme.fs-xs;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Band {
+                            label: "Blend";
+                            VerticalLayout {
+                                alignment: center;
+                                Dropdown {
+                                    small: true;
+                                    width: 80px;
+                                    options: [{ value: "normal", label: "Normal" }, { value: "add", label: "Additive" }];
+                                    value: "normal";
+                                    label: "Blend";
+                                }
+                            }
+                        }
+                        Band {
+                            label: "Record ISO file";
+                            trailing-pad: 10px;
+                            VerticalLayout {
+                                alignment: center;
+                                Switch { on: true; label: "Record ISO file"; }
+                            }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: start;
+                    SheetFrame {
+                        width: 520px;
+                        title: "Recording output";
+                        subtitle: "Where takes are written and how much room to keep free.";
+                        icon: Icons.filters;
+                        icon-accent: "M12 3a2 2 0 1 0 0 4a2 2 0 1 0 0 -4z";
+                        VerticalLayout {
+                            padding-left: Theme.sheet-pad;
+                            padding-right: Theme.sheet-pad;
+                            RowGroup {
+                                GroupRow {
+                                    label: "Keep free";
+                                    place: RowPlace.first;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        NumberField { value: 20; unit: "GB"; stepper: true; small: true; width: Theme.field-xs; stepper-fill: Theme.control-hover; label: "Keep free"; }
+                                    }
+                                }
+                                GroupRow {
+                                    label: "Format";
+                                    place: RowPlace.last;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Segmented { small: true; options: [{ value: "mov", label: "MOV" }, { value: "mp4", label: "MP4" }]; value: "mov"; label: "Format"; }
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-left: Theme.sheet-pad;
+                            padding-right: Theme.sheet-pad;
+                            padding-top: 14px;
+                            spacing: Theme.space-2;
+                            VerticalLayout {
+                                alignment: center;
+                                Icon { path: Icons.display; size: Theme.icon-xs; color: Theme.text-3; }
+                            }
+                            Note { text: "1920×1080 | 30 fps · Stereo 48 kHz · H.264 · ~4.3 GB/h · 212 GB free"; horizontal-stretch: 1; }
+                        }
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 240px;
+                    background: Theme.surface-panel;
+                    border-width: 1px;
+                    border-color: Theme.line;
+                    EmptyState {
+                        width: parent.width;
+                        height: parent.height;
+                        icon: Icons.empty-scene;
+                        text: "No sources in this scene";
+                    }
+                }
+            }
+
+            // The status bar.
+            Rectangle {
+                height: Theme.statusbar;
+                background: Theme.surface-chrome;
+                border-width: 1px;
+                border-color: Theme.frame-line;
+                HorizontalLayout {
+                    padding-left: Theme.pane-x;
+                    padding-right: Theme.pane-x;
+                    HorizontalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 14px;
+                        alignment: start;
+                        VerticalLayout {
+                            alignment: center;
+                            Badge { text: "REC"; tone: BadgeTone.rec; dot: true; status: true; }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Note { text: "Recording to ~/Movies/Isocast · 3 ISO files"; }
+                        }
+                    }
+                    HorizontalLayout {
+                        horizontal-stretch: 0;
+                        spacing: Theme.space-4;
+                        alignment: end;
+                        Text { text: "0 dropped"; color: Theme.text-3; font-family: Theme.font-mono; font-weight: Theme.weight-light; font-size: Theme.fs-xs; vertical-alignment: center; }
+                        Rule { }
+                        Text { text: "6.2 Mb/s"; color: Theme.text-3; font-family: Theme.font-mono; font-weight: Theme.weight-light; font-size: Theme.fs-xs; vertical-alignment: center; }
+                        Rule { }
+                        Text { text: "212 GB free"; color: Theme.text-3; font-family: Theme.font-mono; font-weight: Theme.weight-light; font-size: Theme.fs-xs; vertical-alignment: center; }
+                    }
+                }
+            }
+        }
+
+        // ---- Beyond the board: the signature pieces the Screens boards add
+        // (Settings' sidebar and grouped rows, Studio Mode's column,
+        // Welcome's readout and choices, the viewer line, callouts).
+        BandBox {
+            gap: Theme.space-6;
+            TitleRow { title: "From the Screens boards"; note: "Settings sheet, Studio Mode, Welcome, viewer line"; }
+            HorizontalLayout {
+                spacing: Theme.space-8;
                 alignment: start;
                 NavList {
-                    height: 140px;
+                    height: 360px;
+                    label: "Settings";
                     tabs: [
-                        { id: "general", label: "General", icon: "settings" },
-                        { id: "stream", label: "Stream", icon: "live" },
-                        { id: "output", label: "Output", icon: "disk" },
-                        { id: "hotkeys", label: "Hotkeys", icon: "keyboard" },
+                        { id: "output", label: "Output", icon: "disk", group: "Recording" },
+                        { id: "video", label: "Video", icon: "display", group: "Recording" },
+                        { id: "audio", label: "Audio", icon: "speaker", group: "Recording" },
+                        { id: "stream", label: "Stream", icon: "live", group: "Broadcast" },
+                        { id: "general", label: "General", icon: "settings", group: "System" },
+                        { id: "hotkeys", label: "Hotkeys", icon: "keyboard", group: "System" },
+                        { id: "advanced", label: "Advanced", icon: "filters", group: "System" },
                     ];
                     current: "output";
                 }
                 VerticalLayout {
-                    spacing: Theme.space-2;
-                    Toast { toast: { id: 1, kind: ToastKind.info, title: "Removed “Intro Clip”", action: "Undo" }; }
-                    Toast { toast: { id: 2, kind: ToastKind.warning, title: "Dropping frames", message: "The recording carries on.", action: "Details", rows: [{ label: "Program", value: "12 dropped", tone: "bad" }, { label: "Camera audio", value: "2 gaps", tone: "warn" }] }; }
+                    width: 610px;
+                    alignment: start;
+                    GroupHeading { title: "Recording"; resettable: true; }
+                    RowGroup {
+                        GroupRow {
+                            label: "Recording Path";
+                            place: RowPlace.first;
+                            VerticalLayout {
+                                alignment: center;
+                                TextField { text: "~/isocast-scratch/refine/rec"; mono: true; small: true; width: 300px; label: "Recording Path"; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Button { text: "Browse…"; size: ControlSize.small; on-control: true; }
+                            }
+                        }
+                        GroupRow {
+                            label: "Recording Quality";
+                            VerticalLayout {
+                                alignment: center;
+                                Segmented {
+                                    small: true;
+                                    label: "Recording Quality";
+                                    options: [{ value: "low", label: "Low" }, { value: "medium", label: "Medium" }, { value: "high", label: "High" }, { value: "very-high", label: "Very high" }, { value: "incredible", label: "Incredible" }];
+                                    value: "medium";
+                                }
+                            }
+                        }
+                        GroupRow {
+                            label: "Keep Free";
+                            place: RowPlace.last;
+                            VerticalLayout {
+                                alignment: center;
+                                NumberField { value: 1; unit: "GB"; stepper: true; small: true; width: Theme.field-xs; stepper-fill: Theme.control-hover; label: "Keep Free"; }
+                            }
+                        }
+                    }
+                    GroupHint { text: "A recording won't start without room for it plus this, and stops cleanly when the disk gets this low."; }
+                    GroupHeading { title: "ISO Recording"; resettable: true; }
+                    RowGroup {
+                        GroupRow {
+                            label: "Record ISO Files";
+                            place: RowPlace.only;
+                            trailing-pad: Theme.space-2;
+                            VerticalLayout {
+                                alignment: center;
+                                Switch { label: "Record ISO Files"; }
+                            }
+                        }
+                    }
+                    GroupHint { text: "Each source chosen below in its own file, at its own size, on the program's clock."; }
+                }
+                VerticalLayout {
+                    width: 160px;
+                    spacing: Theme.space-3;
+                    alignment: start;
+                    Button { text: "Transition"; icon: Icons.arrow-right; variant: ButtonVariant.primary; size: ControlSize.large; font-weight: Theme.weight-semibold; }
+                    QuickList {
+                        label: "Quick transitions";
+                        QuickRow { text: "Cut"; index: 0; count: 3; }
+                        QuickRow { text: "Fade"; detail: "300 ms"; index: 1; count: 3; shown: ShownState.hover; }
+                        QuickRow { text: "Fade to Black"; detail: "300 ms"; index: 2; count: 3; last: true; }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        IconButton { icon: Icons.settings; icon-size: Theme.icon-sm; label: "Transition settings"; show-tooltip: false; }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-8;
+                alignment: start;
+                VerticalLayout {
+                    spacing: Theme.space-6;
+                    alignment: start;
+                    HorizontalLayout {
+                        alignment: center;
+                        LcdHero { lead: "00:00:00"; label: "REC TIME"; }
+                    }
+                    HorizontalLayout {
+                        spacing: Theme.space-3;
+                        alignment: start;
+                        Button { width: 180px; text: "Start with this Mac"; icon: Icons.display; variant: ButtonVariant.primary; size: ControlSize.large; capsule: true; font-weight: Theme.weight-semibold; }
+                        Button { width: 180px; text: "Import from OBS…"; icon: Icons.file-up; size: ControlSize.large; capsule: true; }
+                        Button { width: 180px; text: "Open a Setup…"; icon: Icons.folder-open; size: ControlSize.large; capsule: true; }
+                    }
+                }
+                VerticalLayout {
+                    width: 420px;
+                    spacing: Theme.space-4;
+                    alignment: start;
+                    HorizontalLayout {
+                        height: Theme.statusbar;
+                        spacing: Theme.space-2;
+                        alignment: start;
+                        Tag { text: "PREVIEW"; tone: TagTone.preview; }
+                        Text { text: "Main"; color: Theme.text; font-size: Theme.fs-sm; font-weight: Theme.weight-medium; vertical-alignment: center; }
+                        Rectangle { width: Theme.space-6; }
+                        VerticalLayout { alignment: center; TextMenuButton { text: "Fit"; value: "64%"; } }
+                        VerticalLayout { alignment: center; TextMenuButton { text: "View"; shown: ShownState.hover; } }
+                    }
+                    Callout { title: "The file can't be read"; message: "/Volumes/IsocastBuild/clip.mp4 is missing."; }
+                    Callout { kind: CalloutKind.info; title: "Streaming"; message: "Add your stream key first."; }
+                    HorizontalLayout {
+                        spacing: Theme.space-3;
+                        alignment: start;
+                        Spinner { }
+                        VerticalLayout { alignment: center; Note { text: "Working (turns, even with Reduce motion)"; } }
+                    }
                 }
             }
         }
@@ -247,9 +1815,10 @@ export component KitGallery inherits Rectangle {
 
     if root.show-dialog: Dialog {
         title: "Create/Select Source";
+        subtitle: "Colour Source · Main";
+        icon: Icons.color;
         dialog-width: 440px;
         Form {
-            Text { text: "Colour Source · Main"; color: Theme.text; font-weight: Theme.weight-semibold; }
             Radio { text: "Create new"; checked: true; }
             TextField { text: "Colour Source"; auto-focus: true; }
             Radio { text: "Add Existing"; }

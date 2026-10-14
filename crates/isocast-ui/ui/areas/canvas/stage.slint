@@ -1,43 +1,173 @@
-// The preview area at the top of the window (docs/design.md 3.17): the
-// canvas letterboxed on the stage with 8px around it. In Studio Mode it
-// splits into Preview (left, edited) and Program (right), each with its
-// tag and scene name above it, and the studio column (area C) between
-// them, as in OBS.
+// The preview area at the top of the window (Paper "C. Console", Main
+// window and Studio Mode boards): Final Cut's viewer. Above the picture
+// the viewer line: the canvas's format on the left, the scene's name in
+// the middle, the zoom ("Fit 51% ⌄") and View menus on the right; under
+// it the canvas letterboxed on the stage, 8px clear of the window's sides
+// and the control bar. In Studio Mode it splits into Preview (left,
+// edited) and Program (right), each with its own viewer line (a PREVIEW
+// or PROGRAM tag and the scene's name), and the studio column (area C)
+// between them, as in OBS.
 
 import { Theme } from "../../theme.slint";
 import { Ui } from "../../state.slint";
-import { Menus } from "../../kit.slint";
+import { Menus, Tag, TagTone, TextMenuButton } from "../../kit.slint";
 import { CanvasArea } from "state.slint";
 import { Monitor } from "monitor.slint";
 import { StudioColumn } from "../controls/studio.slint";
 
-// A monitor's head: its tag (PREVIEW in copper, PROGRAM in teal) and the
-// scene's name.
-component MonitorHead inherits Rectangle {
-    in property <string> tag;
-    in property <color> tag-color;
-    in property <string> name;
-    height: 26px;
-    HorizontalLayout {
-        padding-bottom: 6px;
-        spacing: Theme.space-2;
-        alignment: center;
-        Text {
-            text: root.tag;
-            color: root.tag-color;
-            font-size: Theme.fs-xs;
-            font-weight: Theme.weight-semibold;
-            letter-spacing: Theme.tracking-tag;
-            vertical-alignment: center;
+// The canvas's format: "1920×1080 · 30p".
+global Format {
+    out property <string> canvas: Ui.canvas-width + "×" + Ui.canvas-height + " · " + Ui.canvas-fps + "p";
+}
+
+// A viewer line's small text (11px `text-3`).
+component LineText inherits Text {
+    color: Theme.text-3;
+    font-size: Theme.fs-xs;
+    letter-spacing: Theme.tracking-xs;
+    vertical-alignment: center;
+    accessible-role: none;
+}
+
+// The main viewer line (Paper: 28px on the stage, 14px in): the format,
+// the scene centred on the window, the zoom and View menus. Before there
+// is a setup: "No format", "No scene" and "Fit", faded (Paper's Welcome
+// board).
+component ViewerLine inherits Rectangle {
+    // The picture's scale, in screen pixels per canvas pixel.
+    in property <float> zoom;
+
+    height: Theme.statusbar;
+    accessible-role: groupbox;
+    accessible-label: "Viewer";
+
+    if !Ui.has-setup: HorizontalLayout {
+        padding-left: Theme.pane-x;
+        padding-right: Theme.pane-x;
+        // Equal sides (Paper's flex-basis 0), so the middle is centred.
+        LineText {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            preferred-width: 0px;
+            text: "No format";
+            color: Theme.text-disabled;
         }
         Text {
+            text: "No scene";
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            font-weight: Theme.weight-medium;
+            letter-spacing: Theme.tracking-sm;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+        LineText {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            preferred-width: 0px;
+            text: "Fit";
+            color: Theme.text-disabled;
+            horizontal-alignment: right;
+        }
+    }
+
+    if Ui.has-setup: LineText {
+        x: Theme.pane-x;
+        y: (parent.height - self.height) / 2;
+        height: Theme.lh-xs;
+        width: min(Theme.viewer-side, max(0px, (parent.width - name.width) / 2 - Theme.pane-x - Theme.space-2));
+        text: Format.canvas + " · Rec. 709";
+        overflow: elide;
+        accessible-role: AccessibleRole.text;
+        accessible-label: "Canvas";
+        accessible-value: self.text;
+    }
+    name := Text {
+        visible: Ui.has-setup;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: min(self.preferred-width, parent.width / 3);
+        height: Theme.lh-sm;
+        text: CanvasArea.program-name;
+        color: Theme.text;
+        font-size: Theme.fs-sm;
+        font-weight: Theme.weight-semibold;
+        letter-spacing: Theme.tracking-sm;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: AccessibleRole.text;
+        accessible-label: "Scene";
+        accessible-value: self.text;
+    }
+    if Ui.has-setup: HorizontalLayout {
+        x: parent.width - Theme.pane-x - self.width;
+        width: self.preferred-width;
+        spacing: Theme.line-gap;
+        VerticalLayout {
+            alignment: center;
+            scale := TextMenuButton {
+                text: Ui.preview-scale == "canvas" ? "Canvas" : "Fit";
+                value: round(root.zoom * 100) + "%";
+                menu-open: Menus.open && Menus.owner == "viewer:scale";
+                clicked => { Menus.request("viewer:scale", self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            TextMenuButton {
+                text: "View";
+                menu-open: Menus.open && Menus.owner == "viewer:view";
+                clicked => { Menus.request("viewer:view", self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+            }
+        }
+    }
+}
+
+// A Studio Mode monitor's viewer line (Paper: 28px, 2px in): its tag
+// (PREVIEW yellow, PROGRAM green) and the scene's name, and on the right
+// what it shows at (the zoom, or the format).
+component MonitorHead inherits Rectangle {
+    in property <string> tag;
+    in property <TagTone> tone;
+    in property <string> name;
+    // On the right: a word and a Martian Mono value ("Fit" "41%"), or a
+    // word alone (the format).
+    in property <string> info;
+    in property <string> info-value;
+
+    height: Theme.statusbar;
+    accessible-role: groupbox;
+    accessible-label: root.tag + " " + root.name;
+
+    HorizontalLayout {
+        padding-left: 2px;
+        padding-right: 2px;
+        spacing: Theme.space-2;
+        Tag {
+            text: root.tag;
+            tone: root.tone;
+        }
+        Text {
+            horizontal-stretch: 1;
             text: root.name;
             color: Theme.text;
             font-size: Theme.fs-sm;
+            font-weight: Theme.weight-medium;
             letter-spacing: Theme.tracking-sm;
-            font-weight: Theme.weight-semibold;
             vertical-alignment: center;
             overflow: elide;
+        }
+        HorizontalLayout {
+            spacing: Theme.space-1;
+            LineText {
+                text: root.info;
+            }
+            if root.info-value != "": LineText {
+                text: root.info-value;
+                font-family: Theme.font-mono;
+                font-weight: Theme.weight-light;
+            }
         }
     }
 }
@@ -76,13 +206,14 @@ export component Stage inherits Rectangle {
     out property <length> stage-height: root.height;
 
     property <length> pad: Theme.space-2;
-    property <length> column: 160px;
-    property <length> head: 26px;
+    property <length> column: Theme.studio-column;
+    // A viewer line (Paper: 28px, the status bar's height).
+    property <length> head: Theme.statusbar;
     property <bool> actual: Ui.preview-scale == "canvas";
     property <float> aspect: max(1, Ui.canvas-width) / max(1, Ui.canvas-height);
     // Studio Mode: each side's picture, as large as fits (or one canvas
     // pixel to a screen pixel).
-    property <length> side: max(0px, (root.width - 2 * root.pad - root.column - 2 * Theme.space-2) / 2);
+    property <length> side: max(0px, (root.width - 2 * root.pad - root.column - 2 * root.pad) / 2);
     property <length> pic-w: root.actual ? max(1, Ui.canvas-width) * 1phx : min(root.side, max(0px, root.height - 2 * root.pad - root.head) * root.aspect);
     property <length> pic-h: root.pic-w / root.aspect;
     property <length> slot-y: (root.height - root.head - root.pic-h) / 2;
@@ -101,13 +232,24 @@ export component Stage inherits Rectangle {
         }
     }
 
-    // The edited monitor: the whole stage, or Studio Mode's left side.
+    // The main viewer line: a layer of its own (its words and chevrons
+    // would otherwise be drawn again for every meter step).
+    if !Ui.studio: ViewerLine {
+        cache-rendering-hint: true;
+        y: 0;
+        width: root.width;
+        zoom: editor.scale * 1px / 1phx;
+    }
+
+    // The edited monitor: under the viewer line, 8px clear of the sides
+    // and the control bar (its 1px ring inside that), or Studio Mode's
+    // left side.
     editor := Monitor {
-        x: Ui.studio ? root.pad + (root.side - root.pic-w) : 0;
-        y: Ui.studio ? root.slot-y + root.head : 0;
-        width: Ui.studio ? root.pic-w : root.width;
-        height: Ui.studio ? root.pic-h : root.height;
-        pad: Ui.studio ? 0 : root.pad;
+        x: Ui.studio ? root.pad + (root.side - root.pic-w) : root.pad;
+        y: Ui.studio ? root.slot-y + root.head : root.head;
+        width: Ui.studio ? root.pic-w : max(0px, root.width - 2 * root.pad);
+        height: Ui.studio ? root.pic-h : max(0px, root.height - root.head - root.pad);
+        pad: Ui.studio ? 0 : 1px;
         actual-size: root.actual;
         editor: true;
         picture: CanvasArea.picture;
@@ -132,24 +274,32 @@ export component Stage inherits Rectangle {
     }
 
     if Ui.studio: MonitorHead {
+        cache-rendering-hint: true;
         x: editor.x;
         y: root.slot-y;
         width: root.pic-w;
         tag: "PREVIEW";
-        tag-color: Theme.accent-text;
+        tone: TagTone.preview;
         name: CanvasArea.preview-name;
+        info: Ui.preview-scale == "canvas" ? "Canvas" : "Fit";
+        info-value: round(editor.scale * 100 * 1px / 1phx) + "%";
     }
     if Ui.studio: MonitorHead {
+        cache-rendering-hint: true;
         x: program.x;
         y: root.slot-y;
         width: root.pic-w;
         tag: "PROGRAM";
-        tag-color: Theme.onair-text;
+        tone: TagTone.program;
         name: CanvasArea.program-name;
+        info: Format.canvas;
     }
     if Ui.studio: StudioColumn {
-        x: root.pad + root.side + Theme.space-2;
-        y: (root.height - self.height) / 2;
+        cache-rendering-hint: true;
+        x: root.pad + root.side + root.pad;
+        y: root.slot-y;
         width: root.column;
+        height: root.head + root.pic-h;
+        head: root.head;
     }
 }

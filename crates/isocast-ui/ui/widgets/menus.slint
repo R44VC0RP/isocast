@@ -1,8 +1,10 @@
-// Menus and context menus (docs/design.md 3.10), one at a time, drawn by
-// one MenuHost in the window. A menu is data: a list of entries (items,
-// separators, headings), and items may open a submenu (one level).
-// Hover is a grey row, never copper; a check mark is copper; danger items
-// are red. Keyboard: ↑ ↓ move, → opens a submenu, ← closes it, Return or
+// Menus and context menus (Paper "Components" › Menu), one at a time,
+// drawn by one MenuHost in the window. A menu is data: a list of entries
+// (items, separators, headings), and items may open a submenu (one level).
+// The panel is `surface-overlay` with a `line-strong` edge, 8px corners and
+// the floating shadow, 4px in; items are 24px, 13px Mona Sans, a 16px mark
+// lane 8px in; hover is `overlay-hover` with 5px corners; a check mark is
+// yellow; danger items are red; shortcuts are 11px `text-3`. Keyboard: ↑ ↓ move, → opens a submenu, ← closes it, Return or
 // Space chooses, Escape closes.
 //
 // To show one, either ask the app to build it (most menus: what's in them
@@ -94,13 +96,13 @@ export global Menus {
     }
 }
 
-// The floating panel: overlay surface, line-strong edge, 3px corners, 4px
-// padding, a shadow.
+// The floating panel (menus, dropdown lists, popovers): `surface-overlay`, a
+// `line-strong` edge, 8px corners, the floating shadow (0 10px 30px).
 export component MenuPanel inherits Rectangle {
     background: Theme.surface-overlay;
     border-width: 1px;
     border-color: Theme.line-strong;
-    border-radius: Theme.r-panel;
+    border-radius: Theme.r-menu;
     drop-shadow-color: Theme.shadow-color;
     drop-shadow-blur: Theme.shadow-blur;
     drop-shadow-offset-y: Theme.shadow-y;
@@ -108,7 +110,8 @@ export component MenuPanel inherits Rectangle {
 }
 
 // The entries of one list, laid out; `active` is the highlighted one.
-component MenuEntries inherits VerticalLayout {
+// Exported as MenuView to draw a menu in place (the kit gallery's).
+export component MenuEntries inherits VerticalLayout {
     in property <MenuList> list;
     in property <int> active: -1;
     // The item whose submenu is open.
@@ -132,7 +135,7 @@ component MenuEntries inherits VerticalLayout {
         }
         height: entry.kind == MenuEntryKind.separator ? 9px : entry.kind == MenuEntryKind.heading ? 26px : Theme.menu-item;
         min-width: self.item ? row.preferred-width : heading.preferred-width + 2 * Theme.space-2;
-        border-radius: Theme.r;
+        border-radius: Theme.r-compact;
         background: !self.lit ? transparent : entry.danger ? Theme.danger-soft : Theme.overlay-hover;
         accessible-role: none;
 

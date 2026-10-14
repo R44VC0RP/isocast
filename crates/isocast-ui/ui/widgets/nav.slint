@@ -1,22 +1,42 @@
-// A sidebar list of pages (Settings' General, Stream, Output…; 3.12): 32px
-// tabs with an icon, on the chrome surface; the chosen one is g9 with the
-// copper marker and a copper icon. ↑ ↓ move between tabs.
+// The sidebar list (Tower's macOS source list; Paper's Settings sheet): a
+// 200px `surface-panel` column with a `line` edge on its right, 14px above
+// and below and 8px in; pages are 30px rows (6px corners, 10px in, a 16px
+// icon 10px from the label) 2px apart, grouped under 11px semibold
+// `text-3` headings 14px apart. The chosen page is `selected` (the
+// yellow-tinted black) with a yellow icon and a medium `text` label; the
+// rest are `text-2`. ↑ ↓ move between pages.
+//
+//     NavList {
+//         tabs: [
+//             { id: "output", label: "Output", icon: "disk", group: "Recording" },
+//             { id: "video", label: "Video", icon: "display", group: "Recording" },
+//             { id: "stream", label: "Stream", icon: "live", group: "Broadcast" },
+//         ];
+//         current: "output";
+//         selected(id) => { … }
+//     }
 
 import { Theme, Motion } from "../theme.slint";
 import { Icon, Icons } from "../icons.slint";
-import { FocusRing } from "focus.slint";
+import { FocusRing, ShownState } from "focus.slint";
 
 export struct NavTab {
     id: string,
     label: string,
     // Its icon, by name (`Icons.named`).
     icon: string,
+    // The heading of the group it starts or belongs to ("" for none): a
+    // heading shows where the group changes from the page before.
+    group: string,
 }
 
 export component NavList inherits Rectangle {
     in property <[NavTab]> tabs;
     in-out property <string> current;
     in property <string> label;
+    // Draw a state regardless of the keyboard (the kit gallery): `focus`
+    // rings the chosen page.
+    in property <ShownState> shown: ShownState.live;
     callback selected(string);
 
     forward-focus: fs;
@@ -37,8 +57,8 @@ export component NavList inherits Rectangle {
         }
     }
 
-    width: 180px;
-    background: Theme.surface-chrome;
+    width: Theme.sidebar-w;
+    background: Theme.surface-panel;
     accessible-role: tab-list;
     accessible-label: root.label;
 
@@ -59,65 +79,90 @@ export component NavList inherits Rectangle {
         }
 
         VerticalLayout {
-            padding-top: Theme.space-1;
-            padding-bottom: Theme.space-1;
+            padding-top: 14px;
+            padding-bottom: 14px;
+            padding-left: Theme.space-2;
+            padding-right: Theme.space-2 + 1px;
+            spacing: 2px;
             alignment: start;
-            for tab[i] in root.tabs: tab-row := Rectangle {
-                property <bool> on: tab.id == root.current;
-                changed on => {
-                    if self.on {
-                        root.index = i;
-                    }
+            for tab[i] in root.tabs: VerticalLayout {
+                property <bool> starts-group: tab.group != "" && (i == 0 || root.tabs[i - 1].group != tab.group);
+                spacing: 2px;
+                // 14px between groups: 10 here and the layouts' 2 + 2.
+                if starts-group && i > 0: Rectangle {
+                    height: 10px;
                 }
-                init => {
-                    if self.on {
-                        root.index = i;
-                    }
-                }
-                height: Theme.nav-row;
-                background: self.on ? Theme.selected : tab-ta.has-hover ? Theme.hover : transparent;
-                accessible-role: AccessibleRole.tab;
-                accessible-label: tab.label;
-                accessible-item-selectable: true;
-                accessible-item-selected: self.on;
-                accessible-item-index: i;
-                accessible-item-count: root.tabs.length;
-                accessible-action-default => { root.choose(tab.id); }
-
-                tab-ta := TouchArea {
-                    clicked => { root.choose(tab.id); }
-                }
-                HorizontalLayout {
-                    padding-left: Theme.space-4;
-                    padding-right: Theme.space-4;
-                    spacing: Theme.space-2;
-                    if tab.icon != "": VerticalLayout {
-                        alignment: center;
-                        Icon {
-                            path: Icons.named(tab.icon);
-                            color: tab-row.on ? Theme.accent-text : tab-ta.has-hover ? Theme.text : Theme.text-2;
-                        }
-                    }
+                if starts-group: Rectangle {
+                    height: 22px;
+                    accessible-role: none;
                     Text {
-                        horizontal-stretch: 1;
-                        text: tab.label;
-                        color: tab-row.on || tab-ta.has-hover ? Theme.text : Theme.text-2;
-                        font-size: Theme.fs;
-                        letter-spacing: Theme.tracking;
+                        x: 10px;
+                        width: parent.width - 10px;
+                        text: tab.group;
+                        color: Theme.text-3;
+                        font-size: Theme.fs-xs;
+                        font-weight: Theme.weight-semibold;
+                        letter-spacing: Theme.tracking-xs;
                         vertical-alignment: center;
                         overflow: elide;
                         accessible-role: none;
                     }
                 }
-                if tab-row.on: Rectangle {
-                    x: 0;
-                    width: 3px;
-                    background: Theme.accent-hover;
-                }
-                FocusRing {
-                    inset: true;
-                    radius: 0;
-                    shown: fs.has-focus && root.keyboard && tab-row.on;
+                tab-row := Rectangle {
+                    property <bool> on: tab.id == root.current;
+                    changed on => {
+                        if self.on {
+                            root.index = i;
+                        }
+                    }
+                    init => {
+                        if self.on {
+                            root.index = i;
+                        }
+                    }
+                    height: Theme.nav-row;
+                    border-radius: Theme.r;
+                    background: self.on ? Theme.selected : tab-ta.has-hover ? Theme.hover : transparent;
+                    animate background { duration: Theme.fast; easing: Motion.ease; }
+                    accessible-role: AccessibleRole.tab;
+                    accessible-label: tab.label;
+                    accessible-item-selectable: true;
+                    accessible-item-selected: self.on;
+                    accessible-item-index: i;
+                    accessible-item-count: root.tabs.length;
+                    accessible-action-default => { root.choose(tab.id); }
+
+                    tab-ta := TouchArea {
+                        clicked => { root.choose(tab.id); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 10px;
+                        if tab.icon != "": VerticalLayout {
+                            alignment: center;
+                            Icon {
+                                path: Icons.named(tab.icon);
+                                color: tab-row.on ? Theme.accent-text : tab-ta.has-hover ? Theme.text : Theme.text-2;
+                            }
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: tab.label;
+                            color: tab-row.on || tab-ta.has-hover ? Theme.text : Theme.text-2;
+                            font-size: Theme.fs;
+                            font-weight: tab-row.on ? Theme.weight-medium : Theme.weight-regular;
+                            letter-spacing: Theme.tracking;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            accessible-role: none;
+                        }
+                    }
+                    FocusRing {
+                        inset: true;
+                        radius: Theme.r;
+                        shown: tab-row.on && ((fs.has-focus && root.keyboard) || root.shown == ShownState.focus);
+                    }
                 }
             }
         }

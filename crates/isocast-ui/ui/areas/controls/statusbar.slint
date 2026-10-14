@@ -1,38 +1,38 @@
-// The status bar (docs/design.md 3.20), as in OBS: while streaming, the
-// stream's dropped frames, its rate and the connection's health; then the
-// LIVE and REC timers, the engine's CPU use and its frame rate. LIVE and
-// REC open their details (the web app's statusbar.js): the stream's
-// numbers, and each file of the take with a marker label, Mark and Split.
+// The status bar (Paper "C. Console", Main window and Studio Mode boards):
+// 28px of `surface-chrome` under a black line, 14px in. On the left a
+// state badge (READY, REC, LIVE; IDLE with no setup) and what is happening ("Records to
+// ~/Movies/Isocast · 2 ISO files", "Streaming for 00:01:01 · connection
+// stable · not recording"); on the right Martian Mono readouts split by
+// short rules: frames dropped, the data rate, the recording disk's free
+// space. The times, frame rate and CPU are the control bar's LCD. The
+// badge and the readouts open the details (the web app's statusbar.js):
+// the stream's numbers, and each file of the take with a marker label,
+// Mark and Split.
 
 import { Theme } from "../../theme.slint";
-import { Icon, Icons } from "../../icons.slint";
+import { Icons } from "../../icons.slint";
 import { Ui, ConnectionState } from "../../state.slint";
-import { Button, Dot, Popover, PopoverPlacement, TextField, Tip, Toasts } from "../../kit.slint";
+import { Badge, BadgeTone, Button, Popover, PopoverPlacement, Rule, Tag, TextField, Tip, Toasts } from "../../kit.slint";
 import { ControlsArea } from "state.slint";
 
-// An item: 6px in, its parts 6px apart; a clickable one goes `hover` and
-// `text` under the pointer (`warn` colours it amber).
+// A part of the bar that can open its details: `hover` and `text` under
+// the pointer while it can.
 component StatusItem inherits Rectangle {
     in property <bool> clickable;
-    in property <bool> warn;
     in property <string> tooltip;
-    // What screen readers say: its words ("REC 00:01:02"); the tooltip is
-    // its description.
+    // What screen readers say: its words; the tooltip is its description.
     in property <string> label;
-    // A button (with `accessible-role: button` where it is used): only
-    // then is it disabled while it can't be clicked.
-    in property <bool> button;
-    // The colour of its words: `text-2`, `text` when on or hovered.
-    out property <color> ink: root.warn ? Theme.warning : root.clickable && ta.has-hover ? Theme.text : Theme.text-2;
+    out property <bool> hovered: root.clickable && ta.has-hover;
     callback clicked();
     horizontal-stretch: 0;
-    min-width: row.preferred-width;
-    background: root.clickable && ta.has-hover ? Theme.hover : transparent;
-    // Clickable ones say `accessible-role: button` where they're used.
-    accessible-role: AccessibleRole.text;
+    min-width: row.min-width;
+    preferred-width: row.preferred-width;
+    border-radius: Theme.r-mini;
+    background: root.hovered ? Theme.hover : transparent;
+    accessible-role: button;
     accessible-label: root.label;
     accessible-description: root.tooltip;
-    accessible-enabled: !root.button || root.clickable;
+    accessible-enabled: root.clickable;
     accessible-action-default => {
         if root.clickable {
             root.clicked();
@@ -43,9 +43,6 @@ component StatusItem inherits Rectangle {
         clicked => { root.clicked(); }
     }
     row := HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 6px;
-        spacing: 6px;
         @children
     }
     if root.tooltip != "": Tooltip {
@@ -53,32 +50,50 @@ component StatusItem inherits Rectangle {
     }
 }
 
+// The bar's words: 11px `text-3` (Mona Sans, or Martian Mono Light for a
+// readout).
 component Meta inherits Text {
+    color: Theme.text-3;
     font-size: Theme.fs-xs;
     letter-spacing: Theme.tracking-xs;
     vertical-alignment: center;
     accessible-role: none;
 }
 
-// The small heading of a details popover ("Files", "Stream").
+component Readout inherits Meta {
+    font-family: Theme.font-mono;
+    font-weight: Theme.weight-light;
+    letter-spacing: Theme.tracking-mono;
+}
+
+// The small heading of a details popover ("FILES", "STREAM"): Hubot caps,
+// as the LCD labels its cells.
 component DetailsHeading inherits Rectangle {
     in property <string> text;
-    height: 26px;
-    Text {
+    height: 28px;
+    Tag {
         x: Theme.space-2;
         y: Theme.space-2;
+        height: Theme.lh-micro;
         text: root.text;
-        color: Theme.text-3;
-        font-size: Theme.fs-xs;
-        letter-spacing: Theme.tracking-xs;
-        font-weight: Theme.weight-semibold;
     }
+}
+
+// A number in the details: Martian Mono Light, as every live number.
+component Figure inherits Text {
+    color: Theme.text-2;
+    font-family: Theme.font-mono;
+    font-size: Theme.fs-xs;
+    font-weight: Theme.weight-light;
+    horizontal-alignment: right;
+    vertical-alignment: center;
+    accessible-role: none;
 }
 
 // While streaming: where to, and how it is keeping up.
 component StreamDetails inherits VerticalLayout {
     spacing: 0;
-    DetailsHeading { text: "Stream"; }
+    DetailsHeading { text: "STREAM"; }
     VerticalLayout {
         padding-left: Theme.space-2;
         padding-right: Theme.space-2;
@@ -113,7 +128,7 @@ component StreamDetails inherits VerticalLayout {
 // Split.
 component RecordingDetails inherits VerticalLayout {
     spacing: 0;
-    DetailsHeading { text: "Files"; }
+    DetailsHeading { text: "FILES"; }
     VerticalLayout {
         padding-left: Theme.space-2;
         padding-right: Theme.space-2;
@@ -125,6 +140,7 @@ component RecordingDetails inherits VerticalLayout {
             accessible-label: f.name + ": " + f.frames + ", " + f.dropped + ", " + f.gaps;
             Text {
                 horizontal-stretch: 1;
+                min-width: 0px;
                 text: f.name;
                 color: Theme.text;
                 font-size: Theme.fs-sm;
@@ -133,37 +149,21 @@ component RecordingDetails inherits VerticalLayout {
                 overflow: elide;
                 accessible-role: none;
             }
-            Text {
-                width: 92px;
+            Figure {
+                width: 112px;
                 text: f.frames;
-                color: Theme.text-2;
-                font-size: Theme.fs-sm;
-                letter-spacing: Theme.tracking-sm;
-                horizontal-alignment: right;
-                vertical-alignment: center;
-                accessible-role: none;
             }
-            Text {
-                width: 84px;
+            Figure {
+                width: 92px;
                 text: f.dropped;
                 color: f.dropped-bad ? Theme.danger-text : Theme.text-2;
-                font-size: Theme.fs-sm;
-                letter-spacing: Theme.tracking-sm;
-                horizontal-alignment: right;
-                vertical-alignment: center;
-                accessible-role: none;
             }
             Rectangle {
-                width: 64px;
-                Text {
+                width: 56px;
+                Figure {
                     width: 100%;
                     text: f.gaps;
                     color: f.gaps-warn ? Theme.warning : Theme.text-2;
-                    font-size: Theme.fs-sm;
-                    letter-spacing: Theme.tracking-sm;
-                    horizontal-alignment: right;
-                    vertical-alignment: center;
-                    accessible-role: none;
                 }
                 Tooltip {
                     Tip { text: "Times audio was missing and filled with silence"; }
@@ -186,8 +186,11 @@ component RecordingDetails inherits VerticalLayout {
         padding-left: Theme.space-2;
         padding-right: Theme.space-2;
         spacing: Theme.space-2;
+        // The field takes what Mark and Split leave (its own preferred
+        // width would squeeze their words).
         label := TextField {
             horizontal-stretch: 1;
+            preferred-width: Theme.field-s;
             placeholder: "Marker label";
             label: "Marker label";
             submits: false;
@@ -214,11 +217,9 @@ component RecordingDetails inherits VerticalLayout {
 
 export component StatusBar inherits Rectangle {
     property <bool> recording: ControlsArea.record-state == "recording" || ControlsArea.record-state == "stopping";
-    property <bool> starting: ControlsArea.record-state == "starting";
-    // LIVE runs its timer while live or reconnecting; the stream's items
-    // show from the moment it starts connecting.
+    // The stream's details are there from the moment it starts connecting.
+    property <bool> stream-on: ControlsArea.stream-state == "live" || ControlsArea.stream-state == "reconnecting" || ControlsArea.stream-state == "connecting";
     property <bool> streaming: ControlsArea.stream-state == "live" || ControlsArea.stream-state == "reconnecting";
-    property <bool> stream-on: root.streaming || ControlsArea.stream-state == "connecting";
 
     // The drops toast's Details opens one of them.
     property <int> details-serial: ControlsArea.details-serial;
@@ -245,6 +246,16 @@ export component StatusBar inherits Rectangle {
     property <bool> details-open: live-details.open || rec-details.open;
     changed details-open => { Toasts.hide-key(self.details-open ? "drops" : ""); }
 
+    // The details the readouts open: the take's while recording, else the
+    // stream's.
+    function show-details() {
+        if root.recording {
+            rec-details.show();
+        } else if root.stream-on {
+            live-details.show();
+        }
+    }
+
     height: Theme.statusbar;
     background: Theme.surface-chrome;
     accessible-role: groupbox;
@@ -253,166 +264,117 @@ export component StatusBar inherits Rectangle {
     Rectangle {
         y: 0;
         height: 1px;
-        background: Theme.line;
+        background: Theme.frame-line;
     }
 
     row := HorizontalLayout {
         y: 1px;
         height: parent.height - 1px;
-        padding-left: 6px;
-        padding-right: 6px;
-        spacing: 4px;
+        padding-left: Theme.pane-x;
+        padding-right: Theme.pane-x;
+        spacing: Theme.line-gap;
 
-        // The left: where the window stands with isocastd when it isn't
-        // simply connected.
-        Meta {
-            horizontal-stretch: 1;
-            text: Ui.connection == ConnectionState.connected ? "" : Ui.connection-error;
-            color: Theme.text-2;
-            overflow: elide;
-        }
-
-        if root.stream-on: dropped-item := StatusItem {
-            accessible-role: button;
-            button: true;
-            label: "Dropped Frames " + ControlsArea.stream-dropped;
-            clickable: true;
-            tooltip: "Stream frames that couldn’t be sent (the program and recordings keep them)";
-            clicked => { live-details.show(); }
-            Meta {
-                text: "Dropped Frames";
-                color: dropped-item.ink;
-            }
-            Meta {
-                text: ControlsArea.stream-dropped;
-                color: ControlsArea.stream-dropped-bad ? Theme.danger-text : dropped-item.ink;
-            }
-        }
-        if root.stream-on: kbps-item := StatusItem {
-            accessible-role: button;
-            button: true;
-            label: ControlsArea.stream-kbps;
-            clickable: true;
-            tooltip: "Sent over the last second";
-            clicked => { live-details.show(); }
-            Meta {
-                text: ControlsArea.stream-kbps;
-                color: kbps-item.ink;
-            }
-        }
-        // A square light (not a dot, so it never reads as REC), and a word
-        // when the connection isn't fine.
-        if root.stream-on: health-item := StatusItem {
-            label: "Connection: " + (ControlsArea.stream-health-word != "" ? ControlsArea.stream-health-word : ControlsArea.stream-state);
-            warn: ControlsArea.stream-health == "warn";
-            tooltip: "Connection: " + (ControlsArea.stream-health-word != "" ? ControlsArea.stream-health-word : ControlsArea.stream-state);
-            VerticalLayout {
-                alignment: center;
-                Dot {
-                    square: true;
-                    dot-color: ControlsArea.stream-health == "ok" ? Theme.onair-text : ControlsArea.stream-health == "warn" ? Theme.warning : ControlsArea.stream-health == "bad" ? Theme.danger : Theme.text-3;
-                }
-            }
-            if ControlsArea.stream-health-word != "": Meta {
-                text: ControlsArea.stream-health-word;
-                color: ControlsArea.stream-health == "bad" ? Theme.danger-text : health-item.ink;
-            }
-        }
-
-        live-item := StatusItem {
-            accessible-role: button;
-            button: true;
+        // LIVE (while streaming) and REC (while recording), else READY
+        // (IDLE before there is a setup: Paper's Welcome board).
+        if root.streaming: live-item := StatusItem {
             label: "LIVE " + ControlsArea.live-time;
-            clickable: root.stream-on;
-            tooltip: root.stream-on ? "Streaming: click for details" : "Not streaming";
+            clickable: true;
+            tooltip: "Streaming: click for details";
             clicked => { live-details.show(); }
             VerticalLayout {
                 alignment: center;
-                Icon {
-                    path: Icons.live;
-                    size: Theme.icon-sm;
-                    color: root.stream-on ? Theme.danger-text : Theme.text-3;
+                Badge {
+                    text: "LIVE";
+                    tone: BadgeTone.live;
+                    dot: true;
+                    status: true;
                 }
             }
-            Meta {
-                text: "LIVE";
-                color: root.stream-on ? Theme.text : live-item.ink;
-            }
-            Meta {
-                text: ControlsArea.live-time;
-                color: root.stream-on ? Theme.text : live-item.ink;
-            }
         }
-
-        rec-item := StatusItem {
-            accessible-role: button;
-            button: true;
-            label: "REC " + ControlsArea.rec-time + (ControlsArea.dropped != "" ? ", " + ControlsArea.dropped + " dropped" : "");
+        if root.recording || ControlsArea.record-state == "starting": rec-item := StatusItem {
+            label: "REC " + ControlsArea.rec-time;
             clickable: root.recording;
             tooltip: ControlsArea.rec-tooltip;
             clicked => { rec-details.show(); }
             VerticalLayout {
                 alignment: center;
-                Dot {
-                    dot-color: root.recording || root.starting ? Theme.danger : Theme.text-3;
-                    pulse: root.starting;
+                Badge {
+                    text: "REC";
+                    tone: BadgeTone.rec;
+                    dot: true;
+                    status: true;
                 }
             }
-            Meta {
-                text: "REC";
-                color: root.recording ? Theme.text : rec-item.ink;
-            }
-            Meta {
-                text: ControlsArea.rec-time;
-                color: root.recording ? Theme.text : rec-item.ink;
-            }
-            if ControlsArea.dropped != "": Meta {
-                text: ControlsArea.dropped + " dropped";
-                color: Theme.danger-text;
+        }
+        if !root.streaming && !root.recording && ControlsArea.record-state != "starting" && Ui.connection == ConnectionState.connected: VerticalLayout {
+            alignment: center;
+            Badge {
+                text: Ui.has-setup ? "READY" : "IDLE";
+                dot: true;
+                status: true;
             }
         }
-
-        cpu-item := StatusItem {
-            label: "CPU: " + ControlsArea.cpu-text;
-            tooltip: "The engine’s share of this Mac’s processor (all cores)";
-            Meta {
-                text: "CPU:";
-                color: cpu-item.ink;
-            }
-            Meta {
-                text: ControlsArea.cpu-text;
-                color: cpu-item.ink;
-            }
+        Meta {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            text: ControlsArea.status-line;
+            color: Ui.connection != ConnectionState.connected ? Theme.text-2 : ControlsArea.status-warn ? Theme.warning : Theme.text-3;
+            overflow: elide;
+            accessible-role: AccessibleRole.text;
+            accessible-label: self.text;
         }
 
-        fps-item := StatusItem {
-            label: ControlsArea.fps-text;
-            warn: ControlsArea.fps-lagging;
-            tooltip: ControlsArea.fps-tooltip;
-            Meta {
-                text: ControlsArea.fps-text;
-                color: fps-item.ink;
+        // The readouts.
+        HorizontalLayout {
+            horizontal-stretch: 0;
+            spacing: Theme.space-4;
+            dropped-item := StatusItem {
+                label: ControlsArea.readout-dropped;
+                clickable: root.recording || root.stream-on;
+                tooltip: root.recording ? "Frames dropped in this take: click for each file" : root.stream-on ? "Stream frames that couldn’t be sent (the program and recordings keep them)" : "";
+                clicked => { root.show-details(); }
+                Readout {
+                    text: ControlsArea.readout-dropped;
+                    color: ControlsArea.readout-dropped-bad ? Theme.danger-text : dropped-item.hovered ? Theme.text : Theme.text-3;
+                }
+            }
+            Rule { }
+            rate-item := StatusItem {
+                label: ControlsArea.readout-rate;
+                clickable: root.stream-on;
+                tooltip: root.stream-on ? "Sent over the last second" : root.recording ? "Written to the disk over the last seconds" : "";
+                clicked => { live-details.show(); }
+                Readout {
+                    text: ControlsArea.readout-rate;
+                    color: rate-item.hovered ? Theme.text : Theme.text-3;
+                }
+            }
+            if ControlsArea.readout-free != "": Rule { }
+            if ControlsArea.readout-free != "": Readout {
+                text: ControlsArea.readout-free;
+                accessible-role: AccessibleRole.text;
+                accessible-label: self.text;
             }
         }
     }
 
-    // The details popovers, anchored to their items (a popover can't sit
-    // in a layout).
+    // The details popovers, anchored to the bar's ends (a popover can't
+    // sit in a layout).
     Rectangle {
-        x: row.x + live-item.x;
+        x: Theme.pane-x;
         y: row.y;
-        width: live-item.width;
+        width: 1px;
         height: row.height;
         live-details := Popover {
-            placement: PopoverPlacement.above-right;
+            placement: PopoverPlacement.above-left;
             panel-width: 420px;
             StreamDetails { }
         }
     }
     Rectangle {
-        x: row.x + rec-item.x;
+        x: parent.width - Theme.pane-x - 1px;
         y: row.y;
-        width: rec-item.width;
+        width: 1px;
         height: row.height;
         rec-details := Popover {
             placement: PopoverPlacement.above-right;

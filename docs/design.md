@@ -1,5 +1,17 @@
 # Isocast design language
 
+> **Superseded for the native app (2026-10-13): the Console direction.**
+> Ryan picked Console (Paper file "C. Console", Final Cut Pro x Logic Pro
+> x Tower): pure neutral blacks in a lighter frame, Mona Sans, Hubot Sans
+> and Martian Mono, and only three colours that light up (yellow for
+> selected/active and the one main button, green for program and live,
+> red for recording). Its values live in
+> `crates/isocast-ui/ui/theme.slint` (named as Paper's tokens) and its
+> pieces in the kit (`ui/kit.slint` lists them; `--state kit` draws them
+> as the Components board). Read values from Paper, never from this file;
+> the layout and naming rules below (OBS's layout and words, flat panes,
+> clean-room) still hold. PLAN.md N.5.
+
 Status: spec, 2026-10-12. Written from snapshots of every view of the web
 app (`crates/isocast-app/ui`) at commit a24edf5. It describes the target
 look, not the current one. The P1/P2/P3 change list in section 5 is the

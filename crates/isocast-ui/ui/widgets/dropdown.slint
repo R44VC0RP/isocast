@@ -1,14 +1,16 @@
-// A dropdown (the web app's `Select`, 3.6): a field with the chosen
-// option and a chevron, and a list that keyboard and pointer both drive.
+// A dropdown (Paper "Components" › Fields › Dropdown): a `control` field
+// with the chosen option and a ⌃⌄ cap, and a list (the menu's panel) that
+// keyboard and pointer both drive. `small` is the 22px one of rows and
+// bands; `on-control` is the one on a grey grouped row (Paper's Settings
+// sheet, Encoder): `control-active` with a 16px `control-hover` cap.
 // Options carry a `detail`, shown dim after the label in the list (and in
 // the field with `show-detail`): two devices with the same name are told
 // apart by it (src/kit.rs `disambiguate` fills it in for duplicates).
 
 import { Theme, Motion } from "../theme.slint";
-import { Icon, Icons } from "../icons.slint";
-import { FieldFrame } from "fields.slint";
+import { Icon, Icons, SvgPath } from "../icons.slint";
 import { MenuPanel } from "menus.slint";
-import { FocusRing } from "focus.slint";
+import { FocusRing, ShownState } from "focus.slint";
 import { Tip } from "tooltip.slint";
 
 export struct DropdownOption {
@@ -27,10 +29,19 @@ export component Dropdown inherits Rectangle {
     // What screen readers call it (the form label beside it).
     in property <string> label;
     in property <bool> enabled: true;
+    // How far a disabled field fades (1 inside something that fades
+    // whole, as a dimmed Band).
+    in property <float> disabled-opacity: Theme.disabled-opacity;
     in property <bool> small;
+    // On a `control` row (a sheet's grouped rows): `control-active`, 5px
+    // corners, 3px in on the right, a 16×16 `control-hover` cap with 4px
+    // corners (it implies `small`'s 22px height).
+    in property <bool> on-control;
     // Show the chosen option's detail in the field too.
     in property <bool> show-detail;
     in property <string> tooltip;
+    // Draw a state regardless of the pointer (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
     out property <bool> open: popup.is-open;
     out property <bool> has-focus: fs.has-focus;
     // The value chosen (only when it changes).
@@ -50,6 +61,7 @@ export component Dropdown inherits Rectangle {
     // The chosen option's index, found by the options themselves.
     property <int> current: -1;
     property <int> rows: min(root.options.length, 14);
+    property <bool> detail-shown: root.show-detail && root.current >= 0 && root.options[root.current].detail != "";
 
     function choose(index: int) {
         if index >= 0 && index < root.options.length && !root.options[index].disabled {
@@ -65,7 +77,7 @@ export component Dropdown inherits Rectangle {
         root.highlighted = max(0, min(root.options.length - 1, root.highlighted + by));
     }
 
-    height: root.small ? Theme.control-h-sm : Theme.control-h;
+    height: root.small || root.on-control ? Theme.control-h-sm : Theme.control-h;
     min-width: 80px;
     preferred-width: Theme.field-m;
     accessible-role: combobox;
@@ -97,16 +109,25 @@ export component Dropdown inherits Rectangle {
         }
     }
 
-    FieldFrame {
-        editing: popup.is-open || (fs.has-focus && root.keyboard);
-        hovered: ta.has-hover;
-        enabled: root.enabled;
+    // The field: a `control` fill (no edge), the chosen label, its detail
+    // dim after it, and the ⌃⌄ cap on the right (16×18 on
+    // `control-active`, 4px corners; 14×16 and 3px `small`).
+    field := Rectangle {
+        border-radius: root.small || root.on-control ? Theme.r-compact : Theme.r;
+        background: root.on-control
+            ? (popup.is-open || ta.pressed || root.shown == ShownState.pressed || ((ta.has-hover || root.shown == ShownState.hover) && root.enabled) ? Theme.field-border-hover : Theme.control-active)
+            : popup.is-open || ta.pressed || root.shown == ShownState.pressed ? Theme.control-active : (ta.has-hover || root.shown == ShownState.hover) && root.enabled ? Theme.control-hover : Theme.control;
+        opacity: root.enabled ? 1 : root.disabled-opacity;
+        animate background { duration: Theme.fast; easing: Motion.ease; }
 
         HorizontalLayout {
-            padding-left: Theme.space-2;
-            padding-right: 28px;
+            padding-left: 10px;
+            padding-right: root.on-control ? 3px : root.small ? 4px : 6px;
             spacing: Theme.space-2;
+            // The label takes the room, or its detail does when shown
+            // (Paper: label, detail, cap 8px apart).
             Text {
+                horizontal-stretch: root.detail-shown ? 0 : 1;
                 text: root.current >= 0 ? root.options[root.current].label : root.placeholder;
                 color: root.current >= 0 ? Theme.text : Theme.text-3;
                 font-size: Theme.fs-sm;
@@ -115,7 +136,7 @@ export component Dropdown inherits Rectangle {
                 overflow: elide;
                 accessible-role: none;
             }
-            if root.show-detail && root.current >= 0 && root.options[root.current].detail != "": Text {
+            if root.detail-shown: Text {
                 horizontal-stretch: 1;
                 text: root.options[root.current].detail;
                 color: Theme.text-3;
@@ -125,17 +146,33 @@ export component Dropdown inherits Rectangle {
                 overflow: elide;
                 accessible-role: none;
             }
-            Rectangle {
-                horizontal-stretch: 1;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: root.small && !root.on-control ? 14px : 16px;
+                    height: root.on-control ? 16px : root.small ? 16px : 18px;
+                    border-radius: root.small && !root.on-control ? Theme.r-cap : Theme.r-mini;
+                    background: root.on-control ? Theme.control-hover : Theme.control-active;
+                    SvgPath {
+                        width: root.small && !root.on-control ? 8px : 10px;
+                        height: root.small && !root.on-control ? 10px : 12px;
+                        box-width: 10;
+                        box-height: 12;
+                        commands: "M2.5 4.5 5 2l2.5 2.5M2.5 7.5 5 10l2.5-2.5";
+                        stroke: Theme.text;
+                        // 1.5 units, at the small one's 0.8 scale.
+                        stroke-width: root.small && !root.on-control ? 1.2px : 1.5px;
+                        stroke-line-cap: round;
+                        stroke-line-join: round;
+                        fill: transparent;
+                    }
+                }
             }
         }
 
-        Icon {
-            x: parent.width - self.width - Theme.space-2;
-            y: (parent.height - self.height) / 2;
-            path: Icons.chevron-down;
-            size: Theme.icon-sm;
-            color: Theme.text-2;
+        FocusRing {
+            shown: (fs.has-focus && root.keyboard) || root.shown == ShownState.focus;
+            radius: field.border-radius;
         }
     }
 
@@ -221,7 +258,7 @@ export component Dropdown inherits Rectangle {
                     for option[i] in root.options: Rectangle {
                         y: i * Theme.menu-item;
                         height: Theme.menu-item;
-                        border-radius: Theme.r;
+                        border-radius: Theme.r-compact;
                         background: i == root.highlighted && !option.disabled ? Theme.overlay-hover : transparent;
                         accessible-role: list-item;
                         accessible-label: option.detail != "" ? option.label + ", " + option.detail : option.label;

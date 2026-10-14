@@ -1049,6 +1049,18 @@ pub struct Status {
     /// Camera output state (installation is explicit, never automatic).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtual_camera: Option<crate::virtual_camera::VirtualCameraStatus>,
+    /// Free space on the disk the live setup records to (its
+    /// `recording.folder`, or the nearest folder above it that exists;
+    /// with no setup yet, `~/Movies/Isocast`'s, where a new one records),
+    /// in bytes, as the daemon may use it: measured with each status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_free_bytes: Option<u64>,
+    /// How fast the live setup's program file fills that disk, at most:
+    /// the generous estimate the free-space check plans for, in bytes per
+    /// second (`ProgramRecording::bytes_per_second`). Absent without a
+    /// setup, or when the program isn't recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_bytes_per_second: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1870,6 +1882,19 @@ pub struct MonitorStatus {
 pub struct AudioLevel {
     pub source: String,
     /// Loudest sample, in dBFS (0 is full scale; -120 is silence).
+    pub peak_db: f64,
+    /// Average level, in dBFS.
+    pub rms_db: f64,
+    /// Left and right on their own, for the program mix's level (stereo);
+    /// absent for a source's, which is one level for all its channels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<[ChannelLevel; 2]>,
+}
+
+/// One channel's level (see `AudioLevel::channels`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelLevel {
+    /// Loudest sample, in dBFS (-120 is silence).
     pub peak_db: f64,
     /// Average level, in dBFS.
     pub rms_db: f64,

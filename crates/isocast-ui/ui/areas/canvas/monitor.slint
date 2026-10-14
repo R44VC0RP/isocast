@@ -17,7 +17,7 @@
 
 import { Theme } from "../../theme.slint";
 import { Ui } from "../../state.slint";
-import { Button, Spinner, Menus } from "../../kit.slint";
+import { Button, EmptyState, Spinner, Menus } from "../../kit.slint";
 import { Icons } from "../../icons.slint";
 import { CanvasArea, CanvasBox } from "state.slint";
 
@@ -52,7 +52,8 @@ export component Monitor inherits Rectangle {
     in property <image> picture;
     // The canvas editor goes over this one.
     in property <bool> editor: true;
-    // The program while recording or streaming: a 2px teal frame.
+    // The program while streaming (live): a 2px green (`onair`) ring.
+    // Recording alone keeps the 1px `line` ring: red is the LCD's.
     in property <bool> program-live;
     // Instead of a picture.
     in property <string> empty-text;
@@ -114,9 +115,17 @@ export component Monitor inherits Rectangle {
     accessible-label: root.editor ? "Preview" : "Program";
     accessible-description: root.has-selection ? "Selected: " + Ui.selected-name : "";
 
-    // The monitor's ring: 1px, or 2px teal while the program is live. A
-    // frame only, so a native picture under it shows through. None before
-    // there is a setup (Welcome shows the bare stage, as the web app).
+    // The monitor's ring: 1px `line`, or 2px `onair` while the program is
+    // live. A frame only, so a native picture under it shows through.
+    // Before there is a setup: the empty monitor instead, no ring (Paper's
+    // Welcome board).
+    if !Ui.has-setup && root.editor: Rectangle {
+        x: pic-x;
+        y: pic-y;
+        width: pic-w;
+        height: pic-h;
+        background: Theme.surface-monitor;
+    }
     if Ui.has-setup: Rectangle {
         x: pic-x - (root.program-live ? 2px : 1px);
         y: pic-y - (root.program-live ? 2px : 1px);
@@ -217,8 +226,9 @@ export component Monitor inherits Rectangle {
                 bh: CanvasArea.shown-box-h;
                 rotate: CanvasArea.shown-box-rotate;
 
-                // The dark outer ring keeps the copper edge visible on
-                // bright pictures.
+                // The dark outer ring keeps the yellow edge visible on
+                // bright pictures (Paper: `accent 0 0 0 1px, #00000080 0 0
+                // 0 2px`).
                 if !CanvasArea.test-outline: Rectangle {
                     x: -2px;
                     y: -2px;
@@ -233,10 +243,11 @@ export component Monitor inherits Rectangle {
                     width: parent.width + (CanvasArea.test-outline ? 6px : 2px);
                     height: parent.height + (CanvasArea.test-outline ? 6px : 2px);
                     border-width: CanvasArea.test-outline ? 3px : 1px;
-                    border-color: CanvasArea.test-outline ? #00ff00 : CanvasArea.box-locked ? Theme.text-2 : Theme.accent;
+                    border-color: CanvasArea.test-outline ? #00ff00 : CanvasArea.box-locked ? Theme.text-2 : Theme.selection-ring;
                 }
 
-                // Handles at the corners and edge midpoints.
+                // Handles at the corners and edge midpoints: 8px bone dots
+                // with a dark edge; yellow while an Option-drag crops.
                 for handle in [
                     { x: 0, y: 0 }, { x: 0.5, y: 0 }, { x: 1, y: 0 },
                     { x: 0, y: 0.5 }, { x: 1, y: 0.5 },
@@ -247,10 +258,10 @@ export component Monitor inherits Rectangle {
                     y: parent.height * handle.y - Theme.handle / 2;
                     width: Theme.handle;
                     height: Theme.handle;
-                    border-radius: Theme.r-handle;
-                    background: CanvasArea.cropping ? Theme.bone : Theme.accent;
+                    border-radius: Theme.handle / 2;
+                    background: CanvasArea.cropping ? Theme.accent : Theme.bone;
                     border-width: 1px;
-                    border-color: Theme.surface-monitor;
+                    border-color: Theme.handle-edge;
                 }
             }
 
@@ -305,25 +316,17 @@ export component Monitor inherits Rectangle {
         }
     }
 
-    // The edited scene has nothing in it yet.
+    // The edited scene has nothing in it yet: the empty dock's glyph and
+    // words (EmptyState), and the way to add one.
     if root.empty-text == "" && root.editor && CanvasArea.scene-empty && Ui.has-setup: Rectangle {
         x: pic-x;
         y: pic-y;
         width: pic-w;
         height: pic-h;
         background: Theme.surface-monitor;
-        VerticalLayout {
-            alignment: center;
-            spacing: Theme.space-3;
-            HorizontalLayout {
-                alignment: center;
-                Text {
-                    text: "Nothing in this scene yet";
-                    color: Theme.text-2;
-                    font-size: Theme.fs-sm;
-                    letter-spacing: Theme.tracking-sm;
-                }
-            }
+        EmptyState {
+            icon: Icons.empty-scene;
+            text: "Nothing in this scene yet";
             HorizontalLayout {
                 alignment: center;
                 add := Button {

@@ -195,7 +195,7 @@ impl Area for Controls {
                     quick_transitions(&app)
                         .into_iter()
                         .nth(index as usize)
-                        .and_then(|(_, t)| serde_json::from_value(t).ok())
+                        .and_then(|(_, _, t)| serde_json::from_value(t).ok())
                 };
                 app.take(transition);
             }
@@ -217,7 +217,7 @@ impl Area for Controls {
         if changed.any(Changed::SETUP | Changed::SCENES) {
             area.set_can_take(app.session.borrow().preview.is_some());
         }
-        self.show_times(window);
+        self.show_times(app, window);
         self.arm_ticker(app);
     }
 
@@ -406,6 +406,7 @@ impl Controls {
         let kind = value["kind"].as_str().unwrap_or("cut").to_string();
         let fields = form::fields("Transition", &kind);
         area.set_dialog_title(format!("Properties for “{}”", transition_label(&kind)).into());
+        area.set_dialog_name(transition_label(&kind).into());
         let groups = {
             let s = app.session.borrow();
             let ctx = Context {
@@ -696,11 +697,140 @@ impl Controls {
         area.set_stream_rows(model(stream_rows(stream)));
     }
 
-    /// The REC and LIVE timers.
-    fn show_times(&self, window: &AppWindow) {
+    /// The REC and LIVE timers (the LCD's, the details'), and the status
+    /// bar's line, which says how long the stream has run.
+    fn show_times(&self, app: &Rc<App>, window: &AppWindow) {
         let area = window.global::<ControlsArea>();
         area.set_rec_time(clock(self.recording.seconds()).into());
         area.set_live_time(clock(self.streaming.seconds()).into());
+        area.set_rec_seconds(self.recording.seconds().min(i32::MAX as u64) as i32);
+        area.set_live_seconds(self.streaming.seconds().min(i32::MAX as u64) as i32);
+        self.show_status_line(app, &area);
+    }
+
+    /// The LCD's numbers and the status bar's words and readouts (Paper's
+    /// Main window and Studio Mode boards): READY, REC or LIVE with what
+    /// is happening, then frames dropped, the data rate and the free space.
+    fn show_status_line(&self, app: &Rc<App>, area: &ControlsArea) {
+        let s = app.session.borrow();
+        let state = s.status.as_ref().map(|x| x.state);
+        let recording = state == Some(EngineState::Recording);
+        let stream = s.stream.as_ref();
+        let streaming = stream
+            .is_some_and(|x| matches!(x.state, StreamState::Live | StreamState::Reconnecting));
+        let live = s.status.as_ref().and_then(|x| x.live.as_ref());
+        let take_dropped: u64 = live.map_or(0, |l| l.files.iter().map(|f| f.dropped_frames).sum());
+        let stream_dropped = stream.map_or(0, |x| x.dropped_frames);
+        let stream_percent = stream.map_or(0.0, |x| {
+            let total = x.dropped_frames + x.frames_sent;
+            if total > 0 {
+                x.dropped_frames as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            }
+        });
+
+        // The LCD: zeros (dimmed) for what isn't running or measured
+        // yet; the take's drops while recording, else the stream's.
+        let engine = s.status.as_ref().and_then(|x| x.engine.as_ref());
+        area.set_engine_running(engine.is_some());
+        let (lead, fps) = lcd_fps(engine.map(|e| e.fps));
+        area.set_lcd_fps_lead(lead.into());
+        area.set_lcd_fps(fps.into());
+        let cpu = s.status.as_ref().and_then(|x| x.cpu_percent);
+        area.set_lcd_cpu_known(cpu.is_some());
+        area.set_lcd_cpu(format!("{:.1}%", cpu.unwrap_or(0.0)).into());
+        let dropped = if recording {
+            take_dropped
+        } else if streaming {
+            stream_dropped
+        } else {
+            0
+        };
+        area.set_lcd_dropped(count(dropped).into());
+        area.set_lcd_dropping(dropped > 0);
+
+        // The status bar's line.
+        let setup = s.setup.as_deref();
+        let folder = setup.map_or(String::new(), |x| home_short(&x.recording.folder));
+        let isos = setup.map_or(0, |x| {
+            if x.recording.iso.enabled {
+                x.recording.iso.sources.len()
+            } else {
+                0
+            }
+        });
+        let isos = match isos {
+            0 => String::new(),
+            1 => " · 1 ISO file".to_string(),
+            n => format!(" · {n} ISO files"),
+        };
+        let health = stream.map_or("off", health);
+        let connection = match (stream.map(|x| x.state), health) {
+            (Some(StreamState::Reconnecting), _) => "reconnecting",
+            (_, "bad") => "poor connection",
+            (_, "warn") => "unstable connection",
+            _ => "connection stable",
+        };
+        let link = s.link_error.as_str();
+        let line = if !link.is_empty() && s.status.is_none() {
+            link.to_string()
+        } else if recording && streaming {
+            format!(
+                "Recording to {folder}{isos} · streaming for {}",
+                clock(self.streaming.seconds())
+            )
+        } else if recording {
+            format!("Recording to {folder}{isos}")
+        } else if state == Some(EngineState::Starting) {
+            "Starting the recording…".to_string()
+        } else if streaming {
+            format!(
+                "Streaming for {} · {connection} · not recording",
+                clock(self.streaming.seconds())
+            )
+        } else if stream.is_some_and(|x| x.state == StreamState::Connecting) {
+            "Connecting the stream…".to_string()
+        } else if setup.is_some() {
+            format!("Records to {folder}{isos}")
+        } else if s.status.is_some() {
+            // Paper's Welcome board, beside the IDLE badge.
+            "No setup loaded".to_string()
+        } else {
+            String::new()
+        };
+        area.set_status_line(line.into());
+        area.set_status_warn(streaming && health != "ok");
+
+        // The readouts: the take's drops, else the stream's (with its
+        // share); the stream's rate, else the disk's while recording.
+        area.set_readout_dropped(
+            if recording || !streaming {
+                format!("{} dropped", count(take_dropped))
+            } else {
+                format!("{} dropped ({stream_percent:.1}%)", count(stream_dropped))
+            }
+            .into(),
+        );
+        area.set_readout_dropped_bad(if recording {
+            take_dropped > 0
+        } else {
+            streaming && stream_dropped > 0
+        });
+        let megabits = if streaming {
+            stream.map_or(0.0, |x| x.total_kbps / 1000.0)
+        } else if recording {
+            live.and_then(|l| l.disk.as_ref())
+                .map_or(0.0, |d| d.write_bytes_per_second * 8.0 / 1e6)
+        } else {
+            0.0
+        };
+        area.set_readout_rate(format!("{megabits:.1} Mb/s").into());
+        let free = s.status.as_ref().and_then(|x| x.recording_free_bytes);
+        area.set_readout_free(
+            free.map_or(String::new(), crate::model::gigabytes_free)
+                .into(),
+        );
     }
 
     /// Tick just after each whole second of whichever timer runs.
@@ -719,7 +849,7 @@ impl Controls {
                 if let Some(app) = weak.upgrade()
                     && let Some(window) = app.window()
                 {
-                    app.controls.show_times(&window);
+                    app.controls.show_times(&app, &window);
                     app.controls.arm_ticker(&app);
                 }
             });
@@ -857,10 +987,10 @@ fn file_label(setup: Option<&isocast_protocol::Setup>, source: &str) -> String {
 /// The transition dock: the kind, its duration and whether it has
 /// properties; Studio Mode's quick transitions.
 fn show_transition(app: &Rc<App>, area: &ControlsArea) {
-    let quick: Vec<SharedString> = quick_transitions(app)
+    let (quick, details): (Vec<SharedString>, Vec<SharedString>) = quick_transitions(app)
         .into_iter()
-        .map(|(label, _)| label.into())
-        .collect();
+        .map(|(name, detail, _)| (name.into(), detail.into()))
+        .unzip();
     let s = app.session.borrow();
     let transition = s.setup_json().map(|x| &x["transition"]);
     let kind = transition
@@ -891,6 +1021,7 @@ fn show_transition(app: &Rc<App>, area: &ControlsArea) {
         .into(),
     );
     area.set_quick_transitions(model(quick));
+    area.set_quick_details(model(details));
 }
 
 /// The transition scene switches use: a kind that needs settings first
@@ -925,6 +1056,23 @@ fn current_transition(app: &Rc<App>) -> Value {
 }
 
 /// 3725 s → "01:02:05".
+/// The LCD's frame rate in two whole digits at least, the unused leading
+/// zero apart to be dimmed: ("0", "7.71"), ("", "29.93"); dimmed "00.00"
+/// while the engine isn't running.
+fn lcd_fps(fps: Option<f64>) -> (String, String) {
+    match fps {
+        None => (String::new(), "00.00".to_string()),
+        Some(fps) => {
+            let text = format!("{fps:.2}");
+            if text.len() < 5 {
+                ("0".to_string(), text)
+            } else {
+                (String::new(), text)
+            }
+        }
+    }
+}
+
 fn clock(seconds: u64) -> String {
     format!(
         "{:02}:{:02}:{:02}",
@@ -932,6 +1080,17 @@ fn clock(seconds: u64) -> String {
         seconds / 60 % 60,
         seconds % 60
     )
+}
+
+/// A folder as people write it: `~` for the home folder.
+fn home_short(folder: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match folder.strip_prefix(&home) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
+            format!("~{rest}")
+        }
+        _ => folder.to_string(),
+    }
 }
 
 /// A count with digit grouping (22,620).
@@ -1089,7 +1248,9 @@ fn stream_drops(message: &str) -> Option<u64> {
 
 /// Studio Mode's quick transitions: a cut, the setup's own duration as a
 /// fade, and a fade through black (label, transition).
-fn quick_transitions(app: &Rc<App>) -> Vec<(String, Value)> {
+/// Studio Mode's quick transitions: each one's name, its length ("300
+/// ms", or "" for a cut) and the transition.
+fn quick_transitions(app: &Rc<App>) -> Vec<(String, String, Value)> {
     let ms = app
         .session
         .borrow()
@@ -1097,13 +1258,15 @@ fn quick_transitions(app: &Rc<App>) -> Vec<(String, Value)> {
         .and_then(|x| x["transition"]["duration_ms"].as_u64())
         .unwrap_or(300);
     vec![
-        ("Cut".into(), json!({ "kind": "cut" })),
+        ("Cut".into(), String::new(), json!({ "kind": "cut" })),
         (
-            format!("Fade ({ms} ms)"),
+            "Fade".into(),
+            format!("{ms} ms"),
             json!({ "kind": "fade", "duration_ms": ms }),
         ),
         (
-            format!("Fade to Black ({ms} ms)"),
+            "Fade to Black".into(),
+            format!("{ms} ms"),
             json!({ "kind": "fade_to_color", "color": "#000000", "duration_ms": ms }),
         ),
     ]

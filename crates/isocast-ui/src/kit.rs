@@ -127,21 +127,19 @@ impl MenuBuilder {
         {
             self.entries.pop();
         }
-        let lane = |entries: &[MenuEntry]| entries.iter().any(|e| e.checked || !e.icon.is_empty());
-        // A submenu keeps the lane of the menu it hangs from, so its text
-        // doesn't jump.
-        let root_lane = lane(&self.entries);
+        // Every menu keeps the 16px lane for checks and icons, empty or
+        // not, so labels always start 36px in (Paper's Components "Menu").
         let submenus: Vec<MenuList> = self
             .submenus
             .into_iter()
             .map(|entries| MenuList {
-                lane: root_lane || lane(&entries),
+                lane: true,
                 entries: ModelRc::new(VecModel::from(entries)),
             })
             .collect();
         (
             MenuList {
-                lane: root_lane,
+                lane: true,
                 entries: ModelRc::new(VecModel::from(self.entries)),
             },
             ModelRc::new(VecModel::from(submenus)),

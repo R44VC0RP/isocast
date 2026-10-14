@@ -1,7 +1,9 @@
-// Docks and their parts (docs/design.md 3.2, 3.3): a dock is a panel with
-// a 28px header band (the bands line up across the dock row), its content,
-// and an optional 32px toolbar at the foot; docks meet at 1px hairlines,
-// with splitters that resize them. No cards, no gaps.
+// Docks and their parts (Paper "Components" › Dock, list rows, toolbar,
+// and the Main window): a dock is a `surface-panel` pane with a 32px
+// header band (`surface-header`, its title 12px semibold `text-2`, 14px
+// in; compact 22px buttons on its right, 8px in), its content, and an
+// optional 34px toolbar at the foot holding capsule clusters. Docks meet
+// at 1px `line` gaps, with splitters that resize them.
 
 import { Theme } from "../theme.slint";
 
@@ -27,9 +29,10 @@ export component PanelHeader inherits Rectangle {
     }
     HorizontalLayout {
         x: Theme.pane-x;
-        width: parent.width - Theme.pane-x - Theme.space-1;
+        width: parent.width - Theme.pane-x - Theme.space-2;
         height: parent.height - 1px;
         alignment: end;
+        spacing: 2px;
         @children
     }
     Rectangle {
@@ -57,9 +60,11 @@ export component Dock inherits Rectangle {
     }
 }
 
-// The toolbar at a dock's foot (OBS's + − ⚙ ∧ ∨): 24px icon buttons 2px
-// apart, the first glyph in line with the rows (12px in).
+// The toolbar at a dock's foot (OBS's + − ⚙ ∧ ∨): 34px under a hairline,
+// 6px in, holding Capsules (or 24px icon buttons), centred. Groups at
+// both ends: `alignment: space-between`.
 export component DockToolbar inherits Rectangle {
+    in property <LayoutAlignment> alignment: LayoutAlignment.start;
     height: Theme.toolbar;
     background: Theme.surface-panel;
     accessible-role: none;
@@ -69,16 +74,15 @@ export component DockToolbar inherits Rectangle {
         height: 1px;
         background: Theme.line;
     }
-    // 24px buttons centred under the hairline.
     HorizontalLayout {
         y: 1px;
         height: parent.height - 1px;
-        padding-left: Theme.space-2;
-        padding-right: Theme.space-2;
-        padding-top: (parent.height - 1px - Theme.icon-button-sm) / 2;
-        padding-bottom: (parent.height - 1px - Theme.icon-button-sm) / 2;
+        padding-left: Theme.list-inset;
+        padding-right: Theme.list-inset;
+        padding-top: (parent.height - 1px - Theme.capsule-h) / 2;
+        padding-bottom: (parent.height - 1px - Theme.capsule-h) / 2;
         spacing: 2px;
-        alignment: start;
+        alignment: root.alignment;
         @children
     }
 }

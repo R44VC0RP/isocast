@@ -2001,7 +2001,15 @@ impl Daemon {
         };
         let info = engine_info(&state);
         let (collection, profile) = state.file.current_names(state.setup.as_ref());
-        Status {
+        // With no setup yet, the folder a new one records to (`setup
+        // init`'s), so a client can say how much room there is from the
+        // start.
+        let folder = Some(isocast_engine::record::expand_home(
+            state.setup.as_ref().map_or(init::DEFAULT_FOLDER, |setup| {
+                setup.recording.folder.as_str()
+            }),
+        ));
+        let mut status = Status {
             state: engine,
             scene: state.scene.clone(),
             preview: state.preview.clone(),
@@ -2028,7 +2036,17 @@ impl Daemon {
                 .map(str::to_string),
             export: self.export_running(),
             virtual_camera: Some(state.camera.status_for(state.setup.as_ref())),
-        }
+            recording_free_bytes: None,
+            program_bytes_per_second: state
+                .setup
+                .as_ref()
+                .map(|setup| setup.recording.program.bytes_per_second(&setup.canvas))
+                .filter(|rate| *rate > 0.0),
+        };
+        // Measured without the lock (a slow disk can't hold up the rest).
+        drop(state);
+        status.recording_free_bytes = folder.as_deref().and_then(free_bytes);
+        status
     }
 
     /// Start streaming the live engine's program to the live setup's
@@ -3347,6 +3365,21 @@ fn scene_png(
 }
 
 #[cfg(target_os = "macos")]
+/// Free space on the disk holding `folder` (or the nearest folder above
+/// it that exists).
+#[cfg(target_os = "macos")]
+fn free_bytes(folder: &Path) -> Option<u64> {
+    let existing = folder.ancestors().find(|path| path.exists())?;
+    isocast_platform_macos::volume(existing)
+        .ok()
+        .map(|volume| volume.free_bytes)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn free_bytes(_folder: &Path) -> Option<u64> {
+    None
+}
+
 fn doctor(setup: Option<&Setup>, folder: Option<&Path>) -> isocast_protocol::api::Doctor {
     isocast_engine::doctor::doctor(&MacPlatform, setup, folder)
 }

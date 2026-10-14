@@ -1,27 +1,48 @@
-// A source's Properties (the web app's properties.js), as in OBS: a live
-// picture of the source on top, its settings below (drawn from the setup
-// schema; only they scroll), Defaults at the bottom left and Cancel / OK
-// at the right. Changes show at once; Cancel puts the source back as it
-// was. A source that can't exist yet (a new image without its file) is a
-// draft, added on OK.
+// A source's Properties (the web app's properties.js; Paper's Properties
+// sheet): the source's name and what it is under its kind's glyph, a live
+// picture of it in the black well (video sources), its settings as
+// grouped rows (drawn from the setup schema; only they scroll), Defaults
+// at the bottom left and Cancel / OK at the right. Changes show at once;
+// Cancel puts the source back as it was. A source that can't exist yet (a
+// new image without its file) is a draft, added on OK.
 //
-// Filters (filters.js): the Audio Filters and Effect Filters lists on the
-// left, each with + − ⌃ ⌄ and an eye per filter; on the right the
-// source's picture and the selected filter's settings. Close keeps them.
+// Filters (filters.js), as Settings is laid out: the Audio Filters and
+// Effect Filters lists in the sheet's sidebar, each with + − ⌃ ⌄ under it
+// and an eye per filter; beside them the source's picture and the
+// selected filter's settings. Close keeps them.
 
 import { Theme } from "../../theme.slint";
 import { Icon, Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
 import {
-    Callout, CalloutKind, Dialog, DockToolbar, Form, IconButton, ListEmpty, Menus, ScrollArea,
-    SettingsForm, ToolbarGap, Viewport,
+    Callout, CalloutKind, Capsule, CapsuleButton, CapsuleDivider, Dialog, DialogFooter, GroupHeading,
+    GroupHint, IconButton, ListRow, Menus, ScrollArea, SettingsForm, SheetHeader, SheetSidebar,
+    SidebarHeading, Viewport,
 } from "../../kit.slint";
 import { SourcesArea, FilterRow } from "state.slint";
 import { SourcePreview } from "source-preview.slint";
 
+// A kind's glyph's yellow part in a sheet's header (the media source's
+// play mark).
+export global KindGlyph {
+    public pure function accent(icon: string) -> string {
+        if icon == "media" { return Icons.film-play; }
+        return "";
+    }
+    // The sheet glyph for a kind (the boards' own film for a media source).
+    public pure function glyph(icon: string) -> string {
+        if icon == "media" { return Icons.film; }
+        return Icons.named(icon);
+    }
+}
+
 export component PropertiesDialog inherits Dialog {
-    title: SourcesArea.props-title;
-    dialog-width: 720px;
+    title: SourcesArea.props-name;
+    accessible-name: SourcesArea.props-title;
+    subtitle: SourcesArea.props-subtitle;
+    icon: KindGlyph.glyph(SourcesArea.props-icon);
+    icon-accent: KindGlyph.accent(SourcesArea.props-icon);
+    dialog-width: 640px;
     ok-enabled: SourcesArea.props-need == "";
     extra-text: "Defaults";
     note: SourcesArea.props-need;
@@ -29,107 +50,71 @@ export component PropertiesDialog inherits Dialog {
     cancelled => { SourcesArea.props-cancel(); }
     extra => { SourcesArea.props-defaults(); }
 
-    // At most 40% of the room a dialog has (the window less 40px), so a
-    // short window leaves the form most of it.
+    // Paper's 288px room under the viewer line; at most 40% of what the
+    // sheet can have in a short window (the window less 40px), so the
+    // settings keep most of it.
     if SourcesArea.props-video: SourcePreview {
-        slot-height: max(120px, min(260px, (Viewport.height - 40px) * 0.4));
+        name: SourcesArea.props-name;
+        area-height: max(120px, min(288px, (Viewport.height - 40px) * 0.4 - 30px));
+    }
+    if SourcesArea.props-problem != "": VerticalLayout {
+        padding-left: Theme.sheet-pad;
+        padding-right: Theme.sheet-pad;
+        padding-bottom: Theme.space-4;
+        Callout {
+            kind: CalloutKind.error;
+            title: "This source isn’t running";
+            message: SourcesArea.props-problem;
+        }
     }
     ScrollArea {
         vertical-stretch: 1;
-        min-height: 80px;
+        min-height: 60px;
         preferred-height: body.preferred-height;
-        body := Form {
-            if SourcesArea.props-problem != "": Callout {
-                kind: CalloutKind.error;
-                title: "This source isn’t running";
-                message: SourcesArea.props-problem;
-            }
-            if SourcesArea.props-form.length == 0: Text {
-                text: "No settings.";
-                color: Theme.text-3;
-                font-size: Theme.fs-sm;
-                letter-spacing: Theme.tracking-sm;
+        body := VerticalLayout {
+            padding-left: Theme.sheet-pad;
+            padding-right: Theme.sheet-pad;
+            spacing: 0;
+            alignment: start;
+            if SourcesArea.props-form.length == 0: GroupHint {
+                text: "This source has no settings.";
             }
             SettingsForm {
                 groups: SourcesArea.props-form;
                 form: "props";
             }
-        }
-    }
-    if SourcesArea.props-created: HorizontalLayout {
-        padding-left: Theme.space-5;
-        padding-right: Theme.space-5;
-        padding-bottom: Theme.space-4;
-        Text {
-            text: "Added to the scene. Cancel keeps it with these settings; remove it with − under Sources.";
-            color: Theme.text-3;
-            font-size: Theme.fs-sm;
-            letter-spacing: Theme.tracking-sm;
-            line-height-factor: Theme.leading-sm;
-            wrap: word-wrap;
-        }
-    }
-}
-
-// A filter's row: its eye (on or off) first, then its name.
-component FilterItem inherits Rectangle {
-    in property <FilterRow> filter;
-    in property <bool> selected;
-    in property <int> index;
-    in property <int> count;
-    callback clicked();
-    callback toggled();
-
-    height: Theme.row;
-    background: root.selected ? Theme.selected : ta.has-hover ? Theme.hover : transparent;
-    accessible-role: list-item;
-    accessible-label: root.filter.name;
-    accessible-description: root.filter.enabled ? "" : "Off";
-    accessible-item-selectable: true;
-    accessible-item-selected: root.selected;
-    accessible-item-index: root.index;
-    accessible-item-count: root.count;
-    accessible-action-default => { root.clicked(); }
-
-    ta := TouchArea {
-        clicked => { root.clicked(); }
-    }
-    HorizontalLayout {
-        // The eye's glyph (not its 24px button) on the 12px inset, under
-        // the title and the toolbar's + (as DockToolbar does).
-        padding-left: Theme.pane-x - 5px;
-        padding-right: Theme.space-1;
-        // The name at 40px, as the web app's.
-        spacing: Theme.space-2 + 1px;
-        VerticalLayout {
-            alignment: center;
-            IconButton {
-                small: true;
-                icon: root.filter.enabled ? Icons.eye : Icons.eye-off;
-                icon-size: Theme.icon-sm;
-                label: root.filter.enabled ? "Turn off" : "Turn on";
-                clicked => { root.toggled(); }
+            if SourcesArea.props-created: GroupHint {
+                text: "Added to the scene. Cancel keeps it with these settings; remove it with − under Sources.";
             }
         }
-        Text {
-            horizontal-stretch: 1;
-            text: root.filter.name;
-            color: root.filter.enabled || root.selected || ta.has-hover ? Theme.text : Theme.text-3;
-            font-size: Theme.fs;
-            letter-spacing: Theme.tracking;
-            vertical-alignment: center;
-            overflow: elide;
-            accessible-role: none;
-        }
-    }
-    if root.selected: Rectangle {
-        x: 0;
-        width: 3px;
-        background: Theme.accent-hover;
     }
 }
 
-// One list of filters with its title and toolbar.
+// A filter's row in the sidebar: the kit's list row, the filter's name
+// (dim when it is off), its eye on the right.
+component FilterItem inherits ListRow {
+    in property <FilterRow> filter;
+    callback toggled();
+
+    text: root.filter.name;
+    dim: !root.filter.enabled;
+    description: root.filter.enabled ? "" : "Off";
+    trailing-pad: 2px;
+
+    VerticalLayout {
+        alignment: center;
+        IconButton {
+            compact: true;
+            icon: root.filter.enabled ? Icons.eye : Icons.eye-off;
+            icon-size: Theme.icon-row;
+            rest-color: root.filter.enabled ? Theme.text-2 : Theme.text-3;
+            label: root.filter.enabled ? "Turn off" : "Turn on";
+            clicked => { root.toggled(); }
+        }
+    }
+}
+
+// One list of filters: its heading, its rows, and + − ⌃ ⌄ under them.
 component FilterGroup inherits VerticalLayout {
     in property <string> title;
     // "audio_filters" or "filters".
@@ -137,27 +122,29 @@ component FilterGroup inherits VerticalLayout {
     in property <[FilterRow]> filters;
     property <int> current: -1;
 
-    spacing: 0;
-    vertical-stretch: 1;
+    spacing: 2px;
 
+    // The sidebar's 8px plus the rows' own 6px: its heading on their text.
     HorizontalLayout {
-        padding-left: Theme.pane-x;
-        padding-right: Theme.pane-x;
-        padding-top: Theme.space-3;
-        padding-bottom: Theme.space-2;
-        Text {
+        padding-left: 6px;
+        SidebarHeading {
             text: root.title;
-            color: Theme.text-2;
-            font-size: Theme.fs-sm;
-            letter-spacing: Theme.tracking-sm;
-            font-weight: Theme.weight-semibold;
-            accessible-role: none;
         }
     }
-    ScrollArea {
-        vertical-stretch: 1;
-        if root.filters.length == 0: ListEmpty {
-            text: "None. Click + to add one.";
+    VerticalLayout {
+        spacing: 2px;
+        accessible-role: AccessibleRole.list;
+        accessible-label: root.title;
+        if root.filters.length == 0: HorizontalLayout {
+            padding-left: 16px;
+            Text {
+                height: Theme.row;
+                text: "None yet. Add one with +.";
+                color: Theme.text-3;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                vertical-alignment: center;
+            }
         }
         for filter[i] in root.filters: FilterItem {
             property <bool> chosen: SourcesArea.filter-list == root.list && SourcesArea.filter-key == filter.key;
@@ -181,125 +168,128 @@ component FilterGroup inherits VerticalLayout {
             toggled => { SourcesArea.filter-toggle(root.list, filter.key); }
         }
     }
-    DockToolbar {
-        IconButton {
-            small: true;
-            icon: Icons.plus;
-            label: "Add a filter";
-            menu-open: Menus.open && Menus.owner == "filters:add:" + root.list;
-            clicked => {
-                SourcesArea.filter-add(root.list, self.absolute-position.x, self.absolute-position.y, self.width, self.height);
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-top: Theme.space-1;
+        spacing: Theme.space-2;
+        alignment: start;
+        Capsule {
+            CapsuleButton {
+                icon: Icons.plus;
+                label: "Add a filter";
+                menu-open: Menus.open && Menus.owner == "filters:add:" + root.list;
+                clicked => {
+                    SourcesArea.filter-add(root.list, self.absolute-position.x, self.absolute-position.y, self.width, self.height);
+                }
+            }
+            CapsuleDivider { }
+            CapsuleButton {
+                icon: Icons.minus;
+                label: "Remove the filter";
+                enabled: root.current >= 0;
+                clicked => { SourcesArea.filter-remove(root.list); }
             }
         }
-        IconButton {
-            small: true;
-            icon: Icons.minus;
-            label: "Remove the filter";
-            enabled: root.current >= 0;
-            clicked => { SourcesArea.filter-remove(root.list); }
-        }
-        ToolbarGap { }
-        IconButton {
-            small: true;
-            icon: Icons.chevron-up;
-            label: "Move up";
-            enabled: root.current > 0;
-            clicked => { SourcesArea.filter-move(root.list, -1); }
-        }
-        IconButton {
-            small: true;
-            icon: Icons.chevron-down;
-            label: "Move down";
-            enabled: root.current >= 0 && root.current < root.filters.length - 1;
-            clicked => { SourcesArea.filter-move(root.list, 1); }
+        Capsule {
+            CapsuleButton {
+                icon: Icons.chevron-up;
+                label: "Move up";
+                enabled: root.current > 0;
+                clicked => { SourcesArea.filter-move(root.list, -1); }
+            }
+            CapsuleDivider { }
+            CapsuleButton {
+                icon: Icons.chevron-down;
+                label: "Move down";
+                enabled: root.current >= 0 && root.current < root.filters.length - 1;
+                clicked => { SourcesArea.filter-move(root.list, 1); }
+            }
         }
     }
 }
 
 export component FiltersDialog inherits Dialog {
-    title: SourcesArea.filters-title;
+    property <string> explain: SourcesArea.filters-audio && SourcesArea.filters-video ? "Filters for the picture and the sound, applied top to bottom."
+        : SourcesArea.filters-audio ? "Filters for the sound, applied top to bottom."
+        : "Filters for the picture, applied top to bottom.";
+
+    title: SourcesArea.filters-name;
+    accessible-name: SourcesArea.filters-title;
+    header: false;
+    footer: false;
+    drag-height: 78px;
     dialog-width: 880px;
-    dialog-height: min(640px, Viewport.height - 60px);
-    ok-text: "Close";
-    cancel-text: "";
-    extra-text: "Defaults";
-    extra-enabled: SourcesArea.filter-key != "";
+    dialog-height: min(700px, Viewport.height - 60px);
     accepted => { Ui.close-dialog(); }
     cancelled => { Ui.close-dialog(); }
-    extra => { SourcesArea.filter-defaults(); }
 
     HorizontalLayout {
         vertical-stretch: 1;
         spacing: 0;
-        VerticalLayout {
-            width: 248px;
-            spacing: 0;
+        SheetSidebar {
+            label: "Filters";
             if SourcesArea.filters-audio: FilterGroup {
                 title: "Audio Filters";
                 list: "audio_filters";
                 filters: SourcesArea.audio-filters;
             }
             if SourcesArea.filters-audio && SourcesArea.filters-video: Rectangle {
-                height: 1px;
-                background: Theme.line;
+                height: 12px;
             }
             if SourcesArea.filters-video: FilterGroup {
                 title: "Effect Filters";
                 list: "filters";
                 filters: SourcesArea.video-filters;
             }
-        }
-        Rectangle {
-            width: 1px;
-            background: Theme.line;
+            Rectangle {
+                vertical-stretch: 1;
+            }
         }
         VerticalLayout {
             horizontal-stretch: 1;
             spacing: 0;
+            SheetHeader {
+                inset: Theme.sheet-pad-wide;
+                title: SourcesArea.filters-name;
+                subtitle: root.explain;
+                icon: Icons.filters;
+            }
             if SourcesArea.filters-video: SourcePreview {
-                slot-height: max(120px, min(220px, (Viewport.height - 40px) * 0.35));
+                padding-left: Theme.sheet-pad-wide;
+                padding-right: Theme.sheet-pad-wide;
+                name: SourcesArea.filters-name;
+                area-height: max(100px, min(240px, (Viewport.height - 40px) * 0.3));
             }
             ScrollArea {
                 vertical-stretch: 1;
-                Form {
-                    if SourcesArea.filter-key != "": HorizontalLayout {
-                        spacing: 0;
-                        Text {
-                            text: SourcesArea.filter-heading;
-                            color: Theme.text;
-                            font-size: Theme.fs;
-                            letter-spacing: Theme.tracking;
-                            font-weight: Theme.weight-semibold;
-                        }
-                        if SourcesArea.filter-off: Text {
-                            text: " · off";
-                            color: Theme.text-3;
-                            font-size: Theme.fs;
-                            letter-spacing: Theme.tracking;
-                        }
-                        Rectangle {
-                            horizontal-stretch: 1;
-                        }
+                VerticalLayout {
+                    padding-left: Theme.sheet-pad-wide;
+                    padding-right: Theme.sheet-pad-wide;
+                    spacing: 0;
+                    alignment: start;
+                    if SourcesArea.filter-key != "": GroupHeading {
+                        title: SourcesArea.filter-heading + (SourcesArea.filter-off ? " · off" : "");
                     }
-                    if SourcesArea.filter-key != "" && SourcesArea.filter-form.length == 0: Text {
-                        text: "No settings.";
-                        color: Theme.text-3;
-                        font-size: Theme.fs-sm;
-                        letter-spacing: Theme.tracking-sm;
+                    if SourcesArea.filter-key != "" && SourcesArea.filter-form.length == 0: GroupHint {
+                        text: "This filter has no settings.";
                     }
                     if SourcesArea.filter-key != "": SettingsForm {
                         groups: SourcesArea.filter-form;
                         form: "filter";
                     }
-                    if SourcesArea.filter-key == "": Text {
+                    if SourcesArea.filter-key == "": GroupHint {
                         text: "Select a filter to change its settings, or add one with +.";
-                        color: Theme.text-3;
-                        font-size: Theme.fs-sm;
-                        letter-spacing: Theme.tracking-sm;
-                        line-height-factor: Theme.leading-sm;
-                        wrap: word-wrap;
                     }
                 }
+            }
+            DialogFooter {
+                inset: Theme.sheet-pad-wide;
+                ok-text: "Close";
+                cancel-text: "";
+                extra-text: "Defaults";
+                extra-enabled: SourcesArea.filter-key != "";
+                ok => { Ui.close-dialog(); }
+                extra => { SourcesArea.filter-defaults(); }
             }
         }
     }

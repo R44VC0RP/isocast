@@ -1,5 +1,8 @@
-// Toasts (docs/design.md 3.13): messages that stack at the top right,
-// newest first, 360px wide. Errors stay until dismissed; the rest fade
+// Toasts (Paper "Components" › Toasts): messages that stack at the top
+// right, newest first, 360px wide: `surface-overlay`, a `line-strong` edge,
+// 8px corners, the floating shadow, 12px in; a 16px status icon, a 13px
+// semibold title, a 12px `text-2` message, quiet 22px actions and a 24px
+// round ✕. Errors stay until dismissed; the rest fade
 // after a few seconds (the app's src/toasts.rs keeps the list and the
 // timers). A toast can carry an action ("Undo", "Details") and a small
 // table of rows (dropped frames per file).
@@ -42,13 +45,17 @@ export component Toast inherits Rectangle {
 
     property <bool> shown;
     init => { root.shown = true; }
+    // A title alone sits in the middle of the 24px line of its buttons;
+    // with a message or rows, everything hangs from the top.
+    property <bool> one-line: root.toast.message == "" && root.toast.rows.length == 0;
 
     width: Theme.toast-w;
-    height: row.preferred-height;
+    // The 1px edge, then 12px in (Paper's border-box).
+    height: row.preferred-height + 2px;
     background: Theme.surface-overlay;
     border-width: 1px;
     border-color: Theme.line-strong;
-    border-radius: Theme.r-panel;
+    border-radius: Theme.r-menu;
     drop-shadow-color: Theme.shadow-color;
     drop-shadow-blur: Theme.shadow-blur;
     drop-shadow-offset-y: Theme.shadow-y;
@@ -61,21 +68,27 @@ export component Toast inherits Rectangle {
     TouchArea { }
 
     row := HorizontalLayout {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
         padding: Theme.space-3;
         spacing: Theme.space-2;
 
         VerticalLayout {
-            padding-top: 1px;
+            padding-top: root.one-line ? (Theme.icon-button-sm - Theme.icon) / 2 : (Theme.lh - Theme.icon) / 2;
             alignment: start;
             Icon {
                 path: root.toast.kind == ToastKind.error ? Icons.alert : root.toast.kind == ToastKind.warning ? Icons.warning : root.toast.kind == ToastKind.success ? Icons.check : Icons.info;
                 color: root.toast.kind == ToastKind.error ? Theme.danger-text : root.toast.kind == ToastKind.warning ? Theme.warning : root.toast.kind == ToastKind.success ? Theme.onair-text : Theme.text-2;
             }
         }
+        // The title, its message and the rows 2px apart (Paper).
         VerticalLayout {
             horizontal-stretch: 1;
-            spacing: 0;
+            spacing: 2px;
             alignment: start;
+            padding-top: root.one-line ? (Theme.icon-button-sm - Theme.lh) / 2 : 0px;
             Text {
                 min-height: Theme.lh;
                 vertical-alignment: center;
@@ -99,11 +112,13 @@ export component Toast inherits Rectangle {
             }
             if root.toast.rows.length > 0: VerticalLayout {
                 padding-top: Theme.space-1;
-                spacing: 2px;
+                spacing: 0;
                 for r in root.toast.rows: HorizontalLayout {
                     spacing: Theme.space-3;
                     Text {
                         horizontal-stretch: 1;
+                        height: Theme.lh-sm;
+                        vertical-alignment: center;
                         text: r.label;
                         color: Theme.text-2;
                         font-size: Theme.fs-sm;
@@ -111,6 +126,8 @@ export component Toast inherits Rectangle {
                         overflow: elide;
                     }
                     Text {
+                        height: Theme.lh-sm;
+                        vertical-alignment: center;
                         text: r.value;
                         color: r.tone == "bad" ? Theme.danger-text : r.tone == "warn" ? Theme.warning : Theme.text-2;
                         font-size: Theme.fs-sm;
@@ -120,26 +137,29 @@ export component Toast inherits Rectangle {
                 }
             }
         }
-        // The buttons (24px) sit on the title's 18px line, 3px over it
-        // above and below, and the ✕ 4px into the padding (as the web
-        // app's `.toast .actions` margins put them).
+        // The action (22px) and the ✕ (24px) on a 24px line at the top,
+        // 8px apart.
         VerticalLayout {
             horizontal-stretch: 0;
             alignment: start;
             Rectangle {
-                width: actions.preferred-width - 4px;
-                height: Theme.lh;
+                width: actions.preferred-width;
+                height: Theme.icon-button-sm;
                 actions := HorizontalLayout {
                     x: 0;
-                    y: -3px;
+                    y: 0;
                     width: self.preferred-width;
-                    height: Theme.control-h-sm;
-                    spacing: Theme.space-1;
-                    if root.toast.action != "": Button {
-                        text: root.toast.action;
-                        variant: ButtonVariant.quiet;
-                        size: ControlSize.small;
-                        clicked => { Toasts.action(root.toast.id); }
+                    height: Theme.icon-button-sm;
+                    spacing: Theme.space-2;
+                    if root.toast.action != "": VerticalLayout {
+                        alignment: center;
+                        Button {
+                            text: root.toast.action;
+                            variant: ButtonVariant.quiet;
+                            size: ControlSize.small;
+                            inset: Theme.space-2;
+                            clicked => { Toasts.action(root.toast.id); }
+                        }
                     }
                     IconButton {
                         small: true;

@@ -1,35 +1,38 @@
-// Buttons (docs/design.md 3.5): four variants plus the live states of the
-// Controls dock, three sizes, and the icon-only buttons of toolbars and
-// rows. One primary button per surface (OK, Close, Continue, Transition…).
+// Buttons (Console, Paper "Components" › Buttons and Icon buttons): flat
+// fills with no edge, 6px corners, Mona Sans medium. Secondary sits on
+// `control`; the one primary button per surface is the yellow LED fill
+// (OK, Continue, Transition, Start with this Mac); a running control is
+// red (Stop Recording); a toggle that is on is tinted yellow (Studio
+// Mode). Hover and press step the fill lighter, never add an edge;
+// keyboard focus is the pale-yellow ring; disabled is 40% opacity.
 
 import { Theme, Motion } from "../theme.slint";
-import { Icon, Icons } from "../icons.slint";
-import { FocusRing } from "focus.slint";
+import { Icon, Icons, SvgPath } from "../icons.slint";
+import { FocusRing, ShownState } from "focus.slint";
 import { Tip } from "tooltip.slint";
 
 export enum ButtonVariant {
-    // Bordered, on `control`: the default.
+    // `control` fill, white label: the default.
     secondary,
-    // Copper fill, white label: OK, Close, Continue, Create setup,
-    // Transition, Try again.
+    // The yellow fill, near-black label: one per surface.
     primary,
-    // No border or fill until hovered: toolbars, helpers, toast actions.
+    // No fill until hovered: toolbars, helpers, toast actions.
     quiet,
-    // Secondary, with a red label (a destructive action that isn't live).
+    // Secondary with a red label (a destructive action that isn't live).
     danger,
-    // Red fill: a running control (Stop Recording, Stop Streaming).
+    // Red fill, bone label: a running control (Stop Recording, Stop
+    // Streaming).
     live,
-    // Amber fill: a live control that is struggling (Reconnecting…).
+    // Orange fill: a live control that is struggling (Reconnecting…).
     live-warn,
 }
 
 export enum ControlSize {
-    // 24px: the source toolbar, dock toolbars, toast actions, quick
-    // transitions, dialog helpers.
+    // 22px, 12px type, 10px in: in rows and bands, toast actions, "Mark".
     small,
-    // 28px.
+    // 28px, 13px type, 14px in.
     regular,
-    // 32px, 13px type: onboarding, Welcome, the full-window states.
+    // 34px, 13px type: Welcome, Transition, the full-window states.
     large,
 }
 
@@ -37,24 +40,40 @@ export component Button inherits Rectangle {
     in property <string> text;
     // A leading icon (`Icons.*`), drawn at 14px.
     in property <string> icon;
+    // Instead of an icon, a 9px round light in a 14px lane (Start
+    // Recording's red dot).
+    in property <color> dot: transparent;
     in property <ButtonVariant> variant: ButtonVariant.secondary;
     in property <ControlSize> size: ControlSize.regular;
     in property <bool> enabled: true;
-    // A toggle that is on (Studio Mode): copper tint and edge, copper label.
+    // A toggle that is on (Studio Mode): the yellow tint, yellow label.
     in property <bool> checked;
     // Tell screen readers it is a toggle (with `checked`).
     in property <bool> toggle;
     // Looks pressed while the menu it opened is showing.
     in property <bool> menu-open;
-    // In a dialog's footer: at least 80px wide.
+    // In a sheet's footer: 16px in; the primary one at least 72px wide
+    // and semibold.
     in property <bool> footer;
-    // Where the label sits when the button is wider than it (full-width
-    // controls keep it centred).
+    // Fully round ends (Welcome's three choices).
+    in property <bool> capsule;
+    // The label in `text-2` (a sheet's "Defaults" helper).
+    in property <bool> subdued;
+    // On a `control` row (a sheet's grouped rows: "Browse…"): one step
+    // lighter, `control-active` at rest and `field-border-hover` under the
+    // pointer, with the compact 5px corners.
+    in property <bool> on-control;
+    // Where the label sits when the button is wider than it (the Controls
+    // dock's full-width buttons start it 10px in).
     in property <LayoutAlignment> content-alignment: LayoutAlignment.center;
-    in property <int> font-weight: Theme.weight-medium;
+    // Space before and after the label (the size's own by default).
+    in property <length> inset: root.footer ? 16px : root.size == ControlSize.small || root.variant == ButtonVariant.live ? 10px : 14px;
+    in property <int> font-weight: root.footer && root.variant == ButtonVariant.primary ? Theme.weight-semibold : Theme.weight-medium;
     in property <string> tooltip;
     // What screen readers say, if not `text` (an icon-only button).
     in property <string> accessible-name;
+    // Draw a state regardless of the pointer (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
     out property <bool> has-focus: fs.has-focus;
     out property <bool> has-hover: ta.has-hover;
     callback clicked();
@@ -62,34 +81,54 @@ export component Button inherits Rectangle {
 
     forward-focus: fs;
     property <bool> keyboard;
-    property <bool> hovered: ta.has-hover && root.enabled;
-    property <bool> pressed: (ta.pressed && root.enabled) || root.menu-open;
-    property <color> fill: root.checked ? Theme.accent-soft
+    property <bool> hovered: (ta.has-hover || root.shown == ShownState.hover) && root.enabled;
+    property <bool> pressed: ((ta.pressed || root.shown == ShownState.pressed) && root.enabled) || root.menu-open;
+    // A sheet's disabled footer button (Apply) is drawn, not faded: the
+    // `hover` fill with a `text-disabled` label (Paper's Settings sheet).
+    property <bool> footer-off: root.footer && !root.enabled && root.variant != ButtonVariant.primary;
+    property <color> fill: root.footer-off ? Theme.hover
+        : root.checked ? Theme.accent-soft
         : root.variant == ButtonVariant.primary ? (root.pressed ? Theme.accent-fill-active : root.hovered ? Theme.accent-fill-hover : Theme.accent-fill)
         : root.variant == ButtonVariant.quiet ? (root.pressed ? Theme.control-hover : root.hovered ? Theme.hover : transparent)
         : root.variant == ButtonVariant.live ? (root.pressed ? Theme.danger-fill-active : root.hovered ? Theme.danger-fill-hover : Theme.danger-fill)
         : root.variant == ButtonVariant.live-warn ? Theme.warning
+        : root.on-control ? (root.hovered || root.pressed ? Theme.field-border-hover : Theme.control-active)
         : (root.pressed ? Theme.control-active : root.hovered ? Theme.control-hover : Theme.control);
-    property <color> edge: root.checked ? Theme.accent
-        : root.variant == ButtonVariant.primary || root.variant == ButtonVariant.quiet ? transparent
-        : root.variant == ButtonVariant.live || root.variant == ButtonVariant.live-warn ? root.fill
-        : Theme.line-strong;
-    property <color> ink: root.checked ? Theme.accent-text
-        : root.variant == ButtonVariant.primary || root.variant == ButtonVariant.live ? Theme.on-accent
+    property <color> ink: root.footer-off ? Theme.text-disabled
+        : root.checked ? Theme.accent-text
+        : root.variant == ButtonVariant.primary ? Theme.on-accent
+        : root.variant == ButtonVariant.live ? Theme.bone
         : root.variant == ButtonVariant.live-warn ? Theme.on-warning
         : root.variant == ButtonVariant.quiet ? (root.hovered || root.pressed ? Theme.text : Theme.text-2)
         : root.variant == ButtonVariant.danger ? Theme.danger-text
+        : root.subdued ? Theme.text-2
         : Theme.text;
-    property <length> pad: root.size == ControlSize.small ? Theme.space-2 : root.size == ControlSize.large ? Theme.space-4 : Theme.space-3;
+    // The label's size (12px in small buttons, 13px otherwise; 12px for
+    // "Browse" beside a path field).
+    in property <length> font-size: root.size == ControlSize.small ? Theme.fs-sm : Theme.fs;
+    // The icon's size (Paper's "Add Files…": 10px; Welcome's choices 15px),
+    // the gap after it (8px; "Add Files…" 6px), and the space after the
+    // label when it differs from `inset` ("Add Files…": 10px before, 12px
+    // after).
+    in property <length> icon-size: Theme.icon-sm;
+    // An icon drawn in another box than Icons' 24 units, with its own
+    // stroke in those units (Properties' "Add Files…": 12, 1.6), and in a
+    // colour of its own (transparent: the button's).
+    in property <float> icon-box: 24;
+    in property <float> icon-stroke: 2.25;
+    in property <color> icon-color: transparent;
+    in property <length> icon-gap: Theme.space-2;
+    in property <length> inset-end: root.inset;
+    // The label may shorten to "…" when the button is given less than its
+    // width (a narrow dock), rather than run out of its place.
+    in property <bool> shrinks;
 
     height: root.size == ControlSize.small ? Theme.control-h-sm : root.size == ControlSize.large ? Theme.control-h-lg : Theme.control-h;
-    min-width: max(root.footer ? 80px : 0px, content.min-width);
-    preferred-width: max(root.footer ? 80px : 0px, content.preferred-width);
-    border-radius: Theme.r;
-    border-width: 1px;
-    border-color: root.edge;
+    min-width: max(root.footer && root.variant == ButtonVariant.primary ? 72px : 0px, content.min-width);
+    preferred-width: max(root.footer && root.variant == ButtonVariant.primary ? 72px : 0px, content.preferred-width);
+    border-radius: root.capsule ? self.height / 2 : root.on-control ? Theme.r-compact : Theme.r;
     background: root.fill;
-    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    opacity: root.enabled || root.footer-off ? 1 : Theme.disabled-opacity;
     animate background { duration: Theme.fast; easing: Motion.ease; }
 
     accessible-role: button;
@@ -123,24 +162,41 @@ export component Button inherits Rectangle {
     }
 
     content := HorizontalLayout {
-        padding-left: root.pad;
-        padding-right: root.pad;
-        spacing: Theme.space-2;
+        padding-left: root.inset;
+        padding-right: root.inset-end;
+        spacing: root.icon-gap;
         alignment: root.content-alignment;
 
         if root.icon != "": VerticalLayout {
             alignment: center;
             Icon {
                 path: root.icon;
-                size: Theme.icon-sm;
-                color: root.ink;
+                size: root.icon-size;
+                box-width: root.icon-box;
+                box-height: root.icon-box;
+                stroke-width: root.icon-size * root.icon-stroke / root.icon-box;
+                color: root.icon-color != transparent ? root.icon-color : root.variant == ButtonVariant.quiet || (root.variant == ButtonVariant.secondary && !root.checked && root.ink == Theme.text) ? (root.hovered || root.pressed ? Theme.text : Theme.text-2) : root.ink;
+            }
+        }
+        if root.icon == "" && root.dot != transparent: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: Theme.icon-sm;
+                height: Theme.icon-sm;
+                Rectangle {
+                    width: 9px;
+                    height: 9px;
+                    border-radius: 4.5px;
+                    background: root.dot;
+                }
             }
         }
         label := Text {
+            min-width: root.shrinks ? 0px : self.preferred-width;
             text: root.text;
             color: root.ink;
-            font-size: root.size == ControlSize.large ? Theme.fs : Theme.fs-sm;
-            letter-spacing: Theme.tracking-for(root.size == ControlSize.large ? Theme.fs : Theme.fs-sm);
+            font-size: root.font-size;
+            letter-spacing: Theme.tracking-for(root.font-size);
             font-weight: root.font-weight;
             vertical-alignment: center;
             overflow: elide;
@@ -149,7 +205,8 @@ export component Button inherits Rectangle {
     }
 
     FocusRing {
-        shown: fs.has-focus && root.keyboard;
+        shown: (fs.has-focus && root.keyboard) || root.shown == ShownState.focus;
+        radius: root.border-radius;
     }
 
     if root.tooltip != "": Tooltip {
@@ -157,18 +214,26 @@ export component Button inherits Rectangle {
     }
 }
 
-// A square button with only an icon: 28px, or 24px (`small`) in rows,
-// dock toolbars and the mixer. Its label is the tooltip and what screen
-// readers say.
+// A button with only an icon: 28px square (6px corners), 24px round
+// (`small`, in rows, toasts and the mixer) or 22px square (`compact`: dock
+// headers, a list row's trailing toggles). At rest it has no fill; hover
+// and press fill it; `on` tints it yellow with a yellow icon (Paper's
+// "On"). Its label is the tooltip and what screen readers say.
 export component IconButton inherits Rectangle {
     in property <string> icon;
     in property <string> label;
     in property <bool> small;
-    in property <length> icon-size: Theme.icon;
+    in property <bool> compact;
+    in property <length> icon-size: root.compact ? Theme.icon-sm : Theme.icon;
     in property <bool> enabled: true;
-    // On (a toggle that is set): the icon in `on-color`.
+    // On (a toggle that is set).
     in property <bool> on;
+    // The icon's colour when on. A colour other than the default makes it
+    // a quiet toggle: only the icon changes, no tint (a source row's lock).
     in property <color> on-color: Theme.accent-text;
+    in property <color> on-fill: root.on-color == Theme.accent-text ? Theme.accent-soft : transparent;
+    // The icon at rest, when neither on, hovered nor danger.
+    in property <color> rest-color: Theme.text-2;
     // The icon in red (a muted strip's speaker).
     in property <bool> danger;
     // Looks pressed while the menu it opened is showing.
@@ -179,6 +244,8 @@ export component IconButton inherits Rectangle {
     in property <bool> show-tooltip: true;
     // Screen readers: a toggle (with `on` as its state).
     in property <bool> toggle;
+    // Draw a state regardless of the pointer (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
     out property <bool> has-focus: fs.has-focus;
     out property <bool> has-hover: ta.has-hover;
     callback clicked();
@@ -186,13 +253,13 @@ export component IconButton inherits Rectangle {
 
     forward-focus: fs;
     property <bool> keyboard;
-    property <bool> hovered: ta.has-hover && root.enabled;
-    property <bool> pressed: (ta.pressed && root.enabled) || root.menu-open;
+    property <bool> hovered: (ta.has-hover || root.shown == ShownState.hover) && root.enabled;
+    property <bool> pressed: ((ta.pressed || root.shown == ShownState.pressed) && root.enabled) || root.menu-open;
 
-    width: root.small ? Theme.icon-button-sm : Theme.icon-button;
+    width: root.compact ? Theme.icon-button-xs : root.small ? Theme.icon-button-sm : Theme.icon-button;
     height: self.width;
-    border-radius: Theme.r;
-    background: root.pressed ? Theme.control-active : root.hovered ? Theme.control-hover : transparent;
+    border-radius: root.small ? self.width / 2 : Theme.r;
+    background: root.pressed ? Theme.control-active : root.hovered ? Theme.control-hover : root.on ? root.on-fill : transparent;
     opacity: root.enabled ? 1 : Theme.disabled-opacity;
     animate background { duration: Theme.fast; easing: Motion.ease; }
 
@@ -231,12 +298,13 @@ export component IconButton inherits Rectangle {
         y: (parent.height - self.height) / 2;
         path: root.icon;
         size: root.icon-size;
-        color: root.danger ? Theme.danger-text : root.on ? root.on-color : root.hovered || root.pressed ? Theme.text : Theme.text-2;
+        color: root.danger ? Theme.danger-text : root.on ? root.on-color : root.hovered || root.pressed ? Theme.text : root.rest-color;
         transform-rotation: root.spinning ? (animation-tick() / 800ms) * 360deg : 0deg;
     }
 
     FocusRing {
-        shown: fs.has-focus && root.keyboard;
+        shown: (fs.has-focus && root.keyboard) || root.shown == ShownState.focus;
+        radius: root.border-radius;
     }
 
     if root.show-tooltip && root.label != "": Tooltip {
@@ -244,7 +312,7 @@ export component IconButton inherits Rectangle {
     }
 }
 
-// A text button in copper with an underline (the web's `.link`).
+// A text button in the yellow with an underline (a link in prose).
 export component LinkButton inherits Rectangle {
     in property <string> text;
     in property <bool> enabled: true;
@@ -266,6 +334,7 @@ export component LinkButton inherits Rectangle {
         text: root.text;
         color: Theme.accent-text;
         font-weight: Theme.weight-medium;
+        letter-spacing: Theme.tracking;
         accessible-role: none;
     }
     Rectangle {
@@ -293,5 +362,317 @@ export component LinkButton inherits Rectangle {
     }
     FocusRing {
         shown: fs.has-focus && root.keyboard;
+    }
+}
+
+// The round transport buttons of the control bar (Logic's record button):
+// 30px circles. `record` idle is a red dot on `control`; running, a bone
+// stop square on red with a bone ring. `stream` idle is the broadcast
+// glyph on `control`; live, white on green. `stop` is a grey square.
+export enum TransportKind { record, stream, stop }
+
+export component TransportButton inherits Rectangle {
+    in property <TransportKind> kind: TransportKind.record;
+    // Recording, or streaming.
+    in property <bool> active;
+    in property <bool> enabled: true;
+    // The tooltip and what screen readers say ("Start Recording").
+    in property <string> label;
+    // Draw a state regardless of the pointer (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
+    out property <bool> has-hover: ta.has-hover;
+    callback clicked();
+
+    forward-focus: fs;
+    property <bool> keyboard;
+    property <bool> hovered: (ta.has-hover || root.shown == ShownState.hover) && root.enabled;
+    property <bool> pressed: (ta.pressed || root.shown == ShownState.pressed) && root.enabled;
+
+    width: Theme.transport;
+    height: Theme.transport;
+    border-radius: self.width / 2;
+    background: root.kind == TransportKind.record && root.active ? (root.pressed ? Theme.danger-fill-active : root.hovered ? Theme.danger-fill-hover : Theme.danger-fill)
+        : root.kind == TransportKind.stream && root.active ? Theme.onair-fill
+        : root.pressed ? Theme.control-active : root.hovered ? Theme.control-hover : Theme.control;
+    border-width: root.kind == TransportKind.record && root.active ? 2px : 0px;
+    border-color: Theme.bone;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-checkable: root.kind != TransportKind.stop;
+    accessible-checked: root.active;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    // Record, idle: a 12px red dot.
+    if root.kind == TransportKind.record && !root.active: Rectangle {
+        width: 12px;
+        height: 12px;
+        border-radius: 6px;
+        background: Theme.danger;
+    }
+    // Recording, and stop: a 10px square with 2px corners.
+    if (root.kind == TransportKind.record && root.active) || root.kind == TransportKind.stop: Rectangle {
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+        background: root.kind == TransportKind.stop ? Theme.text-2 : Theme.bone;
+    }
+    // Stream: the broadcast glyph (Paper: 16px, 2-unit stroke); the
+    // centre filled while live.
+    if root.kind == TransportKind.stream: SvgPath {
+        width: Theme.icon;
+        height: Theme.icon;
+        commands: "M4.9 19.1C1 15.2 1 8.8 4.9 4.9M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5M19.1 4.9C23 8.8 23 15.1 19.1 19";
+        stroke: root.active ? Theme.on-onair : root.hovered ? Theme.text : Theme.text-2;
+        stroke-width: 1.33px;
+        stroke-line-cap: round;
+        fill: transparent;
+    }
+    if root.kind == TransportKind.stream: SvgPath {
+        width: Theme.icon;
+        height: Theme.icon;
+        commands: "M10 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0";
+        stroke: root.active ? Theme.on-onair : root.hovered ? Theme.text : Theme.text-2;
+        stroke-width: 1.33px;
+        fill: root.active ? Theme.on-onair : transparent;
+    }
+
+    FocusRing {
+        shown: (fs.has-focus && root.keyboard) || root.shown == ShownState.focus;
+        radius: root.width / 2;
+    }
+
+    if root.label != "": Tooltip {
+        Tip { text: root.label; }
+    }
+}
+
+// A capsule cluster (Tower's toolbars): icon buttons in one rounded
+// `control` pill, split by short hairlines. 24px in dock toolbars, 30px
+// (`large`) in the control bar. Put CapsuleButtons in it with a
+// CapsuleDivider between each two:
+//
+//     Capsule {
+//         CapsuleButton { icon: Icons.plus; label: "Add Scene"; clicked => { … } }
+//         CapsuleDivider { }
+//         CapsuleButton { icon: Icons.minus; label: "Remove Scene"; … }
+//     }
+export component Capsule inherits Rectangle {
+    in property <bool> large;
+    height: root.large ? Theme.capsule-h-lg : Theme.capsule-h;
+    border-radius: self.height / 2;
+    background: Theme.control;
+    min-width: row.min-width;
+    preferred-width: row.preferred-width;
+    horizontal-stretch: 0;
+    accessible-role: none;
+
+    row := HorizontalLayout {
+        padding-left: root.large ? 1px : 2px;
+        padding-right: root.large ? 1px : 2px;
+        spacing: 0;
+        alignment: center;
+        @children
+    }
+}
+
+// One button of a capsule: 26×24 with a 14px icon, or 32×28 with a 16px
+// one (`large`). Hover lights the icon and fills a pill behind it; `on`
+// lights it yellow.
+export component CapsuleButton inherits Rectangle {
+    in property <string> icon;
+    // The tooltip and what screen readers say.
+    in property <string> label;
+    in property <bool> large;
+    in property <bool> enabled: true;
+    in property <bool> on;
+    in property <bool> menu-open;
+    in property <bool> toggle;
+    // Draw a state regardless of the pointer (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
+    out property <bool> has-hover: ta.has-hover;
+    callback clicked();
+
+    forward-focus: fs;
+    property <bool> keyboard;
+    property <bool> hovered: (ta.has-hover || root.shown == ShownState.hover) && root.enabled;
+    property <bool> pressed: ((ta.pressed || root.shown == ShownState.pressed) && root.enabled) || root.menu-open;
+
+    width: root.large ? Theme.capsule-button-w-lg : Theme.capsule-button-w;
+    height: root.large ? Theme.capsule-button-h-lg : Theme.capsule-h;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-checkable: root.toggle;
+    accessible-checked: root.on;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: parent.height - (root.large ? 0px : 2px);
+        border-radius: self.height / 2;
+        background: root.pressed ? Theme.control-active : root.hovered ? Theme.control-hover : root.on ? Theme.accent-soft : transparent;
+        animate background { duration: Theme.fast; easing: Motion.ease; }
+    }
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        path: root.icon;
+        size: root.large ? Theme.icon : Theme.icon-sm;
+        color: root.on ? Theme.accent-text : root.hovered || root.pressed ? Theme.text : Theme.text-2;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    FocusRing {
+        inset: true;
+        shown: (fs.has-focus && root.keyboard) || root.shown == ShownState.focus;
+        radius: root.height / 2;
+    }
+    if root.label != "": Tooltip {
+        Tip { text: root.label; }
+    }
+}
+
+// The hairline between two CapsuleButtons: 1×12, or 1×14 (`large`).
+export component CapsuleDivider inherits Rectangle {
+    in property <bool> large;
+    width: 1px;
+    accessible-role: none;
+    Rectangle {
+        width: 1px;
+        height: root.large ? 14px : 12px;
+        background: Theme.line-strong;
+    }
+}
+
+// The mixer strip's 18px toggles (Logic's M and the headphones): `M`
+// mutes (yellow fill when on), the monitor glyph listens (yellow tint).
+export component MiniToggle inherits Rectangle {
+    // A letter ("M"), or…
+    in property <string> text;
+    // …an icon (`Icons.headphones`), drawn at 11px.
+    in property <string> icon;
+    in property <bool> on;
+    in property <bool> enabled: true;
+    // Fill when on: solid yellow (mute) or the yellow tint (monitor).
+    in property <bool> solid;
+    in property <string> label;
+    // A toggle (M, the headphones); false for a plain button (⋯).
+    in property <bool> toggle: true;
+    // Looks pressed while the menu it opened is showing.
+    in property <bool> menu-open;
+    // Draw a state regardless of the pointer (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
+    out property <bool> has-focus: fs.has-focus;
+    out property <bool> has-hover: ta.has-hover;
+    callback clicked();
+
+    forward-focus: fs;
+    property <bool> keyboard;
+    property <bool> hovered: (ta.has-hover || root.shown == ShownState.hover || root.menu-open) && root.enabled;
+
+    width: Theme.mini-toggle;
+    height: Theme.mini-toggle;
+    border-radius: Theme.r-mini;
+    background: root.on ? (root.solid ? Theme.accent-fill : Theme.accent-soft) : root.hovered ? Theme.control-hover : Theme.control;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-checkable: root.toggle;
+    accessible-checked: root.toggle && root.on;
+    accessible-enabled: root.enabled;
+    accessible-expandable: !root.toggle;
+    accessible-expanded: root.menu-open;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    if root.text != "": Text {
+        text: root.text;
+        color: root.on ? (root.solid ? Theme.on-accent : Theme.accent-text) : Theme.text-2;
+        font-size: Theme.fs-micro;
+        font-weight: Theme.weight-bold;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+    if root.icon != "": SvgPath {
+        width: 11px;
+        height: 11px;
+        commands: root.icon;
+        stroke: root.on ? (root.solid ? Theme.on-accent : Theme.accent-text) : Theme.text-3;
+        stroke-width: 1.15px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        fill: transparent;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    FocusRing {
+        shown: (fs.has-focus && root.keyboard) || root.shown == ShownState.focus;
+        radius: Theme.r-mini;
+    }
+    if root.label != "": Tooltip {
+        Tip { text: root.label; }
     }
 }

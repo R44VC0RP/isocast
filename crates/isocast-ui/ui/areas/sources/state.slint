@@ -86,6 +86,8 @@ export global SourcesArea {
     // ---- Create/Select Source ("create-source")
     // "Colour Source · Main", or "Scene".
     in property <string> create-heading;
+    // The kind's icon, by name (the sheet's glyph).
+    in property <string> create-icon;
     in property <bool> create-is-scene;
     in property <bool> create-audio-only;
     // "new" or "existing".
@@ -100,6 +102,11 @@ export global SourcesArea {
 
     // ---- Properties ("properties")
     in property <string> props-title;
+    // The sheet's header: the source's name, what it is ("Media source ·
+    // clip.mp4") and its kind's icon (by name).
+    in property <string> props-name;
+    in property <string> props-subtitle;
+    in property <string> props-icon;
     in property <[FormGroup]> props-form;
     // A picture of the source on top (video sources).
     in property <bool> props-video;
@@ -112,6 +119,9 @@ export global SourcesArea {
 
     // ---- Filters ("filters")
     in property <string> filters-title;
+    // The sheet's header: the source's name and its kind's icon (by name).
+    in property <string> filters-name;
+    in property <string> filters-icon;
     in property <bool> filters-audio;
     in property <bool> filters-video;
     in property <[FilterRow]> audio-filters;
@@ -129,9 +139,14 @@ export global SourcesArea {
     in property <string> preview-note;
     // Its width over its height.
     in property <float> preview-aspect: 16 / 9;
+    // The viewer line over it: the source's format as the engine opened it
+    // ("1920×1080 · 30p · Stereo"; "" until it says).
+    in property <string> preview-format;
 
     // ---- Edit Transform ("transform")
     in property <string> transform-title;
+    // The selected item's name ("" for none): the sheet's title.
+    in property <string> transform-name;
     // An item is selected.
     in property <bool> transform-item;
     in property <bool> transform-locked;
@@ -168,6 +183,8 @@ export global SourcesArea {
 
     // ---- Rename ("rename")
     in property <string> rename-heading;
+    // The source's kind's icon, by name (the sheet's glyph).
+    in property <string> rename-icon;
     in-out property <string> rename-name;
 
     // ---- Docks

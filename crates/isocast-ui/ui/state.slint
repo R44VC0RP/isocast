@@ -20,7 +20,9 @@ export global Ui {
     in property <string> setup-name;
     in property <int> canvas-width: 1920;
     in property <int> canvas-height: 1080;
-    // Recording or streaming (the program monitor gets its teal frame).
+    in property <int> canvas-fps: 30;
+    // Streaming (the program's LIVE badge and its green ring; recording
+    // alone keeps PGM and the 1px ring).
     in property <bool> live;
 
     // ---- Scenes: on air, in preview (Studio Mode), and the one whose
@@ -40,6 +42,12 @@ export global Ui {
     in property <string> selected-kind;
     // Its icon, by name (`Icons.named`).
     in property <string> selected-icon;
+    // What the engine says it is: "1920×1080 · 30p · Stereo" (the control
+    // bar's line after the name; "" until it runs).
+    in property <string> selected-meta;
+    // With nothing selected: the scene being edited and how many items it
+    // has ("Main · 4 sources").
+    in property <string> scene-meta;
 
     // ---- One dialog at a time: its kind ("" for none) and what it is for
     // (a source id, a settings tab…). Kinds: create-source (arg: source
@@ -52,8 +60,12 @@ export global Ui {
     in-out property <bool> onboarding;
 
     // ---- The layout (per viewer; the app keeps it between runs)
+    // The source toolbar's parts of the control bar (the selected source
+    // and its quick setting, Properties and Filters).
     in-out property <bool> show-source-toolbar: true;
     in-out property <bool> show-status-bar: true;
+    // The dock row (the control bar's bottom pane toggle).
+    in-out property <bool> show-docks: true;
     in-out property <bool> show-scenes: true;
     in-out property <bool> show-sources: true;
     in-out property <bool> show-mixer: true;

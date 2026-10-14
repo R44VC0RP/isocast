@@ -1,5 +1,7 @@
-// Tooltips (docs/design.md 3.14): short, sentence case, saying what the
-// control does. Slint's own `Tooltip` element shows them (after half a
+// Tooltips (Paper "Components" › Tooltip): short, sentence case, under 80
+// characters, saying what the control does: 11px `text` on
+// `surface-overlay` with a `line-strong` edge, 12px corners and a small
+// shadow (0 2px 6px), 4px by 8px in. Slint's own `Tooltip` element shows them (after half a
 // second of hover, near the pointer, never taking input); `Tip` is how
 // they look. Controls of the kit take a `tooltip` string; for anything
 // else:
@@ -19,9 +21,9 @@ export component Tip inherits Rectangle {
     border-width: 1px;
     border-color: Theme.line-strong;
     border-radius: Theme.r-panel;
-    drop-shadow-color: Theme.shadow-color;
-    drop-shadow-blur: 12px;
-    drop-shadow-offset-y: 4px;
+    drop-shadow-color: Theme.shadow-tip-color;
+    drop-shadow-blur: Theme.shadow-tip-blur;
+    drop-shadow-offset-y: Theme.shadow-tip-y;
     accessible-role: none;
 
     HorizontalLayout {

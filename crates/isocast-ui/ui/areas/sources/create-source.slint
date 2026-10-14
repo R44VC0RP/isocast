@@ -1,74 +1,44 @@
-// Create/Select Source (the web app's add-source.js), OBS's way: a new
-// source with a name, or one already in the setup (for a nested scene, a
-// scene), and whether it starts visible. Audio sources play in every
+// Create/Select Source (the web app's add-source.js), OBS's way, as a
+// Console sheet (the kit gallery's sample): the kind's glyph, "Create/
+// Select Source" and the kind and scene under it; a new source with a
+// name, or one already in the setup (for a nested scene, a scene) from an
+// inset list, and whether it starts visible. Audio sources play in every
 // scene, so they are only made new. Rename (the mixer's and the menus')
-// is here too: it is the same small shape.
+// is here too: it is the same small shape, a sheet with one field.
 
 import { Theme } from "../../theme.slint";
+import { Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
-import { Checkbox, Dialog, FocusRing, Form, Radio, ScrollArea, TextField } from "../../kit.slint";
+import { Checkbox, Dialog, GroupHint, ListRow, PickList, Radio, TextField } from "../../kit.slint";
 import { SourcesArea } from "state.slint";
+import { KindGlyph } from "properties.slint";
 
-// A choice in the list of existing ones: 28px, 8px in, the selected row
-// marked as in the docks.
-component Pick inherits Rectangle {
-    in property <string> text;
-    in property <bool> on;
-    in property <int> index;
-    in property <int> count;
-    callback clicked();
-    callback double-clicked();
+// A sheet's body: 20px at the sides, controls 8px apart.
+component SheetBody inherits VerticalLayout {
+    padding-left: Theme.sheet-pad;
+    padding-right: Theme.sheet-pad;
+    spacing: Theme.space-2;
+    alignment: start;
+}
 
-    height: Theme.row;
-    background: root.on ? Theme.selected : ta.has-hover ? Theme.hover : transparent;
-    accessible-role: list-item;
-    accessible-label: root.text;
-    accessible-item-selectable: true;
-    accessible-item-selected: root.on;
-    accessible-item-index: root.index;
-    accessible-item-count: root.count;
-    accessible-action-default => { root.clicked(); }
-
-    ta := TouchArea {
-        clicked => { root.clicked(); }
-        double-clicked => { root.double-clicked(); }
-    }
-    Text {
-        x: Theme.space-2;
-        width: parent.width - 2 * Theme.space-2;
-        text: root.text;
-        color: Theme.text;
-        font-size: Theme.fs;
-        letter-spacing: Theme.tracking;
-        vertical-alignment: center;
-        overflow: elide;
-        accessible-role: none;
-    }
-    if root.on: Rectangle {
-        x: 0;
-        width: 3px;
-        background: Theme.accent-hover;
-    }
+// What belongs to a choice above it: 24px in (past the radio's circle).
+component Under inherits HorizontalLayout {
+    padding-left: Theme.space-6;
 }
 
 export component CreateSourceDialog inherits Dialog {
     property <bool> fresh: SourcesArea.create-mode == "new";
 
     title: "Create/Select Source";
+    subtitle: SourcesArea.create-heading;
+    icon: KindGlyph.glyph(SourcesArea.create-icon);
+    icon-accent: KindGlyph.accent(SourcesArea.create-icon);
     dialog-width: 440px;
     ok-enabled: root.fresh ? SourcesArea.create-name != "" && !SourcesArea.create-taken : SourcesArea.create-pick != "";
     accepted => { SourcesArea.create-accept(); }
     cancelled => { Ui.close-dialog(); }
 
-    Form {
-        Text {
-            text: SourcesArea.create-heading;
-            color: Theme.text;
-            font-size: Theme.fs;
-            letter-spacing: Theme.tracking;
-            font-weight: Theme.weight-semibold;
-            overflow: elide;
-        }
+    SheetBody {
         if !SourcesArea.create-is-scene: Radio {
             text: "Create new";
             checked: root.fresh;
@@ -83,14 +53,13 @@ export component CreateSourceDialog inherits Dialog {
                 }
             }
         }
-        if !SourcesArea.create-is-scene: HorizontalLayout {
-            padding-left: 24px;
+        if !SourcesArea.create-is-scene: Under {
             opacity: root.fresh ? 1 : Theme.disabled-opacity;
             TextField {
                 text: SourcesArea.create-name;
                 label: "Name";
+                invalid: root.fresh && SourcesArea.create-taken;
                 auto-focus: true;
-                font-size: Theme.fs-sm;
                 edited(text) => {
                     SourcesArea.create-name = text;
                     SourcesArea.create-mode = "new";
@@ -98,13 +67,12 @@ export component CreateSourceDialog inherits Dialog {
                 }
             }
         }
-        if !SourcesArea.create-is-scene && root.fresh && SourcesArea.create-taken: HorizontalLayout {
-            padding-left: 24px;
+        if !SourcesArea.create-is-scene && root.fresh && SourcesArea.create-taken: Under {
             Text {
                 text: "A source is already called that.";
                 color: Theme.danger-text;
-                font-size: Theme.fs-sm;
-                letter-spacing: Theme.tracking-sm;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-xs;
             }
         }
         if !SourcesArea.create-audio-only: Radio {
@@ -122,49 +90,36 @@ export component CreateSourceDialog inherits Dialog {
                 }
             }
         }
-        if !SourcesArea.create-audio-only: HorizontalLayout {
-            padding-left: 24px;
-            Rectangle {
-                height: min(168px, max(Theme.row, SourcesArea.create-existing.length * Theme.row) + 2px);
-                background: Theme.surface-inset;
-                border-width: 1px;
-                border-color: Theme.line;
-                border-radius: Theme.r;
-                clip: true;
-                opacity: !root.fresh ? 1 : Theme.disabled-opacity;
-                accessible-role: list;
-                accessible-label: "Existing";
-
-                if SourcesArea.create-existing.length == 0: Text {
-                    x: Theme.space-2;
-                    width: parent.width - 2 * Theme.space-2;
-                    height: Theme.row;
-                    text: SourcesArea.create-empty;
-                    color: Theme.text-3;
-                    font-size: Theme.fs-sm;
-                    letter-spacing: Theme.tracking-sm;
-                    vertical-alignment: center;
+        if !SourcesArea.create-audio-only: Under {
+            PickList {
+                label: "Existing";
+                enabled: !root.fresh || SourcesArea.create-is-scene;
+                if SourcesArea.create-existing.length == 0: HorizontalLayout {
+                    padding-left: Theme.list-inset + Theme.space-2;
+                    Text {
+                        height: Theme.row;
+                        text: SourcesArea.create-empty;
+                        color: Theme.text-3;
+                        font-size: Theme.fs-sm;
+                        letter-spacing: Theme.tracking-sm;
+                        vertical-alignment: center;
+                    }
                 }
-                ScrollArea {
-                    x: 1px;
-                    y: 1px;
-                    width: parent.width - 2px;
-                    height: parent.height - 2px;
-                    for pick[i] in SourcesArea.create-existing: Pick {
-                        text: pick.label;
-                        on: pick.id == SourcesArea.create-pick;
-                        index: i;
-                        count: SourcesArea.create-existing.length;
-                        clicked => {
-                            SourcesArea.create-mode = "existing";
-                            SourcesArea.create-pick = pick.id;
-                            SourcesArea.create-changed();
-                        }
-                        double-clicked => {
-                            SourcesArea.create-mode = "existing";
-                            SourcesArea.create-pick = pick.id;
-                            SourcesArea.create-accept();
-                        }
+                for pick[i] in SourcesArea.create-existing: ListRow {
+                    text: pick.label;
+                    icon: Icons.named(SourcesArea.create-icon);
+                    selected: pick.id == SourcesArea.create-pick;
+                    index: i;
+                    count: SourcesArea.create-existing.length;
+                    clicked => {
+                        SourcesArea.create-mode = "existing";
+                        SourcesArea.create-pick = pick.id;
+                        SourcesArea.create-changed();
+                    }
+                    double-clicked => {
+                        SourcesArea.create-mode = "existing";
+                        SourcesArea.create-pick = pick.id;
+                        SourcesArea.create-accept();
                     }
                 }
             }
@@ -174,33 +129,23 @@ export component CreateSourceDialog inherits Dialog {
             checked: SourcesArea.create-visible;
             toggled(on) => { SourcesArea.create-visible = on; }
         }
-        if SourcesArea.create-audio-only: Text {
+        if SourcesArea.create-audio-only: GroupHint {
             text: "Audio sources play in every scene; it goes in the Audio Mixer and the program mix.";
-            color: Theme.text-3;
-            font-size: Theme.fs-sm;
-            letter-spacing: Theme.tracking-sm;
-            line-height-factor: Theme.leading-sm;
-            wrap: word-wrap;
         }
     }
 }
 
 export component RenameDialog inherits Dialog {
     title: "Rename";
-    dialog-width: 380px;
+    subtitle: SourcesArea.rename-heading;
+    icon: KindGlyph.glyph(SourcesArea.rename-icon);
+    icon-accent: KindGlyph.accent(SourcesArea.rename-icon);
+    dialog-width: 400px;
     ok-enabled: SourcesArea.rename-name != "";
     accepted => { SourcesArea.rename-accept(); }
     cancelled => { Ui.close-dialog(); }
 
-    Form {
-        Text {
-            text: SourcesArea.rename-heading;
-            color: Theme.text;
-            font-size: Theme.fs;
-            letter-spacing: Theme.tracking;
-            font-weight: Theme.weight-semibold;
-            overflow: elide;
-        }
+    SheetBody {
         // Made after the dialog takes focus, so the field keeps it.
         if true: TextField {
             text: SourcesArea.rename-name;

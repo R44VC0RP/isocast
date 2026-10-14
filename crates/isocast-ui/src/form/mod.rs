@@ -40,6 +40,8 @@ pub struct Row {
     pub empty: bool,
     pub on: bool,
     pub unit: String,
+    /// Right after the number ("×"), which then shows all its decimals.
+    pub suffix: String,
     pub step: f64,
     pub min: f64,
     pub max: f64,
@@ -48,6 +50,8 @@ pub struct Row {
     pub value: String,
     pub mono: bool,
     pub files: Vec<String>,
+    /// The folder each of `files` is in, the home folder as `~`.
+    pub dirs: Vec<String>,
     pub removable: bool,
     pub refresh: bool,
     pub refreshing: bool,
@@ -116,6 +120,15 @@ pub fn text_of(value: &Value) -> String {
 
 fn file_name(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
+/// The folder a file is in, as the Files list shows it ("~/Movies").
+fn folder_of(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some(("", _)) => "/".into(),
+        Some((folder, _)) => crate::platform::abbreviate_home(folder),
+        None => String::new(),
+    }
 }
 
 /// Every row of `fields` for settings `value` (keys prefixed with
@@ -251,6 +264,10 @@ fn control(
         FieldType::Number { integer, min, max } => {
             row.kind = "number";
             row.unit = f.unit.to_string();
+            // A rate of play is a multiple: "1.00×" (Paper's Speed).
+            if f.name == "speed" {
+                row.suffix = "×".into();
+            }
             row.number = shown.as_f64().unwrap_or(0.0);
             row.empty = shown.is_null();
             row.min = if min.is_finite() { *min } else { -1e9 };
@@ -268,10 +285,12 @@ fn control(
         }
         FieldType::Strings => {
             row.kind = "files";
-            row.files = current
+            let paths: Vec<&str> = current
                 .as_array()
-                .map(|a| a.iter().filter_map(Value::as_str).map(file_name).collect())
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
+            row.files = paths.iter().map(|p| file_name(p)).collect();
+            row.dirs = paths.iter().map(|p| folder_of(p)).collect();
         }
         FieldType::String => {
             row.text = text_of(current);
@@ -801,6 +820,7 @@ fn field(row: &Row) -> FormField {
         empty: row.empty,
         on: row.on,
         unit: row.unit.as_str().into(),
+        suffix: row.suffix.as_str().into(),
         step: row.step as f32,
         minimum: row.min as f32,
         maximum: row.max as f32,
@@ -811,6 +831,9 @@ fn field(row: &Row) -> FormField {
         swatch: swatch(&row.text),
         files: ModelRc::new(VecModel::from(
             row.files.iter().map(SharedString::from).collect::<Vec<_>>(),
+        )),
+        file_dirs: ModelRc::new(VecModel::from(
+            row.dirs.iter().map(SharedString::from).collect::<Vec<_>>(),
         )),
         removable: row.removable,
         refresh: row.refresh,

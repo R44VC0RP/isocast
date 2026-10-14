@@ -1,11 +1,13 @@
-// Checkbox, radio and switch share one look (docs/design.md 3.7): 14px
-// outlines in `outline`, copper when on. Segmented controls (3.8) choose
-// one of a few values; the chosen segment is tinted copper with a copper
-// edge, like a toggle that is on.
+// Checkbox, radio and switch (Paper "Components" › Choices): 14px boxes
+// with 6px corners on the inset black with an `outline` edge, the yellow
+// LED when on (a near-black check; a radio's bone centre in a 4px yellow
+// ring); a 30×18 switch, yellow when on, with a bone knob. The segmented
+// control (also the kit's tabs) is a capsule: a 24px inset pill with an
+// 18px `control-active` pill behind the chosen choice.
 
 import { Theme, Motion } from "../theme.slint";
-import { Icon, Icons } from "../icons.slint";
-import { FocusRing } from "focus.slint";
+import { Icon, Icons, SvgPath } from "../icons.slint";
+import { FocusRing, ShownState } from "focus.slint";
 import { Tip } from "tooltip.slint";
 
 // A checkbox and its label (the label starts 24px in: a 14px box in a
@@ -23,6 +25,8 @@ export component Checkbox inherits Rectangle {
     // Its text in `text-3` (a choice that matters only once something
     // else is on, like ISO audio while ISO recording is off).
     in property <bool> faint;
+    // Draw a state regardless of the keyboard (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
     callback toggled(bool);
 
     forward-focus: fs;
@@ -79,22 +83,20 @@ export component Checkbox inherits Rectangle {
                 border-width: 1px;
                 border-color: root.checked ? Theme.accent : Theme.outline;
                 background: root.checked ? Theme.accent : Theme.surface-inset;
-                if root.checked: Path {
+                if root.checked: SvgPath {
                     x: (parent.width - 10px) / 2;
                     y: (parent.height - 10px) / 2;
                     width: 10px;
                     height: 10px;
-                    viewbox-width: 24;
-                    viewbox-height: 24;
                     commands: Icons.check;
-                    stroke: white;
-                    stroke-width: 2px;
+                    stroke: Theme.on-accent;
+                    stroke-width: 1.25px;
                     stroke-line-cap: round;
                     stroke-line-join: round;
                     fill: transparent;
                 }
                 FocusRing {
-                    shown: fs.has-focus && root.keyboard;
+                    shown: (fs.has-focus && root.keyboard) || root.shown == ShownState.focus;
                 }
             }
         }
@@ -123,6 +125,8 @@ export component Radio inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> small;
     in property <string> label;
+    // Draw a state regardless of the keyboard (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
     callback clicked();
     // An arrow key: -1 for the previous button of the group, 1 for the next.
     callback step(int);
@@ -188,7 +192,7 @@ export component Radio inherits Rectangle {
                 border-color: root.checked ? Theme.accent : Theme.outline;
                 background: root.checked ? Theme.bone : Theme.surface-inset;
                 FocusRing {
-                    shown: fs.has-focus && root.keyboard;
+                    shown: (fs.has-focus && root.keyboard) || root.shown == ShownState.focus;
                     radius: parent.width / 2;
                 }
             }
@@ -205,13 +209,16 @@ export component Radio inherits Rectangle {
     }
 }
 
-// An on/off switch, 28×16: grey track off, copper on, a bone knob.
+// An on/off switch, 30×18: `line-strong` off, yellow on, a 14px bone knob
+// with a soft shadow, 2px in.
 export component Switch inherits Rectangle {
     in-out property <bool> on;
     in property <bool> enabled: true;
     // What screen readers call it (the form label beside it).
     in property <string> label;
     in property <string> tooltip;
+    // Draw a state regardless of the keyboard (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
     callback toggled(bool);
 
     forward-focus: fs;
@@ -239,11 +246,14 @@ export component Switch inherits Rectangle {
 
     Rectangle {
         x: root.on ? parent.width - self.width - 2px : 2px;
-        y: 2px;
+        y: (parent.height - self.height) / 2;
         width: Theme.knob;
         height: Theme.knob;
         border-radius: self.width / 2;
         background: Theme.bone;
+        drop-shadow-color: Theme.shadow-knob-color;
+        drop-shadow-blur: Theme.shadow-knob-blur;
+        drop-shadow-offset-y: Theme.shadow-knob-y;
         animate x { duration: Theme.med; easing: Motion.ease; }
     }
 
@@ -267,7 +277,7 @@ export component Switch inherits Rectangle {
     }
 
     FocusRing {
-        shown: fs.has-focus && root.keyboard;
+        shown: (fs.has-focus && root.keyboard) || root.shown == ShownState.focus;
         radius: root.height / 2;
     }
 
@@ -282,12 +292,21 @@ export struct Segment {
     label: string,
 }
 
-// A row of segments, one chosen (`value`). ← → move the choice.
+// A capsule of choices, one chosen (`value`); the kit's tabs too. 24px:
+// the inset black with a `line` edge, 2px in, 18px pills 14px in, the
+// chosen one on `control-active` in `text`, the rest `text-3`; 12px
+// medium. `small` (in grouped rows): 22px, no edge, pills 12px in.
+// ← → move the choice.
 export component Segmented inherits Rectangle {
     in property <[Segment]> options;
     in-out property <string> value;
+    // While no segment is the value: where the value sits among them
+    // (1.5: between the second and the third), so → and ← choose the
+    // next one that way. -1: from the first.
+    in property <float> position: -1;
     in property <bool> enabled: true;
     in property <string> label;
+    in property <bool> small;
     callback selected(string);
 
     forward-focus: fs;
@@ -303,14 +322,14 @@ export component Segmented inherits Rectangle {
         }
     }
 
-    height: Theme.control-h;
-    min-width: segments.min-width + 2px;
-    preferred-width: segments.preferred-width + 2px;
-    border-radius: Theme.r;
+    height: root.small ? Theme.control-h-sm : Theme.capsule-h;
+    min-width: segments.min-width;
+    preferred-width: segments.preferred-width;
+    horizontal-stretch: 0;
+    border-radius: self.height / 2;
     background: Theme.surface-inset;
-    border-width: 1px;
-    border-color: Theme.field-border;
-    clip: true;
+    border-width: root.small ? 0px : 1px;
+    border-color: Theme.line;
     opacity: root.enabled ? 1 : Theme.disabled-opacity;
     accessible-role: tab-list;
     accessible-label: root.label;
@@ -334,21 +353,20 @@ export component Segmented inherits Rectangle {
         if root.current >= 0 {
             root.choose(root.options[max(0, min(root.options.length - 1, root.current + by))].value);
         } else if root.options.length > 0 {
-            root.choose(root.options[0].value);
+            root.choose(root.options[max(0, min(root.options.length - 1, by > 0 ? ceil(root.position) : floor(root.position)))].value);
         }
     }
 
     segments := HorizontalLayout {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: parent.height - 2px;
-        spacing: 0;
+        padding: 2px;
+        spacing: 2px;
         for option[i] in root.options: seg := Rectangle {
             property <bool> on: option.value == root.value;
             changed on => {
                 if self.on {
                     root.current = i;
+                } else if root.current == i {
+                    root.current = -1;
                 }
             }
             init => {
@@ -356,9 +374,12 @@ export component Segmented inherits Rectangle {
                     root.current = i;
                 }
             }
+            height: 18px;
             horizontal-stretch: 1;
-            min-width: segment-label.preferred-width + 2 * Theme.space-3;
-            background: self.on ? Theme.accent-soft : transparent;
+            min-width: segment-label.preferred-width + 2 * (root.small ? Theme.space-3 : 14px);
+            border-radius: self.height / 2;
+            background: self.on ? Theme.control-active : segment-ta.has-hover && root.enabled ? Theme.control : transparent;
+            animate background { duration: Theme.fast; easing: Motion.ease; }
             accessible-role: tab;
             accessible-label: option.label;
             accessible-item-selectable: true;
@@ -367,33 +388,31 @@ export component Segmented inherits Rectangle {
             accessible-item-count: root.options.length;
             accessible-action-default => { root.choose(option.value); }
 
-            if i > 0: Rectangle {
-                x: 0;
-                width: 1px;
-                background: Theme.line;
-            }
-            if seg.on: Rectangle {
-                border-width: 1px;
-                border-color: Theme.accent;
-            }
             segment-ta := TouchArea {
                 enabled: root.enabled;
                 clicked => { root.choose(option.value); }
             }
             segment-label := Text {
                 text: option.label;
-                color: seg.on || segment-ta.has-hover ? Theme.text : Theme.text-2;
+                color: seg.on ? Theme.text : segment-ta.has-hover ? Theme.text-2 : Theme.text-3;
                 font-size: Theme.fs-sm;
                 letter-spacing: Theme.tracking-sm;
+                font-weight: Theme.weight-medium;
                 horizontal-alignment: center;
                 vertical-alignment: center;
                 accessible-role: none;
             }
             FocusRing {
                 inset: true;
-                radius: 0;
+                radius: seg.height / 2;
                 shown: fs.has-focus && root.keyboard && seg.on;
             }
         }
+    }
+    // No segment is the value (a Custom quality): the ring goes round the
+    // whole capsule.
+    FocusRing {
+        radius: root.height / 2;
+        shown: fs.has-focus && root.keyboard && root.current < 0;
     }
 }

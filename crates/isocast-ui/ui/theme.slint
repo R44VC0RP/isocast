@@ -1,153 +1,261 @@
-// The design tokens of docs/design.md section 2, with the same names and
-// values as the `:root` block in crates/isocast-app/ui/app.css: a dark,
-// flat interface whose panes meet at 1px hairlines, controls barely
-// softened (2px) and floating surfaces 3px. Use these names, never hex
-// values or sizes of your own; a value the design lacks goes here first.
+// The Console theme's design tokens (Paper file "C. Console", Ryan's pick on
+// 2026-10-13: Final Cut Pro x Logic Pro x Tower). Every value here was read
+// from Paper (its tokens, or get_jsx/get_computed_styles of the Screens and
+// Components boards), never from a screenshot. Names are Paper's token
+// names without the `--`; a value Paper writes as a literal (no token) has
+// a name of ours and says so. Use these names, never hex values or sizes of
+// your own; a value the design lacks goes here first.
+//
+// Console in short: pure neutral blacks inside a lighter frame, white text,
+// and only three colours that light up: yellow (accent) for what is
+// selected or active and for the one main button, green (onair) for the
+// program and live, red (danger) for recording. Mona Sans for text, Hubot
+// Sans for titles and the caps on tags and the LCD, Martian Mono Light for
+// every live number (each drawn a cut lighter: `weight-*` below).
+//
+// A later theme (Daylight, Workbench, Blender…) replaces these values, and
+// may supply its own versions of the kit's signature components (kit.slint
+// lists them); nothing outside the kit should need to change.
 //
 // rgba() values are written #rrggbbaa (alpha × 255, rounded).
 
-// Instrument Sans (SIL OFL 1.1, fonts/LICENSE-instrument-sans), the brand's
-// secondary face, built into the app: static 400 and 600 cuts of the
-// upstream variable font (google/fonts ofl/instrumentsans) at normal width.
-// Used only for the brand titles (Welcome, first run, About).
-import "fonts/InstrumentSans-Regular.ttf";
-import "fonts/InstrumentSans-SemiBold.ttf";
+// Mona Sans (SIL OFL 1.1, Reserved Font Name "Mona": fonts/LICENSE-mona-sans)
+// and Hubot Sans (OFL, Reserved Font Name "Hubot": fonts/LICENSE-hubot-sans)
+// from GitHub's repositories (github/mona-sans 2.027 fonts/static/ttf,
+// github/hubot-sans fonts/ttf), and Martian Mono (OFL:
+// fonts/LICENSE-martian-mono) from evilmartians/mono fonts/ttf: the
+// projects' own static cuts, unmodified (an instance we cut ourselves would
+// be a Modified Version, which may not carry a Reserved Font Name). Only the
+// cuts the boards' weights are drawn with (one lighter than Paper's: see
+// "Drawn weights" below): Mona Sans Light, Regular, Medium and SemiBold
+// (Paper's 400, 500, 600 and 700), Hubot Sans Medium (Paper's 600),
+// Martian Mono ExtraLight (Paper's 300).
+import "fonts/MonaSans-Light.ttf";
+import "fonts/MonaSans-Regular.ttf";
+import "fonts/MonaSans-Medium.ttf";
+import "fonts/MonaSans-SemiBold.ttf";
+import "fonts/HubotSans-Medium.ttf";
+import "fonts/MartianMono-ExtraLight.ttf";
 
 export global Theme {
     // Set by the app from the system's "Reduce motion": menus, dialogs and
     // toasts then appear without animating (spinners keep turning).
     in-out property <bool> reduce-motion;
 
-    // ---- Brand constants (the mineral palette): the mark, onboarding
-    // pictures, slider thumbs.
+    // ---- Brand constants: the "Equal" mark (the app icon), whatever the
+    // theme. Not Console colours: only BrandMark uses them.
     out property <color> copper: #b4683f;
-    out property <color> slate: #2e3338;
-    out property <color> limestone: #c9c2b6;
-    out property <color> bone: #eeeae2;
-    // The mark's outer bars (verdigris).
     out property <color> verdigris: #3e8e7e;
+    out property <color> brand-bone: #eeeae2;
 
-    // ---- 2.1 Neutral ramp, slate-tinted, darkest at the back (g0–g10)
-    out property <color> surface-monitor: #0b0c0d; // g0: behind the picture, handle borders
-    out property <color> surface-stage: #111315; // g1: the preview's surround, full-window states
-    out property <color> surface-chrome: #141619; // g2: status bar, title bars, settings nav
-    out property <color> surface-inset: #141619; // g2: fields, pick lists
-    out property <color> surface-header: #17191d; // g3: dock header band
-    out property <color> surface-panel: #1b1e22; // g4: docks, source toolbar, dialog bodies
-    out property <color> surface-overlay: #22262b; // g5: menus, popovers, toasts
-    out property <color> hover: #262a30; // g6: row hover, quiet-button hover
-    out property <color> control: #262a30; // g6: secondary button at rest
-    out property <color> line: #2b3035; // g7: every structural hairline
-    out property <color> control-hover: #30353b; // g8: button hover
-    out property <color> overlay-hover: #30353b; // g8: menu item hover
-    out property <color> line-strong: #383e45; // g9: control borders
-    out property <color> control-active: #383e45; // g9: pressed buttons
-    out property <color> selected: #383e45; // g9: a selected row
-    out property <color> selected-hover: #383e45; // g9: the same on hover
-    out property <color> field-border: #383e45; // g9
-    out property <color> field-border-hover: #4a5058; // g10
-    // Only between items of one list (audio rows, hotkeys, mixer strips),
-    // never a pane's edge: rgba(238, 234, 226, 0.06).
-    out property <color> line-soft: #eeeae20f;
+    // ---- Surfaces, darkest at the back. Neutral blacks, no tint.
+    out property <color> surface-monitor: #000000; // behind the picture
+    out property <color> surface-stage: #080808; // the preview's surround, the window behind the docks
+    out property <color> surface-chrome: #1e1e1e; // control bar, status bar, title bars
+    out property <color> surface-inset: #0b0b0b; // fields, pick lists, the LCD, meters
+    out property <color> surface-header: #1a1a1a; // dock header band
+    out property <color> surface-panel: #141414; // docks, toolbars, the sidebar
+    out property <color> surface-overlay: #1e1e1e; // sheets, menus, popovers, toasts
+    // The frame's edge: the control bar's and status bar's 1px black border
+    // (a literal #000000 in Paper), what makes the panels sit inside a
+    // lighter frame.
+    out property <color> frame-line: #000000;
 
-    // ---- 2.2 Text (warm, on the slate surfaces)
-    out property <color> text: #eeeae2; // names, values, titles
-    out property <color> text-2: #b0aba3; // labels, panel titles, idle icons
-    out property <color> text-3: #928e87; // hints, units, placeholders (use text-2 on selected/hover)
-    out property <color> text-disabled: #66625c; // disabled labels only
-    out property <color> outline: #807c75; // checkbox/radio outlines, quality ticks
+    // ---- Lines and borders
+    out property <color> line: #242424; // every structural hairline; the 1px gaps between docks
+    out property <color> line-soft: #ffffff0f; // rgb(255 255 255 / 6%): between items of one list
+    out property <color> line-strong: #333333; // control and popover borders, the LCD's edge
+    out property <color> field-border: #2a2a2a; // a field at rest
+    out property <color> field-border-hover: #444444; // a field on hover, the scroll thumb
 
-    // ---- 2.3 Accent: copper
-    out property <color> accent: #b4683f; // strokes and fills without text
-    out property <color> accent-hover: #c4774c; // their hover; the ISO toggle when on; the row marker
-    out property <color> accent-text: #d38d63; // copper text and icons ("on", "chosen")
-    out property <color> accent-fill: #a65c35; // primary buttons, under white text
-    out property <color> accent-fill-hover: #ae623a;
-    out property <color> accent-fill-active: #9a5430;
-    out property <color> on-accent: #ffffff;
-    out property <color> accent-soft: #b4683f29; // rgba(180, 104, 63, 0.16): checked toggle, info callout
+    // ---- Control and row states
+    out property <color> hover: #1f1f1f; // row hover, quiet-button hover, inspector bands
+    out property <color> control: #2a2a2a; // secondary button at rest, capsules, badges
+    out property <color> control-hover: #343434; // button hover
+    out property <color> overlay-hover: #2c2c2c; // menu item hover
+    out property <color> control-active: #3e3e3e; // pressed; the chosen segment; dropdown caps
+    out property <color> selected: #28251b; // a selected row (yellow-tinted black)
+    out property <color> selected-hover: #28251b; // the same on hover (it doesn't change)
 
-    // ---- 2.4 Status
-    out property <color> onair: #3e8e7e; // on air / program / success: strokes and dots
-    out property <color> onair-text: #56a996;
-    out property <color> onair-fill: #2f7365;
-    out property <color> onair-soft: #3e8e7e29; // rgba(62, 142, 126, 0.16)
-    out property <color> danger: #e5484d; // recording / live / error: strokes and dots
-    out property <color> danger-text: #f27a7d; // 4.6:1 on control-hover (revised after review)
-    out property <color> danger-fill: #cf3a3f;
-    out property <color> danger-fill-hover: #d63d42;
-    out property <color> danger-fill-active: #c4363b;
-    out property <color> danger-soft: #e5484d24; // rgba(229, 72, 77, 0.14)
-    out property <color> warning: #d6a03f;
-    out property <color> warning-soft: #d6a03f24; // rgba(214, 160, 63, 0.14)
-    out property <color> on-warning: #1b1408;
+    // ---- Text, on any surface
+    out property <color> text: #f5f5f5; // names, values, titles
+    out property <color> text-2: #bbbbbb; // labels, panel titles, idle icons
+    out property <color> text-3: #8f8f8f; // hints, units, placeholders
+    out property <color> text-disabled: #555555; // disabled labels only
+    out property <color> outline: #707070; // checkbox and radio edges
 
-    // ---- Meters (3.16)
-    out property <color> meter-ok: #3e8e7e; // below −18 dB
-    out property <color> meter-warn: #d6a03f; // −18 to −6 dB
-    out property <color> meter-clip: #e5484d; // above −6 dB
-    out property <color> meter-track: #22262b; // the unlit bar
+    // ---- Accent: the one yellow LED (selected, active, the main button)
+    out property <color> accent: #f2c14e; // strokes and fills without text
+    out property <color> accent-hover: #f6cd6a; // row bar, ISO on
+    out property <color> accent-text: #f4c95e; // on or chosen: text, icons
+    out property <color> accent-fill: #edb93e; // the primary button, under on-accent
+    out property <color> accent-fill-hover: #f3c552;
+    out property <color> accent-fill-active: #d9a52e;
+    out property <color> on-accent: #1a1408; // near-black text on the yellow fill
+    out property <color> accent-soft: #f2c14e26; // rgb(242 193 78 / 15%): checked toggle, an "on" icon button
+
+    // ---- Status: green on air, red recording, orange warning
+    out property <color> onair: #3dcb63; // program ring, dots, the meters' safe zone
+    out property <color> onair-text: #62d983; // PROGRAM tag, success
+    out property <color> onair-fill: #2eae50; // filled, white text (streaming)
+    out property <color> onair-soft: #3dcb6326; // rgb(61 203 99 / 15%): LIVE/PGM badges
+    out property <color> on-onair: #ffffff; // the streaming transport's glyph on `onair-fill` (a literal white in Paper)
+    out property <color> danger: #ff4d43; // REC dot, invalid border
+    out property <color> danger-text: #ff6f67; // Remove, dropped counts
+    out property <color> danger-fill: #cc3028; // Stop Recording at rest
+    out property <color> danger-fill-hover: #d3352c;
+    out property <color> danger-fill-active: #b72a22;
+    out property <color> danger-soft: #ff4d4326; // rgb(255 77 67 / 15%): error callout, REC badge
+    out property <color> warning: #ff8f3f; // lagging, reconnecting
+    out property <color> on-warning: #1e0f04;
+    out property <color> warning-soft: #ff8f3f26; // rgb(255 143 63 / 15%): the LCD cell when frames drop
+
+    // ---- Brand neutrals (Paper's names; Console's values)
+    out property <color> slate: #141414; // brand mark ground
+    out property <color> limestone: #bbbbbb; // onboarding pictures
+    out property <color> bone: #f5f5f5; // slider thumbs, switch knobs, handles
+
+    // ---- Keyboard focus: a pale-yellow ring 2px wide after a 1px gap
+    // (Paper: `0 0 0 1px surface-panel, 0 0 0 3px focus-ring`), or 2px
+    // inside for things as wide as their pane.
+    out property <color> focus-ring: #f6d27a;
+    out property <length> focus-gap: 1px;
+    out property <length> focus-width: 2px;
+
+    // ---- Meters: green to −12 dB, yellow to −3, red above (Paper's
+    // "Master level" caption).
+    out property <color> meter-ok: #3dcb63; // onair
+    out property <color> meter-warn: #f2c14e; // accent
+    out property <color> meter-clip: #ff4d43; // danger
+    // The peak past the level, at half strength, and a muted source's
+    // level (Paper draws one still level and a muted strip's in
+    // `text-disabled`; the peak is ours, from the mixer's peak and hold).
+    out property <color> meter-ok-peak: #3dcb6380; // meter-ok at 50%
+    out property <color> meter-warn-peak: #f2c14e80; // meter-warn at 50%
+    out property <color> meter-clip-peak: #ff4d4380; // meter-clip at 50%
+    out property <color> meter-muted: #555555; // text-disabled: Paper's muted strip ("Camera Audio")
+    out property <color> meter-muted-peak: #55555580;
+    out property <color> meter-track: #0b0b0b; // surface-inset: a strip's unlit bar
+    out property <color> meter-capsule-track: #242424; // line: the master capsule's unlit bars
+    out property <float> meter-warn-db: -12;
+    out property <float> meter-clip-db: -3;
 
     // ---- Over the picture and behind floating surfaces
-    out property <color> scrim: #08090a80; // rgba(8, 9, 10, 0.5): behind dialogs
-    out property <color> readout: #0b0c0dd9; // rgba(11, 12, 13, 0.85): the drag readout
-    out property <color> hover-outline: #eeeae28c; // rgba(238, 234, 226, 0.55): an item under the pointer
-    out property <color> box-ring: #00000080; // rgba(0, 0, 0, 0.5): outside the selection box
-    out property <color> swatch-ring: #ffffff1f; // rgba(255, 255, 255, 0.12): around colour swatches
-    out property <color> scroll-thumb: #eeeae224; // rgba(238, 234, 226, 0.14)
-    out property <color> scroll-thumb-hover: #4a5058;
-    // Selected text in fields: a neutral grey (g10, as the web app shows;
-    // copper here read as the brown fill design.md P1.4 removed).
-    out property <color> text-selection: #4a5058;
+    out property <color> scrim: #00000073; // behind sheets (Paper's dialog scrim)
+    out property <color> readout: #000000d9; // rgba(0,0,0,0.85): the canvas's drag readout (no Paper value; neutral)
+    out property <color> selection-ring: #f2c14e; // accent: the selection box's 1px line
+    out property <color> box-ring: #00000080; // the 1px ring outside the selection box
+    out property <color> handle-edge: #00000099; // a canvas handle's 1px edge (bone fill)
+    out property <color> hover-outline: #f5f5f58c; // rgba(245,245,245,0.55): an item under the pointer (no Paper value)
+    out property <color> swatch-ring: #ffffff0f; // line-soft: the inset ring of a colour swatch
+    out property <color> scroll-thumb: #ffffff24; // rgba(255,255,255,0.14) (no Paper value)
+    out property <color> scroll-thumb-hover: #444444; // field-border-hover
+    // Selected text in fields: the yellow LED at 25% (no Paper value:
+    // selection is "selected", which lights yellow).
+    out property <color> text-selection: #f2c14e40;
 
-    // ---- 2.5 Type. The system font everywhere; Instrument Sans only for
-    // the brand titles. Weights 400, 500 and 600 only.
-    // The system's UI face (SF on macOS; Slint's default would be
-    // Helvetica). Windows falls back to its own sans-serif.
-    out property <string> font-ui: "System Font";
-    out property <string> font-brand: "Instrument Sans";
-    out property <string> font-mono: "Menlo";
-    out property <length> fs: 13px; // body: rows, menu items, prose
-    out property <length> lh: 18px;
-    out property <length> fs-sm: 12px; // controls, labels, panel titles, captions
-    out property <length> lh-sm: 16px;
-    out property <length> fs-xs: 11px; // meta: status bar, units, kbd, tags
+    // ---- Shadows (Slint draws one per element: the strongest layer)
+    // Menus, popovers, toasts: 0 10px 30px #00000099.
+    out property <color> shadow-color: #00000099;
+    out property <length> shadow-blur: 30px;
+    out property <length> shadow-y: 10px;
+    // Sheets (dialogs, Welcome): 0 20px 60px #00000099.
+    out property <color> shadow-sheet-color: #00000099;
+    out property <length> shadow-sheet-blur: 60px;
+    out property <length> shadow-sheet-y: 20px;
+    // Tooltips: 0 2px 6px #0000004d.
+    out property <color> shadow-tip-color: #0000004d;
+    out property <length> shadow-tip-blur: 6px;
+    out property <length> shadow-tip-y: 2px;
+    // Switch knobs: 0 1px 2px #00000066; slider thumbs: 0 1px 2px #00000080.
+    out property <color> shadow-knob-color: #00000066;
+    out property <color> shadow-thumb-color: #00000080;
+    out property <length> shadow-knob-blur: 2px;
+    out property <length> shadow-knob-y: 1px;
+    // A keycap's lower edge (Paper: inset 0 -1px 0 #00000080).
+    out property <color> kbd-edge: #00000080;
+
+    // ---- Type. Mona Sans for text, Hubot Sans for titles and caps,
+    // Martian Mono Light for every live number.
+    out property <string> font: "Mona Sans";
+    // The window's default face (kept under its old name for app.slint).
+    out property <string> font-ui: root.font;
+    out property <string> font-brand: "Hubot Sans";
+    out property <string> font-mono: "Martian Mono";
+    out property <length> fs-micro: 10px; // tags, badges, the LCD's labels, the meter scale
+    out property <length> fs-xs: 11px; // meta: status bar, units, kbd, mono values
+    out property <length> fs-sm: 12px; // labels, panel titles, captions, small buttons
+    out property <length> fs: 13px; // body: rows, menu items, buttons
+    out property <length> fs-lead: 15px; // sheet titles (Hubot), lead text
+    out property <length> fs-display: 28px; // brand titles (Hubot)
     out property <length> lh-xs: 14px;
-    out property <length> fs-micro: 10px; // the meter scale only
-    out property <length> fs-lead: 14px;
-    out property <length> lh-lead: 21px;
-    out property <length> fs-display: 24px; // brand titles
-    out property <length> lh-display: 30px;
-    out property <int> weight-regular: 400;
-    out property <int> weight-medium: 500; // buttons
-    out property <int> weight-semibold: 600; // headings, panel titles, tags
-    out property <length> tracking-tag: 0.66px; // 0.06em at 11px, uppercase tags
-    out property <length> tracking-display: -0.24px; // -0.01em at 24px
-    // Skia draws the system face narrower than WebKit does (SF at its
-    // display optical size, no variation coordinates): these widen it back
-    // to the web app's word widths ("Shown in the title bar." 120.5pt at
-    // 12px; "Empty Scene" 79pt at 13px), measured against its references.
-    out property <length> tracking: 0.5px; // 13px
-    out property <length> tracking-sm: 0.55px; // 12px
-    out property <length> tracking-xs: 0.5px; // 11px
-    out property <length> tracking-lead: 0.5px; // 14px
-    // Wrapped lines at the type scale's line heights (lh, lh-sm…): Slint's
-    // factor multiplies the face's natural height (about 14px at 12px).
-    out property <float> leading: 1.16; // 13/18
-    out property <float> leading-sm: 1.12; // 12/16
-    out property <float> leading-xs: 1.08; // 11/14
-    out property <float> leading-lead: 1.26; // 14/21
+    out property <length> lh-sm: 16px;
+    out property <length> lh: 18px;
+    out property <length> lh-lead: 22px;
+    out property <length> lh-display: 34px;
+    out property <length> lh-micro: 12px; // badges, tags (a literal in Paper)
+    // The LCD (literals in Paper): values 18/21 Martian Mono Light, labels
+    // 10/11 Hubot; the Welcome's hero readout 44/52.
+    out property <length> fs-lcd: 18px;
+    out property <length> lh-lcd: 21px;
+    out property <length> lh-lcd-label: 11px;
+    out property <length> fs-lcd-hero: 44px;
+    out property <length> lh-lcd-hero: 52px;
+    // Drawn weights: a renderer compensation (Paper value → drawn value).
+    // Slint's Skia text on macOS (CoreText glyphs, subpixel positioned)
+    // lays about a fixed amount of extra ink on every stem, so at Paper's
+    // weights every word read one step heavier than the boards' WebKit
+    // export (ink 1.2–1.5× Paper's: docs/notes.md, Gotchas 2026-10-13).
+    // Each Paper weight is drawn with the next lighter static cut, which
+    // brings the ink back to Paper's and, being a hair narrower, cancels
+    // Skia's ~2px-per-line widening as well. The names stay Paper's; a
+    // theme on a renderer that draws true sets these to Paper's values.
+    out property <int> weight-light: 200; // Paper 300 (Martian Mono: every number) → ExtraLight
+    out property <int> weight-regular: 300; // Paper 400 → Light; the window's default
+    out property <int> weight-medium: 400; // Paper 500: buttons, selected rows → Regular
+    out property <int> weight-semibold: 500; // Paper 600: headings, panel titles, tags (Hubot), the primary button in sheets → Medium
+    out property <int> weight-bold: 600; // Paper 700: the mixer's M → SemiBold
+    out property <length> tracking-tag: 1.2px; // 0.12em at 10px: Hubot caps (PREVIEW, REC, FPS)
+    out property <length> tracking-display: -0.56px; // -0.02em at 28px
+    out property <length> tracking-lcd-hero: -0.44px; // -0.01em at 44px
+    // Letter-spacing per size. Paper sets none on Mona Sans, and the
+    // bundled static cuts shape to Paper's word widths (HarfBuzz widths of
+    // the boards' labels are within a pixel of Paper's: docs/notes.md,
+    // 2026-10-13 Console), so these are 0. They stay as names (every kit
+    // Text carries one) for a theme whose face needs widening, as the
+    // system font did.
+    out property <length> tracking: 0px; // 13px
+    out property <length> tracking-sm: 0px; // 12px
+    out property <length> tracking-xs: 0px; // 11px
+    out property <length> tracking-micro: 0px; // 10px
+    out property <length> tracking-lead: 0px; // 15px
+    out property <length> tracking-mono: 0px; // Martian Mono
+    // Wrapped lines at the type scale's line heights: Slint's factor
+    // multiplies the face's natural height (Mona Sans: 1.41em). Each is
+    // the largest four-place factor whose line stays at or just under the
+    // height (13 × 1.41 × 0.9819 = 17.998): Slint rounds a text's height
+    // up to the next pixel, so a hair over (0.982: 18.0001) made every
+    // such text, and the rows under it, 1px taller than Paper's.
+    out property <float> leading: 0.9819; // 13/18
+    out property <float> leading-sm: 0.9456; // 12/16
+    out property <float> leading-xs: 0.9026; // 11/14
+    out property <float> leading-lead: 1.040; // 15/22
+    out property <float> leading-display: 0.861; // 28/34
+    out property <float> leading-welcome: 1.091; // 13/20: Welcome's line (a literal in Paper)
+    // Martian Mono's own lines are 1.2em: 14px at 11px.
+    out property <float> leading-mono-xs: 1.0606; // 11/14
 
-    // The tracking for a size that is one of fs, fs-sm, fs-xs, fs-lead.
+    // The tracking for a size that is one of fs, fs-sm, fs-xs, fs-micro, fs-lead.
     public pure function tracking-for(size: length) -> length {
         if size == root.fs { return root.tracking; }
         if size == root.fs-xs { return root.tracking-xs; }
         if size == root.fs-lead { return root.tracking-lead; }
         if size == root.fs-sm { return root.tracking-sm; }
+        if size == root.fs-micro { return root.tracking-micro; }
         return 0px;
     }
 
-    // ---- 2.6 Spacing (4px grid)
+    // ---- Spacing (4px grid)
     out property <length> space-1: 4px;
     out property <length> space-2: 8px;
     out property <length> space-3: 12px;
@@ -155,75 +263,122 @@ export global Theme {
     out property <length> space-5: 20px;
     out property <length> space-6: 24px;
     out property <length> space-8: 32px;
-    out property <length> pane-x: 12px; // inset of everything inside a dock, the source toolbar, the status bar
-    out property <length> label-col: 168px; // form label column
-    out property <length> label-gap: 12px;
-    out property <length> hint-indent: 180px; // label-col + label-gap: a hint under its control
+    out property <length> pane-x: 14px; // the inset of everything inside a dock, the control bar, the status bar
+    out property <length> label-col: 156px; // form label column
+    out property <length> label-gap: 12px; // label to control
+    out property <length> hint-indent: 168px; // label-col + label-gap: a hint under its control
+    // Inside sheets (literals in Paper): 20px around (24px beside a sidebar).
+    out property <length> sheet-pad: 20px;
+    out property <length> sheet-pad-wide: 24px;
+    // Sheets hang 44px from the window's top, centred across it (Paper's
+    // Settings and Properties sheets); Welcome's card 120px down.
+    out property <length> sheet-top: 44px;
+    out property <length> welcome-top: 120px;
+    // A list's rows sit 6px in from the dock's edges and 6px below its
+    // header (literals in Paper).
+    out property <length> list-inset: 6px;
+    // An empty dock's glyph to its caption (EmptyState; the Welcome
+    // board's docks, a literal there; the Components sample has 12).
+    out property <length> empty-gap-dock: 10px;
 
-    // ---- 2.7 Sizes
-    out property <length> control-h: 28px; // default button, field, select, segmented
-    out property <length> control-h-sm: 24px; // toolbar buttons and fields, toast actions
-    out property <length> control-h-lg: 32px; // onboarding, Welcome, the Transition button
-    out property <length> row: 28px; // dock lists, filter lists, pick lists
-    out property <length> nav-row: 32px; // settings tabs
+    // ---- Sizes
+    out property <length> control-h: 28px; // default button, field, dropdown
+    out property <length> control-h-sm: 22px; // compact controls in rows and bands, small buttons
+    out property <length> control-h-lg: 34px; // Welcome's buttons, Transition
+    out property <length> row: 30px; // list rows, sidebar rows, inspector bands, grouped rows
+    out property <length> nav-row: 30px; // the sidebar's rows (row)
     out property <length> menu-item: 24px;
-    out property <length> header: 28px; // dock title band; dialog title bar
-    out property <length> toolbar: 32px; // dock toolbars
-    out property <length> source-toolbar: 40px;
-    out property <length> statusbar: 24px;
-    out property <length> dialog-foot: 52px;
+    out property <length> header: 32px; // dock header band; a sheet's section heading
+    out property <length> toolbar: 34px; // dock toolbars
+    out property <length> source-toolbar: 44px; // the control bar
+    out property <length> statusbar: 28px;
+    // The main window's layout: literals on the Main window and Studio
+    // Mode boards, named so a theme can move them.
+    out property <length> bar-slot: 440px; // the control bar's left and right slots, the LCD between them
+    out property <length> bar-gap: 10px; // the control bar: between the selected source's icon, name and line; its right inset
+    out property <length> line-gap: 14px; // between a bar's groups: the viewer line's menus, the status bar's badge and words
+    out property <length> viewer-side: 320px; // the viewer line's format and zoom slots
+    out property <length> lane: 40px; // a source row's ISO lane (its badge at the end)
+    out property <length> narrow-dock: 220px; // under this the Sources dock folds empty ISO lanes away (ours)
+    out property <length> track-h: 44px; // a mixer strip (Logic's track header)
+    out property <length> track-name: 150px; // its name slot
+    out property <length> track-value: 64px; // its volume
+    out property <length> fader-min: 100px; // its fader at the narrowest (ours: 0.6 dB a pixel at 1x)
+    out property <length> band-field: 84px; // a dock band's popup or stepper (Scene Transitions)
+    out property <length> band-field-min: 64px; // ...as narrow as it goes in a narrow dock (ours: "Fade", "300 ms" still fit)
+    out property <length> studio-column: 160px; // Studio Mode's column between the monitors
+    out property <length> dialog-foot: 68px; // a sheet's buttons: 20 + 28 + 20
     out property <length> icon: 16px;
-    out property <length> icon-sm: 14px; // in buttons, chevrons, status bar
-    out property <length> icon-xs: 12px; // checks in step dots and checkboxes
-    out property <length> icon-lg: 20px; // Welcome and onboarding glyphs
-    out property <length> icon-button: 28px;
-    out property <length> icon-button-sm: 24px;
-    out property <length> dot: 8px; // REC, stream health, program dot, source state
+    out property <length> icon-sm: 14px; // in buttons, capsules, dock headers
+    out property <length> icon-xs: 12px; // checks, footers' meta
+    out property <length> icon-lg: 22px; // a sheet's glyph
+    out property <length> icon-row: 15px; // a list row's trailing toggles (a literal in Paper)
+    out property <length> icon-button: 28px; // square, r
+    out property <length> icon-button-sm: 24px; // round
+    out property <length> icon-button-xs: 22px; // square, r: dock headers, row toggles
+    out property <length> dot: 7px; // REC, program, health
     out property <length> field-xs: 96px;
-    out property <length> field-s: 120px;
+    out property <length> field-s: 128px;
     out property <length> field-m: 240px;
     out property <length> field-l: 320px;
+    // A grouped row's wide control (Paper's Properties sheet: the Files
+    // list's column; a literal there); the path field beside Browse… in
+    // Settings (300px) and its Encoder dropdown (220px).
+    out property <length> field-wide: 400px;
+    out property <length> field-path: 300px;
+    out property <length> field-choice: 220px;
     out property <length> check: 14px; // checkbox and radio
-    out property <length> switch-w: 28px;
-    out property <length> switch-h: 16px;
-    out property <length> knob: 12px;
+    out property <length> switch-w: 30px;
+    out property <length> switch-h: 18px;
+    out property <length> knob: 14px;
     out property <length> slider-h: 20px;
-    out property <length> track: 2px;
+    out property <length> track: 4px; // slider and fader track
     out property <length> thumb: 12px;
+    out property <length> track-thin: 2px; // an inspector band's slider
+    out property <length> thumb-thin: 10px;
     out property <length> kbd: 20px;
-    out property <length> meter: 22px; // the meter with its scale
-    out property <length> meter-bar: 8px;
+    out property <length> meter: 18px; // a strip meter with its scale
+    out property <length> meter-bar: 3px; // a strip meter's bar
+    out property <length> master-meter-w: 120px; // the control bar's stereo capsule
+    out property <length> master-meter-bar: 4px;
     out property <length> scrollbar: 8px;
-    out property <length> handle: 8px; // canvas handles
+    out property <length> handle: 8px; // canvas handles (round)
     out property <length> popover-min: 200px;
-    out property <length> menu-min: 180px;
+    out property <length> menu-min: 208px;
     out property <length> toast-w: 360px;
+    out property <length> badge-h: 18px; // capsule badges (ISO, LIVE, REC, READY)
+    out property <length> mini-toggle: 18px; // the mixer's M and headphones
+    out property <length> lcd-h: 36px; // the LCD (with its 1px edge)
+    out property <length> lcd-pad: 14px; // inside each LCD cell
+    out property <length> transport: 30px; // the round record and stream buttons
+    out property <length> capsule-h: 24px; // a toolbar capsule
+    out property <length> capsule-h-lg: 30px; // the control bar's capsule
+    out property <length> capsule-button-w: 26px;
+    out property <length> capsule-button-w-lg: 32px;
+    out property <length> capsule-button-h-lg: 28px;
+    out property <length> glyph: 40px; // a sheet header's icon tile
+    out property <length> sidebar-w: 200px; // a sheet's sidebar list
 
-    // ---- 2.8 Radius, lines, elevation
-    out property <length> r: 2px; // controls
-    out property <length> r-handle: 1px;
-    out property <length> r-panel: 3px; // menus, popovers, dialogs, toasts, cards
+    // ---- Radius and lines
+    out property <length> r: 6px; // controls, rows
+    out property <length> r-panel: 12px; // sheets, tooltips
+    out property <length> r-menu: 8px; // menus, toasts, popovers, the LCD, grouped lists (a literal in Paper)
+    out property <length> r-compact: 5px; // 22px controls, a hovered menu item, keycaps (literal)
+    out property <length> r-mini: 4px; // 18px toggles, a dropdown's cap (literal)
+    out property <length> r-cap: 3px; // a compact dropdown's cap (literal)
+    out property <length> r-glyph: 10px; // a sheet header's icon tile (literal)
+    out property <length> r-handle: 4px; // canvas handles (round, 8px)
     out property <length> hairline: 1px;
-    // --shadow-pop's main layer (0 12px 32px rgba(0, 0, 0, 0.45)); only on
-    // menus, popovers, dialogs, toasts and the welcome/onboarding cards.
-    out property <color> shadow-color: #00000073;
-    out property <length> shadow-blur: 32px;
-    out property <length> shadow-y: 12px;
 
-    // ---- 2.9 States
+    // ---- States
     out property <float> disabled-opacity: 0.4;
-    out property <float> muted-meter-opacity: 0.35;
+    out property <float> lcd-dim-opacity: 0.35; // unused leading zeros; an idle LCD
     out property <float> dragging-opacity: 0.4;
+    out property <float> band-disabled-opacity: 0.5; // a compact field in a disabled band
 
-    // ---- 2.10 Focus: a bone ring 2px wide after a 1px gap (outer), or a
-    // 2px inset ring for things as wide as their pane.
-    out property <color> focus-ring: #eeeae2;
-    out property <length> focus-gap: 1px;
-    out property <length> focus-width: 2px;
-
-    // ---- 2.11 Motion (the easing is Motion.ease)
+    // ---- Motion (the easing is Motion.ease)
     out property <duration> fast: root.reduce-motion ? 1ms : 120ms; // hover colour
-    out property <duration> med: root.reduce-motion ? 1ms : 160ms; // menus, dialogs, a switch's knob, toasts
+    out property <duration> med: root.reduce-motion ? 1ms : 160ms; // menus, sheets, a switch's knob, toasts
 }
 
 // The easing curve, kept out of `Theme` because Slint can't hand an easing

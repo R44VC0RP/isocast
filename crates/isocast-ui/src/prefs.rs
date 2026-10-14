@@ -46,6 +46,7 @@ pub fn load(window: &AppWindow) {
     };
     flag("source_toolbar", &|v| ui.set_show_source_toolbar(v));
     flag("status_bar", &|v| ui.set_show_status_bar(v));
+    flag("docks_pane", &|v| ui.set_show_docks(v));
     flag("scenes", &|v| ui.set_show_scenes(v));
     flag("sources", &|v| ui.set_show_sources(v));
     flag("mixer", &|v| ui.set_show_mixer(v));
@@ -91,6 +92,7 @@ pub fn save(window: &AppWindow) {
     let layout = json!({
         "source_toolbar": ui.get_show_source_toolbar(),
         "status_bar": ui.get_show_status_bar(),
+        "docks_pane": ui.get_show_docks(),
         "scenes": ui.get_show_scenes(),
         "sources": ui.get_show_sources(),
         "mixer": ui.get_show_mixer(),
@@ -136,6 +138,7 @@ pub fn reset(window: &AppWindow, docks_only: bool) {
     ui.set_show_mixer(true);
     ui.set_show_transitions(true);
     ui.set_show_controls(true);
+    ui.set_show_docks(true);
     ui.set_docks_locked(false);
     if !docks_only {
         ui.set_show_source_toolbar(true);

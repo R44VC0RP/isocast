@@ -1,17 +1,23 @@
 // Area C's dialogs: the transition's properties ("transition", arg: the
-// kind to switch to, if it needs settings first). Put on the window by
-// app.slint. As the web app's transitions.js: the settings drawn from the
-// setup's schema; changes show at once and Cancel puts them back; a
-// transition with nothing to set shows only Close.
+// kind to switch to, if it needs settings first), as a Console sheet: the
+// transition's glyph and name, its settings as grouped rows (drawn from
+// the setup's schema), Defaults, Cancel and OK. Put on the window by
+// app.slint. As the web app's transitions.js: changes show at once and
+// Cancel puts them back; a transition with nothing to set shows only
+// Close.
 
 import { Theme } from "../../theme.slint";
+import { Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
-import { Dialog, Form, SettingsForm } from "../../kit.slint";
+import { Dialog, GroupHint, SettingsForm } from "../../kit.slint";
 import { ControlsArea } from "state.slint";
 
 export component ControlsDialogs inherits Rectangle {
     if Ui.dialog == "transition": Dialog {
-        title: ControlsArea.dialog-title;
+        title: ControlsArea.dialog-name;
+        accessible-name: ControlsArea.dialog-title;
+        subtitle: "How the program goes from one scene to the next.";
+        icon: Icons.blend;
         dialog-width: 520px;
         ok-text: ControlsArea.dialog-empty ? "Close" : "OK";
         cancel-text: ControlsArea.dialog-empty ? "" : "Cancel";
@@ -19,12 +25,12 @@ export component ControlsDialogs inherits Rectangle {
         accepted => { ControlsArea.dialog-accept(); }
         cancelled => { ControlsArea.dialog-cancel(); }
         extra => { ControlsArea.dialog-defaults(); }
-        Form {
-            if ControlsArea.form-groups.length == 0: Text {
-                text: "No settings.";
-                color: Theme.text-3;
-                font-size: Theme.fs-sm;
-                letter-spacing: Theme.tracking-sm;
+        VerticalLayout {
+            padding-left: Theme.sheet-pad;
+            padding-right: Theme.sheet-pad;
+            spacing: 0;
+            if ControlsArea.form-groups.length == 0: GroupHint {
+                text: "This transition has no settings: the Scene Transitions dock sets its duration.";
             }
             SettingsForm {
                 form: "transition";

@@ -17,7 +17,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use chrono::Local;
-use isocast_protocol::api::{AudioLevel, EngineInfo, ScenesInfo, SourceRun, SourceStatus};
+use isocast_protocol::api::{
+    AudioLevel, ChannelLevel, EngineInfo, ScenesInfo, SourceRun, SourceStatus,
+};
 use isocast_protocol::manifest::SessionStatus;
 use isocast_protocol::{Canvas, Codec, Monitoring, PROGRAM, Setup, SourceKind, TransitionKind};
 
@@ -25,7 +27,7 @@ use super::disk::{DiskMeter, DiskProbe};
 use super::file::{Done, Split, file_end, write_files};
 use super::frame_stream::{self, FrameFeed};
 use super::iso_frames::IsoFrames;
-use super::mix::{MIX_DELAY, Meter, Mixer};
+use super::mix::{MIX_DELAY, Meter, Mixer, StereoMeter};
 use super::monitor::{Closing, Monitor, MonitorSlot, Tap};
 use super::program::{Compositor, Feed};
 use super::scenes::{SceneInput, SceneThread};
@@ -305,7 +307,7 @@ struct Inner<P: Platform> {
     scenes: SceneThread<P::Frame>,
     program_video: Arc<Routes<P::Frame>>,
     program_audio: Arc<Routes<P::Frame>>,
-    program_meter: Arc<Meter>,
+    program_meter: Arc<StereoMeter>,
     /// Monitors' H.264 streams, by what they show.
     frame_streams: Arc<frame_stream::Streams>,
     /// The setup revision each recent program (and preview) frame was
@@ -1937,6 +1939,7 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                         source: id.clone(),
                         peak_db,
                         rms_db,
+                        channels: None,
                     });
                 }
                 if live.run != SourceRun::Running {
@@ -1958,11 +1961,13 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                 }
             }
         }
-        let (peak_db, rms_db) = inner.program_meter.take();
+        // The program's, each channel too (the control bar's two bars).
+        let ((peak_db, rms_db), channels) = inner.program_meter.take();
         levels.push(AudioLevel {
             source: PROGRAM.to_string(),
             peak_db,
             rms_db,
+            channels: Some(channels.map(|(peak_db, rms_db)| ChannelLevel { peak_db, rms_db })),
         });
         {
             let mut loudest = inner.loudest.lock().unwrap();
@@ -2565,6 +2570,7 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
                         source,
                         peak_db,
                         rms_db,
+                        channels: None,
                     })
                     .collect();
                 let mut status = live_status(&current.plans, levels, shared, now);

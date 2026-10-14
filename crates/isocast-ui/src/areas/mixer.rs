@@ -36,6 +36,8 @@ pub const STATES: &[&str] = &[
 
 /// The meters' floor, in dBFS.
 const FLOOR: f64 = -60.0;
+/// The program mix's levels come as this source.
+const PROGRAM: &str = "program";
 /// How often moving meters are drawn (30 fps). Each change redraws the
 /// whole window (the Skia wgpu renderer has no partial rendering), so this
 /// sets the meters' cost: docs/notes.md has the measurements.
@@ -47,6 +49,11 @@ const HOLD: Duration = Duration::from_millis(1500);
 /// A meter is redrawn when a bar or the hold moves by this much (about a
 /// pixel of a wide meter).
 const STEP_DB: f64 = 0.1;
+/// The control bar's master level moves in whole device pixels of its
+/// bars (Theme.master-meter-w less its 1px edge and 3px padding each
+/// side): 60 dB over 112 points is ~0.54 dB a pixel at 1x. A smaller
+/// change would redraw the window for nothing.
+const MASTER_INSET: f64 = 8.0;
 /// Live edits from a fader or a balance slider: at most one per this.
 const LIVE_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -111,6 +118,16 @@ pub struct Mixer {
     rows: Rc<VecModel<AudioRow>>,
     /// Each source's meter, by id (kept while strips are rebuilt).
     meters: RefCell<HashMap<String, MeterState>>,
+    /// The program mix's meter (the control bar's master level), left and
+    /// right, and what each last showed.
+    master: RefCell<[(Option<MeterState>, Level); 2]>,
+    /// With no strip meter showing, the master level moves on every other
+    /// tick (15 a second): this flips each tick.
+    master_skip: Cell<bool>,
+    /// macOS, layers preview: the master level is a native layer (see
+    /// layers.rs), which moves without redrawing the window.
+    #[cfg(target_os = "macos")]
+    native: RefCell<Option<Rc<RefCell<crate::layers::Layers>>>>,
     /// When each source's levels last came.
     arrived: RefCell<HashMap<String, Instant>>,
     timer: slint::Timer,
@@ -125,6 +142,10 @@ impl Default for Mixer {
             levels: Rc::default(),
             rows: Rc::default(),
             meters: RefCell::default(),
+            master: RefCell::default(),
+            master_skip: Cell::new(false),
+            #[cfg(target_os = "macos")]
+            native: RefCell::default(),
             arrived: RefCell::default(),
             timer: slint::Timer::default(),
             last_tick: Cell::new(None),
@@ -230,7 +251,7 @@ impl Mixer {
     }
 
     /// What `id`'s meter is heading for: its newest level after its fader
-    /// (a muted source shows nothing), or silence once levels stop.
+    /// (a muted source too, greyed), or silence once levels stop.
     fn target(&self, app: &Rc<App>, setup: &Setup, id: &str, now: Instant) -> (f64, f64) {
         let fresh = self
             .arrived
@@ -240,12 +261,32 @@ impl Mixer {
         let s = app.session.borrow();
         let level = s.levels.get(id).filter(|_| fresh);
         let audio = setup_model::find_source(setup, id).map(|x| x.audio);
+        // A muted source's meter still shows what it hears (drawn in
+        // `meter-muted`: Paper's muted strip), as its fader sets it.
         match (level, audio) {
-            (Some(level), Some(audio)) if !audio.muted => (
+            (Some(level), Some(audio)) => (
                 (level.rms_db + audio.gain_db).max(FLOOR),
                 (level.peak_db + audio.gain_db).max(FLOOR),
             ),
             _ => (FLOOR, FLOOR),
+        }
+    }
+
+    /// What the program's meter is heading for, left and right: the
+    /// mix's newest level (both bars the same from an engine that sends
+    /// one level), or silence once levels stop.
+    fn program_target(&self, app: &Rc<App>, now: Instant) -> [(f64, f64); 2] {
+        let fresh = self
+            .arrived
+            .borrow()
+            .get(PROGRAM)
+            .is_some_and(|at| now.duration_since(*at) <= STALE);
+        match app.session.borrow().levels.get(PROGRAM).filter(|_| fresh) {
+            Some(level) => match &level.channels {
+                Some(channels) => channels.map(|c| (c.rms_db.max(FLOOR), c.peak_db.max(FLOOR))),
+                None => [(level.rms_db.max(FLOOR), level.peak_db.max(FLOOR)); 2],
+            },
+            None => [(FLOOR, FLOOR); 2],
         }
     }
 
@@ -264,6 +305,16 @@ impl Mixer {
             meters.get(id.as_str()).is_some_and(|m| m.active(target.1)) || target.1 > FLOOR
         });
         drop(meters);
+        let program = self.program_target(app, now);
+        let any = any
+            || self
+                .master
+                .borrow()
+                .iter()
+                .zip(program)
+                .any(|((meter, _), target)| {
+                    target.1 > FLOOR || meter.is_some_and(|m| m.active(target.1))
+                });
         if !any {
             return;
         }
@@ -318,6 +369,101 @@ impl Mixer {
                 rows.set_row_data(i, level);
             }
         }
+        // The program's, left and right. With no strip meter showing it is
+        // the only thing redrawing the window while sound plays, so it
+        // moves 15 times a second then, and only by whole pixels.
+        let Some(window) = app.window() else {
+            return active;
+        };
+        #[cfg(target_os = "macos")]
+        if let Some(layers) = self.native.borrow().as_ref() {
+            return self.step_native_master(app, &window, layers, dt, now) || active;
+        }
+        let ui = window.global::<Ui>();
+        let strips_drawn = ui.get_show_docks() && ui.get_show_mixer() && !shown.is_empty();
+        let skip = !strips_drawn && !self.master_skip.replace(!self.master_skip.get());
+        let bar = f64::from(window.global::<crate::Theme>().get_master_meter_w()) - MASTER_INSET;
+        let pixel_db = 60.0 / (bar * f64::from(window.window().scale_factor())).max(1.0);
+        let targets = self.program_target(app, now);
+        let mut master = self.master.borrow_mut();
+        let mut moved = [false; 2];
+        for ((meter, level), (target, moved)) in master
+            .iter_mut()
+            .zip(targets.into_iter().zip(moved.iter_mut()))
+        {
+            let meter = meter.get_or_insert_with(|| MeterState::new(now));
+            meter.step(target, dt, now);
+            let still = meter.active(target.1);
+            active |= still;
+            // A meter coming to rest is drawn at rest, skip or not.
+            if !skip || !still {
+                *moved = show_meter_by(level, meter, pixel_db);
+            }
+        }
+        let area = window.global::<MixerArea>();
+        if moved[0] {
+            area.set_master_left(master[0].1.clone());
+        }
+        if moved[1] {
+            area.set_master_right(master[1].1.clone());
+        }
+        active
+    }
+
+    /// Draw the master level in its native layer (from now on, macOS with
+    /// the layers preview): the control bar leaves its inside unpainted.
+    #[cfg(target_os = "macos")]
+    pub fn use_native_master(
+        &self,
+        window: &AppWindow,
+        layers: Rc<RefCell<crate::layers::Layers>>,
+    ) {
+        let silent = crate::layers::MeterLevel {
+            rms: FLOOR as f32,
+            peak: FLOOR as f32,
+            hold: FLOOR as f32,
+        };
+        layers
+            .borrow_mut()
+            .show_meter(crate::preview::meter_rect(window), [silent; 2]);
+        *self.native.borrow_mut() = Some(layers);
+        window.global::<MixerArea>().set_master_native(true);
+    }
+
+    /// The native master level's step: by whole device pixels, at the
+    /// meters' 30 a second (a layer moves without redrawing the window).
+    #[cfg(target_os = "macos")]
+    fn step_native_master(
+        &self,
+        app: &Rc<App>,
+        window: &AppWindow,
+        layers: &Rc<RefCell<crate::layers::Layers>>,
+        dt: f64,
+        now: Instant,
+    ) -> bool {
+        let rect = crate::preview::meter_rect(window);
+        let bar = rect[2] - 2.0 * 3.0;
+        let pixel_db = 60.0 / (bar * f64::from(window.window().scale_factor())).max(1.0);
+        let targets = self.program_target(app, now);
+        let mut master = self.master.borrow_mut();
+        let mut active = false;
+        let mut moved = false;
+        for ((meter, level), target) in master.iter_mut().zip(targets) {
+            let meter = meter.get_or_insert_with(|| MeterState::new(now));
+            meter.step(target, dt, now);
+            active |= meter.active(target.1);
+            moved |= show_meter_by(level, meter, pixel_db);
+        }
+        if moved {
+            let level = |l: &Level| crate::layers::MeterLevel {
+                rms: l.rms,
+                peak: l.peak,
+                hold: l.hold,
+            };
+            layers
+                .borrow_mut()
+                .show_meter(rect, [level(&master[0].1), level(&master[1].1)]);
+        }
         active
     }
 
@@ -351,11 +497,15 @@ impl Mixer {
 /// Put a meter's state on its row (clamped to the scale); true if a bar
 /// or the hold moved enough to draw.
 fn show_meter(strip: &mut Level, meter: &MeterState) -> bool {
+    show_meter_by(strip, meter, STEP_DB)
+}
+
+/// `show_meter`, drawing only moves of at least `step` dB.
+fn show_meter_by(strip: &mut Level, meter: &MeterState, step: f64) -> bool {
     let shown = |db: f64| db.clamp(FLOOR, 0.0) as f32;
     let (rms, peak, hold) = (shown(meter.rms), shown(meter.peak), shown(meter.hold));
-    let moved = |a: f32, b: f32| {
-        f64::from((a - b).abs()) >= STEP_DB || (a != b && (a == -60.0 || b == -60.0))
-    };
+    let moved =
+        |a: f32, b: f32| f64::from((a - b).abs()) >= step || (a != b && (a == -60.0 || b == -60.0));
     let changed = moved(rms, strip.rms) || moved(peak, strip.peak) || moved(hold, strip.hold);
     if changed {
         strip.rms = rms;

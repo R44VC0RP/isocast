@@ -6,9 +6,10 @@
 // sub-path starts with an absolute move.
 //
 // Draw them with `Icon { path: Icons.eye; }`: 16px by default (12, 14 and
-// 20 are the other sizes the design allows), a constant 1.5px stroke, in
-// `Theme.text-2` unless told otherwise (`--text` on hover, `accent-text`
-// when on, a status colour for a status).
+// 20 are the other sizes the design allows), stroked 2.25 of the 24 units
+// as Paper's icons are (1.5px at 16px), in `Theme.text-2` unless told
+// otherwise (`--text` on hover, `accent-text` when on, a status colour for
+// a status).
 
 import { Theme } from "theme.slint";
 
@@ -70,7 +71,7 @@ export global Icons {
     out property <string> scene: "M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83zM2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17";
     out property <string> scissors: "M3 6a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M8.12 8.12 12 12M20 4 8.12 15.88M3 18a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M14.8 14.8 20 20";
     out property <string> search: "M21 21l-4.34-4.34M3 11a8 8 0 1 0 16 0a8 8 0 1 0 -16 0";
-    out property <string> settings: "M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0";
+    out property <string> settings: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2zM9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0";
     out property <string> slideshow: "M22 11l-1.296-1.296a2.4 2.4 0 0 0-3.408 0L11 16M4 8a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2M12 7a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M10 2h10a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-10a2 2 0 0 1 2 -2z";
     out property <string> sparkles: "M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594zM20 2v4M22 4h-4M2 20a2 2 0 1 0 4 0a2 2 0 1 0 -4 0";
     out property <string> speaker: "M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298zM16 9a5 5 0 0 1 0 6M19.364 18.364a9 9 0 0 0 0-12.728";
@@ -79,7 +80,7 @@ export global Icons {
     out property <string> studio: "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2zM12 3v18";
     out property <string> swap: "M8 3 4 7l4 4M4 7h16M16 21l4-4-4-4M20 17H4";
     out property <string> test-pattern: "M17 2l-5 5-5-5M4 7h16a2 2 0 0 1 2 2v11a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2z";
-    out property <string> text: "M12 4v16M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2M9 20h6";
+    out property <string> text: "M4 7V4h16v3M9 20h6M12 4v16";
     out property <string> to-back: "M12 17V3M6 11l6 6 6-6M19 21H5";
     out property <string> to-front: "M5 3h14M18 13l-6-6-6 6M12 7v14";
     out property <string> tone: "M2 13a2 2 0 0 0 2-2V7a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0V4a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0v-4a2 2 0 0 1 2-2";
@@ -90,6 +91,57 @@ export global Icons {
     out property <string> warning: "M21.73 18l-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3M12 9v4M12 17h.01";
     out property <string> window: "M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2zM10 4v4M2 8h20M6 4v4";
     out property <string> x: "M18 6 6 18M6 6l12 12";
+
+    // From the Console boards (Paper's Lucide paths).
+    out property <string> columns: "M3.5 5h6a1.5 1.5 0 0 1 1.5 1.5v11a1.5 1.5 0 0 1 -1.5 1.5h-6a1.5 1.5 0 0 1 -1.5 -1.5v-11a1.5 1.5 0 0 1 1.5 -1.5zM14.5 5h6a1.5 1.5 0 0 1 1.5 1.5v11a1.5 1.5 0 0 1 -1.5 1.5h-6a1.5 1.5 0 0 1 -1.5 -1.5v-11a1.5 1.5 0 0 1 1.5 -1.5z";
+    out property <string> log-out: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9";
+    out property <string> panel-bottom: "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2zM3 15h18";
+    out property <string> panel-right: "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2zM15 3v18";
+    out property <string> reset: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5";
+    out property <string> scene-card: "M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-10a2 2 0 0 1 2 -2zM3 10h18";
+    // Streaming (the Controls dock's Start Streaming; the transport's).
+    out property <string> broadcast: "M4.9 19.1C1 15.2 1 8.8 4.9 4.9M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5M19.1 4.9C23 8.8 23 15.1 19.1 19M10 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0";
+    // Filters, Advanced Audio (the control bar's capsule, the mixer's toolbar).
+    out property <string> sliders: "M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4";
+    // The control bar with nothing selected: scene-card's frame dashed 3/3
+    // (Paper's `strokeDasharray="3 3"`; Slint paths have no dashes, so the
+    // dashes are drawn as segments). Draw it with butt caps.
+    out property <string> scene-none: "M5 5L8 5M11 5L14 5M17 5L19 5L19.49 5.06L19.96 5.24M21 7.86L21 10.86M21 13.86L21 16.86M19.28 18.98L18.78 19L16.28 19M13.28 19L10.28 19M7.28 19L5.28 19L4.78 18.99L4.3 18.87M3 16.42L3 13.42M3 10.42L3 7.42M4.44 5.08L4.72 5.02L5 5";
+
+    // Empty docks (Paper's glyphs, 40px at 1.2 units: EmptyState): the
+    // Welcome board's Scenes ("No scenes yet"), Sources ("No scene
+    // selected") and Audio Mixer ("No audio sources") docks, and the
+    // Components board's "No sources in this scene".
+    out property <string> empty-scenes: "M5.5 7h13a2.5 2.5 0 0 1 2.5 2.5v8a2.5 2.5 0 0 1 -2.5 2.5h-13a2.5 2.5 0 0 1 -2.5 -2.5v-8a2.5 2.5 0 0 1 2.5 -2.5zM6 4.5h12M12 11v5M9.5 13.5h5";
+    out property <string> empty-scene: "M5.5 4h13a2.5 2.5 0 0 1 2.5 2.5v11a2.5 2.5 0 0 1 -2.5 2.5h-13a2.5 2.5 0 0 1 -2.5 -2.5v-11a2.5 2.5 0 0 1 2.5 -2.5zM3 9h18M8 4v5M16 4v5M12 12.5v4M10 14.5h4";
+    out property <string> empty-sources: "M5.5 3h13a2.5 2.5 0 0 1 2.5 2.5v13a2.5 2.5 0 0 1 -2.5 2.5h-13a2.5 2.5 0 0 1 -2.5 -2.5v-13a2.5 2.5 0 0 1 2.5 -2.5zM3 15.5l4.5-4.5 4 4 2.5-2.5 7 7M13.7 8a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0";
+    out property <string> empty-audio: "M4 9.5h6M14 9.5h6M4 14.5h2M10 14.5h10M10 9.5a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M6 14.5a2 2 0 1 0 4 0a2 2 0 1 0 -4 0";
+    // Properties' "Add Files…" plus: 12 units (draw with `box-width: 12`),
+    // stroked 1.6 (Paper's Properties, media clip board).
+    out property <string> plus-12: "M6 1.5v9M1.5 6h9";
+
+    // The sheets' own glyphs (Paper's Settings, Properties and Welcome
+    // boards draw them in 16 units: here at 24, so they take Icon's
+    // sizes and 1.5px strokes). `drive-led` and `film-play` are the
+    // yellow parts of the Output and media sheet glyphs (filled, see
+    // SheetGlyph's `accent`).
+    out property <string> drive: "M4.875 13.125h14.25a2.25 2.25 0 0 1 2.25 2.25v2.25a2.25 2.25 0 0 1 -2.25 2.25h-14.25a2.25 2.25 0 0 1 -2.25 -2.25v-2.25a2.25 2.25 0 0 1 2.25 -2.25zM4.5 13.125L6.9 5.4A2.25 2.25 0 0 1 9 4.125h6a2.25 2.25 0 0 1 2.1 1.275L19.5 13.125M17.25 16.5h0.01";
+    out property <string> drive-led: "M15.9 16.5a1.35 1.35 0 1 0 2.7 0a1.35 1.35 0 1 0 -2.7 0";
+    out property <string> monitor: "M4.875 4.125h14.25a2.25 2.25 0 0 1 2.25 2.25v8.25a2.25 2.25 0 0 1 -2.25 2.25h-14.25a2.25 2.25 0 0 1 -2.25 -2.25v-8.25a2.25 2.25 0 0 1 2.25 -2.25zM8.25 20.625h7.5";
+    out property <string> volume: "M3.375 9v6h3.75l5.25 4.5V4.5l-5.25 4.5h-3.75ZM16.125 8.625a4.8 4.8 0 0 1 0 6.75M19.125 5.625a9 9 0 0 1 0 12.75";
+    out property <string> volume-low: "M3.375 9v6h3.75l5.25 4.5V4.5l-5.25 4.5h-3.75ZM16.125 8.625a4.8 4.8 0 0 1 0 6.75";
+    out property <string> sheet-broadcast: "M9.9 12a2.1 2.1 0 1 0 4.2 0a2.1 2.1 0 1 0 -4.2 0M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.5 4.5a10.65 10.65 0 0 0 0 15M19.5 4.5a10.65 10.65 0 0 1 0 15";
+    out property <string> sun: "M8.7 12a3.3 3.3 0 1 0 6.6 0a3.3 3.3 0 1 0 -6.6 0M12 2.625v2.4M12 18.975v2.4M21.375 12h-2.4M5.025 12h-2.4M18.6 5.4l-1.65 1.65M7.05 16.95l-1.65 1.65M18.6 18.6l-1.65 -1.65M7.05 7.05L5.4 5.4";
+    out property <string> keys: "M4.875 5.625h14.25a2.25 2.25 0 0 1 2.25 2.25v8.25a2.25 2.25 0 0 1 -2.25 2.25h-14.25a2.25 2.25 0 0 1 -2.25 -2.25v-8.25a2.25 2.25 0 0 1 2.25 -2.25zM6.75 9.75h0.015M10.5 9.75h0.015M14.25 9.75h0.015M18 9.75h-0.75M7.5 14.25h9";
+    out property <string> sheet-sliders: "M3.75 6.75h9M17.25 6.75h3M3.75 17.25h3M11.25 17.25h9M12.75 6.75a2.25 2.25 0 1 0 4.5 0a2.25 2.25 0 1 0 -4.5 0M6.75 17.25a2.25 2.25 0 1 0 4.5 0a2.25 2.25 0 1 0 -4.5 0";
+    out property <string> film: "M5.625 2.625h12.75a2.25 2.25 0 0 1 2.25 2.25v14.25a2.25 2.25 0 0 1 -2.25 2.25h-12.75a2.25 2.25 0 0 1 -2.25 -2.25v-14.25a2.25 2.25 0 0 1 2.25 -2.25zM7.5 2.625v18.75M16.5 2.625v18.75M3.375 7.5h4.125M3.375 12h4.125M3.375 16.5h4.125M16.5 7.5h4.125M16.5 12h4.125M16.5 16.5h4.125";
+    out property <string> film-play: "M10.5 9.3v5.4L14.4 12Z";
+    out property <string> reel: "M5.625 2.625h12.75a2.25 2.25 0 0 1 2.25 2.25v14.25a2.25 2.25 0 0 1 -2.25 2.25h-12.75a2.25 2.25 0 0 1 -2.25 -2.25v-14.25a2.25 2.25 0 0 1 2.25 -2.25zM7.5 2.625v18.75M16.5 2.625v18.75";
+    out property <string> folder: "M2.625 6.375a2.25 2.25 0 0 1 2.25 -2.25h4.5l2.25 2.625h7.5a2.25 2.25 0 0 1 2.25 2.25v8.625a2.25 2.25 0 0 1 -2.25 2.25h-14.25a2.25 2.25 0 0 1 -2.25 -2.25Z";
+    out property <string> frame: "M4.875 4.875h14.25a2.25 2.25 0 0 1 2.25 2.25v9.75a2.25 2.25 0 0 1 -2.25 2.25h-14.25a2.25 2.25 0 0 1 -2.25 -2.25v-9.75a2.25 2.25 0 0 1 2.25 -2.25z";
+    out property <string> codec: "M5.625 2.625h12.75a2.25 2.25 0 0 1 2.25 2.25v14.25a2.25 2.25 0 0 1 -2.25 2.25h-12.75a2.25 2.25 0 0 1 -2.25 -2.25v-14.25a2.25 2.25 0 0 1 2.25 -2.25zM7.5 2.625v18.75M16.5 2.625v18.75M3.375 12h17.25";
+    out property <string> clock: "M2.625 12a9.375 9.375 0 1 0 18.75 0a9.375 9.375 0 1 0 -18.75 0M12 7.125V12l3 2.25";
+    out property <string> download: "M12 3v12M7.5 10.5l4.5 4.5l4.5 -4.5M4.125 15.75v2.625a2.25 2.25 0 0 0 2.25 2.25h11.25a2.25 2.25 0 0 0 2.25 -2.25V15.75";
 
     // The icon called `name` (as above, e.g. "camera"), or "": for models
     // built in Rust, which name icons rather than carry their paths.
@@ -171,22 +223,70 @@ export global Icons {
         if name == "warning" { return root.warning; }
         if name == "window" { return root.window; }
         if name == "x" { return root.x; }
+        if name == "columns" { return root.columns; }
+        if name == "log-out" { return root.log-out; }
+        if name == "panel-bottom" { return root.panel-bottom; }
+        if name == "panel-right" { return root.panel-right; }
+        if name == "reset" { return root.reset; }
+        if name == "scene-card" { return root.scene-card; }
+        if name == "broadcast" { return root.broadcast; }
+        if name == "sliders" { return root.sliders; }
+        if name == "scene-none" { return root.scene-none; }
+        if name == "empty-scenes" { return root.empty-scenes; }
+        if name == "empty-scene" { return root.empty-scene; }
+        if name == "empty-sources" { return root.empty-sources; }
+        if name == "empty-audio" { return root.empty-audio; }
+        if name == "drive" { return root.drive; }
+        if name == "drive-led" { return root.drive-led; }
+        if name == "monitor" { return root.monitor; }
+        if name == "volume" { return root.volume; }
+        if name == "volume-low" { return root.volume-low; }
+        if name == "sheet-broadcast" { return root.sheet-broadcast; }
+        if name == "sun" { return root.sun; }
+        if name == "keys" { return root.keys; }
+        if name == "sheet-sliders" { return root.sheet-sliders; }
+        if name == "film" { return root.film; }
+        if name == "film-play" { return root.film-play; }
+        if name == "reel" { return root.reel; }
+        if name == "folder" { return root.folder; }
+        if name == "frame" { return root.frame; }
+        if name == "codec" { return root.codec; }
+        if name == "clock" { return root.clock; }
+        if name == "download" { return root.download; }
         return "";
     }
 }
 
+// A path drawn as an SVG draws it: its box (`box-width` × `box-height`
+// units) scaled evenly into the element and centred, the stroke straddling
+// the outline. Slint fits a Path's viewbox into the element less the
+// stroke (i-slint-core's `fitted_path_events`), so a stroked drawing came
+// out smaller than Paper's (a 16px icon by 1.5px, ~10%); this widens the
+// viewbox by the stroke's share to undo that. Set `width`, `height`,
+// `commands` and the stroke as on a Path.
+export component SvgPath inherits Path {
+    in property <float> box-width: 24;
+    in property <float> box-height: 24;
+    // Units to px, and the stroke in px (as plain numbers).
+    property <float> k: max(0.0001, min(self.width / 1px / root.box-width, self.height / 1px / root.box-height));
+    property <float> s: self.stroke-width / 1px;
+    viewbox-x: root.box-width / 2 - (self.width / 1px - root.s) / (2 * root.k);
+    viewbox-y: root.box-height / 2 - (self.height / 1px - root.s) / (2 * root.k);
+    viewbox-width: max(0.0001, (self.width / 1px - root.s) / root.k);
+    viewbox-height: max(0.0001, (self.height / 1px - root.s) / root.k);
+}
+
 // An icon: `path` from `Icons`, `size` 12, 14, 16 or 20px.
-export component Icon inherits Path {
+export component Icon inherits SvgPath {
     in property <string> path;
     in property <color> color: Theme.text-2;
     in property <length> size: Theme.icon;
     width: root.size;
     height: root.size;
-    viewbox-width: 24;
-    viewbox-height: 24;
     commands: root.path;
     stroke: root.color;
-    stroke-width: 1.5px;
+    // Paper's 2.25 units (some icons there use 2 or 2.5: set it).
+    stroke-width: root.size * 2.25 / 24;
     stroke-line-cap: round;
     stroke-line-join: round;
     fill: transparent;
@@ -221,7 +321,7 @@ export component BrandMark inherits Rectangle {
         viewbox-width: 740;
         viewbox-height: 740;
         commands: "M332 426H580.57A200 200 0 0 1 598.79 490H332A32 32 0 0 1 332 426ZM332 534H598.79A200 200 0 0 1 580.57 598H332A32 32 0 0 1 332 534Z";
-        fill: Theme.bone;
+        fill: Theme.brand-bone;
     }
     Path {
         width: 100%;

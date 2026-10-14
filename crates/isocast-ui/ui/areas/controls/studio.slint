@@ -1,48 +1,77 @@
-// Studio Mode's column between Preview and Program (docs/design.md 3.17):
-// the Transition button (primary, 32px), the quick transitions (small,
-// 4px apart) and the transition properties gear. The Stage (area E)
-// places it.
+// Studio Mode's column between Preview and Program (Paper "C. Console",
+// Studio Mode board): under the monitors' viewer lines and centred beside
+// them, the Transition button (the one yellow button, 34px), the quick
+// transitions as a grouped list (name and length), and the transition
+// properties gear (a 28px round button on `control`), 12px apart. The
+// Stage (area E) places it and gives it the monitors' height.
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
-import { Button, ButtonVariant, ControlSize, IconButton } from "../../kit.slint";
+import { Button, ButtonVariant, ControlSize, IconButton, QuickList, QuickRow, Tip } from "../../kit.slint";
 import { ControlsArea } from "state.slint";
 
 export component StudioColumn inherits Rectangle {
-    height: column.preferred-height;
+    // The viewer lines' height: the column starts under them.
+    in property <length> head;
 
-    column := VerticalLayout {
-        // In line with the monitors under their heads.
-        padding-top: 26px;
-        spacing: Theme.space-2;
-        alignment: start;
+    VerticalLayout {
+        padding-top: root.head;
+        spacing: Theme.space-3;
+        alignment: center;
 
         Button {
-            height: Theme.control-h-lg;
             text: "Transition";
+            icon: Icons.arrow-right;
             variant: ButtonVariant.primary;
+            size: ControlSize.large;
             font-weight: Theme.weight-semibold;
             enabled: ControlsArea.can-take;
             tooltip: "Put the preview on air with the current transition (Return)";
             clicked => { ControlsArea.take(-1); }
         }
-        VerticalLayout {
-            spacing: Theme.space-1;
-            for label[i] in ControlsArea.quick-transitions: Button {
-                text: label;
-                size: ControlSize.small;
+        quick := QuickList {
+            label: "Quick transitions";
+            count: ControlsArea.quick-transitions.length;
+            enabled: ControlsArea.can-take;
+            activated(i) => { ControlsArea.take(i); }
+            for name[i] in ControlsArea.quick-transitions: QuickRow {
+                text: name;
+                detail: ControlsArea.quick-details[i];
+                index: i;
+                count: ControlsArea.quick-transitions.length;
+                last: i == ControlsArea.quick-transitions.length - 1;
                 enabled: ControlsArea.can-take;
-                tooltip: "Put the preview on air: " + label;
-                clicked => { ControlsArea.take(i); }
+                focus-shown: quick.keyboard-focus && quick.current == i;
+                accessible-description: "Put the preview on air with " + name;
+                clicked => {
+                    if ControlsArea.can-take {
+                        ControlsArea.take(i);
+                    }
+                }
+                Tooltip {
+                    Tip { text: "Put the preview on air: " + name; }
+                }
             }
         }
         HorizontalLayout {
             alignment: center;
-            IconButton {
-                icon: Icons.settings;
-                label: "Transition properties";
-                clicked => { Ui.open-dialog("transition", ControlsArea.transition); }
+            // Paper: a 28px circle on `control` with the 14px gear.
+            Rectangle {
+                width: Theme.control-h;
+                height: Theme.control-h;
+                border-radius: self.width / 2;
+                background: Theme.control;
+                // The round button grown to the circle, so hover and press
+                // fill all of it.
+                IconButton {
+                    width: parent.width;
+                    small: true;
+                    icon: Icons.settings;
+                    icon-size: Theme.icon-sm;
+                    label: "Transition properties";
+                    clicked => { Ui.open-dialog("transition", ControlsArea.transition); }
+                }
             }
         }
     }

@@ -1,12 +1,25 @@
-// The Controls dock (docs/design.md 3.19): Start/Stop Streaming, Start/Stop
-// Recording (with Marker and Split beside it while recording), Studio
-// Mode, Settings, Exit; full-width 28px buttons 4px apart.
+// The Controls dock (Paper "C. Console", Main window and Studio Mode
+// boards): Start/Stop Streaming, Start/Stop Recording (with a Marker
+// button beside it while recording), Studio Mode, Settings and Exit as
+// full-width 28px buttons, 6px apart, 12px down and 14px in; each with its
+// icon and its words from the left. Streaming and recording turn their
+// button red; Studio Mode glows yellow while on; Exit is quiet. Split is
+// in the take's details (the status bar's REC): with the icon and the
+// words from the left, "Stop Recording" and two 28px buttons don't fit
+// the dock's 172px; with Marker beside it the words shorten ("Stop
+// Recor…") in a dock under ~210px rather than push Marker out.
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
 import { Button, ButtonVariant, Dock } from "../../kit.slint";
 import { ControlsArea } from "state.slint";
+
+// A dock button: the label from the left, 10px in.
+component DockButton inherits Button {
+    content-alignment: LayoutAlignment.start;
+    inset: 10px;
+}
 
 export component ControlsDock inherits Dock {
     property <bool> streaming: ControlsArea.stream-state == "live" || ControlsArea.stream-state == "connecting" || ControlsArea.stream-state == "reconnecting";
@@ -16,24 +29,31 @@ export component ControlsDock inherits Dock {
 
     VerticalLayout {
         vertical-stretch: 1;
-        padding-top: Theme.space-2;
-        padding-bottom: Theme.space-2;
+        padding-top: Theme.space-3;
+        padding-bottom: Theme.space-3;
         padding-left: Theme.pane-x;
         padding-right: Theme.pane-x;
-        spacing: Theme.space-1;
+        spacing: 6px;
         alignment: start;
 
-        Button {
+        DockButton {
             text: ControlsArea.stream-state == "connecting" ? "Connecting…" : ControlsArea.stream-state == "reconnecting" ? "Reconnecting…" : root.streaming ? "Stop Streaming" : "Start Streaming";
+            icon: Icons.broadcast;
             variant: ControlsArea.stream-state == "reconnecting" ? ButtonVariant.live-warn : root.streaming ? ButtonVariant.live : ButtonVariant.secondary;
             enabled: Ui.has-setup && !ControlsArea.busy-stream;
             clicked => { ControlsArea.toggle-stream(); }
         }
         HorizontalLayout {
             spacing: Theme.space-1;
-            Button {
+            DockButton {
                 horizontal-stretch: 1;
+                shrinks: true;
+                // Its whole words for screen readers and as a tooltip
+                // when they are shortened.
+                tooltip: root.recording ? "Stop Recording" : "";
                 text: ControlsArea.record-state == "starting" ? "Starting…" : ControlsArea.record-state == "stopping" ? "Stopping…" : root.recording ? "Stop Recording" : "Start Recording";
+                // Recording: the button is red, so its light goes bone.
+                dot: root.recording || ControlsArea.record-state == "starting" ? Theme.bone : Theme.danger;
                 variant: root.recording || ControlsArea.record-state == "starting" ? ButtonVariant.live : ButtonVariant.secondary;
                 enabled: Ui.has-setup && !ControlsArea.busy-record;
                 clicked => { ControlsArea.toggle-record(); }
@@ -45,27 +65,24 @@ export component ControlsDock inherits Dock {
                 tooltip: "Add a marker at this moment";
                 clicked => { ControlsArea.marker(""); }
             }
-            if root.recording: Button {
-                width: Theme.control-h;
-                icon: Icons.scissors;
-                accessible-name: "Split";
-                tooltip: "Split: end these files at the next whole second and carry on in new ones";
-                clicked => { ControlsArea.split(); }
-            }
         }
-        Button {
+        DockButton {
             text: "Studio Mode";
+            icon: Icons.columns;
             checked: Ui.studio;
             toggle: true;
             enabled: Ui.has-setup;
             clicked => { Ui.set-studio(!Ui.studio); }
         }
-        Button {
+        DockButton {
             text: "Settings";
+            icon: Icons.settings;
             clicked => { Ui.open-dialog("settings", ""); }
         }
-        Button {
+        DockButton {
             text: "Exit";
+            icon: Icons.log-out;
+            variant: ButtonVariant.quiet;
             clicked => { Ui.quit(); }
         }
     }

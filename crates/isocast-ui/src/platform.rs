@@ -54,6 +54,19 @@ pub fn expand_home(path: &str) -> String {
     }
 }
 
+/// `path` with this user's home folder written `~` (as the setup and the
+/// Files list show paths).
+pub fn abbreviate_home(path: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && home != "/" => match path.strip_prefix(home.as_str()) {
+            Some("") => "~".into(),
+            Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+            _ => path.to_string(),
+        },
+        _ => path.to_string(),
+    }
+}
+
 /// Ask for files (or a folder) with the system's open panel: their paths,
 /// or none if cancelled. `None` where there is no open panel.
 #[cfg(target_os = "macos")]

@@ -5,46 +5,25 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
-use isocast_protocol::Codec;
-
-use crate::{VideoTrackSpec, WriterSpec};
+use crate::WriterSpec;
 
 /// How long an open-ended recording must have room for before it starts.
 pub const MIN_OPEN_ENDED_SECONDS: f64 = 10.0 * 60.0;
 
-/// AAC bit rate per channel.
-const AUDIO_BITS_PER_CHANNEL: f64 = 128_000.0;
-
-/// A generous estimate of a file's data rate, in bytes per second. Real
-/// files are usually far smaller (a still screen compresses to almost
-/// nothing); this is for deciding whether a recording fits.
+/// A generous estimate of a file's data rate, in bytes per second (the
+/// protocol's `encoder_bytes_per_second`, which clients share). Real files
+/// are usually far smaller (a still screen compresses to almost nothing);
+/// this is for deciding whether a recording fits.
 pub fn bytes_per_second(spec: &WriterSpec) -> f64 {
-    let audio: f64 = spec
-        .audio
-        .iter()
-        .map(|track| track.channels as f64 * AUDIO_BITS_PER_CHANNEL)
-        .sum();
-    (video_bits_per_second(&spec.video) + audio) / 8.0
-}
-
-fn video_bits_per_second(video: &VideoTrackSpec) -> f64 {
-    let pixels_per_second = video.width as f64 * video.height as f64 * video.fps as f64;
-    // Apple's published ProRes rates for 1920×1080 at 29.97 fps, scaled
-    // by pixel rate.
-    let prores = |mbps: f64| mbps * 1e6 * pixels_per_second / (1920.0 * 1080.0 * 29.97);
-    // Bits per pixel for HEVC by quality: about 0.12 at quality 70, the
-    // worst case for busy camera footage.
-    let q = video.encoder.quality.value() as f64 / 100.0;
-    let hevc = pixels_per_second * (0.02 + 0.3 * q * q * q);
-    match video.encoder.codec {
-        Codec::Hevc => hevc,
-        Codec::H264 => hevc * 1.5,
-        Codec::Prores422Proxy => prores(45.0),
-        Codec::Prores422Lt => prores(102.0),
-        Codec::Prores422 => prores(147.0),
-        Codec::Prores422Hq => prores(220.0),
-        Codec::Prores4444 => prores(330.0),
-    }
+    let channels: u32 = spec.audio.iter().map(|track| track.channels).sum();
+    let video = &spec.video;
+    isocast_protocol::encoder_bytes_per_second(
+        &video.encoder,
+        video.width,
+        video.height,
+        video.fps,
+        channels,
+    )
 }
 
 /// Bytes as a short human figure, like "3.2 GB".

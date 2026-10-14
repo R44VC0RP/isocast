@@ -824,6 +824,56 @@ impl ProgramRecording {
     }
 }
 
+impl ProgramRecording {
+    /// A generous estimate of the program file's data rate on `canvas`, in
+    /// bytes per second (`encoder_bytes_per_second` with the stereo mix,
+    /// if it has one): what the free-space check plans for. 0 when the
+    /// program isn't recorded.
+    pub fn bytes_per_second(&self, canvas: &Canvas) -> f64 {
+        if !self.enabled {
+            return 0.0;
+        }
+        let (width, height) = self.size(canvas);
+        let channels = if self.audio.is_empty() { 0 } else { 2 };
+        encoder_bytes_per_second(&self.encoder, width, height, canvas.fps, channels)
+    }
+}
+
+/// AAC's bit rate per channel, as the files are written.
+const AUDIO_BITS_PER_CHANNEL: f64 = 128_000.0;
+
+/// A generous estimate of a file's data rate, in bytes per second: video
+/// of `width`×`height` at `fps` with `encoder`, and `audio_channels` of
+/// AAC. Real files are usually far smaller (a still screen compresses to
+/// almost nothing); this is for deciding whether a recording fits, and for
+/// saying how fast one fills a disk.
+pub fn encoder_bytes_per_second(
+    encoder: &Encoder,
+    width: u32,
+    height: u32,
+    fps: u32,
+    audio_channels: u32,
+) -> f64 {
+    let pixels_per_second = width as f64 * height as f64 * fps as f64;
+    // Apple's published ProRes rates for 1920×1080 at 29.97 fps, scaled
+    // by pixel rate.
+    let prores = |mbps: f64| mbps * 1e6 * pixels_per_second / (1920.0 * 1080.0 * 29.97);
+    // Bits per pixel for HEVC by quality: about 0.12 at quality 70, the
+    // worst case for busy camera footage.
+    let q = encoder.quality.value() as f64 / 100.0;
+    let hevc = pixels_per_second * (0.02 + 0.3 * q * q * q);
+    let video = match encoder.codec {
+        Codec::Hevc => hevc,
+        Codec::H264 => hevc * 1.5,
+        Codec::Prores422Proxy => prores(45.0),
+        Codec::Prores422Lt => prores(102.0),
+        Codec::Prores422 => prores(147.0),
+        Codec::Prores422Hq => prores(220.0),
+        Codec::Prores4444 => prores(330.0),
+    };
+    (video + audio_channels as f64 * AUDIO_BITS_PER_CHANNEL) / 8.0
+}
+
 fn default_program_filename() -> String {
     "{date} {time}".into()
 }

@@ -32,8 +32,10 @@ export global ControlsArea {
     in property <string> duration-tooltip: "How long the transition takes";
     // Cut and Fade have no properties.
     in property <bool> has-properties;
-    // Studio Mode's quick transitions ("Cut", "Fade (300 ms)"…).
+    // Studio Mode's quick transitions ("Cut", "Fade"…) and their lengths
+    // ("", "300 ms"…).
     in property <[string]> quick-transitions;
+    in property <[string]> quick-details;
     // Something is in preview to take.
     in property <bool> can-take;
 
@@ -41,13 +43,40 @@ export global ControlsArea {
     // the setup's transition, or of a kind that needs them before it can
     // be chosen (a stinger's video, kept as a draft until OK).
     in property <string> dialog-title: "Properties";
+    // The transition's name, the sheet's title ("Fade").
+    in property <string> dialog-name;
     in property <[FormGroup]> form-groups;
     in property <bool> dialog-draft;
     // Nothing to set and no draft (Cut, Fade): just Close.
     in property <bool> dialog-empty;
     in property <bool> dialog-has-fields;
 
-    // ---- The status bar
+    // ---- The control bar's LCD: the take's (or the stream's) time in
+    // whole seconds, the program's frame rate in two whole digits, the
+    // unused leading zero apart ("0" "7.71", "" "29.93"), frames dropped
+    // ("0"; `lcd-dropping` lights the cell orange) and the engine's CPU
+    // ("2.4%"). Zeros while the engine isn't running (`engine-running`
+    // false dims them, as an idle LCD) or the CPU isn't measured yet.
+    in property <int> rec-seconds;
+    in property <int> live-seconds;
+    in property <string> lcd-fps-lead;
+    in property <string> lcd-fps: "00.00";
+    in property <string> lcd-dropped: "0";
+    in property <bool> lcd-dropping;
+    in property <string> lcd-cpu: "0.0%";
+    in property <bool> lcd-cpu-known;
+    in property <bool> engine-running;
+
+    // ---- The status bar: the state's words after its badge ("Records to
+    // ~/Movies/Isocast · 2 ISO files", "Streaming for 00:01:01 ·
+    // connection stable · not recording"), and the readouts on the right
+    // ("0 dropped", "6.1 Mb/s", "212 GB free"; "" leaves one out).
+    in property <string> status-line;
+    in property <bool> status-warn;
+    in property <string> readout-dropped: "0 dropped";
+    in property <bool> readout-dropped-bad;
+    in property <string> readout-rate: "0.0 Mb/s";
+    in property <string> readout-free;
     in property <string> rec-time: "00:00:00";
     in property <string> live-time: "00:00:00";
     in property <string> rec-tooltip: "Not recording";

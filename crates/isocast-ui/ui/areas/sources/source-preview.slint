@@ -1,53 +1,29 @@
-// A live picture of the source a dialog is about (Properties, Filters),
-// letterboxed on the stage surface with a 12px inset and a hairline under
-// it; or a note where there is no picture. The picture is the daemon's
-// shared frames of that source (src/areas/sources/preview.rs).
+// A live picture of the source a sheet is about (Properties, Filters): the
+// kit's PreviewWell (Paper's Properties sheet) with the source's format,
+// name and picture, 20px in from the sheet's sides and 16px above what
+// follows; or a note where there is no picture. The picture is the
+// daemon's shared frames of that source (src/areas/sources/preview.rs).
 
 import { Theme } from "../../theme.slint";
+import { PreviewWell } from "../../kit.slint";
 import { SourcesArea } from "state.slint";
 
-export component SourcePreview inherits Rectangle {
-    // The picture's slot, without the hairline under it.
-    in property <length> slot-height: 260px;
+export component SourcePreview inherits VerticalLayout {
+    // The room for the picture under the viewer line (Paper: 288px).
+    in property <length> area-height: 288px;
+    in property <string> name;
 
-    property <float> aspect: max(0.1, SourcesArea.preview-aspect);
-    property <length> fit-width: min(root.width - 2 * Theme.space-3, (root.slot-height - 2 * Theme.space-3) * root.aspect);
+    padding-left: Theme.sheet-pad;
+    padding-right: Theme.sheet-pad;
+    padding-bottom: Theme.space-4;
 
-    height: root.slot-height + 1px;
-    background: Theme.surface-stage;
-    accessible-role: image;
-    accessible-label: SourcesArea.preview-note != "" ? SourcesArea.preview-note : "The source’s picture";
-
-    if SourcesArea.preview-note != "": Text {
-        x: Theme.space-3;
-        width: parent.width - 2 * Theme.space-3;
-        height: root.slot-height;
-        text: SourcesArea.preview-note;
-        color: Theme.text-3;
-        font-size: Theme.fs-sm;
-        letter-spacing: Theme.tracking-sm;
-        line-height-factor: Theme.leading-sm;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        wrap: word-wrap;
-    }
-    if SourcesArea.preview-note == "": Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (root.slot-height - self.height) / 2;
-        width: root.fit-width;
-        height: root.fit-width / root.aspect;
-        background: Theme.surface-monitor;
-        if SourcesArea.preview-shown: Image {
-            width: parent.width;
-            height: parent.height;
-            source: SourcesArea.preview;
-            image-fit: contain;
-            accessible-role: none;
-        }
-    }
-    Rectangle {
-        y: root.slot-height;
-        height: 1px;
-        background: Theme.line;
+    PreviewWell {
+        area-height: root.area-height;
+        format: SourcesArea.preview-format;
+        name: root.name;
+        picture: SourcesArea.preview;
+        picture-shown: SourcesArea.preview-shown;
+        aspect: SourcesArea.preview-aspect;
+        note: SourcesArea.preview-note;
     }
 }

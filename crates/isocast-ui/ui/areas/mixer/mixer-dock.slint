@@ -1,24 +1,33 @@
-// The Audio Mixer dock (docs/design.md 3.16), as in OBS: a strip per audio
-// source with its name and volume on top, a meter (−60 to 0 dBFS, green,
-// amber and red zones, peak hold), and under it the fader, mute and a
-// menu; the dock's toolbar has Advanced Audio Properties and a menu. A
-// right-click on a strip opens its menu, elsewhere in the dock the dock's.
+// The Audio Mixer dock (Paper "C. Console", Main window board; Logic's
+// track headers), as OBS's mixer: a 44px band per audio source on `hover`,
+// 1px apart: its name (and "Not in mix" when the program mix leaves it
+// out), M (mute) and the headphones (monitor), the fader (green) over its
+// 3px meter (−60 to 0 dBFS, green, yellow and red, peak hold), and the
+// volume in Martian Mono. The dock's toolbar capsule has Advanced Audio
+// Properties and the dock's menu. A strip's menu (Hide, Rename, Audio
+// Monitoring, Filters…) opens on a right-click, from its ⋯ (in the
+// volume's place while the strip is hovered or has the keyboard; always
+// in the Tab order), or with ⇧F10 or the Menu key from any of its
+// controls; elsewhere a right-click opens the dock's.
 
 import { Theme } from "../../theme.slint";
 import { Icon, Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
-import { Dock, DockToolbar, Dot, IconButton, ListEmpty, Menus, Meter, ScrollArea, Slider, Tip } from "../../kit.slint";
+import {
+    Badge, Capsule, CapsuleButton, CapsuleDivider, Dock, DockToolbar, Dot, EmptyState, Menus, Meter,
+    MiniToggle, ScrollArea, Slider, Tip,
+} from "../../kit.slint";
 import { Level, MixerArea, Strip } from "state.slint";
 
-// A strip's parts, top to bottom: 8px, the 20px head, 4px, the 22px
-// meter, 4px, the 24px controls, 4px.
+// A strip: 44px, then 1px to the next.
 global StripSize {
-    out property <length> body: 86px;
-    // Strips after the first: 2px apart, then a soft line.
-    out property <length> gap: 3px;
+    out property <length> body: Theme.track-h;
+    out property <length> gap: 1px;
+    // The list's own room above and below its strips.
+    out property <length> inset: 6px;
 }
 
-// A small flag in the strip's head with a tooltip (a `Tooltip` can't be a
+// A small flag beside the name with a tooltip (a `Tooltip` can't be a
 // layout's direct child).
 component Flag inherits Rectangle {
     in property <string> tooltip;
@@ -30,17 +39,28 @@ component Flag inherits Rectangle {
 component MixerStrip inherits Rectangle {
     in property <Strip> strip;
     in property <Level> level;
-    in property <bool> first;
+    // A narrow dock (a small window): the volume's words and the
+    // headphones make way, so the name and the fader keep their room (the
+    // fader's tooltip and screen readers still say the volume; the ⋯ menu
+    // has Audio Monitoring).
+    property <bool> narrow: root.width < 300px;
+    property <bool> menu-open: Menus.open && Menus.owner == "mixer:strip:" + root.strip.id;
+    // The ⋯ shows in the volume's place.
+    property <bool> show-more: strip-ta.has-hover || value-ta.has-hover || more.has-hover || root.menu-open
+        || mute.has-focus || fader.has-focus || more.has-focus;
+
     function open-menu() {
         Menus.request("mixer:strip:" + root.strip.id, more.absolute-position.x, more.absolute-position.y, more.width, more.height);
     }
 
-    height: StripSize.body + (root.first ? 0 : StripSize.gap);
+    height: StripSize.body;
+    background: Theme.hover;
     accessible-role: groupbox;
     accessible-label: root.strip.name;
+    accessible-description: root.strip.not-in-mix ? "Not in the program mix" : "";
 
     // Right-click (or ⌃-click) anywhere on the strip: its menu.
-    TouchArea {
+    strip-ta := TouchArea {
         pointer-event(event) => {
             if event.kind == PointerEventKind.up && (event.button == PointerEventButton.right || (event.button == PointerEventButton.left && event.modifiers.control)) {
                 Menus.request("mixer:strip:" + root.strip.id, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, 0, 0);
@@ -48,29 +68,47 @@ component MixerStrip inherits Rectangle {
         }
     }
 
-    if !root.first: Rectangle {
-        y: StripSize.gap - 1px;
-        height: 1px;
-        background: Theme.line-soft;
-    }
+    // ⇧F10 or the Menu key from the strip's controls: its menu.
+    FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        key-pressed(event) => {
+            if (event.text == Key.F10 && event.modifiers.shift) || event.text == Key.Menu {
+                root.open-menu();
+                return accept;
+            }
+            reject
+        }
 
-    VerticalLayout {
-        y: root.first ? 0 : StripSize.gap;
-        height: StripSize.body;
-        padding-top: Theme.space-2;
-        padding-bottom: Theme.space-1;
+    HorizontalLayout {
         padding-left: Theme.pane-x;
         padding-right: Theme.pane-x;
-        spacing: Theme.space-1;
+        spacing: Theme.space-2;
 
-        HorizontalLayout {
-            height: 20px;
-            spacing: Theme.space-2;
-            Text {
-                horizontal-stretch: 1;
+        // The name slot: 150px, the name and its flags after it; in a
+        // narrow dock the name elides and "Not in mix" makes way. Placed
+        // by hand, not by a layout, so what fits can follow the slot's
+        // width.
+        slot := Rectangle {
+            min-width: root.narrow ? 56px : 0px;
+            preferred-width: Theme.track-name;
+            max-width: Theme.track-name;
+            horizontal-stretch: 1;
+            clip: true;
+
+            property <length> flag-x: name.width + Theme.space-2;
+            property <bool> flagged: root.strip.failed || root.strip.opening;
+            property <length> badge-x: self.flag-x + (self.flagged ? Theme.icon + Theme.space-2 : 0px);
+
+            name := Text {
+                x: 0;
+                width: min(self.preferred-width, parent.width);
+                height: parent.height;
                 text: root.strip.name;
-                color: root.strip.muted ? Theme.text-3 : Theme.text;
+                // Muted: `text-2` (Paper's muted strip).
+                color: root.strip.muted ? Theme.text-2 : Theme.text;
                 font-size: Theme.fs;
+                font-weight: Theme.weight-medium;
                 letter-spacing: Theme.tracking;
                 vertical-alignment: center;
                 overflow: elide;
@@ -78,6 +116,7 @@ component MixerStrip inherits Rectangle {
             }
             // The source's state: failed (why, on hover), or opening.
             if root.strip.failed: Flag {
+                x: slot.flag-x;
                 width: Theme.icon;
                 tooltip: root.strip.error != "" ? root.strip.error : "This source couldn’t start.";
                 accessible-role: image;
@@ -91,6 +130,7 @@ component MixerStrip inherits Rectangle {
                 }
             }
             if root.strip.opening && !root.strip.failed: Flag {
+                x: slot.flag-x;
                 width: Theme.icon;
                 tooltip: "Starting…";
                 Dot {
@@ -99,129 +139,145 @@ component MixerStrip inherits Rectangle {
                     pulse: true;
                 }
             }
-            if root.strip.monitored: Flag {
-                width: Theme.icon-sm;
-                tooltip: root.strip.monitor-only ? "Monitored only (not in the output)" : "Monitored";
-                accessible-role: image;
-                accessible-label: self.tooltip;
-                Icon {
-                    x: (parent.width - self.width) / 2;
-                    y: (parent.height - self.height) / 2;
-                    path: Icons.headphones;
-                    size: Theme.icon-sm;
-                    color: Theme.accent-text;
-                }
-            }
             if root.strip.not-in-mix: Flag {
+                x: slot.badge-x;
                 width: not-in-mix.preferred-width;
-                tooltip: "Not in the program mix (⋮ → Include in Program Mix)";
-                not-in-mix := Text {
-                    height: parent.height;
-                    text: "not in mix";
-                    color: Theme.text-3;
-                    font-size: Theme.fs-xs;
-                    letter-spacing: Theme.tracking-xs;
-                    vertical-alignment: center;
+                visible: self.x + self.width <= slot.width;
+                tooltip: "Not in the program mix (⋯ → Include in Program Mix)";
+                not-in-mix := Badge {
+                    y: (parent.height - self.height) / 2;
+                    text: "Not in mix";
                 }
             }
-            Text {
+        }
+
+        // M and the headphones (Logic's): mute, and listen through the
+        // monitoring device.
+        VerticalLayout {
+            alignment: center;
+            mute := MiniToggle {
+                text: "M";
+                solid: true;
+                on: root.strip.muted;
+                label: root.strip.muted ? "Unmute" : "Mute";
+                clicked => { MixerArea.toggle-mute(root.strip.id); }
+            }
+        }
+        if !root.narrow: VerticalLayout {
+            alignment: center;
+            MiniToggle {
+                icon: Icons.headphones;
+                on: root.strip.monitored;
+                label: root.strip.monitor-only ? "Monitored only (not in the output); click to stop" : root.strip.monitored ? "Monitored; click to stop" : "Monitor (listen through the monitoring device)";
+                clicked => { MixerArea.set-monitor(root.strip.id, root.strip.monitored ? "off" : "monitor_and_output"); }
+            }
+        }
+
+        // The fader over its meter (Paper: 6px in, 2px down, 5px apart).
+        // Never shorter than Theme.fader-min: a narrow strip's name gives
+        // way first.
+        VerticalLayout {
+            horizontal-stretch: 1;
+            min-width: Theme.fader-min;
+            padding-left: 6px;
+            padding-top: 2px;
+            spacing: 5px;
+            alignment: center;
+            fader := Slider {
+                height: Theme.thumb;
+                label: "Volume of " + root.strip.name;
+                value-text: root.strip.gain-text;
+                tooltip: root.narrow ? "Volume " + root.strip.gain-text + ": drag; double-click for 0 dB" : "Volume: drag; double-click for 0 dB";
+                fill: root.strip.muted ? Theme.text-disabled : Theme.onair;
+                minimum: -60;
+                maximum: 0;
+                step: 0.1;
+                value: max(-60, min(0, root.strip.gain-db));
+                moved(db) => { MixerArea.gain-moved(root.strip.id, db); }
+                changed(db) => { MixerArea.gain-changed(root.strip.id, db); }
+                double-clicked => { MixerArea.gain-reset(root.strip.id); }
+            }
+            Meter {
+                show-scale: false;
+                rms: root.level.rms;
+                peak: root.level.peak;
+                hold: root.level.hold;
+                muted: root.strip.muted;
+                label: root.strip.name + " level";
+            }
+        }
+
+        // The volume ("−12.0 dB" needs 56px), or the ⋯ for the strip's
+        // menu in its place; a narrow strip keeps only the ⋯'s room.
+        Rectangle {
+            min-width: root.narrow ? Theme.mini-toggle : 56px;
+            preferred-width: root.narrow ? Theme.mini-toggle : Theme.track-value;
+            horizontal-stretch: 0;
+            value-ta := TouchArea { }
+            if !root.narrow: Text {
+                visible: !root.show-more;
+                width: parent.width;
+                height: parent.height;
                 text: root.strip.gain-text;
-                color: root.strip.muted ? Theme.text-3 : Theme.text-2;
-                font-size: Theme.fs-sm;
-                letter-spacing: Theme.tracking-sm;
+                color: root.strip.muted ? Theme.text-3 : Theme.text;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-xs;
+                font-weight: Theme.weight-light;
+                letter-spacing: Theme.tracking-mono;
+                horizontal-alignment: right;
                 vertical-alignment: center;
                 accessible-role: none;
             }
-        }
-
-        Meter {
-            rms: root.level.rms;
-            peak: root.level.peak;
-            hold: root.level.hold;
-            muted: root.strip.muted;
-            label: root.strip.name + " level";
-        }
-
-        HorizontalLayout {
-            height: Theme.control-h-sm;
-            spacing: 2px;
-            HorizontalLayout {
-                horizontal-stretch: 1;
-                padding-right: Theme.space-2;
-                VerticalLayout {
-                    alignment: center;
-                    Slider {
-                        label: "Volume of " + root.strip.name;
-                        value-text: root.strip.gain-text;
-                        tooltip: "Volume: drag; double-click for 0 dB";
-                        minimum: -60;
-                        maximum: 0;
-                        step: 0.1;
-                        value: max(-60, min(0, root.strip.gain-db));
-                        moved(db) => { MixerArea.gain-moved(root.strip.id, db); }
-                        changed(db) => { MixerArea.gain-changed(root.strip.id, db); }
-                        double-clicked => { MixerArea.gain-reset(root.strip.id); }
-                    }
-                }
-            }
-            VerticalLayout {
-                alignment: center;
-                IconButton {
-                    small: true;
-                    icon: root.strip.muted ? Icons.muted : Icons.speaker;
-                    label: root.strip.muted ? "Unmute" : "Mute";
-                    danger: root.strip.muted;
-                    clicked => { MixerArea.toggle-mute(root.strip.id); }
-                }
-            }
-            VerticalLayout {
-                alignment: center;
-                more := IconButton {
-                    small: true;
-                    icon: Icons.more-vertical;
-                    label: "More";
-                    menu-open: Menus.open && Menus.owner == "mixer:strip:" + root.strip.id;
-                    clicked => { root.open-menu(); }
-                }
+            // Kept in the Tab order (and for screen readers) while hidden.
+            more := MiniToggle {
+                x: parent.width - self.width;
+                y: (parent.height - self.height) / 2;
+                opacity: root.show-more ? 1 : 0;
+                icon: Icons.more;
+                toggle: false;
+                menu-open: root.menu-open;
+                label: "More for " + root.strip.name;
+                clicked => { root.open-menu(); }
             }
         }
+    }
     }
 }
 
 export component MixerDock inherits Dock {
     title: "Audio Mixer";
 
-    // A snapshot state opens strip `menu-index`'s ⋮ menu, anchored where
-    // its ⋮ button is (strips are all one height).
+    // A snapshot state opens strip `menu-index`'s menu, anchored at its
+    // volume (strips are all one height).
     property <int> menu-serial: MixerArea.menu-serial;
     changed menu-serial => {
         Menus.request(
             "mixer:strip:" + MixerArea.menu-for,
-            scroll.absolute-position.x + scroll.width - scroll.gutter-width - Theme.pane-x - Theme.control-h-sm,
-            scroll.absolute-position.y - scroll.scroll-y + MixerArea.menu-index * (StripSize.body + StripSize.gap) + 58px,
-            Theme.control-h-sm,
-            Theme.control-h-sm);
+            scroll.absolute-position.x + scroll.width - scroll.gutter-width - Theme.pane-x - Theme.track-value,
+            scroll.absolute-position.y - scroll.scroll-y + StripSize.inset + MixerArea.menu-index * (StripSize.body + StripSize.gap),
+            Theme.track-value,
+            StripSize.body);
     }
 
-    scroll := ScrollArea {
-        gutter: MixerArea.strips.length * (StripSize.body + StripSize.gap) > self.height + 0.5px;
-        vertical-stretch: 1;
+    Rectangle {
+      vertical-stretch: 1;
+      scroll := ScrollArea {
+        width: parent.width;
+        height: parent.height;
+        gutter: 2 * StripSize.inset + MixerArea.strips.length * (StripSize.body + StripSize.gap) - StripSize.gap > self.height + 0.5px;
         accessible-role: list;
         accessible-label: "Audio Mixer";
-        for strip[i] in MixerArea.strips: MixerStrip {
-            strip: strip;
-            level: MixerArea.levels[i];
-            first: i == 0;
-        }
-        if Ui.has-setup && MixerArea.source-count == 0: ListEmpty {
-            text: "No audio sources. Add an Audio Input Capture (a microphone) with + under Sources.";
-        }
-        if MixerArea.source-count > 0 && MixerArea.strips.length == 0: ListEmpty {
-            text: "Every audio source is hidden. Right-click → Unhide All.";
+        Rectangle { height: StripSize.inset; }
+        for strip[i] in MixerArea.strips: VerticalLayout {
+            if i > 0: Rectangle { height: StripSize.gap; }
+            MixerStrip {
+                strip: strip;
+                level: MixerArea.levels[i];
+            }
         }
         // The rest of the dock: a right-click there opens the dock's menu.
         Rectangle {
-            height: max(0px, scroll.visible-height - (MixerArea.strips.length > 0 ? MixerArea.strips.length * (StripSize.body + StripSize.gap) - StripSize.gap : 48px));
+            height: max(0px, scroll.visible-height - StripSize.inset - (MixerArea.strips.length > 0 ? MixerArea.strips.length * (StripSize.body + StripSize.gap) - StripSize.gap : 0px));
             TouchArea {
                 pointer-event(event) => {
                     if event.kind == PointerEventKind.up && (event.button == PointerEventButton.right || (event.button == PointerEventButton.left && event.modifiers.control)) {
@@ -230,23 +286,34 @@ export component MixerDock inherits Dock {
                 }
             }
         }
+      }
+      // No strips: why, in the middle of the dock (its menu still opens
+      // under it, Unhide All among them).
+      if MixerArea.strips.length == 0: EmptyState {
+        width: parent.width;
+        height: parent.height;
+        icon: Icons.empty-audio;
+        text: MixerArea.source-count > 0 ? "Every audio source is hidden" : "No audio sources";
+        gap: Theme.empty-gap-dock;
+      }
     }
 
     DockToolbar {
-        IconButton {
-            small: true;
-            icon: Icons.settings;
-            label: "Advanced Audio Properties";
-            enabled: MixerArea.source-count > 0;
-            clicked => { Ui.menu("advanced_audio"); }
-        }
-        IconButton {
-            small: true;
-            icon: Icons.more-vertical;
-            label: "Mixer menu";
-            menu-open: Menus.open && Menus.owner == "mixer:dock";
-            clicked => {
-                Menus.request("mixer:dock", self.absolute-position.x, self.absolute-position.y, self.width, self.height);
+        Capsule {
+            CapsuleButton {
+                icon: Icons.sliders;
+                label: "Advanced Audio Properties";
+                enabled: MixerArea.source-count > 0;
+                clicked => { Ui.menu("advanced_audio"); }
+            }
+            CapsuleDivider { }
+            CapsuleButton {
+                icon: Icons.more;
+                label: "Mixer menu";
+                menu-open: Menus.open && Menus.owner == "mixer:dock";
+                clicked => {
+                    Menus.request("mixer:dock", self.absolute-position.x, self.absolute-position.y, self.width, self.height);
+                }
             }
         }
     }

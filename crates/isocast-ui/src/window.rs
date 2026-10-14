@@ -256,6 +256,10 @@ fn setup_when_ready(weak: slint::Weak<AppWindow>, shell: Rc<App>, setup: Setup) 
             crate::preview::Output::new(&app, setup.mode, &setup.device, setup.test_outline);
         match output {
             Ok(output) => {
+                #[cfg(target_os = "macos")]
+                if let crate::preview::Output::Layers(layers) = &output {
+                    shell.mixer.use_native_master(&app, layers.clone());
+                }
                 shell.canvas.set_max_fps(setup.fps);
                 shell
                     .canvas

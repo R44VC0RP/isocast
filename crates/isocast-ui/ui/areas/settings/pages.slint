@@ -1,89 +1,129 @@
-// Settings' pages (the web app's settings.js, docs/design.md 3.12): each
-// shows the draft in SettingsArea and changes it by field name; Apply or
-// OK sends the change. In OBS's order: General, Stream, Output, Audio,
-// Video, Hotkeys, Advanced.
+// Settings' pages (the web app's settings.js; Paper's Settings sheet,
+// Output): each shows the draft in SettingsArea as Console's grouped rows
+// (a group's heading with its reset glyph, 30px rows of label and 22px
+// control, a caption under the group) and changes it by field name; Apply
+// or OK sends the change. In the board's order: Output, Video, Audio
+// (Recording), Stream (Broadcast), General, Hotkeys, Advanced (System).
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
 import {
-    Button, ButtonVariant, Callout, CalloutKind, Checkbox, ControlSize, Dropdown, FormRow, IconButton,
-    NumberField, Segmented, Switch, TextField,
+    Button, ButtonVariant, Callout, CalloutKind, ControlSize, Dropdown, GroupHint, GroupRow, IconButton,
+    NumberField, RowPlace, Segmented, Switch, TextField,
 } from "../../kit.slint";
 import { SettingsArea } from "state.slint";
-import { Disclosure, Fill, PageNote, QualitySlider, ServiceRow, SetGroup, SetPage, ShortcutRow } from "parts.slint";
+import { Centred, SetGroup, SetPage, ShortcutKeys } from "parts.slint";
+
+// A place in a group of `count` rows, for row `i`.
+global Rows {
+    public pure function place(i: int, count: int) -> RowPlace {
+        if count <= 1 { return RowPlace.only; }
+        if i == 0 { return RowPlace.first; }
+        if i == count - 1 { return RowPlace.last; }
+        return RowPlace.middle;
+    }
+}
+
+// A number in a stepper (Paper's Keep Free: 96px, 22px, its unit dim).
+component Stepper inherits NumberField {
+    width: Theme.field-xs;
+    small: true;
+    stepper: true;
+    stepper-fill: Theme.control-hover;
+}
+
+// A switch's row: 8px from the edge, the switch in the middle.
+component SwitchRow inherits GroupRow {
+    in-out property <bool> on;
+    callback toggled(bool);
+    trailing-pad: Theme.space-2;
+    Centred {
+        Switch {
+            on <=> root.on;
+            label: root.label;
+            toggled(on) => { root.toggled(on); }
+        }
+    }
+}
 
 // ---------- General ----------
 
 export component GeneralPage inherits SetPage {
     SetGroup {
         title: "Setup";
-        FormRow {
+        hint: SettingsArea.setup-file != ""
+            ? "The name is shown in the title bar. Isocast saves the live setup to that file after every change (the one before as .bak)."
+            : "Shown in the title bar.";
+        GroupRow {
             label: "Name";
-            hint: "Shown in the title bar.";
-            TextField {
-                text: SettingsArea.name;
-                label: "Name";
-                committed(text) => { SettingsArea.set-text("name", text); }
+            place: SettingsArea.setup-file != "" ? RowPlace.first : RowPlace.only;
+            Centred {
+                TextField {
+                    width: Theme.field-l;
+                    small: true;
+                    text: SettingsArea.name;
+                    label: "Name";
+                    committed(text) => { SettingsArea.set-text("name", text); }
+                }
             }
         }
-        if SettingsArea.setup-file != "": FormRow {
+        if SettingsArea.setup-file != "": GroupRow {
             label: "Kept in";
-            hint: "Isocast saves the live setup here after every change (the one before as .bak).";
+            place: RowPlace.last;
+            trailing-pad: Theme.space-3;
             Text {
+                width: Theme.field-wide;
                 text: SettingsArea.setup-file;
                 color: Theme.text-2;
                 font-family: Theme.font-mono;
-                font-size: Theme.fs-sm;
-                letter-spacing: Theme.tracking-sm;
+                font-weight: Theme.weight-light;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-mono;
+                horizontal-alignment: right;
                 vertical-alignment: center;
                 overflow: elide;
-                horizontal-stretch: 1;
             }
         }
     }
     SetGroup {
         title: "Snapping";
-        FormRow {
+        hint: "Edges and centres snap to the canvas and to other sources; hold ⌘ while dragging to place freely.";
+        SwitchRow {
             label: "Enable";
-            hint: "Edges and centres snap to the canvas and to other sources; hold ⌘ while dragging to place freely.";
-            VerticalLayout {
-                alignment: center;
-                horizontal-stretch: 0;
-                Switch {
-                    on <=> SettingsArea.snapping;
-                    label: "Snapping";
-                    toggled(on) => { SettingsArea.set-flag("snapping", on); }
+            place: RowPlace.first;
+            on <=> SettingsArea.snapping;
+            toggled(on) => { SettingsArea.set-flag("snapping", on); }
+        }
+        GroupRow {
+            label: "Snap Sensitivity";
+            place: RowPlace.last;
+            Centred {
+                Stepper {
+                    value: SettingsArea.snap-distance;
+                    minimum: 1;
+                    maximum: 40;
+                    unit: "px";
+                    label: "Snap Sensitivity";
+                    changed(value) => { SettingsArea.set-number("snap_distance", value); }
                 }
             }
-            Fill { }
-        }
-        FormRow {
-            label: "Snap Sensitivity";
-            NumberField {
-                width: Theme.field-s;
-                value: SettingsArea.snap-distance;
-                minimum: 1;
-                maximum: 40;
-                unit: "px";
-                label: "Snap Sensitivity";
-                changed(value) => { SettingsArea.set-number("snap_distance", value); }
-            }
-            Fill { }
         }
     }
     SetGroup {
         title: "Preview";
-        FormRow {
+        hint: "Match canvas shows motion as recorded; 30 fps uses less power (monitors still follow the canvas rate while you drag).";
+        GroupRow {
             label: "Preview Frame Rate";
-            hint: "Match canvas shows motion as recorded; 30 fps uses less power (monitors still follow the canvas rate while you drag).";
-            Segmented {
-                horizontal-stretch: 0;
-                options: [{ value: "canvas", label: "Match canvas" }, { value: "30", label: "30 fps (saves power)" }];
-                value <=> SettingsArea.preview-rate;
-                label: "Preview Frame Rate";
-                selected(value) => { SettingsArea.set-text("preview_rate", value); }
+            place: RowPlace.only;
+            Centred {
+                Segmented {
+                    small: true;
+                    options: [{ value: "canvas", label: "Match canvas" }, { value: "30", label: "30 fps (saves power)" }];
+                    value <=> SettingsArea.preview-rate;
+                    label: "Preview Frame Rate";
+                    selected(value) => { SettingsArea.set-text("preview_rate", value); }
+                }
             }
-            Fill { }
         }
     }
 }
@@ -93,111 +133,125 @@ export component GeneralPage inherits SetPage {
 // No stream yet: choose a service. Custom servers and Kick need their
 // server address first.
 component ChooseService inherits VerticalLayout {
-    spacing: 0;
+    spacing: 10px;
     alignment: start;
-    if SettingsArea.needs-server == "": VerticalLayout {
-        spacing: Theme.space-4;
-        Text {
-            max-width: 560px;
-            text: "Stream the program live: the canvas and the program mix, sent as H.264 and AAC over RTMP or RTMPS. Choose where to:";
-            color: Theme.text-2;
-            wrap: word-wrap;
-        }
-        HorizontalLayout {
-            alignment: start;
-            VerticalLayout {
-                preferred-width: 560px;
-                max-width: 560px;
-                horizontal-stretch: 1;
-                spacing: 0;
-                Rectangle {
-                    height: 1px;
-                    background: Theme.line;
-                }
-                for service in SettingsArea.services: ServiceRow {
-                    label: service.label;
-                    hint: service.hint;
+    if SettingsArea.needs-server == "": SetGroup {
+        title: "Service";
+        hint: "The program goes out live: the canvas and the program mix, as H.264 and AAC over RTMP or RTMPS.";
+        for service[i] in SettingsArea.services: GroupRow {
+            label: service.label;
+            description: service.hint;
+            place: Rows.place(i, SettingsArea.services.length);
+            clickable: true;
+            trailing-pad: Theme.space-3;
+            clicked => { SettingsArea.choose-service(service.id); }
+            Text {
+                text: service.hint;
+                color: Theme.text-3;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+            Centred {
+                IconButton {
+                    compact: true;
+                    icon: Icons.chevron-right;
+                    icon-size: Theme.icon-xs;
+                    rest-color: Theme.text-3;
+                    show-tooltip: false;
+                    label: "Choose " + service.label;
                     clicked => { SettingsArea.choose-service(service.id); }
                 }
             }
         }
     }
     if SettingsArea.needs-server != "": VerticalLayout {
-        spacing: Theme.space-3;
-        Text {
-            max-width: 560px;
-            text: SettingsArea.needs-server == "kick"
+        spacing: Theme.space-4;
+        SetGroup {
+            title: SettingsArea.needs-server == "kick" ? "Kick server" : "Custom server";
+            hint: SettingsArea.needs-server == "kick"
                 ? "Kick gives each channel its own server: copy the Stream URL from the Creator Dashboard (Channel → Stream URL and Key)."
                 : "The server’s address, without the stream key: like rtmp://host/app or rtmps://host/app.";
-            color: Theme.text-2;
-            wrap: word-wrap;
-        }
-        HorizontalLayout {
-            alignment: start;
-            HorizontalLayout {
-                preferred-width: 560px;
-                max-width: 560px;
-                horizontal-stretch: 1;
-                spacing: Theme.space-2;
-                server := TextField {
-                    mono: true;
-                    placeholder: "rtmps://…";
-                    label: "Server";
-                    auto-focus: true;
-                    submits: false;
-                    accepted(text) => {
-                        if SettingsArea.server-valid(text) {
-                            SettingsArea.server-chosen(text);
+            GroupRow {
+                label: "Server";
+                place: RowPlace.only;
+                Centred {
+                    server := TextField {
+                        width: Theme.field-wide;
+                        small: true;
+                        mono: true;
+                        placeholder: "rtmps://…";
+                        label: "Server";
+                        auto-focus: true;
+                        submits: false;
+                        accepted(text) => {
+                            if SettingsArea.server-valid(text) {
+                                SettingsArea.server-chosen(text);
+                            }
                         }
                     }
                 }
-                Button {
-                    text: "Back";
-                    clicked => { SettingsArea.server-back(); }
-                }
-                Button {
-                    text: "Continue";
-                    variant: ButtonVariant.primary;
-                    enabled: SettingsArea.server-valid(server.text);
-                    clicked => { SettingsArea.server-chosen(server.text); }
-                }
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: Theme.space-2;
+            Button {
+                text: "Back";
+                clicked => { SettingsArea.server-back(); }
+            }
+            Button {
+                text: "Continue";
+                variant: ButtonVariant.primary;
+                enabled: SettingsArea.server-valid(server.text);
+                clicked => { SettingsArea.server-chosen(server.text); }
             }
         }
     }
 }
 
-component StreamKeyRow inherits FormRow {
+component StreamKeyRow inherits GroupRow {
     label: "Stream Key";
-    hint: SettingsArea.key-saved ? "Saved in the Keychain. Paste a new one to replace it." : "From your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.";
-    key := TextField {
-        input-type: InputType.password;
-        placeholder: SettingsArea.key-saved ? "••••••••••••  saved" : "Paste the key";
-        label: "Stream Key";
-        submits: false;
-        accepted(text) => {
-            if text != "" {
-                SettingsArea.save-key(text);
-                self.text = "";
+    Centred {
+        key := TextField {
+            width: Theme.field-path - 2 * Theme.space-1 - 80px - (SettingsArea.key-saved ? 72px : 0px);
+            small: true;
+            input-type: InputType.password;
+            placeholder: SettingsArea.key-saved ? "••••••••••••  saved" : "Paste the key";
+            label: "Stream Key";
+            submits: false;
+            accepted(text) => {
+                if text != "" {
+                    SettingsArea.save-key(text);
+                    self.text = "";
+                }
             }
         }
     }
-    Button {
-        text: "Save Key";
-        enabled: key.text != "" && !SettingsArea.key-busy;
-        clicked => {
-            SettingsArea.save-key(key.text);
-            key.text = "";
+    Centred {
+        Button {
+            text: "Save Key";
+            size: ControlSize.small;
+            on-control: true;
+            enabled: key.text != "" && !SettingsArea.key-busy;
+            clicked => {
+                SettingsArea.save-key(key.text);
+                key.text = "";
+            }
         }
     }
-    if SettingsArea.key-saved: Button {
-        text: "Remove";
-        clicked => { SettingsArea.clear-key(); }
+    if SettingsArea.key-saved: Centred {
+        Button {
+            text: "Remove";
+            size: ControlSize.small;
+            on-control: true;
+            clicked => { SettingsArea.clear-key(); }
+        }
     }
 }
 
-export component StreamPage inherits VerticalLayout {
-    spacing: 0;
-    alignment: start;
+export component StreamPage inherits SetPage {
     if SettingsArea.notice != "": Callout {
         kind: CalloutKind.info;
         title: SettingsArea.notice;
@@ -206,15 +260,17 @@ export component StreamPage inherits VerticalLayout {
         kind: CalloutKind.info;
         title: "Changes apply the next time you start streaming.";
     }
-    if !SettingsArea.has-stream: SetPage {
-        ChooseService { }
-    }
-    if SettingsArea.has-stream: SetPage {
-        SetGroup {
-            FormRow {
-                label: "Service";
+    if !SettingsArea.has-stream: ChooseService { }
+    if SettingsArea.has-stream: SetGroup {
+        title: "Service";
+        hint: SettingsArea.server-hint + " " + (SettingsArea.key-saved ? "The key is saved in the Keychain; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.");
+        GroupRow {
+            label: "Service";
+            place: RowPlace.first;
+            Centred {
                 Dropdown {
-                    width: Theme.field-m;
+                    width: Theme.field-choice;
+                    on-control: true;
                     options: [
                         { value: "twitch", label: "Twitch" },
                         { value: "youtube", label: "YouTube" },
@@ -226,28 +282,34 @@ export component StreamPage inherits VerticalLayout {
                     label: "Service";
                     selected(value) => { SettingsArea.set-text("service", value); }
                 }
-                Fill { }
             }
-            FormRow {
-                label: "Server";
-                hint: SettingsArea.server-hint;
+        }
+        GroupRow {
+            label: "Server";
+            Centred {
                 TextField {
-                    text: SettingsArea.server;
+                    width: Theme.field-path;
+                    small: true;
                     mono: true;
+                    text: SettingsArea.server;
                     placeholder: SettingsArea.server-placeholder;
                     label: "Server";
                     committed(text) => { SettingsArea.set-text("server", text); }
                 }
             }
-            StreamKeyRow { }
         }
-        SetGroup {
-            title: "Output";
-            FormRow {
-                label: "Video Bitrate";
-                hint: "Twitch suggests up to 6000 kb/s; YouTube 4500–9000 for 1080p.";
-                NumberField {
-                    width: Theme.field-s;
+        StreamKeyRow {
+            place: RowPlace.last;
+        }
+    }
+    if SettingsArea.has-stream: SetGroup {
+        title: "Output";
+        hint: (SettingsArea.stream-custom-size ? "" : "The canvas, scaled down to fit 1080p if it is larger. ") + "Twitch suggests up to 6000 kb/s and YouTube 4500–9000 for 1080p; both ask for Constant (CBR) and a keyframe every 2 s.";
+        GroupRow {
+            label: "Video Bitrate";
+            place: RowPlace.first;
+            Centred {
+                Stepper {
                     value: SettingsArea.video-bitrate;
                     minimum: 200;
                     maximum: 50000;
@@ -256,24 +318,26 @@ export component StreamPage inherits VerticalLayout {
                     label: "Video Bitrate";
                     changed(value) => { SettingsArea.set-number("video_bitrate", value); }
                 }
-                Fill { }
             }
-            FormRow {
-                label: "Rate Control";
-                hint: "Constant (CBR) is what YouTube and Twitch ask for. Average sends less when the picture is still.";
+        }
+        GroupRow {
+            label: "Rate Control";
+            Centred {
                 Segmented {
-                horizontal-stretch: 0;
+                    small: true;
                     options: [{ value: "constant", label: "Constant (CBR)" }, { value: "average", label: "Average (VBR)" }];
                     value <=> SettingsArea.rate-control;
                     label: "Rate Control";
                     selected(value) => { SettingsArea.set-text("rate_control", value); }
                 }
-                Fill { }
             }
-            FormRow {
-                label: "Audio Bitrate";
+        }
+        GroupRow {
+            label: "Audio Bitrate";
+            Centred {
                 Dropdown {
                     width: Theme.field-s;
+                    on-control: true;
                     options: [
                         { value: "64", label: "64 kb/s" },
                         { value: "96", label: "96 kb/s" },
@@ -287,13 +351,12 @@ export component StreamPage inherits VerticalLayout {
                     label: "Audio Bitrate";
                     selected(value) => { SettingsArea.set-text("audio_bitrate", value); }
                 }
-                Fill { }
             }
-            FormRow {
-                label: "Keyframe Interval";
-                hint: "Every 2 s is what Twitch and YouTube ask for.";
-                NumberField {
-                    width: Theme.field-s;
+        }
+        GroupRow {
+            label: "Keyframe Interval";
+            Centred {
+                Stepper {
                     value: SettingsArea.keyframe-interval;
                     minimum: 1;
                     maximum: 10;
@@ -301,20 +364,15 @@ export component StreamPage inherits VerticalLayout {
                     label: "Keyframe Interval";
                     changed(value) => { SettingsArea.set-number("keyframe_interval", value); }
                 }
-                Fill { }
             }
-            FormRow {
-                label: "Output Resolution";
-                hint: SettingsArea.stream-custom-size ? "" : "The canvas, scaled down to fit 1080p if it is larger.";
-                Segmented {
-                horizontal-stretch: 0;
-                    options: [{ value: "canvas", label: "Canvas" }, { value: "custom", label: "Custom" }];
-                    value: SettingsArea.stream-custom-size ? "custom" : "canvas";
-                    label: "Output Resolution";
-                    selected(value) => { SettingsArea.set-text("stream_size", value); }
-                }
-                if SettingsArea.stream-custom-size: NumberField {
+        }
+        GroupRow {
+            label: "Output Resolution";
+            place: RowPlace.last;
+            if SettingsArea.stream-custom-size: Centred {
+                NumberField {
                     width: Theme.field-xs;
+                    small: true;
                     prefix: "W";
                     value: SettingsArea.stream-width;
                     minimum: 16;
@@ -323,8 +381,11 @@ export component StreamPage inherits VerticalLayout {
                     label: "Output width";
                     changed(value) => { SettingsArea.set-number("stream_width", value); }
                 }
-                if SettingsArea.stream-custom-size: NumberField {
+            }
+            if SettingsArea.stream-custom-size: Centred {
+                NumberField {
                     width: Theme.field-xs;
+                    small: true;
                     prefix: "H";
                     value: SettingsArea.stream-height;
                     minimum: 16;
@@ -333,171 +394,221 @@ export component StreamPage inherits VerticalLayout {
                     label: "Output height";
                     changed(value) => { SettingsArea.set-number("stream_height", value); }
                 }
-                Fill { }
+            }
+            Centred {
+                Segmented {
+                    small: true;
+                    options: [{ value: "canvas", label: "Canvas" }, { value: "custom", label: "Custom" }];
+                    value: SettingsArea.stream-custom-size ? "custom" : "canvas";
+                    label: "Output Resolution";
+                    selected(value) => { SettingsArea.set-text("stream_size", value); }
+                }
             }
         }
-        HorizontalLayout {
-            alignment: start;
-            Button {
-                text: "Turn off streaming";
-                variant: ButtonVariant.danger;
-                enabled: !SettingsArea.stream-live;
-                clicked => { SettingsArea.set-flag("stream", false); }
-            }
+    }
+    if SettingsArea.has-stream: HorizontalLayout {
+        alignment: start;
+        Button {
+            text: "Turn off streaming";
+            variant: ButtonVariant.danger;
+            enabled: !SettingsArea.stream-live;
+            clicked => { SettingsArea.set-flag("stream", false); }
         }
     }
 }
 
 // ---------- Output ----------
 
-// The encoder and its format; 8- or 10-bit for HEVC.
+// The encoder and its format (8- or 10-bit for HEVC): a group's rows after
+// its switch.
 component EncoderRows inherits VerticalLayout {
     in property <string> which;
     in property <string> codec;
     in property <string> container;
     in property <string> depth;
     in property <bool> shows-depth;
-    spacing: Theme.space-2;
-    FormRow {
+    // The format row ends the group.
+    in property <bool> last: true;
+    spacing: 1px;
+    GroupRow {
         label: "Encoder";
-        Dropdown {
-            width: Theme.field-m;
-            options: SettingsArea.codecs;
-            value: root.codec;
-            label: "Encoder";
-            selected(value) => { SettingsArea.set-text(root.which + "_codec", value); }
+        Centred {
+            Dropdown {
+                width: Theme.field-choice;
+                on-control: true;
+                show-detail: true;
+                options: SettingsArea.codecs;
+                value: root.codec;
+                label: "Encoder";
+                selected(value) => { SettingsArea.set-text(root.which + "_codec", value); }
+            }
         }
-        Fill { }
     }
-    FormRow {
+    GroupRow {
         label: "Recording Format";
-        Segmented {
-                horizontal-stretch: 0;
-            options: [{ value: "mov", label: "MOV" }, { value: "mp4", label: "MP4" }];
-            value: root.container;
-            label: "Recording Format";
-            selected(value) => { SettingsArea.set-text(root.which + "_container", value); }
+        place: root.last ? RowPlace.last : RowPlace.middle;
+        if root.shows-depth: Centred {
+            Segmented {
+                small: true;
+                options: [{ value: "8", label: "8-bit" }, { value: "10", label: "10-bit" }];
+                value: root.depth;
+                label: "Bit depth";
+                selected(value) => { SettingsArea.set-text(root.which + "_depth", value); }
+            }
         }
-        if root.shows-depth: Segmented {
-                horizontal-stretch: 0;
-            options: [{ value: "8", label: "8-bit" }, { value: "10", label: "10-bit" }];
-            value: root.depth;
-            label: "Bit depth";
-            selected(value) => { SettingsArea.set-text(root.which + "_depth", value); }
+        Centred {
+            Segmented {
+                small: true;
+                options: [{ value: "mov", label: "MOV" }, { value: "mp4", label: "MP4" }];
+                value: root.container;
+                label: "Recording Format";
+                selected(value) => { SettingsArea.set-text(root.which + "_container", value); }
+            }
         }
-        Fill { }
     }
 }
 
 export component OutputPage inherits SetPage {
     SetGroup {
         title: "Recording";
-        FormRow {
+        resettable: true;
+        reset-label: "Put Recording back as saved";
+        reset => { SettingsArea.revert-group("recording"); }
+        hint: (SettingsArea.quality-disabled ? "ProRes files are made at a fixed quality. " : "") + (SettingsArea.quality-advanced ? "Quality is constant quality, 1–100: higher makes bigger files. " : "") + "A recording won’t start without room for it plus this, and stops cleanly when the disk gets this low.";
+        GroupRow {
             label: "Recording Path";
-            TextField {
-                text: SettingsArea.folder;
-                mono: true;
-                label: "Recording Path";
-                committed(text) => { SettingsArea.set-text("folder", text); }
+            place: RowPlace.first;
+            Centred {
+                TextField {
+                    width: Theme.field-path;
+                    small: true;
+                    mono: true;
+                    icon: Icons.folder;
+                    text: SettingsArea.folder;
+                    rest-text: SettingsArea.folder-short;
+                    label: "Recording Path";
+                    committed(text) => { SettingsArea.set-text("folder", text); }
+                }
             }
-            Button {
-                text: "Browse";
-                clicked => { SettingsArea.browse-folder(); }
+            Centred {
+                Button {
+                    text: "Browse…";
+                    size: ControlSize.small;
+                    on-control: true;
+                    accessible-name: "Choose the recording folder";
+                    clicked => { SettingsArea.browse-folder(); }
+                }
             }
         }
-        FormRow {
+        GroupRow {
             label: "Recording Quality";
-            VerticalLayout {
-                horizontal-stretch: 1;
-                spacing: Theme.space-1;
-                padding-top: 2px;
-                HorizontalLayout {
-                    alignment: start;
-                    QualitySlider {
-                        preferred-width: 460px;
-                        max-width: 460px;
-                        horizontal-stretch: 1;
-                        labels: ["Low", "Medium", "High", "Very high", "Incredible"];
-                        stop: SettingsArea.quality-stop;
-                        at: SettingsArea.quality-at;
-                        enabled: !SettingsArea.quality-disabled;
-                        chosen(i) => { SettingsArea.choose-quality(i); }
-                    }
+            Centred {
+                Segmented {
+                    small: true;
+                    enabled: !SettingsArea.quality-disabled;
+                    options: [
+                        { value: "0", label: "Low" },
+                        { value: "1", label: "Medium" },
+                        { value: "2", label: "High" },
+                        { value: "3", label: "Very high" },
+                        { value: "4", label: "Incredible" },
+                    ];
+                    value: SettingsArea.quality-stop >= 0 ? "" + SettingsArea.quality-stop : "custom";
+                    position: SettingsArea.quality-position;
+                    label: "Recording Quality";
+                    selected(value) => { SettingsArea.choose-quality(value.to-float()); }
                 }
-                if SettingsArea.quality-status != "": Text {
-                    text: SettingsArea.quality-status;
-                    color: Theme.text-2;
+            }
+        }
+        // "› Advanced": each one's quality number.
+        GroupRow {
+            label: "Advanced";
+            lead-icon: SettingsArea.quality-advanced ? Icons.chevron-down : Icons.chevron-right;
+            clickable: true;
+            expandable: true;
+            expanded: SettingsArea.quality-advanced;
+            trailing-pad: Theme.space-3;
+            clicked => { SettingsArea.quality-advanced = !SettingsArea.quality-advanced; }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: "Quality value";
+                    color: Theme.text-3;
                     font-size: Theme.fs-sm;
                     letter-spacing: Theme.tracking-sm;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+                Text {
+                    text: SettingsArea.quality-value;
+                    color: Theme.text;
+                    font-family: Theme.font-mono;
+                    font-weight: Theme.weight-light;
+                    font-size: Theme.fs-xs;
+                    letter-spacing: Theme.tracking-mono;
+                    vertical-alignment: center;
+                    accessible-role: AccessibleRole.text;
+                    accessible-label: "Quality value " + SettingsArea.quality-value;
                 }
             }
         }
-        FormRow {
-            label: "";
-            Disclosure {
-                text: "Advanced";
-                open <=> SettingsArea.quality-advanced;
-            }
-            Fill { }
-        }
-        if SettingsArea.quality-advanced: FormRow {
+        if SettingsArea.quality-advanced: GroupRow {
             label: "Program Quality";
-            hint: "Constant quality, 1–100; higher makes bigger files.";
-            NumberField {
-                width: Theme.field-s;
-                value: SettingsArea.program-quality;
-                minimum: 1;
-                maximum: 100;
-                enabled: SettingsArea.program-on;
-                label: "Program Quality";
-                changed(value) => { SettingsArea.set-number("program_quality", value); }
+            indent: Theme.space-4;
+            enabled: SettingsArea.program-on;
+            Centred {
+                Stepper {
+                    value: SettingsArea.program-quality;
+                    minimum: 1;
+                    maximum: 100;
+                    enabled: SettingsArea.program-on;
+                    label: "Program Quality";
+                    changed(value) => { SettingsArea.set-number("program_quality", value); }
+                }
             }
-            Fill { }
         }
-        if SettingsArea.quality-advanced: FormRow {
+        if SettingsArea.quality-advanced: GroupRow {
             label: "ISO Quality";
-            NumberField {
-                width: Theme.field-s;
-                value: SettingsArea.iso-quality;
-                minimum: 1;
-                maximum: 100;
-                enabled: SettingsArea.iso-on;
-                label: "ISO Quality";
-                changed(value) => { SettingsArea.set-number("iso_quality", value); }
+            indent: Theme.space-4;
+            enabled: SettingsArea.iso-on;
+            Centred {
+                Stepper {
+                    value: SettingsArea.iso-quality;
+                    minimum: 1;
+                    maximum: 100;
+                    enabled: SettingsArea.iso-on;
+                    label: "ISO Quality";
+                    changed(value) => { SettingsArea.set-number("iso_quality", value); }
+                }
             }
-            Fill { }
         }
-        FormRow {
+        GroupRow {
             label: "Keep Free";
-            hint: "A recording won’t start without room for it plus this, and stops cleanly when the disk gets this low.";
-            NumberField {
-                width: Theme.field-s;
-                value: SettingsArea.keep-free;
-                minimum: 0;
-                maximum: 10000;
-                step: 0.5;
-                unit: "GB";
-                label: "Keep Free";
-                changed(value) => { SettingsArea.set-number("keep_free", value); }
+            place: RowPlace.last;
+            Centred {
+                Stepper {
+                    value: SettingsArea.keep-free;
+                    minimum: 0;
+                    maximum: 10000;
+                    step: 0.5;
+                    unit: "GB";
+                    label: "Keep Free";
+                    changed(value) => { SettingsArea.set-number("keep_free", value); }
+                }
             }
-            Fill { }
         }
     }
     SetGroup {
         title: "Program";
-        FormRow {
+        resettable: true;
+        reset-label: "Put Program back as saved";
+        reset => { SettingsArea.revert-group("program"); }
+        hint: "Record Program writes the canvas as everyone sees it, with the program mix.";
+        SwitchRow {
             label: "Record Program";
-            hint: "The canvas as everyone sees it, with the program mix.";
-            VerticalLayout {
-                alignment: center;
-                horizontal-stretch: 0;
-                Switch {
-                    on <=> SettingsArea.program-on;
-                    label: "Record Program";
-                    toggled(on) => { SettingsArea.set-flag("program", on); }
-                }
-            }
-            Fill { }
+            place: SettingsArea.program-on ? RowPlace.first : RowPlace.only;
+            on <=> SettingsArea.program-on;
+            toggled(on) => { SettingsArea.set-flag("program", on); }
         }
         if SettingsArea.program-on: EncoderRows {
             which: "program";
@@ -509,39 +620,30 @@ export component OutputPage inherits SetPage {
     }
     SetGroup {
         title: "ISO Recording";
-        FormRow {
+        resettable: true;
+        reset-label: "Put ISO Recording back as saved";
+        reset => { SettingsArea.revert-group("iso"); }
+        hint: SettingsArea.iso-on
+            ? "Each source switched on here is recorded to its own file, at its own size, on the program’s clock. Also in each source’s right-click menu."
+            : "Each source chosen below in its own file, at its own size, on the program’s clock.\nAlso in each source’s right-click menu.";
+        SwitchRow {
             label: "Record ISO Files";
-            hint: "Each source chosen below in its own file, at its own size, on the program’s clock. Also in each source’s right-click menu.";
-            VerticalLayout {
-                alignment: center;
-                horizontal-stretch: 0;
-                Switch {
-                    on <=> SettingsArea.iso-on;
-                    label: "Record ISO Files";
-                    toggled(on) => { SettingsArea.set-flag("iso", on); }
-                }
-            }
-            Fill { }
+            place: SettingsArea.iso-on ? RowPlace.first : RowPlace.only;
+            on <=> SettingsArea.iso-on;
+            toggled(on) => { SettingsArea.set-flag("iso", on); }
         }
-        if SettingsArea.iso-on: FormRow {
-            label: "Sources";
-            HorizontalLayout {
-                spacing: Theme.space-4;
-                alignment: start;
-                horizontal-stretch: 1;
-                for source in SettingsArea.iso-sources: Checkbox {
-                    text: source.name;
-                    checked: source.on;
-                    small: true;
-                    toggled(on) => { SettingsArea.set-iso-source(source.id, on); }
-                }
-                if SettingsArea.iso-sources.length == 0: Text {
-                    text: "No video sources yet.";
-                    color: Theme.text-2;
-                    font-size: Theme.fs-sm;
-                    letter-spacing: Theme.tracking-sm;
-                    vertical-alignment: center;
-                }
+        if SettingsArea.iso-on && SettingsArea.iso-sources.length == 0: GroupRow {
+            label: "No video sources yet.";
+            indent: Theme.space-4;
+            enabled: false;
+        }
+        if SettingsArea.iso-on: VerticalLayout {
+            spacing: 1px;
+            for source in SettingsArea.iso-sources: SwitchRow {
+                label: source.name;
+                indent: Theme.space-4;
+                on: source.on;
+                toggled(on) => { SettingsArea.set-iso-source(source.id, on); }
             }
         }
         if SettingsArea.iso-on: EncoderRows {
@@ -550,20 +652,13 @@ export component OutputPage inherits SetPage {
             container: SettingsArea.iso-container;
             depth: SettingsArea.iso-depth;
             shows-depth: SettingsArea.iso-shows-depth;
+            last: false;
         }
-        if SettingsArea.iso-on: FormRow {
+        if SettingsArea.iso-on: SwitchRow {
             label: "With Filters";
-            hint: "Record sources as the program shows them (filters applied) instead of as captured.";
-            VerticalLayout {
-                alignment: center;
-                horizontal-stretch: 0;
-                Switch {
-                    on <=> SettingsArea.iso-filtered;
-                    label: "With Filters";
-                    toggled(on) => { SettingsArea.set-flag("iso_filtered", on); }
-                }
-            }
-            Fill { }
+            place: RowPlace.last;
+            on <=> SettingsArea.iso-filtered;
+            toggled(on) => { SettingsArea.set-flag("iso_filtered", on); }
         }
     }
 }
@@ -573,8 +668,8 @@ export component OutputPage inherits SetPage {
 component RefreshDevices inherits IconButton {
     icon: Icons.refresh;
     label: "Look for devices again";
-    small: true;
-    icon-size: Theme.icon-sm;
+    compact: true;
+    icon-size: Theme.icon-xs;
     spinning: SettingsArea.looking;
     enabled: !SettingsArea.looking;
     clicked => { SettingsArea.refresh-devices(); }
@@ -583,64 +678,66 @@ component RefreshDevices inherits IconButton {
 export component AudioPage inherits SetPage {
     if SettingsArea.mics.length > 0: SetGroup {
         title: "Audio Devices";
-        for mic[i] in SettingsArea.mics: FormRow {
+        hint: "Your Audio Input Capture sources. Add more with + under Sources.";
+        for mic[i] in SettingsArea.mics: GroupRow {
             label: mic.name;
-            Dropdown {
-                width: Theme.field-l;
-                options: mic.options;
-                value: mic.value;
-                show-detail: true;
-                label: mic.name;
-                selected(value) => { SettingsArea.set-mic(mic.id, value); }
+            place: Rows.place(i, SettingsArea.mics.length);
+            Centred {
+                Dropdown {
+                    width: Theme.field-l;
+                    on-control: true;
+                    options: mic.options;
+                    value: mic.value;
+                    show-detail: true;
+                    label: mic.name;
+                    selected(value) => { SettingsArea.set-mic(mic.id, value); }
+                }
             }
-            if i == 0: VerticalLayout {
-                alignment: center;
-                RefreshDevices { }
-            }
-            Fill { }
-        }
-        HorizontalLayout {
-            padding-left: Theme.hint-indent;
-            Text {
-                text: "Your Audio Input Capture sources. Add more with + under Sources.";
-                color: Theme.text-3;
-                font-size: Theme.fs-sm;
-                letter-spacing: Theme.tracking-sm;
-                line-height-factor: Theme.leading-sm;
-                wrap: word-wrap;
+            Centred {
+                if i == 0: RefreshDevices { }
+                if i > 0: Rectangle {
+                    width: Theme.icon-button-xs;
+                }
             }
         }
     }
     SetGroup {
         title: "Advanced";
-        FormRow {
+        hint: "Monitoring Device: where sources you monitor play (Audio Mixer → ⋮ → Audio Monitoring). Balance Law: how moving a source towards one side lowers the other.";
+        GroupRow {
             label: "Monitoring Device";
-            hint: "Where sources you monitor play (Audio Mixer → ⋮ → Audio Monitoring).";
-            Dropdown {
-                width: Theme.field-l;
-                options: SettingsArea.outputs;
-                value <=> SettingsArea.monitoring-device;
-                show-detail: true;
-                label: "Monitoring Device";
-                selected(value) => { SettingsArea.set-text("monitoring_device", value); }
+            place: RowPlace.first;
+            Centred {
+                Dropdown {
+                    width: Theme.field-l;
+                    on-control: true;
+                    options: SettingsArea.outputs;
+                    value <=> SettingsArea.monitoring-device;
+                    show-detail: true;
+                    label: "Monitoring Device";
+                    selected(value) => { SettingsArea.set-text("monitoring_device", value); }
+                }
             }
-            VerticalLayout {
-                alignment: center;
+            Centred {
                 RefreshDevices { }
             }
-            Fill { }
         }
-        FormRow {
+        GroupRow {
             label: "Balance Law";
-            hint: "How moving a source towards one side lowers the other.";
-            Dropdown {
-                width: Theme.field-l;
-                options: SettingsArea.pan-laws;
-                value <=> SettingsArea.pan-law;
-                label: "Balance Law";
-                selected(value) => { SettingsArea.set-text("pan_law", value); }
+            place: RowPlace.last;
+            Centred {
+                Dropdown {
+                    width: Theme.field-l;
+                    on-control: true;
+                    options: SettingsArea.pan-laws;
+                    value <=> SettingsArea.pan-law;
+                    label: "Balance Law";
+                    selected(value) => { SettingsArea.set-text("pan_law", value); }
+                }
             }
-            Fill { }
+            Rectangle {
+                width: Theme.icon-button-xs;
+            }
         }
     }
 }
@@ -650,48 +747,60 @@ export component AudioPage inherits SetPage {
 export component VideoPage inherits SetPage {
     SetGroup {
         title: "Video";
-        FormRow {
+        hint: "Recordings and the program are made at this size. Sources keep their pixel positions when it changes.";
+        GroupRow {
             label: "Base (Canvas) Resolution";
-            hint: "Recordings and the program are made at this size. Sources keep their pixel positions when it changes.";
-            Dropdown {
-                width: Theme.field-m;
-                options: SettingsArea.canvas-sizes;
-                value <=> SettingsArea.canvas-size;
-                label: "Base (Canvas) Resolution";
-                selected(value) => { SettingsArea.set-text("canvas_size", value); }
+            place: RowPlace.first;
+            Centred {
+                Dropdown {
+                    width: 132px;
+                    on-control: true;
+                    options: SettingsArea.canvas-sizes;
+                    value <=> SettingsArea.canvas-size;
+                    label: "Base (Canvas) Resolution";
+                    selected(value) => { SettingsArea.set-text("canvas_size", value); }
+                }
             }
-            NumberField {
-                width: Theme.field-xs;
-                prefix: "W";
-                value: SettingsArea.canvas-width;
-                minimum: 16;
-                maximum: 8192;
-                step: 2;
-                label: "Canvas width";
-                changed(value) => { SettingsArea.set-number("canvas_width", value); }
+            Centred {
+                NumberField {
+                    width: Theme.field-xs;
+                    small: true;
+                    prefix: "W";
+                    value: SettingsArea.canvas-width;
+                    minimum: 16;
+                    maximum: 8192;
+                    step: 2;
+                    label: "Canvas width";
+                    changed(value) => { SettingsArea.set-number("canvas_width", value); }
+                }
             }
-            NumberField {
-                width: Theme.field-xs;
-                prefix: "H";
-                value: SettingsArea.canvas-height;
-                minimum: 16;
-                maximum: 8192;
-                step: 2;
-                label: "Canvas height";
-                changed(value) => { SettingsArea.set-number("canvas_height", value); }
+            Centred {
+                NumberField {
+                    width: Theme.field-xs;
+                    small: true;
+                    prefix: "H";
+                    value: SettingsArea.canvas-height;
+                    minimum: 16;
+                    maximum: 8192;
+                    step: 2;
+                    label: "Canvas height";
+                    changed(value) => { SettingsArea.set-number("canvas_height", value); }
+                }
             }
-            Fill { }
         }
-        FormRow {
+        GroupRow {
             label: "Common FPS Values";
-            Dropdown {
-                width: Theme.field-s;
-                options: SettingsArea.fps-options;
-                value <=> SettingsArea.fps;
-                label: "Common FPS Values";
-                selected(value) => { SettingsArea.set-text("fps", value); }
+            place: RowPlace.last;
+            Centred {
+                Dropdown {
+                    width: Theme.field-s;
+                    on-control: true;
+                    options: SettingsArea.fps-options;
+                    value <=> SettingsArea.fps;
+                    label: "Common FPS Values";
+                    selected(value) => { SettingsArea.set-text("fps", value); }
+                }
             }
-            Fill { }
         }
     }
 }
@@ -699,43 +808,16 @@ export component VideoPage inherits SetPage {
 // ---------- Hotkeys ----------
 
 export component HotkeysPage inherits SetPage {
-    spacing: Theme.space-4;
-    // The web app's 4px above and 12px below, inside the page's gaps.
-    VerticalLayout {
-        padding-top: Theme.space-1;
-        padding-bottom: Theme.space-3;
-        PageNote {
-            text: "Isocast’s keys are fixed for now. They don’t fire while you type in a field.";
-        }
+    GroupHint {
+        text: "Isocast’s keys are fixed for now. They don’t fire while you type in a field.";
     }
-    for group in SettingsArea.hotkeys: VerticalLayout {
-        spacing: 0;
-        HorizontalLayout {
-            spacing: Theme.space-2;
-            Text {
-                text: group.title;
-                color: Theme.text-2;
-                font-size: Theme.fs-sm;
-                letter-spacing: Theme.tracking-sm;
-                font-weight: Theme.weight-semibold;
-                vertical-alignment: center;
-            }
-            VerticalLayout {
-                alignment: center;
-                horizontal-stretch: 1;
-                Rectangle {
-                    height: 1px;
-                    background: Theme.line;
-                }
-            }
-        }
-        VerticalLayout {
-            padding-top: Theme.space-2;
-            spacing: 0;
-            for row[i] in group.rows: ShortcutRow {
-                what: row.what;
+    for group in SettingsArea.hotkeys: SetGroup {
+        title: group.title;
+        for row[i] in group.rows: GroupRow {
+            label: row.what;
+            place: Rows.place(i, group.rows.length);
+            ShortcutKeys {
                 keys: row.keys;
-                last: i == group.rows.length - 1;
             }
         }
     }
@@ -746,48 +828,42 @@ export component HotkeysPage inherits SetPage {
 export component AdvancedPage inherits SetPage {
     SetGroup {
         title: "Automatically Reconnect";
-        if !SettingsArea.has-stream: PageNote {
-            text: "Set up streaming (Stream) to change how it reconnects.";
-        }
-        if SettingsArea.has-stream: FormRow {
+        hint: SettingsArea.has-stream ? "When the connection drops, Isocast tries again after the delay, up to the maximum." : "Set up streaming (Stream) to change how it reconnects.";
+        if SettingsArea.has-stream: SwitchRow {
             label: "Enable";
-            VerticalLayout {
-                alignment: center;
-                horizontal-stretch: 0;
-                Switch {
-                    on <=> SettingsArea.reconnect-on;
-                    label: "Automatically Reconnect";
-                    toggled(on) => { SettingsArea.set-flag("reconnect", on); }
+            place: RowPlace.first;
+            on <=> SettingsArea.reconnect-on;
+            toggled(on) => { SettingsArea.set-flag("reconnect", on); }
+        }
+        if SettingsArea.has-stream: GroupRow {
+            label: "Retry Delay";
+            enabled: SettingsArea.reconnect-on;
+            Centred {
+                Stepper {
+                    value: SettingsArea.reconnect-delay;
+                    minimum: 1;
+                    maximum: 600;
+                    unit: "s";
+                    enabled: SettingsArea.reconnect-on;
+                    label: "Retry Delay";
+                    changed(value) => { SettingsArea.set-number("reconnect_delay", value); }
                 }
             }
-            Fill { }
         }
-        if SettingsArea.has-stream: FormRow {
-            label: "Retry Delay";
-            NumberField {
-                width: Theme.field-s;
-                value: SettingsArea.reconnect-delay;
-                minimum: 1;
-                maximum: 600;
-                unit: "s";
-                enabled: SettingsArea.reconnect-on;
-                label: "Retry Delay";
-                changed(value) => { SettingsArea.set-number("reconnect_delay", value); }
-            }
-            Fill { }
-        }
-        if SettingsArea.has-stream: FormRow {
+        if SettingsArea.has-stream: GroupRow {
             label: "Maximum Retries";
-            NumberField {
-                width: Theme.field-s;
-                value: SettingsArea.reconnect-retries;
-                minimum: 1;
-                maximum: 1000;
-                enabled: SettingsArea.reconnect-on;
-                label: "Maximum Retries";
-                changed(value) => { SettingsArea.set-number("reconnect_retries", value); }
+            place: RowPlace.last;
+            enabled: SettingsArea.reconnect-on;
+            Centred {
+                Stepper {
+                    value: SettingsArea.reconnect-retries;
+                    minimum: 1;
+                    maximum: 1000;
+                    enabled: SettingsArea.reconnect-on;
+                    label: "Maximum Retries";
+                    changed(value) => { SettingsArea.set-number("reconnect_retries", value); }
+                }
             }
-            Fill { }
         }
     }
 }

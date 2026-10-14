@@ -1,16 +1,17 @@
-// The first run (the web app's onboarding.js, docs/design.md 3.22):
-// permissions, then the devices to use, then the layout; Create setup
-// makes it with `init_setup` and the window opens on it. A card over the
-// window (Welcome's "Start with this Mac", or Tools → Auto-Configuration
+// The first run (the web app's onboarding.js), as a Console sheet (no
+// board of its own: Welcome's and Settings' manners): permissions, then
+// the devices to use, then the layout; Create setup makes it with
+// `init_setup` and the window opens on it. A sheet 120px down the window
+// (Welcome's "Start with this Mac", or Tools → Auto-Configuration
 // Wizard), one height for every step so the header and Continue don't
-// jump.
+// jump; the step is the one yellow dot, done steps a check.
 
 import { Theme } from "../../theme.slint";
 import { BrandMark, Icon, Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
 import {
-    Button, ButtonVariant, ControlSize, FocusRing, IconButton, LinkButton, ScrollArea, Segmented,
-    Spinner, Switch, TextField,
+    Button, ButtonVariant, ControlSize, DialogFooter, FocusRing, GroupRow, IconButton, LinkButton, RowGroup,
+    RowPlace, ScrollArea, Segmented, Spinner, Switch, TextField,
 } from "../../kit.slint";
 import { SettingsArea } from "state.slint";
 
@@ -28,13 +29,13 @@ component StepItem inherits HorizontalLayout {
             width: 20px;
             height: 20px;
             border-radius: 10px;
-            background: root.on ? Theme.accent-fill : root.done ? Theme.onair-soft : transparent;
+            background: root.on ? Theme.accent-fill : root.done ? Theme.control : transparent;
             border-width: root.on || root.done ? 0 : 1px;
             border-color: Theme.outline;
             if root.done: Icon {
                 path: Icons.check;
                 size: Theme.icon-xs;
-                color: Theme.onair-text;
+                color: Theme.text-2;
             }
             if !root.done: Text {
                 text: root.index + 1;
@@ -115,7 +116,7 @@ component DeviceItem inherits Rectangle {
                 border-radius: self.width / 2;
                 border-width: root.on ? 4px : 1px;
                 border-color: root.on ? Theme.accent : Theme.outline;
-                background: root.on ? Theme.bone : transparent;
+                background: root.on ? Theme.bone : Theme.surface-inset;
             }
         }
         VerticalLayout {
@@ -187,7 +188,8 @@ component Looking inherits HorizontalLayout {
     }
 }
 
-// A tiny picture of a layout: the screen in grey, the camera in copper.
+// A tiny picture of a layout: the screen in grey, the camera in
+// `limestone` (Paper's onboarding pictures).
 component LayoutPicture inherits Rectangle {
     in property <string> layout;
     property <bool> side: root.layout == "side_by_side";
@@ -195,31 +197,35 @@ component LayoutPicture inherits Rectangle {
     property <bool> top: root.layout == "top_right" || root.layout == "top_left";
     width: 72px;
     height: 41px;
-    background: Theme.control;
+    background: Theme.surface-inset;
     border-width: 1px;
     border-color: Theme.line-strong;
+    border-radius: Theme.r-mini;
     Rectangle {
         x: 4px;
         y: 4px;
         width: root.side ? 44px : 64px;
         height: 33px;
-        background: Theme.text-3;
+        border-radius: 2px;
+        background: Theme.control-active;
     }
     if root.side: Rectangle {
         x: 51px;
         y: 4px;
         width: 17px;
         height: 33px;
-        background: Theme.accent;
+        border-radius: 2px;
+        background: Theme.limestone;
     }
     if !root.side: Rectangle {
         x: root.right ? 46px : 4px;
         y: root.top ? 4px : 25px;
         width: 22px;
         height: 12px;
-        background: Theme.accent;
+        border-radius: 2px;
+        background: Theme.limestone;
         border-width: 1px;
-        border-color: Theme.surface-panel;
+        border-color: Theme.surface-inset;
     }
 }
 
@@ -233,6 +239,7 @@ component LayoutTile inherits Rectangle {
 
     horizontal-stretch: 1;
     height: column.preferred-height;
+    border-radius: Theme.r;
     background: root.on ? Theme.selected : ta.has-hover ? Theme.hover : transparent;
     accessible-role: radio-button;
     accessible-label: root.label;
@@ -279,28 +286,13 @@ component LayoutTile inherits Rectangle {
     if root.on: Rectangle {
         border-width: 1px;
         border-color: Theme.accent;
+        border-radius: Theme.r;
     }
     FocusRing {
         inset: true;
-        radius: 0;
+        radius: Theme.r;
         shown: fs.has-focus && root.keyboard;
     }
-}
-
-// A form row of the Layout step: a 96px label, then its controls.
-component ObRow inherits HorizontalLayout {
-    in property <string> label;
-    spacing: Theme.space-3;
-    Text {
-        width: 96px;
-        text: root.label;
-        color: Theme.text-2;
-        font-size: Theme.fs-sm;
-        letter-spacing: Theme.tracking-sm;
-        horizontal-alignment: right;
-        vertical-alignment: center;
-    }
-    @children
 }
 
 // The step's title (the brand face) and what it is about.
@@ -322,9 +314,9 @@ component StepTitle inherits VerticalLayout {
         max-width: 600px;
         text: root.lead;
         color: Theme.text-2;
-        font-size: Theme.fs-lead;
-        letter-spacing: Theme.tracking-lead;
-        line-height-factor: Theme.leading-lead;
+        font-size: Theme.fs;
+        letter-spacing: Theme.tracking;
+        line-height-factor: Theme.leading-welcome;
         wrap: word-wrap;
     }
 }
@@ -370,7 +362,8 @@ component PermissionsStep inherits VerticalLayout {
                 Icon {
                     path: Icons.named(permission.icon);
                     size: Theme.icon-lg;
-                    color: Theme.accent-text;
+                    stroke-width: 1.65px;
+                    color: Theme.text-2;
                 }
             }
             VerticalLayout {
@@ -390,10 +383,13 @@ component PermissionsStep inherits VerticalLayout {
                     line-height-factor: Theme.leading-sm;
                     wrap: word-wrap;
                 }
-                if permission.todo != "": HorizontalLayout {
+                // What to do, then the link that finishes its sentence
+                // ("… Then restart the engine.") on the line under it: a
+                // text can't hold a link, and beside it the link floated
+                // away from its sentence.
+                if permission.todo != "": VerticalLayout {
                     padding-top: 2px;
-                    spacing: Theme.space-1;
-                    alignment: start;
+                    spacing: 2px;
                     Text {
                         text: permission.todo;
                         color: Theme.text-2;
@@ -401,11 +397,13 @@ component PermissionsStep inherits VerticalLayout {
                         letter-spacing: Theme.tracking-sm;
                         line-height-factor: Theme.leading-sm;
                         wrap: word-wrap;
-                        horizontal-stretch: 1;
                     }
-                    if permission.restart: LinkButton {
-                        text: "restart the engine.";
-                        clicked => { SettingsArea.ob-restart-engine(); }
+                    if permission.restart: HorizontalLayout {
+                        alignment: start;
+                        LinkButton {
+                            text: "restart the engine.";
+                            clicked => { SettingsArea.ob-restart-engine(); }
+                        }
                     }
                 }
             }
@@ -448,7 +446,6 @@ component PermissionsStep inherits VerticalLayout {
         alignment: start;
         if SettingsArea.any-to-ask: Button {
             text: SettingsArea.asking ? "Waiting for your answers…" : "Allow access…";
-            variant: ButtonVariant.primary;
             enabled: !SettingsArea.asking;
             clicked => { SettingsArea.ob-ask(); }
         }
@@ -566,51 +563,74 @@ component LayoutStep inherits VerticalLayout {
     }
     VerticalLayout {
         padding-top: Theme.space-6;
-        spacing: Theme.space-3;
-        ObRow {
-            label: "Canvas";
-            Segmented {
-                horizontal-stretch: 0;
-                options: [
-                    { value: "1920x1080", label: "1080p" },
-                    { value: "2560x1440", label: "1440p" },
-                    { value: "3840x2160", label: "4K" },
-                    { value: "1080x1920", label: "Vertical" },
-                ];
-                value: SettingsArea.ob-canvas;
+        RowGroup {
+            GroupRow {
                 label: "Canvas";
-                selected(value) => { SettingsArea.ob-set("canvas", value); }
+                place: RowPlace.first;
+                VerticalLayout {
+                    alignment: center;
+                    Segmented {
+                        small: true;
+                        options: [
+                            { value: "1920x1080", label: "1080p" },
+                            { value: "2560x1440", label: "1440p" },
+                            { value: "3840x2160", label: "4K" },
+                            { value: "1080x1920", label: "Vertical" },
+                        ];
+                        value: SettingsArea.ob-canvas;
+                        label: "Canvas";
+                        selected(value) => { SettingsArea.ob-set("canvas", value); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Segmented {
+                        small: true;
+                        options: [{ value: "30", label: "30 fps" }, { value: "60", label: "60 fps" }];
+                        value: SettingsArea.ob-fps;
+                        label: "Frame rate";
+                        selected(value) => { SettingsArea.ob-set("fps", value); }
+                    }
+                }
             }
-            Segmented {
-                horizontal-stretch: 0;
-                options: [{ value: "30", label: "30 fps" }, { value: "60", label: "60 fps" }];
-                value: SettingsArea.ob-fps;
-                label: "Frame rate";
-                selected(value) => { SettingsArea.ob-set("fps", value); }
-            }
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-        }
-        ObRow {
-            label: "Recordings";
-            TextField {
-                text: SettingsArea.ob-folder;
-                mono: true;
+            GroupRow {
                 label: "Recordings";
-                committed(text) => { SettingsArea.ob-set("folder", text); }
+                VerticalLayout {
+                    alignment: center;
+                    TextField {
+                        width: Theme.field-path;
+                        small: true;
+                        mono: true;
+                        icon: Icons.folder;
+                        text: SettingsArea.ob-folder;
+                        label: "Recordings";
+                        committed(text) => { SettingsArea.ob-set("folder", text); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Button {
+                        text: "Choose…";
+                        size: ControlSize.small;
+                        on-control: true;
+                        accessible-name: "Choose the recordings folder";
+                        clicked => { SettingsArea.ob-browse(); }
+                    }
+                }
             }
-            Button {
-                text: "Choose…";
-                clicked => { SettingsArea.ob-browse(); }
-            }
-        }
-        ObRow {
-            label: "Name";
-            TextField {
-                text: SettingsArea.ob-name;
+            GroupRow {
                 label: "Name";
-                committed(text) => { SettingsArea.ob-set("name", text); }
+                place: RowPlace.last;
+                VerticalLayout {
+                    alignment: center;
+                    TextField {
+                        width: Theme.field-l;
+                        small: true;
+                        text: SettingsArea.ob-name;
+                        label: "Name";
+                        committed(text) => { SettingsArea.ob-set("name", text); }
+                    }
+                }
             }
         }
     }
@@ -635,14 +655,15 @@ export component Onboarding inherits Rectangle {
         width: min(760px, root.width - 40px);
         height: min(560px, root.height - 40px);
         x: (root.width - self.width) / 2;
-        y: (root.height - self.height) / 2;
-        background: Theme.surface-panel;
+        y: max(Theme.space-5, min(Theme.welcome-top, root.height - self.height - Theme.space-5));
+        background: Theme.surface-overlay;
         border-width: 1px;
         border-color: Theme.line-strong;
         border-radius: Theme.r-panel;
-        drop-shadow-color: Theme.shadow-color;
-        drop-shadow-blur: Theme.shadow-blur;
-        drop-shadow-offset-y: Theme.shadow-y;
+        drop-shadow-color: Theme.shadow-sheet-color;
+        drop-shadow-blur: Theme.shadow-sheet-blur;
+        drop-shadow-offset-y: Theme.shadow-sheet-y;
+        clip: true;
         accessible-role: groupbox;
         accessible-label: "Set up Isocast";
 
@@ -706,49 +727,21 @@ export component Onboarding inherits Rectangle {
                 }
             }
 
-            Rectangle {
-                height: 1px;
-                background: Theme.line;
-            }
-            // The footer: Back (or Cancel) on the 32px edge, Continue or
-            // Create setup on the right.
-            HorizontalLayout {
-                padding-top: Theme.space-4;
-                padding-bottom: Theme.space-4;
-                padding-left: Theme.space-8 - 1px - Theme.space-3;
-                padding-right: Theme.space-8 - 1px;
-                spacing: Theme.space-2;
-                Button {
-                    text: SettingsArea.step > 0 ? "Back" : SettingsArea.can-close ? "Cancel" : "Back";
-                    variant: ButtonVariant.quiet;
-                    size: ControlSize.large;
-                    clicked => { SettingsArea.ob-back(); }
-                }
-                Rectangle {
-                    horizontal-stretch: 1;
-                }
-                if SettingsArea.step < 2: Button {
-                    horizontal-stretch: 0;
-                    text: "Continue";
-                    variant: ButtonVariant.primary;
-                    size: ControlSize.large;
-                    clicked => { SettingsArea.ob-next(); }
-                }
-                if SettingsArea.step == 2: HorizontalLayout {
-                    horizontal-stretch: 0;
-                    spacing: Theme.space-2;
-                    if SettingsArea.creating: VerticalLayout {
-                        alignment: center;
-                        Spinner {
-                            small: true;
-                        }
-                    }
-                    Button {
-                        text: "Create setup";
-                        variant: ButtonVariant.primary;
-                        size: ControlSize.large;
-                        enabled: !SettingsArea.creating;
-                        clicked => { SettingsArea.ob-create(); }
+            // The footer: Back (or Cancel) on the left, Continue or Create
+            // setup (the one yellow button) on the right.
+            DialogFooter {
+                inset: Theme.space-8 - 1px;
+                extra-text: SettingsArea.step > 0 ? "Back" : SettingsArea.can-close ? "Cancel" : "Back";
+                cancel-text: "";
+                ok-text: SettingsArea.step < 2 ? "Continue" : "Create setup";
+                ok-enabled: !SettingsArea.creating;
+                note: SettingsArea.creating ? "Making your setup…" : "";
+                extra => { SettingsArea.ob-back(); }
+                ok => {
+                    if SettingsArea.step < 2 {
+                        SettingsArea.ob-next();
+                    } else {
+                        SettingsArea.ob-create();
                     }
                 }
             }

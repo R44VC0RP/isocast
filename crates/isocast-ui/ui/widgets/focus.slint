@@ -1,10 +1,24 @@
-// Keyboard focus (docs/design.md 2.10): a bone ring 2px wide after a 1px
-// gap, outside the control; or a 2px ring inside it for things as wide as
-// their pane (rows, tabs, segments). Only keyboard focus shows a ring (Tab,
-// or arrows moving between rows), never a click: widgets track that in a
-// `keyboard` property set from `FocusScope.focus-gained`'s reason.
+// Keyboard focus (Paper "Components": `0 0 0 1px surface-panel, 0 0 0 3px
+// focus-ring`): a pale-yellow ring 2px wide after a 1px gap, outside the
+// control; or a 2px ring inside it for things as wide as their pane (rows,
+// tabs, segments). Only keyboard focus shows a ring (Tab, or arrows moving
+// between rows), never a click: widgets track that in a `keyboard`
+// property set from `FocusScope.focus-gained`'s reason.
 
 import { Theme } from "../theme.slint";
+
+// A state to draw whatever the pointer and focus do: the kit gallery
+// (`--state kit`) shows every control at rest, hovered, pressed and with
+// keyboard focus side by side, as Paper's Components board does. The app
+// leaves it `live`. Interactive kit components take it as `shown`.
+export enum ShownState {
+    // As the pointer and keyboard make it.
+    live,
+    hover,
+    pressed,
+    // Keyboard focus (a field: editing).
+    focus,
+}
 
 // Put it last inside the control, so it draws on top. Hidden unless
 // `shown`.

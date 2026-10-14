@@ -1,8 +1,10 @@
-// Sliders (docs/design.md 3.9) are neutral: a 2px track, a 2px fill in
-// `text-3` from `origin` to the value (a bipolar one, like Balance, fills
-// from the centre), a 12px bone thumb with a dark ring. The mixer's fader
-// is the same slider. From the keyboard, arrows move it a hundredth of its
-// range (⇧ a tenth), Home and End to its ends.
+// Sliders (Paper "Components" › Sliders and meters): a 4px `line-strong`
+// track with 2px corners, a yellow fill from `origin` to the value (a
+// bipolar one, like Balance, fills from the centre), a 12px bone thumb with
+// a soft shadow. The mixer's fader is the same slider with a green fill
+// (`fill`); an inspector band's is `thin` (2px, a 10px thumb). From the
+// keyboard, arrows move it a hundredth of its range (⇧ a tenth), Home and
+// End to its ends.
 
 import { Theme } from "../theme.slint";
 import { FocusRing } from "focus.slint";
@@ -20,12 +22,17 @@ export component Slider inherits Rectangle {
     in property <string> label;
     in property <string> value-text;
     in property <string> tooltip;
+    // The fill: yellow; the mixer's fader green, a muted one `text-disabled`.
+    in property <color> fill: Theme.accent;
+    // 2px track, 10px thumb (an inspector band).
+    in property <bool> thin;
     // While dragging (the value at the pointer).
     callback moved(float);
     // A final value: a release, a click, a key.
     callback changed(float);
     // A double-click (the mixer's fader goes back to 0 dB).
     callback double-clicked();
+    out property <bool> has-focus: fs.has-focus;
 
     forward-focus: fs;
     property <bool> keyboard;
@@ -46,7 +53,7 @@ export component Slider inherits Rectangle {
         root.changed(max(root.minimum, min(root.maximum, round((root.value + by) / root.step) * root.step)));
     }
 
-    height: Theme.slider-h;
+    height: root.thin ? 12px : Theme.slider-h;
     min-width: 40px;
     horizontal-stretch: 1;
     opacity: root.enabled ? 1 : Theme.disabled-opacity;
@@ -60,38 +67,35 @@ export component Slider inherits Rectangle {
     accessible-action-increment => { root.nudge(root.unit); }
     accessible-action-decrement => { root.nudge(-root.unit); }
 
+    property <length> track-h: root.thin ? Theme.track-thin : Theme.track;
+
     // Track
     Rectangle {
-        y: (parent.height - Theme.track) / 2;
-        height: Theme.track;
-        border-radius: 1px;
+        y: (parent.height - root.track-h) / 2;
+        height: root.track-h;
+        border-radius: root.track-h / 2;
         background: Theme.line-strong;
     }
     // Fill
     Rectangle {
         x: parent.width * min(root.from, root.fraction);
-        y: (parent.height - Theme.track) / 2;
+        y: (parent.height - root.track-h) / 2;
         width: parent.width * abs(root.fraction - root.from);
-        height: Theme.track;
-        border-radius: 1px;
-        background: Theme.text-3;
+        height: root.track-h;
+        border-radius: root.track-h / 2;
+        background: root.fill;
     }
-    // Thumb, with a 1px ring of the monitor's black
+    // Thumb
     thumb := Rectangle {
         x: parent.width * root.fraction - self.width / 2;
         y: (parent.height - self.height) / 2;
-        width: Theme.thumb + 2px;
+        width: root.thin ? Theme.thumb-thin : Theme.thumb;
         height: self.width;
         border-radius: self.width / 2;
-        background: Theme.surface-monitor;
-        Rectangle {
-            x: 1px;
-            y: 1px;
-            width: Theme.thumb;
-            height: Theme.thumb;
-            border-radius: self.width / 2;
-            background: Theme.bone;
-        }
+        background: Theme.bone;
+        drop-shadow-color: root.thin ? transparent : Theme.shadow-thumb-color;
+        drop-shadow-blur: Theme.shadow-knob-blur;
+        drop-shadow-offset-y: Theme.shadow-knob-y;
         FocusRing {
             shown: fs.has-focus && root.keyboard;
             radius: parent.width / 2;

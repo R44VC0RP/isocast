@@ -101,6 +101,69 @@ fn name_or_kind(source: &Value) -> String {
         })
 }
 
+/// A kind's name as a sheet's line says it: OBS's words in sentence case
+/// ("Media Source" → "Media source").
+fn sentence_case(label: &str) -> String {
+    let mut words = label.split(' ');
+    let first = words.next().unwrap_or_default().to_string();
+    words.fold(first, |text, word| {
+        format!("{text} {}", word.to_lowercase())
+    })
+}
+
+/// What the Properties sheet's line says a source is: its kind, and the
+/// file, words, colour or page it shows ("Media source · clip.mp4").
+fn source_subtitle(source: &Value) -> String {
+    let kind = source["kind"].as_str().unwrap_or_default();
+    let label = sentence_case(setup_model::kind_info(kind).label);
+    let name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+    let detail = match kind {
+        "media" | "slideshow" => {
+            let files: Vec<&str> = source["files"]
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            match files.as_slice() {
+                [] => String::new(),
+                [one] => name(one),
+                [first, rest @ ..] => format!("{} and {} more", name(first), rest.len()),
+            }
+        }
+        "image" => source["path"].as_str().map(name).unwrap_or_default(),
+        "text" => source["text"]
+            .as_str()
+            .and_then(|t| t.lines().next())
+            .map(|line| {
+                let short: String = line.chars().take(40).collect();
+                if short.len() < line.len() {
+                    format!("“{short}…”")
+                } else {
+                    format!("“{short}”")
+                }
+            })
+            .or_else(|| source["file"].as_str().map(name))
+            .unwrap_or_default(),
+        "color" => source["color"].as_str().unwrap_or_default().to_string(),
+        "browser" => source["url"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| source["file"].as_str().map(name))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    if detail.is_empty() {
+        label
+    } else {
+        format!("{label} · {detail}")
+    }
+}
+
+/// A running source's format, as a viewer line says it ("1920×1080 · 30p ·
+/// Stereo"); "" until the engine has opened it.
+fn source_format(status: Option<&isocast_protocol::api::SourceStatus>) -> String {
+    status.map(setup_model::source_format).unwrap_or_default()
+}
+
 fn kind_has_video(kind: &str) -> bool {
     !matches!(
         kind,
@@ -472,10 +535,14 @@ impl Dialogs {
             }
             "rename" => {
                 *self.rename_source.borrow_mut() = arg.to_string();
-                let name = source_json(app, arg)
-                    .map(|s| name_or_kind(&s))
+                let source = source_json(app, arg);
+                let name = source.as_ref().map(name_or_kind).unwrap_or_default();
+                let kind = source
+                    .as_ref()
+                    .and_then(|s| s["kind"].as_str().map(str::to_string))
                     .unwrap_or_default();
-                area.set_rename_heading(format!("Name for “{name}”").into());
+                area.set_rename_heading(format!("A new name for “{name}”.").into());
+                area.set_rename_icon(setup_model::kind_info(&kind).icon.into());
                 area.set_rename_name(name.into());
             }
             _ => {}
@@ -550,6 +617,14 @@ impl Dialogs {
             )
         };
         area.set_create_heading(heading.into());
+        area.set_create_icon(
+            if kind == "scene" {
+                "scene-card"
+            } else {
+                setup_model::kind_info(&kind).icon
+            }
+            .into(),
+        );
         let name = area.get_create_name().trim().to_string();
         let taken = area.get_create_mode() == "new"
             && s.setup.as_ref().is_some_and(|setup| {
@@ -656,6 +731,9 @@ impl Dialogs {
             .to_string();
         let source = Value::Object(value.clone());
         area.set_props_title(format!("Properties for “{}”", name_or_kind(&source)).into());
+        area.set_props_name(name_or_kind(&source).into());
+        area.set_props_subtitle(source_subtitle(&source).into());
+        area.set_props_icon(setup_model::kind_info(&kind).icon.into());
         let fields = form::fields("Source", &kind);
         let s = app.session.borrow();
         let running = (!draft).then(|| s.running.get(&id)).flatten();
@@ -670,6 +748,7 @@ impl Dialogs {
             typing: self.props_typing.get(),
         };
         let groups = form::build(&ctx, &fields, &value);
+        area.set_preview_format(source_format(running).into());
         let failed = running
             .filter(|r| r.state == isocast_protocol::api::SourceRun::Failed)
             .map(|r| {
@@ -974,6 +1053,10 @@ impl Dialogs {
         let video = kind_has_video(&kind);
         let audio = kind_has_audio(&source);
         area.set_filters_title(format!("Filters for “{}”", name_or_kind(&source)).into());
+        area.set_filters_name(name_or_kind(&source).into());
+        area.set_filters_icon(setup_model::kind_info(&kind).icon.into());
+        let format = source_format(app.session.borrow().running.get(&id));
+        area.set_preview_format(format.into());
         area.set_filters_audio(audio);
         area.set_filters_video(video);
         let rows = |list: &str| -> Vec<FilterRow> {
@@ -1225,6 +1308,7 @@ impl Dialogs {
         area.set_transform_item(found.is_some());
         let Some((_, chain)) = found else {
             area.set_transform_title("Edit Transform".into());
+            area.set_transform_name("".into());
             return;
         };
         let item = &chain[chain.len() - 1];
@@ -1240,6 +1324,7 @@ impl Dialogs {
             })
             .unwrap_or_default();
         area.set_transform_title(format!("Edit Transform for “{label}”").into());
+        area.set_transform_name(label.as_str().into());
         area.set_transform_locked(item["locked"] == true);
         let n = |v: &Value, d: f64| v.as_f64().unwrap_or(d);
         let rect = &item["rect"];

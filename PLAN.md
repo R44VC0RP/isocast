@@ -822,6 +822,75 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
   retired.
 - [ ] **N.4 Windows (parked by Ryan, 2026-10-13: later).** Shared D3D12 textures for the preview, packaging
   (with the engine's Windows platform crate, separate work).
+- [x] **N.5 Console design (Ryan, 2026-10-13).** Ryan picked the Console
+  direction (Paper file "C. Console", Final Cut Pro x Logic Pro x Tower:
+  01M4SHX06Z4XBZDXMWN2YEB9EA, its Screens boards Main window, Studio Mode,
+  Properties, Settings and Welcome, and its Components page) and wants
+  the app redesigned in it now, keeping today's OBS layout (no workspaces
+  or timeline). Themes become swappable later (Console first; Daylight,
+  Workbench, Blender…), so every Console value is in the Theme global
+  under Paper's token names and every signature piece is a kit component
+  the areas use, never drawn inline. Exact values only from Paper.
+  - [x] **N.5.0 Foundation** (branch ui/console). The tokens, the fonts
+    (Mona Sans, Hubot Sans, Martian Mono with their OFL licences), the
+    kit restyled to the Components board, the signature components (LCD,
+    capsule clusters, transport buttons, sidebar list, sheets, meters,
+    list rows, number fields, tabs, inspector bands, grouped rows, quick
+    list, popovers, toasts, tooltips), and the kit gallery drawn as the
+    Components board (`--state kit`, 1440×3060) with every state.
+  - [x] **N.5.1 Areas.** Each area rebuilt from the Screens boards with
+    the kit: the control bar (selected source, LCD, transport, master
+    meter, capsules, pane toggles) and the status bar; the docks and
+    their rows and toolbars; the mixer strips (green faders, M and
+    headphones toggles); the sheets (Settings with its full-height
+    sidebar, grouped rows and summary footer; Properties; Filters; the
+    rest); Welcome; Studio Mode's column and viewer lines.
+    - [x] **N.5.1a Main window and Studio Mode** (branch ui/console-main):
+      the viewer line and preview frame, the control bar (selected
+      source, LCD, transport, master level, Properties/Filters capsule,
+      pane toggles), the Scenes, Sources, Audio Mixer, Scene Transitions
+      and Controls docks, the status bar with REC/LIVE details and free
+      space, toasts, Studio Mode's viewer lines and column, as the Main
+      window and Studio Mode boards draw them.
+    - [x] **N.5.1b Sheets, Settings and Welcome** (branch
+      ui/console-dialogs). Every dialog a Console sheet (glyph, Hubot
+      title, one line; grouped rows; Defaults left, the one yellow OK):
+      Properties with its preview well, Filters and Settings with
+      full-height sidebars (Settings' macOS list, summary footer),
+      Create/Select Source, Rename, Edit Transform, Transition
+      Properties, Advanced Audio, the profile and collection sheets,
+      About, the first run and Welcome. Open: Settings' summary has no
+      "~4.3 GB/h" (the engine exposes no estimate) and its disk badge
+      waits on Status.recording_free_bytes (ui/console-main); the
+      Properties well's time waits on a media position from the engine.
+    - [x] **N.5.1c Integration** (branch ui/console-integrate, from
+      ui/console with ui/console-main and ui/console-dialogs merged).
+      Conflicts resolved (both branches' `broadcast`/`sliders` icons kept,
+      the sheets' as `sheet-*`; the dropdown cap's SvgPath with
+      `on-control`); Settings' disk badge wired to
+      Status.recording_free_bytes; one `source_format`. Open: the master
+      level keeps the window redrawing while sound plays, even with the
+      mixer hidden (notes, Decisions 2026-10-13, Console integration).
+  - [x] **N.5.2 Critique fixes** (branch ui/console-integrate). The
+    fidelity and function critiques of 2f22005, checked against Paper
+    and fixed (notes, Decisions 2026-10-13, Console critique fixes):
+    - [x] Text weight: each Paper weight drawn with the next lighter
+      official cut (Theme `weight-*`, a recorded renderer compensation).
+    - [x] No setup and empty states as the Welcome board draws them
+      (EmptyState with Paper's glyphs, IDLE, dimmed zero LCD, faded
+      bands); menus' lane and red Remove; green only while streaming;
+      the LCD's templates; the destructive Remove button; the muted
+      strip; meter and streaming-glyph tokens; the 12-unit plus.
+    - [x] The program file's GB/h (shared estimate, Status for the CLI
+      and MCP), free space before a setup, stereo master level.
+    - [x] Keyboard and screen readers: strip ⋯ and ⇧F10, quick
+      transitions, Segmented from Custom, reset glyphs, the selected
+      source's file, the path field, Welcome's names, LCD descriptions.
+    - [x] Small windows: ISO lanes, fader minimum, band fields, Marker.
+    - [x] Cost: cached chrome layers; the master level a native layer
+      under the window (no redraw per step).
+    Open: the Properties well's time (needs a media position from the
+    engine); the contrast of two Paper values (Questions for Ryan).
 
 ### 7. Plugins
 
@@ -2307,3 +2376,88 @@ One line per finished task, newest last.
   and SIGTERM leave no child processes. Three-pair A/A benchmark automation
   reports noise correctly. actionlint, fmt, release all-target clippy and
   all 179 existing Rust tests pass. Hosted first-run steps in the e2e report.
+- N.5.0 (2026-10-13): the Console foundation on ui/console. Every Console
+  token from Paper in ui/theme.slint under Paper's names (97, plus the
+  literals the boards use: LCD, sheet, capsule, meter, shadow sizes);
+  Mona Sans 400/500/600/700, Hubot Sans 600 and Martian Mono 300 bundled
+  as their projects' static cuts with their OFL licences (their shaped
+  widths of the boards' labels are within a pixel of Paper's); the kit
+  restyled to the Components board, with new components (Lcd, LcdCell,
+  LcdTime, LcdHero, Capsule, CapsuleButton, TransportButton, MiniToggle,
+  MasterMeter, MeterBar, Badge, Tag, Rule, TextMenuButton, EmptyState,
+  SheetGlyph, SheetHeader, SheetFrame, RowGroup, GroupRow, GroupHeading,
+  GroupHint, Band, Inspector, QuickList, QuickRow, MenuView, ShownState),
+  the sheets hung 44px from the top with glyph, title and one line, and
+  NavList as the grouped sidebar. Verified offscreen: the gallery
+  (`--state kit`) drawn as the Components board, snapshot at 1440×3060
+  at 1x and 2x beside Paper's 1x and 2x exports (pairs in
+  /Volumes/IsocastBuild/console-foundation/pairs): every band starts on
+  the board's pixel row (146, 683, 1264, 1685, 2158, 2543) and the label
+  widths match; text draws heavier than Paper's (Skia, see notes). The
+  app's views (main, Studio Mode, menus, Properties, Filters, Transform,
+  Settings, toasts, a 1024×700 window, the kit's menu, dialog and
+  dropdown) drawn against an isolated engine; `--a11y` lists the docks,
+  the sheet, its sidebar tabs and buttons. Areas not restyled (N.5.1).
+- N.5.1a (2026-10-13): the main window and Studio Mode in Console on
+  ui/console-main (the WIP 7f210de checked against Paper and fixed, kit
+  fixes b823452: icons drew ~10% small through Slint's stroke-inset path
+  fit, now Paper's size and stroke; a field's disabled fade; the band
+  stepper). Verified offscreen at 1440x900, 1x and 2x, beside the Main
+  window and Studio Mode exports (pictures masked: 0.76-0.92% mean
+  difference; pairs, scores and contact sheets in
+  /Volumes/IsocastBuild/console-main/pairs), 20 views and states
+  (recording, REC/LIVE details, toasts, menus, hover, no docks, 1024 and
+  900 px windows); `--a11y` lists the rows, controls, menus and dialogs;
+  18 behaviours pass against an isolated engine (record, marker, split,
+  stop, scene switch, mute, ISO toggle, transition, Studio Mode preview
+  and takes, drag and undo, pane toggle); on isocast-m2-b idle 3.6% and
+  meters moving 21.5% of a core vs main's 3.8% and 21.2%.
+- N.5.1b (2026-10-13): the sheets, Settings and Welcome in Console on
+  ui/console-dialogs (WIP 42d2955 checked against Paper and finished).
+  Kit fixes: leading tokens a hair under their line heights (Slint
+  rounds text heights up, which made each such text 1px taller than
+  Paper's), toasts with Paper's edge and 2px gaps, NumberField `suffix`
+  and `fixed` ("1.00×"), Dialog `accessible-name`. Region scores against
+  the boards (mean absolute difference, 0-255, boards converted from
+  Display P3): Properties 1.65 (1x) / 1.46 (2x), Settings 2.77 / 2.70,
+  Welcome 3.14 / 2.99; the rows land on the boards' rows, what is left
+  is Skia's heavier text and data. Behaviours driven offscreen against
+  an isolated engine (OK, Cancel/Escape, Return, Apply, switches,
+  segments, steppers, typing, the sidebar, filters' eyes, a new
+  profile, dragging a sheet); `--a11y` lists every sheet and control.
+- N.5.1c (2026-10-13): the Console main window, Studio Mode and sheets
+  together on ui/console-integrate. fmt, clippy --all-targets -D warnings
+  and the 165 release tests clean. Offscreen, 52 views and states at
+  1440x900 (1x, 2x) and 900x600 beside the Paper exports
+  (/Volumes/IsocastBuild/console-integrate/compare): main window 0.86% /
+  0.79% (1x/2x, pictures masked), Studio Mode 0.92% / 0.75%, Properties
+  1.58 / 1.39, Settings › Output 2.66 / 2.59 (2.77 / 2.70 before the
+  disk badge), Welcome 3.10 / 2.95; the kit gallery against the
+  Components board 1.48% / 1.22% (the foundation's 1.57% / 1.32%); the
+  main window pixel-identical to ui/console-main's but for live content.
+  Both areas' behaviour runs pass (18/18 main, 19/19 sheets); `--a11y`
+  lists the sheets, their rows and controls. Real windows on
+  isocast-m2-b (cua-driver, benchmark lock): every in-window menu, the
+  dropdown, every menu-bar dialog (13), a canvas drag and Edit › Undo,
+  scene switches, Studio Mode takes by Transition, Fade, Cut and Return,
+  a pointer-started 7.6 s recording (ffprobe: H.264 1920x1080 60 fps +
+  AAC). CPU (3 runs each, alternating with main's 9cda72d): at rest
+  3.8% vs 3.5%; three tones 21.4% vs 19.9% (6 runs; ui/console-main's
+  own build 22.4%); with the mixer hidden 16.6% vs 3.7%, as the control
+  bar's master level redraws the window with the sound.
+- N.5.2 (2026-10-13): the Console critiques fixed on ui/console-integrate
+  (37c28c9, b71274c, ba7dbb2, 708e98c). Text a cut lighter than Paper's
+  weights (ink against the boards 1.48-1.54x → 1.24-1.28x for 400,
+  Welcome's title 1.20x → 1.04x); Welcome's window and every empty state
+  as the boards draw them (the whole Welcome window 0.77% → 0.49% from
+  its board); menus, signals, the LCD, the destructive button, the muted
+  strip, tokens; the program file's GB/h through Status; stereo master;
+  keyboard and screen-reader paths (strip ⋯ and ⇧F10, quick
+  transitions, Segmented, reset glyphs); small windows; the master level
+  as a native layer. Offscreen: 52 views at 1x/2x/900x600, behaviours
+  18/18 and 19/19, Tab orders, --a11y. isocast-m2-b (real window,
+  benchmark lock): menus, sheets, a strip's menu by keyboard, a recording
+  by the transport (ffprobe H.264 1080p60 + AAC), a Studio take, a drag
+  and Undo; CPU vs main 9cda72d (medians) at rest 3.3 vs 3.1%, tones
+  with the mixer shown 20.2 vs 20.0%, hidden 4.6 vs 4.0% (2f22005:
+  18.0%). fmt, clippy --workspace -D warnings, 166 release tests clean.

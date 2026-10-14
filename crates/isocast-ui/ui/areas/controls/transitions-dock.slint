@@ -1,78 +1,103 @@
-// The Scene Transitions dock (docs/design.md 3.21): the transition (one
-// per setup, so no + or −; scenes can override it), its properties gear
-// (none for Cut and Fade), and its duration in ms (disabled for Cut, and
-// for a Stinger, which lasts as long as its video).
+// The Scene Transitions dock (Paper "C. Console", Main window board; Final
+// Cut's inspector bands): the transition properties gear in the header
+// (none for Cut and Fade), then two 30px bands 1px apart: the transition
+// (one per setup, so no + or −; scenes can override it) and its duration
+// in ms (disabled for Cut, and for a Stinger, which lasts as long as its
+// video). With no setup yet both are there, faded (Paper's Welcome
+// board). In a narrow dock the fields give way before the labels.
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
-import { Dock, Dropdown, IconButton, NumberField, Tip } from "../../kit.slint";
+import { Band, Dropdown, IconButton, NumberField, PanelHeader, Tip } from "../../kit.slint";
 import { ControlsArea } from "state.slint";
 
-export component TransitionsDock inherits Dock {
-    title: "Scene Transitions";
+export component TransitionsDock inherits Rectangle {
+    background: Theme.surface-panel;
+    clip: true;
+    accessible-role: groupbox;
+    accessible-label: "Scene Transitions";
 
-    // Empty until there is a setup (the web app's Welcome).
-    if Ui.has-setup: VerticalLayout {
-        vertical-stretch: 1;
-        padding-top: Theme.space-2;
-        padding-bottom: Theme.space-2;
-        padding-left: Theme.pane-x;
-        padding-right: Theme.pane-x;
-        spacing: Theme.space-2;
-        alignment: start;
-
-        HorizontalLayout {
-            spacing: Theme.space-2;
-            Dropdown {
-                horizontal-stretch: 1;
-                min-width: 60px;
-                label: "Transition";
-                options: ControlsArea.transitions;
-                value: ControlsArea.transition;
-                enabled: Ui.has-setup;
-                selected(value) => { ControlsArea.choose-transition(value); }
-            }
-            // A full 28px icon button beside the 28px dropdown (3.17).
-            IconButton {
-                icon: Icons.settings;
-                label: "Transition properties";
-                enabled: Ui.has-setup && ControlsArea.has-properties;
-                clicked => { Ui.open-dialog("transition", ControlsArea.transition); }
+    VerticalLayout {
+        spacing: 0;
+        PanelHeader {
+            title: "Scene Transitions";
+            // Paper puts it 6px from the edge (the header keeps 8px):
+            // its last 2px hang past this slot.
+            Rectangle {
+                width: Theme.icon-button-xs - 2px;
+                IconButton {
+                    x: 0;
+                    y: (parent.height - self.height) / 2;
+                    compact: true;
+                    icon: Icons.settings;
+                    label: "Transition properties";
+                    enabled: Ui.has-setup && ControlsArea.has-properties;
+                    clicked => { Ui.open-dialog("transition", ControlsArea.transition); }
+                }
             }
         }
-        HorizontalLayout {
-            spacing: Theme.space-2;
-            Text {
-                width: 64px;
-                text: "Duration";
-                color: ControlsArea.has-duration ? Theme.text-2 : Theme.text-disabled;
-                font-size: Theme.fs-sm;
-                letter-spacing: Theme.tracking-sm;
-                vertical-alignment: center;
-            }
-            // Its tooltip says what it is for (a stinger's length is its
-            // video's).
-            Rectangle {
-                horizontal-stretch: 1;
-                min-width: 56px;
-                height: Theme.control-h;
-                HorizontalLayout {
-                    NumberField {
-                        horizontal-stretch: 1;
-                        max-width: 10000px;
-                        label: "Duration";
-                        value: ControlsArea.duration-ms;
-                        unit: "ms";
-                        minimum: 0;
-                        maximum: 10000;
-                        step: 50;
-                        enabled: ControlsArea.has-duration && Ui.has-setup;
-                        changed(value) => { ControlsArea.set-duration(round(value)); }
+
+        VerticalLayout {
+            vertical-stretch: 1;
+            padding-top: Theme.list-inset;
+            padding-bottom: Theme.list-inset;
+            spacing: 1px;
+            alignment: start;
+
+            Band {
+                label: "Transition";
+                dimmed: !Ui.has-setup;
+                VerticalLayout {
+                    alignment: center;
+                    Dropdown {
+                        min-width: Theme.band-field-min;
+                        preferred-width: Theme.band-field;
+                        max-width: Theme.band-field;
+                        small: true;
+                        enabled: Ui.has-setup;
+                        // The band fades whole.
+                        disabled-opacity: 1;
+                        label: "Transition";
+                        options: ControlsArea.transitions;
+                        value: ControlsArea.transition;
+                        selected(value) => { ControlsArea.choose-transition(value); }
                     }
                 }
-                Tooltip {
-                    Tip { text: ControlsArea.duration-tooltip; }
+            }
+            Band {
+                label: "Duration";
+                enabled: Ui.has-setup && ControlsArea.has-duration;
+                // Its tooltip says what it is for (a stinger's length is
+                // its video's).
+                Rectangle {
+                    min-width: Theme.band-field-min;
+                    preferred-width: Theme.band-field;
+                    max-width: Theme.band-field;
+                    VerticalLayout {
+                        alignment: center;
+                        NumberField {
+                            small: true;
+                            stepper: true;
+                            // Paper's band stepper: a line between the
+                            // arrows, the 8×5 arrows.
+                            stepper-rule: true;
+                            label: "Duration";
+                            value: ControlsArea.duration-ms;
+                            unit: "ms";
+                            minimum: 0;
+                            maximum: 10000;
+                            step: 50;
+                            enabled: Ui.has-setup && ControlsArea.has-duration;
+                            // Paper: the whole field at half (once, not
+                            // on top of a field's own fade).
+                            disabled-opacity: Theme.band-disabled-opacity;
+                            changed(value) => { ControlsArea.set-duration(round(value)); }
+                        }
+                    }
+                    Tooltip {
+                        Tip { text: ControlsArea.duration-tooltip; }
+                    }
                 }
             }
         }

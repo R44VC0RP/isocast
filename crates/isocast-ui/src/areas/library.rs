@@ -379,17 +379,17 @@ impl Library {
             app.close_dialog();
             return;
         };
-        area.set_remove_title(format!("Remove {}", title(kind)).into());
         let all = listing
             .as_ref()
             .map(|l| entries(l, kind))
             .unwrap_or_default();
         area.set_remove_heading(format!("Remove “{}”?", menu_label(now, all)).into());
         area.set_remove_note(
+            format!("Isocast switches to “{}” first.", menu_label(next, all)).into(),
+        );
+        area.set_remove_detail(
             format!(
-                "Isocast switches to “{}” first. The {}’s file is kept in the library’s deleted \
-                 folder.",
-                menu_label(next, all),
+                "The {}’s file is kept in the library’s deleted folder.",
                 kind.label()
             )
             .into(),

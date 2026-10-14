@@ -1,72 +1,190 @@
-// Dialogs (docs/design.md 3.11), as OBS has them: window-like panels over
-// a dimmed window, with a centred title bar (drag it to move the dialog,
-// double-click to put it back), a body, and a footer: a helper on the left
-// (Defaults, Reset) and the actions on the right (Cancel, then OK).
+// Sheets (Paper's Settings, Properties and "Recording output" sheets;
+// Tower's sheets): the app's dialogs. A sheet hangs 44px from the window's
+// top, centred, over a dimmed window: `surface-overlay`, a `line-strong`
+// edge, 12px corners and a deep shadow (0 20px 60px). Its header is a
+// 40px icon tile (the inset black, a `line-strong` edge, 10px corners, a
+// 22px glyph), a bold title (Hubot Sans 15/22 semibold) and one line of
+// explanation (13px `text-2`); then the body; then the footer: a helper on
+// the left (Defaults), the actions on the right (Cancel, then the one
+// yellow OK), 20px in, no rule above it.
 //
 // A dialog is modal: it lives in a popup that covers the window, so the
 // window behind can't be clicked, Tab stays inside it, and focus goes back
 // where it was when it closes. Escape cancels; Return accepts (from a
-// single-line field too, after the field commits).
+// single-line field too, after the field commits). Drag its header to
+// move it; double-click the header to put it back.
 //
 // Declare it where its state is and show it with an `if`:
 //
 //     if Ui.dialog == "rename": Dialog {
 //         title: "Rename";
+//         subtitle: "A new name for “Intro Clip”.";
+//         icon: Icons.text;
 //         dialog-width: 400px;
 //         accepted => { … }
 //         cancelled => { Ui.close-dialog(); }
 //         Form { FormRow { label: "Name"; TextField { auto-focus: true; } } }
 //     }
+//
+// The pieces are kit components too, for a sheet laid out otherwise
+// (Settings: its sidebar runs the full height, so it sets `header: false`
+// and `footer: false` and puts a SheetHeader and a DialogFooter in its
+// page column): SheetGlyph, SheetHeader, DialogFooter, and SheetFrame (a
+// sheet drawn in place, for the kit gallery).
 
 import { Theme, Motion } from "../theme.slint";
+import { Icon } from "../icons.slint";
 import { Button, ButtonVariant } from "buttons.slint";
 import { DialogKeys, Viewport } from "globals.slint";
 import { ToastStack } from "toast.slint";
 
-// The footer on its own, for a dialog that draws its own (`footer: false`).
+// The header's icon tile: 40px, the inset black, a `line-strong` edge,
+// 10px corners, the glyph 22px in `text-2` (strokes 1.65px, as Paper's
+// 1.2 units at 22px), and an optional accent part filled yellow (the
+// LED of Output's drive, the play mark of a media source).
+export component SheetGlyph inherits Rectangle {
+    // An `Icons.*` path (24 units).
+    in property <string> icon;
+    // A path in the same 24 units, filled `accent-text`.
+    in property <string> accent;
+    width: Theme.glyph;
+    height: Theme.glyph;
+    background: Theme.surface-inset;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    border-radius: Theme.r-glyph;
+    accessible-role: none;
+
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        path: root.icon;
+        size: Theme.icon-lg;
+        stroke-width: 1.65px;
+        color: Theme.text-2;
+    }
+    if root.accent != "": Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: Theme.icon-lg;
+        height: Theme.icon-lg;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.accent;
+        fill: Theme.accent-text;
+        stroke-width: 0;
+    }
+}
+
+// A sheet's header: the glyph, the title, the line under it. 20px above,
+// 16px below, `inset` at the sides (24px beside a sidebar). With
+// `one-line` (a Dialog's header, whose height is one line's) a long line
+// ends in "…" instead of wrapping over the title.
+export component SheetHeader inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> icon;
+    in property <string> icon-accent;
+    in property <length> inset: Theme.sheet-pad;
+    in property <bool> one-line;
+    accessible-role: none;
+    min-height: row.min-height;
+    preferred-height: row.preferred-height;
+
+    row := HorizontalLayout {
+        padding-top: Theme.space-5;
+        padding-bottom: Theme.space-4;
+        padding-left: root.inset;
+        padding-right: root.inset;
+        spacing: 14px;
+        if root.icon != "": VerticalLayout {
+            alignment: center;
+            SheetGlyph {
+                icon: root.icon;
+                accent: root.icon-accent;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-family: Theme.font-brand;
+                font-size: Theme.fs-lead;
+                font-weight: Theme.weight-semibold;
+                letter-spacing: Theme.tracking-lead;
+                height: Theme.lh-lead;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                color: Theme.text-2;
+                font-size: Theme.fs;
+                letter-spacing: Theme.tracking;
+                line-height-factor: Theme.leading;
+                min-height: Theme.lh;
+                vertical-alignment: center;
+                wrap: root.one-line ? TextWrap.no-wrap : TextWrap.word-wrap;
+                overflow: root.one-line ? TextOverflow.elide : TextOverflow.clip;
+                accessible-role: none;
+            }
+        }
+    }
+}
+
+// A sheet's footer, 68px: 20px around the 28px buttons. A helper on the
+// left (`extra-text`, in `text-2`) and a note beside it, the actions on the
+// right, 8px apart; OK is the yellow one, at least 72px wide and semibold,
+// or, when it destroys something (`ok-danger`), the destructive button
+// (`control` with a red label: Paper's Components "Destructive"). Under a
+// SheetSummary the buttons sit 4px below it (`pad-top`: Paper's Settings
+// sheet).
 export component DialogFooter inherits Rectangle {
     in property <string> ok-text: "OK";
     in property <bool> ok-enabled: true;
+    in property <bool> ok-danger;
     in property <string> cancel-text: "Cancel";
     in property <string> apply-text;
     in property <bool> apply-enabled: true;
     in property <string> extra-text;
     in property <bool> extra-enabled: true;
     in property <string> note;
+    in property <length> inset: Theme.sheet-pad;
+    in property <length> pad-top: Theme.space-5;
     callback ok();
     callback cancel();
     callback apply();
     callback extra();
 
-    height: Theme.dialog-foot;
+    height: root.pad-top + Theme.control-h + Theme.space-5;
     accessible-role: none;
 
-    Rectangle {
-        y: 0;
-        height: 1px;
-        background: Theme.line;
-    }
     HorizontalLayout {
-        padding-left: Theme.space-4;
-        padding-right: Theme.space-4;
+        padding-left: root.inset;
+        padding-right: root.inset;
+        padding-top: root.pad-top;
+        padding-bottom: Theme.space-5;
         spacing: Theme.space-2;
         alignment: stretch;
 
         if root.extra-text != "": VerticalLayout {
             alignment: center;
-            // Helpers on the left aren't held to 80px (web: only the
-            // actions on the right are).
             Button {
                 text: root.extra-text;
                 enabled: root.extra-enabled;
+                subdued: true;
                 clicked => { root.extra(); }
             }
         }
         if root.note != "": Text {
             text: root.note;
             color: Theme.text-3;
-            font-size: Theme.fs-sm;
-            letter-spacing: Theme.tracking-sm;
+            font-size: Theme.fs-xs;
+            letter-spacing: Theme.tracking-xs;
             vertical-alignment: center;
             overflow: elide;
         }
@@ -94,7 +212,7 @@ export component DialogFooter inherits Rectangle {
             alignment: center;
             Button {
                 text: root.ok-text;
-                variant: ButtonVariant.primary;
+                variant: root.ok-danger ? ButtonVariant.danger : ButtonVariant.primary;
                 enabled: root.ok-enabled;
                 footer: true;
                 clicked => { root.ok(); }
@@ -103,8 +221,73 @@ export component DialogFooter inherits Rectangle {
     }
 }
 
+// A sheet drawn in place (not modal): the frame, the header and the
+// children, then the footer if `footer`. The kit gallery's; Dialog draws
+// the same parts in its popup.
+export component SheetFrame inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> icon;
+    in property <string> icon-accent;
+    in property <bool> footer: true;
+    in property <string> ok-text: "OK";
+    in property <string> cancel-text: "Cancel";
+    in property <string> apply-text;
+    in property <bool> apply-enabled: true;
+    in property <string> extra-text;
+    callback ok();
+    callback cancel();
+
+    background: Theme.surface-overlay;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    border-radius: Theme.r-panel;
+    drop-shadow-color: Theme.shadow-sheet-color;
+    drop-shadow-blur: Theme.shadow-sheet-blur;
+    drop-shadow-offset-y: Theme.shadow-sheet-y;
+    min-height: column.min-height;
+    preferred-height: column.preferred-height;
+    accessible-role: groupbox;
+    accessible-label: root.title;
+
+    column := VerticalLayout {
+        padding: 1px;
+        spacing: 0;
+        if root.title != "": SheetHeader {
+            title: root.title;
+            subtitle: root.subtitle;
+            icon: root.icon;
+            icon-accent: root.icon-accent;
+        }
+        @children
+        if root.footer: DialogFooter {
+            ok-text: root.ok-text;
+            cancel-text: root.cancel-text;
+            apply-text: root.apply-text;
+            apply-enabled: root.apply-enabled;
+            extra-text: root.extra-text;
+            ok => { root.ok(); }
+            cancel => { root.cancel(); }
+        }
+    }
+}
+
 export component Dialog inherits Rectangle {
     in property <string> title;
+    // What screen readers call the sheet when its title alone doesn't say
+    // ("Properties for “Intro Clip”" where the title is the source's name).
+    in property <string> accessible-name;
+    // One line of explanation under the title.
+    in property <string> subtitle;
+    // The header's glyph (`Icons.*`) and its yellow part (see SheetGlyph).
+    in property <string> icon;
+    in property <string> icon-accent;
+    // The header (glyph, title, line); without it the title is only for
+    // screen readers, and the body starts at the sheet's top.
+    in property <bool> header: true;
+    // Without the header: how far down from the sheet's top a press where
+    // nothing else takes it moves the sheet (Settings: its page header).
+    in property <length> drag-height;
     in property <length> dialog-width: 560px;
     // 0 to fit the content (never taller than the window less 40px).
     in property <length> dialog-height: 0px;
@@ -112,6 +295,8 @@ export component Dialog inherits Rectangle {
     in property <bool> footer: true;
     in property <string> ok-text: "OK";
     in property <bool> ok-enabled: true;
+    // OK destroys something: the destructive button, not the yellow one.
+    in property <bool> ok-danger;
     in property <string> cancel-text: "Cancel";
     in property <string> apply-text;
     in property <bool> apply-enabled: true;
@@ -182,58 +367,70 @@ export component Dialog inherits Rectangle {
                 reject
             }
 
-            // The frame's 1px border top and bottom around a title bar of
-            // header − 1px: one more pixel than header + body + foot.
-            property <length> fit: root.dialog-height > 0 ? root.dialog-height : body.preferred-height + Theme.header + 1px + (root.footer ? Theme.dialog-foot : 0);
+            // The frame's 1px edge top and bottom, the header (20 + 16
+            // around its glyph, or its title and one line), the body and
+            // the footer.
+            property <length> head-h: root.header ? Theme.space-5 + Theme.space-4 + max(root.icon != "" ? Theme.glyph : 0px, Theme.lh-lead + (root.subtitle != "" ? 2px + Theme.lh : 0px)) : 0px;
+            property <length> fit: root.dialog-height > 0 ? root.dialog-height : body.preferred-height + self.head-h + 2px + (root.footer ? Theme.dialog-foot : 0);
             property <length> h: min(self.fit, parent.height - 40px);
             property <length> w: min(root.dialog-width, parent.width - 40px);
 
             frame := Rectangle {
-                // Centred; moved by its title bar, which stays on screen.
+                // Hung from the top, centred across; moved by its header,
+                // which stays on screen.
                 x: max(80px - parent.w, min(parent.width - 80px, (parent.width - parent.w) / 2 + root.offset-x));
-                y: max(0px, min(parent.height - 40px, (parent.height - parent.h) / 2 + root.offset-y));
+                y: max(0px, min(parent.height - 40px, max(Theme.space-5, min(Theme.sheet-top, parent.height - parent.h - Theme.space-5)) + root.offset-y));
                 width: parent.w;
                 height: parent.h;
-                background: Theme.surface-panel;
+                background: Theme.surface-overlay;
                 border-width: 1px;
                 border-color: Theme.line-strong;
                 border-radius: Theme.r-panel;
-                drop-shadow-color: Theme.shadow-color;
-                drop-shadow-blur: Theme.shadow-blur;
-                drop-shadow-offset-y: Theme.shadow-y;
+                drop-shadow-color: Theme.shadow-sheet-color;
+                drop-shadow-blur: Theme.shadow-sheet-blur;
+                drop-shadow-offset-y: Theme.shadow-sheet-y;
+                clip: true;
                 opacity: root.shown ? 1 : 0;
                 animate opacity { duration: Theme.med; easing: Motion.ease; }
                 accessible-role: groupbox;
-                accessible-label: root.title;
+                accessible-label: root.accessible-name != "" ? root.accessible-name : root.title;
+
+                // A header the body draws itself: drag where its own
+                // controls don't take the press.
+                if !root.header && root.drag-height > 0: TouchArea {
+                    y: 0;
+                    height: root.drag-height;
+                    pointer-event(event) => {
+                        if event.kind == PointerEventKind.down {
+                            root.drag-x = root.offset-x;
+                            root.drag-y = root.offset-y;
+                        }
+                    }
+                    moved => {
+                        root.offset-x = root.drag-x + self.mouse-x - self.pressed-x;
+                        root.offset-y = root.drag-y + self.mouse-y - self.pressed-y;
+                    }
+                    double-clicked => {
+                        root.offset-x = 0;
+                        root.offset-y = 0;
+                    }
+                }
 
                 VerticalLayout {
                     padding: 1px;
                     spacing: 0;
 
-                    // The title bar: drag it to move the dialog.
-                    Rectangle {
-                        height: Theme.header - 1px;
-                        background: Theme.surface-chrome;
-                        border-top-left-radius: Theme.r-panel - 1px;
-                        border-top-right-radius: Theme.r-panel - 1px;
-                        Text {
-                            x: Theme.space-4;
-                            width: parent.width - 2 * Theme.space-4;
-                            height: parent.height - 1px;
-                            text: root.title;
-                            color: Theme.text-2;
-                            font-size: Theme.fs-sm;
-                            letter-spacing: Theme.tracking-sm;
-                            font-weight: Theme.weight-semibold;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                            overflow: elide;
-                            accessible-role: none;
-                        }
-                        Rectangle {
-                            y: parent.height - 1px;
-                            height: 1px;
-                            background: Theme.line;
+                    // The header: drag it to move the sheet.
+                    if root.header: Rectangle {
+                        height: keys.head-h;
+                        SheetHeader {
+                            width: parent.width;
+                            height: parent.height;
+                            one-line: true;
+                            title: root.title;
+                            subtitle: root.subtitle;
+                            icon: root.icon;
+                            icon-accent: root.icon-accent;
                         }
                         TouchArea {
                             pointer-event(event) => {
@@ -254,8 +451,7 @@ export component Dialog inherits Rectangle {
                     }
 
                     // The body scrolls when the window is shorter than its
-                    // content can shrink to (the web app's `.dialog-body`
-                    // has overflow-y: auto); otherwise it fills the dialog
+                    // content can shrink to; otherwise it fills the sheet
                     // (stretching rows, like a form's own ScrollArea, grow).
                     body-area := Rectangle {
                         vertical-stretch: 1;
@@ -301,6 +497,7 @@ export component Dialog inherits Rectangle {
                     if root.footer: DialogFooter {
                         ok-text: root.ok-text;
                         ok-enabled: root.ok-enabled;
+                        ok-danger: root.ok-danger;
                         cancel-text: root.cancel-text;
                         apply-text: root.apply-text;
                         apply-enabled: root.apply-enabled;

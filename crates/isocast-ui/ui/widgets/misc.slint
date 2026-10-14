@@ -1,21 +1,32 @@
-// Small pieces: keycaps, the spinner, status dots.
+// Small pieces (Paper "Components" › Keys, badges and tags): keycaps,
+// capsule badges, the viewer's line tags, status dots, the spinner, and an
+// empty dock's caption.
 
 import { Theme } from "../theme.slint";
+import { Icon, Icons, SvgPath } from "../icons.slint";
+import { FocusRing, ShownState } from "focus.slint";
 
-// A flat keycap (3.12): 20px, 6px padding, meta type, a 1px edge.
+// A keycap: 20px, 6px in, 5px corners on `control`, a darker lower edge,
+// 11px medium in `text-2`.
 export component Kbd inherits Rectangle {
     in property <string> text;
     height: Theme.kbd;
     min-width: max(Theme.kbd, label.preferred-width + 12px);
-    border-radius: Theme.r;
+    border-radius: Theme.r-compact;
     background: Theme.control;
-    border-width: 1px;
-    border-color: Theme.line-strong;
+    clip: true;
     accessible-role: AccessibleRole.text;
     accessible-label: root.text;
+    // Paper's `inset 0 -1px 0 #00000080`: Slint has no inset shadow, so a
+    // 1px line inside the bottom edge (clipped to the corners).
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.kbd-edge;
+    }
     label := Text {
         text: root.text;
-        color: Theme.text;
+        color: Theme.text-2;
         font-size: Theme.fs-xs;
         letter-spacing: Theme.tracking-xs;
         font-weight: Theme.weight-medium;
@@ -23,6 +34,75 @@ export component Kbd inherits Rectangle {
         vertical-alignment: center;
         accessible-role: none;
     }
+}
+
+export enum BadgeTone {
+    // `control` with `text-2`: ISO, 1080p60, Not in mix, READY.
+    neutral,
+    // Green tint: LIVE, PGM.
+    live,
+    // Red tint: REC.
+    rec,
+}
+
+// An 18px capsule badge, 10px semibold caps, 7px in; with a dot before the
+// word when `dot` (5px, 4px gap; the status bar's are 6px, 5px gap:
+// `status`).
+export component Badge inherits Rectangle {
+    in property <string> text;
+    in property <BadgeTone> tone: BadgeTone.neutral;
+    in property <bool> dot;
+    in property <bool> status;
+    // The neutral badge's dot (`text-3` in the status bar's READY).
+    in property <color> dot-color: root.tone == BadgeTone.live ? Theme.onair : root.tone == BadgeTone.rec ? Theme.danger : Theme.text-3;
+
+    height: Theme.badge-h;
+    min-width: row.min-width;
+    preferred-width: row.preferred-width;
+    horizontal-stretch: 0;
+    border-radius: self.height / 2;
+    background: root.tone == BadgeTone.live ? Theme.onair-soft : root.tone == BadgeTone.rec ? Theme.danger-soft : Theme.control;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+
+    row := HorizontalLayout {
+        padding-left: 7px;
+        padding-right: 7px;
+        spacing: root.status ? 5px : 4px;
+        alignment: center;
+        if root.dot: VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: root.status ? 6px : 5px;
+                height: self.width;
+                border-radius: self.width / 2;
+                background: root.dot-color;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.tone == BadgeTone.live ? Theme.onair-text : root.tone == BadgeTone.rec ? Theme.danger-text : Theme.text-2;
+            font-size: Theme.fs-micro;
+            letter-spacing: Theme.tracking-micro;
+            font-weight: Theme.weight-semibold;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+export enum TagTone { preview, program, neutral }
+
+// A viewer's line tag: Hubot Sans caps, 10px semibold, tracked 0.12em;
+// yellow for PREVIEW, green for PROGRAM. Also the LCD's labels.
+export component Tag inherits Text {
+    in property <TagTone> tone: TagTone.neutral;
+    color: root.tone == TagTone.preview ? Theme.accent-text : root.tone == TagTone.program ? Theme.onair-text : Theme.text-3;
+    font-family: Theme.font-brand;
+    font-size: Theme.fs-micro;
+    font-weight: Theme.weight-semibold;
+    letter-spacing: Theme.tracking-tag;
+    vertical-alignment: center;
 }
 
 // A turning ring: work under way (18px, or 14px `small`). It keeps
@@ -54,10 +134,11 @@ export component Spinner inherits Rectangle {
     }
 }
 
-// An 8px round light: REC, a scene on air, a source's state.
+// A 7px round light: REC, program, stream health (ok green, lagging
+// orange, bad red, off `text-disabled`).
 export component Dot inherits Rectangle {
     in property <color> dot-color: Theme.text-3;
-    // Square (1px corners) instead: stream health, so it never looks like REC.
+    // Square (1px corners) instead.
     in property <bool> square;
     // Pulse (opening, starting).
     in property <bool> pulse;
@@ -67,4 +148,155 @@ export component Dot inherits Rectangle {
     background: root.dot-color;
     opacity: root.pulse ? 0.675 + 0.325 * cos((animation-tick() / 1200ms) * 360deg) : 1;
     accessible-role: none;
+}
+
+// An empty dock or picture (Paper "Components" › Empty state, and the
+// Welcome board's docks): a 40px glyph in `text-disabled` (its strokes
+// 1.2 units, as Paper draws them) over a 13px caption in `text-3`, both
+// centred in the whole area, 16px in from its sides; `gap` apart (12px
+// on the Components board, 10px in the docks: Theme.empty-gap-dock). An
+// action (a button) can go in as a child, under the caption.
+export component EmptyState inherits Rectangle {
+    in property <string> icon;
+    in property <string> text;
+    in property <length> gap: Theme.space-3;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+
+    VerticalLayout {
+        alignment: center;
+        padding-left: Theme.space-4;
+        padding-right: Theme.space-4;
+        spacing: root.gap;
+        if root.icon != "": HorizontalLayout {
+            alignment: center;
+            SvgPath {
+                width: 40px;
+                height: 40px;
+                commands: root.icon;
+                stroke: Theme.text-disabled;
+                // 1.2 of the 24 units at 40px.
+                stroke-width: 2px;
+                stroke-line-cap: round;
+                stroke-line-join: round;
+                fill: transparent;
+                accessible-role: none;
+            }
+        }
+        Text {
+            text: root.text;
+            color: Theme.text-3;
+            font-size: Theme.fs;
+            letter-spacing: Theme.tracking;
+            line-height-factor: Theme.leading;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            accessible-role: none;
+        }
+        @children
+    }
+}
+
+// A short upright rule between readouts (the status bar's, the LCD's
+// neighbours): 1px of `line-strong`, 12px tall (14 in the control bar's
+// capsule).
+export component Rule inherits Rectangle {
+    in property <length> length: 12px;
+    width: 1px;
+    accessible-role: none;
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: 1px;
+        height: root.length;
+        background: Theme.line-strong;
+    }
+}
+
+// A pull-down in words (the viewer line's "Fit 64% ⌄" and "View ⌄"): an
+// 11px `text-2` label, an optional Martian Mono value, a 10px `text-3`
+// chevron, 4px apart; `text` under the pointer. It asks for its menu with
+// `clicked` (the caller shows it, e.g. `Menus.request`).
+export component TextMenuButton inherits Rectangle {
+    in property <string> text;
+    in property <string> value;
+    in property <bool> enabled: true;
+    in property <bool> menu-open;
+    // Draw a state regardless of the pointer (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
+    callback clicked();
+
+    forward-focus: fs;
+    property <bool> keyboard;
+    property <bool> lit: (ta.has-hover || root.shown == ShownState.hover || root.menu-open) && root.enabled;
+
+    height: Theme.lh-xs + 4px;
+    min-width: row.min-width;
+    preferred-width: row.preferred-width;
+    horizontal-stretch: 0;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-value: root.value;
+    accessible-enabled: root.enabled;
+    accessible-expandable: true;
+    accessible-expanded: root.menu-open;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" || event.text == Key.DownArrow {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    row := HorizontalLayout {
+        spacing: Theme.space-1;
+        Text {
+            text: root.text;
+            color: root.lit ? Theme.text : Theme.text-2;
+            font-size: Theme.fs-xs;
+            letter-spacing: Theme.tracking-xs;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+        if root.value != "": Text {
+            text: root.value;
+            color: root.lit ? Theme.text : Theme.text-2;
+            font-family: Theme.font-mono;
+            font-size: Theme.fs-xs;
+            font-weight: Theme.weight-light;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                path: Icons.chevron-down;
+                size: 10px;
+                // Paper: 2.5 units at 10px.
+                stroke-width: 1.05px;
+                color: root.lit ? Theme.text-2 : Theme.text-3;
+            }
+        }
+    }
+
+    FocusRing {
+        shown: (fs.has-focus && root.keyboard) || root.shown == ShownState.focus;
+        radius: 3px;
+    }
 }

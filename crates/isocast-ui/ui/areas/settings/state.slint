@@ -71,7 +71,12 @@ export global SettingsArea {
     // ---- The Settings dialog
     // Settings' pages, and the one showing.
     in-out property <[NavTab]> tabs;
-    in-out property <string> tab: "general";
+    in-out property <string> tab: "output";
+    // The page's header: its name, one line of what it is for, and its
+    // glyph (by name).
+    in-out property <string> page-title;
+    in-out property <string> page-about;
+    in-out property <string> page-icon;
     // A note at the top of Stream (why it opened: "Add your stream key
     // first."), until the stream is ready.
     in-out property <string> notice;
@@ -86,6 +91,21 @@ export global SettingsArea {
     callback ok();
     callback cancel();
     callback tab-chosen(string);
+    // A group's reset glyph: put its fields back as saved ("recording",
+    // "program", "iso").
+    callback revert-group(string);
+    // The sheet's summary (Paper's Settings footer): the canvas ("1920×1080
+    // | 30 fps"), the program's sound ("Stereo 48 kHz") and its files
+    // ("H.264 · MOV"), from the draft.
+    in-out property <string> summary-video;
+    in-out property <string> summary-audio;
+    in-out property <string> summary-codec;
+    // How fast the program file fills the disk at most ("~4.3 GB/h": the
+    // estimate the free-space check uses), "" when no program is recorded.
+    in-out property <string> summary-rate;
+    // The recording folder's disk ("212 GB free"), the summary's badge;
+    // "" when the engine hasn't said.
+    in-out property <string> summary-free;
 
     // A field of the draft changed, by its name (settings.rs: FIELDS).
     callback set-text(string, string);
@@ -134,14 +154,20 @@ export global SettingsArea {
 
     // ---- Output
     in-out property <string> folder;
-    // Recording Quality: the stop it is exactly (-1: Custom), where the
-    // thumb is, and what it says under the slider.
+    // The same shortened in the middle, for the field at rest.
+    in property <string> folder-short;
+    // Recording Quality: the stop it is exactly (-1: Custom: none of the
+    // segments is chosen), and whether it can be chosen (not for ProRes).
     in-out property <int> quality-stop: 2;
-    in-out property <int> quality-at: 2;
+    // Where a Custom quality sits among the stops (1.5: between Medium and
+    // High), so → and ← go to the next stop that way.
+    in-out property <float> quality-position: -1;
     in-out property <bool> quality-disabled;
     // Output's Advanced disclosure (each one's quality number) is open.
     in-out property <bool> quality-advanced;
-    in-out property <string> quality-status;
+    // The Advanced row's "Quality value" ("60"; "60 · ISO 50" when they
+    // differ; "Fixed" for ProRes).
+    in-out property <string> quality-value;
     in-out property <float> program-quality;
     in-out property <float> iso-quality;
     in-out property <float> keep-free;

@@ -33,9 +33,10 @@ export global LibraryArea {
     in property <string> name-heading;
     in-out property <string> name;
     // ---- Remove ("library-remove", arg: KIND)
-    in property <string> remove-title;
     in property <string> remove-heading;
+    // The sheet's one line (what happens first), then where the file goes.
     in property <string> remove-note;
+    in property <string> remove-detail;
 
     // An entry of a menu's list: kind ("collection" or "profile"), id.
     callback switch-to(string, string);

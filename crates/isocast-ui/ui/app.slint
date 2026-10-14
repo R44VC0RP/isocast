@@ -1,8 +1,9 @@
-// The Isocast window, laid out as OBS Studio's default (docs/design.md
-// 3.1): the preview on top, the source toolbar under it, then the Scenes,
-// Sources, Audio Mixer, Scene Transitions and Controls docks with
-// splitters between them, and the status bar; menus, dialogs and toasts
-// over everything. Each part is an area's (ui/areas/, see
+// The Isocast window, laid out as OBS Studio's default in the Console
+// design (Paper "C. Console", Main window board): the preview on top with
+// its viewer line, the control bar under it (the source toolbar's parts,
+// the LCD, the transport), then the Scenes, Sources, Audio Mixer, Scene
+// Transitions and Controls docks with splitters between them, and the
+// status bar; menus, dialogs and toasts over everything. Each part is an area's (ui/areas/, see
 // src/areas/mod.rs); this file only puts them in place, so it changes
 // rarely. Every change goes to isocastd through callbacks the Rust side
 // answers; nothing here holds state the daemon owns.
@@ -19,13 +20,13 @@ import { Stage } from "areas/canvas/stage.slint";
 import { SourcesArea } from "areas/sources/state.slint";
 import { ScenesDock } from "areas/sources/scenes-dock.slint";
 import { SourcesDock } from "areas/sources/sources-dock.slint";
-import { SourceToolbar } from "areas/sources/source-toolbar.slint";
 import { SourcesDialogs } from "areas/sources/dialogs.slint";
 import { MixerArea } from "areas/mixer/state.slint";
 import { MixerDock } from "areas/mixer/mixer-dock.slint";
 import { MixerDialogs } from "areas/mixer/dialogs.slint";
 import { ControlsArea } from "areas/controls/state.slint";
 import { ControlsDock } from "areas/controls/controls-dock.slint";
+import { ControlBar } from "areas/controls/control-bar.slint";
 import { TransitionsDock } from "areas/controls/transitions-dock.slint";
 import { StatusBar } from "areas/controls/statusbar.slint";
 import { ControlsDialogs } from "areas/controls/dialogs.slint";
@@ -46,7 +47,7 @@ export { FileRow } from "areas/controls/state.slint";
 export { DeviceChoice, HotkeyGroup, HotkeyRow, IsoChoice, MicRow, PermissionRow, ServiceChoice } from "areas/settings/state.slint";
 export { LibraryRow } from "areas/library/state.slint";
 
-// The preview, the source toolbar, the docks.
+// The preview, the control bar, the docks.
 component Workspace inherits VerticalLayout {
     // The edited monitor's place (see Stage).
     out property <length> area-x: stage.area-x;
@@ -76,6 +77,11 @@ component Workspace inherits VerticalLayout {
     out property <length> stage-y: stage.stage-y;
     out property <length> stage-width: stage.stage-width;
     out property <length> stage-height: stage.stage-height;
+    // The control bar's master level's inside (its native layer).
+    out property <length> meter-x: bar.meter-x;
+    out property <length> meter-y: bar.meter-y;
+    out property <length> meter-width: bar.meter-width;
+    out property <length> meter-height: bar.meter-height;
 
     // The window is redrawn whole for every change (the mixer's meters
     // 30 times a second, and every video frame with `--preview image`):
@@ -85,8 +91,9 @@ component Workspace inherits VerticalLayout {
     // pictures (redrawn only for the meters) it draws directly.
     property <bool> cache-docks: true;
 
-    // The dock row's height: as set, or about a third of the window.
-    property <length> docks-height: Ui.docks-height > 0 ? Ui.docks-height : round(min(320px, max(224px, Viewport.height * 0.3)) / 1px) * 1px;
+    // The dock row's height: as set, or 4/15 of the window (240px of a
+    // 900px window, as on Paper's board), 224 to 320px.
+    property <length> docks-height: Ui.docks-height > 0 ? Ui.docks-height : round(min(320px, max(224px, Viewport.height * 4 / 15)) / 1px) * 1px;
 
     spacing: 0;
 
@@ -95,11 +102,14 @@ component Workspace inherits VerticalLayout {
         min-height: 80px;
     }
 
-    if Ui.show-source-toolbar: SourceToolbar {
-        cache-rendering-hint: root.cache-docks;
-    }
+    // The LCD moves every second while recording, and the master level
+    // with the sound, so the bar isn't kept as a layer.
+    bar := ControlBar { }
 
-    RowSplitter {
+    // The control bar's lower (black) edge is the splitter: no line of
+    // its own, the 7px grab around that edge.
+    if Ui.show-docks: RowSplitter {
+        height: 0px;
         size: root.docks-height;
         min-size: 120px;
         max-size: max(120px, Viewport.height - 220px);
@@ -110,11 +120,11 @@ component Workspace inherits VerticalLayout {
 
     // The docks share the width: the mixer takes what's left, and when the
     // window is narrow the docks give way down to their minimums (140,
-    // 170, 240, 160, 160: 874px with the splitters, under the window's
-    // 900px minimum), so Controls is never cut off. The hairline above
-    // counts in their height, as the web app's border does.
-    HorizontalLayout {
-        height: root.docks-height - 1px;
+    // 170, 228, 160, 172: 874px with the splitters, under the window's
+    // 900px minimum), so Controls (172: "Start Streaming" with its icon)
+    // is never cut off. They meet at 1px `line` gaps (the splitters).
+    if Ui.show-docks: HorizontalLayout {
+        height: root.docks-height;
         spacing: 0;
 
         if Ui.show-scenes: ScenesDock {
@@ -148,7 +158,7 @@ component Workspace inherits VerticalLayout {
         if Ui.show-mixer: MixerDock {
             // Kept for the video frames between meter steps in image mode.
             cache-rendering-hint: !CanvasArea.native-picture;
-            min-width: 240px;
+            min-width: 228px;
             horizontal-stretch: 1;
         }
         // Right of the mixer, the splitter resizes the dock after it.
@@ -162,7 +172,7 @@ component Workspace inherits VerticalLayout {
         }
         if Ui.show-mixer && !Ui.show-transitions && Ui.show-controls: ColumnSplitter {
             size: Ui.controls-width;
-            min-size: 160px;
+            min-size: 172px;
             sign: -1;
             locked: Ui.docks-locked;
             changing(width) => { Ui.controls-width = width; }
@@ -186,7 +196,7 @@ component Workspace inherits VerticalLayout {
         if Ui.show-controls: ControlsDock {
             cache-rendering-hint: root.cache-docks;
             preferred-width: Ui.controls-width;
-            min-width: 160px;
+            min-width: 172px;
             horizontal-stretch: 0;
         }
     }
@@ -230,6 +240,10 @@ export component AppWindow inherits Window {
     out property <length> stage-y: workspace.stage-y;
     out property <length> stage-width: workspace.stage-width;
     out property <length> stage-height: workspace.stage-height;
+    out property <length> master-meter-x: workspace.meter-x;
+    out property <length> master-meter-y: workspace.meter-y;
+    out property <length> master-meter-width: workspace.meter-width;
+    out property <length> master-meter-height: workspace.meter-height;
 
     // Snapshots: the widget kit on one page (`--state kit`), with its menu,
     // dropdown or dialog open.
@@ -256,6 +270,8 @@ export component AppWindow inherits Window {
     background: CanvasArea.native-picture ? transparent : Theme.surface-chrome;
     default-font-size: Theme.fs;
     default-font-family: Theme.font-ui;
+    // Paper's 400, drawn a cut lighter (Theme's "Drawn weights").
+    default-font-weight: Theme.weight-regular;
     forward-focus: keys;
 
     // Overlays size themselves to the window.
@@ -342,6 +358,7 @@ export component AppWindow inherits Window {
             MenuSeparator { }
             MenuItem { title: "Source Toolbar"; checkable: true; checked: Ui.show-source-toolbar; activated => { Ui.menu("source_toolbar"); } }
             MenuItem { title: "Status Bar"; checkable: true; checked: Ui.show-status-bar; activated => { Ui.menu("status_bar"); } }
+            MenuItem { title: "Docks"; checkable: true; checked: Ui.show-docks; activated => { Ui.menu("docks_pane"); } }
             MenuSeparator { }
             MenuItem { title: "Reset UI"; activated => { Ui.menu("reset_ui"); } }
         }
@@ -488,7 +505,10 @@ export component AppWindow inherits Window {
 
     MenuHost { }
 
+    // Under the viewer line (its Fit and View menus stay in reach), 12px
+    // in from the window's right.
     ToastStack {
         area-width: root.width;
+        y: Theme.statusbar + Theme.space-3;
     }
 }

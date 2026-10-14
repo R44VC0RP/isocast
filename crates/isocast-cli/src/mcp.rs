@@ -867,8 +867,10 @@ impl Isocast {
                        the stream (state, bitrates, dropped frames, congestion, reconnects, \
                        whether a key is set), the live engine's frame rate (engine.fps of \
                        canvas.fps), each live source's size and frame rate (engine.sources: \
-                       fps opened at, received_fps measured) and isocastd's CPU use \
-                       (cpu_percent, of all cores).",
+                       fps opened at, received_fps measured), isocastd's CPU use \
+                       (cpu_percent, of all cores), the recording disk's free space \
+                       (recording_free_bytes) and how fast the program file fills it at most \
+                       (program_bytes_per_second).",
         annotations(read_only_hint = true)
     )]
     async fn get_status(&self) -> Result<Json<Status>, String> {

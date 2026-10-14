@@ -828,6 +828,7 @@ impl Sources {
         menu = menu
             .item("remove", "Remove")
             .hint("⌫")
+            .danger()
             .separator()
             .submenu("Order", order_menu())
             .submenu("Transform", transform_menu())
@@ -904,7 +905,10 @@ impl Sources {
         menu = menu
             .item("duplicate", "Duplicate")
             .item("rename", "Rename")
+            // No ⌫: the key doesn't remove a scene (it removes the
+            // selected source), so the menu doesn't promise it.
             .item("remove", "Remove")
+            .danger()
             .separator()
             .submenu(
                 "Order",

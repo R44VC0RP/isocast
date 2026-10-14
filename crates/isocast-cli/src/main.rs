@@ -1536,6 +1536,8 @@ fn status(json: bool) -> Result<ExitCode> {
             timeline_problem: None,
             export: None,
             virtual_camera: None,
+            recording_free_bytes: None,
+            program_bytes_per_second: None,
         },
     };
     if json {
@@ -1578,6 +1580,12 @@ fn status(json: bool) -> Result<ExitCode> {
             export.progress * 100.0,
             export.export
         );
+    }
+    if let Some(free) = status.recording_free_bytes {
+        println!("Recording disk: {:.1} GB free", free as f64 / 1e9);
+    }
+    if let Some(rate) = status.program_bytes_per_second {
+        println!("Program file: up to ~{:.1} GB an hour", rate * 3600.0 / 1e9);
     }
     if let Some(data) = status.data.as_ref().filter(|data| data.keys > 0) {
         println!(

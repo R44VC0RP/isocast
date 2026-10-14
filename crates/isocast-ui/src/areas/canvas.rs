@@ -32,6 +32,7 @@ use super::{Area, Changed};
 use crate::app::App;
 use crate::frames::{Feed, Incoming};
 use crate::gpu::Gpu;
+use crate::kit::MenuBuilder;
 use crate::model;
 use crate::picture::{Scene as TestScene, TestPicture};
 use crate::preview::{BoxShape, BoxStyle, Output, Preview, Role};
@@ -1283,6 +1284,52 @@ impl Area for Canvas {
                 .into(),
             );
         }
+    }
+
+    /// The viewer line's menus: the zoom ("Fit 51% ⌄": Preview Scaling)
+    /// and View (the View menu's toggles).
+    fn context_menu(&self, app: &Rc<App>, owner: &str) -> Option<MenuBuilder> {
+        let window = app.window()?;
+        let ui = window.global::<Ui>();
+        match owner {
+            "viewer:scale" => {
+                let canvas = ui.get_preview_scale() == "canvas";
+                Some(
+                    MenuBuilder::new()
+                        .item("preview_scale_window", "Scale to Window")
+                        .checked(!canvas)
+                        .item("preview_scale_canvas", "Canvas (100%)")
+                        .checked(canvas),
+                )
+            }
+            "viewer:view" => Some(
+                MenuBuilder::new()
+                    .item("studio_mode", "Studio Mode")
+                    .hint("⇧⌘S")
+                    .checked(ui.get_studio())
+                    .separator()
+                    .item("source_toolbar", "Source Toolbar")
+                    .checked(ui.get_show_source_toolbar())
+                    .item("status_bar", "Status Bar")
+                    .checked(ui.get_show_status_bar())
+                    .item("docks_pane", "Docks")
+                    .checked(ui.get_show_docks())
+                    .separator()
+                    .item("lock_preview", "Lock Preview")
+                    .checked(ui.get_preview_locked())
+                    .separator()
+                    .item("reset_ui", "Reset UI"),
+            ),
+            _ => None,
+        }
+    }
+
+    fn menu_chosen(&self, app: &Rc<App>, owner: &str, id: &str) -> bool {
+        if !owner.starts_with("viewer:") {
+            return false;
+        }
+        app.menu(id);
+        true
     }
 
     fn menu(&self, app: &Rc<App>, id: &str) -> bool {

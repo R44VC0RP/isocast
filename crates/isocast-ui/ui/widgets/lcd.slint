@@ -1,0 +1,271 @@
+// The LCD (Logic's instrument display, Paper "Components" › Control bar):
+// a black window in the bar with the take's time, frames per second,
+// dropped frames and CPU, each a cell of 18px Martian Mono Light over a
+// 10px Hubot Sans caps label. Unused leading zeros are dimmed to 35%
+// ("00:" before "12:41"); an idle LCD is dimmed whole. The recording time
+// is red, the streaming time green; a cell turns orange when frames drop.
+//
+//     Lcd {
+//         LcdTime { seconds: 761; label: "REC"; tone: LcdTone.recording; }
+//         LcdCell { lead: "0"; value: "7.71"; label: "FPS"; template: "00.00"; }
+//         LcdCell { value: "0"; label: "DROPPED"; }
+//         LcdCell { value: "2.4%"; label: "CPU"; template: "00.0%"; last: true; }
+//     }
+//
+// A cell is as wide as its `template` (the widest number it shows) even
+// while its number is shorter, so the LCD never changes width as the
+// numbers do, as Logic's doesn't.
+//
+// Welcome's large readout is LcdHero.
+
+import { Theme } from "../theme.slint";
+
+export enum LcdTone {
+    normal,
+    // The recording time: red.
+    recording,
+    // The streaming time: green.
+    live,
+    // Frames dropping: an orange cell.
+    warning,
+}
+
+// The window: 36px, the inset black, a `line-strong` edge, 8px corners.
+// Its cells go in as children, side by side (an idle LCD: set `idle` on
+// each cell).
+export component Lcd inherits Rectangle {
+    height: Theme.lcd-h;
+    min-width: cells.min-width + 2px;
+    preferred-width: cells.preferred-width + 2px;
+    horizontal-stretch: 0;
+    background: Theme.surface-inset;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    border-radius: Theme.r-menu;
+    clip: true;
+    accessible-role: groupbox;
+    accessible-label: "Recording status";
+
+    cells := HorizontalLayout {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        spacing: 0;
+        @children
+    }
+}
+
+// One cell: `lead` (dimmed) then `value`, over `label`, 14px in on each
+// side, a hairline on its right unless it is the `last`.
+export component LcdCell inherits Rectangle {
+    // The unused leading zeros, drawn at 35% ("00:").
+    in property <string> lead;
+    // The rest of the number ("12:41", "29.93").
+    in property <string> value;
+    in property <string> label;
+    in property <LcdTone> tone: LcdTone.normal;
+    // Nothing running: the whole value at 35%.
+    in property <bool> idle;
+    // No hairline after it.
+    in property <bool> last;
+    // On its own (outside an Lcd): its own edge and corners.
+    in property <bool> standalone;
+    // The widest number the cell shows ("00.00"): its width at least.
+    in property <string> template;
+    // What screen readers add after the number (the tooltip's words).
+    in property <string> description;
+
+    property <color> ink: root.tone == LcdTone.recording ? Theme.danger-text
+        : root.tone == LcdTone.live ? Theme.onair-text
+        : root.tone == LcdTone.warning ? Theme.warning
+        : Theme.text;
+
+    min-width: column.min-width;
+    preferred-width: column.preferred-width;
+    height: root.standalone ? Theme.lcd-h : Theme.lcd-h - 2px;
+    background: root.tone == LcdTone.warning ? Theme.warning-soft : root.standalone ? Theme.surface-inset : transparent;
+    border-radius: root.standalone ? Theme.r-menu : 0;
+    border-width: root.standalone ? 1px : 0;
+    border-color: Theme.line-strong;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.label;
+    accessible-value: root.lead + root.value;
+    accessible-description: root.description;
+
+    // Measures the template (never drawn).
+    probe := Text {
+        visible: false;
+        text: root.template;
+        font-family: Theme.font-mono;
+        font-size: Theme.fs-lcd;
+        font-weight: Theme.weight-light;
+        accessible-role: none;
+    }
+
+    if !root.last && !root.standalone: Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.line;
+    }
+
+    column := VerticalLayout {
+        padding-left: Theme.lcd-pad;
+        padding-right: Theme.lcd-pad + (root.last || root.standalone ? 0px : 1px);
+        alignment: center;
+        spacing: 0;
+        HorizontalLayout {
+            alignment: center;
+            spacing: 0;
+            min-width: root.template != "" ? probe.preferred-width : 0px;
+            if root.lead != "": Text {
+                text: root.lead;
+                color: root.ink;
+                opacity: Theme.lcd-dim-opacity;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-lcd;
+                font-weight: Theme.weight-light;
+                height: Theme.lh-lcd;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+            if root.value != "": Text {
+                text: root.value;
+                color: root.ink;
+                opacity: root.idle ? Theme.lcd-dim-opacity : 1;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-lcd;
+                font-weight: Theme.weight-light;
+                height: Theme.lh-lcd;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+        }
+        Text {
+            text: root.label;
+            color: root.tone == LcdTone.warning ? Theme.warning : Theme.text-3;
+            font-family: Theme.font-brand;
+            font-size: Theme.fs-micro;
+            font-weight: Theme.weight-semibold;
+            letter-spacing: Theme.tracking-tag;
+            height: Theme.lh-lcd-label;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+// A time on the LCD, from whole seconds: HH:MM:SS with its unused leading
+// zeros dimmed ("00:" 12:41; "00:0" 1:01). 00:00:00 is dimmed whole.
+export component LcdTime inherits LcdCell {
+    in property <int> seconds;
+
+    property <int> h: floor(max(0, root.seconds) / 3600);
+    property <int> m: mod(floor(max(0, root.seconds) / 60), 60);
+    property <int> s: mod(max(0, root.seconds), 60);
+    property <string> hh: (root.h < 10 ? "0" : "") + root.h;
+    property <string> mm: (root.m < 10 ? "0" : "") + root.m;
+    property <string> ss: (root.s < 10 ? "0" : "") + root.s;
+
+    lead: root.h >= 10 ? ""
+        : root.h > 0 ? "0"
+        : root.m >= 10 ? "00:"
+        : root.m > 0 ? "00:0"
+        : root.s >= 10 ? "00:00:"
+        : root.s > 0 ? "00:00:0"
+        : "00:00:00";
+    value: root.h >= 10 ? root.hh + ":" + root.mm + ":" + root.ss
+        : root.h > 0 ? root.h + ":" + root.mm + ":" + root.ss
+        : root.m >= 10 ? root.mm + ":" + root.ss
+        : root.m > 0 ? root.m + ":" + root.ss
+        : root.s >= 10 ? root.ss
+        : root.s > 0 ? "" + root.s
+        : "";
+}
+
+// Welcome's hero readout: 44px Martian Mono Light (tracked −0.01em) over a
+// dot and a Hubot caps label, 28px in, on the inset black with the LCD's
+// edge and corners. Decoration (Welcome's idle readout): screen readers
+// skip it.
+export component LcdHero inherits Rectangle {
+    in property <string> lead;
+    in property <string> value;
+    in property <string> label: "REC TIME";
+    in property <color> dot-color: Theme.text-disabled;
+    in property <color> ink: Theme.text;
+
+    min-width: column.min-width + 2px;
+    preferred-width: column.preferred-width + 2px;
+    height: column.preferred-height + 2px;
+    horizontal-stretch: 0;
+    background: Theme.surface-inset;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    border-radius: Theme.r-menu;
+    accessible-role: none;
+
+    column := VerticalLayout {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        // Not the frame's height: the layout would share out the edge's
+        // 2px and set the digits half a pixel low.
+        height: parent.height - 2px;
+        padding-top: 12px;
+        padding-bottom: 10px;
+        padding-left: 28px;
+        padding-right: 28px;
+        spacing: Theme.space-1;
+        HorizontalLayout {
+            alignment: center;
+            if root.lead != "": Text {
+                text: root.lead;
+                color: root.ink;
+                opacity: Theme.lcd-dim-opacity;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-lcd-hero;
+                font-weight: Theme.weight-light;
+                letter-spacing: Theme.tracking-lcd-hero;
+                height: Theme.lh-lcd-hero;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+            if root.value != "": Text {
+                text: root.value;
+                color: root.ink;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-lcd-hero;
+                font-weight: Theme.weight-light;
+                letter-spacing: Theme.tracking-lcd-hero;
+                height: Theme.lh-lcd-hero;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+        }
+        HorizontalLayout {
+            alignment: center;
+            spacing: 6px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 3px;
+                    background: root.dot-color;
+                }
+            }
+            Text {
+                text: root.label;
+                color: Theme.text-3;
+                font-family: Theme.font-brand;
+                font-size: Theme.fs-micro;
+                font-weight: Theme.weight-semibold;
+                letter-spacing: Theme.tracking-tag;
+                height: Theme.lh-micro;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+        }
+    }
+}

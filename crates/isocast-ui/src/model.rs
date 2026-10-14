@@ -223,6 +223,36 @@ pub fn db_text(db: f64) -> String {
     text.replacen('-', "\u{2212}", 1)
 }
 
+/// What the engine says a running source is, as the control bar shows it
+/// after its name: "1920×1080 · 30p · Stereo" (the parts it has).
+pub fn source_format(status: &isocast_protocol::api::SourceStatus) -> String {
+    let mut parts = Vec::new();
+    if let (Some(w), Some(h)) = (status.width, status.height) {
+        parts.push(format!("{w}×{h}"));
+    }
+    if let Some(fps) = status.fps.filter(|f| *f > 0) {
+        parts.push(format!("{fps}p"));
+    }
+    match status.channels {
+        Some(1) => parts.push("Mono".into()),
+        Some(2) => parts.push("Stereo".into()),
+        Some(n) if n > 2 => parts.push(format!("{n} channels")),
+        _ => {}
+    }
+    parts.join(" · ")
+}
+
+/// "212 GB free", "3.2 GB free" (decimal gigabytes, as Finder counts): the
+/// status bar's readout and Settings' disk badge.
+pub fn gigabytes_free(bytes: u64) -> String {
+    let gb = bytes as f64 / 1e9;
+    if gb >= 10.0 {
+        format!("{gb:.0} GB free")
+    } else {
+        format!("{gb:.1} GB free")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +264,11 @@ mod tests {
         assert_eq!(next_name("Scene", ["Scene 1", "Scene 2"]), "Scene 3");
         assert_eq!(db_text(-12.0), "\u{2212}12.0 dB");
         assert_eq!(db_text(3.0), "+3.0 dB");
+        let clip: isocast_protocol::api::SourceStatus = serde_json::from_value(json!({
+            "source": "clip", "state": "running", "width": 1920, "height": 1080,
+            "fps": 30, "channels": 2,
+        }))
+        .unwrap();
+        assert_eq!(source_format(&clip), "1920×1080 · 30p · Stereo");
     }
 }

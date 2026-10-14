@@ -1,25 +1,91 @@
-// The Sources dock (the web app's sources.js): the items of the scene
-// being edited, the front one at the top, as in OBS, groups' children
-// under them (their chevron folds them). Each row has the source's kind
-// icon and name, its state, then ISO (records the source to its own file;
-// shown on hover, copper when on), eye (visible) and lock. A click
+// The Sources dock (Paper "C. Console", Main window board; the web app's
+// sources.js): the items of the scene being edited, the front one at the
+// top, as in OBS, groups' children under them (their chevron folds them).
+// Each 30px pill row has the source's kind icon and name, its state, then
+// a 40px ISO lane (the grey ISO badge while it records its own file; on
+// hover a faint one to turn that on), eye (visible) and lock. A click
 // selects (the canvas shows the box), double-click opens Properties, F2
-// renames, a drag restacks; the toolbar adds (a menu of kinds), removes,
-// opens Properties and moves the item; right-click opens the item's menu
-// (away from the items: Add and Paste). Hovering a row outlines its item
-// on the canvas.
+// renames, a drag restacks; the toolbar's capsules add (a menu of kinds),
+// remove and open Properties, and move the item; right-click opens the
+// item's menu (away from the items: Add and Paste). Hovering a row
+// outlines its item on the canvas.
 
 import { Theme } from "../../theme.slint";
 import { Icon, Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
 import {
-    Dock, DockToolbar, Dot, DropLine, IconButton, List, ListEmpty, ListRow, Menus, TextField,
-    Tip, ToolbarGap,
+    Badge, Capsule, CapsuleButton, CapsuleDivider, Dock, DockToolbar, Dot, DropLine, FocusRing,
+    IconButton, List, ListRow, Menus, TextField, Tip,
 } from "../../kit.slint";
 import { CanvasArea } from "../canvas/state.slint";
 import { SourcesArea } from "state.slint";
 
+// A row's ISO lane (Paper: 40px, the badge at its end): the grey ISO
+// badge while the source records its own file; while the row is hovered
+// (or the lane has keyboard focus) a faint one to turn that on. A click
+// turns it on or off.
+component IsoToggle inherits Rectangle {
+    in property <bool> on;
+    in property <bool> row-hovered;
+    // A narrow dock: the lane is only as wide as its badge, and takes no
+    // room while it shows nothing (ISO off, the row neither hovered nor
+    // focused), so the name keeps it.
+    in property <bool> collapsible;
+    callback clicked();
+
+    forward-focus: fs;
+    property <bool> keyboard;
+    property <bool> lit: root.on || root.row-hovered || fs.has-focus;
+
+    width: !root.collapsible ? Theme.lane : root.lit ? badge.preferred-width : 0px;
+    accessible-role: button;
+    accessible-label: root.on ? "Records its own ISO file; click to stop" : "Record its own ISO file";
+    accessible-checkable: true;
+    accessible-checked: root.on;
+    accessible-action-default => { root.clicked(); }
+
+    badge := Badge {
+        x: parent.width - self.width;
+        // Its own width (out of a layout an element takes its parent's).
+        width: self.preferred-width;
+        y: (parent.height - self.height) / 2;
+        visible: root.lit;
+        text: "ISO";
+        opacity: root.on ? 1 : ta.has-hover ? 0.7 : Theme.disabled-opacity;
+    }
+    ta := TouchArea {
+        x: badge.x;
+        width: badge.width;
+        clicked => { root.clicked(); }
+    }
+    fs := FocusScope {
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    FocusRing {
+        x: badge.x;
+        y: badge.y;
+        width: badge.width;
+        height: badge.height;
+        radius: badge.height / 2;
+        shown: fs.has-focus && root.keyboard;
+    }
+    Tooltip {
+        Tip { text: root.on ? "Records its own ISO file; click to stop" : "Record its own ISO file"; }
+    }
+}
+
 export component SourcesDock inherits Dock {
+    // Under this, rows without ISO give the lane's 40px to their names.
+    property <bool> narrow: root.width < Theme.narrow-dock;
     property <int> current: -1;
     property <int> drag-from: -1;
     property <int> drop-at: -1;
@@ -29,6 +95,8 @@ export component SourcesDock inherits Dock {
     list := List {
         label: "Sources";
         count: SourcesArea.items.length;
+        empty-text: Ui.editing-scene == "" ? "No scene selected" : "No sources in this scene";
+        empty-icon: Ui.editing-scene == "" ? Icons.empty-sources : Icons.empty-scene;
         current: root.current;
         navigate(index) => { Ui.select(SourcesArea.items[index].path); }
         unhandled-key(event) => {
@@ -73,6 +141,7 @@ export component SourcesDock inherits Dock {
 
             row := ListRow {
                 text: item.name;
+                trailing-pad: Theme.space-1;
                 icon: Icons.named(item.icon);
                 selected: parent.chosen;
                 dim: !item.visible;
@@ -131,44 +200,34 @@ export component SourcesDock inherits Dock {
                         }
                     }
                 }
-                if item.can-iso: VerticalLayout {
-                    alignment: center;
-                    IconButton {
-                        small: true;
-                        icon: Icons.record;
-                        icon-size: Theme.icon-sm;
-                        label: item.iso ? "Records its own ISO file; click to stop" : "Record its own ISO file";
-                        on: item.iso;
-                        on-color: Theme.accent-hover;
-                        toggle: true;
-                        // Hidden until the row is hovered, unless on.
-                        opacity: item.iso || row.has-hover || self.has-focus ? 1 : 0;
-                        clicked => { SourcesArea.toggle-iso(item.path); }
-                    }
+                if item.can-iso: IsoToggle {
+                    on: item.iso;
+                    row-hovered: row.has-hover;
+                    collapsible: root.narrow;
+                    clicked => { SourcesArea.toggle-iso(item.path); }
                 }
-                VerticalLayout {
-                    alignment: center;
-                    IconButton {
-                        small: true;
-                        icon: item.visible ? Icons.eye : Icons.eye-off;
-                        icon-size: Theme.icon-sm;
-                        label: item.visible ? "Hide" : "Show";
-                        toggle: true;
-                        clicked => { SourcesArea.toggle-visible(item.path); }
-                    }
+                if !item.can-iso: Rectangle {
+                    width: root.narrow ? 0px : Theme.lane;
                 }
-                VerticalLayout {
-                    alignment: center;
-                    IconButton {
-                        small: true;
-                        icon: item.locked ? Icons.lock : Icons.unlock;
-                        icon-size: Theme.icon-sm;
-                        label: item.locked ? "Unlock" : "Lock";
-                        on: item.locked;
-                        on-color: Theme.text;
-                        toggle: true;
-                        clicked => { SourcesArea.toggle-locked(item.path); }
-                    }
+                IconButton {
+                    compact: true;
+                    icon: item.visible ? Icons.eye : Icons.eye-off;
+                    icon-size: Theme.icon-row;
+                    rest-color: item.path == Ui.selected-item ? Theme.text-2 : Theme.text-3;
+                    label: item.visible ? "Hide" : "Show";
+                    toggle: true;
+                    clicked => { SourcesArea.toggle-visible(item.path); }
+                }
+                IconButton {
+                    compact: true;
+                    icon: item.locked ? Icons.lock : Icons.unlock;
+                    icon-size: Theme.icon-row;
+                    rest-color: item.path == Ui.selected-item ? Theme.text-2 : Theme.text-3;
+                    label: item.locked ? "Unlock" : "Lock";
+                    on: item.locked;
+                    on-color: Theme.text;
+                    toggle: true;
+                    clicked => { SourcesArea.toggle-locked(item.path); }
                 }
             }
 
@@ -220,59 +279,55 @@ export component SourcesDock inherits Dock {
                 cancelled => { SourcesArea.renaming-item = ""; }
             }
         }
-        if SourcesArea.items.length == 0 && Ui.editing-scene != "": ListEmpty {
-            text: "No sources in this scene. Click + below, or right-click here, to add one.";
-        }
-        if Ui.editing-scene == "": ListEmpty {
-            text: "No scene.";
-        }
     }
 
     DockToolbar {
-        add := IconButton {
-            small: true;
-            icon: Icons.plus;
-            label: "Add a source";
-            enabled: Ui.editing-scene != "";
-            menu-open: Menus.open && Menus.owner == "sources:add";
-            property <int> serial: SourcesArea.add-menu-serial;
-            changed serial => {
-                if self.enabled {
-                    self.clicked();
+        alignment: space-between;
+        Capsule {
+            add := CapsuleButton {
+                icon: Icons.plus;
+                label: "Add a source";
+                enabled: Ui.editing-scene != "";
+                menu-open: Menus.open && Menus.owner == "sources:add";
+                property <int> serial: SourcesArea.add-menu-serial;
+                changed serial => {
+                    if self.enabled {
+                        self.clicked();
+                    }
+                }
+                clicked => {
+                    Menus.request("sources:add", self.absolute-position.x, self.absolute-position.y, self.width, self.height);
                 }
             }
-            clicked => {
-                Menus.request("sources:add", self.absolute-position.x, self.absolute-position.y, self.width, self.height);
+            CapsuleDivider { }
+            CapsuleButton {
+                icon: Icons.minus;
+                label: "Remove the selected source";
+                enabled: Ui.selected-item != "";
+                clicked => { Ui.menu("remove"); }
+            }
+            CapsuleDivider { }
+            CapsuleButton {
+                icon: Icons.settings;
+                label: "Properties of the selected source";
+                enabled: Ui.selected-source != "";
+                clicked => { Ui.menu("properties"); }
             }
         }
-        IconButton {
-            small: true;
-            icon: Icons.minus;
-            label: "Remove the selected source";
-            enabled: Ui.selected-item != "";
-            clicked => { Ui.menu("remove"); }
-        }
-        IconButton {
-            small: true;
-            icon: Icons.settings;
-            label: "Properties of the selected source";
-            enabled: Ui.selected-source != "";
-            clicked => { Ui.menu("properties"); }
-        }
-        ToolbarGap { }
-        IconButton {
-            small: true;
-            icon: Icons.chevron-up;
-            label: "Move up";
-            enabled: Ui.selected-item != "";
-            clicked => { Ui.menu("order_up"); }
-        }
-        IconButton {
-            small: true;
-            icon: Icons.chevron-down;
-            label: "Move down";
-            enabled: Ui.selected-item != "";
-            clicked => { Ui.menu("order_down"); }
+        Capsule {
+            CapsuleButton {
+                icon: Icons.chevron-up;
+                label: "Move up";
+                enabled: Ui.selected-item != "";
+                clicked => { Ui.menu("order_up"); }
+            }
+            CapsuleDivider { }
+            CapsuleButton {
+                icon: Icons.chevron-down;
+                label: "Move down";
+                enabled: Ui.selected-item != "";
+                clicked => { Ui.menu("order_down"); }
+            }
         }
     }
 }

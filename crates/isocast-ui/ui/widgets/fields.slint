@@ -1,6 +1,10 @@
-// Fields (docs/design.md 3.6): text, multi-line text, numbers with a unit
-// and a scrub label, and colours. 28px (24px `small`, in the source
-// toolbar), inset surface, 1px border; copper edge while editing.
+// Fields (Paper "Components" › Fields): text, multi-line text, numbers
+// (with a scrub label, or a stepper), colours. 28px on the inset black
+// with a `field-border` edge and 6px corners, 10px in, 12px Mona Sans; a
+// `compact` field is 22px with 5px corners (in rows and bands). While
+// editing the edge turns yellow with the pale-yellow focus ring around
+// it; an invalid one has a red edge. Paths, colours and numbers in
+// steppers are 11px Martian Mono Light.
 //
 // Values are committed, not streamed: `committed` fires on Return or when
 // the field loses focus, if the text changed; Escape puts the text back
@@ -8,35 +12,38 @@
 // open dialog (see DialogKeys) unless `submits` is false.
 
 import { Theme, Motion } from "../theme.slint";
+import { Icon } from "../icons.slint";
 import { EditCommands, DialogKeys } from "globals.slint";
+import { FocusRing, ShownState } from "focus.slint";
+import { SvgPath } from "../icons.slint";
 
-// The field's box: the border and the editing ring.
+// The field's box: its edge, and the ring while editing.
 export component FieldFrame inherits Rectangle {
     in property <bool> editing;
     in property <bool> hovered;
     in property <bool> invalid;
     in property <bool> enabled: true;
+    // 22px fields: 5px corners.
+    in property <bool> compact;
     // No box of its own (inside another field's frame).
     in property <bool> bare;
+    // How far it fades while disabled (a disabled band's field: half).
+    in property <float> disabled-opacity: Theme.disabled-opacity;
 
-    border-radius: Theme.r;
+    border-radius: root.compact ? Theme.r-compact : Theme.r;
     background: root.bare ? transparent : Theme.surface-inset;
     border-width: root.bare ? 0 : 1px;
     border-color: root.invalid ? Theme.danger : root.editing ? Theme.accent : root.hovered && root.enabled ? Theme.field-border-hover : Theme.field-border;
-    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    opacity: root.enabled ? 1 : root.disabled-opacity;
     animate border-color { duration: Theme.fast; easing: Motion.ease; }
 
-    // box-shadow: 0 0 0 1px accent, outside the border.
-    if root.editing && !root.invalid && !root.bare: Rectangle {
-        x: -1px;
-        y: -1px;
-        width: parent.width + 2px;
-        height: parent.height + 2px;
-        border-width: 1px;
-        border-color: Theme.accent;
-        border-radius: Theme.r + 1px;
-    }
     @children
+
+    // Paper: `0 0 0 1px surface-panel, 0 0 0 3px focus-ring` while editing.
+    FocusRing {
+        shown: root.editing && !root.invalid && !root.bare;
+        radius: root.border-radius;
+    }
 }
 
 export component TextField inherits Rectangle {
@@ -47,18 +54,33 @@ export component TextField inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> read-only;
     in property <bool> invalid;
+    // A path or code: 11px Martian Mono Light.
     in property <bool> mono;
-    // 24px, as in the source toolbar.
+    // 22px with 5px corners, 8px in (in rows and bands).
     in property <bool> small;
-    in property <length> font-size: Theme.fs-sm;
+    in property <length> font-size: root.mono ? Theme.fs-xs : Theme.fs-sm;
     // No box of its own (inside another field, like ColorField).
     in property <bool> bare;
+    // A 12px `text-3` glyph before the text, 6px from it (a path field's
+    // folder: Paper's Settings sheet, Recording Path).
+    in property <string> icon;
     in property <InputType> input-type: InputType.text;
     in property <bool> select-on-focus;
     // Focus and select everything when it appears.
     in property <bool> auto-focus;
     // Return submits the open dialog after committing.
     in property <bool> submits: true;
+    // Space before and after the text.
+    in property <length> inset: root.bare ? 0px : root.small ? Theme.space-2 : 10px;
+    // Shown instead of the text while it isn't being edited and doesn't
+    // fit (a path shortened in the middle by its owner, so the folder's
+    // own name shows: "/Volumes/…/scratch/rec").
+    in property <string> rest-text;
+    property <length> text-x: root.inset + (root.icon != "" ? Theme.icon-xs + 6px : 0px);
+    property <bool> show-rest: root.rest-text != "" && !input.has-focus && full.preferred-width > input.width;
+    // Draw a state regardless of the pointer (the kit gallery): `hover`,
+    // or `focus` for editing.
+    in property <ShownState> shown: ShownState.live;
     out property <bool> has-focus: input.has-focus;
     callback edited(string);
     callback accepted(string);
@@ -136,34 +158,46 @@ export component TextField inherits Rectangle {
     accessible-role: none;
 
     frame := FieldFrame {
-        editing: input.has-focus;
-        hovered: ta.has-hover;
+        editing: input.has-focus || root.shown == ShownState.focus;
+        hovered: ta.has-hover || root.shown == ShownState.hover;
         invalid: root.invalid;
         enabled: root.enabled;
         bare: root.bare;
+        compact: root.small;
 
         ta := TouchArea {
             mouse-cursor: MouseCursor.text;
             clicked => { input.focus(); }
         }
 
+        if root.icon != "": Icon {
+            x: root.inset;
+            y: (parent.height - self.height) / 2;
+            path: root.icon;
+            size: Theme.icon-xs;
+            // Paper's 1.5 units of 16 at 12px.
+            stroke-width: 1.125px;
+            color: Theme.text-3;
+        }
+
         Text {
-            x: Theme.space-2;
-            width: parent.width - 2 * Theme.space-2;
+            x: root.text-x;
+            width: parent.width - root.text-x - root.inset;
             visible: input.text == "" && root.placeholder != "";
             text: root.placeholder;
             color: Theme.text-3;
             font-size: root.font-size;
-            letter-spacing: Theme.tracking-for(root.font-size);
-            font-family: root.mono ? Theme.font-mono : "";
+            letter-spacing: root.mono ? Theme.tracking-mono : Theme.tracking-for(root.font-size);
+            font-family: root.mono ? Theme.font-mono : Theme.font;
+            font-weight: root.mono ? Theme.weight-light : Theme.weight-regular;
             vertical-alignment: center;
             overflow: elide;
             accessible-role: none;
         }
 
         input := TextInput {
-            x: Theme.space-2;
-            width: parent.width - 2 * Theme.space-2;
+            x: root.text-x;
+            width: parent.width - root.text-x - root.inset;
             height: parent.height;
             text <=> root.text;
             enabled: root.enabled;
@@ -173,10 +207,12 @@ export component TextField inherits Rectangle {
             vertical-alignment: center;
             color: Theme.text;
             font-size: root.font-size;
-            letter-spacing: Theme.tracking-for(root.font-size);
-            font-family: root.mono ? Theme.font-mono : "";
+            letter-spacing: root.mono ? Theme.tracking-mono : Theme.tracking-for(root.font-size);
+            font-family: root.mono ? Theme.font-mono : Theme.font;
+            font-weight: root.mono ? Theme.weight-light : Theme.weight-regular;
             selection-background-color: Theme.text-selection;
             selection-foreground-color: Theme.text;
+            opacity: root.show-rest ? 0 : 1;
             accessible-label: root.label;
             accessible-placeholder-text: root.placeholder;
             edited => { root.edited(self.text); }
@@ -197,11 +233,48 @@ export component TextField inherits Rectangle {
                 reject
             }
         }
+
+        // The text's whole width (never drawn), and the short form over
+        // the field while that is too wide.
+        full := Text {
+            visible: false;
+            text: root.text;
+            font-size: input.font-size;
+            font-family: input.font-family;
+            font-weight: input.font-weight;
+            letter-spacing: input.letter-spacing;
+            accessible-role: none;
+        }
+        if root.show-rest: Text {
+            x: input.x;
+            width: input.width;
+            height: parent.height;
+            text: root.rest-text;
+            color: input.color;
+            font-size: input.font-size;
+            font-family: input.font-family;
+            font-weight: input.font-weight;
+            letter-spacing: input.letter-spacing;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+
+        // The caret Paper draws in its "Editing" field (1×14 `text`, 1px
+        // after the text), for the gallery's focus state without focus.
+        if root.shown == ShownState.focus && !input.has-focus: Rectangle {
+            x: root.text-x + input.preferred-width + 1px;
+            y: (parent.height - self.height) / 2;
+            width: 1px;
+            height: 14px;
+            background: Theme.text;
+        }
     }
 }
 
 // Several lines of text (a text source's words): grows with its text from
-// 64px. Return makes a new line; ⌘Return commits.
+// 64px, 6px top and bottom, 10px in. Return makes a new line; ⌘Return
+// commits.
 export component TextArea inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder;
@@ -209,6 +282,8 @@ export component TextArea inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> mono;
     in property <length> empty-height: 64px;
+    // Draw a state regardless of the pointer (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
     out property <bool> has-focus: input.has-focus;
     callback edited(string);
     callback committed(string);
@@ -251,8 +326,8 @@ export component TextArea inherits Rectangle {
     accessible-role: none;
 
     FieldFrame {
-        editing: input.has-focus;
-        hovered: ta.has-hover;
+        editing: input.has-focus || root.shown == ShownState.focus;
+        hovered: ta.has-hover || root.shown == ShownState.hover;
         enabled: root.enabled;
 
         ta := TouchArea {
@@ -261,9 +336,9 @@ export component TextArea inherits Rectangle {
         }
 
         Text {
-            x: Theme.space-2;
+            x: 10px;
             y: 6px;
-            width: parent.width - 2 * Theme.space-2;
+            width: parent.width - 20px;
             visible: input.text == "" && root.placeholder != "";
             text: root.placeholder;
             color: Theme.text-3;
@@ -273,19 +348,20 @@ export component TextArea inherits Rectangle {
         }
 
         input := TextInput {
-            x: Theme.space-2;
+            x: 10px;
             y: 6px;
-            width: parent.width - 2 * Theme.space-2;
+            width: parent.width - 20px;
             height: parent.height - 12px;
             text <=> root.text;
             enabled: root.enabled;
             single-line: false;
             wrap: word-wrap;
             color: Theme.text;
-            font-size: Theme.fs-sm;
-            letter-spacing: Theme.tracking-sm;
+            font-size: root.mono ? Theme.fs-xs : Theme.fs-sm;
+            letter-spacing: root.mono ? Theme.tracking-mono : Theme.tracking-sm;
             line-height-factor: Theme.leading-sm;
-            font-family: root.mono ? Theme.font-mono : "";
+            font-family: root.mono ? Theme.font-mono : Theme.font;
+            font-weight: root.mono ? Theme.weight-light : Theme.weight-regular;
             selection-background-color: Theme.text-selection;
             selection-foreground-color: Theme.text;
             accessible-label: root.label;
@@ -301,9 +377,38 @@ export component TextArea inherits Rectangle {
     }
 }
 
+// The stepper's ▲ or ▼ (Paper: an 8×5 chevron, 1.4 stroke; 7×4 compact).
+component StepArrow inherits Rectangle {
+    in property <bool> up;
+    in property <bool> compact;
+    in property <bool> enabled: true;
+    callback step();
+    accessible-role: none;
+    // Paper's 1.4-unit stroke, at the arrow's scale (7×4 of the 8×5 box:
+    // 0.8, uniform as SVG draws it).
+    SvgPath {
+        width: root.compact ? 7px : 8px;
+        height: root.compact ? 4px : 5px;
+        box-width: 8;
+        box-height: 5;
+        commands: root.up ? "M1 4 4 1l3 3" : "M1 1l3 3 3-3";
+        stroke: ta.has-hover && root.enabled ? Theme.text : Theme.text-2;
+        stroke-width: root.compact ? 1.12px : 1.4px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        fill: transparent;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.step(); }
+    }
+}
+
 // A number with an optional scrub label before it (drag it sideways, like
-// a design tool: ⇧ ×10, ⌥ ×0.1) and a unit after it. ↑ and ↓ step it (⇧
-// ×10). `scrubbing` fires while dragging; `changed` once a value is final.
+// a design tool: ⇧ ×10, ⌥ ×0.1) and a unit after it ("W 1920 px"); or,
+// with `stepper`, a Martian Mono value and unit with ▲▼ arrows on its
+// right ("300 ms"). ↑ and ↓ step it (⇧ ×10). `scrubbing` fires while
+// dragging; `changed` once a value is final.
 export component NumberField inherits Rectangle {
     in property <float> value;
     in property <float> minimum: -1000000000;
@@ -315,25 +420,45 @@ export component NumberField inherits Rectangle {
     in property <length> prefix-min-width: 20px;
     // After the value, dim ("px", "ms", "dB", "%").
     in property <string> unit;
+    // Right after the value, in its own face and colour ("1.00×": Paper's
+    // Speed); not part of what is typed.
+    in property <string> suffix;
+    // Every decimal the step has ("1.00", not "1").
+    in property <bool> fixed;
     in property <string> label;
     in property <string> placeholder;
     in property <bool> enabled: true;
+    // How far it fades while disabled (`Theme.band-disabled-opacity` in a
+    // disabled band, as Paper's Scene Transitions dock draws Duration).
+    in property <float> disabled-opacity: Theme.disabled-opacity;
     in property <bool> invalid;
+    // 22px with 5px corners (in rows, bands and sheets' grouped rows).
     in property <bool> small;
+    // The ▲▼ stepper on the right, the value in Martian Mono.
+    in property <bool> stepper;
+    // The stepper's fill (`control`; `control-hover` on a `control` row).
+    in property <color> stepper-fill: Theme.control;
+    // A line between the arrows and the 8×5 arrows, as full size has them;
+    // a small field's stepper has neither (Components' "Speed") unless set
+    // (a dock band's Duration, Paper's Main window).
+    in property <bool> stepper-rule: !root.small;
     in property <bool> submits: true;
     // Shown when there is no value (a mixed or unset number).
     in property <bool> empty;
+    // Draw a state regardless of the pointer (the kit gallery).
+    in property <ShownState> shown: ShownState.live;
     out property <bool> has-focus: input.has-focus;
     callback scrubbing(float);
     callback changed(float);
 
 
     forward-focus: input;
-    property <int> decimals: root.step >= 1 ? 0 : root.step >= 0.1 ? 1 : root.step >= 0.01 ? 2 : 3;
+    // The step's decimals (a step of 0.01 arrives a hair under 0.01).
+    property <int> decimals: root.step >= 0.999 ? 0 : root.step >= 0.0999 ? 1 : root.step >= 0.00999 ? 2 : 3;
     // As few decimals as the value needs, up to the step's ("0.1", not
     // "0.10"; "1", not "1.00"), as the web app rounds.
     property <int> needed: abs(root.value - round(root.value)) < 0.00005 ? 0 : abs(root.value * 10 - round(root.value * 10)) < 0.0005 ? 1 : abs(root.value * 100 - round(root.value * 100)) < 0.005 ? 2 : 3;
-    property <string> shown: root.empty ? "" : root.value.to-fixed(min(root.decimals, root.needed));
+    property <string> display-text: root.empty ? "" : root.value.to-fixed(root.fixed ? root.decimals : min(root.decimals, root.needed));
     property <string> draft;
     property <bool> drafting;
     property <bool> focused: input.has-focus;
@@ -341,6 +466,8 @@ export component NumberField inherits Rectangle {
     property <float> scrub-value;
     property <length> scrub-start;
     property <bool> scrubbed;
+    property <bool> mono: root.stepper;
+    property <length> value-size: root.mono ? Theme.fs-xs : Theme.fs-sm;
 
     function clamp-step(v: float) -> float {
         return max(root.minimum, min(root.maximum, round(v / root.step) * root.step));
@@ -355,6 +482,11 @@ export component NumberField inherits Rectangle {
         }
     }
 
+    function nudge(by: int) {
+        root.drafting = false;
+        root.changed(root.clamp-step(root.value + by * root.step));
+    }
+
     changed focused => {
         if root.focused {
             input.select-all();
@@ -365,16 +497,18 @@ export component NumberField inherits Rectangle {
 
     height: root.small ? Theme.control-h-sm : Theme.control-h;
     min-width: 56px;
-    preferred-width: Theme.field-m;
+    preferred-width: root.stepper ? Theme.field-xs : Theme.field-s;
     // Numbers needn't fill a value column (set another to let them).
     max-width: Theme.field-m;
     accessible-role: none;
 
-    FieldFrame {
-        editing: input.has-focus;
-        hovered: ta.has-hover;
+    frame := FieldFrame {
+        editing: input.has-focus || root.shown == ShownState.focus;
+        hovered: ta.has-hover || root.shown == ShownState.hover;
         invalid: root.invalid;
         enabled: root.enabled;
+        disabled-opacity: root.disabled-opacity;
+        compact: root.small;
 
         ta := TouchArea {
             mouse-cursor: MouseCursor.text;
@@ -382,15 +516,25 @@ export component NumberField inherits Rectangle {
         }
 
         HorizontalLayout {
-            padding-left: root.prefix != "" ? 0 : Theme.space-2;
-            padding-right: Theme.space-2;
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: parent.height - 2px;
             spacing: 0;
 
-            // The scrub label: 8px in, then 6px to the value.
+            // Value and unit: 8px in (10px before a full-size stepper's
+            // value), 8px between them (6px beside a stepper).
+            HorizontalLayout {
+            horizontal-stretch: 1;
+            padding-left: root.prefix != "" ? 0 : root.stepper && !root.small ? 9px : Theme.space-2 - 1px;
+            padding-right: Theme.space-2 - (root.stepper ? 0px : 1px);
+            spacing: root.stepper ? 6px : Theme.space-2;
+
+            // The scrub label: 8px in, then 8px to the value.
             if root.prefix != "": Rectangle {
-                width: max(root.prefix-min-width, prefix-text.preferred-width + Theme.space-2 + 6px);
+                width: max(root.prefix-min-width, prefix-text.preferred-width + Theme.space-2 - 1px);
                 prefix-text := Text {
-                    x: Theme.space-2;
+                    x: Theme.space-2 - 1px;
                     text: root.prefix;
                     color: Theme.text-3;
                     font-size: Theme.fs-xs;
@@ -439,17 +583,19 @@ export component NumberField inherits Rectangle {
                 input := TextInput {
                     width: parent.width;
                     height: parent.height;
-                    text: root.drafting ? root.draft : root.shown;
+                    text: root.drafting ? root.draft : root.display-text;
                     enabled: root.enabled;
                     single-line: true;
                     input-type: InputType.decimal;
                     vertical-alignment: center;
                     color: Theme.text;
-                    font-size: Theme.fs-sm;
-                    letter-spacing: Theme.tracking-sm;
+                    font-size: root.value-size;
+                    font-family: root.mono ? Theme.font-mono : Theme.font;
+                    font-weight: root.mono ? Theme.weight-light : Theme.weight-regular;
+                    letter-spacing: root.mono ? Theme.tracking-mono : Theme.tracking-sm;
                     selection-background-color: Theme.text-selection;
                     selection-foreground-color: Theme.text;
-                    accessible-label: root.unit != "" ? root.label + " (" + root.unit + ")" : root.label;
+                    accessible-label: root.unit != "" ? root.label + " (" + root.unit + ")" : root.suffix != "" ? root.label + " (" + root.suffix + ")" : root.label;
                     accessible-placeholder-text: root.placeholder;
                     edited => {
                         root.draft = self.text;
@@ -468,12 +614,34 @@ export component NumberField inherits Rectangle {
                             return accept;
                         }
                         if event.text == Key.UpArrow || event.text == Key.DownArrow {
-                            root.drafting = false;
-                            root.changed(root.clamp-step(root.value + (event.text == Key.UpArrow ? 1 : -1) * root.step * (event.modifiers.shift ? 10 : 1)));
+                            root.nudge((event.text == Key.UpArrow ? 1 : -1) * (event.modifiers.shift ? 10 : 1));
                             return accept;
                         }
                         reject
                     }
+                }
+                // The suffix, drawn where the value's text ends (measured
+                // by an unseen copy of it).
+                if root.suffix != "" && input.text != "": Text {
+                    x: min(parent.width - self.width, value-width.preferred-width);
+                    height: parent.height;
+                    text: root.suffix;
+                    color: input.color;
+                    font-size: input.font-size;
+                    font-family: input.font-family;
+                    font-weight: input.font-weight;
+                    letter-spacing: input.letter-spacing;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+                value-width := Text {
+                    visible: false;
+                    text: input.text;
+                    font-size: input.font-size;
+                    font-family: input.font-family;
+                    font-weight: input.font-weight;
+                    letter-spacing: input.letter-spacing;
+                    accessible-role: none;
                 }
             }
 
@@ -485,52 +653,105 @@ export component NumberField inherits Rectangle {
                 vertical-alignment: center;
                 accessible-role: none;
             }
+            }
+
+            // The stepper: 18px (16px compact) on `stepper-fill`, a
+            // `field-border` line on its left; a line between the arrows
+            // at full size. Its right corners follow the field's.
+            if root.stepper: Rectangle {
+                width: root.small ? 16px : 18px;
+                background: root.stepper-fill;
+                border-top-right-radius: frame.border-radius - 1px;
+                border-bottom-right-radius: frame.border-radius - 1px;
+                Rectangle {
+                    x: 0;
+                    width: 1px;
+                    background: Theme.field-border;
+                }
+                if root.stepper-rule: Rectangle {
+                    x: 1px;
+                    // A small one's is the upper half's last line (Paper).
+                    y: root.small ? parent.height / 2 - 1px : (parent.height - 1px) / 2;
+                    width: parent.width - 1px;
+                    height: 1px;
+                    background: Theme.surface-inset;
+                }
+                StepArrow {
+                    x: 1px;
+                    y: 0;
+                    width: parent.width - 1px;
+                    height: parent.height / 2;
+                    up: true;
+                    compact: !root.stepper-rule;
+                    enabled: root.enabled;
+                    step => { root.nudge(1); }
+                }
+                StepArrow {
+                    x: 1px;
+                    y: parent.height / 2;
+                    width: parent.width - 1px;
+                    height: parent.height / 2;
+                    up: false;
+                    compact: !root.stepper-rule;
+                    enabled: root.enabled;
+                    step => { root.nudge(-1); }
+                }
+            }
         }
     }
 }
 
-// A colour as #rrggbb (or #rrggbbaa): a swatch that asks for a picker
-// (`pick`) and the hex value, committed on Return or focus loss. Slint
-// can't read a colour from text, so the caller passes `swatch` too.
+// A colour as #rrggbb (or #rrggbbaa): a 16px swatch that asks for a picker
+// (`pick`) and the hex value in Martian Mono, committed on Return or focus
+// loss. Slint can't read a colour from text, so the caller passes `swatch`
+// too. `small` is the 22px one of grouped rows (5px corners, 8px in, a
+// 14px swatch: Paper draws only the 28px one).
 export component ColorField inherits Rectangle {
     in property <string> value;
     in property <color> swatch;
     in property <string> label;
     in property <bool> enabled: true;
+    in property <bool> small;
     callback changed(string);
     callback pick();
 
     forward-focus: hex;
-    height: Theme.control-h;
-    preferred-width: Theme.field-m;
+    height: root.small ? Theme.control-h-sm : Theme.control-h;
+    preferred-width: Theme.field-s;
     accessible-role: none;
 
     FieldFrame {
         editing: hex.has-focus;
         hovered: ta.has-hover;
         enabled: root.enabled;
+        compact: root.small;
 
         ta := TouchArea {
             clicked => { hex.focus(); }
         }
 
         HorizontalLayout {
-            padding-left: 6px;
-            spacing: 0;
+            padding-left: root.small ? Theme.space-2 : 10px;
+            padding-right: root.small ? Theme.space-2 : 10px;
+            spacing: Theme.space-2;
             alignment: stretch;
 
             VerticalLayout {
                 alignment: center;
                 Rectangle {
-                    width: 16px;
-                    height: 16px;
-                    border-radius: Theme.r;
+                    width: root.small ? Theme.icon-sm : 16px;
+                    height: self.width;
+                    border-radius: root.small ? Theme.r-compact : Theme.r;
                     background: root.swatch;
-                    border-width: 1px;
-                    border-color: Theme.swatch-ring;
                     accessible-role: button;
                     accessible-label: "Choose a colour";
                     accessible-action-default => { root.pick(); }
+                    // Paper: an inset 1px `line-soft` ring.
+                    Rectangle {
+                        border-radius: parent.border-radius;
+                        border-width: 1px;
+                        border-color: Theme.swatch-ring;
+                    }
                     TouchArea {
                         enabled: root.enabled;
                         clicked => { root.pick(); }
@@ -540,6 +761,7 @@ export component ColorField inherits Rectangle {
             hex := TextField {
                 horizontal-stretch: 1;
                 bare: true;
+                small: root.small;
                 text: root.value;
                 label: root.label;
                 mono: true;

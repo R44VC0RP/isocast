@@ -273,6 +273,17 @@ each section. Delete entries that stop being true.
   client integration. The native Settings page/focused-input bridge and
   consuming the daemon's Studio Mode state belong to the app-redesign
   follow-up; no native UI behavior was replaced in this branch.
+- 2026-10-13 — The Console redesign of the native app (N.5, branch
+  ui/console-integrate, not merged): `open "/Volumes/IsocastBuild/console-fix/Isocast Console.app"`
+  (a release build of the branch, bundled by scripts/ui-dev.sh; it talks
+  to your own isocastd and live setup, as the web app does). Final Cut's
+  frame, Logic's LCD and Tower's capsules from the "C. Console" Paper
+  boards: try the Welcome screen (no setup), Studio Mode, Settings, a
+  right-click on a scene, a strip's ⋯. Text is drawn a cut lighter than
+  Paper's weights to match the boards (Skia draws heavier). Taste calls
+  are in Questions for Ryan; screenshots in .claude/artifacts/console-app.
+  To rebuild it yourself: `CARGO_TARGET_DIR=/Volumes/IsocastBuild/console-fix/target ISOCAST_UI_APP="/Volumes/IsocastBuild/console-fix/Isocast Console.app" scripts/ui-dev.sh --release`
+  from the worktree.
 
 - 2026-10-13 — Profile and Scene Collection menus (P.2, branch
   app/p2-menus): once merged and built, both apps have them, as in OBS.
@@ -388,6 +399,12 @@ each section. Delete entries that stop being true.
   Blender Foundation's trademark: fine locally, maybe renamed
   ("Editor") before any release. (7) The old copper look retires with
   N.5 rather than becoming a fifth theme.
+- 2026-10-13 (N.5.2): two Console values from Paper fall under WCAG's
+  contrast minimums: the idle LCD's dimmed zeros (35% white on the inset
+  black, 2.99:1; 50% would be 4.98:1) and the white streaming glyph on
+  `onair-fill` #2EAE50 (2.64:1, under 3:1 for non-text). The app keeps
+  Paper's values (Theme `lcd-dim-opacity`, `on-onair`/`onair-fill`);
+  say if either should change (one token each). Nothing waits on it.
 
 - 2026-10-13 (7.4a): three things to overrule if you'd rather. (1) Wasm
   calls are bounded by fuel (work), not the design's 1 ms epoch ticker
@@ -1536,6 +1553,250 @@ each section. Delete entries that stop being true.
   because they reference its ids; stop before settings/canvas/library
   switches. Six advertised dimensions, optional letterboxed output size,
   integer canvas fps 1–240. Details in docs/virtual-camera.md.
+- 2026-10-13: **Console critique fixes (N.5.2, branch ui/console-integrate,
+  console-fix).** The fidelity and function critiques of 2f22005, each
+  checked against Paper (get_jsx of the Welcome board 1-0 and the
+  Components "Empty state" 5BS-0, "Menu" 3KN-0, "Destructive" R5-0,
+  "Sliders and meters" 3EY-0, Properties' "Add Files…" 5RO-0, Settings'
+  summary 5NP-0) and the app, then fixed:
+  - Text weight: Theme's `weight-*` hold the drawn weight, Paper's name
+    kept (Paper 400 → Mona Sans Light, 500 → Regular, 600 → Medium (Hubot
+    Medium), 700 → SemiBold, Martian Mono 300 → ExtraLight; the window's
+    default too). Ink against the main board: 400 1.48-1.54x → 1.24-1.28x,
+    500 1.41-1.43x → 1.24-1.28x, 600 1.17-1.23x → 1.07-1.14x, Martian Mono
+    1.27x → 1.03x; Welcome's title 1.20x → 1.04x. The rest of the gap is
+    Skia's (Gotchas); lines are ~2% narrower (Gotchas).
+  - No setup (Welcome's window) as board 1-0 draws it; EmptyState (with
+    Paper's glyphs) in every empty dock and the empty canvas; menus keep
+    the 16px lane; Remove red; LIVE/green ring only while streaming;
+    the LCD in templates ("00.00", "00.0%": the CPU cell is 11px wider
+    than the board's 79 so the bar never moves at 10%); Remove sheets use
+    the destructive button; a muted strip as "Camera Audio" (its meter
+    still shows what it hears, in `meter-muted`); tokens for the meter's
+    peak and the streaming glyph's white; the 12-unit plus.
+  - Settings' "~4.3 GB/h" is the program file's rate from the shared
+    estimate (protocol `ProgramRecording::bytes_per_second`, which the
+    engine's disk check uses too; Status.program_bytes_per_second for the
+    CLI and MCP). The status bar's free space without a setup is
+    ~/Movies/Isocast's disk. The master level shows left and right (the
+    engine's program level gained `channels`).
+  - Keyboard and screen readers: a ⋯ "More for <name>" in each strip's
+    volume slot (hover or focus; always a Tab stop; Paper's strip has no
+    menu button, so it hides in the volume's place) and ⇧F10 / Menu key;
+    the quick transitions one Tab stop with arrows, Space/Return and
+    `accessible-enabled`; Segmented's whole-capsule ring and → / ← from a
+    Custom quality to the next stop; reset glyphs are IconButtons; the
+    file in the selected source's line; the path field's
+    "/Volumes/…/scratch/rec"; Welcome's names; LCD descriptions.
+  - Small windows: Sources folds empty ISO lanes under 220px (the badge
+    lane is badge-wide); faders keep 100px (Theme.fader-min: 0.6 dB a
+    pixel), and a strip under 300px drops the headphones (its ⋯ menu has
+    Audio Monitoring); band fields shrink to 64px before labels elide;
+    "Stop Recording" shortens ("Stop Recor…") beside Marker.
+  - Cost: the critic's cached layers (viewer line, transport, pane
+    toggles, Studio's heads and column); the master level is Core
+    Animation layers under the window in layers mode (layers.rs `Meter`,
+    moved by the meter timer in whole device pixels): the control bar
+    paints its fill in four pieces round the capsule's inside and the
+    MasterMeter only its edge, so anything Slint draws over the bar (a
+    menu, a sheet, its scrim) still covers the layer. Offscreen and image
+    mode draw it in Slint (pixel steps, 15 Hz when no strip meter shows).
+  - CPU on isocast-m2-b (real window, layers preview, benchmark lock, 20 s
+    runs alternating main 9cda72d / 2f22005 / this, 3 each, medians):
+    at rest 3.1 / 3.7 / 3.3%; three tones, mixer shown 20.0 / 22.3 /
+    20.2%, hidden 4.0 / 18.0 / 4.6%; pink noise with a 3 Hz tremolo (a
+    level that moves like speech), mixer shown 17.3 / 20.3 / 17.3%,
+    hidden 3.9 / 15.6 / 4.1%; offscreen full redraws at 60 Hz (per-redraw
+    cost, `--soak --still`) 14.1 / 19.6 / 15.1%. The pixel-steps-at-15-Hz
+    build before the layer: three tones hidden 10.8%.
+  - Real window (isocast-m2-b, cua-driver, lock held): the meter draws in
+    its capsule and a strip's menu and the Settings sheet cover it; a
+    strip's ⋯ opens its menu by AXPress, by Tab then Return, and by
+    ⇧F10; a scene's right-click menu (lane, red Remove); recording by the
+    transport button (PGM, no green ring, "Stop Recor…" beside Marker;
+    ffprobe: H.264 1920x1080 60 fps + AAC); Studio Mode's Fade row takes
+    the preview; a canvas drag (title 120,840 → 257,750) and Edit › Undo
+    back; the Remove sheet's destructive button; Properties.
+    Shots: /Volumes/IsocastBuild/console-fix/compare/m2b.
+  - Left as they were (reasons): the Properties well's "00:00:30" needs a
+    media position the engine doesn't report; About's glyph, Cut's gear
+    and the right pane toggle stay as N.5.1a/b decided; Welcome's "+"
+    stays disabled (no setup to add a scene to, the board draws it
+    enabled); the idle LCD's 0.35 (2.99:1) and white on `onair-fill`
+    (2.64:1) are Paper's values (Questions for Ryan); the items the
+    function critic found on main too (Sources' blank Tab stop, a sheet's
+    own stop, the first typed character offscreen, "In preview" after
+    Studio Mode).
+  - Scores (/Volumes/IsocastBuild/console-fix/compare, scripts/pairs.sh):
+    the whole Welcome window 0.77% → 0.49% (1x and 2x); main viewer 0.81
+    → 0.57%, control bar 2.82 → 2.68%, status bar 1.94 → 1.54%,
+    Settings' footers 2.87 → 2.27; the card-only and dock scores rose
+    (Welcome card 3.10 → 4.81, docks 1.04 → 1.25%, Properties 1.58 →
+    1.86) from the narrower glyphs, not from layout (rows unmoved).
+
+- 2026-10-13: **Console integration (N.5.1c, branch ui/console-integrate).**
+  ui/console with ui/console-main, then ui/console-dialogs, merged.
+  - Both areas added an icon `broadcast` and one `sliders`, drawn
+    differently; each matches its own board, so both stay. The sheets'
+    16-unit glyphs (Settings' Stream and Advanced, the profile and
+    Advanced Audio sheets) are `sheet-broadcast` and `sheet-sliders`.
+  - console-main's SvgPath (stroked paths at Paper's size) now draws the
+    sheets' glyphs too: Settings' sidebar icons and the header glyph tile
+    were ~10% small on ui/console-dialogs and now match the board's.
+  - Settings' summary has its disk badge ("217 GB free", the drive glyph)
+    from Status.recording_free_bytes; `gigabytes_free` and
+    `source_format` live once, in model.rs.
+  - Scores against the boards (/Volumes/IsocastBuild/console-integrate/
+    compare, scripts/pairs.sh): main window 0.86% / 0.79% (1x/2x, pictures
+    masked), Studio Mode 0.92% / 0.75%, Properties 1.58 / 1.39 (0-255),
+    Settings › Output 2.66 / 2.59, Welcome 3.10 / 2.95, the kit gallery
+    1.48% / 1.22%. The main window is pixel-identical to
+    ui/console-main's but for live content; the sheets differ from
+    ui/console-dialogs' only in the window behind them and the glyphs.
+  - Cost, isocast-m2-b (real window, layers preview, benchmark lock,
+    20 s runs alternating with main's 9cda72d, `--bench`): at rest
+    3.7/3.8/4.1% vs 3.5/3.6/3.4%; three tones 21.1/22.5/22.0 and
+    21.6/20.8/21.0% vs 19.5/20.1/20.2 and 19.6/21.0/18.9% (medians 21.4
+    vs 19.9; ui/console-main's own build 22.4 in the same session, so
+    the merge adds nothing); console-main's review60 setup 21.4 vs
+    19.6. With the mixer dock hidden ({"mixer": false}) and three tones:
+    16.6% vs 3.7%, 28.7 redraws/s vs 0.3: the control bar's master
+    level (a signature piece of the boards) moves with the sound, and
+    Slint redraws the whole window for it. The ~1.5 points with the
+    mixer shown are the same cause (more drawn per frame). Left as it
+    is: halving its rate or drawing it as a native layer are the
+    options if the budget matters more than the board's meter; for
+    Ryan to weigh. Scripts: /Volumes/IsocastBuild/console-integrate/
+    remote/ab.sh and abp.sh (on the test Mac in
+    ~/isocast-scratch/console-integrate/perf).
+
+- 2026-10-13: **Console main window and Studio Mode (N.5.1a, branch
+  ui/console-main).** Restyled from the Main window (8-0) and Studio
+  Mode (9B-0) boards with the foundation's kit: OBS's layout as the
+  boards draw it (viewer line, preview with its 1px `line` ring 8px clear
+  of the sides, the 44px control bar, the 240px dock row, the status
+  bar). Board-vs-app choices:
+  - The fader keeps its −60..0 dB law. The boards' knob positions are
+    mock values no law fits (0 dB at 77% of the track, −12 dB at 58% on
+    the Main window; −9 dB at 72% on Components), so neither a Logic
+    curve nor headroom above 0 dB comes from them.
+  - The right pane toggle shows and hides Studio Mode's program. On the
+    boards it is off in both, because it is the Workspace boards'
+    Inspector, which today's layout doesn't have (no workspaces yet); a
+    dead button would be worse. Lit while Studio Mode is on.
+  - Scene Transitions' gear stays disabled for Cut and Fade (no
+    properties, as OBS); the board draws it enabled with Cut.
+  - Controls dock, recording: Marker stays beside "Stop Recording", Split
+    lives in the take's details (status bar REC, beside Mark): with the
+    icon and words from the left, the button and two 28px buttons don't
+    fit 172px ("Stop Rec…"); one does (138 of 140px).
+  - Toasts sit under the viewer line (y 40) so Fit and View stay usable.
+  - The mixer below a 300px strip (a ~1024px window) drops the dB words;
+    the fader's tooltip says the volume then.
+  - The status bar's free space comes from the daemon (`Status`
+    `recording_free_bytes`: the recording folder's disk, or the nearest
+    folder above it that exists; also in `isocast status` and MCP).
+  - Scores (chrome, pictures masked; mean absolute difference, % of full
+    scale): main window 0.84% at 1x and 0.76% at 2x, Studio Mode 0.92% and
+    0.74%; the rest is the text weight (Gotchas), live content (LCD, the
+    meters' live peak and hold, paths) and the pictures (the engine's,
+    not Paper's mock).
+  - Cost, isocast-m2-b (base M2, real window, layers preview, one
+    isolated engine, benchmark lock, 20 s runs alternating with main's
+    9cda72d build): idle 3.4/3.8/3.6% of a core vs main's 3.8/3.9/3.5%;
+    meters moving 20.7/21.6/21.5% vs 19.6/21.2/21.7% (medians 21.5 vs
+    21.2), 30 redraws/s, 60 fps both. No regression.
+- 2026-10-13: **Console sheets, Settings and Welcome (N.5.1b, branch
+  ui/console-dialogs).** Every dialog is a kit Dialog sheet: Properties
+  (Paper's "Properties, media clip": glyph with the kind's yellow part,
+  the preview well, grouped rows, Defaults left), Settings (Paper's
+  "Settings, Output": NavList sidebar the sheet's height, the page's
+  header, grouped rows with reset glyphs and captions, SheetSummary),
+  Welcome (Paper's "Welcome": LcdHero, Hubot display title, three 34px
+  capsule choices), and, with no board of their own, in the same
+  manners: Filters (Settings' layout: lists in the sidebar), Create/
+  Select Source, Rename, Edit Transform (grouped rows), Transition
+  Properties, Advanced Audio, the profile and collection sheets, About
+  and the first run. Decisions and compromises:
+  - Paper's Settings board shows Medium chosen with "Quality value 60";
+    the engine's Medium is 50, so the app chooses a segment only when
+    the quality is exactly a preset (60 shows no segment chosen).
+  - Settings' summary shows what the setup says (size and rate, sound,
+    codec · container); Paper's "~4.3 GB/h" needs an estimate the engine
+    doesn't expose (isocast-engine space.rs has one for its disk check),
+    and the disk badge waits on Status.recording_free_bytes, which
+    ui/console-main adds: after both merge, set the SheetSummary badge
+    ("drive", "212 GB free") from it.
+  - The Properties well's time ("00:00:30") is left empty: the engine
+    reports no media position or duration (SourceStatus).
+  - Welcome's line is 470px, not Paper's 460: WebKit sets its first line
+    ("…all on one clock.") in 459.5px and Skia a pixel or two wider, so
+    460 broke it a word early. The lines are centred, so only the break
+    changes.
+  - Sheets whose title is only a name keep a descriptive name for
+    screen readers (Dialog `accessible-name`: "Properties for “Intro
+    Clip”").
+  - Speed shows "1.00×" (NumberField `suffix` + `fixed`); other numbers
+    keep the web app's "as few decimals as needed".
+  - About keeps the brand mark in its body (the header's glyph tile
+    takes line icons; the mark is a picture). Remove's confirmation keeps
+    the yellow main button ("Remove"), as before.
+  - Kit fixes found on the way (their own commit): the leading tokens,
+    the Toast's edge and gaps, LcdHero's column height (Gotchas).
+
+- 2026-10-13: **Console foundation (N.5.0, branch ui/console).** The
+  native app's look is Paper's "C. Console" (01M4SHX06Z4XBZDXMWN2YEB9EA;
+  the original Screens boards Main window, Studio Mode, Properties,
+  Settings, Welcome, and the Components page; the Workspace boards beside
+  them are a later idea, not built). Values were read with get_tokens,
+  get_jsx (inline styles) and get_computed_styles, never from pictures.
+  - Tokens: ui/theme.slint holds all 97 Paper tokens under Paper's names
+    (minus the `--`; ems turned into px at their size), and the literals
+    the boards repeat get names of ours there (r-menu 8, r-compact 5,
+    r-mini 4, r-cap 3, r-glyph 10, the LCD's 18/21 and 44/52 type, sheet
+    padding 20/24, sheet-top 44, capsule and transport sizes, the three
+    shadows, frame-line #000). The old names areas use all still exist.
+  - Fonts: Mona Sans 2.027 (static/ttf 400, 500, 600, 700), Hubot Sans
+    600 (fonts/ttf) and Martian Mono 300 (fonts/ttf), the projects' own
+    static cuts from github/mona-sans, github/hubot-sans and
+    evilmartians/mono, unmodified (a cut we instanced ourselves would be
+    a Modified Version under the OFL and couldn't keep the Reserved Font
+    Name), with LICENSE-mona-sans/-hubot-sans/-martian-mono. Paper's
+    Mona Sans has wght and wdth axes; hb-shape widths of 33 of the
+    boards' labels in the static cuts are within 1-2px of Paper's
+    (ceil-rounded) node widths, so the tracking tokens are 0 now (the
+    WIP's +0.3px came from the system font's correction). The only
+    weights the boards use: Hubot 600 for titles, tags and LCD labels;
+    Martian Mono 300 for every live number (the Components board's
+    token captions use 400; the gallery draws them in 300).
+    Instrument Sans left the Slint app (Hubot Sans takes the brand
+    titles; the web app keeps it); the brand mark is unchanged.
+  - Board inconsistencies, resolved one way: badges are 600 (every
+    screen; the Components "Badges" sample omits it); a disabled button
+    fades to 40% (Components) except a sheet's footer buttons, drawn as
+    the Settings sheet's Apply (`hover` fill, `text-disabled`); the
+    control bar's master meter is MasterMeter and the Components band's
+    two separate capsules are `MasterMeter { split: true }`; a sheet's
+    footer is 68px (20 above the buttons) everywhere, where the "Recording
+    output" sample has 16 above; list rows' trailing controls are 8px
+    apart (Paper's row gap; the old kit had 0).
+  - Themes later: each signature piece is a kit component with its own
+    interface (kit.slint lists them) and only the kit reads Theme for
+    them, so a theme can swap Theme's values and, where its look differs
+    in shape (an LCD that isn't an LCD), its own version of a component
+    with the same properties and callbacks. Interactive components take
+    `shown: ShownState` (live, hover, pressed, focus) so the gallery can
+    draw every state; the app leaves it alone.
+  - Slint compromises: text draws heavier than Paper's WebKit export
+    (Gotchas); one shadow per element, so Paper's two-layer "floating"
+    sample (0 12 32 #00000073 + 0 2 6 #0000004D) keeps its main layer,
+    and the real menus, toasts, sheets and tooltips are one layer in
+    Paper anyway; inset shadows (a keycap's lower edge, a swatch's
+    `line-soft` ring) are 1px lines and borders inside the element; no
+    blur or blend modes are needed; menus, dropdowns and popovers are
+    in-window popups as before; the "Editing" field's caret is drawn
+    for the gallery's focus state (a TextInput only shows one when it
+    has focus).
 
 - 2026-10-13: **S.2 scale repairs ported onto main after 5.0
   (stress/scale-port).** Ported: c1e3d40 + 9f40df8 (ISO frames that
@@ -2198,7 +2459,8 @@ each section. Delete entries that stop being true.
   or written by snapshots. A widget gallery (`--state kit`, `kit-menu`,
   `kit-dropdown`, `kit-dialog`) extends the approved snapshot harness for
   checking the kit; it isn't reachable from the interface.
-- 2026-10-12: The Slint app uses the system face ("System Font", SF) via
+- 2026-10-12: (Superseded 2026-10-13 by the Console fonts: Mona Sans.)
+  The Slint app uses the system face ("System Font", SF) via
   `Theme.font-ui`; Slint's own default is Helvetica (fontique puts
   SansSerif before SystemUi). Docks have preferred widths and minimums
   (140, 170, 240, 160, 160 = 874px with splitters) so every dock fits the
@@ -2928,6 +3190,123 @@ each section. Delete entries that stop being true.
   Stop reports the new missing-reader error; restoring the reader restarts
   cleanly (121 frames, no drops). Start joins the finished output before
   establishing new source demand, avoiding stale status/late cleanup.
+- 2026-10-13: Fonts a cut lighter are narrower too: Mona Sans Light sets
+  lines ~2% narrower than Regular (and than Paper's), Hubot Sans Medium
+  ~4% narrower than SemiBold. Wrapped text can then break later than on
+  a board (the kit gallery's intro now fits one line, so every band
+  below sits 22px higher than the Components board's), and pixel scores
+  against the boards (pairs.sh's MAD) rise from misregistered glyphs
+  even as the weight converges: judge weight by ink
+  (/Volumes/IsocastBuild/console-fix/tools/ink2.py), layout by rows.
+- 2026-10-13: Slint 1.18: `accessible-role` must be a constant (no
+  `cond ? a : b`); a Text's min-width is its preferred width even with
+  `overflow: elide` (set `min-width: 0px` for a label that may shorten:
+  Button `shrinks`); a binding that reads the width an element gets from
+  its layout and changes what it contains is a loop even when the
+  containing layout's min/preferred are set explicitly (a field sized
+  from its band's width; Marker shown by the dock's width): let the
+  layout share the room (min/preferred/max on the child) instead. Key
+  events a focused item rejects go up to its ancestors' FocusScopes, so
+  a FocusScope with `focus-on-tab-navigation: false` and
+  `focus-on-click: false` wrapping a group takes keys for all of it (a
+  mixer strip's ⇧F10).
+- 2026-10-13: Isolated engines need socket names nobody else picks: the
+  function critic's `/tmp/isocast-cfd.sock` and `-cfw` were also the
+  names console-fix first chose (its own now: `-cfx*`). Check with
+  `lsof /tmp/isocast-NAME.sock` before starting one.
+
+- 2026-10-13: cua-driver's foreground `click` and `right_click` warp the
+  pointer to the target without a mouse-moved event, and winit/Slint
+  take the press at the last position they saw: a click right after
+  another one on a different control lands on the first (on
+  isocast-m2-b the Studio column's Transition, Fade and Cut "didn't
+  work", a source row's right-click selected nothing, the dropdown
+  "didn't reopen" after Escape; main's 9cda72d build the same). Real
+  pointers move first, so the app is fine. Click with a 1px `drag`
+  (from x,y to x+1,y: it posts the moves) or the accessibility press;
+  /Volumes/IsocastBuild/console-integrate/remote/d.py. Right-clicks
+  after other input stayed unreliable even after a 1px drag; each
+  context menu opened as the first input after a start.
+- 2026-10-13: A meter anywhere in the window costs a whole-window redraw
+  per step (Slint has no partial redraw on wgpu; ~0.45% of a base M2
+  core per redraw a second at 1440x900). The Console control bar's
+  master level kept the window redrawing ~29 times a second while sound
+  played (17-18% with the mixer hidden, main 4%), and quantising it to
+  pixels at 15 Hz still left 10-11%: the meter's ballistic fall between
+  level updates moves it every tick. Since N.5.2 it is a native layer
+  under the window in layers mode (layers.rs `Meter`; the bar leaves a
+  hole for it), 4.6%. Anything else that must move often belongs in a
+  layer the same way.
+
+- 2026-10-13: Slint fits a Path's viewbox into the element *less its
+  stroke width* and offsets it by half the stroke (i-slint-core
+  items/path.rs `fitted_path_events`), so a stroked 24-unit icon drew
+  ~10% smaller than the SVG (16px icon, 1.5px stroke: the drawing spanned
+  14.5px). The kit's `SvgPath` (ui/icons.slint) widens the viewbox by
+  the stroke's share; draw any new stroked path with it, not `Path`.
+- 2026-10-13: Out of a layout, a Slint element without a width takes its
+  parent's, even one with a preferred width (the Sources dock's ISO badge
+  was 40px, its lane's): set `width: self.preferred-width`.
+- 2026-10-13: Offscreen snapshots run one process each: the undo history
+  and the layout prefs (docks shown, Studio Mode) don't carry from one
+  `--snapshot` to the next, but the isolated engine's state does (a
+  recording started by `press:Start Recording` keeps running, a
+  `transition:fade` stays set, Studio Mode's preview scene stays).
+  Check undo or the pane toggles inside one run; stop or reset engine
+  state after a run (/Volumes/IsocastBuild/console-main/scripts/beh.py).
+- 2026-10-13: Paper's PNG exports carry a Display P3 profile (`danger`
+  #FF4D43 reads (236,91,77)); convert them to sRGB before comparing
+  pixels with the app's snapshots (PIL ImageCms; console-main's
+  compare.py and crop.py and console-dialogs' compare.py do; the yellow
+  #EDB93E reads #E5BB56 raw), then the colours match exactly.
+- 2026-10-13: Slint 1.18 rounds a Text's layout height up to the next
+  pixel (items/text.rs: `.ceil()`), and the line is font size × the
+  face's natural ratio × `line-height-factor` in f32: 13 × 1.41 × 0.982
+  is 18.0001, so the text was 19px, not Paper's 18 (Settings' page sat
+  1px low under its header and gained 1px under every caption). The
+  leading tokens are now the largest four-place factor whose line stays
+  at or under the height (0.9819, 0.9456, 0.9026, 1.0606 for Martian
+  Mono); a new one must be checked the same way (13 × 1.41 × f ≤ 18).
+  A Text without a factor is its natural height rounded up (12px Mona
+  Sans: 17, not Paper's 16): give single lines their `lh-*` height.
+- 2026-10-13: A layout placed inside a 1px edge (`x: 1px; y: 1px; width:
+  parent.width - 2px`) without `height: parent.height - 2px` is as tall
+  as its parent, so it shares out the edge's 2px among its children:
+  Welcome's buttons sat 1px low and LcdHero's digits half a pixel low.
+  Padding inside such a layout is Paper's own (border-box), not less 1px.
+- 2026-10-13: `--state press:NAME` can't reach anything in a dialog: the
+  testing backend's search leaves out popups, and sheets live in one.
+  Click by where `--a11y` says the control is instead (it lists popups):
+  /Volumes/IsocastBuild/console-dialogs/scripts/behave.sh's `at`. A
+  layout's numbers can be read the same way: give an element a
+  temporary `accessible-description` built from `preferred-height`s.
+
+- 2026-10-13: Slint 1.18's Skia text is heavier than Paper's (WebKit,
+  `-webkit-font-smoothing: antialiased`) at the same weight and width:
+  "Intro Clip, Desk Camera" (Mona Sans 13/400) is 142px wide in both, but
+  its ink sums 324 in Paper's 1x and 2x exports, 497 in the 1x snapshot
+  and 457 at 2x (hb-view's grayscale render of the same cut: 355). The
+  weight is right (Medium would be 144px wide). `-AppleFontSmoothing 0`
+  on the command line changed nothing; Slint draws glyphs with
+  `skia_safe::Font::set_subpixel(true)` and the CoreText font manager,
+  and offers no switch. Worked around since (N.5.2, Decisions): each
+  Paper weight is drawn with the next lighter static cut (Theme's
+  `weight-*`), which brings the ink to 1.02-1.28x Paper's; a patched
+  renderer remains the exact fix.
+- 2026-10-13: Slint layout traps met building the Console gallery: an
+  item of fixed height in a HorizontalLayout sits at the top of a taller
+  row (wrap it in `VerticalLayout { alignment: center; }`); a `for` of
+  layouts in a HorizontalLayout stretches each one across the row
+  (layouts stretch by default: set the group's `alignment`); a Text's
+  preferred height is the face's own line (Mona Sans 1.41em: 15.5px at
+  11px, not Paper's 14px), so stacked single-line labels need their
+  `lh-*` heights or rows grow 1-2px each; equal columns need
+  `preferred-width: 0px` as well as `min-width: 0px`; an element inside
+  an `if` can't be read from outside it (the sheet's header height is
+  computed from tokens); adding a public `shown` to NumberField collided
+  with a private one of the same name ("Cannot override property"); an
+  `Icon` (it inherits Path) can take `stroke-width` per instance; arrays
+  of struct literals with different fields convert to `[MenuEntry]`.
 
 - 2026-10-13: Never hand VideoToolbox's H.264/HEVC encoders BGRA. Its
   own BGRA to Y'CbCr transfer runs inside the encoder service, and with
@@ -3944,6 +4323,38 @@ each section. Delete entries that stop being true.
   `CMClock::host_time_clock().time()`); the free functions are deprecated.
 
 ## Verification recipes
+
+- The sheets against Paper's Screens boards (N.5.1b): in
+  /Volumes/IsocastBuild/console-dialogs, `scripts/boards.sh` snapshots
+  Properties, Settings and Welcome at 1x and 2x (Welcome from a second
+  engine with no setup) and scores each sheet's region against the
+  board exports in board/ (scripts/compare.py: board | app | difference,
+  mean absolute difference and the share of pixels off by more than
+  32); `scripts/views.sh` snapshots every dialog and state, and
+  `scripts/final.sh` all of it at 1x and 2x with the pairs, scores
+  (pairs/final/scores.tsv) and a contact sheet;
+  `scripts/behave.sh` drives the sheets' controls and checks the
+  engine's setup; `scripts/bands.py` and `edges.py` find text rows and
+  edges for pixel-exact checks. Run the app with BIN=… for a debug build
+  (2-3 minutes a rebuild against 5 for release).
+
+- The kit against Paper's Components board (N.5): export the board with
+  Paper's `export` tool (node 1K-0 on page p-2-0 of the Console file; it
+  writes to ~/Downloads, move the PNGs to scratch), snapshot the gallery
+  with `isocast-ui --snapshot kit.png --size 1440x3060 [--scale 2]
+  --state kit`, and set them side by side band by band
+  (/Volumes/IsocastBuild/console-foundation/scripts/pair.py and
+  allpairs.sh; rules.py finds the bands' top rules, ink.py measures a
+  label's width and weight). Values come from get_jsx/get_computed_styles,
+  never from these pictures.
+- The main window and Studio Mode against their boards (N.5.1a): in
+  /Volumes/IsocastBuild/console-main, `scripts/shots.sh` (offscreen 1x
+  and 2x against the isolated engine of env.sh), `scripts/pairs.sh`
+  (board left, app right, whole and band by band, scores.jsonl; the
+  pictures masked), `scripts/views.sh 1|2` (every state the area owns),
+  `scripts/contact.py`, `scripts/crop.sh main|studio OUT x0,y0,x1,y1 ZOOM`
+  (a 1x box of both, stacked), and `scripts/beh.py` (behaviours by
+  accessibility presses and drags, checked with `isocast status/get`).
 
 - Test the daemon without touching `~/Library`: `export ISOCAST_SOCKET=<a
   short path in the scratchpad>` (Unix socket paths max out at 103 bytes;

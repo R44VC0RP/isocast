@@ -1,30 +1,41 @@
 // Area B's dialogs: Advanced Audio Properties ("advanced-audio"), as in
-// OBS: one row per audio source with its volume, mute, balance, sync
-// offset and monitoring, and where it is recorded (Isocast's tracks: the
-// program mix, and the ISO files). Put on the window by app.slint.
+// OBS, drawn as a Console sheet: one grouped row per audio source (its
+// name, then its volume, mute, balance, sync offset and monitoring, and
+// where it is recorded: Isocast's tracks, the program mix and the ISO
+// files) under a line of column names. Put on the window by app.slint.
 
 import { Theme } from "../../theme.slint";
+import { Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
-import { Checkbox, Dialog, Viewport, Dropdown, ListEmpty, NumberField, ScrollArea, Slider, Tip } from "../../kit.slint";
+import {
+    Checkbox, Dialog, Dropdown, GroupHint, GroupRow, NumberField, RowGroup, RowPlace, ScrollArea, Slider, Tip,
+    Viewport,
+} from "../../kit.slint";
 import { AudioRow, MixerArea } from "state.slint";
 
-// The table's columns (the web app's: name ≥ 120, then 104 44 170 108 200
-// 136, 12px apart), from the dialog's width (1060, at most the window's
-// less 40; less its border and 16px sides). In a narrow window the name
-// gives way first (to 80), then Balance and Audio Monitoring.
+// The table's columns (the web app's: name ≥ 80, then 104 44 170 108 200
+// 136, 12px apart), from the sheet's width (1060, at most the window's
+// less 40; less its edge and 20px sides) and a grouped row's insets (12px
+// before the name, 12px after it, 4px at the end). In a narrow window the
+// name gives way first (to 80), then Balance and Audio Monitoring.
 global Columns {
     out property <length> dialog: 1060px;
     out property <length> gap: 12px;
-    property <length> table: min(root.dialog, Viewport.width - 40px) - 2px - 32px;
-    property <length> fixed: 104px + 44px + 170px + 108px + 200px + 136px + 6 * 12px;
-    property <length> deficit: max(0px, 80px + root.fixed - root.table);
-    out property <length> name-w: max(80px, root.table - root.fixed);
+    property <length> table: min(root.dialog, Viewport.width - 40px) - 2px - 2 * Theme.sheet-pad;
+    property <length> fixed: 104px + 44px + 170px + 108px + 200px + 136px + 5 * 12px;
+    property <length> insets: Theme.space-3 + 12px + Theme.space-1;
+    property <length> deficit: max(0px, 80px + root.fixed + root.insets - root.table);
+    out property <length> name-w: max(80px, root.table - root.fixed - root.insets);
     out property <length> balance-w: 170px - root.deficit * 0.4;
     out property <length> monitor-w: 200px - root.deficit * 0.6;
 }
 
 component Columned inherits HorizontalLayout {
     spacing: Columns.gap;
+}
+
+component Centred inherits VerticalLayout {
+    alignment: center;
 }
 
 // A column's tooltip (a `Tooltip` straight in a dialog's tree trips the
@@ -36,8 +47,9 @@ component HeadTip inherits Rectangle {
     }
 }
 
+// A column's name: 11px semibold `text-3` (the sidebar's headings).
 component Head inherits Text {
-    color: Theme.text-2;
+    color: Theme.text-3;
     font-size: Theme.fs-xs;
     letter-spacing: Theme.tracking-xs;
     font-weight: Theme.weight-semibold;
@@ -45,35 +57,16 @@ component Head inherits Text {
     overflow: elide;
 }
 
-component AudioTableRow inherits Rectangle {
+component AudioTableRow inherits GroupRow {
     in property <AudioRow> audio;
-    in property <bool> last;
 
-    min-height: 40px;
-    accessible-role: groupbox;
-    accessible-label: root.audio.name;
-
-    if !root.last: Rectangle {
-        y: parent.height - 1px;
-        height: 1px;
-        background: Theme.line-soft;
-    }
+    label: root.audio.name;
 
     Columned {
-        Text {
-            width: Columns.name-w;
-            text: root.audio.name;
-            color: Theme.text;
-            font-size: Theme.fs-sm;
-            letter-spacing: Theme.tracking-sm;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-        VerticalLayout {
+        Centred {
             width: 104px;
-            alignment: center;
             NumberField {
-                max-width: 104px;
+                small: true;
                 label: "Volume of " + root.audio.name;
                 value: root.audio.gain-db;
                 minimum: -100;
@@ -96,10 +89,10 @@ component AudioTableRow inherits Rectangle {
         HorizontalLayout {
             width: Columns.balance-w;
             spacing: Theme.space-2;
-            VerticalLayout {
+            Centred {
                 horizontal-stretch: 1;
-                alignment: center;
                 Slider {
+                    thin: true;
                     label: "Balance of " + root.audio.name;
                     value-text: root.audio.balance-text;
                     minimum: -1;
@@ -114,19 +107,20 @@ component AudioTableRow inherits Rectangle {
             Text {
                 width: 30px;
                 text: root.audio.balance-text;
-                color: Theme.text-2;
-                font-size: Theme.fs-sm;
-                letter-spacing: Theme.tracking-sm;
+                color: Theme.text;
+                font-family: Theme.font-mono;
+                font-weight: Theme.weight-light;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-mono;
                 horizontal-alignment: right;
                 vertical-alignment: center;
                 accessible-role: none;
             }
         }
-        VerticalLayout {
+        Centred {
             width: 108px;
-            alignment: center;
             NumberField {
-                max-width: 108px;
+                small: true;
                 label: "Sync offset of " + root.audio.name;
                 value: root.audio.offset-ms;
                 minimum: -5000;
@@ -137,10 +131,10 @@ component AudioTableRow inherits Rectangle {
                 changed(ms) => { MixerArea.set-offset(root.audio.id, ms); }
             }
         }
-        VerticalLayout {
+        Centred {
             width: Columns.monitor-w;
-            alignment: center;
             Dropdown {
+                on-control: true;
                 label: "Audio monitoring of " + root.audio.name;
                 options: MixerArea.monitoring;
                 value: root.audio.monitor;
@@ -172,6 +166,8 @@ component AudioTableRow inherits Rectangle {
 export component MixerDialogs inherits Rectangle {
     if Ui.dialog == "advanced-audio": Dialog {
         title: "Advanced Audio Properties";
+        subtitle: "Each audio source’s volume, balance, sync and monitoring, and the files it is recorded in.";
+        icon: Icons.sheet-sliders;
         dialog-width: Columns.dialog;
         ok-text: "Close";
         cancel-text: "";
@@ -179,66 +175,68 @@ export component MixerDialogs inherits Rectangle {
         cancelled => { Ui.close-dialog(); }
 
         VerticalLayout {
-            padding-top: Theme.space-2;
-            padding-bottom: Theme.space-4;
-            padding-left: Theme.space-4;
-            padding-right: Theme.space-4;
+            padding-left: Theme.sheet-pad;
+            padding-right: Theme.sheet-pad;
             spacing: 0;
 
-            Columned {
-                height: 32px;
+            // The columns' names, over the rows' controls.
+            HorizontalLayout {
+                height: 24px;
+                padding-left: Theme.space-3;
+                padding-right: Theme.space-1;
+                spacing: 12px;
                 Head {
                     width: Columns.name-w;
                     text: "Name";
                 }
-                Head {
-                    width: 104px;
-                    text: "Volume";
-                }
-                Head {
-                    width: 44px;
-                    text: "Mute";
-                    horizontal-alignment: center;
-                }
-                Head {
-                    width: Columns.balance-w;
-                    text: "Balance";
-                }
-                Head {
-                    width: 108px;
-                    text: "Sync Offset";
-                }
-                Head {
-                    width: Columns.monitor-w;
-                    text: "Audio Monitoring";
-                }
-                Rectangle {
-                    width: 136px;
+                Columned {
                     Head {
-                        x: 0;
-                        width: parent.width;
-                        height: parent.height;
-                        text: "Tracks";
+                        width: 104px;
+                        text: "Volume";
                     }
-                    HeadTip {
-                        tooltip: "Where it is recorded: the program mix (Program), and attached to every ISO file (ISO)";
+                    Head {
+                        width: 44px;
+                        text: "Mute";
+                        horizontal-alignment: center;
+                    }
+                    Head {
+                        width: Columns.balance-w;
+                        text: "Balance";
+                    }
+                    Head {
+                        width: 108px;
+                        text: "Sync Offset";
+                    }
+                    Head {
+                        width: Columns.monitor-w;
+                        text: "Audio Monitoring";
+                    }
+                    Rectangle {
+                        width: 136px;
+                        Head {
+                            x: 0;
+                            width: parent.width;
+                            height: parent.height;
+                            text: "Tracks";
+                        }
+                        HeadTip {
+                            tooltip: "Where it is recorded: the program mix (Program), and attached to every ISO file (ISO)";
+                        }
                     }
                 }
             }
-            Rectangle {
-                height: 1px;
-                background: Theme.line-soft;
-            }
-            if MixerArea.rows.length == 0: ListEmpty {
+            if MixerArea.rows.length == 0: GroupHint {
                 text: "No audio sources.";
             }
             ScrollArea {
                 min-height: 0;
                 preferred-height: self.content-height;
                 vertical-stretch: 1;
-                for row[i] in MixerArea.rows: AudioTableRow {
-                    audio: row;
-                    last: i == MixerArea.rows.length - 1;
+                RowGroup {
+                    for row[i] in MixerArea.rows: AudioTableRow {
+                        audio: row;
+                        place: MixerArea.rows.length == 1 ? RowPlace.only : i == 0 ? RowPlace.first : i == MixerArea.rows.length - 1 ? RowPlace.last : RowPlace.middle;
+                    }
                 }
             }
         }

@@ -60,15 +60,59 @@ pub const STATES: &[&str] = &[
     "import-obs:PATH",
 ];
 
-/// Settings' pages, in OBS's order and words (with their icons' names).
-const TABS: &[(&str, &str, &str)] = &[
-    ("general", "General", "settings"),
-    ("stream", "Stream", "live"),
-    ("output", "Output", "disk"),
-    ("audio", "Audio", "speaker"),
-    ("video", "Video", "display"),
-    ("hotkeys", "Hotkeys", "keyboard"),
-    ("advanced", "Advanced", "wand"),
+/// Settings' pages in the sidebar's order and groups (Paper's Settings
+/// sheet: Recording, Broadcast, System), in OBS's words: id, name, glyph
+/// (by name), group, and the line under the page's name.
+const TABS: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "output",
+        "Output",
+        "drive",
+        "Recording",
+        "Where takes are written, how good they look, and which files each take makes.",
+    ),
+    (
+        "video",
+        "Video",
+        "monitor",
+        "Recording",
+        "The canvas every scene is drawn on, and how many frames a second it makes.",
+    ),
+    (
+        "audio",
+        "Audio",
+        "volume",
+        "Recording",
+        "The microphones your sources use, and where monitored sources play.",
+    ),
+    (
+        "stream",
+        "Stream",
+        "sheet-broadcast",
+        "Broadcast",
+        "Where the program goes live, and how it is sent.",
+    ),
+    (
+        "general",
+        "General",
+        "sun",
+        "System",
+        "This setup's name, snapping in the preview, and how often the preview draws.",
+    ),
+    (
+        "hotkeys",
+        "Hotkeys",
+        "keys",
+        "System",
+        "The keyboard shortcuts, in the window and its menus.",
+    ),
+    (
+        "advanced",
+        "Advanced",
+        "sheet-sliders",
+        "System",
+        "What a stream does when its connection drops.",
+    ),
 ];
 
 /// Streaming services, and where each one's key (and for Kick, server)
@@ -328,10 +372,13 @@ pub struct Settings {
 impl Area for Settings {
     fn connect(&self, app: &Rc<App>, window: &AppWindow) {
         let area = window.global::<SettingsArea>();
-        area.set_tabs(model(TABS.iter().map(|(id, label, icon)| NavTab {
-            id: (*id).into(),
-            label: (*label).into(),
-            icon: (*icon).into(),
+        area.set_tabs(model(TABS.iter().map(|(id, label, icon, group, _)| {
+            NavTab {
+                id: (*id).into(),
+                label: (*label).into(),
+                icon: (*icon).into(),
+                group: (*group).into(),
+            }
         })));
         area.set_services(model(SERVICES.iter().map(|(id, label, hint)| {
             ServiceChoice {
@@ -340,10 +387,16 @@ impl Area for Settings {
                 hint: (*hint).into(),
             }
         })));
+        // What makes the files (shown after the codec: Paper's Encoder row).
+        let engine = if cfg!(target_os = "macos") {
+            "Apple VideoToolbox"
+        } else {
+            ""
+        };
         area.set_codecs(model(
             CODECS
                 .iter()
-                .map(|(value, label)| kit::option(value, label, "")),
+                .map(|(value, label)| kit::option(value, label, engine)),
         ));
         area.set_pan_laws(model(
             PAN_LAWS
@@ -376,6 +429,9 @@ impl Area for Settings {
             app.settings.close(&app);
         });
         on!(on_tab_chosen, |app, tab| app.settings.tab_shown(&app, &tab));
+        on!(on_revert_group, |app, group| app
+            .settings
+            .revert_group(&app, &group));
         on!(on_set_text, |app, field, value| app
             .settings
             .set_text(&app, &field, &value));
@@ -554,7 +610,7 @@ impl Area for Settings {
         let tab = if TABS.iter().any(|(id, ..)| *id == tab) {
             tab
         } else {
-            "general"
+            TABS[0].0
         };
         let prefs = Prefs::read(&window.global::<Ui>());
         let base = app.session.borrow().setup_json().map(pick);
@@ -665,6 +721,14 @@ impl Settings {
 
     /// A page came up: Audio asks for the devices again.
     fn tab_shown(&self, app: &Rc<App>, tab: &str) {
+        if let (Some(window), Some((_, title, icon, _, about))) =
+            (app.window(), TABS.iter().find(|(id, ..)| *id == tab))
+        {
+            let area = window.global::<SettingsArea>();
+            area.set_page_title((*title).into());
+            area.set_page_about((*about).into());
+            area.set_page_icon((*icon).into());
+        }
         if tab == "audio" {
             app.load_devices(true);
         }
@@ -1090,6 +1154,7 @@ impl Settings {
         let program = &rec["program"];
         let iso = &rec["iso"];
         area.set_folder(text(&rec["folder"]).into());
+        area.set_folder_short(middle_short(&text(&rec["folder"])).into());
         area.set_keep_free(number(&rec["keep_free_gb"], 1.0));
         let program_on = program["enabled"] != json!(false);
         let iso_on = iso["enabled"] == json!(true);
@@ -1107,26 +1172,15 @@ impl Settings {
         let shown = if iso_on && !program_on { iq } else { pq };
         let exact = if same { quality_stop(shown) } else { -1 };
         area.set_quality_stop(exact);
-        area.set_quality_at(if exact >= 0 {
-            exact
-        } else {
-            nearest_stop(shown)
-        });
+        area.set_quality_position(quality_position(quality_number(shown)));
         area.set_quality_disabled(prores);
-        let stop = if prores { -1 } else { exact };
-        area.set_quality_status(
-            if stop >= 0 {
-                String::new()
-            } else if prores {
-                "ProRes files are made at a fixed quality".into()
+        area.set_quality_value(
+            if prores {
+                "Fixed".to_string()
             } else if same {
-                format!("Custom ({})", quality_number(shown))
+                quality_number(shown).to_string()
             } else {
-                format!(
-                    "Custom (program {}, ISO {})",
-                    quality_number(pq),
-                    quality_number(iq)
-                )
+                format!("{} · ISO {}", quality_number(pq), quality_number(iq))
             }
             .into(),
         );
@@ -1240,6 +1294,108 @@ impl Settings {
         area.set_reconnect_on(reconnect["enabled"] != json!(false));
         area.set_reconnect_delay(number(&reconnect["delay_seconds"], 2.0));
         area.set_reconnect_retries(number(&reconnect["max_retries"], 25.0));
+
+        // The summary: what the draft makes, how fast its program file
+        // fills the disk (the estimate the engine's free-space check uses,
+        // ProgramRecording::bytes_per_second), and the recording folder's
+        // disk (the engine's Status, as the status bar shows it).
+        area.set_summary_video(format!("{width}×{height} | {fps} fps").into());
+        let rate = serde_json::from_value::<isocast_protocol::ProgramRecording>(program.clone())
+            .ok()
+            .zip(serde_json::from_value::<isocast_protocol::Canvas>(canvas.clone()).ok())
+            .map(|(program, canvas)| program.bytes_per_second(&canvas))
+            .filter(|rate| *rate > 0.0);
+        area.set_summary_rate(
+            rate.map_or(String::new(), |rate| {
+                format!("~{:.1} GB/h", rate * 3600.0 / 1e9)
+            })
+            .into(),
+        );
+        area.set_summary_free(
+            s.status
+                .as_ref()
+                .and_then(|x| x.recording_free_bytes)
+                .map_or(String::new(), crate::model::gigabytes_free)
+                .into(),
+        );
+        let (on, files) = if program_on {
+            (true, &program["encoder"])
+        } else {
+            (iso_on, &iso["encoder"])
+        };
+        let mix = program["audio"].as_array().is_some_and(|a| !a.is_empty());
+        // The engine mixes the program in stereo at 48 kHz.
+        area.set_summary_audio(
+            if program_on && mix {
+                "Stereo 48 kHz"
+            } else {
+                "No program sound"
+            }
+            .into(),
+        );
+        area.set_summary_codec(
+            if on {
+                let codec = codec(files);
+                let label = CODECS
+                    .iter()
+                    .find(|(v, _)| *v == codec)
+                    .map(|(_, label)| *label)
+                    .unwrap_or(codec.as_str());
+                let container = files["container"].as_str().unwrap_or("mov").to_uppercase();
+                format!("{label} · {container}")
+            } else {
+                "Nothing recorded".to_string()
+            }
+            .into(),
+        );
+    }
+
+    /// Put a group of fields back as they are in the live setup (a group
+    /// heading's reset glyph): "recording" (folder, quality, keep free),
+    /// "program" and "iso" (all but their quality, which Recording has).
+    fn revert_group(&self, app: &Rc<App>, group: &str) {
+        let paths: &[&[&str]] = match group {
+            "recording" => &[
+                &["recording", "folder"],
+                &["recording", "keep_free_gb"],
+                &["recording", "program", "encoder", "quality"],
+                &["recording", "iso", "encoder", "quality"],
+            ],
+            "program" => &[&["recording", "program"]],
+            "iso" => &[&["recording", "iso"]],
+            _ => return,
+        };
+        if let Some(d) = self.draft.borrow_mut().as_mut() {
+            for path in paths {
+                // Recording's quality numbers stay as they are in Program
+                // and ISO.
+                let kept = (path.len() == 2)
+                    .then(|| d.draft["recording"][path[1]]["encoder"]["quality"].clone());
+                let saved = path.iter().fold(&d.base, |v, k| &v[*k]).clone();
+                let mut slot = &mut d.draft;
+                for key in &path[..path.len() - 1] {
+                    if !slot[*key].is_object() {
+                        slot[*key] = json!({});
+                    }
+                    slot = &mut slot[*key];
+                }
+                let last = path[path.len() - 1];
+                if let Some(map) = slot.as_object_mut() {
+                    if saved.is_null() {
+                        map.remove(last);
+                    } else {
+                        map.insert(last.to_string(), saved);
+                    }
+                }
+                if let Some(quality) = kept.filter(|q| !q.is_null()) {
+                    let encoder = &mut d.draft["recording"][path[1]]["encoder"];
+                    if encoder.is_object() {
+                        encoder["quality"] = quality;
+                    }
+                }
+            }
+        }
+        self.show(app);
     }
 
     // ---------- Welcome: opening and importing setups ----------
@@ -1836,18 +1992,37 @@ fn quality_stop(quality: &Value) -> i32 {
         .map_or(-1, |i| i as i32)
 }
 
-/// The stop nearest a quality.
-fn nearest_stop(quality: &Value) -> i32 {
-    let n = quality_number(quality) as i32;
-    let mut best = 0;
-    for (i, (_, preset)) in QUALITIES.iter().enumerate() {
-        let v = EncoderQuality::Preset(*preset).value() as i32;
-        let b = EncoderQuality::Preset(QUALITIES[best].1).value() as i32;
-        if (v - n).abs() < (b - n).abs() {
-            best = i;
-        }
+/// A path with its middle left out when it has more than three parts,
+/// so the folder's own name shows: "/Volumes/…/scratch/rec".
+fn middle_short(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() <= 4 {
+        return path.to_string();
     }
-    best as i32
+    let head = if parts[0].is_empty() {
+        format!("/{}", parts[1])
+    } else {
+        parts[0].to_string()
+    };
+    format!("{head}/…/{}", parts[parts.len() - 2..].join("/"))
+}
+
+/// Where a quality number sits among the stops, as Segmented's `position`:
+/// the stop's index when it is one, else half way between its neighbours
+/// (60: 1.5, between Medium's 50 and High's 70).
+fn quality_position(quality: u8) -> f32 {
+    let below = QUALITIES
+        .iter()
+        .filter(|(_, preset)| EncoderQuality::Preset(*preset).value() < quality)
+        .count();
+    let exact = QUALITIES
+        .iter()
+        .any(|(_, preset)| EncoderQuality::Preset(*preset).value() == quality);
+    if exact {
+        below as f32
+    } else {
+        below as f32 - 0.5
+    }
 }
 
 /// A server the setup can use: rtmp:// or rtmps://, a host, then an app.

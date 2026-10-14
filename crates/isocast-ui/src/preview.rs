@@ -24,7 +24,7 @@ use slint::wgpu_30::wgpu;
 use crate::frames::Feed;
 #[cfg(target_os = "macos")]
 pub use crate::layers::{BoxShape, BoxStyle};
-use crate::{AppWindow, CanvasArea, Ui};
+use crate::{AppWindow, CanvasArea, Theme, Ui};
 
 /// The selected item's box (see layers.rs; the same off macOS).
 #[cfg(not(target_os = "macos"))]
@@ -149,14 +149,7 @@ impl Output {
                 app.global::<CanvasArea>().set_native_picture(true);
                 Output::Layers(Rc::new(RefCell::new(crate::layers::Layers::attach(
                     app.window(),
-                    crate::layers::Colours {
-                        window: [0x14, 0x16, 0x19],
-                        stage: [0x11, 0x13, 0x15],
-                        monitor: [0x0b, 0x0c, 0x0d],
-                        accent: [0xb4, 0x68, 0x3f],
-                        locked: [0xb0, 0xab, 0xa3],
-                        bone: [0xee, 0xea, 0xe2],
-                    },
+                    theme_colours(app),
                     test_outline,
                 )?)))
             }
@@ -167,6 +160,41 @@ impl Output {
                 Output::Image(device.clone())
             }
         })
+    }
+}
+
+/// The layers' colours, from the theme (so a theme's change follows).
+#[cfg(target_os = "macos")]
+fn theme_colours(app: &AppWindow) -> crate::layers::Colours {
+    let theme = app.global::<Theme>();
+    let rgb = |c: slint::Color| [c.red(), c.green(), c.blue()];
+    let rgba = |c: slint::Color| [c.red(), c.green(), c.blue(), c.alpha()];
+    crate::layers::Colours {
+        window: rgb(theme.get_surface_chrome()),
+        stage: rgb(theme.get_surface_stage()),
+        monitor: rgb(theme.get_surface_monitor()),
+        accent: rgb(theme.get_selection_ring()),
+        ring: rgba(theme.get_box_ring()),
+        locked: rgb(theme.get_text_2()),
+        bone: rgb(theme.get_bone()),
+        handle_edge: rgba(theme.get_handle_edge()),
+        meter: crate::layers::MeterColours {
+            inset: rgb(theme.get_surface_inset()),
+            track: rgb(theme.get_meter_capsule_track()),
+            zones: [
+                rgb(theme.get_meter_ok()),
+                rgb(theme.get_meter_warn()),
+                rgb(theme.get_meter_clip()),
+            ],
+            peaks: [
+                rgba(theme.get_meter_ok_peak()),
+                rgba(theme.get_meter_warn_peak()),
+                rgba(theme.get_meter_clip_peak()),
+            ],
+            warn_db: theme.get_meter_warn_db(),
+            clip_db: theme.get_meter_clip_db(),
+            radius: f64::from(theme.get_r()) - 1.0,
+        },
     }
 }
 
@@ -607,7 +635,19 @@ fn geometry(app: &AppWindow) -> crate::layers::Geometry {
             app.get_program_height() as f64,
         ],
         scale: app.get_canvas_scale() as f64,
+        meter: meter_rect(app),
     }
+}
+
+/// The control bar's master level's inside, in window points (its native
+/// layer's place).
+pub fn meter_rect(app: &AppWindow) -> [f64; 4] {
+    [
+        app.get_master_meter_x() as f64,
+        app.get_master_meter_y() as f64,
+        app.get_master_meter_width() as f64,
+        app.get_master_meter_height() as f64,
+    ]
 }
 
 fn is_magenta(p: [u8; 4]) -> bool {

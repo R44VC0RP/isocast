@@ -57,6 +57,13 @@ export global MixerArea {
     in property <[Strip]> strips;
     // Their meters, in the same order.
     in property <[Level]> levels;
+    // The program mix's meter (the control bar's master level), left and
+    // right.
+    in property <Level> master-left: { rms: -60, peak: -60, hold: -60 };
+    in property <Level> master-right: { rms: -60, peak: -60, hold: -60 };
+    // The master level is a native layer under the window (macOS, layers
+    // preview): the control bar leaves its inside unpainted.
+    in property <bool> master-native;
     // How many sources the mixer would show before hiding (0: "No audio
     // sources"; none shown: "Every audio source is hidden").
     in property <int> source-count;
