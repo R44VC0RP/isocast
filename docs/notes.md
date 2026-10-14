@@ -152,6 +152,15 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-13 (G.3b investigation, compatibility check only): QuickTime on
+  exonbook opens the one-second-rotation HEVC export and draws its picture,
+  but its locked desktop exposes no AX window; playback-control routes are
+  unavailable and cleanup File > Close was refused. No unlock or permission
+  was attempted.
+  A paused scratch QuickTime window remains. After unlocking, retry through
+  the desktop bridge: `scripts/testmac.sh gui '/Applications/CuaDriver.app/Contents/MacOS/cua-driver call launch_app '\''{"bundle_id":"com.apple.QuickTimePlayerX","urls":["/Users/ryanvogel/isocast-scratch/g3b-segments/rotation2/r0-n1/export/r0-n1 PROGRAM.mov"],"session":"g3b-playback"}'\'''`, then inspect/play/close that window.
+  This is not a G.3b qualification: no crash-safe writer was implemented.
+
 - 2026-10-13 (8.4, branch agent/visual-ci): the visual check's first real
   run on GitHub. The runner's GPU (macOS 15 arm64 VM, paravirtual Metal)
   has not drawn the app yet; only this Mac has. After merging to main:
@@ -260,6 +269,11 @@ each section. Delete entries that stop being true.
   crash is unknown: manifest `recoverable_seconds_at_pause: null`, including
   after Resume. Pause/Resume replies do not acknowledge committed media.
 
+- 2026-10-14 — The Create view (C.2, branch ui/create-view): in the app,
+  View → Create (⌘⇧C). New Timeline, record a few takes, Retake, drag a
+  clip, Export. To see it without a window: `isocast-ui --snapshot
+  out.png --size 1440x900 --scale 2 --state create --state wait:800
+  --state create-thumbs` against an engine with a timeline.
 - 2026-10-13 — Repo docs and release files (8.1, 8.3, branch
   agent/docs-release): read README.md as a visitor would (the screenshots
   are real, from the Console redesign), then `git diff main --stat`. To
@@ -459,6 +473,29 @@ each section. Delete entries that stop being true.
   a console, or can be dropped from the rig. Nothing waits on it.
 
 ## Benchmarks
+
+- 2026-10-13: **G.3b feasibility, not a delivered crash-safe writer.** Main
+  runtime f6f287d on exonbook M4 Max/macOS 26.6.2, synthetic inputs, common
+  lock, no screensharingd. Three interleaved 16 s flagship rounds each of
+  ordinary recording / existing split every ~1 s / split every ~2 s:
+  daemon CPU medians 26.97/31.97/30.42%, instructions 628.09/1015.84/808.64
+  M/s, VT CPU 18.25/25.05/20.91%, RSS 113.84/112.89/111.41 MiB. Stop alone
+  80.4/90.1/74.0 ms, then join 284.8/427.1/384.4 ms median. Ordinary and
+  1 s runs zero-drop; one 2 s run reports 698 ISO video drops, program and
+  all audio remain whole. This measures reuse of public split/timeline/join
+  (including its metadata/RPC cost), not a lower bound for every internal
+  rolling design. The 1 s schedule's first segment is 2 s; terminal chunks
+  are partial. File sizes vary substantially, so no same-quality/size claim.
+  All 27 joined MOVs fully decode, have equal A/V durations, and import all
+  54 tracks into AVMutableComposition. Existing join copies compressed video
+  but decodes/re-encodes AAC: it is not bit-preserving audio assembly.
+  Repeated baseline crash matrix: 55 exact cuts, 111/165 files decode, 54
+  lack a movie header, every recovery claim remains null. Twenty seeded
+  plain kills: 45/60 files decode, 15 lack a header; worst common A/V loss
+  2.249517 s, two files exceed 2 s. No 1/2 s guarantee is qualified. E2E:
+  12 PASS, bug_report unavailable; fmt/clippy and 180 tests pass. Evidence:
+  /Volumes/IsocastBuild/g3b-segments/scratch/REPORT.md and adjacent JSON;
+  full media under ~/isocast-scratch/g3b-segments on exonbook.
 
 - 2026-10-13: **G.3 re-review R1/R2**, exonbook, synthetic reviewer rig,
   common bench lock. 55 exact-target killed takes / 165 files: H.264, HEVC,
@@ -1182,6 +1219,32 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-13 (delegator, overnight): **G.3b (crash-safe takes) waits until
+  after the alpha week.** The probes show it needs our own video/audio
+  encoders feeding a segment writer, which replaces the core recording path;
+  landing that the night before Ryan's alpha testing risks more than the
+  rare crash it protects against. Until then a crash loses what's after the
+  last 2 s fragment (a take under 2 s entirely), and pauses report the
+  recoverable length as unknown. First engine project after the alpha week.
+
+- 2026-10-13: **G.3b is not a segment-API toggle.** Recording uses raw
+  CVPixelBuffers via AVAssetWriterInputPixelBufferAdaptor and PCM via AAC
+  AVAssetWriterInputs (writer.rs); only streaming/monitors use the explicit
+  VTCompressionSession in stream.rs. Fifteen native probes on M5/macOS 27.2
+  confirm: manual MP4 segmentation rejects non-nil output settings; delegate
+  MOV output fails with -11875; ProRes rejects MP4; the HLS profile refuses
+  two audio inputs. Automatic MP4 segmentation *does* encode raw H.264/HEVC,
+  but flushSegment then raises and the pause tail remains unwritten. Earlier
+  shorthand saying all delegate output is passthrough-only was too broad.
+  Reusing existing split/join is the smallest measured equivalent and fails
+  the unchanged-cost bar (Benchmarks). Retain the honest unknown recovery
+  contract; no new committed_seconds field or cut-derived number is shipped.
+  A complete replacement needs persistent recording encoders, a muxer that
+  supports MOV/ProRes/multiple AAC tracks, recoverable track-time accounting,
+  fsync/error propagation, and an all-writer Pause commit barrier. Encoder
+  draining alone is insufficient; AAC priming/tail and sample durations must
+  be resolved explicitly. No replacement, dependency or runtime edit retained.
+
 - 2026-10-13: **G.3 R1 replaces the cut-derived durability claim.** Neither
   FileWriter acceptance (which can mean only queued) nor AVAssetWriter input
   acceptance acknowledges an on-disk fragment. No numeric lower bound can
@@ -1223,13 +1286,40 @@ each section. Delete entries that stop being true.
   wrong at exact boundaries and during encoder draining; it is now unknown.
   Rejected alternatives, measured: AVAssetWriter can't change
   `movieFragmentInterval` after writing starts ("Cannot call method when
-  status is 1"), `flushSegment` only works in delegate segment mode (which is
-  passthrough-only, so it would mean replacing the encoder pipeline), and
+  status is 1"), `flushSegment` only works in manual delegate segment mode
+  (which is passthrough-only; automatic mode can compress, see G.3b), and
   padding past the fragment boundary would put paused time back into the
   file. A real fix needs a writer that encodes itself and writes segments.
   (F4) Documented the cut steps and concurrent direct-RPC refusal; hotkey
   actions queue instead (R2). (F6) Pre-existing 30 fps ISO duplicate/skip,
   not G.3: below.
+- 2026-10-14: **The Create view (C.2).** Overrule any of these:
+  - *A View menu item plus a Build/Create switch in the clip bar's
+    header*, not Paper's workspace bar (Build/Create/Live workspaces are
+    parked); the choice is remembered ("create" in the UI prefs).
+  - *The clip bar takes the docks' place and height* (the same splitter),
+    shown in Create even with the docks hidden; the 280px track-header
+    column narrows to 200px under a 1200px window.
+  - *Clips are named by their id* ("Take 3" for c3, which survives moves)
+    after their place ("03"); the engine has no clip names yet.
+  - *Thumbnails*: 8 frames per take's program file (nearest keyframe,
+    at most 160x90), made by AVFoundation's image generator on one thread
+    of the app's (msg_send, no new crates: two more features on
+    objc2-core-graphics), cached in memory by file for the session. Not
+    on disk: nothing is written next to recordings. A 51-clip timeline
+    costs ~5 s of one core once, at open. None off macOS.
+  - *Optimistic move and remove*: shown at once, then the
+    `timeline_changed` read replaces them; a refused call reloads.
+  - *Next-take placeholder* is drawn solid: Slint has no dashed edges.
+  - *The take being recorded* is a red clip growing from the end, its
+    length the LCD's REC seconds less those at the last `started` event
+    (a split or retake's next take; the LCD keeps counting the
+    recording). A window opened mid-recording counts from the LCD.
+  - *No export button on the boards*: Export (and Show in Finder after
+    one) sit in the header's tools in Paper's 24px capsule style; it
+    exports to the engine's default folder (the first take's).
+  - Not in the MVP, as the brief says: rundown, segments, ratings,
+    inspector, ISO rows, trimming, splitting, playback at the playhead.
 - 2026-10-13: **Visual check on pull requests (8.4).** Split in two
   workflows because one can't both run untrusted code and hold write
   tokens or secrets: visual.yml (`pull_request`, read-only token, no
@@ -3179,6 +3269,15 @@ each section. Delete entries that stop being true.
   only 2 s on immediate kill. Request replies, metadata checkpoints and
   input progress must never be described as media durability evidence.
 
+- 2026-10-14: An accessible Text inside a button makes an accessibility
+  hit test (cua-driver's background click, VoiceOver) land on the text,
+  whose press does nothing; give such labels `accessible-role: none`.
+  Inside a `for` element, `parent.foo` doesn't reach a property declared
+  on the repeated element: name it (`tick := Rectangle`). A dragged
+  element's own `mouse-x` moves with it: measure drags in window
+  coordinates (`absolute-position.x + mouse-x`). On the test-Mac bridge,
+  a job whose children inherit its stdout (a lock holder, the app) keeps
+  the queue busy until they exit: send their output elsewhere.
 - 2026-10-14: README screenshots at 1440x900 on isocast-m2-b: its screen
   is only 960x720 points at 2x, and cua-driver's set_window_frame can't
   make a window bigger than the screen ("did not settle"). take.sh now adds

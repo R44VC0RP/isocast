@@ -55,6 +55,10 @@ pub fn load(window: &AppWindow) {
     flag("docks_locked", &|v| ui.set_docks_locked(v));
     flag("preview_locked", &|v| ui.set_preview_locked(v));
     flag("studio", &|v| ui.set_studio(v));
+    // The Create view (area G).
+    flag("create", &|v| {
+        window.global::<crate::CreateArea>().set_active(v)
+    });
     length("docks_height", &|v| ui.set_docks_height(v));
     length("scenes_width", &|v| ui.set_scenes_width(v));
     length("sources_width", &|v| ui.set_sources_width(v));
@@ -101,6 +105,7 @@ pub fn save(window: &AppWindow) {
         "docks_locked": ui.get_docks_locked(),
         "preview_locked": ui.get_preview_locked(),
         "studio": ui.get_studio(),
+        "create": window.global::<crate::CreateArea>().get_active(),
         "docks_height": ui.get_docks_height(),
         "scenes_width": ui.get_scenes_width(),
         "sources_width": ui.get_sources_width(),

@@ -64,6 +64,7 @@ pub struct App {
     pub settings: areas::settings::Settings,
     pub canvas: areas::canvas::Canvas,
     pub library: areas::library::Library,
+    pub create: areas::create::Create,
 }
 
 impl App {
@@ -91,6 +92,7 @@ impl App {
             settings: areas::settings::Settings::default(),
             canvas,
             library: areas::library::Library::default(),
+            create: areas::create::Create::default(),
         });
         window.set_version(env!("CARGO_PKG_VERSION").into());
         if !mode.offscreen {
@@ -125,9 +127,11 @@ impl App {
         app
     }
 
-    /// The areas, in the order they update.
-    pub fn areas(&self) -> [&dyn Area; 6] {
+    /// The areas, in the order they update. Create comes first so that in
+    /// its view Delete takes off the selected clip, not a scene item.
+    pub fn areas(&self) -> [&dyn Area; 7] {
         [
+            &self.create,
             &self.canvas,
             &self.sources,
             &self.mixer,
@@ -326,7 +330,7 @@ impl App {
             Event::PluginChanged { .. } => {}
             // Data shows in the program's picture; the app has no data view.
             Event::DataChanged { .. } => {}
-            // No Create view yet (C.2); `isocast timeline` has timelines.
+            // The Create view (area G) reads them in its `event`.
             Event::TimelineChanged { .. }
             | Event::ExportProgress { .. }
             | Event::ExportFinished { .. } => {}

@@ -1,0 +1,970 @@
+// The Create view's clip bar (C.2), after Paper's "Workspace · Create"
+// and "Create · Retake" boards (the Timeline, nodes 86H-0 and 8OE-0): a
+// 34px header (record, Retake and Remove, the take's line, the timeline,
+// Export, zoom, the view switch), a 20px time ruler, the Program track's
+// 56px lane of clips (a thumbnail strip each, its name and length), and
+// the playhead, or the record head while a take is being recorded. A
+// 280px track-header column (200px in a narrow window) on the left, then
+// a 1px line, then the lanes, which scroll sideways. The rundown,
+// segments, ratings, the inspector and the ISO rows aren't in the MVP.
+//
+// Everything it shows comes from CreateArea (src/areas/create.rs), which
+// reads the engine's timeline methods and events; the playhead, zoom and
+// scroll are the view's own.
+
+import { Theme, Motion } from "../../theme.slint";
+import { Icons, Icon, SvgPath } from "../../icons.slint";
+import { Ui } from "../../state.slint";
+import { FocusRing, Menus, Segment, Segmented, Slider, Tip } from "../../kit.slint";
+import { ControlsArea } from "../controls/state.slint";
+import { CreateArea, ClipRow } from "state.slint";
+
+// Paper's retake glyph (8EQ-0's cluster), not in Icons.
+global CreateIcons {
+    out property <string> retake: "M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5";
+}
+
+// A time as mm:ss in Martian Mono, the unused leading zeros dimmed (as
+// the LCD and Paper's ruler draw them: "0" dim, then "2:00").
+component TimeText inherits HorizontalLayout {
+    in property <float> seconds;
+    in property <color> color: Theme.text-3;
+    property <int> whole: floor(max(0, root.seconds) + 0.0001);
+    property <int> m: floor(root.whole / 60);
+    property <int> s: mod(root.whole, 60);
+    property <string> ss: (root.s < 10 ? "0" : "") + root.s;
+    property <string> lead: root.whole == 0 ? "00:00" : root.m >= 10 ? "" : root.m >= 1 ? "0" : root.s >= 10 ? "00:" : "00:0";
+    property <string> rest: root.whole == 0 ? "" : root.m >= 1 ? root.m + ":" + root.ss : "" + root.s;
+    spacing: 0;
+    alignment: start;
+    if root.lead != "": Text {
+        text: root.lead;
+        color: root.color;
+        opacity: 0.35;
+        font-family: Theme.font-mono;
+        font-size: Theme.fs-micro;
+        font-weight: Theme.weight-light;
+        vertical-alignment: center;
+    }
+    if root.rest != "": Text {
+        text: root.rest;
+        color: root.color;
+        font-family: Theme.font-mono;
+        font-size: Theme.fs-micro;
+        font-weight: Theme.weight-light;
+        vertical-alignment: center;
+    }
+}
+
+// Paper's 24px header capsule (the "Retake / Next" cluster, "Marker"):
+// `control`, round ends, 2px in; PillItems split by a 1x12 line.
+component PillGroup inherits Rectangle {
+    height: 24px;
+    border-radius: 12px;
+    background: Theme.control;
+    min-width: row.min-width;
+    preferred-width: row.preferred-width;
+    horizontal-stretch: 0;
+    row := HorizontalLayout {
+        padding-left: 2px;
+        padding-right: 2px;
+        spacing: 0;
+        alignment: center;
+        @children
+    }
+}
+
+component PillDivider inherits Rectangle {
+    width: 1px;
+    Rectangle {
+        width: 1px;
+        height: 12px;
+        background: Theme.line-strong;
+    }
+}
+
+// One button of a PillGroup: a 12px icon and an 11px label, 8px in on
+// the left and 9px on the right, 5px between. Hover fills it.
+component PillItem inherits Rectangle {
+    in property <string> icon;
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> menu-open;
+    in property <string> tooltip;
+    in property <color> tint: Theme.text-2;
+    callback clicked();
+
+    property <bool> hovered: ta.has-hover && root.enabled;
+    property <bool> keyboard;
+    forward-focus: fs;
+    height: 24px;
+    min-width: row.min-width;
+    preferred-width: row.preferred-width;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-description: root.tooltip;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    Rectangle {
+        y: 1px;
+        height: parent.height - 2px;
+        border-radius: self.height / 2;
+        background: ta.pressed || root.menu-open ? Theme.control-active : root.hovered ? Theme.control-hover : transparent;
+        animate background { duration: Theme.fast; easing: Motion.ease; }
+    }
+    row := HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 9px;
+        spacing: 5px;
+        alignment: center;
+        if root.icon != "": Icon {
+            y: (parent.height - self.height) / 2;
+            path: root.icon;
+            size: Theme.icon-xs;
+            color: root.hovered ? Theme.text : root.tint;
+        }
+        Text {
+            text: root.text;
+            color: root.hovered ? Theme.text : root.tint;
+            font-size: Theme.fs-xs;
+            font-weight: Theme.weight-medium;
+            vertical-alignment: center;
+            // The button speaks for it (and an accessibility hit test
+            // lands on the button, which presses).
+            accessible-role: none;
+        }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    fs := FocusScope {
+        enabled: root.enabled;
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+    FocusRing {
+        inset: true;
+        shown: fs.has-focus && root.keyboard;
+        radius: root.height / 2;
+    }
+    if root.tooltip != "": Tooltip {
+        Tip { text: root.tooltip; }
+    }
+}
+
+// The 26px record button (8EQ-0 "Record / idle", 8XA-0 "Record /
+// recording"): a red dot on `control`, or a bone square on the red fill
+// with a 2px bone edge while recording.
+component RecordButton inherits Rectangle {
+    in property <bool> active;
+    in property <bool> enabled: true;
+    in property <string> label;
+    callback clicked();
+    property <bool> hovered: ta.has-hover && root.enabled;
+    width: 26px;
+    height: 26px;
+    border-radius: 13px;
+    background: root.active ? (ta.pressed ? Theme.danger-fill-active : root.hovered ? Theme.danger-fill-hover : Theme.danger-fill) : (ta.pressed ? Theme.control-active : root.hovered ? Theme.control-hover : Theme.control);
+    border-width: root.active ? 2px : 0px;
+    border-color: Theme.bone;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+    Rectangle {
+        width: 10px;
+        height: 10px;
+        border-radius: root.active ? 2px : 5px;
+        background: root.active ? Theme.bone : Theme.danger;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    Tooltip {
+        Tip { text: root.label; }
+    }
+}
+
+// One clip on the Program track (8HF-0 "Clip / 01 Cold open"): 44px on
+// `control` with 4px corners, a 20px line with its place, name and
+// length, and a strip of 39x22 frames 1px apart; a 2px yellow ring inside
+// when selected.
+component ClipView inherits Rectangle {
+    in property <ClipRow> data;
+    in property <bool> dragging;
+    border-radius: 4px;
+    background: Theme.control;
+    clip: true;
+
+    property <int> tiles: max(0, ceil((root.width - 1px) / 40px));
+    property <int> frames: root.data.thumbs.length;
+
+    VerticalLayout {
+        spacing: 0;
+        HorizontalLayout {
+            height: 20px;
+            padding-left: 6px;
+            padding-right: 6px;
+            spacing: 4px;
+            // Narrow clips (a long timeline seen whole) keep what fits:
+            // the place, then the name, then the length.
+            if root.width >= 28px: Text {
+                text: root.data.number;
+                color: Theme.text-3;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-micro;
+                font-weight: Theme.weight-light;
+                vertical-alignment: center;
+                accessible-role: none;
+                horizontal-stretch: 0;
+            }
+            if root.width >= 64px: Text {
+                text: root.data.name;
+                color: root.data.problem ? Theme.text-3 : Theme.text;
+                font-size: Theme.fs-xs;
+                font-weight: Theme.weight-semibold;
+                vertical-alignment: center;
+                accessible-role: none;
+                overflow: elide;
+                horizontal-stretch: 1;
+                min-width: 0px;
+            }
+            if root.data.problem || root.data.dropped: Icon {
+                y: (parent.height - self.height) / 2;
+                path: Icons.warning;
+                size: 10px;
+                color: root.data.problem ? Theme.danger-text : Theme.warning;
+            }
+            if root.width >= 104px: Text {
+                text: root.data.length;
+                color: Theme.text-3;
+                font-family: Theme.font-mono;
+                font-size: Theme.fs-micro;
+                font-weight: Theme.weight-light;
+                vertical-alignment: center;
+                accessible-role: none;
+                horizontal-stretch: 0;
+            }
+        }
+        Rectangle {
+            height: 2px;
+        }
+        // The frames: as many 39px tiles as fit, each the frame nearest
+        // its place in the take.
+        Rectangle {
+            height: 22px;
+            for t in root.tiles: Rectangle {
+                x: 1px + t * 40px;
+                width: 39px;
+                height: 22px;
+                background: Theme.surface-inset;
+                if root.frames > 0: Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.data.thumbs[min(root.frames - 1, floor((t + 0.5) * root.frames / max(1, root.tiles)))];
+                    image-fit: cover;
+                }
+            }
+        }
+    }
+    // The selection ring (8J8-0): yellow, 2px, inside.
+    if root.data.selected: Rectangle {
+        border-radius: 4px;
+        border-width: 2px;
+        border-color: Theme.accent;
+    }
+}
+
+export component ClipBar inherits Rectangle {
+    // The track-header column: Paper's 280px, 200px in a narrow window.
+    property <length> head-w: root.width >= 1200px ? 280px : 200px;
+    property <length> header-h: 34px;
+    property <length> ruler-h: 20px;
+    property <length> lane-h: 56px;
+    property <length> lane-w: root.width - root.head-w - 1px;
+
+    property <bool> recording: ControlsArea.record-state == "recording" || ControlsArea.record-state == "stopping";
+    // A take is being recorded onto this timeline.
+    property <bool> rolling: root.recording && CreateArea.has-timeline;
+    property <float> rec: !root.rolling ? 0 : ControlsArea.rec-seconds >= CreateArea.rec-offset ? ControlsArea.rec-seconds - CreateArea.rec-offset : ControlsArea.rec-seconds;
+    property <float> total: CreateArea.total-seconds;
+    property <float> span: root.total + root.rec;
+
+    // The scale: the whole timeline fits at zoom 0 (at least 10 s), up to
+    // 32 times closer at zoom 1. The first clip starts 8px in (Paper),
+    // and room is left after the last for the next take's place.
+    property <length> pad: 8px;
+    property <length> next-w: 120px;
+    property <float> fit: max(0.2, (root.lane-w - 2 * root.pad - root.next-w) / 1px / max(10, root.span));
+    property <float> pps: root.fit * pow(2, CreateArea.zoom * 5);
+    property <length> content-w: max(root.lane-w, 2 * root.pad + root.next-w + root.span * root.pps * 1px);
+    property <length> max-scroll: max(0px, root.content-w - root.lane-w);
+    property <length> sx: clamp(CreateArea.scroll-x, 0px, root.max-scroll);
+
+    // The ruler: a label every 1, 2, 5, 10, 15, 30 s, 1, 2, 5, 10, 20 min
+    // or 1 h, whichever is the first at least 90px apart; four ticks to
+    // a label.
+    property <float> want: 90 / root.pps;
+    property <float> label-s: root.want <= 1 ? 1 : root.want <= 2 ? 2 : root.want <= 5 ? 5 : root.want <= 10 ? 10 : root.want <= 15 ? 15 : root.want <= 30 ? 30 : root.want <= 60 ? 60 : root.want <= 120 ? 120 : root.want <= 300 ? 300 : root.want <= 600 ? 600 : root.want <= 1200 ? 1200 : 3600;
+    property <length> tick-px: root.label-s / 4 * root.pps * 1px;
+    property <int> first-tick: max(0, floor((root.sx - root.pad) / root.tick-px));
+    property <int> tick-count: ceil(root.lane-w / root.tick-px) + 2;
+
+    // The playhead (at the end, where the next take lands, unless placed).
+    property <float> playhead: CreateArea.playhead < 0 ? root.total : min(CreateArea.playhead, root.total);
+
+    // A clip being dragged: its index, how far, and where it would go.
+    property <int> drag-from: -1;
+    property <length> drag-dx;
+    // The pointer's window x when the clip was pressed (the clip moves
+    // under the pointer, so its own coordinates won't do).
+    property <length> press-x;
+    property <float> drag-mid: root.drag-from >= 0 && root.drag-from < CreateArea.clips.length ? CreateArea.clips[root.drag-from].start + CreateArea.clips[root.drag-from].duration / 2 + root.drag-dx / 1px / root.pps : 0;
+    property <int> drop-at: root.drag-from >= 0 ? CreateArea.drop-index(root.drag-from, root.drag-mid) : -1;
+
+    function x-of(seconds: float) -> length {
+        return root.pad + seconds * root.pps * 1px;
+    }
+    function scroll-by(dx: length) {
+        CreateArea.scroll-x = clamp(root.sx + dx, 0px, root.max-scroll);
+    }
+
+    background: Theme.surface-stage;
+    clip: true;
+    accessible-role: groupbox;
+    accessible-label: "Timeline";
+
+    // ---- The header (8EO-0)
+    header := Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.header-h;
+        background: Theme.surface-header;
+
+        Rectangle {
+            y: parent.height - 1px;
+            height: 1px;
+            background: Theme.line;
+        }
+
+        HorizontalLayout {
+            height: parent.height - 1px;
+            y: 0;
+            spacing: 0;
+
+            // Record, Retake and Remove (8EP-0).
+            HorizontalLayout {
+                width: root.head-w;
+                padding-left: 10px;
+                spacing: 8px;
+                alignment: start;
+                VerticalLayout {
+                    alignment: center;
+                    RecordButton {
+                        active: root.recording || ControlsArea.record-state == "starting";
+                        enabled: Ui.has-setup && !ControlsArea.busy-record;
+                        label: root.recording ? "Stop Recording" : "Start Recording";
+                        clicked => { ControlsArea.toggle-record(); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    PillGroup {
+                        PillItem {
+                            icon: CreateIcons.retake;
+                            text: "Retake";
+                            enabled: CreateArea.can-retake;
+                            tooltip: root.recording ? "Drop this take and record it again" : "Take the last clip off and record it again";
+                            clicked => { CreateArea.retake(); }
+                        }
+                        PillDivider { }
+                        PillItem {
+                            icon: Icons.trash;
+                            text: "Remove";
+                            enabled: CreateArea.can-remove;
+                            tooltip: "Take the selected clip off the timeline (its files stay)";
+                            clicked => { CreateArea.remove-selected(); }
+                        }
+                    }
+                }
+            }
+
+            // The take's line (8F2-0): "Next take: 04" · where it goes.
+            HorizontalLayout {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                padding-left: 10px;
+                padding-right: 8px;
+                spacing: 0;
+                Text {
+                    text: CreateArea.status-title;
+                    color: CreateArea.retaking ? Theme.danger-text : Theme.text;
+                    font-size: Theme.fs-sm;
+                    font-weight: Theme.weight-semibold;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                    overflow: elide;
+                    min-width: 0px;
+                }
+                Text {
+                    text: CreateArea.status-detail;
+                    color: Theme.text-3;
+                    font-size: Theme.fs-xs;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                }
+                // Export's progress.
+                if CreateArea.exporting: HorizontalLayout {
+                    spacing: 8px;
+                    horizontal-stretch: 0;
+                    padding-left: 8px;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 96px;
+                            height: 4px;
+                            border-radius: 2px;
+                            background: Theme.line-strong;
+                            Rectangle {
+                                x: 0;
+                                width: parent.width * max(0, min(1, CreateArea.export-progress));
+                                border-radius: 2px;
+                                background: Theme.accent;
+                            }
+                        }
+                    }
+                    Text {
+                        text: round(CreateArea.export-progress * 100) + "%";
+                        color: Theme.text-2;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.fs-micro;
+                        font-weight: Theme.weight-light;
+                        vertical-alignment: center;
+                        width: 30px;
+                    }
+                }
+            }
+
+            // The timeline, Export, zoom and the view (8F5-0).
+            HorizontalLayout {
+                padding-right: 8px;
+                spacing: 8px;
+                horizontal-stretch: 0;
+                VerticalLayout {
+                    alignment: center;
+                    timeline-pill := PillGroup {
+                        PillItem {
+                            property <bool> open: Menus.open && Menus.owner == "create:timelines";
+                            icon: Icons.film;
+                            text: CreateArea.has-timeline ? CreateArea.timeline-name : "No Timeline";
+                            menu-open: self.open;
+                            tooltip: "New or open a timeline";
+                            clicked => { Menus.request("create:timelines", timeline-pill.absolute-position.x, timeline-pill.absolute-position.y, timeline-pill.width, timeline-pill.height); }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    PillGroup {
+                        PillItem {
+                            icon: Icons.download;
+                            text: CreateArea.exporting ? "Exporting…" : "Export";
+                            enabled: CreateArea.can-export && !CreateArea.exporting;
+                            tooltip: "Join the clips into one file (and one per ISO source)";
+                            clicked => { CreateArea.export(); }
+                        }
+                        if CreateArea.export-path != "": PillDivider { }
+                        if CreateArea.export-path != "": PillItem {
+                            icon: Icons.folder-open;
+                            text: root.width >= 1100px ? "Show in Finder" : "";
+                            tooltip: "Show the exported file in the Finder";
+                            accessible-label: "Show in Finder";
+                            clicked => { CreateArea.reveal-export(); }
+                        }
+                    }
+                }
+                // Zoom (8FG-0): − slider +.
+                if root.width >= 1000px: HorizontalLayout {
+                    spacing: 6px;
+                    padding-left: 4px;
+                    VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            path: Icons.minus;
+                            size: Theme.icon-xs;
+                            color: Theme.text-3;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Slider {
+                            width: 96px;
+                            thin: true;
+                            value: CreateArea.zoom;
+                            label: "Zoom";
+                            tooltip: "Zoom the timeline";
+                            moved(v) => { CreateArea.zoom = v; }
+                            changed(v) => { CreateArea.zoom = v; }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            path: Icons.plus;
+                            size: Theme.icon-xs;
+                            color: Theme.text-3;
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Segmented {
+                        small: true;
+                        label: "Workspace";
+                        options: [{ value: "build", label: "Build" }, { value: "create", label: "Create" }];
+                        value: CreateArea.active ? "create" : "build";
+                        selected(v) => {
+                            if (v == "create") != CreateArea.active {
+                                CreateArea.toggle-view();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- The track-header column
+    Rectangle {
+        x: 0;
+        y: root.header-h;
+        width: root.head-w;
+        height: root.height - root.header-h;
+        background: Theme.surface-panel;
+
+        // The ruler's cell (8FQ-0).
+        Rectangle {
+            y: root.ruler-h - 1px;
+            height: 1px;
+            background: Theme.line;
+        }
+        // Program (8H5-0): icon, name, PGM.
+        Rectangle {
+            y: root.ruler-h;
+            height: root.lane-h;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 8px;
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        path: Icons.display;
+                        size: Theme.icon-sm;
+                        color: Theme.text-2;
+                    }
+                }
+                Text {
+                    text: "Program";
+                    color: Theme.text;
+                    font-size: Theme.fs-sm;
+                    font-weight: Theme.weight-medium;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: 18px;
+                        width: pgm.preferred-width + 14px;
+                        border-radius: 9px;
+                        background: Theme.onair-soft;
+                        pgm := Text {
+                            text: "PGM";
+                            color: Theme.onair-text;
+                            font-size: Theme.fs-micro;
+                            font-weight: Theme.weight-semibold;
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.line;
+            }
+        }
+        // The timeline's name and length.
+        if CreateArea.has-timeline: VerticalLayout {
+            y: root.ruler-h + root.lane-h;
+            height: parent.height - self.y;
+            padding-left: 14px;
+            padding-right: 14px;
+            padding-top: 10px;
+            spacing: 2px;
+            alignment: start;
+            Text {
+                text: CreateArea.timeline-name;
+                color: Theme.text-2;
+                font-size: Theme.fs-xs;
+                font-weight: Theme.weight-medium;
+                overflow: elide;
+            }
+            Text {
+                text: CreateArea.summary;
+                color: Theme.text-3;
+                font-size: Theme.fs-xs;
+                overflow: elide;
+            }
+        }
+    }
+    Rectangle {
+        x: root.head-w;
+        y: root.header-h;
+        width: 1px;
+        height: root.height - root.header-h;
+        background: Theme.line;
+    }
+
+    // ---- The lanes: the ruler, the Program track and the air below,
+    // scrolling sideways together.
+    lanes := Rectangle {
+        x: root.head-w + 1px;
+        y: root.header-h;
+        width: root.lane-w;
+        height: root.height - root.header-h;
+        clip: true;
+
+        // The row lines.
+        Rectangle {
+            y: root.ruler-h - 1px;
+            height: 1px;
+            background: Theme.line;
+        }
+        Rectangle {
+            y: root.ruler-h + root.lane-h - 1px;
+            height: 1px;
+            background: Theme.line;
+        }
+
+        // A click on the ruler or the lanes puts the playhead there (and
+        // lets go of the selected clip); scrolling moves sideways.
+        TouchArea {
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down && event.button == PointerEventButton.left && CreateArea.has-timeline {
+                    CreateArea.playhead = max(0, (self.mouse-x + root.sx - root.pad) / 1px / root.pps);
+                    if self.mouse-y >= root.ruler-h {
+                        CreateArea.select("");
+                    }
+                }
+            }
+            moved => {
+                if self.pressed && CreateArea.has-timeline {
+                    CreateArea.playhead = max(0, (self.mouse-x + root.sx - root.pad) / 1px / root.pps);
+                }
+            }
+            scroll-event(event) => {
+                if root.max-scroll == 0 {
+                    return reject;
+                }
+                root.scroll-by(-(abs(event.delta-x) >= abs(event.delta-y) ? event.delta-x : event.delta-y));
+                accept
+            }
+        }
+
+        // The ruler's ticks and labels (8FS-0), only those in view.
+        for i in root.tick-count: tick := Rectangle {
+            property <int> n: root.first-tick + i;
+            property <bool> major: mod(self.n, 4) == 0;
+            x: root.pad + self.n * root.tick-px - root.sx;
+            y: 0;
+            width: 40px;
+            height: root.ruler-h - 1px;
+            Rectangle {
+                x: 0;
+                y: parent.height - self.height;
+                width: 1px;
+                height: tick.major ? 7px : 4px;
+                background: Theme.line-strong;
+            }
+            if tick.major: TimeText {
+                x: 4px;
+                y: 2px;
+                height: 12px;
+                seconds: tick.n / 4 * root.label-s;
+            }
+        }
+
+        // The clips, at their places (8HD-0).
+        for clip[i] in CreateArea.clips: ClipView {
+            property <bool> dragged: root.drag-from == i;
+            x: root.x-of(clip.start) - root.sx + (self.dragged ? root.drag-dx : 0px);
+            y: root.ruler-h + 10px;
+            width: max(3px, clip.duration * root.pps * 1px - 1px);
+            height: 44px;
+            data: clip;
+            dragging: self.dragged;
+            opacity: self.dragged ? 0.8 : 1;
+            z: self.dragged ? 2 : 0;
+            accessible-role: button;
+            accessible-label: clip.number + " " + clip.name + ", " + clip.length;
+            accessible-action-default => { CreateArea.select(clip.id); }
+
+            TouchArea {
+                mouse-cursor: root.drag-from == i ? MouseCursor.grabbing : MouseCursor.default;
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                        root.press-x = self.absolute-position.x + self.mouse-x;
+                        CreateArea.select(clip.id);
+                        CreateArea.playhead = clip.start;
+                    } else if event.kind == PointerEventKind.up && event.button == PointerEventButton.right {
+                        CreateArea.select(clip.id);
+                        Menus.request("create:clip:" + clip.id, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, 0, 0);
+                    } else if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) || event.kind == PointerEventKind.cancel {
+                        if root.drag-from == i {
+                            if event.kind == PointerEventKind.up && root.drop-at >= 0 && root.drop-at != i {
+                                CreateArea.move-clip(clip.id, root.drop-at);
+                            }
+                            root.drag-from = -1;
+                            root.drag-dx = 0;
+                        }
+                    }
+                }
+                moved => {
+                    if self.pressed && (root.drag-from == i || abs(self.absolute-position.x + self.mouse-x - root.press-x) > 4px) {
+                        root.drag-from = i;
+                        root.drag-dx = self.absolute-position.x + self.mouse-x - root.press-x;
+                    }
+                }
+            }
+        }
+
+        // Where a dragged clip would go.
+        if root.drag-from >= 0 && root.drop-at >= 0 && root.drop-at != root.drag-from: Rectangle {
+            x: root.x-of(CreateArea.drop-seconds(root.drag-from, root.drag-mid)) - root.sx - 2px;
+            y: root.ruler-h + 6px;
+            width: 2px;
+            height: 52px;
+            background: Theme.accent;
+            z: 3;
+        }
+
+        // The take being recorded onto the timeline (8V1-0's "Take 4
+        // (recording)" on the Program track): red, growing.
+        if root.rolling: Rectangle {
+            x: root.x-of(root.total) - root.sx;
+            y: root.ruler-h + 10px;
+            width: max(3px, root.rec * root.pps * 1px);
+            height: 44px;
+            border-radius: 4px;
+            background: Theme.danger-soft;
+            border-width: 1px;
+            border-color: Theme.danger;
+            clip: true;
+            Text {
+                x: 7px;
+                y: 3px;
+                text: CreateArea.retaking ? "Retake" : "Recording";
+                color: Theme.danger-text;
+                font-size: Theme.fs-xs;
+                font-weight: Theme.weight-semibold;
+            }
+        }
+
+        // Where the next take lands (Paper's dashed "Placeholder / 04
+        // Interview", drawn solid: Slint has no dashed edges).
+        if CreateArea.has-timeline && !root.rolling: Rectangle {
+            x: root.x-of(root.total) - root.sx + 1px;
+            y: root.ruler-h + 10px;
+            width: root.next-w - 2 * root.pad;
+            height: 44px;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: Theme.line-strong;
+            VerticalLayout {
+                padding-left: 7px;
+                padding-right: 7px;
+                padding-top: 5px;
+                padding-bottom: 5px;
+                spacing: 2px;
+                Text {
+                    text: (CreateArea.clips.length < 9 ? "0" : "") + (CreateArea.clips.length + 1) + " Next take";
+                    color: Theme.text-3;
+                    font-size: Theme.fs-xs;
+                    font-weight: Theme.weight-medium;
+                    overflow: elide;
+                }
+                Text {
+                    text: "on Record";
+                    color: Theme.text-disabled;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-micro;
+                    font-weight: Theme.weight-light;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // An empty timeline: how takes land here.
+        if CreateArea.has-timeline && CreateArea.clips.length == 0 && !root.rolling: Text {
+            x: 16px;
+            y: root.ruler-h + root.lane-h + 14px;
+            width: min(460px, parent.width - 32px);
+            text: "Every take you record lands here, in order: press Record, and when you stop (or split) the take is added to the end of " + CreateArea.timeline-name + ". Retake records the last one again; drag a clip to move it.";
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            wrap: word-wrap;
+        }
+
+        // No timeline: make one.
+        if !CreateArea.has-timeline: VerticalLayout {
+            x: 16px;
+            y: root.ruler-h + 10px;
+            width: min(460px, parent.width - 32px);
+            spacing: 6px;
+            alignment: start;
+            Text {
+                text: "No timeline is open";
+                color: Theme.text-2;
+                font-size: Theme.fs;
+                font-weight: Theme.weight-medium;
+            }
+            Text {
+                text: "Takes are only recorded. Make a timeline, and every take you record lands on it, in order, ready to export as one file.";
+                color: Theme.text-3;
+                font-size: Theme.fs-sm;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: start;
+                padding-top: 4px;
+                spacing: 8px;
+                PillGroup {
+                    PillItem {
+                        icon: Icons.plus;
+                        text: "New Timeline";
+                        clicked => { CreateArea.new-timeline(); }
+                    }
+                }
+                open-pill := PillGroup {
+                    PillItem {
+                        icon: Icons.film;
+                        text: "Open…";
+                        menu-open: Menus.open && Menus.owner == "create:timelines";
+                        clicked => { Menus.request("create:timelines", open-pill.absolute-position.x, open-pill.absolute-position.y, open-pill.width, open-pill.height); }
+                    }
+                }
+            }
+        }
+
+        // The playhead (8NP-0): a bone line and its time.
+        if CreateArea.has-timeline && !root.rolling: Rectangle {
+            x: root.x-of(root.playhead) - root.sx - 20px;
+            y: 0;
+            width: 41px;
+            height: parent.height;
+            z: 4;
+            Rectangle {
+                x: 20px;
+                width: 1px;
+                background: Theme.bone;
+            }
+            // Kept in view at the timeline's start.
+            Rectangle {
+                x: max(0px, -parent.x);
+                y: 0;
+                width: 41px;
+                height: 18px;
+                border-radius: 4px;
+                background: Theme.control-active;
+                TimeText {
+                    alignment: center;
+                    seconds: root.playhead;
+                    color: Theme.text;
+                }
+            }
+        }
+
+        // The record head (98E-0): a 2px red line and REC.
+        if root.rolling: Rectangle {
+            x: root.x-of(root.span) - root.sx - 19px;
+            y: 0;
+            width: 38px;
+            height: parent.height;
+            z: 4;
+            Rectangle {
+                x: 18px;
+                width: 2px;
+                background: Theme.danger;
+            }
+            Rectangle {
+                y: 0;
+                height: 18px;
+                border-radius: 4px;
+                background: Theme.danger-fill;
+                Text {
+                    text: "REC";
+                    color: Theme.bone;
+                    font-size: Theme.fs-micro;
+                    font-weight: Theme.weight-semibold;
+                    letter-spacing: 0.4px;
+                }
+            }
+        }
+
+        // A sideways scroll bar while the timeline is wider than the view.
+        if root.max-scroll > 0: bar := Rectangle {
+            property <length> thumb-w: max(24px, root.lane-w * root.lane-w / root.content-w);
+            property <length> start;
+            x: 0;
+            y: parent.height - 10px;
+            width: parent.width;
+            height: 10px;
+            z: 5;
+            Rectangle {
+                x: 2px + root.sx / root.max-scroll * (parent.width - 4px - bar.thumb-w);
+                y: 2px;
+                width: bar.thumb-w;
+                height: 6px;
+                border-radius: 3px;
+                background: thumb.has-hover || thumb.pressed ? Theme.scroll-thumb-hover : Theme.scroll-thumb;
+                thumb := TouchArea {
+                    pointer-event(event) => {
+                        if event.kind == PointerEventKind.down {
+                            bar.start = root.sx;
+                        }
+                    }
+                    moved => {
+                        if self.pressed {
+                            CreateArea.scroll-x = clamp(bar.start + (self.mouse-x - self.pressed-x) * root.max-scroll / max(1px, bar.width - 4px - bar.thumb-w), 0px, root.max-scroll);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

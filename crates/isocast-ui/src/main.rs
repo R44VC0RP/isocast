@@ -39,6 +39,7 @@ mod preview;
 // Filters, Transition Properties) move onto it next.
 #[allow(dead_code)]
 mod session;
+mod thumbs;
 mod toasts;
 mod usage;
 mod window;

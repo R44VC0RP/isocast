@@ -427,7 +427,7 @@ come later (clips already carry in/out points on their take).
   `isocast retake`, `--json`), MCP tools, `timeline_changed` events.
   Taking a clip off never touches its take's files; timelines persist
   across restarts and crashes (docs/notes.md, Decisions, 2026-10-13).
-- [ ] **C.2 Create view in the Slint app.** The clip bar: takes in order
+- [x] **C.2 Create view in the Slint app.** The clip bar: takes in order
   (thumbnails, lengths), record and retake, remove, drag to reorder,
   export with progress; on the same methods and events. After the console
   redesign of crates/isocast-ui lands.
@@ -624,6 +624,17 @@ native app; each verified against OBS's behaviour on a test Mac.
     recorded; report recoverable seconds from committed output only.
     Engine work for the record/* owner (Astra), with the reviewer's
     55-case kill matrix as the check. After the alpha unless it's small.
+    - [x] **G.3b investigation.** Trace the actual raw-buffer recording path,
+      probe native segment modes, and measure the existing split/join route
+      at 1/2 s. Neither is a qualifying small replacement: manual delegate
+      output needs compressed inputs and excludes MOV/ProRes; rolling takes
+      add measured work. Repeat the 55 pause kills and 20 plain kills as
+      negative controls. Evidence: g3b-segments scratch REPORT.md.
+    - [ ] **G.3b implementation and qualification.** Persistent recording
+      encoders plus a MOV/MP4-capable commit path, including AAC priming and
+      multiple tracks; acknowledged/fsynced progress and a writer barrier
+      before Pause replies. Numeric recovery fields stay unknown until this
+      passes the full crash, compatibility and unchanged-cost gates.
 - [ ] **G.4 Projectors and multiview.** Fullscreen or windowed preview,
   program, scene or source on any display; a multiview grid.
 - [x] **G.5 Custom hotkeys (engine side).** Bindable action catalogue,
@@ -2522,3 +2533,28 @@ One line per finished task, newest last.
   succeeds twice. e2e 12 PASS, 0 FAIL, bug_report unavailable; full fmt,
   release all-target clippy and 180 tests pass. Full per-output comparison:
   /Volumes/IsocastBuild/g3-pause/scratch/REPORT.md, "Re-review fixes".
+- G.3b investigation (2026-10-13): no runtime replacement retained. Fifteen
+  native configuration probes distinguish automatic raw compression from
+  manual passthrough-only segmentation; MOV, ProRes and multi-audio limits
+  prevent a drop-in switch. Three interleaved flagship rounds of existing
+  split/join add 62%/29% median instructions at 1/2 s. Baseline pause kills:
+  111/165 files decode, 54 unreadable; plain kills: 45/60 decode, worst
+  common A/V loss 2.250 s. All 27 joined outputs decode and 54 tracks import
+  into AVMutableComposition. E2E 12 pass/1 unavailable; fmt/clippy and 180
+  tests pass. G.3b remains unchecked; full evidence and remaining work in
+  /Volumes/IsocastBuild/g3b-segments/scratch/REPORT.md.
+- C.2 (2026-10-14, branch ui/create-view): View → Create (⌘⇧C, or the
+  Build/Create switch) puts Paper's clip bar where the docks are: takes in
+  order on a Program track with thumbnail strips (AVFoundation, off the UI
+  thread, cached), names and lengths; ruler, playhead, record head; Record,
+  Retake, Remove (and Delete), drag to reorder, New/Open/Close, Export with
+  progress and Show in Finder; it reads timelines only on connect and
+  `timeline_changed`. Verified: offscreen snapshots (no timeline, empty,
+  three takes, recording, retake, export; 1440x900@2 and 900x600@2);
+  real window on isocast-m2-b (cua-driver, bench lock): three takes,
+  retake idle (`retaken`) and while recording (`dropped`), drag reorder,
+  Remove, Export: 15.300 s program/ISO files = 4.08 + 5.75 + 5.47 s, video
+  and audio 15.300 s each; CPU at rest medians main 2.7%, Build 2.5%,
+  Create 2.8% (3 runs, 20 s); 51 clips: zoom, scroll and drags at most
+  29% of one core in any second; e2e.py 11 PASS (2 skips, not present on
+  main).

@@ -46,7 +46,8 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGColor", "CGColorSpace"] }
+# CGImage and CGContext: the Create view's clip thumbnails (src/thumbs.rs).
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGColor", "CGColorSpace", "CGContext", "CGImage"] }
 objc2-io-surface = { version = "0.3.2", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "libc", "objc2-core-foundation"] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics"] }
 raw-window-handle = "0.6.2"

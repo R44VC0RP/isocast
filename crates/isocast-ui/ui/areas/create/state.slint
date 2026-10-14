@@ -1,0 +1,81 @@
+// Area G: the Create view (C.2), the clip bar from Paper's "Workspace ·
+// Create" and "Create · Retake" boards under the viewer and the control
+// bar, in place of the docks. src/areas/create.rs fills this from the
+// engine's timeline methods and events.
+
+// One clip on the Program track.
+export struct ClipRow {
+    id: string,
+    // Its place, from 1, as two digits ("01").
+    number: string,
+    // "Take 3" (from the clip's id, which stays when it moves).
+    name: string,
+    // Its length, "00:04".
+    length: string,
+    // Where it starts on the timeline and how long it is, in seconds.
+    start: float,
+    duration: float,
+    selected: bool,
+    // Its take can't be read, or a file is missing.
+    problem: bool,
+    // Frames dropped while it was recorded.
+    dropped: bool,
+    // Frames from its program file, evenly spaced (empty until made).
+    thumbs: [image],
+}
+
+export global CreateArea {
+    // The Create view is showing (View → Create).
+    in-out property <bool> active;
+
+    // ---- The current timeline
+    in property <bool> has-timeline;
+    in property <string> timeline-name;
+    in property <[ClipRow]> clips;
+    in property <float> total-seconds;
+    // "3 takes · 00:12".
+    in property <string> summary;
+
+    // ---- The header's line: the title ("Next take: 04") and its detail
+    // (" · adds to Timeline 1").
+    in property <string> status-title;
+    in property <string> status-detail;
+    // A retake was asked for and its take hasn't begun yet.
+    in property <bool> retaking;
+    // The control bar's REC seconds when the take being recorded began
+    // (after a split or a retake the LCD keeps counting the recording).
+    in property <int> rec-offset;
+    in property <bool> can-retake;
+    in property <bool> can-remove;
+    in property <bool> can-export;
+
+    // ---- Export
+    in property <bool> exporting;
+    // 0 to 1.
+    in property <float> export-progress;
+    // The last export's program file, for Show in Finder ("" for none).
+    in property <string> export-path;
+
+    // ---- The view's own state (not the engine's)
+    // The playhead in seconds; -1 puts it at the end, where the next take
+    // lands.
+    in-out property <float> playhead: -1;
+    // 0 shows the whole timeline; 1 is 32 times closer.
+    in-out property <float> zoom: 0;
+    // The horizontal scroll, in points.
+    in-out property <length> scroll-x;
+
+    callback toggle-view();
+    callback select(string);
+    // Move clip `id` to place `index` (from 0).
+    callback move-clip(string, int);
+    callback remove-selected();
+    callback retake();
+    callback export();
+    callback reveal-export();
+    callback new-timeline();
+    // Dragging clip `from` with its middle at `seconds`: the place it
+    // would go, and where that place starts on the timeline (seconds).
+    pure callback drop-index(int, float) -> int;
+    pure callback drop-seconds(int, float) -> float;
+}

@@ -36,16 +36,20 @@ import { ConnectingState, Welcome } from "areas/settings/states.slint";
 import { Onboarding } from "areas/settings/onboarding.slint";
 import { LibraryArea } from "areas/library/state.slint";
 import { LibraryDialogs } from "areas/library/dialogs.slint";
+import { CreateArea } from "areas/create/state.slint";
+import { ClipBar } from "areas/create/clip-bar.slint";
 
 // What Rust sees: the globals and the structs in their models.
 export { Theme, Ui, ConnectionState, Menus, Toasts, EditCommands, SettingsForms }
 export { CanvasArea, SourcesArea, MixerArea, ControlsArea, SettingsArea, LibraryArea }
+export { CreateArea }
 export { DropdownOption, MenuEntry, MenuList, MenuEntryKind, NavTab, Segment, ToastData, ToastRow, ToastKind, FormField, FormGroup } from "kit.slint";
 export { SceneRow, ItemRow, FilterRow, PickRow } from "areas/sources/state.slint";
 export { Strip, Level, AudioRow } from "areas/mixer/state.slint";
 export { FileRow } from "areas/controls/state.slint";
 export { DeviceChoice, HotkeyGroup, HotkeyRow, IsoChoice, MicRow, PermissionRow, ServiceChoice } from "areas/settings/state.slint";
 export { LibraryRow } from "areas/library/state.slint";
+export { ClipRow } from "areas/create/state.slint";
 
 // The preview, the control bar, the docks.
 component Workspace inherits VerticalLayout {
@@ -108,7 +112,9 @@ component Workspace inherits VerticalLayout {
 
     // The control bar's lower (black) edge is the splitter: no line of
     // its own, the 7px grab around that edge.
-    if Ui.show-docks: RowSplitter {
+    // Create (View → Create, area G) puts the clip bar where the docks
+    // are, at the same height, shown even with the docks hidden.
+    if Ui.show-docks || CreateArea.active: RowSplitter {
         height: 0px;
         size: root.docks-height;
         min-size: 120px;
@@ -123,7 +129,11 @@ component Workspace inherits VerticalLayout {
     // 170, 228, 160, 172: 874px with the splitters, under the window's
     // 900px minimum), so Controls (172: "Start Streaming" with its icon)
     // is never cut off. They meet at 1px `line` gaps (the splitters).
-    if Ui.show-docks: HorizontalLayout {
+    if CreateArea.active: ClipBar {
+        height: max(130px, root.docks-height);
+    }
+
+    if Ui.show-docks && !CreateArea.active: HorizontalLayout {
         height: root.docks-height;
         spacing: 0;
 
@@ -355,6 +365,7 @@ export component AppWindow inherits Window {
         Menu {
             title: "View";
             MenuItem { title: "Studio Mode"; shortcut: @keys(Control + Shift + S); checkable: true; checked: Ui.studio; activated => { Ui.menu("studio_mode"); } }
+            MenuItem { title: "Create"; shortcut: @keys(Control + Shift + C); checkable: true; checked: CreateArea.active; activated => { Ui.menu("create_view"); } }
             MenuSeparator { }
             MenuItem { title: "Source Toolbar"; checkable: true; checked: Ui.show-source-toolbar; activated => { Ui.menu("source_toolbar"); } }
             MenuItem { title: "Status Bar"; checkable: true; checked: Ui.show-status-bar; activated => { Ui.menu("status_bar"); } }

@@ -9,6 +9,7 @@
 //! | D settings and first run | `settings.rs` | `settings/` | `SettingsArea` |
 //! | E the canvas | `canvas.rs` (+ preview.rs, layers.rs, frames.rs, picture.rs) | `canvas/` | `CanvasArea` |
 //! | F scene collections and profiles | `library.rs` | `library/` | `LibraryArea` |
+//! | G the Create view (clip bar) | `create.rs` (+ thumbs.rs) | `create/` | `CreateArea` |
 //!
 //! What is shared lives outside the areas and changes rarely: the widget
 //! kit (ui/kit.slint, ui/widgets/), the tokens (ui/theme.slint), icons
@@ -56,6 +57,7 @@
 
 pub mod canvas;
 pub mod controls;
+pub mod create;
 pub mod library;
 pub mod mixer;
 pub mod settings;
@@ -78,6 +80,7 @@ pub const STATES: &[&[&str]] = &[
     settings::STATES,
     canvas::STATES,
     library::STATES,
+    create::STATES,
 ];
 
 /// What `App` asks of an area. Everything but `connect` and `update` has
