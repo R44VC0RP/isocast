@@ -890,7 +890,7 @@ impl Isocast {
     }
 
     #[tool(
-        description = "Generate a sanitized offline bug-report zip or preview every included file. Includes environment, logs, metrics, crashes and manifests, never media. Nothing is uploaded.",
+        description = "Generate a sanitized offline bug-report zip or preview every included file. Includes environment, logs, metrics, crashes and manifests, never media. Nothing is uploaded unless submit is true: then ISSUE.md becomes a public GitHub issue and the zip is kept privately for maintainers (pass preview_id to send exactly a reviewed preview). Only submit when the user asked to send the report; on failure the zip is kept and submit_error says why.",
         annotations(read_only_hint = false)
     )]
     async fn bug_report(
@@ -899,8 +899,19 @@ impl Isocast {
     ) -> Result<CallToolResult, String> {
         let Json(report): Json<isocast_protocol::diagnostics::BugReport> =
             self.call(Method::BugReport(params)).await?;
+        let sent = match (&report.submitted, &report.submit_error) {
+            (Some(sent), _) => format!("Sent: {} (report {}).", sent.issue_url, sent.report_id),
+            (None, Some(why)) => format!(
+                "Not sent: {why}. The zip is kept at {}; attach it to a new GitHub issue by hand.",
+                report
+                    .archive
+                    .as_deref()
+                    .map_or("?".into(), |p| p.display().to_string())
+            ),
+            (None, None) => "No upload occurred.".into(),
+        };
         let mut result = CallToolResult::success(vec![ContentBlock::text(format!(
-            "{} files. Preview ID: {}. Use read_bug_report_file for bounded contents; no upload occurred.",
+            "{} files. Preview ID: {}. Use read_bug_report_file for bounded contents. {sent}",
             report.files.len(),
             report.preview_id.as_deref().unwrap_or("archive written")
         ))]);

@@ -642,6 +642,11 @@ layout editing, Windows, release prep).
   - [x] **A.6b Functional qualification:** real recording/stream/error/crash
     bundles, planted-secret/title audit, retention, native crash collection,
     CLI/MCP/app-launch hooks and available counters checked on isolated engines.
+  - [x] **A.6 one-click reports (report worker):** `bug_report` `submit`
+    (CLI `--submit`, MCP, the app's Send Report) posts the previewed
+    ISSUE.md and zip to services/report-worker (GitHub App issue, private
+    R2 zip, secret scan, dedupe, rate limits, maintainer fetch). Deploying
+    it is waiting on Ryan.
   - [ ] **A.6 strict zero-overhead gate.** Review-fix 6+6 versus current
     main a619986, including descendant helper CPU/RSS: 48.9 → 49.0% of
     one core (+0.1 point), instructions 553.1 → 558.7 M/s; 18/18 complete
@@ -3073,3 +3078,10 @@ One line per finished task, newest last.
 - A.2 re-pass #5 (2026-10-14): m2-a 1024x681: Exit button beside Settings
   (AX "Exit", pressing it quit the app); keep_free_gb 100000 → Start
   Recording → one toast "Couldn't start recording" (was two).
+- A.6 report worker (2026-10-14): `isocast report --submit` against
+  `wrangler dev` with a fake GitHub filed the issue. Its body starts with the
+  exact preview ISSUE.md, the R2 zip is byte-identical to the local zip, and
+  the planted stream key and password are absent from the issue and zip. The
+  worker's 8 local tests pass. Offline, 429, no-endpoint and invalid-param
+  paths keep the zip. Offscreen snapshots show the sheet sent and offline.
+  The e2e bug_report case passes.

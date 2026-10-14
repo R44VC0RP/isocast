@@ -1,0 +1,18 @@
+{
+  "name": "isocast-report-worker",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Files Isocast bug reports as GitHub issues and keeps their zips in private R2.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "check": "tsc --noEmit",
+    "test": "node --test test/worker.test.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261014.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.151.0"
+  }
+}

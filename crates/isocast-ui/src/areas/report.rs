@@ -4,7 +4,10 @@
 //! (`bug_report` without `preview`); Open GitHub Issue opens a new issue
 //! on R44VC0RP/isocast with the bug-report template's fields filled in
 //! (the description, the triage block, the version, the Mac) and shows the
-//! zip in the Finder to attach. Nothing is sent by the app.
+//! zip in the Finder to attach. Send Report instead has the engine file
+//! the issue (`bug_report` with `submit` and the preview's id, so exactly
+//! the text shown becomes public; the zip goes privately to the
+//! maintainers). Nothing is sent before Send Report.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -34,6 +37,8 @@ pub struct Report {
     /// "Apple M5 Max (Mac17,6), macOS 27.2 (26B5101f)", from the preview's
     /// environment.json.
     mac: RefCell<String>,
+    /// The description the shown preview was made with.
+    previewed: RefCell<Option<String>>,
 }
 
 impl Report {
@@ -48,6 +53,12 @@ impl Report {
         area.on_report_create(move || {
             if let Some(app) = weak.upgrade() {
                 app.settings.report.create(&app);
+            }
+        });
+        let weak = Rc::downgrade(app);
+        area.on_report_send(move || {
+            if let Some(app) = weak.upgrade() {
+                app.settings.report.send(&app);
             }
         });
         let weak = Rc::downgrade(app);
@@ -74,6 +85,8 @@ impl Report {
             area.set_report_archive(SharedString::new());
             area.set_report_copied(false);
             area.set_report_error(SharedString::new());
+            area.set_report_sending(false);
+            area.set_report_issue_url(SharedString::new());
             area.set_report_issue("Collecting what the report holds…".into());
             area.set_report_issue_lines(1);
             area.set_report_files(model(Vec::<ReportFileRow>::new()));
@@ -105,6 +118,7 @@ impl Report {
     }
 
     fn preview(&self, app: &Rc<App>) {
+        *self.previewed.borrow_mut() = Some(Self::describe(app).unwrap_or_default());
         let params = BugReportParams {
             describe: Self::describe(app),
             preview: true,
@@ -153,6 +167,70 @@ impl Report {
                 Ok(written) => {
                     let archive = written.archive.clone();
                     report.show(app, written, archive.as_deref());
+                }
+                Err(error) => report.error(app, &error.message),
+            }
+        });
+    }
+
+    /// Send Report: the engine writes the zip from the preview on screen
+    /// and posts it. A description typed since that preview is previewed
+    /// first, so what is sent is always what was shown.
+    pub fn send(&self, app: &Rc<App>) {
+        let preview_id = self
+            .shown
+            .borrow()
+            .as_ref()
+            .and_then(|r| r.preview_id.clone());
+        let current = Self::describe(app).unwrap_or_default();
+        let Some(preview_id) =
+            preview_id.filter(|_| self.previewed.borrow().as_deref() == Some(current.as_str()))
+        else {
+            self.preview(app);
+            if let Some(window) = app.window() {
+                window.global::<SettingsArea>().set_report_error(
+                    "The preview now has your description. Check it, then Send Report.".into(),
+                );
+            }
+            return;
+        };
+        let params = BugReportParams {
+            submit: true,
+            preview_id: Some(preview_id),
+            ..BugReportParams::default()
+        };
+        Self::busy(app, true);
+        if let Some(window) = app.window() {
+            window.global::<SettingsArea>().set_report_sending(true);
+        }
+        app.call_as::<BugReport>(Method::BugReport(params), |app, result| {
+            Self::busy(app, false);
+            if let Some(window) = app.window() {
+                window.global::<SettingsArea>().set_report_sending(false);
+            }
+            let report = &app.settings.report;
+            match result {
+                Ok(written) => {
+                    let archive = written.archive.clone();
+                    let url = written.submitted.as_ref().map(|s| s.issue_url.clone());
+                    let failed = written.submit_error.clone();
+                    report.show(app, written, archive.as_deref());
+                    if let Some(window) = app.window() {
+                        let area = window.global::<SettingsArea>();
+                        if let Some(url) = url {
+                            area.set_report_issue_url(url.into());
+                        }
+                        // Not sent: the zip is saved, and the manual path
+                        // (Open GitHub Issue, Show in Finder) is offered.
+                        if let Some(why) = failed {
+                            area.set_report_error(
+                                format!(
+                                    "Couldn’t send the report: {why}. Open GitHub Issue and attach the zip instead."
+                                )
+                                .into(),
+                            );
+                        }
+                    }
                 }
                 Err(error) => report.error(app, &error.message),
             }
@@ -224,6 +302,10 @@ impl Report {
         let Some(report) = self.shown.borrow().clone() else {
             return;
         };
+        if let Some(sent) = &report.submitted {
+            crate::platform::open_url(&sent.issue_url);
+            return;
+        }
         let describe = Self::describe(app).unwrap_or_default();
         let url = issue_url(
             report.repository_url.as_deref().unwrap_or(REPOSITORY),

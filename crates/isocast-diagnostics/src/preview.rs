@@ -31,6 +31,20 @@ pub fn save(files: BTreeMap<String, String>) -> Result<String, String> {
     });
     Ok(id)
 }
+/// A preview's files, exactly as shown, to write and send.
+pub fn contents(id: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut cache = PREVIEWS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let p = cache
+        .iter_mut()
+        .find(|p| p.id == id && p.at.elapsed() < Duration::from_secs(300))
+        .ok_or("params.preview_id: expired or unknown; create a new bug_report preview")?;
+    p.at = Instant::now();
+    Ok(p.files.clone())
+}
+
 pub fn read(params: &ReportFileParams) -> Result<ReportFile, String> {
     let limit = params.limit.unwrap_or(4096);
     if !(1..=16384).contains(&limit) {

@@ -1,0 +1,16 @@
+{
+  "name": "Isocast Bug Reports",
+  "url": "https://github.com/R44VC0RP/isocast",
+  "description": "Files bug reports sent from the Isocast app as issues on R44VC0RP/isocast.",
+  "public": false,
+  "hook_attributes": {
+    "url": "https://github.com/R44VC0RP/isocast",
+    "active": false
+  },
+  "redirect_url": "http://127.0.0.1:3999/callback",
+  "default_permissions": {
+    "issues": "write",
+    "metadata": "read"
+  },
+  "default_events": []
+}

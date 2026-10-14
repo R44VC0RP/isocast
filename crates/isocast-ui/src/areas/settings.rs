@@ -62,6 +62,7 @@ pub const STATES: &[&str] = &[
     "bug-report",
     "bug-report-describe:TEXT",
     "bug-report-create",
+    "bug-report-send",
     "hotkey-record:INDEX",
 ];
 
@@ -671,6 +672,8 @@ impl Area for Settings {
                 self.report.refresh(app);
             }
             "bug-report-create" => self.report.write(app),
+            // ...or sent, as Send Report does (to ISOCAST_REPORT_ENDPOINT).
+            "bug-report-send" => self.report.send(app),
             "settings" => app.open_dialog("settings", arg),
             // Settings → Stream as Start Streaming opens it without a key.
             "notice" => app.open_dialog("settings", &format!("stream:{arg}")),

@@ -257,7 +257,8 @@ export global SettingsArea {
 
     // ---- Help > Report a Bug… (dialog "bug-report"): what happened, the
     // report's ISSUE.md (summary and triage block) and its files exactly
-    // as they will be shared, then the zip once written. Nothing is sent.
+    // as they will be shared, then the zip once written. Nothing is sent
+    // until Send Report.
     in-out property <string> report-describe;
     // ISSUE.md as it is (for screen readers), wrapped to the well's 84
     // columns, and its line count.
@@ -271,8 +272,12 @@ export global SettingsArea {
     in-out property <bool> report-copied;
     in-out property <bool> report-busy;
     in-out property <string> report-error;
+    // Send Report: posting it, then the issue it made (or added to).
+    in-out property <bool> report-sending;
+    in-out property <string> report-issue-url;
     callback report-preview();
     callback report-create();
+    callback report-send();
     callback report-open-issue();
     callback report-reveal();
 

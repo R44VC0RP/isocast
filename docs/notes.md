@@ -164,6 +164,15 @@ each section. Delete entries that stop being true.
   No environment/secret configuration, workflow dispatch, tag push or draft
   update was performed during development. This first real hosted run is
   the remaining signing/API-notary integration check. See REPORT.md Workflow.
+- 2026-10-14 (report worker, agent/report-worker): one-click bug reports
+  are built and tested locally but not live. Ryan creates the GitHub App
+  (`node services/report-worker/register-app.mjs <pem path>`), the R2
+  bucket, the two secrets, then deploys and sets `REPORT_ENDPOINT` in
+  crates/isocast-protocol/src/diagnostics.rs. These are steps 1-8 in
+  services/report-worker/README.md (needs Workers Paid). Until then, Send
+  Report and `isocast report --submit` save the zip and say "no report
+  service is configured yet". Retry check:
+  `isocast report --describe "Test, please close" --submit`.
 
 - 2026-10-14 (A.2 R3 hotkeys): exonbook's GUI qualification is blocked by its
   locked session (`lsappinfo front` names loginwindow; ScreenSaverEngine
@@ -1510,6 +1519,25 @@ each section. Delete entries that stop being true.
   summary and virtual-camera installation link. Actual matching-draft reuse
   confirms one release remains (id 412748947, draft=true). No engine/UI
   implementation changes; no publication, settings changes or git push.
+- 2026-10-14 (report worker): bug reports are filed by
+  services/report-worker (Cloudflare Worker, GitHub App, private R2), not the
+  prefilled link. `bug_report` gains `submit` and `preview_id`. With
+  `preview_id`, the zip is written from the cached preview, so the issue text
+  is byte-identical to what was shown. The engine posts with /usr/bin/curl
+  (no HTTP/TLS crate). It sends ISSUE.md verbatim; the worker appends only a
+  footer (report id, version, Mac, crash signature). The engine and the worker
+  run the same secret scan (diagnostics/src/scan.rs and
+  services/report-worker/src/scan.ts; keep them in step). The rules are
+  publish-snapshot.sh's patterns plus anything the redactor should have
+  replaced, and the engine checks before uploading. Install id: a random 32-hex
+  file beside the socket (`<socket>.install-id`), sent only as a rate-limit
+  header. Endpoint: `ISOCAST_REPORT_ENDPOINT` or `REPORT_ENDPOINT` (None until
+  deployed); https only, except 127.0.0.1/localhost. The app's sheet now
+  reads Update Preview (left), Cancel, Save Zip Only, Send Report (primary).
+  After sending: Open Issue. If sending fails, the zip is saved and Open
+  GitHub Issue is offered. ISSUE.md no longer says "Nothing was uploaded".
+  Dedupe compares a digest of the panic message and thread, with digits
+  folded, against the newest 300 open `from-app` issues.
 
 - 2026-10-14 (QA-3 R1): every file's audio advances with its pause-mapped
   video clock, padding silence only behind a 500 ms input allowance (plus
@@ -4069,6 +4097,14 @@ each section. Delete entries that stop being true.
   not one tool per API call.
 
 ## Gotchas
+
+- 2026-10-14 (report worker): a Worker module may export only handlers;
+  `export const` beside `export default` fails at startup ("Incorrect type
+  for map entry"). Local `wrangler dev` honors a client-sent
+  `CF-Connecting-IP`, so the tests can use one IP per case. Rate limits are
+  simulated locally (3/min per install shows [201,201,201,429]). The
+  isocast-diagnostics crate isn't in default-members: run
+  `cargo test -p isocast-diagnostics` for its scan test.
 
 - 2026-10-14 (QA-3 R1): filling an off-air ISO's entire audio gap only when
   its next sample arrives (or at Stop) bursts 10 ms silence blocks into the

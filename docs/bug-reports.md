@@ -5,9 +5,19 @@
    index with sizes, ISSUE.md, redaction policy and a `preview_id`, without
    creating a zip. Read selected contents with
    `isocast report-file PREVIEW_ID FILE --offset 0 --limit 4096 --json`.
-3. Attach the reviewed zip and paste its `ISSUE.md` into an issue when the
-   repository is available. `ISSUE_REPOSITORY_URL` in the protocol is currently
-   `None`; generating a report never opens a browser or sends data.
+3. Send it: `isocast report --submit --preview-id PREVIEW_ID` (or
+   `isocast report --describe "…" --submit` in one step; MCP `bug_report`
+   with `submit: true`; the app's Send Report). The engine writes the zip,
+   checks it for secrets, and posts it to the report service
+   (services/report-worker). ISSUE.md becomes a public GitHub issue (or a
+   comment on an open issue with the same crash), and the zip is kept
+   privately for the maintainers under a report id. The issue URL is
+   returned. Sending happens only with this explicit flag. If it fails
+   (offline, refused, rate limited, no service configured), `submit_error`
+   says why, the command exits nonzero, and the zip is kept: attach it to a
+   new issue by hand. The endpoint is `ISOCAST_REPORT_ENDPOINT` in the
+   daemon's environment, else `REPORT_ENDPOINT` in the protocol (unset until
+   the service is deployed).
 
 `--out DIR` chooses a directory, `--launches 1..10` selects the most recent
 launches of each process (default 3). `--private` (alias `--hash-paths`)

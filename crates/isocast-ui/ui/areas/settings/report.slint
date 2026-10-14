@@ -2,8 +2,9 @@
 // exactly what the report holds (its ISSUE.md, summary and triage block,
 // and every file with its size) before anything is written, then writes
 // the zip and offers the prefilled GitHub issue and the zip in the
-// Finder. Nothing is sent: the issue page opens in the browser for you to
-// post, and the zip is yours to attach. src/areas/report.rs fills it.
+// Finder, or Send Report files the issue itself: its text becomes public,
+// the zip goes privately to the maintainers. Nothing is sent before Send
+// Report. src/areas/report.rs fills it.
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
@@ -23,31 +24,35 @@ component Well inherits Rectangle {
 
 export component BugReportDialog inherits Dialog {
     property <bool> saved: SettingsArea.report-archive != "";
+    property <bool> sent: SettingsArea.report-issue-url != "";
     title: "Report a Bug";
-    subtitle: SettingsArea.report-copied ? "Triage block copied: paste it into the issue’s Triage field (⌘V), then attach the zip." : root.saved ? "Saved: attach the zip to the issue. Nothing was sent." : "Made on this Mac and never uploaded: you see all of it first.";
+    subtitle: root.sent ? "Sent. The issue is public on GitHub; the zip went privately to the maintainers." : SettingsArea.report-copied ? "Triage block copied: paste it into the issue’s Triage field (⌘V), then attach the zip." : root.saved ? "Saved: attach the zip to the issue. Nothing was sent." : "Made on this Mac: you see all of it before anything is sent.";
     icon: Icons.alert;
     dialog-width: 640px;
     dialog-height: 620px;
-    ok-text: root.saved ? "Open GitHub Issue" : "Create Report";
+    ok-text: root.sent ? "Open Issue" : root.saved ? "Open GitHub Issue" : "Send Report";
     ok-enabled: !SettingsArea.report-busy;
-    apply-text: root.saved ? "Show in Finder" : "Update Preview";
+    apply-text: root.saved ? "Show in Finder" : "Save Zip Only";
     apply-enabled: !SettingsArea.report-busy;
+    extra-text: root.saved ? "" : "Update Preview";
+    extra-enabled: !SettingsArea.report-busy;
     cancel-text: root.saved ? "Close" : "Cancel";
-    note: SettingsArea.report-busy ? "Collecting…" : "";
+    note: SettingsArea.report-sending ? "Sending…" : SettingsArea.report-busy ? "Collecting…" : "";
     accepted => {
         if root.saved {
             SettingsArea.report-open-issue();
         } else {
-            SettingsArea.report-create();
+            SettingsArea.report-send();
         }
     }
     applied => {
         if root.saved {
             SettingsArea.report-reveal();
         } else {
-            SettingsArea.report-preview();
+            SettingsArea.report-create();
         }
     }
+    extra => { SettingsArea.report-preview(); }
     cancelled => { Ui.close-dialog(); }
 
     VerticalLayout {
@@ -57,9 +62,8 @@ export component BugReportDialog inherits Dialog {
         spacing: Theme.space-2;
 
         GroupHeading { title: "What happened"; }
-        // Made after the dialog takes focus, so the field keeps it.
         // Made after the dialog takes focus, so the field keeps it. One
-        // line (Return previews it again; OK still creates the report).
+        // line (Return previews it again; it never sends).
         if true: TextField {
             text: SettingsArea.report-describe;
             placeholder: "What you did, what you expected and what happened instead";
@@ -150,7 +154,7 @@ export component BugReportDialog inherits Dialog {
             }
         }
         GroupHint {
-            text: root.saved ? SettingsArea.report-archive : "Keys, tokens and stream URLs are redacted. No video or audio is included.";
+            text: root.saved ? SettingsArea.report-archive : "Send Report makes the issue’s text above public on GitHub; the zip stays private to the maintainers. Keys, tokens and stream URLs are redacted; no video or audio.";
         }
     }
 }

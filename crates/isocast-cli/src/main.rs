@@ -89,7 +89,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Create a private, redacted bug-report zip. Nothing is uploaded.
+    /// Create a private, redacted bug-report zip. Nothing is uploaded
+    /// unless you pass --submit.
     Report {
         #[arg(long)]
         out: Option<PathBuf>,
@@ -102,6 +103,13 @@ enum Command {
         hash_paths: bool,
         #[arg(long)]
         launches: Option<usize>,
+        /// Also send it: ISSUE.md becomes a public GitHub issue, and the zip
+        /// is kept privately for the maintainers. Prints the issue URL.
+        #[arg(long, conflicts_with = "preview")]
+        submit: bool,
+        /// With --submit: send exactly this preview (from --preview).
+        #[arg(long, requires = "submit")]
+        preview_id: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -764,6 +772,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             preview,
             hash_paths,
             launches,
+            submit,
+            preview_id,
             json,
         } => {
             let params = isocast_protocol::diagnostics::BugReportParams {
@@ -780,13 +790,37 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 preview,
                 hash_paths,
                 launches,
+                submit,
+                preview_id,
             };
             let report: isocast_protocol::diagnostics::BugReport =
                 Client::connect_or_launch()?.call(Method::BugReport(params))?;
             if json || preview {
                 println!("{}", serde_json::to_string_pretty(&report)?);
-            } else if let Some(path) = report.archive {
+            } else if let Some(path) = &report.archive {
                 println!("{}\n{}", path.display(), report.issue_body);
+                if let Some(sent) = &report.submitted {
+                    println!(
+                        "Sent: {}{} (report {})",
+                        sent.issue_url,
+                        if sent.deduplicated {
+                            ", added to an open issue with the same crash"
+                        } else {
+                            ""
+                        },
+                        sent.report_id
+                    );
+                }
+            }
+            if let Some(why) = &report.submit_error {
+                eprintln!(
+                    "isocast: report not sent: {why}. The zip is kept at {}; attach it to a new GitHub issue by hand.",
+                    report
+                        .archive
+                        .as_deref()
+                        .map_or("?".into(), |p| p.display().to_string())
+                );
+                return Ok(ExitCode::FAILURE);
             }
             Ok(ExitCode::SUCCESS)
         }

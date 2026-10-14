@@ -113,6 +113,7 @@ pub fn generate(
     manifest_folders: &[PathBuf],
     credentials: Vec<String>,
 ) -> Result<BugReport, String> {
+    check(params)?;
     let n = params.launches.unwrap_or(3);
     if !(1..=10).contains(&n) {
         return Err("params.launches: valid range: 1..10".into());
@@ -476,7 +477,7 @@ pub fn generate(
         .collect::<Vec<_>>()
         .join("\n");
     let issue = format!(
-        "# Isocast bug report\n\nState: {}. {} prior abnormal launch(es); {} recent warning/error entries.\n\n## Description\n\n{}\n\n## Agent triage\n\n```json\n{}\n```\n\nReview metrics.jsonl, logs/, status.json, manifests/ and crash reports in the attached archive. No media is included. Nothing was uploaded.\n",
+        "# Isocast bug report\n\nState: {}. {} prior abnormal launch(es); {} recent warning/error entries.\n\n## Description\n\n{}\n\n## Agent triage\n\n```json\n{}\n```\n\nReview metrics.jsonl, logs/, status.json, manifests/ and crash reports in the report's zip. No media is included.\n",
         snapshot["status"]["state"],
         snapshot["diagnostics"]["previous_abnormal"]
             .as_array()
@@ -498,20 +499,56 @@ pub fn generate(
         "REDACTION.json".into(),
         serde_json::to_string_pretty(&redaction).unwrap(),
     );
+    build(params, contents, redaction)
+}
+
+/// Checks what every `bug_report` call must satisfy before collecting.
+pub fn check(params: &BugReportParams) -> Result<(), String> {
+    if params.submit && params.preview {
+        return Err(
+            "params.submit: preview first (preview: true), then submit with its preview_id".into(),
+        );
+    }
+    if params.preview_id.is_some() && !params.submit {
+        return Err("params.preview_id: only used with submit: true".into());
+    }
+    Ok(())
+}
+
+/// `submit` with a `preview_id`: write and send exactly that preview.
+pub fn from_preview(params: &BugReportParams) -> Result<BugReport, String> {
+    check(params)?;
+    let id = params.preview_id.as_deref().unwrap_or_default();
+    let contents = crate::preview::contents(id)?;
+    let redaction = contents
+        .get("REDACTION.json")
+        .and_then(|r| serde_json::from_str(r).ok())
+        .unwrap_or(Value::Null);
+    build(params, contents, redaction)
+}
+
+fn build(
+    params: &BugReportParams,
+    contents: BTreeMap<String, String>,
+    redaction: Value,
+) -> Result<BugReport, String> {
     let names = contents.keys().cloned().collect();
     let mut report = BugReport {
         preview_id: None,
         file_sizes: contents.iter().map(|(n, s)| (n.clone(), s.len())).collect(),
         archive: None,
-        issue_body: issue,
+        issue_body: contents.get("ISSUE.md").cloned().unwrap_or_default(),
         repository_url: ISSUE_REPOSITORY_URL.map(String::from),
         files: names,
         redaction,
+        submitted: None,
+        submit_error: None,
     };
     if params.preview {
         report.preview_id = Some(crate::preview::save(contents)?);
         return Ok(report);
     }
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     let out = params.out.clone().unwrap_or_else(|| {
         if std::env::var_os("ISOCAST_SOCKET").is_some() {
             logs_folder().with_extension("reports")
@@ -537,7 +574,7 @@ pub fn generate(
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o600);
-    for (name, text) in contents {
+    for (name, text) in &contents {
         archive
             .start_file(name, options)
             .map_err(|e| e.to_string())?;
@@ -551,6 +588,9 @@ pub fn generate(
         .sync_all()
         .map_err(|e| e.to_string())?;
     report.archive = Some(path);
+    if params.submit {
+        crate::submit::send(&mut report, &contents);
+    }
     Ok(report)
 }
 

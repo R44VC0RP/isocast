@@ -278,6 +278,9 @@ fn thread_cpu() -> f64 {
 }
 
 pub fn bug_report(daemon: &Daemon, params: &BugReportParams) -> Result<BugReport, RpcError> {
+    if params.preview_id.is_some() {
+        return isocast_diagnostics::bundle::from_preview(params).map_err(error);
+    }
     let status = daemon.status();
     let live = daemon.get(Default::default());
     let library = daemon.library();

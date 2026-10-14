@@ -159,7 +159,9 @@ class Engine:
         self.env.update(ISOCAST_SOCKET=str(self.sock), ISOCAST_SETUP=str(root / "setup.toml"),
                         ISOCAST_DEV_APP=str(self.app), ISOCAST_PLUGINS=str(root / "plugins"),
                         ISOCAST_TIMELINES=str(root / "timelines"), ISOCAST_MONITOR_SILENT="1",
-                        ISOCAST_STREAM_KEY="e2e", ISOCAST_LOG_DIR=str(root / "logs"))
+                        ISOCAST_STREAM_KEY="e2e", ISOCAST_LOG_DIR=str(root / "logs"),
+                        # Never the real report service: bug_report's submit fails cleanly.
+                        ISOCAST_REPORT_ENDPOINT="http://127.0.0.1:9/reports")
         self.log = open(root / "daemon.log", "ab", buffering=0)
         self.process = None
         self.start()
@@ -831,6 +833,13 @@ def scenario_bug_report(e, cfg, evidence):
         require(archive.testzip() is None and bool(archive.namelist()), "bug report archive corrupt/empty")
         evidence["archive_entries"] = len(archive.namelist())
     evidence["report"] = result
+    # submit to an unreachable service: the redaction check passes, the
+    # zip is kept and submit_error says why (never a real upload).
+    sent = e.rpc("bug_report", {"out": str(e.root / "bug-report-submit"), "describe": "Synthetic e2e", "submit": True})
+    require(sent.get("submitted") is None and "couldn't reach" in (sent.get("submit_error") or ""),
+            f"submit to an unreachable service did not fail cleanly: {sent.get('submit_error')}")
+    require(Path(sent["archive"]).is_file(), "submit failure lost the zip")
+    evidence["submit_error"] = sent["submit_error"]
 
 
 def scenario_capacity(e, cfg, evidence):

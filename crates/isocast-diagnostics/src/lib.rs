@@ -6,6 +6,8 @@ pub mod output;
 pub mod poll;
 pub mod preview;
 pub mod redact;
+pub mod scan;
+pub mod submit;
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};

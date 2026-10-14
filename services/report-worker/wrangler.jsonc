@@ -1,0 +1,30 @@
+// Isocast bug-report worker. See README.md for Ryan's setup steps; nothing
+// here is deployed or created by the repository's agents.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "isocast-report-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  // Scanning a large report's text takes more than the default CPU budget
+  // (Workers Paid plan).
+  "limits": { "cpu_ms": 60000 },
+  "observability": { "enabled": true },
+  "vars": {
+    "GITHUB_API": "https://api.github.com",
+    "GITHUB_REPO": "R44VC0RP/isocast",
+    // The GitHub App's numeric id (README step 2).
+    "GITHUB_APP_ID": "5316809",
+    // Optional Cloudflare Access for the maintainer route (README).
+    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_AUD": ""
+  },
+  // Secrets (never in this file): GITHUB_APP_PRIVATE_KEY, MAINTAINER_TOKEN.
+  "r2_buckets": [
+    { "binding": "REPORTS", "bucket_name": "isocast-bug-reports" }
+  ],
+  "ratelimits": [
+    { "name": "IP_LIMIT", "namespace_id": "4401", "simple": { "limit": 10, "period": 60 } },
+    { "name": "INSTALL_LIMIT", "namespace_id": "4402", "simple": { "limit": 3, "period": 60 } }
+  ]
+}
