@@ -255,19 +255,6 @@ an Apple ID app-specific password. Rotate it once the hosted run works:
 
 ## Cut a release
 
-0. **README once-over (every release, before the version bump).** The
-   README is the landing page for people looking for an OBS alternative,
-   so it must match what the download does:
-   - every feature it lists as available is in this release; anything still
-     unreleased sits under "coming"; this release's new features are added
-     and the "coming" list is trimmed;
-   - the screenshots show the current app: retake any that changed (new
-     buttons, dialogs, layout), always through `scripts/snapshot.sh` or
-     `scripts/screenshots/take.sh`, never against Ryan's own engine;
-   - the Isocast vs OBS table, FAQ, requirements and benchmark numbers are
-     still true; every image link resolves and has alt text.
-   Commit it as `README: <version>` (or note "README checked, no changes"
-   in the version commit) so the history shows it was done.
 1. Set `[workspace.package].version` in Cargo.toml (and refresh Cargo.lock)
    in the source repository, verify/commit it, and publish a clean snapshot.
 2. In the **public snapshot checkout**, tag the matching version and push
@@ -287,6 +274,20 @@ an Apple ID app-specific password. Rotate it once the hosted run works:
    approval and before any secret is read.
 4. Inspect the job summary's draft link, checksum and results. Download the
    DMG for the final human check. Publication is manual, outside the workflow.
+5. **README once-over, before publishing (every release).** The README is
+   the landing page for people looking for an OBS alternative, so when the
+   release goes live it must describe exactly what this version ships:
+   - every feature it lists as available is in this version's DMG; this
+     version's new features are added, and anything still unreleased sits
+     under "coming";
+   - the screenshots show this version's app: retake any that changed (new
+     buttons, dialogs, layout) from the release build, always through
+     `scripts/snapshot.sh` or `scripts/screenshots/take.sh`, never against
+     Ryan's own engine;
+   - the Isocast vs OBS table, FAQ, requirements and benchmark numbers are
+     still true; every image link resolves and has alt text.
+   Commit it as `README: <version>` (or "README checked for <version>, no
+   changes"), publish the snapshot, and only then publish the release.
 
 Manual retry of an **existing tag** (also requires environment approval):
 
