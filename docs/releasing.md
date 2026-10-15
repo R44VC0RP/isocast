@@ -255,6 +255,19 @@ an Apple ID app-specific password. Rotate it once the hosted run works:
 
 ## Cut a release
 
+0. **README once-over (every release, before the version bump).** The
+   README is the landing page for people looking for an OBS alternative,
+   so it must match what the download does:
+   - every feature it lists as available is in this release; anything still
+     unreleased sits under "coming"; this release's new features are added
+     and the "coming" list is trimmed;
+   - the screenshots show the current app: retake any that changed (new
+     buttons, dialogs, layout), always through `scripts/snapshot.sh` or
+     `scripts/screenshots/take.sh`, never against Ryan's own engine;
+   - the Isocast vs OBS table, FAQ, requirements and benchmark numbers are
+     still true; every image link resolves and has alt text.
+   Commit it as `README: <version>` (or note "README checked, no changes"
+   in the version commit) so the history shows it was done.
 1. Set `[workspace.package].version` in Cargo.toml (and refresh Cargo.lock)
    in the source repository, verify/commit it, and publish a clean snapshot.
 2. In the **public snapshot checkout**, tag the matching version and push
