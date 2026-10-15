@@ -25,9 +25,28 @@ Each finished take is verified while the run goes on and its media deleted
 (--keep keeps it), so disk use stays at about two takes. --out gets the
 report, samples, events, manifests and logs, never media. --deadline (Unix
 time) stops recording early enough to verify and report before a CI job limit.
+
+--profile hardware is the test-Mac soak: synthetic sources at 3840x2160@60
+and 1920x1080@60 recorded as HEVC ISOs, a 1920x1080@60 HEVC program, an
+H.264 6000 kb/s 1080p60 stream, takes split every 15 min, and two crash tests
+at the end (kill -9 while recording and while paused; the relaunched engine
+must report the take interrupted and its files must play to within 2.5 s of
+the kill). Dropped frames or audio dropouts in the program or the stream fail
+it. ISOs are what the engine drops first under overload, so their drops are
+reported and fail only above --max-iso-drop-ratio (default 0.1% of an ISO's
+frame slots over the run: a sustained overload drops far more, a stray
+system hiccup far less). Takes are decoded with VideoToolbox at up to 4x
+real time, so verification keeps up with 4K60 without starving the encoders.
+
+--receiver HOST streams to an ffmpeg receiver on another machine: HOST is an
+ssh destination (with --receiver-ssh-config FILE if it needs one). Each
+listener runs there over ssh and the stream goes through an `ssh -L`
+tunnel, so only ssh has to reach HOST. Afterwards nothing may still listen
+there.
 """
 
 import argparse
+import concurrent.futures
 import ctypes
 import datetime
 import fcntl
@@ -51,12 +70,34 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import e2e  # noqa: E402  (Engine, setup, capabilities, probe: one isolation model)
 
-WIDTH, HEIGHT, FPS = 1280, 720, 30
 SOURCES = ["program", "bars", "bars2"]
+# canvas (w, h, fps); each ISO source's size; the program codec (None: the
+# best hardware one); the stream; minutes between splits; strict: drops in
+# the program and stream fail, plus the crash tests.
+PROFILES = {
+    "hosted": {"canvas": (1280, 720, 30), "sources": {"bars": (1280, 720), "bars2": (1280, 720)},
+               "codec": None, "stream": {"video_bitrate_kbps": 2500, "audio_bitrate_kbps": 128},
+               "split_min": 30, "strict": False},
+    "hardware": {"canvas": (1920, 1080, 60), "sources": {"bars": (3840, 2160), "bars2": (1920, 1080)},
+                 "codec": "hevc", "stream": {"video_bitrate_kbps": 6000, "audio_bitrate_kbps": 160},
+                 "split_min": 15, "strict": True},
+}
+PROFILE = PROFILES["hosted"]
+WIDTH, HEIGHT, FPS = PROFILE["canvas"]
 TRANSITIONS = [{"kind": "cut"}, {"kind": "fade", "duration_ms": 500},
                {"kind": "slide", "duration_ms": 400, "easing": "linear"}]
 # Minutes between events at --scale 1 (scenes: a random gap in the range).
 SPLIT_MIN, PAUSE_MIN, MARKER_MIN, SCENE_MIN = 30, 40, 10, (1, 4)
+SSH_OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=30",
+               "-o", "ServerAliveCountMax=4", "-o", "LogLevel=ERROR"]
+REMOTE_PATH = "PATH=/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+
+def use_profile(name):
+    global PROFILE, WIDTH, HEIGHT, FPS, SPLIT_MIN
+    PROFILE = PROFILES[name]
+    WIDTH, HEIGHT, FPS = PROFILE["canvas"]
+    SPLIT_MIN = PROFILE["split_min"]
 FINISH_RESERVE = 20 * 60  # seconds kept after recording for the last take, shutdown and report
 
 STOP = threading.Event()   # end the session early (fatal failure or signal)
@@ -134,6 +175,17 @@ def trend(samples, key, warmup):
             "min": min(values), "max": max(values), "samples": len(points)}
 
 
+def decode(file, timeout, paced=False):
+    """A full decode of every stream. The hardware profile decodes video with
+    VideoToolbox (4K60 HEVC is too slow on one CPU thread to keep up), at
+    most 4x real time while recording so it can't starve the encoders."""
+    hw = ["-hwaccel", "videotoolbox"] if PROFILE["strict"] else []
+    pace = ["-readrate", "4"] if PROFILE["strict"] and paced else []
+    return e2e.command(["nice", "-n", "10", "ffmpeg", "-nostdin", "-hide_banner", "-v", "error",
+                        "-progress", "pipe:1", "-nostats", "-threads", "1", *hw, *pace, "-i", file,
+                        "-map", "0", "-f", "null", "-"], timeout=timeout, check=False)
+
+
 # ------------------------------------------------------------------- the engine
 
 class Soak:
@@ -152,8 +204,78 @@ class Soak:
         self.receiver = {"connections": [], "errors": []}
         self.receiver_stop = threading.Event()
         self.listener = None
-        self.port = None
+        self.port = None         # where the engine streams to, on 127.0.0.1
+        self.remote_port = None  # the receiver's port on --receiver's host
+        self.tunnel = None
         self.lost = None         # why the engine can no longer be trusted (crash or hang)
+
+    # ------------------------------------------------------- remote receiver
+    def ssh(self):
+        cfg = ["-F", str(self.args.receiver_ssh_config)] if self.args.receiver_ssh_config else []
+        return ["ssh", *cfg, *SSH_OPTIONS]
+
+    def remote(self, script, timeout=60):
+        return subprocess.run([*self.ssh(), self.args.receiver, script], capture_output=True,
+                              timeout=timeout, check=False)
+
+    def remote_listening(self):
+        out = self.remote(f"lsof -nP -iTCP:{self.remote_port} -sTCP:LISTEN -t || true")
+        if out.returncode:
+            raise e2e.Failure(f"ssh {self.args.receiver}: {out.stderr.decode(errors='replace')[-300:]}")
+        return out.stdout.decode().split()
+
+    def open_tunnel(self):
+        """Pick a free port on the receiver host and forward a local port to it."""
+        check = self.remote(f"{REMOTE_PATH}; command -v ffmpeg && hostname")
+        e2e.require(check.returncode == 0, f"ssh {self.args.receiver} or its ffmpeg failed: "
+                    f"{(check.stdout + check.stderr).decode(errors='replace')[-300:]}")
+        self.receiver["host"] = check.stdout.decode().split()[-1]
+        rng = random.Random()
+        for _ in range(5):
+            self.remote_port = rng.randrange(20000, 60000)
+            if not self.remote_listening():
+                break
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            self.port = reservation.getsockname()[1]
+        self.tunnel = subprocess.Popen(
+            [*self.ssh(), "-N", "-o", "ExitOnForwardFailure=yes",
+             "-L", f"127.0.0.1:{self.port}:127.0.0.1:{self.remote_port}", self.args.receiver],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=open(OUT / "tunnel.log", "wb"))
+
+        def up():
+            e2e.require(self.tunnel.poll() is None, "the ssh tunnel exited; see tunnel.log")
+            try:
+                socket.create_connection(("127.0.0.1", self.port), timeout=2).close()
+                return True
+            except OSError:
+                return False
+        e2e.until(up, 30, "the ssh tunnel to the receiver")
+
+    def close_remote(self):
+        """Stop the tunnel and anything of ours still on the receiver host; fail if it still listens."""
+        if self.tunnel and self.tunnel.poll() is None:
+            self.tunnel.terminate()
+            try:
+                self.tunnel.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.tunnel.kill()
+        if not self.remote_port:
+            return
+        url = f"rtmp://127.0.0.1:{self.remote_port}/"
+        try:
+            # Killing the local ssh leaves a listener that is still waiting
+            # for a connection (the loop opens one after each stream ends)
+            # running there: stopping it here is the normal path.
+            self.remote(f"pkill -f '{url}'; sleep 2; pkill -9 -f '{url}'; true")
+            left = self.remote_listening()
+            if left:
+                fail("stream", f"port {self.remote_port} on {self.args.receiver} is still listening "
+                               f"after the run (pids {left})")
+            self.receiver["cleanup"] = "nothing left listening"
+        except (e2e.Failure, subprocess.TimeoutExpired) as exc:
+            fail("stream", f"could not check the receiver host is clean: {exc}")
+        self.remote_port = None
 
     def lose(self, kind, message):
         if not self.lost:
@@ -287,10 +409,13 @@ class Soak:
         sources = sorted(f["source"] for f in manifest["files"])
         if sources != sorted(SOURCES):
             problems.append(f"files are for {sources}, expected {sorted(SOURCES)}")
-        files = []
-        for entry in manifest["files"]:
-            row = self.verify_file(path.parent / entry["path"], entry)
-            files.append(row)
+        # The hardware profile decodes a take's files at once: one after
+        # another, VideoToolbox's 4K60 HEVC decode (~2-3.5x real time while
+        # recording) took as long as the take, so the backlog grew.
+        with concurrent.futures.ThreadPoolExecutor(3 if PROFILE["strict"] else 1) as pool:
+            files = list(pool.map(lambda entry: self.verify_file(path.parent / entry["path"], entry),
+                                  manifest["files"]))
+        for entry, row in zip(manifest["files"], files):
             problems.extend(f"{Path(entry['path']).name}: {p}" for p in row["problems"])
         if not self.args.keep:
             for entry in manifest["files"]:
@@ -349,10 +474,7 @@ class Soak:
                             f"{entry['repeated_frames']} repeated = {accounted}, expected {slots} slots ±2")
         # A full decode of every stream; any error or warning fails the file.
         started = now()
-        decoded = e2e.command(["nice", "-n", "10", "ffmpeg", "-nostdin", "-hide_banner", "-v", "error",
-                               "-progress", "pipe:1", "-nostats", "-threads", "1", "-i", file,
-                               "-map", "0", "-f", "null", "-"],
-                              timeout=max(900, 2 * vd), check=False)
+        decoded = decode(file, timeout=max(900, 2 * vd), paced=True)
         frames = [int(m) for m in re.findall(rb"^frame=(\d+)", decoded.stdout, re.M)]
         row["decoded"] = frames[-1] if frames else None
         row["decode_seconds"] = round(now() - started, 1)
@@ -364,16 +486,24 @@ class Soak:
 
     # -------------------------------------------------------------- receiver
     def receive(self):
-        url = f"rtmp://127.0.0.1:{self.port}/live/e2e"
+        remote = bool(self.args.receiver)
+        url = f"rtmp://127.0.0.1:{self.remote_port if remote else self.port}/live/e2e"
         n = 0
         while not self.receiver_stop.is_set():
             n += 1
             progress = OUT / f"receiver-{n}.progress"
-            with open(OUT / f"receiver-{n}.log", "wb") as errors:
-                self.listener = subprocess.Popen(
-                    ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-progress", str(progress), "-nostats",
-                     "-threads", "1", "-listen", "1", "-i", url, "-map", "0", "-f", "null", "-"],
-                    stdout=subprocess.DEVNULL, stderr=errors)
+            with open(OUT / f"receiver-{n}.log", "wb") as errors, open(progress, "wb") as pipe:
+                ffmpeg = ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-progress",
+                          "pipe:1" if remote else str(progress), "-nostats", "-threads", "1",
+                          "-listen", "1", "-i", url, "-map", "0", "-f", "null", "-"]
+                if remote:
+                    # Progress comes back over ssh's stdout; ffmpeg ends with
+                    # the stream, and close_remote() kills a waiting one.
+                    argv = [*self.ssh(), self.args.receiver, f"{REMOTE_PATH}; exec " + " ".join(ffmpeg)]
+                else:
+                    argv = ffmpeg
+                self.listener = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                                                 stdout=pipe if remote else subprocess.DEVNULL, stderr=errors)
                 opened = time.strftime("%H:%M:%S")
                 code = self.listener.wait()
             text = progress.read_text() if progress.exists() else ""
@@ -412,9 +542,11 @@ class Soak:
             self.receiver_thread = threading.Thread(target=self.receive, daemon=True)
             self.receiver_thread.start()
             time.sleep(1)
+            if self.args.receiver:
+                e2e.until(self.remote_listening, 60, f"the receiver on {self.args.receiver}")
             if self.call("stream_start", None) is not None:
                 self.stream_expected = True
-                log("streaming to the local receiver")
+                log(f"streaming to the receiver on {self.receiver.get('host') or 'this Mac'}")
         nxt = {"split": SPLIT_MIN * 60 * scale, "pause": PAUSE_MIN * 60 * scale * 0.5,
                "marker": MARKER_MIN * 60 * scale, "scene": rng.uniform(*SCENE_MIN) * 60 * scale}
         scenes = [sc["id"] for sc in cfg["scenes"]]
@@ -497,12 +629,94 @@ class Soak:
     def stop_receiver(self):
         self.receiver_stop.set()
         thread = getattr(self, "receiver_thread", None)
-        if not thread:
-            return
-        thread.join(timeout=15)
-        if thread.is_alive() and self.listener and self.listener.poll() is None:
-            self.listener.kill()
-            thread.join(timeout=10)
+        if thread:
+            thread.join(timeout=15)
+            if thread.is_alive() and self.listener and self.listener.poll() is None:
+                self.listener.kill()
+                thread.join(timeout=10)
+        if self.args.receiver:
+            self.close_remote()
+
+    # ----------------------------------------------------------- crash tests
+    def crash_test(self, label, paused):
+        """Start a take, kill -9 isocastd while it records (or is paused),
+        relaunch it: it must report the take interrupted, and every file must
+        play up to within 2.5 s of the kill (of the pause, if paused)."""
+        log(f"crash test {label}: starting")
+        res = {"label": label, "paused": paused, "problems": []}
+        problems = res["problems"]
+        started = self.call("start", {}, fatal=False)
+        if not started:
+            problems.append("start failed")
+            return res
+        manifest = Path(started["manifest"])
+        res["manifest"] = str(manifest)
+        files = [Path(f) for f in started["files"]]
+        time.sleep(self.args.crash_seconds)
+        if paused:
+            res["expected_seconds"] = (self.e.rpc("status").get("live") or {}).get("elapsed_seconds")
+            if self.call("pause", None, fatal=False) is None:
+                problems.append("pause failed")
+            time.sleep(10)
+        live = self.e.rpc("status").get("live") or {}
+        if not paused:
+            res["expected_seconds"] = live.get("elapsed_seconds")
+        pid = self.e.process.pid
+        os.kill(pid, signal.SIGKILL)
+        self.e.process.wait(timeout=30)
+        log(f"crash test {label}: killed isocastd pid {pid} at {res['expected_seconds']}s; relaunching")
+        relaunched = now()
+        self.e.start()
+        res["relaunch_seconds"] = round(now() - relaunched, 1)
+        want = os.path.realpath(manifest)
+        reported = None
+        deadline = now() + 30
+        while now() < deadline and reported is None:
+            for item in self.e.rpc("status").get("interrupted") or []:
+                if os.path.realpath(os.path.expanduser(str(item.get("manifest")))) == want:
+                    reported = item
+            if reported is None:
+                time.sleep(1)
+        if reported is None:
+            problems.append("the relaunched engine did not report the take as interrupted")
+        man = e2e.read_json(manifest)
+        res["manifest_status"] = man.get("status")
+        if man.get("status") != "interrupted":
+            problems.append(f"manifest status {man.get('status')}, expected interrupted")
+        fps = {f["path"]: f.get("fps") or FPS for f in man.get("files", [])}
+        res["files"] = []
+        expect = res["expected_seconds"]
+        for f in files:
+            row = {"file": f.name}
+            res["files"].append(row)
+            if not f.is_file():
+                problems.append(f"{f.name}: missing")
+                continue
+            row["bytes"] = f.stat().st_size
+            d = decode(f, timeout=600)
+            frames = [int(m) for m in re.findall(rb"^frame=(\d+)", d.stdout, re.M)]
+            row["decoded"] = frames[-1] if frames else 0
+            row["decode_exit"] = d.returncode
+            row["decode_errors"] = d.stderr.decode(errors="replace")[-500:]
+            row["playable_seconds"] = round(row["decoded"] / fps.get(f.name, FPS), 3)
+            if d.returncode or not row["decoded"]:
+                problems.append(f"{f.name}: does not decode (exit {d.returncode}): {row['decode_errors'][-200:]}")
+            elif expect is None:
+                problems.append("no elapsed time at the kill to compare with")
+            else:
+                row["short_by"] = round(expect - row["playable_seconds"], 3)
+                if not -1.0 <= row["short_by"] <= 2.5:
+                    problems.append(f"{f.name}: plays {row['playable_seconds']}s, expected {expect:.1f}s "
+                                    "(short by more than 2.5 s)")
+        if not self.args.keep:
+            for f in files:
+                f.unlink(missing_ok=True)
+        e2e.until(lambda: self.e.rpc("status").get("state") == "idle", 60, "an idle recorder after the crash test")
+        for p in problems:
+            fail("crash-test", f"{label}: {p}")
+        log(f"crash test {label}: {'PASS' if not problems else 'FAIL'} "
+            f"(short by {[r.get('short_by') for r in res['files']]})")
+        return res
 
 
 # ------------------------------------------------------------------- analysis
@@ -514,7 +728,7 @@ def analyze(soak, report_stop, args):
     a["takes"] = takes
     a["events"] = {"switches": len(soak.events["switches"]), "markers": len(soak.events["markers"]),
                    "pauses": len(soak.events["pauses"]), "splits": soak.events["splits"], "takes": len(takes)}
-    # Drops: information only.
+    # Drops: information only, except in a strict profile (checked below).
     outputs = {}
     for t in takes:
         for f in t.get("files", []):
@@ -587,6 +801,21 @@ def analyze(soak, report_stop, args):
         for c in conns:
             if c["errors"]:
                 fail("stream", f"receiver connection {c['n']} errors: {c['errors'][-500:]}")
+    if PROFILE["strict"]:
+        # The program and the stream are protected: any drop fails. ISOs
+        # are dropped first under overload by design; fail above a ratio.
+        for name, o in outputs.items():
+            slots = o["frames"] + o["dropped"]
+            if name == "program":
+                if o["dropped"] or o["audio_dropouts"]:
+                    fail("drops", f"the program dropped {o['dropped']} frames and had "
+                                  f"{o['audio_dropouts']} audio dropouts")
+            elif slots and o["dropped"] / slots > args.max_iso_drop_ratio:
+                fail("drops", f"ISO {name} dropped {o['dropped']} of {slots} frames "
+                              f"({o['dropped'] / slots:.3%}), limit {args.max_iso_drop_ratio:.3%}")
+        if final and (final.get("dropped_frames") or final.get("audio_dropouts")):
+            fail("drops", f"the stream dropped {final.get('dropped_frames')} frames and had "
+                          f"{final.get('audio_dropouts')} audio dropouts")
     return a
 
 
@@ -616,10 +845,14 @@ def summary(report):
         return str(v).replace("|", "/").replace("\n", " ")[:400]
     a = report.get("analysis", {})
     verdict = report.get("verdict", "FAIL")
-    lines = [f"## Nightly soak: {verdict}", ""]
+    profile = PROFILES.get(report.get("profile", "hosted"), PROFILES["hosted"])
+    (w, h, fps), strict = profile["canvas"], profile["strict"]
+    isos = " + ".join(f"{iw}×{ih}" for iw, ih in profile["sources"].values())
+    lines = [f"## {'Hardware' if strict else 'Nightly'} soak: {verdict}", ""]
     caps = report.get("capabilities", {})
-    lines += [f"{report.get('session_minutes', 0):.0f} min of a {WIDTH}×{HEIGHT}@{FPS} program + 2 ISOs "
-              f"({caps.get('record_codec')}), stream {'on' if report.get('stream') else 'off: ' + cell(report.get('stream_reason'))}; "
+    receiver = report.get("receiver") or "this Mac"
+    lines += [f"{report.get('session_minutes', 0):.0f} min of a {w}×{h}@{fps} program + ISOs {isos} "
+              f"({caps.get('record_codec')}), stream {'on, to ' + receiver if report.get('stream') else 'off: ' + cell(report.get('stream_reason'))}; "
               f"{caps.get('chip')}, {caps.get('cores')} cores, "
               f"{(caps.get('memory_bytes') or 0) / 2**30:.1f} GiB; seed {report.get('seed')}.", ""]
     fails = report.get("failures", [])
@@ -643,7 +876,8 @@ def summary(report):
     for t in a.get("takes", []):
         lines.append(f"| {cell(Path(t['manifest']).name)} | {t.get('duration_seconds') or 0:.1f} | "
                      f"{len(t.get('files', []))} | {'ok' if t.get('ok') else cell('; '.join(t.get('problems') or [t.get('error', '')]))} |")
-    lines += ["", "### Drops (information only, not a failure on hosted VMs)", "",
+    lines += ["", "### Drops (program and stream must be 0; ISOs up to the limit)" if strict else
+              "### Drops (information only, not a failure on hosted VMs)", "",
               "| Output | Frames | Dropped | Ratio | Repeated | Audio dropouts |", "|---|---:|---:|---:|---:|---:|"]
     for name, o in (a.get("drops") or {}).items():
         slots = o["frames"] + o["dropped"]
@@ -658,18 +892,29 @@ def summary(report):
         lines += ["", f"Stream: {st.get('elapsed_seconds', 0):.0f}s sent, {st.get('reconnects', 0)} reconnects; "
                   f"receiver {len(recv)} connection(s), {sum(c['seconds'] for c in recv):.0f}s and "
                   f"{sum(c['frames'] for c in recv)} frames decoded."]
+    crashes = report.get("crash_tests")
+    if crashes is not None:
+        lines += ["", "### Crash tests (kill -9, relaunch, files play)", "",
+                  "| Test | Killed at | Plays (s) | Result |", "|---|---:|---|---|"]
+        for c in crashes:
+            plays = ", ".join(str(f.get("playable_seconds")) for f in c.get("files", []))
+            lines.append(f"| {c['label']} | {c.get('expected_seconds')} | {plays} | "
+                         f"{'ok' if not c.get('problems') else cell('; '.join(c['problems']))} |")
     return "\n".join(lines) + "\n"
 
 
 # ----------------------------------------------------------------------- main
 
 def interrupted(signum, _frame):
-    if not STOP.is_set():
+    if not any(f["kind"] == "interrupted" for f in FAILS):
         fail("interrupted", f"signal {signum}: stopping early", fatal=True)
 
 
 def scene_setup(root, codec):
     cfg = e2e.setup(root, codec, iso=True, width=WIDTH, height=HEIGHT, fps=FPS)
+    for source in cfg["sources"]:
+        if source["id"] in PROFILE["sources"]:
+            source["width"], source["height"] = PROFILE["sources"][source["id"]]
     full = {"x": 0, "y": 0, "width": WIDTH, "height": HEIGHT}
     cfg["name"] = "isolated soak"
     cfg["scenes"] = [
@@ -703,6 +948,16 @@ def main():
     parser.add_argument("--max-memory-growth-mb", type=float, default=200)
     parser.add_argument("--max-thread-growth", type=float, default=16)
     parser.add_argument("--max-fd-growth", type=float, default=32)
+    parser.add_argument("--profile", choices=sorted(PROFILES), default="hosted",
+                        help="hosted (720p30, drops informational) or hardware (4K60 + 1080p60 HEVC "
+                             "ISOs, 1080p60 program and stream, strict drops, crash tests)")
+    parser.add_argument("--max-iso-drop-ratio", type=float, default=0.001,
+                        help="hardware profile: the share of an ISO's frame slots it may drop")
+    parser.add_argument("--receiver", help="stream to an ffmpeg receiver on this ssh host "
+                                           "instead of this Mac")
+    parser.add_argument("--receiver-ssh-config", type=Path, help="ssh -F file for --receiver")
+    parser.add_argument("--crash-seconds", type=float, default=30)
+    parser.add_argument("--no-crash-tests", action="store_true")
     args = parser.parse_args()
     if args.summary:
         print(summary(json.loads(args.summary.read_text())), end="")
@@ -714,7 +969,9 @@ def main():
     (OUT / "manifests").mkdir(parents=True)
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
+    use_profile(args.profile)
     report = {"version": 1, "seed": args.seed, "hours": args.hours, "scale": args.scale,
+              "profile": args.profile, "receiver": args.receiver,
               "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     root = engine = soak = None
     try:
@@ -727,7 +984,9 @@ def main():
             log("waiting for the benchmark lock")
             fcntl.flock(lock, fcntl.LOCK_EX)
             caps = e2e.capabilities()
-            caps["record_codec"] = "h264" if caps["h264"] else "prores422"
+            caps["record_codec"] = PROFILE["codec"] or ("h264" if caps["h264"] else "prores422")
+            e2e.require(caps.get(caps["record_codec"], True),
+                        f"no hardware {caps['record_codec']} encoder for --profile {args.profile}")
             report["capabilities"] = caps
             planned = args.hours * 3600
             if args.deadline:
@@ -745,12 +1004,20 @@ def main():
             report["stream_reason"] = ("--no-stream" if args.no_stream else
                                        None if caps["h264"] else "no hardware H.264 encoder on this machine")
             if soak.stream_on:
-                with socket.socket() as reservation:
-                    reservation.bind(("127.0.0.1", 0))
-                    soak.port = reservation.getsockname()[1]
+                if args.receiver:
+                    soak.open_tunnel()
+                    report["receiver"] = f"{args.receiver} ({soak.receiver['host']})"
+                    log(f"receiver on {args.receiver} ({soak.receiver['host']}) port {soak.remote_port}, "
+                        f"tunnelled from 127.0.0.1:{soak.port}")
+                else:
+                    with socket.socket() as reservation:
+                        reservation.bind(("127.0.0.1", 0))
+                        soak.port = reservation.getsockname()[1]
                 cfg["stream"] = {"service": "custom", "server": f"rtmp://127.0.0.1:{soak.port}/live",
-                                 "video_bitrate_kbps": 2500, "audio_bitrate_kbps": 128,
+                                 **PROFILE["stream"],
                                  "width": WIDTH, "height": HEIGHT, "keyframe_interval_seconds": 2}
+            elif PROFILE["strict"]:
+                e2e.require(args.no_stream, "the hardware profile needs a hardware H.264 encoder to stream")
             engine.apply(cfg)
             report["planned_minutes"] = round(planned / 60, 1)
             log(f"soak: {planned / 60:.1f} min, codec {caps['record_codec']}, stream {soak.stream_on}, "
@@ -758,6 +1025,22 @@ def main():
             _, stop_report = soak.run(cfg, planned)
             report["session_minutes"] = round(getattr(soak, "session_seconds", 0) / 60, 1)
             report["analysis"] = analyze(soak, stop_report, args)
+            signalled = any(f["kind"] == "interrupted" for f in FAILS)
+            if PROFILE["strict"] and not args.no_crash_tests:
+                if soak.lost or signalled or engine.process.poll() is not None:
+                    log("crash tests skipped: the engine was lost or the run was interrupted")
+                else:
+                    report["crash_tests"] = []
+                    for label, paused in (("recording", False), ("paused", True)):
+                        if any(f["kind"] == "interrupted" for f in FAILS):
+                            break
+                        try:
+                            report["crash_tests"].append(soak.crash_test(label, paused))
+                        except Exception as exc:  # noqa: BLE001
+                            fail("crash-test", f"{label}: {exc!r}")
+                            report["crash_tests"].append({"label": label, "problems": [repr(exc)],
+                                                          "trace": traceback.format_exc()[-2000:]})
+                            break
             # A clean shutdown is part of the soak: hung native teardown fails it.
             if engine.process.poll() is None and not soak.lost:
                 try:

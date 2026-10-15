@@ -84,6 +84,14 @@ each section. Delete entries that stop being true.
   instances doesn't stop the bill; release with `aws ec2 terminate-instances`
   then `aws ec2 release-hosts --host-ids …` (ask Ryan first). The public IPs
   change if an instance is stopped; update ~/.ssh/config then.
+- 2026-10-15: The two M2s can't reach each other (m2-a -> m2-b:22 times
+  out: the security group admits ssh only from Ryan's IP). `hw-batch.py
+  soak --receiver m2-b` relays through the runner (ssh -R on m2-a to m2-b's
+  sshd, a per-job `restrict,port-forwarding` key on m2-b, removed after);
+  ~150 Mb/s, so a 6 Mb/s stream is fine, but it needs Ryan's Mac and home
+  connection up. The hardware soak (`soak.py --profile hardware`) fails on
+  ISO drops while #41 stands (~40% on both ISOs with the stream on, from
+  the first seconds; program and stream 0).
 - 2026-10-12: The test-Mac bridge must be a ProcessType Interactive launch
   agent (Astra found it): with launchd's default policy its jobs' timers
   overslept 5-8x (a 10 ms sleep took 75-85 ms on exonbook), so every

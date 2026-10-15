@@ -30,7 +30,10 @@ Kinds (all strict: the test Macs' zero-drop bar):
   motion    scripts/motion.sh --window [--scenario NAME] [--variant V]
             (desktop session)
   drag-lag  scripts/drag-lag.py with --args '...' (desktop session)
-  soak      scripts/soak.py --hours H [--scale S]
+  soak      scripts/soak.py --hours H [--scale S] [--profile hosted|hardware]
+            [--receiver local|m2-a|m2-b]: the stream goes to an ffmpeg
+            receiver on the other test Mac (the runner relays it over ssh:
+            the test Macs can't reach each other directly)
   cmd       --command '<shell>' [--gui]: anything else; $HW_OUT is the
             folder whose contents come back
 
@@ -61,6 +64,7 @@ import argparse
 import fcntl
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -133,7 +137,17 @@ def submit(args):
     if args.kind == "soak":
         hours = args.hours or 1.0
         job["hours"] = hours
-        job["timeout_min"] = args.timeout or int(hours * 60 * (args.scale or 1.0)) + 30
+        job["profile"] = args.profile
+        job["receiver"] = None if args.receiver in (None, "local") else args.receiver
+        if job["receiver"] and args.mac == job["receiver"]:
+            sys.exit("hw-batch: --receiver must be the other test Mac")
+        if job["receiver"] and args.mac == "any":
+            job["mac"] = next(m for m in MACS if m != job["receiver"])
+        # The hardware profile adds its crash tests and a slower last decode.
+        extra = 45 if args.profile == "hardware" else 30
+        job["timeout_min"] = args.timeout or int(hours * 60 * (args.scale or 1.0)) + extra
+    elif args.profile or args.receiver:
+        sys.exit("hw-batch: --profile and --receiver are for soak")
     if args.kind == "cmd" and not args.command:
         sys.exit("hw-batch: cmd needs --command")
     for d in (args.bin_dir, args.base_bin_dir):
@@ -216,9 +230,9 @@ def build_on_exonbook(src, lane, bins, dest, out):
         raise RuntimeError(f"exonbook build failed (exit {r.returncode}); see build.log")
 
 
-def job_command(job, r):
+def job_command(job, r, relay=None):
     """The shell command run in the test Mac's checkout; r is its results
-    folder ($HW_OUT's parent)."""
+    folder ($HW_OUT's parent); relay the ssh config for --receiver."""
     kind = job["kind"]
     out = f"{r}/out"
     e2e = (f"python3 scripts/e2e.py --daemon target/release/isocastd --work {r} "
@@ -237,6 +251,9 @@ def job_command(job, r):
         return f"{e2e}{only}; e=$?; ({bench}); b=$?; echo \"smoke: e2e exit $e, bench exit $b\"; [ $e = 0 ] && [ $b = 0 ]"
     if kind == "soak":
         scale = f" --scale {job['scale']}" if job.get("scale") else ""
+        scale += f" --profile {job['profile']}" if job.get("profile") else ""
+        scale += f" --receiver {Relay.ALIAS} --receiver-ssh-config {relay}" if relay else ""
+        scale += f" {job['args']}" if job.get("args") else ""
         return (f"python3 scripts/soak.py --hours {job['hours']}{scale} --daemon target/release/isocastd "
                 f"--work {r}/soak --out {out}/soak")
     if kind == "motion":
@@ -246,6 +263,103 @@ def job_command(job, r):
     if kind == "drag-lag":
         return f"python3 scripts/drag-lag.py --bin-dir target/release --work {out}/lag {job['args']}"
     return job["command"]
+
+
+class Relay:
+    """An ssh path from the job's test Mac to the receiver Mac for a soak's
+    --receiver. The test Macs' security group lets ssh in only from Ryan's
+    IP, so the runner forwards a port on the job's Mac to the receiver's
+    sshd (`ssh -R`), and a throwaway key for this job, allowed on the
+    receiver as `restrict,port-forwarding`, logs in through it. soak.py then
+    starts its receiver there and tunnels the stream with `ssh -L`. stop()
+    removes the key and checks nothing of ours still listens there."""
+    ALIAS = "isocast-receiver"
+
+    def __init__(self, host, receiver, job_id, jobdir, logf):
+        self.host, self.receiver, self.job_id, self.logf = host, receiver, job_id, logf
+        self.dir = jobdir / "relay"
+        self.tag = f"isocast-hw-batch-{job_id}"
+        self.forward = None
+
+    def keys(self, add=None):
+        """Drop every hw-batch key on the receiver (stale ones from a killed
+        runner too) and add `add`; refuses to write a file that lost any
+        other key."""
+        script = ('set -e; cd ~/.ssh; touch authorized_keys; n=$(grep -vc isocast-hw-batch- authorized_keys || true); '
+                  'grep -v isocast-hw-batch- authorized_keys >ak.hw-batch || true; cat >>ak.hw-batch; '
+                  '[ "$(grep -vc isocast-hw-batch- ak.hw-batch || true)" = "$n" ] || { rm -f ak.hw-batch; exit 3; }; '
+                  'chmod 600 ak.hw-batch; mv ak.hw-batch authorized_keys')
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", self.receiver, script],
+                           input=add or "", capture_output=True, text=True, timeout=60)
+        if r.returncode:
+            raise RuntimeError(f"updating authorized_keys on {self.receiver} failed: {r.stderr[-300:]}")
+
+    def start(self):
+        if self.receiver == self.host:
+            raise RuntimeError("the receiver must be the other test Mac")
+        cfg = dict(l.split(" ", 1) for l in subprocess.run(["ssh", "-G", self.receiver], capture_output=True,
+                                                             text=True, check=True).stdout.splitlines() if " " in l)
+        hostname, user = cfg["hostname"], cfg["user"]
+        known = subprocess.run(["ssh-keygen", "-F", hostname], capture_output=True, text=True).stdout
+        known = "".join(f"{self.ALIAS} {l.split(' ', 1)[1]}\n" for l in known.splitlines()
+                        if l and not l.startswith("#"))
+        if not known:
+            raise RuntimeError(f"no host key for {self.receiver} ({hostname}) in known_hosts")
+        self.dir.mkdir(parents=True, exist_ok=True)
+        key = self.dir / "key"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", self.tag, "-f", str(key)],
+                       check=True)
+        self.keys(f"restrict,port-forwarding {(self.dir / 'key.pub').read_text().strip()}\n")
+        home = ssh(self.host, "echo $HOME").stdout.strip()
+        remote = f"{home}/isocast-scratch/{REMOTE_NAME}/{self.job_id}/relay"
+        for _ in range(3):
+            port = random.randrange(20000, 40000)
+            self.forward = subprocess.Popen(
+                ["ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30",
+                 "-o", "ServerAliveCountMax=4", "-R", f"127.0.0.1:{port}:{hostname}:22", self.host],
+                stdin=subprocess.DEVNULL, stdout=self.logf, stderr=self.logf, start_new_session=True)
+            time.sleep(5)
+            if self.forward.poll() is None:
+                break
+        else:
+            raise RuntimeError(f"could not forward a port on {self.host} to {self.receiver}")
+        config = (f"Host {self.ALIAS}\n  HostName 127.0.0.1\n  Port {port}\n  User {user}\n"
+                  f"  IdentityFile {remote}/key\n  IdentitiesOnly yes\n  HostKeyAlias {self.ALIAS}\n"
+                  f"  UserKnownHostsFile {remote}/known_hosts\n  StrictHostKeyChecking yes\n")
+        files = {"key": key.read_text(), "known_hosts": known, "config": config}
+        for name, text in files.items():
+            r = subprocess.run(["ssh", "-o", "BatchMode=yes", self.host,
+                                f"umask 077; mkdir -p '{remote}' && cat >'{remote}/{name}'"],
+                               input=text, capture_output=True, text=True, timeout=60)
+            if r.returncode:
+                raise RuntimeError(f"copying the relay {name} to {self.host} failed: {r.stderr[-300:]}")
+        check = ssh(self.host, f"ssh -F '{remote}/config' -o BatchMode=yes {self.ALIAS} hostname")
+        if check.returncode:
+            raise RuntimeError(f"{self.host} can't reach {self.receiver} through the relay: {check.stderr[-300:]}")
+        log(f"relay: {self.host} -> {self.receiver} ({check.stdout.strip()}) through 127.0.0.1:{port}")
+        return f"{remote}/config"
+
+    def stop(self):
+        """Returns a warning if anything was left on the receiver."""
+        warning = None
+        if self.forward and self.forward.poll() is None:
+            self.forward.terminate()
+            try:
+                self.forward.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.forward.kill()
+        try:
+            self.keys()
+        except (RuntimeError, subprocess.TimeoutExpired) as e:
+            warning = f"relay key not removed from {self.receiver}: {e}"
+        # soak.py cleans up after itself; this is the backstop.
+        r = ssh(self.receiver, "pgrep -fl 'listen 1 -i rtmp://127.0.0.1:' || true")
+        if r.stdout.strip():
+            ssh(self.receiver, "pkill -f 'listen 1 -i rtmp://127.0.0.1:' || true")
+            warning = f"a receiver was left on {self.receiver}; killed: {r.stdout.strip()[:200]}"
+        if warning:
+            log(warning)
+        return warning
 
 
 def summarize(job, out, status, seconds, host):
@@ -297,6 +411,7 @@ def run_job(path):
     status = "FAIL"
     logf = open(out / "log.txt", "a")
     proc = None
+    relay = None
     try:
         with open(LOCK, "a") as lock:
             log(f"{job_id}: waiting for {LOCK}")
@@ -336,10 +451,14 @@ def run_job(path):
                 else:
                     job["warning"] = "a screen sharing session was open: numbers may be noisy"
             r = f'"$ISOCAST_SCRATCH/{REMOTE_NAME}/{job_id}"'
+            relay_config = None
+            if job.get("receiver"):
+                relay = Relay(host, MACS[job["receiver"]], job_id, jobdir, logf)
+                relay_config = relay.start()
             # $R/pid lets a timeout stop the job's whole process tree (in the
             # desktop session too, where the bridge's process group is shared).
             command = (f"mkdir -p {r}/out && echo $$ >{r}/pid && export HW_OUT={r}/out && "
-                       f"{{ {job_command(job, r)}\n}}")
+                       f"{{ {job_command(job, r, relay_config)}\n}}")
             gui = job["kind"] in ("motion", "drag-lag") or job.get("gui")
             log(f"{job_id}: {job['kind']} on {host} ({'desktop session' if gui else 'ssh'}), "
                 f"timeout {job['timeout_min']} min")
@@ -354,6 +473,9 @@ def run_job(path):
                 code = None
                 job["warning"] = f"timed out after {job['timeout_min']} min; stopped"
             proc = None
+            if relay:
+                job["warning"] = relay.stop() or job.get("warning")
+                relay = None
             subprocess.run(["rsync", "-a", "-e", "ssh", f"{host}:isocast-scratch/{REMOTE_NAME}/{job_id}/out/",
                             f"{out}/"], stdout=logf, stderr=subprocess.STDOUT, timeout=1800)
             ssh(host, f"rm -rf \"$HOME/isocast-scratch/{REMOTE_NAME}/{job_id}\"")
@@ -370,6 +492,8 @@ def run_job(path):
             os.killpg(proc.pid, 15)
             if host:
                 stop_remote(host, job_id)
+        if relay:
+            relay.stop()
         logf.close()
         seconds = time.time() - start
         job["status"] = status
@@ -447,9 +571,9 @@ def cancel(args):
 def schedule(args):
     hour, minute = (int(x) for x in args.at.split(":"))
     argv = ["cronctl", "add", "isocast-hw-nightly", "--cron", f"{minute} {hour} * * *",
-            "--timezone", "America/New_York", "--missed", "once", "--timeout", "9h",
+            "--timezone", "America/New_York", "--missed", "once", "--timeout", "12h",
             "--inherit-path", "--cwd", str(Path(args.script).parent.parent), "--replace", "--json", "--",
-            "/usr/bin/python3", args.script, "run-queue", "--max-hours", "8"]
+            "/usr/bin/python3", args.script, "run-queue", "--max-hours", "11"]
     subprocess.run(argv, check=True)
     if not args.enable:
         subprocess.run(["cronctl", "pause", "isocast-hw-nightly", "--json"], check=True)
@@ -478,11 +602,14 @@ def main():
         s.add_argument("--seconds", type=int)
         s.add_argument("--hours", type=float)
         s.add_argument("--scale", type=float)
-        s.add_argument("--args", help="drag-lag.py arguments")
+        s.add_argument("--profile", choices=("hosted", "hardware"), help="soak: scripts/soak.py --profile")
+        s.add_argument("--receiver", choices=("local", *MACS), help="soak: stream to a receiver on this Mac")
+        s.add_argument("--args", help="extra arguments for drag-lag.py or soak.py")
         s.add_argument("--command", help="cmd: a shell command")
         s.add_argument("--gui", action="store_true", help="cmd: run in the desktop session")
     q = sub.add_parser("run-queue")
-    q.add_argument("--max-hours", type=float, default=8)
+    q.add_argument("--max-hours", type=float, default=11,
+                   help="start no job after this many hours (a 10 h soak takes about 10.75 h)")
     sub.add_parser("list")
     c = sub.add_parser("cancel")
     c.add_argument("id")
