@@ -152,6 +152,15 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-14 (motion harness): the test Macs' desktop bridge may not post
+  mouse events (no Accessibility), so `scripts/motion/pointer.swift`
+  can't replay a scenario's whole path in a real window; window.py falls
+  back to one straight cua-driver drag. To get full paths and timed lag:
+  on isocast-m2-b, System Settings › Privacy & Security › Accessibility,
+  add the bridge's shell (or /usr/bin/swift), then retry
+  `ISOCAST_TESTMAC=isocast-m2-b scripts/testmac.sh gui 'scripts/motion.sh --window --bin target/release'`.
+  Blocks nothing else.
+
 - 2026-10-14 (8.2h auto-update, #40): the Sparkle update key. Until
   `scripts/sparkle/public-ed-key.txt` holds the real public key, every
   Developer ID `release.sh` build (and the Release workflow's source check)
@@ -300,6 +309,12 @@ each section. Delete entries that stop being true.
 
 
 ## Ready for Ryan
+
+- 2026-10-14 (motion harness, #24): `scripts/motion.sh` (after
+  `cargo build --release -p isocast-ui -p isocast-daemon -p isocast-cli`)
+  runs the motion suite headless in ~3 minutes and writes a table plus a
+  contact sheet per failing run; docs/motion-testing.md says what each
+  number means. It currently fails on main as #24 says it should.
 
 - 2026-10-14 (8.2): **Isocast 0.0.2 is published**, the first release that
   updates itself: https://github.com/R44VC0RP/isocast/releases/tag/v0.0.2
@@ -1446,6 +1461,46 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-14 (motion harness, fix round 2): suites are trusted input
+  but boxed: plain scenario names, run folders only as plain children of
+  --out with only the harness's own files removed, an allowlist of state
+  steps, and --motion refuses to run without ISOCAST_SOCKET and
+  ISOCAST_SETUP. Lag is reported only when the gain is within 20% of 1.
+
+- 2026-10-14 (motion harness, review fix round): the app reads time
+  through `crate::clock` (src/clock.rs): the wall clock normally, the
+  virtual display's under `--motion`, so lockstep is deterministic
+  (repeated runs draw identical frames, checked by
+  scripts/motion/compare.py). A measurement that couldn't be made
+  (target missing in any gesture frame, engine not caught up within 2 s)
+  fails the run. Stalls are judged on the device-pixel grid.
+  scripts/motion/controls.toml (a good drag passes; injected lag, jump
+  and blank frame fail) is the harness's own regression check.
+
+- 2026-10-14 (motion harness, GitHub #24): Ryan approved new test
+  infrastructure for this. `isocast-ui --motion SUITE.toml` (src/motion)
+  runs one scenario per process on its own offscreen platform (the
+  snapshot code's, plus a virtual clock and a redraw counter), with the
+  preview in image mode (no layers offscreen), and `scripts/motion.sh`
+  gives each run a fresh throwaway engine. Lockstep (each frame waits up
+  to 250 ms for the engine) for CI, realtime for this Mac, the real window
+  for the test Macs. The lag/gap is measured against the pointer, not
+  against the drawn box: drag-lag.py's "0 px" compared the box with the
+  picture, both drawn from the same frame, while both trail the pointer.
+  Suites are TOML (the toml crate, already the setup format).
+- 2026-10-15 (nightly soak): **the hosted soak checks slow failures, never
+  drop counts.** `scripts/soak.py` reuses e2e.py's `Engine` (same
+  isolation) and verifies each take while recording, deleting its media,
+  so disk stays at about two takes (30-min splits). Memory is the process
+  footprint (`proc_pid_rusage`, what Activity Monitor shows) rather than
+  RSS, measured only while recording, after a warm-up of min(10 min, 20%);
+  limits: +200 MB, +16 threads, +32 fds (median of the last third minus the
+  first). Baseline on isocast-m2-a: ~125 MB, 47 threads, 18 fds, flat over
+  12 min. ffmpeg's receiver logs "Error during demuxing: Input/output
+  error" when the sender closes; it's filtered, and disconnects are judged
+  by the connection count and `reconnects`. After a crash or hang the
+  report shows only that failure, not what follows from it.
 
 - 2026-10-14 (Ryan): **reading OBS source is allowed; copying it isn't.**
   Agents may clone OBS Studio and its plugins outside the repo and read them
@@ -4402,6 +4457,47 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-14 (motion harness, fix round 3): a gain computed as an
+  unaligned regression drops for a late edge (0.79 at 14 frames) and
+  must never gate the lag; use travel over travel. A SIGKILLed motion.sh
+  leaves its isocast-ui --motion child running (parent 1, no lock), and
+  it would relaunch the engine: the marker records UI pids for recovery.
+  Shell redirection and write_text follow symlinks: publish outputs by
+  writing a temp file and renaming it.
+
+- 2026-10-14 (motion harness, fix round 2): a lock made of mkdir + a
+  pid file has a window where the pid isn't written yet and a second run
+  "reclaims" it; hold an flock on an inherited fd instead (python3 -c
+  'fcntl.flock(9, …)' on the shell's fd 9 keeps the lock with the
+  shell's open file) and close fd 9 for children, or a detached engine
+  keeps it. A script started as a background job of a non-interactive
+  shell inherits SIGINT ignored and can't trap it (POSIX), so it runs to
+  the end on Ctrl-C to its group: test signal cleanup from a foreground
+  or new-session launch.
+
+- 2026-10-14 (motion harness, review fix round): `isocast engine stop`
+  only lets isocastd idle, and the CLI launches it detached (parent
+  launchd, no socket path in its argv), so `pkill -f "$work"` never ends
+  it: shut it down over its socket and TERM/KILL what `lsof -a -c
+  isocastd -t +D "$work"` still lists (without `-c isocastd` the script's
+  own shell matches, through its open files, and kills itself). Things
+  that made "identical" lockstep runs draw different pixels: the work
+  folder's path in the status bar (use a fixed folder), setup revisions
+  (the engine numbers them from the clock), the engine's CPU and the
+  recording disk's free space in status replies, the picture during a
+  preview resize (the engine draws at the size asked for when the window
+  was last drawn; wait for that exact fitted size), and replies vs events
+  racing on their two connections.
+
+- 2026-10-14 (motion harness): Slint's TouchArea `mouse-x` is relative to
+  where the area is now; a splitter that moves with the drag and sizes
+  itself from `mouse-x - pressed-x` settles at half the pointer's distance
+  (#24). Window recordings: 4:2:0 video can't be cropped to an odd height
+  (ffmpeg fails quietly in a pipe), and levels come out shifted
+  (#242424 on #121212 → #141414 on #080808): find lines by contrast. The
+  real app needs ISOCAST_UI_PREFS per test run, or a drag's layout carries
+  into the next run. CGWindowList shows isocast-ui's windows with owner
+  `isocast-ui` and an empty title without Screen Recording.
 - 2026-10-14 (#47 fix round): building a `git archive` of main into the
   same CARGO_TARGET_DIR (for "before" screenshots) left main's
   isocast-protocol/diagnostics artifacts in place; the branch then failed

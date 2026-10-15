@@ -18,12 +18,16 @@
 //!                                    drawn offscreen, nothing on screen
 //! isocast-ui --soak 600 [--no-check] offscreen at 60 fps for 10 minutes,
 //!                                    dragging the box and checking frames
+//! isocast-ui --motion SUITE.toml …   replay scripted pointer input
+//!                                    offscreen and check each frame
+//!                                    (src/motion, docs/motion-testing.md)
 //! ```
 
 mod a11y;
 mod app;
 mod areas;
 mod background;
+mod clock;
 mod daemon;
 mod form;
 mod frames;
@@ -34,6 +38,8 @@ mod kit;
 #[cfg(target_os = "macos")]
 mod layers;
 mod model;
+// The motion harness (`--motion`): docs/motion-testing.md.
+mod motion;
 mod offscreen;
 mod picture;
 mod platform;
@@ -204,6 +210,16 @@ fn parse() -> Result<Options> {
 
 fn main() {
     let _logs = isocast_diagnostics::init("isocast-ui", true);
+    if std::env::args().nth(1).as_deref() == Some("--motion") {
+        exit(match motion::main(std::env::args().skip(1).collect()) {
+            Ok(true) => 0,
+            Ok(false) => 3,
+            Err(error) => {
+                isocast_diagnostics::diagnostic!("error"; "Error: {error:?}");
+                1
+            }
+        });
+    }
     let result = parse().and_then(|options| {
         if options.snapshot.is_some() || options.a11y || options.soak.is_some() {
             offscreen::run(&options)

@@ -1,0 +1,187 @@
+# Controls for the harness itself: runs whose verdict is known, so a
+# change to the harness that stops catching faults (or starts failing
+# good motion) shows. `scripts/motion.sh --suite scripts/motion/controls.toml`
+# exits 0 only if every run came out as its `expect` says.
+#
+# The good drag uses the offscreen test picture, drawn from the item's
+# box in the same frame (no engine in the picture's path), so it follows
+# the pointer by construction. The injected faults are put in by the
+# harness (runner.rs Inject): inputs reaching the app late, one frame's
+# pointer 30 points off, one frame not drawn, ten frames of moves never
+# reaching the app. A control expected to fail names exactly the checks
+# it must fail (`expect_failing`), so it fails for the right reason.
+#
+# The real-window runner's analysis has its own controls on known rows:
+# `scripts/motion/window.py --selfcheck` (no window needed).
+
+[defaults]
+size = "1280x800"
+scale = 1
+fps = 60
+picture = "test"
+clock = "lockstep"
+variants = ["idle"]
+
+[defaults.thresholds]
+gap_pt_p95 = 2.0
+lag_frames = 1
+gain_tolerance = 0.1
+jump_back_frames = 0
+stall_frames = 2
+black_frames = 0
+flicker_frames = 0
+
+[[scenario]]
+name = "good-drag"
+description = "Move the item 100 pt right at 60 Hz: follows the pointer"
+target = "canvas-move"
+before = ["select-first-item", "snap:off"]
+expect = "pass"
+steps = [
+  { press = "target", ms = 50 },
+  { move = [100, 0], ms = 600, hz = 60, easing = "ease-in-out" },
+  { release = true, ms = 100 },
+]
+
+[[scenario]]
+name = "slow-drag"
+description = "24 pt in 600 ms: the edge moves less than a pixel a frame (no false stalls)"
+target = "canvas-move"
+before = ["select-first-item", "snap:off"]
+expect = "pass"
+steps = [
+  { press = "target", ms = 50 },
+  { move = [24, 0], ms = 600, hz = 60 },
+  { release = true, ms = 100 },
+]
+
+[[scenario]]
+name = "vertical-drag"
+description = "Move the item 120 pt down and right: tracked all the way"
+target = "canvas-move"
+before = ["select-first-item", "snap:off"]
+expect = "pass"
+steps = [
+  { press = "target", ms = 50 },
+  { move = [60, 120], ms = 600, hz = 60, easing = "ease-in-out" },
+  { release = true, ms = 100 },
+]
+
+[[scenario]]
+name = "injected-lag"
+description = "The good drag with inputs reaching the app 3 frames late"
+target = "canvas-move"
+before = ["select-first-item", "snap:off"]
+expect = "fail"
+expect_failing = ["gap_pt_p95", "lag_frames"]
+inject = "lag:3"
+steps = [
+  { press = "target", ms = 50 },
+  { move = [100, 0], ms = 600, hz = 60, easing = "ease-in-out" },
+  { release = true, ms = 100 },
+]
+
+[[scenario]]
+name = "injected-jump"
+description = "The good drag with frame 20's pointer 30 pt off"
+target = "canvas-move"
+before = ["select-first-item", "snap:off"]
+expect = "fail"
+expect_failing = ["gain_off_by", "jump_back_frames"]
+inject = "jump:20"
+steps = [
+  { press = "target", ms = 50 },
+  { move = [100, 0], ms = 600, hz = 60, easing = "ease-in-out" },
+  { release = true, ms = 100 },
+]
+
+[[scenario]]
+name = "injected-blank"
+description = "The good drag with frame 20 not drawn"
+target = "canvas-move"
+before = ["select-first-item", "snap:off"]
+expect = "fail"
+expect_failing = ["untracked_frames", "black_frames", "flicker_frames"]
+inject = "blank:20"
+steps = [
+  { press = "target", ms = 50 },
+  { move = [100, 0], ms = 600, hz = 60, easing = "ease-in-out" },
+  { release = true, ms = 100 },
+]
+
+# The good drag with ten frames of its moves never reaching the app: the
+# edge stands still while the pointer goes on, so it must stall.
+[[scenario]]
+name = "injected-freeze"
+description = "The good drag with frames 15-24's moves dropped"
+target = "canvas-move"
+before = ["select-first-item", "snap:off"]
+expect = "fail"
+expect_failing = ["gap_pt_p95", "stall_frames"]
+inject = "freeze:15"
+steps = [
+  { press = "target", ms = 50 },
+  { move = [100, 0], ms = 600, hz = 60, easing = "ease-in-out" },
+  { release = true, ms = 100 },
+]
+
+# Released, then the pointer hovers far away in the same instant: the item
+# stays where it was released, and so must the expectation (REVIEW RR4).
+[[scenario]]
+name = "release-then-hover"
+description = "Move 60 pt, release, hover 300 pt on at once: the item stays put"
+target = "canvas-move"
+before = ["select-first-item", "snap:off"]
+expect = "pass"
+steps = [
+  { press = "target", ms = 50 },
+  { move = [60, 0], ms = 600, hz = 60 },
+  { release = true },
+  { move = [300, 0], ms = 200, hz = 60 },
+]
+
+# Two 60 pt moves in the first instant of the press: the canvas and the
+# splitter follow (the splitter ended 60 pt short before #24's fix).
+# Frame 0 is drawn before any input, so motion batched into the first
+# pressed frame is measured.
+[[scenario]]
+name = "batched-start"
+description = "Press and two instant 60 pt moves: the item follows"
+target = "canvas-move"
+before = ["select-first-item", "snap:off"]
+expect = "pass"
+steps = [
+  { press = "target" },
+  { move = [60, 0] },
+  { move = [60, 0], ms = 200 },
+  { release = true, ms = 100 },
+]
+
+[[scenario]]
+name = "splitter-batched-start"
+description = "Press and two instant 60 pt moves on the splitter: it follows (#24 fixed)"
+target = "splitter:0"
+expect = "pass"
+steps = [
+  { press = "target" },
+  { move = [60, 0] },
+  { move = [60, 0], ms = 200 },
+  { release = true, ms = 100 },
+]
+
+# A 14-frame delay with the edge going the whole way: lag must be checked
+# whatever the gain (it was skipped once the unaligned gain came out at
+# 0.79, re-review 2 R2-3). Gain, measured after the lag, is ~1.
+[[scenario]]
+name = "injected-lag-14"
+description = "The good drag with inputs reaching the app 14 frames late"
+target = "canvas-move"
+before = ["select-first-item", "snap:off"]
+expect = "fail"
+expect_failing = ["gap_pt_p95", "lag_frames"]
+inject = "lag:14"
+steps = [
+  { press = "target", ms = 50 },
+  { move = [120, 0], ms = 1000, hz = 60, easing = "ease-in-out" },
+  { release = true, ms = 100 },
+]

@@ -158,7 +158,7 @@ impl Mixer {
     fn show_strips(&self, app: &Rc<App>, window: &AppWindow) {
         let area = window.global::<MixerArea>();
         let hidden: HashSet<String> = area.get_hidden().iter().map(|x| x.to_string()).collect();
-        let now = Instant::now();
+        let now = crate::clock::now();
         let (strips, levels, count) = {
             let s = app.session.borrow();
             let Some(setup) = s.setup.clone() else {
@@ -306,7 +306,7 @@ impl Mixer {
         let Some(setup) = app.session.borrow().setup.clone() else {
             return;
         };
-        let now = Instant::now();
+        let now = crate::clock::now();
         let meters = self.meters.borrow();
         let any = self.shown.borrow().iter().any(|id| {
             let target = self.target(app, &setup, id, now);
@@ -346,7 +346,7 @@ impl Mixer {
     /// Ease each meter towards its target since the last step, and change
     /// the rows whose bars moved. True while some meter still moves.
     fn step_meters(&self, app: &Rc<App>) -> bool {
-        let now = Instant::now();
+        let now = crate::clock::now();
         let dt = self
             .last_tick
             .replace(Some(now))
@@ -771,7 +771,7 @@ impl Area for Mixer {
             Event::Status { live } => &live.levels,
             _ => return,
         };
-        let now = Instant::now();
+        let now = crate::clock::now();
         let mut arrived = self.arrived.borrow_mut();
         for level in levels {
             arrived.insert(level.source.clone(), now);
@@ -907,7 +907,7 @@ mod tests {
 
     #[test]
     fn meters_rise_at_once_and_fall_smoothly() {
-        let start = Instant::now();
+        let start = crate::clock::now();
         let mut meter = MeterState::new(start);
         meter.step((-20.0, -10.0), 0.016, start);
         assert_eq!((meter.rms, meter.peak, meter.hold), (-20.0, -10.0, -10.0));

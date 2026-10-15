@@ -24,6 +24,9 @@ i-slint-backend-testing = "=1.18.1"
 png = "0.18.1"
 serde = "1.0.229"
 serde_json = "1.0.154"
+# The motion harness's suites (src/motion/scenario.rs); already the
+# workspace's setup format.
+toml = "1.1.8"
 slint = { version = "=1.18.1", default-features = false, features = [
     "std",
     "compat-1-2",

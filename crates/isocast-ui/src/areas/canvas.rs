@@ -430,7 +430,10 @@ impl Canvas {
             .window()
             .is_some_and(|w| w.global::<Ui>().get_preview_rate() == "30");
         let working = self.gesture.borrow().is_some()
-            || self.gesture_tail.get().is_some_and(|t| Instant::now() < t);
+            || self
+                .gesture_tail
+                .get()
+                .is_some_and(|t| crate::clock::now() < t);
         let fps = if saving && !working {
             POWER_SAVING_FPS
         } else {
@@ -453,7 +456,8 @@ impl Canvas {
     /// The user worked on the canvas (a drag ended, a nudge): keep the
     /// canvas's rate a moment longer.
     fn worked(&self, app: &Rc<App>) {
-        self.gesture_tail.set(Some(Instant::now() + GESTURE_TAIL));
+        self.gesture_tail
+            .set(Some(crate::clock::now() + GESTURE_TAIL));
         self.update_fps(app);
         let weak = Rc::downgrade(app);
         self.tail_timer.start(

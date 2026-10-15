@@ -1,0 +1,103 @@
+# The standard motion suite (scripts/motion.sh; docs/motion-testing.md).
+# CI runs it in lockstep as a gate. Known open issues are recorded per
+# scenario as expect = "fail" with exactly the checks they fail
+# (expect_failing): the gate fails if one gets a new failure, and also if
+# one is fixed, so its line here is updated in the same change.
+# Every scenario runs idle and while recording (program + 2 ISO files).
+# Positions and moves are in window points.
+
+[defaults]
+size = "1280x800"
+scale = 1
+fps = 60
+picture = "engine"
+clock = "realtime"
+variants = ["idle", "recording"]
+
+[defaults.thresholds]
+gap_pt_p95 = 2.0        # the edge on screen within 2 points of the pointer
+lag_frames = 1          # at most one frame behind
+gain_tolerance = 0.1    # the edge moves 0.9-1.1 points per point of pointer motion
+jump_back_frames = 0    # never moves against the pointer
+stall_frames = 2        # the pointer moved and the edge didn't
+black_frames = 0
+flicker_frames = 0
+frame_ms_max = 16.7     # the interface's own work per frame (wall time)
+
+# The splitter between Scenes and Sources: Scenes gets wider, then back.
+[[scenario]]
+name = "splitter-scenes"
+# Known issue: the mixer's controls wobble a pixel while the docks resize.
+expect = "fail"
+expect_failing = ["flicker_frames"]
+description = "Drag the Scenes|Sources splitter right 120 pt and back"
+target = "splitter:0"
+steps = [
+  { press = "target", ms = 50 },
+  { move = [120, 0], ms = 600, easing = "ease-in-out" },
+  { move = [-120, 0], ms = 600, easing = "ease-in-out" },
+  { release = true, ms = 100 },
+]
+
+# Right of the mixer: this splitter resizes the dock after it (sign -1).
+[[scenario]]
+name = "splitter-transitions"
+# Known issue: the mixer's controls wobble a pixel while the docks resize.
+expect = "fail"
+expect_failing = ["flicker_frames"]
+description = "Drag the Mixer|Transitions splitter left 80 pt and back"
+target = "splitter:2"
+steps = [
+  { press = "target", ms = 50 },
+  { move = [-80, 0], ms = 500, easing = "ease-in-out" },
+  { move = [80, 0], ms = 500, easing = "ease-in-out" },
+  { release = true, ms = 100 },
+]
+
+# Above the docks: makes them taller, so the preview (and its picture
+# size) shrinks as it goes.
+[[scenario]]
+name = "row-splitter"
+# Known issue: the docks' footer toolbars wobble a pixel as the docks resize.
+expect = "fail"
+expect_failing = ["flicker_frames"]
+description = "Drag the splitter above the docks up 80 pt and back"
+target = "row-splitter"
+steps = [
+  { press = "target", ms = 50 },
+  { move = [0, -80], ms = 600, easing = "ease-in-out" },
+  { move = [0, 80], ms = 600, easing = "ease-in-out" },
+  { release = true, ms = 100 },
+]
+
+# The block's bottom-right handle, diagonally (it keeps its aspect).
+[[scenario]]
+name = "canvas-corner"
+# Known issue: the size readout pill changes width with its digits.
+expect = "fail"
+expect_failing = ["flicker_frames"]
+description = "Resize the block by its bottom-right handle, 80 pt out and back"
+target = "canvas-corner"
+before = ["select-first-item", "snap:off"]
+steps = [
+  { press = "target", ms = 50 },
+  { move = [80, 80], ms = 600, easing = "ease-in-out" },
+  { move = [-80, -80], ms = 600, easing = "ease-in-out" },
+  { release = true, ms = 100 },
+]
+
+# Moving was fixed on 2026-10-12 (notes "Drag lag"): the control.
+[[scenario]]
+name = "canvas-move"
+# Known issue: edits go to the engine once per 16 ms, so the second 120 Hz pointer event of a frame waits a frame (lag 1, 6.6 pt p95).
+expect = "fail"
+expect_failing = ["gap_pt_p95"]
+description = "Drag the block right 150 pt and back"
+target = "canvas-move"
+before = ["select-first-item", "snap:off"]
+steps = [
+  { press = "target", ms = 50 },
+  { move = [150, 0], ms = 600, easing = "ease-in-out" },
+  { move = [-150, 0], ms = 600, easing = "ease-in-out" },
+  { release = true, ms = 100 },
+]

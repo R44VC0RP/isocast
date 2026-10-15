@@ -251,6 +251,9 @@ pub struct Preview {
     pending_size: Rc<Cell<Option<(u32, u32)>>>,
     size_timer: slint::Timer,
     size_asked_at: Rc<Cell<Option<Instant>>>,
+    /// The size last asked of the daemon (the motion harness waits for
+    /// frames of it).
+    size_asked: Rc<Cell<(u32, u32)>>,
     size_requests: Rc<Cell<u64>>,
     layouts: Layouts,
     /// The box as the pointer has it while a handle is dragged, drawn at
@@ -312,6 +315,7 @@ impl Preview {
             pending_size: Rc::default(),
             size_timer: slint::Timer::default(),
             size_asked_at: Rc::default(),
+            size_asked: Rc::default(),
             size_requests: Rc::default(),
             layouts: Layouts::default(),
             live_box: None,
@@ -390,11 +394,11 @@ impl Preview {
         let held_since = self.waiting.take().map(|(_, since)| since);
         let unknown =
             frame.revision.is_some_and(|r| r > self.layouts.newest()) && self.layouts.newest() > 0;
-        if unknown && held_since.is_none_or(|since| since.elapsed() < LAYOUT_WAIT) {
+        if unknown && held_since.is_none_or(|since| crate::clock::since(since) < LAYOUT_WAIT) {
             // Drawn from a setup this window hasn't read yet: hold it until
             // the layout comes, so the box isn't drawn at the old one.
             self.stats.waited_for_layout += 1;
-            self.waiting = Some((frame, held_since.unwrap_or_else(Instant::now)));
+            self.waiting = Some((frame, held_since.unwrap_or_else(crate::clock::now)));
             return;
         }
         if unknown {
@@ -467,7 +471,7 @@ impl Preview {
         self.live_box = match (live, self.live_box.take()) {
             (Some(live), _) => Some(live),
             (None, Some(held)) => Some(LiveBox {
-                ended: held.ended.or(Some(Instant::now())),
+                ended: held.ended.or(Some(crate::clock::now())),
                 ..held
             }),
             (None, None) => None,
@@ -541,30 +545,38 @@ impl Preview {
         let due = self
             .size_asked_at
             .get()
-            .is_none_or(|at| at.elapsed() >= RESIZE_EVERY);
+            .is_none_or(|at| crate::clock::since(at) >= RESIZE_EVERY);
         if due {
             self.pending_size.set(None);
             self.size_timer.stop();
-            self.size_asked_at.set(Some(Instant::now()));
+            self.size_asked_at.set(Some(crate::clock::now()));
+            self.size_asked.set(size);
             self.feed.set_size(size.0, size.1);
             self.size_requests.set(self.size_requests.get() + 1);
             return;
         }
         self.pending_size.set(Some(size));
-        let (feed, pending, requests, asked_at) = (
+        let (feed, pending, requests, asked_at, asked) = (
             self.feed.clone(),
             self.pending_size.clone(),
             self.size_requests.clone(),
             self.size_asked_at.clone(),
+            self.size_asked.clone(),
         );
         self.size_timer
             .start(slint::TimerMode::SingleShot, RESIZE_SETTLE, move || {
                 if let Some((width, height)) = pending.take() {
-                    asked_at.set(Some(Instant::now()));
+                    asked_at.set(Some(crate::clock::now()));
+                    asked.set((width, height));
                     feed.set_size(width, height);
                     requests.set(requests.get() + 1);
                 }
             });
+    }
+
+    /// The picture size last asked of the daemon.
+    pub fn size_asked(&self) -> (u32, u32) {
+        self.size_asked.get()
     }
 
     pub fn stats(&self) -> Stats {
@@ -598,7 +610,9 @@ impl Preview {
                 .and_then(|layout| layout.rects.get(selected.as_str()))
                 == Some(&live.shape);
             match live.ended {
-                Some(at) if caught_up || at.elapsed() > LIVE_BOX_HOLD => self.live_box = None,
+                Some(at) if caught_up || crate::clock::since(at) > LIVE_BOX_HOLD => {
+                    self.live_box = None
+                }
                 _ => return Some(live.shape),
             }
         }
@@ -625,7 +639,7 @@ impl Preview {
         }
         self.put(&app, Some(&frame), rect);
         self.stats.shown += 1;
-        let now = Instant::now();
+        let now = crate::clock::now();
         if let Some(last) = self.last_shown_at.replace(now) {
             self.stats.longest_gap = self.stats.longest_gap.max(now - last);
         }

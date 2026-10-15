@@ -55,3 +55,72 @@ jobs:
 
       - name: Third-party notices up to date
         run: scripts/third-party-notices.sh --check
+
+  motion:
+    # The motion harness (docs/motion-testing.md): the real interface drawn
+    # offscreen, scripted drags replayed on a virtual clock, every frame
+    # checked. Lockstep runs draw the same pixels on any machine, so this
+    # is a pass/fail gate, not a benchmark: the harness's controls must
+    # come out as expected, and the standard suite must match its baseline
+    # of known issues exactly (scripts/motion/suite.toml).
+    name: motion suite (headless, macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Pull requests: only when the interface or the harness changed (the
+      # job still reports success otherwise, so it can be required).
+      # Pushes to main and manual runs: always.
+      - name: Interface changed?
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          run=true
+          if [ "$EVENT" = pull_request ]; then
+            base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+            if [ -z "$(git diff --name-only "$base" "$HEAD_SHA" -- crates/isocast-ui/ scripts/motion.sh scripts/motion/ .github/workflows/ci.yml)" ]; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "motion suite: run=$run"
+
+      - name: Rust toolchain
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cargo cache
+        if: steps.changes.outputs.run == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build release binaries
+        if: steps.changes.outputs.run == 'true'
+        run: cargo build --locked --release -p isocast-ui -p isocast-daemon -p isocast-cli
+
+      - name: Harness controls
+        if: steps.changes.outputs.run == 'true'
+        run: scripts/motion.sh --suite scripts/motion/controls.toml --no-timing --out "$RUNNER_TEMP/motion/controls"
+
+      - name: Standard suite (lockstep)
+        if: steps.changes.outputs.run == 'true'
+        run: scripts/motion.sh --clock lockstep --no-timing --out "$RUNNER_TEMP/motion/suite"
+
+      - name: Upload results
+        if: always() && steps.changes.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: motion-results
+          path: ${{ runner.temp }}/motion
+          if-no-files-found: ignore
+          retention-days: 14

@@ -141,6 +141,12 @@ impl App {
         app
     }
 
+    /// Calls made to the daemon and not answered yet (the motion
+    /// harness's lockstep waits for none).
+    pub fn calls_pending(&self) -> usize {
+        self.replies.borrow().len()
+    }
+
     /// The areas, in the order they update. Create comes first so that in
     /// its view Delete takes off the selected clip, not a scene item.
     pub fn areas(&self) -> [&dyn Area; 9] {
@@ -803,7 +809,7 @@ impl App {
                     return;
                 }
                 let interval = next.interval;
-                let since = s.last_sent.map_or(Duration::MAX, |t| t.elapsed());
+                let since = s.last_sent.map_or(Duration::MAX, crate::clock::since);
                 if since < interval {
                     s.waiting = true;
                     let weak = Rc::downgrade(self);
@@ -844,7 +850,7 @@ impl App {
                 s.inflight.push_back((edit, revision));
                 s.applies_sent += 1;
                 s.most_in_flight = s.most_in_flight.max(s.inflight.len());
-                s.last_sent = Some(Instant::now());
+                s.last_sent = Some(crate::clock::now());
                 ApplyParams {
                     revision,
                     change,
@@ -1007,7 +1013,7 @@ impl App {
 
     /// Read the engine's status (`quiet`: no toast if it fails).
     pub fn refresh_status(self: &Rc<Self>, quiet: bool) {
-        let asked = Instant::now();
+        let asked = crate::clock::now();
         self.call_as::<Status>(Method::Status, move |app, result| match result {
             Ok(status) => {
                 {
@@ -1081,7 +1087,7 @@ impl App {
     pub fn choose_scene(self: &Rc<Self>, id: &str) {
         let studio = {
             let mut s = self.session.borrow_mut();
-            s.switched_at = Some(Instant::now());
+            s.switched_at = Some(crate::clock::now());
             s.selection = None;
             if s.studio {
                 s.preview = Some(id.to_string());
@@ -1123,7 +1129,7 @@ impl App {
             let Some(preview) = s.preview.clone() else {
                 return;
             };
-            s.switched_at = Some(Instant::now());
+            s.switched_at = Some(crate::clock::now());
             let on_air = s.scene.replace(preview);
             s.preview = on_air;
         }
@@ -1140,7 +1146,7 @@ impl App {
         let stage = {
             let mut s = self.session.borrow_mut();
             s.studio = on;
-            s.switched_at = Some(Instant::now());
+            s.switched_at = Some(crate::clock::now());
             if !on {
                 s.preview = None;
             }

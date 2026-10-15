@@ -1,0 +1,58 @@
+# The engine the motion harness drives (scripts/motion.sh): synthetic
+# sources only. The block is the item canvas scenarios drag and resize:
+# pure magenta on a plain background, so its edges can be found in every
+# frame. Recording writes the program and two ISO files (the test pattern
+# and the block) into the run's work folder. The test pattern is recorded
+# but not in the scene: it changes every frame, and the flicker check
+# would see its moving parts.
+
+version = 1
+name = "Motion test"
+
+[canvas]
+width = 1920
+height = 1080
+fps = 60
+
+[recording]
+folder = "recordings"
+program = { encoder = { codec = "hevc" }, audio = ["tone"] }
+iso = { enabled = true, sources = ["pattern", "block"], audio = ["tone"] }
+
+[[sources]]
+id = "background"
+name = "Background"
+kind = "color"
+color = "#2a2d31"
+
+[[sources]]
+id = "pattern"
+name = "Pattern"
+kind = "test_pattern"
+
+[[sources]]
+id = "block"
+name = "Block"
+kind = "color"
+color = "#ff00ff"
+width = 240
+height = 240
+
+[[sources]]
+id = "tone"
+name = "Tone"
+kind = "tone"
+frequency = 440
+
+[[scenes]]
+id = "main"
+name = "Main"
+
+[[scenes.items]]
+source = "background"
+rect = { x = 0, y = 0, width = 1920, height = 1080 }
+
+[[scenes.items]]
+id = "block-item"
+source = "block"
+rect = { x = 600, y = 300, width = 240, height = 240 }

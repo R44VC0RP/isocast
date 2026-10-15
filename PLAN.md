@@ -1234,6 +1234,33 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 
 ## Log
 
+- Motion harness fix round 2 (2026-10-14, re-review): no path outside
+  the run folder is touched (plain names, no recursive removal, symlinks
+  refused, state allowlist, isolated engine required); an flock for the
+  work folder and a crashed run's engine ended before its folder goes;
+  release expectations at the release's position; window stalls of a
+  frozen edge; gain reported, lag only when the edge follows. Verified:
+  controls 11/11, window --selfcheck 6/6, three lockstep suites + a
+  CPU-loaded one identical, reviewer's repros, lock and leak checks.
+- Motion harness fix round (2026-10-14, review "fix first"): no false
+  passes (coverage gate, invalid on engine timeout), pixel-grid stalls,
+  true rest frame and per-gesture expectations, app time through
+  src/clock.rs so lockstep is deterministic, no leaked engines, stale
+  results rejected, GPU time in frame time, controls with injected faults.
+  Verified: controls 9/9 as expected; three lockstep suites plus a
+  SIGSTOP-perturbed and a CPU-loaded one compared with
+  scripts/motion/compare.py; pgrep/lsof clean after normal, failed,
+  SIGINT and SIGTERM runs.
+- Motion harness (2026-10-14, GitHub #24): `scripts/motion.sh` replays
+  scripted pointer input into the real interface offscreen (virtual clock,
+  real engine, every frame read back) and in a real window on a test Mac
+  (`--window`), and checks the edge against the pointer every frame
+  (docs/motion-testing.md). It reproduces #24 on main e9753d4: every
+  splitter moves at half the pointer's distance (headless: 59 pt p95 gap
+  on a 120 pt drag; isocast-m2-b window: 50 pt for 120, gain 0.42, idle
+  and recording); canvas resize realtime a frame behind with 27-31 stalled
+  frames, 6.3 pt p95 while recording. Verified by two identical lockstep
+  runs and the window recordings.
 - A.4 / #41 (2026-10-14, fixed): the cause is VideoToolbox's placement of
   hardware sessions on the M4 Max's two encode engines, decided at each
   session's first picture; a standalone VT benchmark reproduced the slow

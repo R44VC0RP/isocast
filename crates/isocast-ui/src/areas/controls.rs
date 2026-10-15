@@ -84,9 +84,9 @@ impl Since {
             self.0.set(None);
             return;
         };
-        let at = Instant::now()
+        let at = crate::clock::now()
             .checked_sub(Duration::from_secs_f64(elapsed.max(0.0)))
-            .unwrap_or_else(Instant::now);
+            .unwrap_or_else(crate::clock::now);
         let keep = self.0.get().is_some_and(|old| {
             let off = if old > at { old - at } else { at - old };
             off <= Duration::from_millis(1500)
@@ -100,7 +100,9 @@ impl Since {
         if let Some(seconds) = self.1.get() {
             return seconds.max(0.0) as u64;
         }
-        self.0.get().map_or(0, |at| at.elapsed().as_secs())
+        self.0
+            .get()
+            .map_or(0, |at| crate::clock::since(at).as_secs())
     }
 
     fn pause(&self, elapsed: f64) {
@@ -111,7 +113,7 @@ impl Since {
     /// Until just after its next whole second.
     fn next_tick(&self) -> Option<Duration> {
         let at = self.0.get()?;
-        let ms = at.elapsed().as_millis() as u64 % 1000;
+        let ms = crate::clock::since(at).as_millis() as u64 % 1000;
         Some(Duration::from_millis(1000 - ms + 5))
     }
 }

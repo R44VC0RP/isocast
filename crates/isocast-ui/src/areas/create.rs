@@ -376,7 +376,7 @@ impl Create {
         if self.retake_since.get().is_some() {
             return;
         }
-        self.retake_since.set(Some(Instant::now()));
+        self.retake_since.set(Some(crate::clock::now()));
         self.show_header(app);
         // If the take's start never shows (a failure the reply reports),
         // the line goes back after a while.

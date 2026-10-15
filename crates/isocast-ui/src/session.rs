@@ -289,7 +289,7 @@ impl Session {
     /// Before a change: keep the setup as it was, for undo (a stream of
     /// edits with the same key within 1.5 s counts once).
     pub(crate) fn remember(&mut self, key: Option<&str>) {
-        let now = Instant::now();
+        let now = crate::clock::now();
         let same = match (key, &self.last_undo) {
             (Some(key), Some((last, at))) => key == last && now - *at < Duration::from_millis(1500),
             _ => false,

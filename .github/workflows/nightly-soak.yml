@@ -1,0 +1,87 @@
+name: Nightly soak
+
+# Hours of recording on synthetic sources, looking for slow failures that
+# the short E2E scenarios can't see: crashes, hangs, leaks, stalled writes,
+# broken takes and stream disconnects. See "Nightly soak" in docs/handoff/README.md (section 6).
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: 'Hours to record (at most 5.25; the job limit is 6 h including the build)'
+        required: false
+        default: '5'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-soak
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    # GitHub-hosted arm64 only: free for public repos, never our own Macs.
+    runs-on: macos-15
+    timeout-minutes: 350
+    env:
+      CARGO_INCREMENTAL: 0
+      HOURS: ${{ inputs.hours || '5' }}
+    steps:
+      - name: Job start and architecture
+        run: |
+          test "$(uname -m)" = arm64
+          echo "SOAK_JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+          echo "ISOCAST_SCRATCH=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          if ! printf '%s' "$HOURS" | grep -Eq '^[0-9]+(\.[0-9]+)?$' ||
+             ! awk -v h="$HOURS" 'BEGIN { exit !(h > 0 && h <= 5.25) }'; then
+            echo "::error::hours must be a number above 0 and at most 5.25"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/e2e.yml') }}
+          restore-keys: ffmpeg-${{ runner.os }}-${{ runner.arch }}-
+      - name: FFmpeg
+        run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+      - name: Build release engine
+        run: cargo build --locked --release -p isocast-daemon
+      - name: Soak (program, two ISOs and a local RTMP stream)
+        # The script stops recording 20 minutes before --deadline to verify
+        # the last take and write its report; the deadline leaves 15 minutes
+        # of the job for the summary and upload.
+        run: |
+          python3 scripts/soak.py --hours "$HOURS" \
+            --deadline "$((SOAK_JOB_START + 335 * 60))" \
+            --work "$RUNNER_TEMP/soak" --out "$RUNNER_TEMP/soak-out"
+      - name: Job summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/soak-out/report.json" ]; then
+            python3 scripts/soak.py --summary "$RUNNER_TEMP/soak-out/report.json" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '## Nightly soak: no report (build failed or the job was cancelled); see the logs.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Report and logs (no recordings)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-soak
+          path: ${{ runner.temp }}/soak-out
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Clean up scratch
+        if: always()
+        run: rm -rf "${RUNNER_TEMP:?}/soak" "${RUNNER_TEMP:?}/soak-out"
