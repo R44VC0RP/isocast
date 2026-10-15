@@ -12,7 +12,8 @@ use isocast_protocol::{Source, SourceKind};
 
 use super::pause::RecordingClock;
 use super::{
-    AUDIO_CHUNK, AUDIO_JITTER, FilePlan, MAX_PENDING_AUDIO, Packet, SPLIT_AUDIO_WAIT, Shared,
+    AUDIO_CHUNK, AUDIO_JITTER, FilePlan, MAX_PENDING_AUDIO, Packet, SPLIT_AUDIO_WAIT,
+    SPLIT_FINISH_DELAY, Shared,
 };
 use crate::record::FileReport;
 use crate::{FileWriter, SAMPLE_RATE, Time};
@@ -122,6 +123,9 @@ pub(super) fn write_files<W: FileWriter>(
                                 file: old,
                                 failure: Ok(()),
                             };
+                            // A split within the previous one's closing window
+                            // finishes that file now (its sessions then end as
+                            // this take's start; see `SPLIT_FINISH_DELAY`).
                             if let Some(c) = closing.replace(ended) {
                                 finish(c.file, c.at, c.take, c.failure);
                             }
@@ -159,8 +163,8 @@ pub(super) fn write_files<W: FileWriter>(
                 );
                 if let Some(c) = &closing
                     && (c.failure.is_err()
-                        || c.file.audio_complete(c.at)
-                        || newest >= c.at + SPLIT_AUDIO_WAIT)
+                        || (newest >= c.at + SPLIT_FINISH_DELAY
+                            && (c.file.audio_complete(c.at) || newest >= c.at + SPLIT_AUDIO_WAIT)))
                 {
                     let c = closing.take().expect("checked");
                     finish(c.file, c.at, c.take, c.failure);

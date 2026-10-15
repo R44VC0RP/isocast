@@ -9,6 +9,7 @@ use std::mem::size_of;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -58,7 +59,10 @@ use objc2_video_toolbox::{
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
 
-use crate::writer::EncoderPressure;
+use crate::writer::{
+    EncoderPressure, cancel_encoder_start, claim_encoder_start, encoder_start_rank,
+    request_encoder_start,
+};
 use crate::{PixelBuffer, from_cm_time};
 
 /// Nanoseconds: frame times go to the encoder exactly as the engine has
@@ -83,6 +87,12 @@ pub struct H264Encoder {
     low_latency: bool,
     force_keyframe: CFRetained<CFDictionary<CFString, CFBoolean>>,
     priority: Option<EncoderPressure>,
+    /// The session has its first frame; until then `start_ticket` is its
+    /// place in the process's encoder start order (see
+    /// [`claim_encoder_start`]).
+    started: bool,
+    start_ticket: Option<u64>,
+    size: (u32, u32),
 }
 
 // SAFETY: VideoToolbox sessions may be used from any thread; this one is
@@ -283,12 +293,18 @@ impl H264Encoder {
             low_latency: spec.low_latency,
             force_keyframe,
             priority: (!spec.low_latency).then(EncoderPressure::new),
+            started: false,
+            start_ticket: None,
+            size: (spec.width, spec.height),
         })
     }
 }
 
 impl Drop for H264Encoder {
     fn drop(&mut self) {
+        if let (false, Some(ticket)) = (self.started, self.start_ticket) {
+            cancel_encoder_start(ticket);
+        }
         // No callbacks after this, so `output` can go.
         unsafe { self.session.invalidate() };
     }
@@ -329,6 +345,18 @@ impl VideoEncoder for H264Encoder {
             )
         };
         let options = keyframe.then(|| self.force_keyframe.as_opaque());
+        if !self.started {
+            // The first frame starts the hardware session: in its turn, not
+            // within a few milliseconds of another session's start.
+            let (width, height) = self.size;
+            let ticket = *self.start_ticket.get_or_insert_with(|| {
+                request_encoder_start(encoder_start_rank(false, width, height))
+            });
+            while !claim_encoder_start(ticket) {
+                thread::sleep(Duration::from_millis(2));
+            }
+            self.started = true;
+        }
         self.output.in_flight.fetch_add(1, Ordering::Relaxed);
         let status = unsafe {
             self.session.encode_frame(

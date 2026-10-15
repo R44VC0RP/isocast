@@ -80,6 +80,15 @@ const STINGER_WAIT: Duration = Duration::from_secs(2);
 /// How long, in capture time, a file a split ended stays open for its last
 /// audio, which can arrive after the next take's first frame.
 const SPLIT_AUDIO_WAIT: Duration = Duration::from_millis(500);
+/// How long, in capture time, a file a split ended stays open even once its
+/// audio is complete, so that its encoder sessions are not torn down while
+/// the next take's sessions start (they start one after another over the
+/// first ~100 ms of the take). VideoToolbox places a new hardware session
+/// by what the encode engines are doing at that moment; a session torn
+/// down just then left the new ones badly placed, every ISO of the take
+/// then dropping about half its pictures (one split in three on an M4 Max;
+/// GitHub #41).
+const SPLIT_FINISH_DELAY: Duration = Duration::from_millis(200);
 /// How often live status is reported.
 const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 /// How overdue a frame must be before live status counts it as dropped

@@ -301,6 +301,16 @@ each section. Delete entries that stop being true.
 
 ## Ready for Ryan
 
+- 2026-10-14 (8.2): **Isocast 0.0.2 is published**, the first release that
+  updates itself: https://github.com/R44VC0RP/isocast/releases/tag/v0.0.2
+  (full release, Latest). Built locally from main 33b9b73 (public snapshot
+  a681a63), notarized with isocast-notary, appcast signed with the login
+  keychain's Sparkle key. DMG SHA-256 matches its .sha256; Gatekeeper
+  accepts it; releases/latest/download/appcast.xml resolves (200) and points
+  at the v0.0.2 DMG with the right length. The tag push's Release run ended
+  green at preflight (already published). Install it by hand once; the #41
+  ISO-drop and #24 resize fixes will arrive as 0.0.3 through the updater.
+
 - 2026-10-14 (8.2h auto-update, #40): branch `ui/auto-update`. Testers
   on 0.0.1 have no updater: they install 0.0.2 from its DMG once; from
   then on each published release reaches them (daily check or Isocast ›
@@ -1518,6 +1528,55 @@ each section. Delete entries that stop being true.
   allowed as dev.isocast.isocastd). Agents never answer it. Lanes on
   exonbook prefer SSH runs without display capture; a GUI run there must
   expect the alert on screen. Root cause: GitHub #44.
+- 2026-10-14 (#41, iso-drops-2): **hardware encoder sessions start in order,
+  apart, and never during a teardown.** VideoToolbox places a session on one
+  of the M4 Max's two video encode engines when it gets its first picture,
+  by what the engines are doing at that moment, for the session's life.
+  Sessions starting within a few milliseconds of each other (or while
+  another one is being torn down) can land so that three share an engine in
+  a mode where each runs at ~45 fps with eight pictures in flight; the
+  program's queue then trips the pressure controller, the ISO share goes to
+  13% and takes 43 s to recover. So the macOS writer (`writer.rs`,
+  `ENCODER_START_GAP`/`claim_encoder_start`) hands each video input its first
+  picture in a process-wide order: the protected program first, then the
+  other files from the largest down, each at least 25 ms after the previous
+  session started; pictures queue meanwhile (the ISO pending limit and the
+  stall detector do not apply before the first picture). The H.264
+  stream/monitor encoder takes the same turn (blocking, at most a few gaps).
+  At a split, a file the split ended stays open `SPLIT_FINISH_DELAY` (200 ms)
+  past the split even once its audio is complete, so no session is torn down
+  while the next take's start (order alone left 17 of 20 split takes lossy:
+  every other split badly placed; with the delay 0 of 20, every take's engine
+  ratio 1.00). Not chosen: delaying ISO frame delivery in `run_iso` (tried:
+  the gaps came out 5–40 ms through wake jitter and the GPU stage, and it
+  retains frames in the source slot); an engine-side session recreation on a
+  detected bad placement (AVAssetWriter cannot swap its encoder: a new file
+  would be needed); any private VideoToolbox key (`PreemptiveLoadBalancing`,
+  `Priority` exist but are not public). Evidence and the standalone
+  benchmark: `/Volumes/IsocastBuild/iso-drops-2/scratch/REPORT.md`.
+  After review: a writer that never got its first picture withdraws its
+  request in `Drop`; requests older than 500 ms are pruned; ProRes writers
+  take no turn. Fix round 1 (review blocker B1): the "wait for a protected
+  writer that exists but has not started" hold is gone. It counted from
+  `prioritize_video`, which `create_writers` calls on the *next* take's
+  program writer when a split or retake is requested, so a split/retake
+  within ~100 ms of a take's start held that take's not-yet-started ISOs
+  for the full 500 ms and the backlog was then refused against
+  `PENDING_ISO` (5–38 % of the 1 s take, 6/6 runs). Counting it from the
+  file's first frame instead would be the same moment the writer's own
+  ticket is requested (`start` → `append_video` → `drain_ready`, one call
+  chain, microseconds apart), so the ticket's rank already gives that
+  ordering and the hold was removed rather than moved. The ISO queue limit
+  (`PENDING_ISO` 4) now only applies once the pictures that queued during
+  the wait for the start have drained below it (`AssetWriter::backlog`),
+  so a wait can never turn into refusals. A program whose first frame
+  arrives > ~65 ms after the ISOs' would now start after a 1080p ISO (the
+  measured-bad order) and have one #41-style take; not seen in any run.
+  Known, documented: during the 200 ms closing window the old program
+  writer's pressure flag is not re-evaluated, so a program already stalled
+  at the split (real overload) can refuse the new take's ISOs for up to
+  ~12 pictures before the new program's guard takes over.
+
 - 2026-10-14 (#42, iso-drops): summary warnings are assembled once from the
   completed `FileReport`s in record/engine.rs, after all split writers join.
   Source id, take number, count, percentage and path identify every affected
@@ -4205,6 +4264,33 @@ each section. Delete entries that stop being true.
   tokens are per session) and a session ends after idling; use a new label.
 - 2026-10-14 (8.2h): macOS 27 prints a deprecation warning for `hdiutil
   attach/detach` (use `diskutil image attach`); it still works.
+- 2026-10-14 (#41, iso-drops-2): **VideoToolbox engine placement is the ISO
+  loss.** A standalone VT benchmark (`iso-drops-2/scratch/vtbench`, same
+  settings as the writer: hardware HEVC, RealTime, quality 0.7, no
+  reordering, look-ahead 0) with 2× 4K60 + 2× 1080p60 sessions reproduces
+  the slow mode in a few seconds: started together, 3–30% of trials (94%
+  when one session already runs) put three sessions on one engine, each at
+  ~45–53 fps with ~170 ms latency while the fourth sits at 13 ms; started
+  ≥ 17 ms apart it is deterministic in the order of sizes (4K,4K,1080,1080 /
+  1080,1080,4K,4K / 4K,1080,4K,1080 always fine; 4K,1080,1080,4K and
+  1080,4K,1080,4K always bad), 10 ms apart 3%, 5 ms 22%. Capacity is not the
+  problem: the same four sessions fed at 120 fps each all hold 120 fps when
+  started apart. `IOReport` (private, read-only, `/usr/lib/libIOReport.dylib`)
+  exposes per-engine counters, "Interrupt Statistics (by index) | ave0 0 /
+  ave1 0 | First Level Interrupt Handler Count" (about 7 per 4K60 picture,
+  2 per 1080p60): a balanced take reads ave0 ≈ ave1 (1.00), {program} +
+  {4K,1080,1080} reads 0.60 and is still fine, a bad take reads ~2:1 with the
+  program at 170 ms latency. `powermetrics` has no media-engine sampler and
+  `AMC Stats | AVE0/AVE1` byte counters stay zero. The AVAssetWriter session
+  is created inside the first `appendPixelBuffer` (synchronously, on the
+  writer's thread; the trace's create→first encode is ~5 ms) and torn down
+  when the writer is finished/released, ~10–20 ms after `markAsFinished`.
+  The pressure controller's recovery (+1%/500 ms, 43 s from 13%) made a
+  single bad split cost the following take 150–700 frames too (its share
+  was still recovering); unchanged in this fix, measured for later. The
+  stream encoder shares the engines: start it apart from recordings too
+  (done through the same gate).
+
 - 2026-10-14 (#41, iso-drops, BLOCKED): the presumed stale ISO-share toggle
   is not the cause of bad independent takes. Temporary guards log new
   outputs=1/pressure=0/share=1000 every time and outputs=0/pressure=0 on Drop.

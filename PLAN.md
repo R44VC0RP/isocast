@@ -602,12 +602,12 @@ layout editing, Windows, release prep).
   recording (G.3), virtual camera (G.1). Replay buffer and projectors wait.
 - [x] **A.4 Graceful overload (S.3 round 3):** the program and stream stay
   whole while ISOs drop first; A/V durations equal (S.2c); stop stays fast.
-- [ ] **A.4 ISO take loss (GitHub #41, blocked investigation):** current
-  main reproduces 57–60% ISO loss with clean program files. Native traces
-  show slow VT submissions before shared admission cuts; the globals reset
-  correctly. Zero-relative-time and three native-setting controls failed.
-  No throughput fix ships; stop this hypothesis and revisit native-session
-  initialization/scheduling. Evidence: iso-drops scratch REPORT.md.
+- [x] **A.4 ISO take loss (GitHub #41):** VideoToolbox placed sessions
+  started within a few milliseconds of each other (or during another's
+  teardown) three to one engine, each then at ~45 fps for the whole take,
+  which tripped the pressure controller. Sessions now start in order
+  (program, then largest first), 25 ms apart, and a split's old files stay
+  open 200 ms past the split. Evidence: iso-drops-2 scratch REPORT.md.
 - [x] **A.5 Timeline MVP (C.1, C.2):** takes append, retake, remove,
   reorder, export one joined file; a simple Create view in the app.
 - [x] **A.6 Log everything, report bugs in one click.**
@@ -1179,7 +1179,18 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
 
 ## Log
 
-- A.4 / #41 (2026-10-14, blocked): baseline six-take repro lost 9,416 ISO
+- A.4 / #41 (2026-10-14, fixed): the cause is VideoToolbox's placement of
+  hardware sessions on the M4 Max's two encode engines, decided at each
+  session's first picture; a standalone VT benchmark reproduced the slow
+  mode (three sessions on one engine at ~45 fps) in 3–30% of together-started
+  trials and 0 of 240 started ≥ 17 ms apart. The macOS writer and the stream
+  encoder now take turns starting (program first, then largest first, 25 ms
+  apart) and a split's ending files stay open 200 ms. Exonbook six 30 s takes
+  + 10-minute split session: 0 drops in all files, three repeats (main lost
+  1,011–1,068 per ISO in half the takes); 20-take split loop 0 lossy files,
+  engine ratio 1.00 every take; m2-a interleaved A/B unchanged (healthy 0
+  drops, overload ISO losses retained); e2e 13/13 on both.
+- A.4 / #41 (2026-10-14, blocked, superseded above): baseline six-take repro lost 9,416 ISO
   frames, zero program frames. Native submission stalls precede the shared
   controller's 1000→132 cut; independent takes reset all priority counters.
   Relative timestamps, late look-ahead=0, power-efficiency=false and explicit

@@ -3,7 +3,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -68,6 +68,115 @@ static PRIORITY_PRESSURE: AtomicUsize = AtomicUsize::new(0);
 /// Fraction of ISO pictures admitted, in thousandths. Reduce promptly under
 /// pressure, then probe for spare capacity slowly instead of sending bursts.
 static ISO_SHARE: AtomicU32 = AtomicU32::new(1000);
+
+/// How far apart hardware sessions get their first pictures, and in what
+/// order. VideoToolbox places a session on one of the chip's video encode
+/// engines when it gets its first picture, by what the engines are doing
+/// just then, so sessions that start within the same few milliseconds
+/// often land together, for good: on an M4 Max (two engines), a 4K60 HEVC
+/// program, a 4K60 ISO and two 1080p60 ISOs started together put three
+/// sessions on one engine in 10–40% of trials (94% with the program
+/// already running), and each of the three then ran at ~45 fps for the
+/// whole take while the fourth had an engine to itself (GitHub #41).
+/// Started 17 ms or more apart the placement is deterministic and depends
+/// on the order of sizes: largest first (4K, 4K, 1080p, 1080p) or
+/// alternating was right in 120 of 120 trials, a 4K last after a 1080p
+/// wrong in 120 of 120; 10 ms apart 3% went wrong, 5 ms apart 22%. So the
+/// program goes first, then the other files from the largest down, this
+/// far apart. Pictures a session is waiting for stay queued, so nothing is
+/// dropped; the last of four sessions waits three gaps.
+const ENCODER_START_GAP: Duration = Duration::from_millis(25);
+/// How long a session waits for others of its take to ask before it goes
+/// first: their first pictures arrive within a frame of each other.
+const ENCODER_START_SETTLE: Duration = Duration::from_millis(8);
+/// A session that has waited this long no longer holds others back (its
+/// writer was dropped before its first picture, or starved).
+const ENCODER_START_STALE: Duration = Duration::from_millis(500);
+
+/// Hardware video sessions of this process waiting for their first
+/// picture, and when the last one got it.
+struct EncoderStarts {
+    last: Option<Instant>,
+    next_ticket: u64,
+    /// (rank, asked, ticket): lower ranks go first.
+    waiting: Vec<((u8, u32), Instant, u64)>,
+}
+
+static ENCODER_STARTS: Mutex<EncoderStarts> = Mutex::new(EncoderStarts {
+    last: None,
+    next_ticket: 0,
+    waiting: Vec::new(),
+});
+
+fn encoder_starts() -> std::sync::MutexGuard<'static, EncoderStarts> {
+    ENCODER_STARTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A session's place in the start order: protected outputs first, then
+/// by size, largest first.
+pub(crate) fn encoder_start_rank(protected: bool, width: u32, height: u32) -> (u8, u32) {
+    (
+        u8::from(!protected),
+        u32::MAX - width.saturating_mul(height),
+    )
+}
+
+/// Ask to start a session with `rank`: a ticket for [`claim_encoder_start`].
+pub(crate) fn request_encoder_start(rank: (u8, u32)) -> u64 {
+    let mut starts = encoder_starts();
+    let ticket = starts.next_ticket;
+    starts.next_ticket += 1;
+    starts.waiting.push((rank, Instant::now(), ticket));
+    ticket
+}
+
+/// Whether the session holding `ticket` may get its first picture now: it
+/// has waited [`ENCODER_START_SETTLE`], the last session to start did so
+/// at least [`ENCODER_START_GAP`] ago, and no session ahead of it in the
+/// start order is waiting. Claims the moment if so. A session that has
+/// waited [`ENCODER_START_STALE`] is held back by nothing but the gap.
+pub(crate) fn claim_encoder_start(ticket: u64) -> bool {
+    let mut starts = encoder_starts();
+    let now = Instant::now();
+    if starts
+        .last
+        .is_some_and(|at| now.duration_since(at) < ENCODER_START_GAP)
+    {
+        return false;
+    }
+    let Some(&(rank, asked, _)) = starts.waiting.iter().find(|(.., t)| *t == ticket) else {
+        // Never asked, or forgotten as stale: start now.
+        starts.last = Some(now);
+        return true;
+    };
+    let waited = now.duration_since(asked);
+    if waited < ENCODER_START_SETTLE {
+        return false;
+    }
+    if waited < ENCODER_START_STALE {
+        let held_back = starts.waiting.iter().any(|(other, other_asked, t)| {
+            *t != ticket
+                && (*other, *other_asked) < (rank, asked)
+                && now.duration_since(*other_asked) < ENCODER_START_STALE
+        });
+        if held_back {
+            return false;
+        }
+    }
+    // Requests this old no longer hold anyone back; forget them.
+    starts.waiting.retain(|(_, other_asked, t)| {
+        *t != ticket && now.duration_since(*other_asked) < ENCODER_START_STALE
+    });
+    starts.last = Some(now);
+    true
+}
+
+/// Withdraw a request: the session ends without a first picture.
+pub(crate) fn cancel_encoder_start(ticket: u64) {
+    encoder_starts().waiting.retain(|(.., t)| *t != ticket);
+}
 
 /// Admission feedback across the native sessions sharing this process's
 /// hardware encoders. Only an output's worker mutates its guard. Capture and
@@ -141,6 +250,18 @@ pub struct AssetWriter {
     frame_duration: CMTime,
     priority: Option<EncoderPressure>,
     iso_credit: u32,
+    /// The video input has its first picture, so its hardware session has
+    /// started; until then pictures wait for their turn in the start order
+    /// (`start_ticket` is the request; see [`claim_encoder_start`]).
+    encoding: bool,
+    start_ticket: Option<u64>,
+    pixels: (u32, u32),
+    /// The encoder is hardware H.264/HEVC, which shares the chip's video
+    /// encode engines; ProRes does not take a turn.
+    gated: bool,
+    /// Pictures that queued while the session waited for its turn are
+    /// still draining; the ISO queue limit waits until they have.
+    backlog: bool,
 }
 
 struct AudioInput {
@@ -153,6 +274,18 @@ struct AudioInput {
 // SAFETY: AVAssetWriter and its inputs may be used from any thread as long as
 // calls are not concurrent; an AssetWriter is only ever used by one thread.
 unsafe impl Send for AssetWriter {}
+
+impl Drop for AssetWriter {
+    /// A writer that never got its first picture (cancelled, or failed
+    /// while finishing) holds no one back.
+    fn drop(&mut self) {
+        if !self.encoding
+            && let Some(ticket) = self.start_ticket
+        {
+            cancel_encoder_start(ticket);
+        }
+    }
+}
 
 impl AssetWriter {
     /// A writer for `spec`. The recording's threads live as long as it does
@@ -245,6 +378,11 @@ impl AssetWriter {
             frame_duration: unsafe { CMTime::new(1, spec.video.fps as i32) },
             priority: None,
             iso_credit: 0,
+            encoding: false,
+            start_ticket: None,
+            pixels: (spec.video.width, spec.video.height),
+            gated: matches!(spec.video.encoder.codec, Codec::H264 | Codec::Hevc),
+            backlog: false,
         })
     }
 
@@ -314,7 +452,14 @@ impl AssetWriter {
     }
 
     fn append_frame(&mut self, frame: &PixelBuffer, pts: Time) -> Result<bool> {
-        let limit = if self.priority.is_none() && PRIORITY_OUTPUTS.load(Ordering::Relaxed) > 0 {
+        // Pictures waiting for the session's start all fit, and the ISO
+        // limit only applies once they have drained: a wait for the start
+        // must never turn into refusals.
+        let limit = if self.encoding
+            && !self.backlog
+            && self.priority.is_none()
+            && PRIORITY_OUTPUTS.load(Ordering::Relaxed) > 0
+        {
             PENDING_ISO
         } else {
             PENDING_VIDEO
@@ -365,6 +510,19 @@ impl AssetWriter {
         Ok(true)
     }
 
+    /// Whether the video input may get its first picture now (its turn in
+    /// the process's encoder start order; see [`claim_encoder_start`]).
+    fn may_start(&mut self) -> bool {
+        if !self.gated {
+            return true;
+        }
+        let ticket = *self.start_ticket.get_or_insert_with(|| {
+            let (width, height) = self.pixels;
+            request_encoder_start(encoder_start_rank(self.priority.is_some(), width, height))
+        });
+        claim_encoder_start(ticket)
+    }
+
     /// AVAssetWriter's inputs depend on each other for interleaving. Waiting
     /// on video here used to prevent the same thread from feeding audio,
     /// causing 100 ms timeouts and overflowing the shared packet channel
@@ -383,7 +541,15 @@ impl AssetWriter {
                     progressed = true;
                 }
             }
-            if !self.pending_video.is_empty() && unsafe { self.video.isReadyForMoreMediaData() } {
+            if !self.pending_video.is_empty()
+                && unsafe { self.video.isReadyForMoreMediaData() }
+                && (self.encoding || self.may_start())
+            {
+                // The first picture starts the input's hardware session.
+                if !self.encoding {
+                    self.encoding = true;
+                    self.backlog = true;
+                }
                 let (frame, time) = self.pending_video.pop_front().expect("not empty");
                 if !unsafe {
                     self.adaptor
@@ -396,7 +562,13 @@ impl AssetWriter {
                 progressed = true;
             }
             if !progressed {
-                if let Some(priority) = &mut self.priority {
+                if self.backlog && self.pending_video.len() < PENDING_ISO {
+                    self.backlog = false;
+                }
+                // Pictures waiting for the start slot are not a stall.
+                if let Some(priority) = &mut self.priority
+                    && self.encoding
+                {
                     priority.set(self.pending_video.len() > 2);
                 }
                 return Ok(());

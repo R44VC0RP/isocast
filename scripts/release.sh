@@ -116,9 +116,20 @@ app="$output/Isocast.app"
 engine="$app/Contents/Helpers/Isocast Engine.app"
 dmg="$output/Isocast-$version-arm64.dmg"
 entitlements="$root/scripts/release-entitlements.plist"
+app_entitlements="$root/scripts/release-app-entitlements.plist"
 
 verify_app() {
     run codesign --verify --deep --strict --verbose=2 "$app"
+    # The app and its engine must both be allowed to ask for the camera and
+    # microphone, or macOS denies them silently with no prompt (#50).
+    [ "$dry_run" = 1 ] && return 0
+    local bundle key
+    for bundle in "$app" "$engine"; do
+        for key in com.apple.security.device.camera com.apple.security.device.audio-input; do
+            codesign -d --entitlements - --xml "$bundle" 2>/dev/null | grep -q "<key>$key</key>" ||
+                die "$bundle is missing the $key entitlement; camera/microphone would be denied without a prompt"
+        done
+    done
 }
 verify_dmg() {
     run hdiutil verify "$dmg"
@@ -228,8 +239,10 @@ if [ "$ad_hoc" = 1 ]; then
 else
     sign_args=(--force --sign "$identity" --keychain "$keychain" --timestamp --options runtime)
 fi
-# Inside out. The UI has no entitlements: it only talks to the daemon. CLI
-# record runs the engine in-process, so it needs the same three as isocastd.
+# Inside out. CLI record runs the engine in-process, so it needs the same
+# three as isocastd. The app gets camera and audio-input only: macOS
+# attributes the bundled engine's device access to Isocast.app, and denies it
+# silently (no prompt) if the app lacks them (0.0.2, GitHub #50).
 # Sparkle's helpers as its docs sign them: hardened runtime, no entitlements,
 # no --deep (the app's signature then seals the framework).
 if [ -n "$sparkle_key" ]; then
@@ -240,7 +253,7 @@ if [ -n "$sparkle_key" ]; then
 fi
 sign "${sign_args[@]}" --entitlements "$entitlements" "$engine"
 sign "${sign_args[@]}" --entitlements "$entitlements" "$app/Contents/MacOS/isocast"
-sign "${sign_args[@]}" "$app"
+sign "${sign_args[@]}" --entitlements "$app_entitlements" "$app"
 run codesign --verify --deep --strict --verbose=2 "$app"
 
 verify_app
