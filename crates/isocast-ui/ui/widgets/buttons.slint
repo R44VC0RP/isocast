@@ -164,7 +164,7 @@ export component Button inherits Rectangle {
     content := HorizontalLayout {
         padding-left: root.inset;
         padding-right: root.inset-end;
-        spacing: root.icon-gap;
+        spacing: root.text == "" ? 0px : root.icon-gap;
         alignment: root.content-alignment;
 
         if root.icon != "": VerticalLayout {
