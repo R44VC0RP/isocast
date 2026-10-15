@@ -4682,6 +4682,28 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-15 (#68, iso-overshed, BLOCKED): **Estimated spare capacity is
+  not proof that stream pressure is false.** On exonbook/M4 Max, synthetic
+  4K60 + 1080p60 HEVC ISOs, 1080p60 program and 6 Mb/s 1080p60 stream:
+  stream-first is loss-free; record-first loses 1,973/1,971 ISO pictures in
+  a 181 s stream window and 2,024/2,021 across six 30 s split takes, with
+  protected outputs clean. Disabling only #60's post-call pressure produces
+  0 ISO drops but 5,523 program / 6,058 stream drops over 181 s; three split
+  takes then lose 883 / 897 / 0 program pictures. Native placement/start order
+  is the leading hypothesis (#41), not measured engine assignment. Do not
+  dismiss those calls as harmless based on the capacity estimate. Traces
+  confirm rising pressure edges bypass the controller's 100 ms cut limit;
+  recovery is per guard (usually two), not process-wide. An eight-call
+  capped-average signal worsened M4 long ISO losses to 5,906 each; limiting
+  cuts to 100 ms and recovering +5%/500 ms improved short starts but worsened
+  long/split runs (3,100/3,099 and 4,946/4,940). Both candidates and temporary
+  traces were removed. M2-b fitting 1080p60 ISO + program + 720p60 stream is
+  already loss-free on main for 6 s, 181 s and six split takes; heavy runs
+  retain the known 11–14 startup protected losses but zero post-split losses.
+  Stop tuning constants: next measure native engine placement/throughput for
+  the two start orders. Evidence, per-take counts and full decodes:
+  `/Volumes/IsocastBuild/iso-overshed/scratch/REPORT.md`. #68 is not resolved.
+
 - 2026-10-15 (#18): **AAC in a .mov for AVFoundation** needs QuickTime's
   version 1 sound description (compression id -2, 1024 samples per packet)
   with the `esds` inside a `wave` atom (`frma`, `mp4a`, `esds`,

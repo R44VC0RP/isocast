@@ -608,6 +608,11 @@ layout editing, Windows, release prep).
   recording (G.3), virtual camera (G.1). Replay buffer and projectors wait.
 - [x] **A.4 Graceful overload (S.3 round 3):** the program and stream stay
   whole while ISOs drop first; A/V durations equal (S.2c); stop stays fast.
+- [ ] **A.4 ISO admission over-shedding (GitHub #68), blocked:** M2 fitting
+  load already clean; M4 record-first loss persists through 181 s and splits,
+  but disabling pressure loses ~50% of protected frames. Two admission
+  candidates worsened long M4 runs and were removed. Investigate native
+  placement/start order before weakening #60 feedback (iso-overshed report).
 - [ ] **A.4 Split + stream losses (GitHub #60), qualification partial:**
   synchronous native stream submission stalls now signal pressure; final
   build's 16 post-split takes have zero protected losses. Cold stream startup
