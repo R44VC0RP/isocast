@@ -14,6 +14,8 @@ use security_framework::passwords;
 const NOT_FOUND: i32 = -25300;
 /// The Keychain's "user interaction is not allowed": it would have asked.
 const NEEDS_PERMISSION: i32 = -25308;
+/// errSecInvalidOwnerEdit: the item belongs to another build's code identity.
+const NOT_OWNER: i32 = -25244;
 /// What reading another build's item gives once its prompt was refused.
 const AUTH_FAILED: i32 = -25293;
 
@@ -76,7 +78,12 @@ fn keychain_error(
     service: &str,
     err: &security_framework::base::Error,
 ) -> anyhow::Error {
-    let hint = if err.code() == NEEDS_PERMISSION {
+    let hint = if err.code() == NOT_OWNER {
+        format!(
+            "; another build of Isocast saved this key, and macOS lets only that build change it: \
+             remove the \"{service}\" item in Keychain Access and set the key again"
+        )
+    } else if err.code() == NEEDS_PERMISSION {
         format!(
             "; macOS wants permission, which Isocast doesn't ask for from the background: \
              remove the \"{service}\" item in Keychain Access and set the key again"
