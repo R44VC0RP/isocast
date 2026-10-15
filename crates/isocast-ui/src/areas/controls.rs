@@ -301,7 +301,7 @@ impl Area for Controls {
                 self.drops.borrow_mut().files.clear();
                 self.pauses.borrow_mut().clear();
             }
-            Event::RecordingPaused { recording } => {
+            Event::RecordingPaused { recording, .. } => {
                 {
                     let mut pauses = self.pauses.borrow_mut();
                     let open = pauses.last().is_some_and(|(_, d)| d.is_none());

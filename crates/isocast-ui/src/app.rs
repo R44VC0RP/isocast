@@ -382,6 +382,12 @@ impl App {
                 self.changed(Changed::VCAM);
             }
             Event::Started { .. } => self.refresh_status(true),
+            // Plugin-facing context; the app refreshes on `started` and
+            // `stopped`.
+            Event::TakeFinished { .. }
+            | Event::ProjectCreated { .. }
+            | Event::ProjectRenamed { .. }
+            | Event::DeviceChanged { .. } => {}
             Event::RecordingPaused { .. } => self.refresh_status(true),
             Event::Status { live } => {
                 {

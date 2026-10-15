@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-68 tools. Arguments marked required must be given; ids, not names,
+70 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -289,6 +289,14 @@ List recording encoders with their display labels and supported containers. Use 
 
 The installed plugins: id, version, what they provide (a process, and kinds like twitch-chat/glow), state (ok, disabled, incompatible or failed, and why), their process (running or restarting, restarts, how it last ended, its log) and the permissions they were granted.
 
+## list_projects
+
+The recording projects, newest first: each recording session writes into its own folder (`<date> <time> Untitled` in the recordings folder) with every take's program and ISO files, manifests and exports. Each has an id (stable across renames), name, folder, takes (manifests) and files. Optional `limit` (100 if absent).
+
+| Argument | Type | Description |
+|---|---|---|
+| `limit` | integer (optional) | At most this many, newest first: 100 if absent. |
+
 ## list_timelines
 
 Every timeline (id, name, clips, length) and which is current (the one finished takes are added to).
@@ -422,6 +430,15 @@ Rename a scene collection or profile; its id stays. Renaming the collection in u
 | `id` (required) | string |  |
 | `kind` (required) | LibraryKind |  |
 | `name` (required) | string |  |
+
+## rename_project
+
+Rename a recording project (by id, from list_projects): its folder becomes `<date> <time> <name>` (numbered if taken). Refused while a recording or an export writes into it. Manifests and timelines keep finding its files. Returns the project, its old name and old folder.
+
+| Argument | Type | Description |
+|---|---|---|
+| `name` (required) | string | Its new name: the folder becomes `<date> <time> <name>`. |
+| `project` (required) | string | The project's id (from `list_projects` or a `project_created` event). |
 
 ## request_permissions
 

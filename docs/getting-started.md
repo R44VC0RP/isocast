@@ -66,9 +66,12 @@ collection and profile (a copy goes to `setup/backups/`) and left as it was.
 
 ## Recording
 
-Press **Record** (or `isocast start`, and `isocast stop`). Recordings go to
-the setup's folder (`~/Movies/Isocast` for a setup made by "Start with
-this Mac"):
+Press **Record** (or `isocast start`, and `isocast stop`). Each recording
+gets its own project folder in the setup's recordings folder
+(`~/Movies/Isocast` for a setup made by "Start with this Mac"), named
+`2026-10-12 09-30-00 Untitled`, holding every take of that recording (a
+`split` adds a take to the same folder) and the timeline exports made from
+them:
 
 - `2026-10-12 09-30-00.mov`: the program, what the scenes show;
 - `SCREEN-….mov`, `CAMERA-….mov`: each ISO source at its own resolution,
@@ -78,7 +81,11 @@ this Mac"):
 
 Completed movie fragments can survive a crash; see the recovery limitations
 below. `isocast split` starts a new take without stopping anything;
-`isocast marker "intro done"` marks a moment.
+`isocast marker "intro done"` marks a moment. `isocast project list` shows
+the projects and `isocast project rename <id> "Rust talk"` names one once it
+has stopped (the folder becomes `2026-10-12 09-30-00 Rust talk`; manifests
+and timelines keep finding its files). Recordings from before project
+folders stay where they are.
 
 `isocast pause` and `isocast resume` keep the same take and files. The paused
 span is removed from the program and every ISO, including their audio;

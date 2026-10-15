@@ -758,7 +758,8 @@ encoder = {{ codec = "hevc", quality = 95 }}
                 app_proc.terminate()
             shutdown(test_sock)
             shutdown(rec_sock)
-    videos = sorted(folder.glob("WINDOW-*.mov"))
+    # In the recording's project folder.
+    videos = sorted(folder.glob("*/WINDOW-*.mov")) or sorted(folder.glob("WINDOW-*.mov"))
     if not videos:
         sys.exit(f"drag-lag: no recording in {folder}; see {work}/app.log")
     app_log = (work / "app.log").read_text(errors="replace")

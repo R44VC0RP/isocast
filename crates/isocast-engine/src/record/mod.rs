@@ -1240,10 +1240,23 @@ fn take_manifest<P: Platform>(
 }
 
 /// Write the manifest so that a reader (or a crash) never sees half of it.
+/// The `.partial` is made new (`O_EXCL | O_NOFOLLOW`), never written
+/// through whatever was at its name (a link a plugin put there, say).
 fn write_manifest(path: &Path, manifest: &SessionManifest) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let partial = path.with_extension("json.partial");
     let json = serde_json::to_string_pretty(manifest)?;
-    std::fs::write(&partial, json + "\n")
+    // A leftover (an earlier write that failed): remove the entry itself.
+    if partial.symlink_metadata().is_ok() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&partial)
+        .and_then(|mut file| file.write_all((json + "\n").as_bytes()))
         .and_then(|()| std::fs::rename(&partial, path))
         .inspect_err(|_| {
             let _ = std::fs::remove_file(&partial);
@@ -1521,7 +1534,14 @@ fn unique_paths(
             let manifest = folder.join(format!("{manifest_stem}{suffix}.session.json"));
             (files, manifest)
         })
-        .find(|(files, manifest)| !manifest.exists() && files.iter().all(|p| !p.exists()))
+        // Any entry at a name takes it, a dangling link included (a link
+        // followed would write the file wherever it points).
+        .find(|(files, manifest)| {
+            [manifest]
+                .into_iter()
+                .chain(files)
+                .all(|p| p.symlink_metadata().is_err())
+        })
         .expect("some numbered name is free")
 }
 

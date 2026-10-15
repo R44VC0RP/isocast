@@ -52,7 +52,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "timeline",
-             "data", "plugin", "hotkeys", "shutdown", "pause", "bug_report")
+             "data", "plugin", "hotkeys", "shutdown", "pause", "bug_report", "projects",
+             "plugin_files")
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -198,6 +199,8 @@ class Engine:
             folder = Path(result["files"][0]).parent
             def locate():
                 for path in folder.glob("*.session.json"):
+                    if path.is_symlink():
+                        continue  # plugin_files plants dangling links
                     if {f["path"] for f in read_json(path)["files"]} == files:
                         return str(path)
                 return None
@@ -783,6 +786,9 @@ def scenario_shutdown(e, cfg, evidence):
     e.process.wait(timeout=10)
     manifest = read_json(killed["manifest"])
     require(manifest["status"] == "recording", "crashed take incorrectly marked complete")
+    folder = Path(killed["manifest"]).parent
+    require((folder / ".isocast-project.json").is_file() and folder.parent == e.root / "recordings",
+            f"killed take is not in a project folder: {folder}")
     evidence["fragments"] = []
     for f in manifest["files"]:
         path = Path(killed["manifest"]).parent / f["path"]
@@ -800,6 +806,317 @@ def scenario_shutdown(e, cfg, evidence):
             "crash manifest not recovered")
     until(lambda: finished(recovery["manifest"]), 30, "recovery recording")
     evidence["recovery_notes"] = recovery.get("notes", [])
+
+
+class Watch:
+    """Collect `watch` events on a connection of their own, in a thread."""
+
+    def __init__(self, engine, kinds):
+        import threading
+        self.events = []
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(str(engine.sock))
+        self.sock.sendall((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "watch",
+                                       "params": {"kinds": kinds}}) + "\n").encode())
+        self.reader = self.sock.makefile("rb")
+        require("result" in json.loads(self.reader.readline(16 * 1024 * 1024)), "watch refused")
+        self.thread = threading.Thread(target=self.read, daemon=True)
+        self.thread.start()
+
+    def read(self):
+        for line in self.reader:
+            message = json.loads(line)
+            if message.get("method") == "event":
+                self.events.append(message["params"])
+
+    def of(self, kind):
+        return [event for event in self.events if event["type"] == kind]
+
+    def close(self):
+        self.sock.close()
+
+
+def files_of(manifest_path):
+    """Every media file a manifest lists, resolved from its own folder."""
+    path = Path(manifest_path)
+    return [path.parent / f["path"] for f in read_json(path)["files"]]
+
+
+def scenario_projects(e, cfg, evidence):
+    """7.7: a folder per session, every lifecycle event once with its paths,
+    rename (refused while recording) keeping files, manifests, timelines and
+    exports resolving, and flat recordings from before projects untouched."""
+    root = e.root / "recordings"
+    root.mkdir(parents=True)
+    cfg["recording"]["iso"]["enabled"] = True
+    e.apply(cfg)
+    # A flat recording from before projects: a finished take and a killed
+    # one (status "recording") right in the recordings folder.
+    legacy_path, legacy = take(e, 2)
+    flat = []
+    for f in [legacy_path, *files_of(legacy_path)]:
+        flat.append(root / ("legacy " + f.name))
+        shutil.copy2(f, flat[-1])
+    flat_manifest = root / ("legacy " + legacy_path.name)
+    killed = read_json(flat_manifest)
+    killed["status"] = "recording"
+    for f in killed["files"]:
+        f["path"] = "legacy " + f["path"]
+    write_json(flat_manifest, killed)
+    flat_hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in flat[1:]}
+    e.rpc("timeline_new", {"name": "Projects"})
+    kinds = ["started", "take_finished", "stopped", "marker", "project_created",
+             "project_renamed", "recording_paused"]
+    watch = Watch(e, kinds)
+    first = e.rpc("start", {})
+    folder = Path(first["manifest"]).parent
+    project = read_json(folder / ".isocast-project.json")["id"]
+    require(folder.parent == root and folder.name.endswith(" Untitled"),
+            f"recording is not in a new '<date> <time> Untitled' folder: {folder}")
+    time.sleep(1)
+    e.rpc("marker", {"label": "one"})
+    try:
+        e.rpc("rename_project", {"project": project, "name": "Too Soon"})
+        raise Failure("rename_project was allowed while recording into the project")
+    except RpcError as exc:
+        require(exc.error["code"] == -32001, f"rename while recording: wrong error {exc.error}")
+        evidence["refused_while_recording"] = exc.error["message"]
+    second = e.rpc("split")
+    begins = datetime.datetime.fromisoformat(second["begins_at"]).timestamp()
+    time.sleep(max(0, begins - time.time()) + 1)
+    e.rpc("stop")
+    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
+    until(lambda: watch.of("stopped"), 10, "stopped event")
+    time.sleep(0.5)
+    watch.close()
+    counts = {kind: len(watch.of(kind)) for kind in kinds}
+    manifests = [Path(first["manifest"]), Path(second["manifest"])]
+    require(Path(second["manifest"]).parent == folder, "the split's take is in another folder")
+    # Each event once, with the project, folder, manifest and files.
+    created = watch.of("project_created")
+    require(len(created) == 1 and created[0]["project"]["id"] == project
+            and Path(created[0]["project"]["folder"]) == folder, f"project_created: {created}")
+    started = watch.of("started")
+    require([(s.get("take"), s.get("cause")) for s in started] == [(1, "start"), (2, "split")],
+            f"started events: {started}")
+    for event, path in zip(started, manifests):
+        require(Path(event["manifest"]) == path and Path(event["folder"]) == folder
+                and event["project"] == project, f"started event paths: {event}")
+        require(sorted(map(Path, event["files"])) == sorted(files_of(path)), "started files differ")
+    finished_takes = watch.of("take_finished")
+    require([t["take"] for t in finished_takes] == [1, 2], f"take_finished: {finished_takes}")
+    for event, path in zip(finished_takes, manifests):
+        require(Path(event["manifest"]) == path and event["status"] == "complete"
+                and event["project"] == project, f"take_finished event: {event}")
+        require(sorted(map(Path, event["files"])) == sorted(files_of(path)), "take_finished files differ")
+        require(all(Path(f).is_file() for f in event["files"]), "take_finished names missing files")
+    stopped = watch.of("stopped")
+    require(len(stopped) == 1 and stopped[0]["project"] == project
+            and Path(stopped[0]["folder"]) == folder
+            and Path(stopped[0]["report"]["folder"]) == folder, f"stopped: {stopped}")
+    markers = watch.of("marker")
+    require(len(markers) == 1 and markers[0]["project"] == project, f"marker: {markers}")
+    # Export into the project (the first clip's folder) before renaming.
+    exported = e.rpc("timeline_export")
+    require(Path(exported["manifest"]).parent == folder, "export did not go into the project folder")
+    until(lambda: read_json(exported["manifest"])["status"] != "exporting", 45, "export")
+    require(read_json(exported["manifest"])["status"] == "complete", "export failed")
+    # Rename, and everything still resolves from the new folder.
+    watch = Watch(e, ["project_renamed"])
+    renamed = e.rpc("rename_project", {"project": project, "name": "My Talk"})
+    new = Path(renamed["project"]["folder"])
+    require(new.parent == root and new.name == folder.name.replace("Untitled", "My Talk")
+            and not folder.exists() and renamed["project"]["id"] == project,
+            f"rename result: {renamed}")
+    until(lambda: watch.of("project_renamed"), 10, "project_renamed event")
+    time.sleep(0.3)
+    watch.close()
+    event = watch.of("project_renamed")
+    require(len(event) == 1 and Path(event[0]["old_folder"]) == folder
+            and Path(event[0]["project"]["folder"]) == new and event[0]["old_name"] == "Untitled",
+            f"project_renamed: {event}")
+    listed = [p for p in e.rpc("list_projects")["projects"] if p["id"] == project]
+    require(len(listed) == 1 and listed[0]["name"] == "My Talk" and len(listed[0]["takes"]) == 2,
+            f"list_projects after rename: {listed}")
+    evidence["files"] = []
+    for path in listed[0]["takes"]:
+        require(Path(path).parent == new, "a take is outside the renamed folder")
+        evidence["files"].extend(check_take(Path(path), read_json(path), evidence=evidence))
+    require(sorted(map(Path, listed[0]["files"])) ==
+            sorted(f for t in listed[0]["takes"] for f in files_of(t)), "list_projects files differ")
+    timeline = e.rpc("timeline_get")
+    require(len(timeline["clips"]) >= 2, "takes did not reach the timeline")
+    for clip in timeline["clips"]:
+        require(Path(clip["take"]).parent == new and Path(clip["take"]).is_file()
+                and all(f["exists"] for f in clip["files"]) and not clip.get("problem"),
+                f"timeline clip does not resolve after rename: {clip}")
+    export = read_json(new / Path(exported["manifest"]).name)
+    for f in export["files"]:
+        require(Path(f["path"]).is_file() and all(Path(p["path"]).is_file() for p in f["parts"]),
+                f"export manifest does not resolve after rename: {f}")
+        check_file(Path(f["path"]), f["duration_seconds"], f["fps"])
+    for clip in export["clips"]:
+        require(Path(clip["take"]).is_file(), "export clip take does not resolve after rename")
+    # Collisions get a number, and bad names name the field.
+    try:
+        e.rpc("rename_project", {"project": project, "name": "a/b"})
+        raise Failure("a name with / was accepted")
+    except RpcError as exc:
+        require("name" in exc.error["message"], f"bad name error: {exc.error}")
+    # A rename behind Isocast's back (the Finder), and one whose timeline
+    # update never happened (isocastd stopped right after the folder
+    # rename): the timeline finds the takes by project id.
+    def resolves(where):
+        clips = e.rpc("timeline_get")["clips"]
+        return all(Path(c["take"]).parent == where and not c.get("problem")
+                   and all(f["exists"] for f in c["files"]) for c in clips)
+    finder = new.with_name(new.name.replace("My Talk", "Finder Name"))
+    new.rename(finder)
+    require(resolves(finder), "timeline broke after a Finder rename")
+    e.stop()
+    killed = finder.with_name(finder.name.replace("Finder Name", "Killed Rename"))
+    finder.rename(killed)
+    e.start()
+    require(resolves(killed), "timeline broke after a rename with no timeline update")
+    e.stop()
+    e.start()
+    require(resolves(killed), "timeline did not stay healed across a restart")
+    evidence["healed"] = [str(finder), str(killed)]
+    # Flat recordings stay where they were, unchanged, and a killed one is
+    # still recovered at launch.
+    require({str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in flat[1:]} == flat_hashes,
+            "flat recordings changed")
+    e.stop()
+    e.start()
+    interrupted = [Path(r["manifest"]) for r in e.rpc("status").get("interrupted", [])]
+    require(flat_manifest in interrupted, f"flat killed take not recovered: {interrupted}")
+    require(read_json(flat_manifest)["status"] == "interrupted", "flat manifest not marked")
+    counts["project_renamed"] = len(event)
+    evidence.update(project=renamed["project"], events=counts,
+                    flat=[str(p) for p in flat])
+
+
+PLUGIN_PROBE = r"""
+import json, os, socket, time
+data = os.environ["ISOCAST_PLUGIN_DATA"]
+def call(method, params=None):
+    s = socket.socket(socket.AF_UNIX); s.connect(os.environ["ISOCAST_SOCKET"])
+    s.sendall((json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}) + "\n").encode())
+    return json.loads(s.makefile().readline())
+def attempt(fn):
+    try:
+        fn(); return "ok"
+    except OSError as err:
+        return f"denied: {err.strerror}"
+project = call("list_projects")["result"]["projects"][0]
+media = project["files"][0]
+mine = os.path.join(project["folder"], os.environ["ISOCAST_PLUGIN_ID"] + "-note.txt")
+results = {
+    "read_media": attempt(lambda: open(media, "rb").read(64)),
+    "list_folder": attempt(lambda: os.listdir(project["folder"])),
+    "create_file": attempt(lambda: open(mine, "x").write("transcript\n")),
+    "append_media": attempt(lambda: open(media, "ab").write(b"x")),
+    "truncate_media": attempt(lambda: os.truncate(media, 0)),
+    "delete_media": attempt(lambda: os.remove(media)),
+    "rename_media": attempt(lambda: os.rename(media, media + ".moved")),
+    "hard_link_media": attempt(lambda: os.link(media, os.path.join(data, "link.mov"))),
+    "hard_link_in_project": attempt(lambda: os.link(media, os.path.join(project["folder"], "link.mov"))),
+    "symlink_in_project": attempt(lambda: os.symlink(os.path.join(data, "steal.mov"),
+                                                      os.path.join(project["folder"], "next.mov"))),
+    "create_partial": attempt(lambda: open(os.path.join(project["folder"], "x.session.json.partial"), "x").write("{}")),
+    "create_in_non_project": attempt(lambda: open(os.path.join(os.path.dirname(project["folder"]), "legacy-sub", "x.txt"), "x").write("x")),
+    "create_manifest": attempt(lambda: open(os.path.join(project["folder"], "fake.session.json"), "x").write("{}")),
+    "create_in_root": attempt(lambda: open(os.path.join(os.path.dirname(project["folder"]), "x.txt"), "x").write("x")),
+    "rewrite_own_file": attempt(lambda: open(mine, "a").write("more\n")),
+}
+with open(os.path.join(data, "results.json"), "w") as out:
+    json.dump(results, out)
+while True:
+    time.sleep(60)
+"""
+
+
+def scenario_plugin_files(e, cfg, evidence):
+    """7.7c: recordings = read / write grants, enforced by the sandbox."""
+    e.apply(cfg)
+    path, manifest = take(e, 2)
+    # A folder in the recordings folder that isn't a project's.
+    (e.root / "recordings" / "legacy-sub").mkdir()
+    media = files_of(path)
+    before = {str(f): hashlib.sha256(f.read_bytes()).hexdigest() for f in media}
+    results = {}
+    for grant in (None, "read", "write"):
+        name = f"probe-{grant or 'none'}"
+        folder = e.root / name
+        folder.mkdir()
+        (folder / "probe.py").write_text(PLUGIN_PROBE)
+        permissions = {"methods": ["list_projects"]}
+        if grant:
+            permissions["recordings"] = grant
+        lines = [f'id = "{name}"', 'name = "Probe"', 'version = "0.1.0"', "api = 1",
+                 "[permissions]", 'methods = ["list_projects"]']
+        if grant:
+            lines.append(f'recordings = "{grant}"')
+        lines += ["[process]", 'command = ["python3", "probe.py"]', "autostart = true"]
+        (folder / "isocast-plugin.toml").write_text("\n".join(lines) + "\n")
+        added = e.rpc("plugin_add", {"path": str(folder), "grant": permissions})
+        out = e.root / "plugins" / name / "data" / "results.json"
+        until(lambda: out.exists() and out.read_text(), 30, f"{name} results")
+        time.sleep(0.2)
+        results[grant or "none"] = read_json(out)
+        evidence.setdefault("asked", {})[name] = added.get("plugin", {}).get("granted")
+    evidence["results"] = results
+    none, read, write = results["none"], results["read"], results["write"]
+    require(none["read_media"].startswith("denied") and none["list_folder"].startswith("denied"),
+            f"no grant could read recordings: {none}")
+    require(read["read_media"] == "ok" and read["list_folder"] == "ok", f"read grant can't read: {read}")
+    require(write["read_media"] == "ok" and write["create_file"] == "ok",
+            f"write grant can't add a file: {write}")
+    for result in (none, read):
+        require(result["create_file"].startswith("denied"), f"created a file without write: {result}")
+    for result in (none, read, write):
+        for key in ("append_media", "truncate_media", "delete_media", "rename_media",
+                    "hard_link_media", "hard_link_in_project", "symlink_in_project",
+                    "create_partial", "create_in_non_project", "create_manifest",
+                    "create_in_root"):
+            require(result[key].startswith("denied"), f"{key} was allowed: {result}")
+    require(write["rewrite_own_file"].startswith("denied"), "write grant reopened a file for writing")
+    require({str(f): hashlib.sha256(f.read_bytes()).hexdigest() for f in media} == before,
+            "a plugin changed the media")
+    require((path.parent / "probe-write-note.txt").read_text() == "transcript\n",
+            "the write grant's new file is missing or wrong")
+    evidence["files"] = check_take(path, read_json(path), 2, evidence=evidence)
+    # Links planted (here, unsandboxed) at the names the next take would
+    # get: the engine must take other names, never write through them.
+    project = path.parent
+    bait = e.root / "bait"
+    bait.mkdir()
+    now = datetime.datetime.now()
+    planted = []
+    for i in range(0, 40):
+        stem = (now + datetime.timedelta(seconds=i)).strftime("%Y-%m-%d %H-%M-%S")
+        for name in (stem + ".mov", stem + ".session.json", stem + ".session.json.partial"):
+            link = project / name
+            if not os.path.lexists(link):
+                os.symlink(bait / name, link)
+                planted.append(link)
+        # The numbered take's manifest scratch file, which the engine
+        # must replace rather than write through.
+        os.symlink(bait / (stem + " 2.session.json.partial"), project / (stem + " 2.session.json.partial"))
+    started = e.rpc("start", {"seconds": 2, "folder": str(project)})
+    second = Path(started["manifest"])
+    m = until(lambda: finished(second), 40, "take beside planted links")
+    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
+    for f in [second, *map(Path, started["files"])]:
+        require(f.parent == project and not f.is_symlink() and f.is_file(),
+                f"the engine wrote through or onto a planted link: {f}")
+    require(not any(bait.iterdir()), f"files appeared at link targets: {list(bait.iterdir())}")
+    require(all(p.is_symlink() for p in planted), "a planted link was replaced")
+    evidence["planted_links"] = len(planted)
+    evidence["files"] += check_take(second, m, 2, evidence=evidence)
+    for link in project.iterdir():
+        if link.is_symlink():
+            link.unlink()
 
 
 def scenario_pause(e, cfg, evidence):
@@ -878,7 +1195,9 @@ def worker(args):
             engine.close()
         # Preserve every output's counters even when an earlier assertion
         # failed. A rejected take must not make the summary look drop-free.
-        for path in (root / "recordings").glob("*.session.json"):
+        for path in (root / "recordings").rglob("*.session.json"):
+            if path.is_symlink() or not path.is_file():
+                continue  # plugin_files plants dangling links
             manifest = read_json(path)
             if manifest["status"] != "recording":
                 evidence.setdefault("drops", {}).update({str(path.parent / row["output"]): row

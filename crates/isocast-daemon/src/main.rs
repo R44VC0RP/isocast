@@ -34,8 +34,8 @@ use isocast_protocol::api::{
     FrameParams, FrameRate, FrameStream, FramesParams, GetParams, ImportObsParams, Live,
     LiveStatus, Marked, Method, Notification, Plan, Refreshed, Report, Request, Resolved, Response,
     RpcError, SharedFrameStream, SharedFramesParams, Snapshot, SnapshotParams, StartParams,
-    Started, Status, StreamKey, StreamKeyParams, StreamKeyTarget, Switched, TuneParams, Tuning,
-    WatchParams, lock_path, shared, socket_path,
+    Started, Status, StreamKey, StreamKeyParams, StreamKeyTarget, Switched, TakeCause, TuneParams,
+    Tuning, WatchParams, lock_path, shared, socket_path,
 };
 use isocast_protocol::change::{Change, diff, merge_patch, missing_removals};
 use isocast_protocol::devices::{PermissionKind, PermissionsReport};
@@ -50,6 +50,9 @@ use isocast_surfaces::{Exporter, Surface, Token};
 
 /// How long `start` waits for devices to open and files to be created.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
+/// How many of the newest project folders `start` checks for recordings
+/// that were interrupted (startup recovery checks more).
+const START_SCAN_PROJECTS: usize = 5;
 /// How long `stop` waits for the files to be finished.
 const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// Why a recording stopped while it was starting had no report.
@@ -87,6 +90,7 @@ mod export;
 mod hotkeys;
 mod library;
 mod plugins;
+mod projects;
 mod recovery;
 mod store;
 mod timeline;
@@ -292,11 +296,18 @@ fn serve(listener: UnixListener, daemon: Arc<Daemon>) {
 fn start_plugins(daemon: &Arc<Daemon>) {
     let publish = Arc::downgrade(daemon);
     let serve = Arc::downgrade(daemon);
+    let roots = Arc::downgrade(daemon);
     daemon.plugins.start(plugins::Hooks {
         publish: Box::new(move |event| {
             if let Some(daemon) = publish.upgrade() {
                 daemon.publish(event);
             }
+        }),
+        recording_roots: Box::new(move || {
+            roots
+                .upgrade()
+                .map(|daemon| daemon.recording_roots())
+                .unwrap_or_default()
         }),
         serve: Box::new(move |connection, scope| {
             if let Some(daemon) = serve.upgrade() {
@@ -791,6 +802,9 @@ struct Daemon {
     timelines: Mutex<timeline::Timelines>,
     /// Held while a `retake` runs: one at a time.
     retaking: Mutex<()>,
+    /// Held while a recording picks its project folder and while a project
+    /// is renamed, so a rename never races a recording into it.
+    projects: Mutex<()>,
     /// The export running, if one is.
     export: Mutex<Option<export::Running>>,
     hotkeys: hotkeys::HotkeyRuntime,
@@ -961,6 +975,8 @@ struct Session {
     live: Arc<Mutex<Option<LiveStatus>>>,
     /// Its takes, for the current timeline.
     takes: Arc<timeline::SessionTakes>,
+    /// The project folder it records into, once picked.
+    project: Option<projects::ProjectRef>,
 }
 
 /// The live engine, whatever the platform.
@@ -1257,7 +1273,7 @@ impl Daemon {
             }
             Method::Apply(params) => self.apply(*params).and_then(to_json),
             Method::Split => self
-                .split_take(SplitTiming::WholeSecond)
+                .split_take(SplitTiming::WholeSecond, TakeCause::Split)
                 .map(|split| Started {
                     begins_at: Some(timeline::split_text(&split)),
                     files: split.files,
@@ -1382,6 +1398,8 @@ impl Daemon {
             Method::ShutdownIfIdle => self.shutdown_if_idle().and_then(to_json),
             Method::DebugStatus => to_json(debug::status(self)),
             Method::DebugSet(params) => debug::set(self, params).and_then(to_json),
+            Method::ListProjects(params) => to_json(self.list_projects(params.unwrap_or_default())),
+            Method::RenameProject(params) => self.rename_project(params).and_then(to_json),
             Method::Stop | Method::Shutdown => match self.stop() {
                 // Shutting down while idle is fine.
                 Err(err) if shutdown && err.code == RpcError::WRONG_STATE => {
@@ -1993,15 +2011,20 @@ impl Daemon {
             return Err(wrong(reason));
         }
         let recording = control.pause_status(now()).expect("recording clock");
+        let project = state
+            .session
+            .as_ref()
+            .and_then(|s| s.project.as_ref().map(|p| p.id.clone()));
         drop(state);
         self.publish(Event::RecordingPaused {
             recording: recording.clone(),
+            project,
         });
         Ok(recording)
     }
 
     /// Split the running recording into a new take (at `timing`).
-    fn split_take(&self, timing: SplitTiming) -> Result<SplitTake, SplitFailed> {
+    fn split_take(&self, timing: SplitTiming, cause: TakeCause) -> Result<SplitTake, SplitFailed> {
         let refused = |ending: bool, code: i64, message: &str| SplitFailed {
             ending,
             error: RpcError {
@@ -2031,6 +2054,7 @@ impl Daemon {
         let reply = control.split(timing);
         let current = session.files.clone();
         let takes = session.takes.clone();
+        let project = session.project.clone();
         drop(state);
         match reply.recv_timeout(START_TIMEOUT) {
             Ok(Ok(split)) => {
@@ -2046,6 +2070,11 @@ impl Daemon {
                 self.publish(Event::Started {
                     files: split.files.clone(),
                     begins_at: Some(begins_at),
+                    take: Some(split.take),
+                    manifest: Some(split.manifest.clone()),
+                    folder: split.manifest.parent().map(Path::to_path_buf),
+                    project: project.map(|p| p.id),
+                    cause: Some(cause),
                 });
                 Ok(split)
             }
@@ -2093,12 +2122,13 @@ impl Daemon {
 
     fn marker(&self, label: String) -> Result<Marked, RpcError> {
         let state = self.state.lock().unwrap();
-        let (Some(_), Some(control)) = (&state.session, state.control()) else {
+        let (Some(session), Some(control)) = (&state.session, state.control()) else {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
                 message: "markers need a recording in progress".into(),
             });
         };
+        let project = session.project.as_ref().map(|p| p.id.clone());
         let (take, time_seconds) = match control.marker(now(), label.clone()) {
             Ok(placed) => placed.unwrap_or((1, 0.0)),
             Err((take, time_seconds)) => {
@@ -2116,6 +2146,7 @@ impl Daemon {
             label: label.clone(),
             take,
             time_seconds,
+            project,
         });
         Ok(Marked {
             label,
@@ -2586,6 +2617,15 @@ impl Daemon {
     }
 
     fn start(self: &Arc<Self>, params: StartParams) -> Result<Started, RpcError> {
+        self.start_as(params, TakeCause::Start)
+    }
+
+    /// Start recording; `cause` says why, for the `started` event.
+    pub(crate) fn start_as(
+        self: &Arc<Self>,
+        params: StartParams,
+        cause: TakeCause,
+    ) -> Result<Started, RpcError> {
         check_folder(params.folder.as_deref())?;
         let duration = match params.seconds {
             None => None,
@@ -2655,17 +2695,27 @@ impl Daemon {
                 .clone()
                 .unwrap_or_else(|| expand_home(&setup.recording.folder))
         };
+        // It records into a project folder in the recordings folder
+        // (`folder` itself, if it is a project's).
+        let root = projects::root_of(&folder);
         // Recordings there that never finished (isocastd was killed or
         // crashed): the engine marks them as failed; say so now.
-        self.remember_recording_folder(&folder);
+        self.remember_recording_folder(&root);
         // Startup recovery may already have marked them (status.interrupted);
         // the first start into their folder still says so, once.
-        let mut interrupted = interrupted_sessions(&folder, true);
+        let mut interrupted: Vec<PathBuf> =
+            isocast_protocol::project::recording_folders(&root, START_SCAN_PROJECTS)
+                .iter()
+                .flat_map(|folder| interrupted_sessions(folder, true))
+                .collect();
         for take in self
             .interrupted_unnoted
             .lock()
             .unwrap()
-            .extract_if(.., |m| m.parent() == Some(&folder))
+            .extract_if(.., |m| {
+                m.parent()
+                    .is_some_and(|p| p == root || p.parent() == Some(&root))
+            })
         {
             if !interrupted.contains(&take) {
                 interrupted.push(take);
@@ -2708,6 +2758,7 @@ impl Daemon {
             files: Arc::new(Mutex::new(None)),
             live: Arc::new(Mutex::new(None)),
             takes: Arc::new(timeline::SessionTakes::default()),
+            project: None,
         };
         let id = session.id;
         let (started_tx, started_rx) = mpsc::channel();
@@ -2720,6 +2771,40 @@ impl Daemon {
         state.session = Some(session);
         drop(state);
 
+        // Its project folder, picked holding the projects lock so a rename
+        // can't move it meanwhile, and kept with the session (renames are
+        // refused while it records there).
+        let picked = {
+            let _projects = self.projects.lock().unwrap();
+            let picked = projects::project_for(&folder);
+            if let Ok(project) = &picked {
+                let mut state = self.state.lock().unwrap();
+                if let Some(session) = state.session.as_mut().filter(|s| s.id == id) {
+                    session.project = Some(project.clone());
+                }
+            }
+            picked
+        };
+        let project = match picked {
+            Ok(project) => project,
+            Err(err) => {
+                self.publish(Event::Stopped {
+                    report: None,
+                    error: Some(err.message.clone()),
+                    project: None,
+                    folder: None,
+                });
+                self.ended(id, Err(err.message.clone()));
+                return Err(err);
+            }
+        };
+        // A folder made for a recording that wrote nothing goes again.
+        let discard = |project: &projects::ProjectRef| {
+            if project.created {
+                isocast_protocol::project::discard_if_empty(&project.folder);
+            }
+        };
+
         let engine = match self.ensure_engine() {
             Ok(_) if options.0.load(Ordering::SeqCst) => Err(RpcError {
                 code: RpcError::FAILED,
@@ -2730,9 +2815,12 @@ impl Daemon {
         let engine = match engine {
             Ok(engine) => engine,
             Err(err) => {
+                discard(&project);
                 self.publish(Event::Stopped {
                     report: None,
                     error: Some(err.message.clone()),
+                    project: None,
+                    folder: None,
                 });
                 self.ended(id, Err(err.message.clone()));
                 return Err(err);
@@ -2753,9 +2841,21 @@ impl Daemon {
                 daemon.take_began(&takes, 1, manifest);
                 *files.lock().unwrap() = Some(paths.to_vec());
                 let _ = started_tx.send(Ok(paths.to_vec()));
+                if project.created
+                    && let Some(file) = isocast_protocol::project::read(&project.folder)
+                {
+                    daemon.publish(Event::ProjectCreated {
+                        project: isocast_protocol::project::describe(&project.folder, &file, true),
+                    });
+                }
                 daemon.publish(Event::Started {
                     files: paths.to_vec(),
                     begins_at: None,
+                    take: Some(1),
+                    manifest: Some(manifest.to_path_buf()),
+                    folder: Some(project.folder.clone()),
+                    project: Some(project.id.clone()),
+                    cause: Some(cause),
                 });
             };
             let reported = Mutex::new(Vec::<(u64, u64)>::new());
@@ -2770,9 +2870,24 @@ impl Daemon {
             };
             let on_take = |number: u32, path: &Path, manifest: &SessionManifest| {
                 daemon.take_finished(&takes, number, path, manifest);
+                let folder = path.parent().unwrap_or(Path::new("")).to_path_buf();
+                daemon.publish(Event::TakeFinished {
+                    take: number,
+                    manifest: path.to_path_buf(),
+                    files: manifest
+                        .files
+                        .iter()
+                        .map(|file| folder.join(&file.path))
+                        .collect(),
+                    folder,
+                    project: Some(project.id.clone()),
+                    status: manifest.status,
+                    duration_seconds: manifest.duration_seconds,
+                    errors: manifest.errors.clone(),
+                });
             };
             let options = RecordOptions {
-                folder: params.folder,
+                folder: Some(project.folder.clone()),
                 duration,
                 stop,
                 on_start: Some(&on_start),
@@ -2786,10 +2901,14 @@ impl Daemon {
             daemon.session_over(&takes);
             if let Err(message) = &ended {
                 let _ = started_tx.send(Err(message.clone()));
+                discard(&project);
             }
             daemon.publish(Event::Stopped {
                 report: ended.clone().ok().map(Box::new),
                 error: ended.clone().err(),
+                // Unless the folder went again (it held nothing).
+                project: project.folder.exists().then(|| project.id.clone()),
+                folder: project.folder.exists().then(|| project.folder.clone()),
             });
             daemon.ended(id, ended);
         });

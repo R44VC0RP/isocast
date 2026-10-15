@@ -273,6 +273,13 @@ fn timeline(weak: Weak<Daemon>) {
                         "device inventory or formats changed",
                         json!({"previous":inventory,"current":now}),
                     );
+                    // Devices that came or went since the last inventory
+                    // (none for the first one), for watchers.
+                    if !inventory.is_null() {
+                        for event in devices_came_or_went(&inventory, &now) {
+                            daemon.publish(event);
+                        }
+                    }
                     inventory = now;
                 }
             }
@@ -283,6 +290,43 @@ fn timeline(weak: Weak<Daemon>) {
             next = Instant::now() + Duration::from_secs(1);
         }
     }
+}
+
+/// `device_changed` events for the cameras, microphones, displays and
+/// audio outputs that appear in only one of two inventories (by id). An
+/// inventory that failed (no lists) compares as unchanged.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn devices_came_or_went(before: &Value, after: &Value) -> Vec<isocast_protocol::api::Event> {
+    use isocast_protocol::api::{DeviceAction, DeviceKind, Event};
+    let mut events = Vec::new();
+    for (key, kind) in [
+        ("cameras", DeviceKind::Camera),
+        ("microphones", DeviceKind::Microphone),
+        ("displays", DeviceKind::Display),
+        ("audio_outputs", DeviceKind::AudioOutput),
+    ] {
+        let (Some(old), Some(new)) = (before[key].as_array(), after[key].as_array()) else {
+            continue;
+        };
+        let id = |device: &Value| device["id"].to_string().trim_matches('"').to_string();
+        let name = |device: &Value| device["name"].as_str().unwrap_or_default().to_string();
+        for (from, to, action) in [
+            (new, old, DeviceAction::Added),
+            (old, new, DeviceAction::Removed),
+        ] {
+            for device in from {
+                if !to.iter().any(|other| id(other) == id(device)) {
+                    events.push(Event::DeviceChanged {
+                        action,
+                        kind,
+                        id: id(device),
+                        name: name(device),
+                    });
+                }
+            }
+        }
+    }
+    events
 }
 
 fn thread_cpu() -> f64 {
@@ -329,7 +373,11 @@ pub fn bug_report(daemon: &Daemon, params: &BugReportParams) -> Result<BugReport
     });
     let mut folders = Vec::new();
     if let Some(setup) = &live.setup {
-        folders.push(crate::expand_home(&setup.recording.folder));
+        // The recordings folder and its newest project folders.
+        folders.extend(isocast_protocol::project::recording_folders(
+            &crate::expand_home(&setup.recording.folder),
+            10,
+        ));
     }
     if let Some(last) = &status.last {
         folders.push(last.folder.clone());
@@ -365,5 +413,39 @@ pub fn error(message: String) -> RpcError {
             RpcError::FAILED
         },
         message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isocast_protocol::api::{DeviceAction, DeviceKind, Event};
+
+    #[test]
+    fn devices_that_came_or_went_become_events() {
+        let before = json!({"cameras":[{"id":"a","name":"Cam A"}],"microphones":[{"id":"m","name":"Mic"}],
+            "displays":[{"id":1,"name":"Built-in"}],"audio_outputs":[]});
+        let after = json!({"cameras":[{"id":"b","name":"Cam B"}],"microphones":[{"id":"m","name":"Mic"}],
+            "displays":[{"id":1,"name":"Built-in"}],"audio_outputs":[{"id":"o","name":"Out"}]});
+        let events = devices_came_or_went(&before, &after);
+        let found: Vec<_> = events
+            .iter()
+            .map(|e| match e {
+                Event::DeviceChanged {
+                    action, kind, id, ..
+                } => (*action, *kind, id.as_str()),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (DeviceAction::Added, DeviceKind::Camera, "b"),
+                (DeviceAction::Removed, DeviceKind::Camera, "a"),
+                (DeviceAction::Added, DeviceKind::AudioOutput, "o"),
+            ]
+        );
+        // A failed inventory (no lists) is no change.
+        assert!(devices_came_or_went(&before, &json!({"error":"x"})).is_empty());
     }
 }

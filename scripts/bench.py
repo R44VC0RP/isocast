@@ -418,7 +418,8 @@ def measure(args, daemon, label, index, cleanup):
         # and says "recording" until the files are finished.
         deadline = time.time() + 60
         while time.time() < deadline:
-            manifests = list(folder.glob("*.session.json"))
+            # In the recording's project folder (or, before projects, the folder).
+            manifests = list(folder.rglob("*.session.json"))
             try:
                 if manifests and all(json.loads(m.read_text()).get("status") != "recording" for m in manifests):
                     break
@@ -446,10 +447,10 @@ def measure(args, daemon, label, index, cleanup):
         result["tone_filters"] = tone_filters
     if compositor:
         result["compositor"] = compositor
-    for manifest in folder.glob("*.session.json"):
+    for manifest in folder.rglob("*.session.json"):
         session = json.loads(manifest.read_text())
         for f in session.get("files", []):
-            path = folder / f["path"]
+            path = manifest.parent / f["path"]
             size = path.stat().st_size if path.exists() else 0
             duration = f.get("duration_seconds") or 0
             want = (f.get("fps") or 0) * duration
@@ -472,8 +473,8 @@ def measure(args, daemon, label, index, cleanup):
     cleanup.pop_all()
     # Media goes (it may show the screen); manifests stay.
     runs = (work / "runs").resolve()
-    for media in folder.iterdir():
-        if media.suffix in (".mov", ".mp4") and media.resolve().parent.parent == runs:
+    for media in folder.rglob("*"):
+        if media.suffix in (".mov", ".mp4") and runs in media.resolve().parents:
             media.unlink()
     with open(work / "results.jsonl", "a") as out:
         out.write(json.dumps(result) + "\n")

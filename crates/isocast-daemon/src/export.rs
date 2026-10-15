@@ -450,6 +450,8 @@ impl Daemon {
         params: TimelineExportParams,
     ) -> Result<ExportStarted, RpcError> {
         check_folder(params.folder.as_deref())?;
+        // Its clips' takes, where they are now.
+        self.heal_timelines();
         // One at a time: the slot is taken before anything is planned.
         let mut slot = {
             let mut running = self.export.lock().unwrap();

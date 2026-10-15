@@ -1100,7 +1100,7 @@ pages, background scheduling.
 
 Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 
-- [ ] **7.7 Plugin events and file access** (one feature, general, not
+- [x] **7.7 Plugin events and file access** (one feature, general, not
   built around one plugin). (a) **Every state change emits an event with
   full context**, so a plugin never has to poll or guess: recording and
   take started/paused/resumed/finished/failed, split, retake, marker,
@@ -3268,3 +3268,15 @@ One line per finished task, newest last.
   50.0% vs 49.7% off, 560.0 vs 559.0 M instr/s, 2.25 KB/s logged; 4K60 + 3
   ISOs 2.9 KB/s. Toggling 8 times during a 20 s recording: 3 files,
   600/600 frames, 0 dropped (ffprobe). e2e 13/13 on isocast-m2-a.
+- 7.7 (2026-10-14): every recording session writes into its own project
+  folder (`<date> <time> Untitled/`, `.isocast-project.json` id) with
+  `list_projects`/`rename_project` on API, CLI (`isocast project`) and MCP;
+  new events take_finished, project_created, project_renamed,
+  device_changed and project/take/manifest/folder/cause context on
+  started/stopped/marker/recording_paused (catalogue in docs/plugins.md);
+  `permissions.recordings = "read" | "write"` enforced by Seatbelt.
+  Verified on isocast-m2-a: e2e 15/15 PASS with zero drops (new
+  `projects`: events once with paths, rename refused while recording,
+  files/manifests/timeline/export resolve after rename, flat recordings
+  untouched and recovered; `plugin_files`: denials per grant; shutdown:
+  kill -9 take recovered in its project folder).

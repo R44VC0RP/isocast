@@ -1490,6 +1490,82 @@ each section. Delete entries that stop being true.
     submit-to-callback latency is in `stream_encoders`. Capture-to-composite
     isn't measured per source; `age_us` is a frame's time (capture, or the
     program's tick) to its writer taking it.
+- 2026-10-14 (7.7, plugin events and file access): **A project folder per
+  recording session.**
+  - *Name:* `<recordings>/<YYYY-MM-DD HH-MM-SS> Untitled/` (local time at
+    start; ` 2`, ` 3`… if taken). A hidden `.isocast-project.json`
+    (`version`, `id` = `20261014-153012[-n]`, `prefix`, `created_at`) makes
+    a folder a project and keeps its id across renames. The *name* is the
+    folder name after `<prefix> `, never stored, so a Finder rename shows
+    up as a rename and `rename_project` is one atomic `renamex_np
+    (RENAME_EXCL)` with no second file to update. The date prefix stays on
+    rename (sorting, uniqueness); a taken name gets ` 2`.
+  - *What a session is:* one `start` … `stop`, with all its splits and
+    retakes-while-recording. A `start` (or idle `retake`) whose `folder` is
+    a project folder records into it (an idle retake goes into the folder
+    of the take it replaces, so retakes join their project); any other
+    folder (or the setup's `recording.folder`) gets a new project inside
+    it. `--folder` therefore names the recordings folder, not the files'
+    folder. A start that fails before writing removes its empty folder.
+  - *Engine:* record/* is unchanged; the daemon (and standalone `isocast
+    record`) hand the engine the project folder as its folder, so
+    manifests (paths relative to themselves), the disk checks and the
+    folder lock work as before.
+  - *Rename:* refused (wrong state) while the session recording into the
+    project hasn't ended (including a stop finishing) or while any export
+    runs; serialized with `start`'s project choice (a `projects` mutex) and
+    with `retake` (the `retaking` lock, since an idle retake picks its
+    folder before starting). Timelines' manifest paths are rewritten all
+    or nothing (on failure the folder is renamed back); export manifests in
+    the folder and `status.last` are rewritten too.
+  - *Migration:* none. Flat recordings stay where they are; recovery,
+    `start`'s interrupted-take check, `doctor` and bug reports look in each
+    recordings folder and its newest project folders (50 at launch, 5 at
+    start and in doctor, 10 for reports), so flat and project recordings
+    are both recovered.
+  - *Events:* appended, none renamed (`take_finished`, `project_created`,
+    `project_renamed`, `device_changed`; optional `take`, `manifest`,
+    `folder`, `project`, `cause` on `started`, `project`/`folder` on
+    `stopped`, `project` on `marker` and `recording_paused`). The brief's
+    `project.created`/`project.renamed` are spelled `project_created` /
+    `project_renamed` like every other event type. `device_changed` is a
+    diff of the diagnostics inventory, which already re-reads devices on
+    AVFoundation/Core Audio/Core Graphics notifications (and once a
+    minute), so no new polling.
+- 2026-10-14 (7.7c, corrected in 7.7 fix round 1): **`recordings = "read"
+  | "write"`: Seatbelt plus engine checks.** `file-write-create` permits
+  creating a file and writing it through the creating descriptor, and
+  denies reopening an existing file for writing, truncating, unlinking and
+  renaming it. It does **not** stop creating symlinks, fifos or hard links
+  (the first version claimed hard links were denied; the review showed an
+  in-project hard link and a symlink being made). A planted dangling
+  symlink at the next take's name made the engine record through it into
+  the plugin's folder (review B1). Now:
+  - the write rule requires `(vnode-type REGULAR-FILE DIRECTORY)` (no
+    links or fifos), and `(deny file-link (subpath root))` applies to every
+    recordings folder for every plugin;
+  - it matches only folders named `<YYYY-MM-DD HH-MM-SS> …` (Isocast's
+    project names), and folders so named without `.isocast-project.json`
+    when the process starts are denied (Seatbelt can't test for a file);
+  - denied names: `*.session.json`, `*.partial`, `.isocast*`;
+  - the engine treats any entry at a name (a dangling link too) as taken
+    (`unique_paths`), makes a manifest's `.partial` with
+    `O_CREAT|O_EXCL|O_NOFOLLOW`, and the writer refuses a path where an
+    entry exists and cancels unless what AVAssetWriter made is a plain file
+    with one name (AVAssetWriter takes a path, so it can't get O_NOFOLLOW).
+  Consequences documented in docs/plugins.md: a plugin can't reopen its own
+  file either. Without the grant the recordings folders are explicitly
+  unreadable (before, one outside the home folder was readable by every
+  plugin). The roots are those known when the plugin's process starts.
+- 2026-10-14 (7.7 fix round 1): `rename_project` falls back to check-then-
+  `rename(2)` when `renamex_np(RENAME_EXCL)` gives ENOTSUP/EINVAL (exFAT,
+  FAT, some shares), under the projects lock. Timeline clips store their
+  project id; takes missing at their path are found by id (or, for older
+  clips, the one project folder holding that manifest name) before
+  `timeline_get`, exports and idle retakes, and the timelines rewritten, so
+  a Finder rename or a kill between the folder rename and the timeline
+  writes heals itself. Export manifests are not healed after a Finder
+  rename (they are rewritten only by `rename_project`).
 
 - 2026-10-14 (8.2h fix round 1, review findings): **Trust and safety
   corrections.**
@@ -4318,6 +4394,14 @@ each section. Delete entries that stop being true.
   read the default. `isocast start --seconds N` returns once the files
   exist, not when the take ends. Offscreen `press:LABEL` finds a dialog's
   buttons only after a render: put `type:` (renders, types nothing) first.
+- 2026-10-14 (7.7): scripts that look for a recording's files in the
+  folder they passed as `--folder` / `recording.folder` must now look one
+  level down (the project folder): e2e's drop collection, bench.py and
+  drag-lag.py were changed; the e2e harness already followed the paths in
+  `started`.
+- 2026-10-14 (7.7): SBPL rules are last-match-wins; `regex` filters take a
+  POSIX regex in `#"..."` (no `"` possible), so the recordings root is
+  regex-escaped and a root with a quote gets no write rule.
 
 - 2026-10-14 (8.2h): Slint's macOS menu bar (muda) rebuilds the whole
   application menu whenever a tracked property changes, so an NSMenuItem

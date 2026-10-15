@@ -108,6 +108,16 @@ impl Daemon {
         });
     }
 
+    /// The recordings folders recordings were made in lately (newest
+    /// last), as `remember_recording_folder` keeps them.
+    pub(crate) fn remembered_recording_folders(&self) -> Vec<PathBuf> {
+        let path = isocast_protocol::api::setup_path().with_extension("recording-folders.json");
+        std::fs::read(path)
+            .ok()
+            .and_then(|s| serde_json::from_slice::<Vec<PathBuf>>(&s).ok())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn remember_recording_folder(&self, folder: &std::path::Path) {
         let path = isocast_protocol::api::setup_path().with_extension("recording-folders.json");
         let mut folders = std::fs::read(&path)
@@ -123,14 +133,12 @@ impl Daemon {
     }
 
     pub(crate) fn recover_recordings(&self) {
-        let path = isocast_protocol::api::setup_path().with_extension("recording-folders.json");
-        let mut folders = std::fs::read(path)
-            .ok()
-            .and_then(|s| serde_json::from_slice::<Vec<PathBuf>>(&s).ok())
-            .unwrap_or_default();
-        if let Some(setup) = self.state.lock().unwrap().setup.as_ref() {
-            folders.push(crate::expand_home(&setup.recording.folder));
-        }
+        // Each recordings folder, and every project folder in it.
+        let mut folders: Vec<PathBuf> = self
+            .recording_roots()
+            .iter()
+            .flat_map(|root| isocast_protocol::project::recording_folders(root, 50))
+            .collect();
         folders.sort();
         folders.dedup();
         #[cfg(target_os = "macos")]

@@ -42,13 +42,97 @@ autostart = true
 - It may call only the methods in `permissions.methods`; anything else is
   refused.
 - It runs in a macOS sandbox: it can write only to its own data folder, has
-  no network unless granted, and cannot open cameras or microphones.
+  no network unless granted, cannot open cameras or microphones, and
+  cannot read recordings unless granted (below).
 - If it exits five times in five minutes, it is turned off until you enable
   it again.
 
 Example: [examples/plugins/deck](../examples/plugins/deck), a page on
 `127.0.0.1` with a button per scene plus Record, Marker and Split, in plain
 Python with only the standard library.
+
+### Recordings
+
+A plugin that works with recorded files asks for them:
+
+```toml
+[permissions]
+methods = ["watch", "list_projects", "rename_project"]
+recordings = "write"   # or "read"
+```
+
+| Grant | It may |
+|---|---|
+| none | nothing: the recordings folders are unreadable, wherever they are |
+| `read` | read every file in the recordings folders |
+| `write` | read, and **create new files** inside a project folder (a transcript, an export) |
+
+`write` never lets it change, rename or delete a file that exists, its own
+included: the sandbox (Seatbelt's `file-write-create`) lets a process make
+a new plain file or folder and write the file through the handle that made
+it, and nothing else. Write a file in one go (or write a new one to replace
+it). It can only create inside a project folder (one named `<date> <time>
+…` with Isocast's project file in it), never links (symbolic or hard),
+manifests (`*.session.json`), `*.partial` files or Isocast's own `.isocast*`
+files. No plugin can hard-link a recording, whatever its grant. The
+recordings folders are the live setup's `recording.folder` and those
+recorded into lately, as they are when the plugin's process starts; a
+folder recorded into for the first time is in its sandbox from its next
+start.
+
+### Projects
+
+Every recording session writes into its own **project folder** in the
+recordings folder, `<YYYY-MM-DD HH-MM-SS> Untitled/`: every take's program
+and ISO files, their manifests (`….session.json`, listing files relative
+to themselves) and the timeline exports made from them. A hidden
+`.isocast-project.json` gives it a stable id (`20261014-153012`); its name
+is the folder's name after the date and time. `list_projects` lists them;
+`rename_project` (refused while a recording or an export writes into it)
+renames the folder to `<date> <time> <name>` in one step (atomic on APFS
+and HFS+; on exFAT a check and a rename) and moves timelines' references
+(timelines also find a project renamed in the Finder by its id), so a plugin can name a take once `take_finished`
+or `stopped` says it is done. Recordings from before project folders stay
+where they are.
+
+### Events
+
+A plugin granted `watch` gets every state change as it happens, with ids
+and, where there are files, their paths, so it never has to poll. Ask only
+for what you need: `{"method": "watch", "params": {"kinds": ["take_finished",
+"project_renamed"]}}` (`isocast watch --kinds/--except` on the CLI). Each
+arrives once, as `{"jsonrpc":"2.0","method":"event","params":{"type":…}}`.
+
+| Event (`type`) | When | Fields |
+|---|---|---|
+| `started` | a recording's first take began, or a split or retake began a new take | `files`, `take`, `manifest`, `folder`, `project`, `cause` (`start`, `split`, `retake`), `begins_at` (split/retake) |
+| `take_finished` | a take's files are finished (stop, split, retake, or failure) | `take`, `manifest`, `files`, `folder`, `project`, `status` (`complete`, `failed`, `interrupted`), `duration_seconds`, `errors` |
+| `stopped` | a recording ended, or failed to start | `report` (every take and file), `error`, `project`, `folder` |
+| `recording_paused` | a recording paused or resumed | `recording` (`paused`, `elapsed_seconds`, `paused_seconds`), `project` |
+| `marker` | a marker was added | `label`, `take`, `time_seconds`, `project` |
+| `project_created` | a recording made a new project folder (as its first take began) | `project` (`id`, `name`, `folder`, `created_at`, `takes`, `files`) |
+| `project_renamed` | a project was renamed | `project` (after), `old_name`, `old_folder` |
+| `scene_changed` | a scene went on air | `scene`, `take`, `time_seconds`, `transition` |
+| `preview_changed` / `preview_cleared` | studio mode's preview changed / was cleared | `scene` |
+| `stream` | the stream connected, went live, is reconnecting, failed or stopped | `stream` (`state`, counters) |
+| `timeline_changed` | a timeline was made, opened, closed or changed | `timeline`, `action`, `clip`, `clips`, `current` |
+| `export_progress` | a timeline export moved on | `export`, `timeline`, `progress`, `file` |
+| `export_finished` | a timeline export ended | `export`, `timeline`, `manifest`, `files`, `error` |
+| `setup_changed` | a setup change was applied | `revision` (`get` reads it) |
+| `library_changed` | a scene collection or profile was made, renamed, deleted, imported or switched | `action`, `kind`, `id`, `collection`, `profile` |
+| `device_changed` | a camera, microphone, display or audio output appeared or went | `action` (`added`, `removed`), `kind`, `id`, `name` |
+| `source_changed` | a live source started opening, runs, or failed | `status` |
+| `engine_changed` | the live engine started or stopped | `running` |
+| `plugin_changed` | a plugin was added, removed, enabled, disabled, crashed or restarted | `id`, `action`, `state`, `process` |
+| `data_changed` | data keys were set or deleted | `revision`, `keys` |
+| `hotkey_fired` | a hotkey ran its action | `binding`, `action`, `source`, `phase`, `error` |
+| `virtual_camera` | the virtual camera's state changed | `camera` |
+| `warning` | something needs attention (dropped frames, a failed save) | `message` |
+| `status` | live counters, about once a second while recording | `live` |
+| `levels` | audio levels, about 20 times a second | `levels` |
+
+Fields added later are optional: a plugin should ignore fields it doesn't
+know.
 
 ## WebAssembly audio filters
 

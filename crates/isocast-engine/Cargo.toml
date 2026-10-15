@@ -13,6 +13,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 isocast-protocol = { path = "../isocast-protocol" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+# O_NOFOLLOW for files made in project folders (already in the lock file).
+libc = "0.2"
 png = "0.18.1"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tga"] }
 cosmic-text = "0.19.0"

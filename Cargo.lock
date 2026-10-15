@@ -3021,6 +3021,7 @@ dependencies = [
  "image",
  "isocast-diagnostics",
  "isocast-protocol",
+ "libc",
  "native-tls",
  "nnnoiseless",
  "png",

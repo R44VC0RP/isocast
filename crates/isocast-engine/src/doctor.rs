@@ -376,7 +376,12 @@ pub fn doctor<P: Platform>(platform: &P, setup: Option<&Setup>, folder: Option<&
         )),
     }
     // Recordings there that a kill or crash left unfinished.
-    if let Some(note) = interrupted_note(&interrupted_sessions(&folder, false), false) {
+    // In it, and in its newest project folders.
+    let interrupted: Vec<_> = isocast_protocol::project::recording_folders(&folder, 5)
+        .iter()
+        .flat_map(|folder| interrupted_sessions(folder, false))
+        .collect();
+    if let Some(note) = interrupted_note(&interrupted, false) {
         checks.push(check(
             &format!("recordings: {}", folder.display()),
             CheckStatus::Warning,

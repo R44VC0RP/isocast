@@ -102,11 +102,39 @@ pub struct Permissions {
     /// starting with `~/`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
+    /// The recordings folders: `read` (read recording files, nothing
+    /// else) or `write` (also add new files inside a project's folder,
+    /// like a transcript or an export; never change or delete a file that
+    /// exists). Without it a process plugin can't read recordings at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recordings: Option<RecordingsAccess>,
+}
+
+/// Access to the recordings folders, granted with `permissions.recordings`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingsAccess {
+    /// Read recording files and list the folders.
+    Read,
+    /// Read, and create new files inside project folders (never modify,
+    /// rename or delete an existing file).
+    Write,
+}
+
+impl RecordingsAccess {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
 }
 
 impl Permissions {
     pub fn is_empty(&self) -> bool {
-        self.lists().iter().all(|(_, list)| list.is_empty())
+        self.lists().iter().all(|(_, list)| list.is_empty()) && self.recordings.is_none()
     }
 
     /// Each list by its field name.
@@ -134,6 +162,7 @@ impl Permissions {
             data_write: tidy(&self.data_write),
             methods: tidy(&self.methods),
             files: tidy(&self.files),
+            recordings: self.recordings,
         }
     }
 
@@ -157,6 +186,9 @@ impl Permissions {
             data_write: more(&self.data_write, &granted.data_write),
             methods: more(&self.methods, &granted.methods),
             files: more(&self.files, &granted.files),
+            recordings: self
+                .recordings
+                .filter(|asked| granted.recordings < Some(*asked)),
         }
         .normalized()
     }
@@ -164,14 +196,25 @@ impl Permissions {
     /// One line per list that isn't empty (`methods: get, watch`), or
     /// "nothing".
     pub fn describe(&self) -> Vec<String> {
-        let lines: Vec<String> = self
+        let mut lines: Vec<String> = self
             .lists()
             .iter()
             .filter(|(_, list)| !list.is_empty())
             .map(|(name, list)| format!("{name}: {}", list.join(", ")))
             .collect();
+        match self.recordings {
+            Some(RecordingsAccess::Read) => {
+                lines.push("recordings: read (read every recording file)".into())
+            }
+            Some(RecordingsAccess::Write) => lines.push(
+                "recordings: write (read every recording file, and add new files inside \
+                 project folders; never change or delete existing ones)"
+                    .into(),
+            ),
+            None => {}
+        }
         if lines.is_empty() {
-            vec!["nothing (no methods, network, data or files)".into()]
+            vec!["nothing (no methods, network, data, files or recordings)".into()]
         } else {
             lines
         }

@@ -65,6 +65,10 @@ pub struct Clip {
     /// frame grid ([`take_seconds`]).
     pub in_seconds: f64,
     pub out_seconds: f64,
+    /// The recording project (its id) the take is in, so the clip is found
+    /// again if the project's folder is renamed behind Isocast's back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// A take that was on a timeline (or recorded for it) and was taken off.

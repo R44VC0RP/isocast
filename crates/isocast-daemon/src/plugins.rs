@@ -40,7 +40,7 @@ use isocast_protocol::api::{Check, CheckStatus, Event, Method, RpcError, plugins
 use isocast_protocol::plugin::{
     AudioFilterSpec, Installed, KindClass, MANIFEST, Manifest, Permissions, PluginAction,
     PluginAddParams, PluginChange, PluginEnableParams, PluginInfo, PluginState, Plugins,
-    ProcessInfo, ProcessState, Version,
+    ProcessInfo, ProcessState, RecordingsAccess, Version,
 };
 use isocast_protocol::{Issue, Setup};
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,8 @@ const MAX_COPY_BYTES: u64 = 1 << 30;
 pub struct Hooks {
     pub publish: Box<dyn Fn(Event) + Send + Sync>,
     pub serve: Box<dyn Fn(UnixStream, Arc<Scope>) + Send + Sync>,
+    /// The recordings folders, for `permissions.recordings`.
+    pub recording_roots: Box<dyn Fn() -> Vec<PathBuf> + Send + Sync>,
 }
 
 /// The installed plugins.
@@ -1073,7 +1075,14 @@ impl Shared {
                 break;
             }
             let started = Instant::now();
-            let outcome = launch.start(&process.command);
+            // The recordings folders as they are now (a folder recorded to
+            // later is in its sandbox from its next start).
+            let roots = self
+                .hooks
+                .get()
+                .map(|hooks| (hooks.recording_roots)())
+                .unwrap_or_default();
+            let outcome = launch.start(&process.command, &roots);
             let exit = match outcome {
                 Ok((pid, sandboxed)) => {
                     self.pids.lock().unwrap().insert(pid, launch.scope.clone());
@@ -1296,7 +1305,7 @@ struct Launch {
 
 impl Launch {
     /// Start the process; its id and whether it is sandboxed.
-    fn start(&self, command: &[String]) -> Result<(u32, bool), String> {
+    fn start(&self, command: &[String], recordings: &[PathBuf]) -> Result<(u32, bool), String> {
         let program = find_program(&command[0], &self.folder)?;
         let data = self.dir.join("data");
         let tmp = data.join("tmp");
@@ -1326,7 +1335,8 @@ impl Launch {
             ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
             ("PYTHONUNBUFFERED".into(), "1".into()),
         ]);
-        let profile = sandbox_available().then(|| self.profile(&program, &socket, &data));
+        let profile =
+            sandbox_available().then(|| self.profile(&program, &socket, &data, recordings));
         let sandboxed = profile.is_some();
         let pid = spawn(
             &program,
@@ -1348,7 +1358,13 @@ impl Launch {
 
     /// Its sandbox profile.
     #[cfg(target_os = "macos")]
-    fn profile(&self, program: &Path, socket: &Path, data: &Path) -> String {
+    fn profile(
+        &self,
+        program: &Path,
+        socket: &Path,
+        data: &Path,
+        recordings: &[PathBuf],
+    ) -> String {
         let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let home = real(Path::new(&std::env::var_os("HOME").unwrap_or_default()));
         let mut readable = vec![real(&self.dir), real(&self.folder)];
@@ -1366,6 +1382,27 @@ impl Launch {
             (Some(parent), Some(name)) => real(parent).join(name),
             _ => socket.to_path_buf(),
         };
+        // Canonical, as Seatbelt matches resolved paths; folders not made
+        // yet are left out (no file can be in them), and so is a recordings
+        // folder holding the home folder, the plugin's own folders or its
+        // program (`/`, say): denying or granting all of that isn't what
+        // the grant means, and the home folder's own rule still applies.
+        let mut own = vec![
+            home.clone(),
+            real(&self.dir),
+            real(&self.folder),
+            program_real.clone(),
+        ];
+        own.extend(program_folders.iter().cloned());
+        let recordings: Vec<PathBuf> = recordings
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .filter(|root| !own.iter().any(|path| path.starts_with(root)))
+            .collect();
+        let not_projects = recordings
+            .iter()
+            .flat_map(|root| isocast_protocol::project::named_like_but_not(root))
+            .collect();
         isocast_platform_macos::plugin::Sandbox {
             home,
             readable,
@@ -1374,12 +1411,25 @@ impl Launch {
             program_folders,
             socket,
             network: !self.granted.network.is_empty(),
+            recordings,
+            not_projects,
+            recordings_access: match self.granted.recordings {
+                None => isocast_platform_macos::plugin::Recordings::None,
+                Some(RecordingsAccess::Read) => isocast_platform_macos::plugin::Recordings::Read,
+                Some(RecordingsAccess::Write) => isocast_platform_macos::plugin::Recordings::Write,
+            },
         }
         .profile()
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn profile(&self, _program: &Path, _socket: &Path, _data: &Path) -> String {
+    fn profile(
+        &self,
+        _program: &Path,
+        _socket: &Path,
+        _data: &Path,
+        _recordings: &[PathBuf],
+    ) -> String {
         String::new()
     }
 }

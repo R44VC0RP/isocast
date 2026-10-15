@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use chrono::{Local, SecondsFormat};
 use isocast_engine::record::{SplitTake, SplitTiming};
-use isocast_protocol::api::{Event, RpcError, StartParams, timelines_path};
+use isocast_protocol::api::{Event, RpcError, StartParams, TakeCause, timelines_path};
 use isocast_protocol::library::slug;
 use isocast_protocol::manifest::{SessionManifest, SessionStatus};
 use isocast_protocol::timeline::{
@@ -213,6 +213,11 @@ impl Timelines {
         self.current.as_deref()
     }
 
+    /// Every timeline.
+    pub fn all(&self) -> impl Iterator<Item = &Timeline> {
+        self.timelines.values()
+    }
+
     pub fn get(&self, id: &str) -> Option<&Timeline> {
         self.timelines.get(id)
     }
@@ -389,6 +394,52 @@ impl Timelines {
         Ok(())
     }
 
+    /// A recording project's folder moved from `from` to `to`: every
+    /// timeline naming takes inside it names them there. All or nothing:
+    /// if one can't be written, those already written are put back.
+    /// Returns the timelines changed.
+    pub fn move_folder(&mut self, from: &Path, to: &Path) -> Result<Vec<String>, RpcError> {
+        let fix = |path: &mut PathBuf| match isocast_protocol::project::moved(path, from, to) {
+            Some(new) => {
+                *path = new;
+                true
+            }
+            None => false,
+        };
+        let mut changed: Vec<(String, Timeline)> = Vec::new();
+        for (id, timeline) in &self.timelines {
+            let mut moved = timeline.clone();
+            let mut any = false;
+            for clip in &mut moved.clips {
+                any |= fix(&mut clip.take);
+            }
+            for removed in &mut moved.removed {
+                any |= fix(&mut removed.take);
+            }
+            for take in &mut moved.recording {
+                any |= fix(take);
+            }
+            if any {
+                changed.push((id.clone(), moved));
+            }
+        }
+        for (i, (_, moved)) in changed.iter().enumerate() {
+            if let Err(err) = self.write(moved) {
+                for (id, _) in &changed[..i] {
+                    if let Some(old) = self.timelines.get(id) {
+                        let _ = self.write(old);
+                    }
+                }
+                return Err(err);
+            }
+        }
+        let ids = changed.iter().map(|(id, _)| id.clone()).collect();
+        for (id, moved) in changed {
+            self.timelines.insert(id, moved);
+        }
+        Ok(ids)
+    }
+
     /// Change timeline `id` and write it; nothing changes if it can't be
     /// written.
     pub fn change<T>(
@@ -438,6 +489,10 @@ pub fn append(timeline: &mut Timeline, take: &Path, manifest: &SessionManifest) 
         take: take.to_path_buf(),
         in_seconds: 0.0,
         out_seconds: timeline::take_seconds(manifest),
+        project: take
+            .parent()
+            .and_then(isocast_protocol::project::read)
+            .map(|file| file.id),
     });
     id
 }
@@ -707,7 +762,78 @@ impl Daemon {
         });
     }
 
+    /// Takes on timelines whose files aren't where the timeline says (their
+    /// project's folder was renamed in the Finder, or isocastd stopped
+    /// between renaming one and updating the timelines): find their
+    /// project by id (or, for clips from before ids, the project folder
+    /// holding a manifest of that name, if only one does) and point every
+    /// timeline there.
+    pub(crate) fn heal_timelines(&self) {
+        let missing: Vec<(PathBuf, Option<String>)> = {
+            let timelines = self.timelines.lock().unwrap();
+            timelines
+                .all()
+                .flat_map(|timeline| {
+                    timeline
+                        .clips
+                        .iter()
+                        .map(|clip| (clip.take.clone(), clip.project.clone()))
+                        .chain(timeline.removed.iter().map(|r| (r.take.clone(), None)))
+                })
+                .filter(|(take, _)| take.symlink_metadata().is_err())
+                .collect()
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let projects: Vec<_> = self
+            .recording_roots()
+            .iter()
+            .flat_map(|root| isocast_protocol::project::scan(root))
+            .collect();
+        let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for (take, project) in missing {
+            let (Some(old), Some(name)) = (take.parent(), take.file_name()) else {
+                continue;
+            };
+            if moves.iter().any(|(from, _)| from == old) {
+                continue;
+            }
+            let by_id = project.and_then(|id| projects.iter().find(|(_, file)| file.id == id));
+            let found = match by_id {
+                Some((folder, _)) => Some(folder.clone()),
+                None => {
+                    let holding: Vec<_> = projects
+                        .iter()
+                        .filter(|(folder, _)| folder.join(name).is_file())
+                        .collect();
+                    match holding.as_slice() {
+                        [(folder, _)] => Some(folder.clone()),
+                        _ => None,
+                    }
+                }
+            };
+            if let Some(new) = found.filter(|new| new.join(name).is_file()) {
+                moves.push((old.to_path_buf(), new));
+            }
+        }
+        for (from, to) in moves {
+            if let Err(err) = self.timelines.lock().unwrap().move_folder(&from, &to) {
+                self.publish(Event::Warning {
+                    message: format!(
+                        "timelines name takes in {}, which moved to {}, but couldn't be \
+                         updated: {}",
+                        from.display(),
+                        to.display(),
+                        err.message
+                    ),
+                });
+            }
+        }
+    }
+
     fn timeline_info(&self, id: &str, notes: Vec<String>) -> Result<TimelineInfo, RpcError> {
+        self.heal_timelines();
         self.timelines
             .lock()
             .unwrap()
@@ -1037,7 +1163,7 @@ impl Daemon {
                 notes: vec![note],
             });
         }
-        match self.split_take(SplitTiming::Soonest) {
+        match self.split_take(SplitTiming::Soonest, TakeCause::Retake) {
             Ok(split) => {
                 // The take split from ends when the new one begins (at least
                 // a quarter second from now) and finishes after that, so it
@@ -1080,6 +1206,8 @@ impl Daemon {
         mut notes: Vec<String>,
         take_off: TakeOff,
     ) -> Result<Retaken, RpcError> {
+        // The retake goes into its take's folder: find it if it moved.
+        self.heal_timelines();
         let taken = self.timelines.lock().unwrap().change(&id, |timeline| {
             let off = match (&take_off, timeline.clips.last()) {
                 (_, None) => false,
@@ -1104,11 +1232,14 @@ impl Daemon {
                 .as_ref()
                 .and_then(|(clip, _)| clip.take.parent().map(Path::to_path_buf))
         });
-        let started = self.start(StartParams {
-            setup: None,
-            folder,
-            seconds: params.seconds,
-        });
+        let started = self.start_as(
+            StartParams {
+                setup: None,
+                folder,
+                seconds: params.seconds,
+            },
+            TakeCause::Retake,
+        );
         match started {
             Ok(started) => {
                 notes.extend(started.notes);

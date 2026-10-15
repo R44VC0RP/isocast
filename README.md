@@ -86,8 +86,9 @@ today (plugins, platforms, years of polish). Isocast was written clean-room:
 no OBS code was read or copied.
 
 **Where do my recordings go?**
-To `~/Movies/Isocast` unless you choose another folder in Settings → Output.
-Each take is the finished video (`2026-10-13 21-40-37.mov`), one file per
+To `~/Movies/Isocast` unless you choose another folder in Settings → Output,
+one folder per recording (`2026-10-13 21-40-37 Untitled`, renamed with
+`isocast project rename`). Each take is the finished video (`2026-10-13 21-40-37.mov`), one file per
 ISO source (`SCREEN-…`, `CAMERA-…`) and a `.session.json` that says where
 each file starts. Files are written in fragments, so even a crash leaves
 them playable.

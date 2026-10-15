@@ -21,6 +21,9 @@ use isocast_protocol::library::{
 };
 use isocast_protocol::obs::Imported;
 use isocast_protocol::plugin::{PluginAddParams, PluginChange, PluginTarget, Plugins};
+use isocast_protocol::project::{
+    ListProjectsParams, ProjectRenamed, Projects, RenameProjectParams,
+};
 use isocast_protocol::stream::{StreamService, StreamStatus};
 use isocast_protocol::timeline::{
     ExportStarted, RetakeParams, Retaken, TimelineClosed, TimelineExportParams, TimelineInfo,
@@ -607,6 +610,39 @@ impl Isocast {
         Parameters(Strict(params)): Parameters<Strict<DataSetParams>>,
     ) -> Result<Json<DataRevision>, String> {
         self.call(Method::DataSet(Box::new(params))).await
+    }
+
+    #[tool(
+        description = "The recording projects, newest first: each recording session writes \
+                       into its own folder (`<date> <time> Untitled` in the recordings folder) \
+                       with every take's program and ISO files, manifests and exports. Each \
+                       has an id (stable across renames), name, folder, takes (manifests) and \
+                       files. Optional `limit` (100 if absent).",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_projects(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ListProjectsParams>>,
+    ) -> Result<Json<Projects>, String> {
+        self.call(Method::ListProjects(Some(params))).await
+    }
+
+    #[tool(
+        description = "Rename a recording project (by id, from list_projects): its folder \
+                       becomes `<date> <time> <name>` (numbered if taken). Refused while a \
+                       recording or an export writes into it. Manifests and timelines keep \
+                       finding its files. Returns the project, its old name and old folder.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn rename_project(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<RenameProjectParams>>,
+    ) -> Result<Json<ProjectRenamed>, String> {
+        self.call(Method::RenameProject(params)).await
     }
 
     #[tool(
@@ -1566,6 +1602,8 @@ Text in scenes can show a data key (`data = \"score.home\"`); set_data changes i
 Timelines line takes up like a clip bar: new_timeline makes one current, and every take that \
 finishes is added to it; retake records the last one again, remove_clip and move_clip edit \
 it (takes' files are never deleted), export_timeline joins it into one file. \
+Each recording session writes into its own project folder; list_projects finds them and \
+rename_project names one once it has stopped. \
 Sources and scenes are addressed by id. Errors name the field and list valid options."
 )]
 impl ServerHandler for Isocast {}

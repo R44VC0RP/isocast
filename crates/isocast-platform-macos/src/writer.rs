@@ -316,6 +316,12 @@ impl AssetWriter {
             .path
             .to_str()
             .context("the file path is not valid UTF-8")?;
+        // AVAssetWriter takes a path, not a descriptor, and follows a link
+        // at it: refuse any entry there (a dangling link a plugin made),
+        // and check what it made below.
+        if spec.path.symlink_metadata().is_ok() {
+            bail!("{path} already exists; not recording over it");
+        }
         let url = NSURL::fileURLWithPath(&NSString::from_str(path));
         let file_type = match spec.container {
             Container::Mov => unsafe { AVFileTypeQuickTimeMovie },
@@ -375,6 +381,12 @@ impl AssetWriter {
 
         if !unsafe { writer.startWriting() } {
             return Err(writer_error(&writer).context("could not start writing"));
+        }
+        // What it made must be a plain file with one name: a link put in
+        // its place meanwhile would send the recording elsewhere.
+        if let Some(problem) = not_plain(&spec.path) {
+            unsafe { writer.cancelWriting() };
+            bail!("{path}: {problem}; not recording into it");
         }
         Ok(Self {
             writer,
@@ -910,6 +922,21 @@ pub(crate) fn ns_error(err: &NSError) -> anyhow::Error {
             .and_then(|e| e.downcast::<NSError>().ok());
     }
     anyhow!(parts.join(": "))
+}
+
+/// Why the file at `path` isn't a plain file with a single name (a
+/// symbolic link, or a hard link to another), if it isn't.
+fn not_plain(path: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    match path.symlink_metadata() {
+        // Not made until the first sample on some systems: nothing there
+        // to follow yet.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => Some(format!("it can't be checked ({err})")),
+        Ok(meta) if !meta.file_type().is_file() => Some("it isn't a plain file".into()),
+        Ok(meta) if meta.nlink() != 1 => Some(format!("it has {} names", meta.nlink())),
+        Ok(_) => None,
+    }
 }
 
 /// AVFoundation constants are weakly linked; every one used here exists on

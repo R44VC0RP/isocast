@@ -336,6 +336,16 @@ pub enum Method {
     /// log segments. Changing it never touches a running recording. Returns
     /// [`DeveloperStatus`](crate::developer::DeveloperStatus).
     DebugSet(crate::developer::DebugSetParams),
+    /// The recording projects (a folder per recording session) in the
+    /// recordings folders, newest first, each with its takes, files and
+    /// exports. Its params are optional. Returns
+    /// [`Projects`](crate::project::Projects).
+    ListProjects(Option<crate::project::ListProjectsParams>),
+    /// Rename a project (by id): its folder becomes `<date> <time>
+    /// <name>`, numbered if taken. Refused while a recording or an export
+    /// writes into it. Manifests and timelines keep resolving. Returns
+    /// [`ProjectRenamed`](crate::project::ProjectRenamed).
+    RenameProject(crate::project::RenameProjectParams),
 }
 
 /// Every method's name, as requests and plugin grants spell it
@@ -411,7 +421,9 @@ pub struct StartParams {
     /// The setup to record; the live setup if absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<Setup>,
-    /// Write files here instead of the setup's `recording.folder`.
+    /// Record into a new project folder in this folder instead of the
+    /// setup's `recording.folder` (or into this folder, if it is a
+    /// project's: the new take joins that project).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<PathBuf>,
     /// Stop on its own after this many seconds.
@@ -798,6 +810,21 @@ pub enum Event {
         files: Vec<PathBuf>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         begins_at: Option<String>,
+        /// The take (1 for the first) these files belong to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        take: Option<u32>,
+        /// The take's manifest (`….session.json`), written as it records.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        manifest: Option<PathBuf>,
+        /// The folder the files are in: the project's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder: Option<PathBuf>,
+        /// The project (its id) the recording writes into.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        /// What began the take: `start`, `split` or `retake`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<TakeCause>,
     },
     /// Live counters, about once a second while recording.
     Status { live: LiveStatus },
@@ -818,6 +845,9 @@ pub enum Event {
         label: String,
         take: u32,
         time_seconds: f64,
+        /// The project (its id) being recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
     },
     /// The stream's state changed (connecting, live, reconnecting, failed,
     /// offline).
@@ -826,6 +856,12 @@ pub enum Event {
     Stopped {
         report: Option<Box<Report>>,
         error: Option<String>,
+        /// The project (its id) it recorded into, if it got one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        /// The project's folder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder: Option<PathBuf>,
     },
     /// Every audio source's and the program mix's level (`program`), about
     /// 20 times a second while the live engine runs.
@@ -889,7 +925,12 @@ pub enum Event {
         error: Option<String>,
     },
     /// A recording crossed a pause/resume boundary; its files stay open.
-    RecordingPaused { recording: RecordingPause },
+    RecordingPaused {
+        recording: RecordingPause,
+        /// The project (its id) being recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
     HotkeyFired {
         binding: String,
         action: String,
@@ -903,6 +944,65 @@ pub enum Event {
     VirtualCamera {
         camera: crate::virtual_camera::VirtualCameraStatus,
     },
+    /// A take's files are finished (a stop, a split or a retake ended it,
+    /// or the recording failed): its manifest, every file and how it
+    /// ended. Comes once per take, after its last `started`.
+    TakeFinished {
+        take: u32,
+        manifest: PathBuf,
+        /// Program and ISO files, as the manifest lists them.
+        files: Vec<PathBuf>,
+        folder: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        status: crate::manifest::SessionStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_seconds: Option<f64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        errors: Vec<String>,
+    },
+    /// A recording made a new project folder, as its first take began.
+    ProjectCreated { project: crate::project::Project },
+    /// A project was renamed: its folder moved from `old_folder`.
+    ProjectRenamed {
+        project: crate::project::Project,
+        old_name: String,
+        old_folder: PathBuf,
+    },
+    /// A camera, microphone, display or audio output appeared or went.
+    DeviceChanged {
+        action: DeviceAction,
+        kind: DeviceKind,
+        id: String,
+        name: String,
+    },
+}
+
+/// What began a take, in `started` events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TakeCause {
+    Start,
+    Split,
+    Retake,
+}
+
+/// Whether a device appeared or went, in `device_changed` events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceAction {
+    Added,
+    Removed,
+}
+
+/// The kind of device in `device_changed` events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceKind {
+    Camera,
+    Microphone,
+    Display,
+    AudioOutput,
 }
 
 /// The kind of an [`Event`], as its `type` says it.
@@ -931,11 +1031,15 @@ pub enum EventKind {
     HotkeyFired,
     PreviewCleared,
     VirtualCamera,
+    TakeFinished,
+    ProjectCreated,
+    ProjectRenamed,
+    DeviceChanged,
 }
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 22] = [
+    pub const NAMES: [&str; 26] = [
         "setup_changed",
         "started",
         "status",
@@ -958,6 +1062,10 @@ impl EventKind {
         "hotkey_fired",
         "preview_cleared",
         "virtual_camera",
+        "take_finished",
+        "project_created",
+        "project_renamed",
+        "device_changed",
     ];
 
     /// The kind's name, as events and `watch` spell it.
@@ -991,6 +1099,10 @@ impl Event {
             Self::HotkeyFired { .. } => EventKind::HotkeyFired,
             Self::PreviewCleared => EventKind::PreviewCleared,
             Self::VirtualCamera { .. } => EventKind::VirtualCamera,
+            Self::TakeFinished { .. } => EventKind::TakeFinished,
+            Self::ProjectCreated { .. } => EventKind::ProjectCreated,
+            Self::ProjectRenamed { .. } => EventKind::ProjectRenamed,
+            Self::DeviceChanged { .. } => EventKind::DeviceChanged,
         }
     }
 }

@@ -18,6 +18,7 @@ pub mod hotkeys;
 pub mod layout;
 mod pacing;
 mod picture;
+pub mod project;
 pub mod record;
 pub mod render;
 pub mod scene;

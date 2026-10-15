@@ -24,6 +24,7 @@ pub mod located;
 pub mod manifest;
 pub mod obs;
 pub mod plugin;
+pub mod project;
 mod source;
 pub mod stream;
 pub mod timeline;

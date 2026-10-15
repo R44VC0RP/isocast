@@ -60,6 +60,9 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast timeline remove`](#isocast-timeline-remove)
   - [`isocast timeline move`](#isocast-timeline-move)
   - [`isocast timeline export`](#isocast-timeline-export)
+- [`isocast project`](#isocast-project)
+  - [`isocast project list`](#isocast-project-list)
+  - [`isocast project rename`](#isocast-project-rename)
 - [`isocast retake`](#isocast-retake)
 - [`isocast devices`](#isocast-devices)
 - [`isocast record`](#isocast-record)
@@ -125,6 +128,7 @@ Commands:
   plugin       Plugins: folders with an isocast-plugin.toml, installed from a local folder. A plugin's process runs sandboxed and may only call the methods it was granted
   data         The data store: values by key (like `score.home`) that text in scenes shows (`data = "score.home"` on a text source or text content), set by you, scripts, agents and plugins without changing the setup
   timeline     Timelines: takes in order, joined into one file by `export`. While one is current, every take that finishes (`stop`, or a `split`) is added to its end; `retake` records the last one again
+  project      Recording projects: a folder per recording session (`<date> <time> Untitled` in the recordings folder) with every take's files, manifests and exports
   retake       Record the last take again. Not recording (or while a stop is finishing, once it has): take the current timeline's last clip off (its files stay) and start recording. Recording: drop the take being recorded from the timeline (its files stay) and begin a new take about a quarter second later, without stopping any device; returns once it has begun
   devices      List displays, windows, cameras, microphones and audio outputs (for monitoring), with their ids and formats, and the permissions recording them needs
   record       Record a setup's ISO sources, each to its own file, until --seconds runs out or Ctrl-C. Without a setup file, record --source specs
@@ -1024,6 +1028,51 @@ Options:
   -h, --help                 Print help
 ```
 
+## isocast project
+
+```text
+Recording projects: a folder per recording session (`<date> <time> Untitled` in the recordings folder) with every take's files, manifests and exports
+
+Usage: isocast project <COMMAND>
+
+Commands:
+  list    List the recording projects (a folder per recording session), newest first, with their takes and files
+  rename  Rename a project (by id): its folder becomes `<date> <time> <NAME>`. Refused while a recording or an export writes into it; manifests and timelines keep finding its files
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## isocast project list
+
+```text
+List the recording projects (a folder per recording session), newest first, with their takes and files
+
+Usage: isocast project list [OPTIONS]
+
+Options:
+      --limit <LIMIT>  At most this many (100 if absent)
+      --json           
+  -h, --help           Print help
+```
+
+## isocast project rename
+
+```text
+Rename a project (by id): its folder becomes `<date> <time> <NAME>`. Refused while a recording or an export writes into it; manifests and timelines keep finding its files
+
+Usage: isocast project rename [OPTIONS] <PROJECT> <NAME>
+
+Arguments:
+  <PROJECT>  
+  <NAME>     
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
 ## isocast retake
 
 ```text
@@ -1063,7 +1112,7 @@ Arguments:
 Options:
       --source <SPEC>      Record without a setup file: screen, display[:NAME_OR_ID], camera:NAME_OR_ID, mic[:NAME_OR_ID], system-audio, test-pattern[:WIDTHxHEIGHT[@FPS]] or tone[:HZ]. Repeat for more sources; every audio source goes into every file
       --seconds <SECONDS>  Stop after this many seconds
-      --folder <FOLDER>    Write files here instead of the setup's recording.folder
+      --folder <FOLDER>    Record into a new project folder in this folder instead of the setup's recording.folder (or into this folder, if it is a project's)
       --json               Print the result as JSON
   -h, --help               Print help
 ```

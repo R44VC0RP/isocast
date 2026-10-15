@@ -29,6 +29,7 @@ mod hotkeys;
 mod library;
 mod mcp;
 mod plugin;
+mod project;
 #[cfg(target_os = "macos")]
 mod shared_frames;
 mod timeline;
@@ -175,6 +176,13 @@ enum Command {
         #[command(subcommand)]
         command: timeline::TimelineCommand,
     },
+    /// Recording projects: a folder per recording session
+    /// (`<date> <time> Untitled` in the recordings folder) with every
+    /// take's files, manifests and exports.
+    Project {
+        #[command(subcommand)]
+        command: project::ProjectCommand,
+    },
     /// Record the last take again. Not recording (or while a stop is
     /// finishing, once it has): take the current timeline's last clip off
     /// (its files stay) and start recording. Recording: drop the take being
@@ -213,7 +221,9 @@ enum Command {
         /// Stop after this many seconds.
         #[arg(long)]
         seconds: Option<f64>,
-        /// Write files here instead of the setup's recording.folder.
+        /// Record into a new project folder in this folder instead of the
+        /// setup's recording.folder (or into this folder, if it is a
+        /// project's).
         #[arg(long)]
         folder: Option<PathBuf>,
         /// Print the result as JSON.
@@ -933,6 +943,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Plugin { command } => plugin::run(command),
         Command::Data { command } => data::run(command),
         Command::Timeline { command } => timeline::run(command),
+        Command::Project { command } => project::run(command),
         Command::Retake {
             folder,
             seconds,
@@ -1619,8 +1630,15 @@ fn record(
             isocast_diagnostics::diagnostic!("warn"; "warning: {message}");
         }
     };
+    // Into a project folder in the recordings folder, as isocastd records.
+    let root = match folder {
+        Some(folder) => folder,
+        None => isocast_engine::record::expand_home(&setup.recording.folder),
+    };
+    let (project, _, created) = isocast_engine::project::begin(&root)
+        .with_context(|| format!("could not make a project folder in {}", root.display()))?;
     let options = RecordOptions {
-        folder,
+        folder: Some(project.clone()),
         duration,
         stop,
         on_start: Some(&announce),
@@ -1628,8 +1646,11 @@ fn record(
         on_take: None,
         control: None,
     };
-    let report = record_with_platform(&setup, &options)?;
-    print_report(&report, json)
+    let report = record_with_platform(&setup, &options);
+    if report.is_err() && created {
+        isocast_protocol::project::discard_if_empty(&project);
+    }
+    print_report(&report?, json)
 }
 
 /// Print a session report; failing if the session had errors.
@@ -2974,10 +2995,20 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
         }
         match event {
             Event::SetupChanged { revision } => println!("setup changed: revision {revision}"),
-            Event::Started { files, begins_at } => {
+            Event::Started {
+                files,
+                begins_at,
+                take,
+                folder,
+                ..
+            } => {
+                let take = take.map(|n| format!(" {n}")).unwrap_or_default();
+                let folder = folder
+                    .map(|f| format!(" in {}", f.display()))
+                    .unwrap_or_default();
                 match begins_at {
-                    Some(at) => println!("new take (from {at}):"),
-                    None => println!("recording started:"),
+                    Some(at) => println!("new take{take} (from {at}){folder}:"),
+                    None => println!("recording started{folder}:"),
                 }
                 for file in files {
                     println!("  {}", file.display());
@@ -2996,7 +3027,7 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                 );
             }
             Event::Warning { message } => println!("warning: {message}"),
-            Event::RecordingPaused { recording } => println!(
+            Event::RecordingPaused { recording, .. } => println!(
                 "{} at {:.2} s; {:.2} s paused",
                 if recording.paused {
                     "paused"
@@ -3031,8 +3062,9 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                 label,
                 take,
                 time_seconds,
+                ..
             } => println!("marker {label:?} at {time_seconds:.2} s in take {take}"),
-            Event::Stopped { report, error } => match (report, error) {
+            Event::Stopped { report, error, .. } => match (report, error) {
                 (Some(report), _) => println!(
                     "recording stopped after {:.2} s; manifest {}",
                     report.duration_seconds,
@@ -3136,6 +3168,44 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                     error.map(|e| format!(": {e}")).unwrap_or_default()
                 );
             }
+            Event::TakeFinished {
+                take,
+                manifest,
+                status,
+                duration_seconds,
+                ..
+            } => println!(
+                "take {take} finished ({}{}): {}",
+                serde_json::to_value(status)?.as_str().unwrap_or_default(),
+                duration_seconds
+                    .map(|d| format!(", {d:.2} s"))
+                    .unwrap_or_default(),
+                manifest.display()
+            ),
+            Event::ProjectCreated { project } => println!(
+                "project {} {:?} created: {}",
+                project.id,
+                project.name,
+                project.folder.display()
+            ),
+            Event::ProjectRenamed {
+                project, old_name, ..
+            } => println!(
+                "project {} renamed from {old_name:?} to {:?}: {}",
+                project.id,
+                project.name,
+                project.folder.display()
+            ),
+            Event::DeviceChanged {
+                action,
+                kind,
+                id,
+                name,
+            } => println!(
+                "{} {name:?} ({id}) {}",
+                serde_json::to_value(kind)?.as_str().unwrap_or_default(),
+                serde_json::to_value(action)?.as_str().unwrap_or_default()
+            ),
         }
     }
     // Events end only when isocastd hangs up; a watcher must not mistake

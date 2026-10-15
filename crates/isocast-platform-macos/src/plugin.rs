@@ -40,6 +40,33 @@ pub struct Sandbox {
     /// It may connect anywhere on the network. Without it, it can only
     /// serve (accept connections), and reach isocastd on its socket.
     pub network: bool,
+    /// The recordings folders, and what it may do in them (`permissions.
+    /// recordings`): nothing (unreadable even outside the home folder),
+    /// read, or read and create new files inside their project folders.
+    pub recordings: Vec<PathBuf>,
+    pub recordings_access: Recordings,
+    /// Folders in the recordings folders named like project folders that
+    /// aren't (no `.isocast-project.json`): no writing in them either.
+    pub not_projects: Vec<PathBuf>,
+}
+
+/// A project folder's name as a regex: `<YYYY-MM-DD HH-MM-SS> <name>`.
+const PROJECT_NAME: &str =
+    "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]-[0-9][0-9]-[0-9][0-9] [^/]+";
+
+/// What a plugin may do in the recordings folders.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Recordings {
+    /// Nothing: not even read.
+    #[default]
+    None,
+    Read,
+    /// Read, and create new files (and folders) inside a folder in a
+    /// recordings folder (a project's). Seatbelt's `file-write-create`
+    /// alone allows making a file and writing it through the handle that
+    /// made it, but not opening an existing file for writing, renaming,
+    /// deleting, or hard-linking one: existing media can't be changed.
+    Write,
 }
 
 /// Mach services a plugin may not look up: privacy-protected devices and
@@ -82,18 +109,29 @@ impl Sandbox {
              (deny file-read* (subpath {}))\n",
             quote(&self.home)
         ));
+        let mut readable = self.readable.clone();
+        if self.recordings_access != Recordings::None {
+            readable.extend(self.recordings.iter().cloned());
+        }
         let mut parents: Vec<PathBuf> = Vec::new();
-        for path in &self.readable {
+        for path in &readable {
             for parent in path.ancestors().skip(1) {
                 if parent.starts_with(&self.home) && !parents.iter().any(|p| p == parent) {
                     parents.push(parent.to_path_buf());
                 }
             }
         }
-        if !self.readable.is_empty() {
+        if self.recordings_access == Recordings::None && !self.recordings.is_empty() {
+            out.push_str(&format!(
+                ";; Recordings: not granted, so unreadable wherever they are.\n\
+                 (deny file-read*{})\n",
+                list(&self.recordings, "subpath")
+            ));
+        }
+        if !readable.is_empty() {
             out.push_str(&format!(
                 "(allow file-read*{})\n",
-                list(&self.readable, "subpath")
+                list(&readable, "subpath")
             ));
         }
         if !parents.is_empty() {
@@ -109,6 +147,44 @@ impl Sandbox {
              (literal \"/dev/tty\"))\n",
             list(&self.writable, "subpath")
         ));
+        if !self.recordings.is_empty() {
+            // No hard links in them, ever: a second name for a recording
+            // outlives deleting it and can be reached from outside.
+            out.push_str(&format!(
+                ";; Recordings: never a hard link to a file in them.\n(deny file-link{})\n",
+                list(&self.recordings, "subpath")
+            ));
+        }
+        if self.recordings_access == Recordings::Write {
+            // Later rules win: plain files and folders inside a project
+            // folder (named `<YYYY-MM-DD HH-MM-SS> …` as Isocast names them;
+            // folders so named that aren't projects are listed in
+            // `not_projects`), never links, and never the engine's own
+            // files (manifests and their `.partial`s, project, lock and
+            // probe files).
+            let roots: Vec<String> = self
+                .recordings
+                .iter()
+                .filter_map(|root| regex(root))
+                .collect();
+            if !roots.is_empty() {
+                out.push_str(";; Recordings: new plain files inside project folders only.\n");
+                out.push_str("(allow file-write-create (require-all (require-any");
+                for root in &roots {
+                    out.push_str(&format!(" (regex #\"^{root}/{PROJECT_NAME}/\")"));
+                }
+                out.push_str(") (vnode-type REGULAR-FILE DIRECTORY)))\n(deny file-write-create");
+                for root in &roots {
+                    out.push_str(&format!(
+                        " (regex #\"^{root}/.*\\.session\\.json$\") \
+                         (regex #\"^{root}/.*\\.partial$\") \
+                         (regex #\"^{root}/(.*/)?\\.isocast[^/]*$\")"
+                    ));
+                }
+                out.push_str(&list(&self.not_projects, "subpath"));
+                out.push_str(")\n");
+            }
+        }
         out.push_str(&format!(
             ";; Programs: only its own command.\n\
              (deny process-exec*)\n\
@@ -143,6 +219,23 @@ impl Sandbox {
         );
         out
     }
+}
+
+/// A path as the start of an SBPL regex (`#"..."`, where a quote can't
+/// appear): None for a path with a quote or a non-UTF-8 name.
+fn regex(path: &Path) -> Option<String> {
+    let text = path.to_str()?;
+    if text.contains('"') {
+        return None;
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        if "\\.^$|?*+()[]{}".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    Some(out)
 }
 
 /// A path as an SBPL string.
@@ -345,6 +438,9 @@ mod tests {
             program_folders: vec!["/opt/homebrew/Cellar/python@3.14/3.14.7".into()],
             socket: "/private/tmp/a \"b\".sock".into(),
             network: false,
+            recordings: vec!["/Volumes/Media/Rec (1).x".into()],
+            recordings_access: Recordings::None,
+            not_projects: Vec::new(),
         };
         let profile = sandbox.profile();
         assert!(profile.contains("(deny file-read* (subpath \"/Users/ryan\"))"));
@@ -357,6 +453,20 @@ mod tests {
                 .contains("(allow network-outbound (literal \"/private/tmp/a \\\"b\\\".sock\"))")
         );
         assert!(!profile.contains("(remote ip)"));
+        // Recordings: unreadable without a grant, even outside home.
+        assert!(profile.contains("(deny file-read* (subpath \"/Volumes/Media/Rec (1).x\"))"));
+        assert!(!profile.contains("file-write-create"));
+        let write = Sandbox {
+            recordings_access: Recordings::Write,
+            ..sandbox.clone()
+        }
+        .profile();
+        assert!(write.contains("(allow file-read* "));
+        assert!(write.contains(&format!(
+            "(regex #\"^/Volumes/Media/Rec \\(1\\)\\.x/{PROJECT_NAME}/\")"
+        )));
+        assert!(write.contains("(vnode-type REGULAR-FILE DIRECTORY)"));
+        assert!(profile.contains("(deny file-link (subpath \"/Volumes/Media/Rec (1).x\"))"));
         assert!(
             Sandbox {
                 network: true,
