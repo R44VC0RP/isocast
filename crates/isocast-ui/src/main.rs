@@ -15,7 +15,12 @@
 //!                                    window without taking focus)
 //! isocast-ui --snapshot out.png [--size 1280x800] [--scale 2]
 //!            [--state settings:output] [--state kit] [--a11y]
-//!                                    drawn offscreen, nothing on screen
+//!            [--crop controls]       drawn offscreen, nothing on screen
+//!                                    (several --snapshot: one picture
+//!                                    after each one's states, one app)
+//! isocast-ui --snapshot-watch DIR [--state record] [--crop controls]
+//!                                    …redrawn on every ui/*.slint edit
+//!                                    (built with --features live-slint)
 //! isocast-ui --soak 600 [--no-check] offscreen at 60 fps for 10 minutes,
 //!                                    dragging the box and checking frames
 //! isocast-ui --motion SUITE.toml …   replay scripted pointer input
@@ -63,7 +68,14 @@ use anyhow::{Context, Result, bail};
 slint::include_modules!();
 
 pub struct Options {
-    pub snapshot: Option<PathBuf>,
+    /// Each picture, after the first N of `states` (the states given
+    /// before the next `--snapshot`).
+    pub snapshots: Vec<(PathBuf, usize)>,
+    /// `--snapshot-watch DIR`: draw DIR/snapshot.png, then again whenever
+    /// a .slint file changes (a `live-slint` build reads them at run time).
+    pub watch: Option<PathBuf>,
+    /// `--crop`: only this part of the window in each picture.
+    pub crop: Option<String>,
     pub size: (u32, u32),
     pub scale: f32,
     pub states: Vec<String>,
@@ -88,6 +100,11 @@ pub struct Options {
 const USAGE: &str = "usage: isocast-ui [--bench SECONDS] [--check] [--drag-test SECONDS] [--fps N]
                   [--drag-mode move|resize|resize-select|columns|rows] [--preview layers|image] [--no-float]
        isocast-ui --snapshot OUT.png [--size WxH] [--scale N] [--state STATE]… [--a11y] [--wait-ms MS]
+                  [--crop AREA|X,Y,W,H] [--snapshot OUT2.png [--state STATE]…]…
+       isocast-ui --snapshot-watch DIR [--size WxH] [--scale N] [--state STATE]… [--crop AREA|X,Y,W,H]
+                  (a `--features live-slint` build: redraws DIR/snapshot.png on every ui/*.slint edit)
+crop areas: an element id in ui/app.slint (scenes, sources, mixer, transitions, controls, stage,
+        bar), the first shown element of a component (ControlsDock), or X,Y,W,H in window points
        isocast-ui --a11y [--state STATE]…
        isocast-ui --soak SECONDS [--no-check] [--still] [--size WxH] [--scale N]
 states (in order, see src/offscreen.rs and each area's STATES):
@@ -105,7 +122,9 @@ ISOCAST_BACKGROUND=1 shows the window without taking focus (always on for
 
 fn parse() -> Result<Options> {
     let mut options = Options {
-        snapshot: None,
+        snapshots: Vec::new(),
+        watch: None,
+        crop: None,
         size: (1280, 800),
         scale: 1.0,
         states: Vec::new(),
@@ -129,7 +148,19 @@ fn parse() -> Result<Options> {
                 .with_context(|| format!("{name} needs a value\n{USAGE}"))
         };
         match arg.as_str() {
-            "--snapshot" => options.snapshot = Some(value("--snapshot")?.into()),
+            // A later picture is taken after the states that follow it;
+            // the first after every state before the second (so one
+            // `--snapshot` anywhere comes after all the states).
+            "--snapshot" => {
+                let path = value("--snapshot")?.into();
+                let states = options.states.len();
+                if let Some(last) = options.snapshots.last_mut() {
+                    last.1 = states;
+                }
+                options.snapshots.push((path, usize::MAX));
+            }
+            "--snapshot-watch" => options.watch = Some(value("--snapshot-watch")?.into()),
+            "--crop" => options.crop = Some(value("--crop")?),
             "--size" => {
                 let size = value("--size")?;
                 let (w, h) = size
@@ -205,6 +236,10 @@ fn parse() -> Result<Options> {
             other => bail!("unknown option {other:?}\n{USAGE}"),
         }
     }
+    let states = options.states.len();
+    if let Some(last) = options.snapshots.last_mut() {
+        last.1 = states;
+    }
     Ok(options)
 }
 
@@ -221,7 +256,11 @@ fn main() {
         });
     }
     let result = parse().and_then(|options| {
-        if options.snapshot.is_some() || options.a11y || options.soak.is_some() {
+        if !options.snapshots.is_empty()
+            || options.watch.is_some()
+            || options.a11y
+            || options.soak.is_some()
+        {
             offscreen::run(&options)
         } else {
             window::run(&options)

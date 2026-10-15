@@ -3337,3 +3337,11 @@ One line per finished task, newest last.
   files/manifests/timeline/export resolve after rename, flat recordings
   untouched and recovered; `plugin_files`: denials per grant; shutdown:
   kill -9 take recovered in its project folder).
+- UI fast loop (2026-10-15): .slint edits show without a rebuild
+  (`--features live-slint`, Slint's interpreter, dev only), a watcher
+  (`--snapshot-watch DIR --crop AREA`) redraws in ~0.9 s, `--snapshot`
+  repeats for several pictures per run, the `ui-dev` profile rebuilds a
+  Rust edit in ~3-4 s, and visual-shots renders 4 views at once with
+  VIEWS/SIZES subsets. Verified: 86900ef's fix redone in watch mode
+  (0.87 s to the clipped picture, 0.91 s to the fixed one); 0 changed
+  pixels base vs head and live vs compiled across all 15 views.

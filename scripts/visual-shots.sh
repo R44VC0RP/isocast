@@ -15,20 +15,29 @@
 # A view that fails to draw is reported and skipped (a state the other
 # build doesn't know shows as added or removed); the script fails only if
 # no view at all was drawn, or the GPU is a software or unknown one.
+#
+# For a quicker local check, VIEWS and SIZES pick a subset (VIEWS="main
+# settings" SIZES=1440x900@2), and JOBS renders that many views at once
+# (default 4; the pictures are the same as one at a time). CI renders
+# every view at every size, one at a time (JOBS=1 in visual.yml).
 set -eu
 
 # Window size and scale (WxH@SCALE). Adding a size is one line here.
-SIZES="
+SIZES="${SIZES:-
 1440x900@2
 1920x1080@1
 900x600@2
-"
+}"
+VIEWS="${VIEWS:-main studio properties settings mixer}"
+JOBS="${JOBS:-4}"
 
 here="$(cd "$(dirname "$0")" && pwd)"
 bin="$(cd "${1:?usage: visual-shots.sh BIN_DIR OUT_DIR}" && pwd)"
 out="${2:?usage: visual-shots.sh BIN_DIR OUT_DIR}"
 mkdir -p "$out/logs"
 out="$(cd "$out" && pwd)"
+# Only this run's logs count towards "drawn" (OUT_DIR may be reused).
+rm -f "${out:?}"/logs/*.log
 isocast="$bin/isocast"
 ui="$bin/isocast-ui"
 
@@ -44,6 +53,9 @@ export TZ=UTC LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 # No CPU reading or audio levels in the pictures (they differ every run).
 export ISOCAST_SNAPSHOT_STILL=1
 cleanup() {
+    # Renders still running (an interrupted run) go first.
+    # shellcheck disable=SC2046
+    kill $(jobs -p) 2>/dev/null || true
     "$isocast" engine stop >/dev/null 2>&1 || true
     pkill -f "$work" 2>/dev/null || true
     rm -rf "${work:?}"
@@ -57,21 +69,28 @@ cp "$here/screenshots/offscreen.toml" "$here/screenshots/landscape.jpg" \
 "$isocast" scene main --cut >/dev/null
 "$isocast" preview intro >/dev/null
 
-drawn=0
+running=0
 shot() { # shot NAME WxH@SCALE [STATE...]
+    case " $VIEWS " in *" $1 "*) ;; *) return 0 ;; esac
     wh="${2%@*}"
     scale="${2#*@}"
     name="$1-$wh"
     shift 2
     set -- --snapshot "$out/$name.png" --size "$wh" --scale "$scale" --wait-ms 800 \
         $(for state in "$@"; do printf -- '--state %s ' "$state"; done)
-    if "$ui" "$@" >"$out/logs/$name.log" 2>&1; then
-        echo "$out/$name.png"
-        drawn=$((drawn + 1))
-    else
-        echo "visual-shots: $name failed:" >&2
-        tail -5 "$out/logs/$name.log" >&2
-        rm -f "$out/$name.png"
+    (
+        if "$ui" "$@" >"$out/logs/$name.log" 2>&1; then
+            echo "$out/$name.png"
+        else
+            echo "visual-shots: $name failed:" >&2
+            tail -5 "$out/logs/$name.log" >&2
+            rm -f "$out/$name.png"
+        fi
+    ) &
+    running=$((running + 1))
+    if [ "$running" -ge "$JOBS" ]; then
+        wait
+        running=0
     fi
 }
 
@@ -83,6 +102,11 @@ for size in $SIZES; do
     shot properties "$size" dialog:properties:mic
     shot settings "$size" settings:output
     shot mixer "$size" mixer-menu:mic
+done
+wait
+drawn=0
+for log in "$out"/logs/*.log; do
+    [ -f "$out/$(basename "$log" .log).png" ] && drawn=$((drawn + 1))
 done
 
 # isocast-ui prints the adapter it drew with ("gpu: NAME (BACKEND,

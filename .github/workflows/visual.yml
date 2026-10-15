@@ -164,6 +164,10 @@ jobs:
       # visual-shots.sh fails if the GPU adapter is a software one, and
       # visual_diff.py if a picture is blank: comparing those would be noise.
       - name: Render
+        # One view at a time, as before the local default of 4: the
+        # runner's few cores are shared with the engine.
+        env:
+          JOBS: "1"
         run: |
           tools="$RUNNER_TEMP/tools"
           "$tools/visual-shots.sh" "$RUNNER_TEMP/bin-base" "$RUNNER_TEMP/shots-base"

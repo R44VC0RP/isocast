@@ -1541,6 +1541,19 @@ each section. Delete entries that stop being true.
   regression; coordinator owns the remaining acceptance decision.
   Evidence and limitations:
   `/Volumes/IsocastBuild/split-drops/scratch/REPORT.md`.
+- 2026-10-15 (ui/fast-loop): **the layout loop runs on Slint's
+  interpreter, never the shipped app.** `--features live-slint` turns on
+  Slint 1.18.1's `live-preview`: the generated `AppWindow` becomes a typed
+  wrapper over slint-interpreter that compiles ui/app.slint (an absolute
+  path baked in at build time) when the app starts, so the Rust side
+  compiles unchanged. Default and release builds are untouched (same
+  pixels in all 15 visual-shots views; the optional crates aren't in
+  THIRD_PARTY_NOTICES). `--snapshot-watch` reloads in place through an
+  `AppWindow::live_reload()` that build.rs adds to the generated module
+  (Slint's own watcher needs an event loop the offscreen platform lacks).
+  The `ui-dev` profile (release + incremental, own folder) makes an
+  isocast-ui .rs edit ~3-4 s. Numbers: .slint edit -> PNG ~345 s before,
+  0.9 s watching / 1.4-3.3 s one-off now.
 
 - 2026-10-14 (Ryan): **reading OBS source is allowed; copying it isn't.**
   Agents may clone OBS Studio and its plugins outside the repo and read them
@@ -4538,6 +4551,22 @@ each section. Delete entries that stop being true.
   real app needs ISOCAST_UI_PREFS per test run, or a drag's layout carries
   into the next run. CGWindowList shows isocast-ui's windows with owner
   `isocast-ui` and an empty title without Screen Recording.
+- 2026-10-15 (ui/fast-loop): under the interpreter (`live-slint`) the
+  window's `init` ran before the Rust side hid the in-window menu bar and
+  `changed height` never fired after, so `Viewport` was 40 points short
+  (docks 229 instead of 240). offscreen.rs resizes there and back after
+  show and after every reload (`live_resize`); keep that if the menu bar
+  or Viewport logic changes. The interpreter also logs "The use of the
+  ElementHandle API requires … debug info" for each of ~2000 internal
+  items on every element search (`--crop`, `press:`); the offscreen
+  platform drops that line, as printing it made a reload 3.8 s instead
+  of 0.9 s. Watch reloads keep properties, models and callbacks the Rust
+  side set, so dialogs, menus, recording carry over; hover does not.
+  `--state stream:live` before `wait:` is undone by the daemon's next
+  stream status (compiled builds too): put `stream:` after the wait.
+  visual-shots pictures include the disk's free space, so render base
+  and head back to back or unrelated text shows as changed.
+
 - 2026-10-14 (#47 fix round): building a `git archive` of main into the
   same CARGO_TARGET_DIR (for "before" screenshots) left main's
   isocast-protocol/diagnostics artifacts in place; the branch then failed

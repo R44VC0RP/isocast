@@ -8,6 +8,14 @@ description = "The Isocast app rebuilt in Slint (spike): a portable native windo
 # Slint is used under its royalty-free licence, which asks for the
 # "About Slint" notice the app shows in Help → About Isocast.
 
+[features]
+# Development only, never in a shipped build: the interface is read from
+# ui/*.slint by Slint's interpreter when the app starts (and again after an
+# edit, under `--snapshot-watch`) instead of being compiled into the
+# binary, so a layout change needs no rebuild and a Rust change rebuilds
+# far less. Same Slint version; see build.rs.
+live-slint = ["slint/live-preview"]
+
 [[bin]]
 name = "isocast-ui"
 path = "src/main.rs"

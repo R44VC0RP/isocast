@@ -68,6 +68,16 @@ impl Platform for OffscreenPlatform {
     fn duration_since_start(&self) -> Duration {
         self.now.get()
     }
+
+    /// Slint's `debug()` output, less the element search's complaint about
+    /// missing debug info, which the interpreter (`live-slint`) makes for
+    /// each of thousands of internal items on every search.
+    fn debug_log(&self, arguments: core::fmt::Arguments) {
+        let text = arguments.to_string();
+        if !text.starts_with("The use of the ElementHandle API requires") {
+            eprintln!("{text}");
+        }
+    }
 }
 
 struct Offscreen {
@@ -127,6 +137,8 @@ pub fn run(options: &Options) -> Result<()> {
         size: LogicalSize::new(width as f32, height as f32),
     });
     app.show()?;
+    #[cfg(feature = "live-slint")]
+    live_resize(&window.window, width as f32, height as f32);
 
     let (tx, updates) = channel();
     let commands = daemon::start(move |update| {
@@ -150,11 +162,23 @@ pub fn run(options: &Options) -> Result<()> {
         still: std::env::var_os("ISOCAST_SNAPSHOT_STILL").is_some(),
     };
     offscreen.wait_for_daemon(Duration::from_millis(options.wait_ms))?;
-    for state in &options.states {
-        offscreen
-            .state(state)
-            .with_context(|| format!("--state {state}"))?;
+    let mut done = 0;
+    for (path, states) in &options.snapshots {
+        offscreen.states(&options.states[done..(*states).max(done)])?;
+        done = done.max(*states);
+        offscreen.settle();
+        let started = Instant::now();
+        offscreen.snapshot(path, options.crop.as_deref())?;
+        isocast_diagnostics::diagnostic!(
+            "saved {} ({}x{} at {}x, drawn in {} ms)",
+            path.display(),
+            width,
+            height,
+            scale,
+            started.elapsed().as_millis()
+        );
     }
+    offscreen.states(&options.states[done..])?;
     offscreen.settle();
 
     if options.a11y {
@@ -164,15 +188,8 @@ pub fn run(options: &Options) -> Result<()> {
         offscreen.settle();
         crate::a11y::print(&offscreen.app)?;
     }
-    if let Some(path) = &options.snapshot {
-        offscreen.snapshot(path)?;
-        isocast_diagnostics::diagnostic!(
-            "saved {} ({}x{} at {}x)",
-            path.display(),
-            width,
-            height,
-            scale
-        );
+    if let Some(dir) = &options.watch {
+        offscreen.watch(dir, options.crop.as_deref())?;
     }
     if let Some(seconds) = options.soak {
         offscreen.soak(seconds, options.check, options.still)?;
@@ -181,6 +198,14 @@ pub fn run(options: &Options) -> Result<()> {
 }
 
 impl Offscreen {
+    fn states(&mut self, states: &[String]) -> Result<()> {
+        for state in states {
+            self.state(state)
+                .with_context(|| format!("--state {state}"))?;
+        }
+        Ok(())
+    }
+
     /// Apply what the daemon sent until it has answered (or said it can't
     /// be reached), then a moment longer for anything that follows.
     fn wait_for_daemon(&mut self, extra: Duration) -> Result<()> {
@@ -522,13 +547,16 @@ impl Offscreen {
         Ok(target)
     }
 
-    fn snapshot(&mut self, path: &Path) -> Result<()> {
+    fn snapshot(&mut self, path: &Path, crop: Option<&str>) -> Result<()> {
         // Two passes: the first lays out and makes the preview texture at
         // its final size.
         self.render()?;
         let target = self.render()?;
-        let (w, h) = (target.width(), target.height());
-        let rgba = read_pixels(&self.gpu, &target, 0, 0, w, h)?;
+        let (x, y, w, h) = match crop {
+            Some(crop) => self.crop(crop, &target)?,
+            None => (0, 0, target.width(), target.height()),
+        };
+        let rgba = read_pixels(&self.gpu, &target, x, y, w, h)?;
         let mut file = std::io::BufWriter::new(
             std::fs::File::create(path)
                 .with_context(|| format!("can't write {}", path.display()))?,
@@ -540,6 +568,107 @@ impl Offscreen {
         writer.write_image_data(&rgba)?;
         writer.finish()?;
         Ok(())
+    }
+
+    /// `--snapshot-watch DIR`: draw DIR/snapshot.png now and again after
+    /// every edit to a .slint file, until stopped. The new interface is
+    /// put in place of the old (the interpreter reads ui/ again); what the
+    /// Rust side gave it (properties, models, callbacks) and the daemon's
+    /// state carry over, so the states don't run again. Each picture is
+    /// written whole (renamed into place) and announced on stdout.
+    #[cfg(feature = "live-slint")]
+    fn watch(&mut self, dir: &Path, crop: Option<&str>) -> Result<()> {
+        std::fs::create_dir_all(dir).with_context(|| format!("can't make {}", dir.display()))?;
+        let out = dir.join("snapshot.png");
+        let partial = dir.join(".snapshot.png.partial");
+        let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+        let mut seen = slint_files(&ui);
+        let draw = |this: &mut Self, started: Instant, reload_ms: u128| -> Result<()> {
+            this.snapshot(&partial, crop)?;
+            std::fs::rename(&partial, &out)?;
+            println!(
+                "drawn {} in {} ms (reload {reload_ms} ms)",
+                out.display(),
+                started.elapsed().as_millis()
+            );
+            Ok(())
+        };
+        draw(self, Instant::now(), 0)?;
+        eprintln!(
+            "watching {} for .slint edits (stop with Ctrl-C)",
+            ui.display()
+        );
+        loop {
+            self.pump(Duration::from_millis(25));
+            let now = slint_files(&ui);
+            if now == seen {
+                continue;
+            }
+            seen = now;
+            let started = Instant::now();
+            if !self.app.live_reload() {
+                println!("not drawn: the interface has errors (above); fix and save again");
+                continue;
+            }
+            let size = self.window.size.get().to_logical(self.scale);
+            live_resize(&self.window.window, size.width, size.height);
+            let reload_ms = started.elapsed().as_millis();
+            self.pump(Duration::from_millis(1));
+            self.settle();
+            // A picture that can't be drawn now (the cropped element gone
+            // mid-edit, DIR removed) is reported; the next save tries again.
+            if let Err(error) = draw(self, started, reload_ms) {
+                println!("not drawn: {error:#}");
+            }
+        }
+    }
+
+    #[cfg(not(feature = "live-slint"))]
+    fn watch(&mut self, _dir: &Path, _crop: Option<&str>) -> Result<()> {
+        bail!(
+            "--snapshot-watch reads ui/*.slint at run time, which needs a development build: \
+             cargo build --profile ui-dev -p isocast-ui --features live-slint"
+        )
+    }
+
+    /// `--crop AREA|X,Y,W,H` as a rectangle of the drawn texture's pixels.
+    fn crop(&self, crop: &str, target: &wgpu::Texture) -> Result<(u32, u32, u32, u32)> {
+        let (x, y, w, h) = if let Ok([x, y, w, h]) = numbers::<4>(crop) {
+            (x, y, w, h)
+        } else {
+            use i_slint_backend_testing::{ElementHandle, ElementRoot};
+            // An id is qualified by the component that declares it
+            // (`Workspace::controls`).
+            let suffix = format!("::{}", crop.replace('_', "-"));
+            let shown = |e: &ElementHandle| e.size().width > 0.0 && e.size().height > 0.0;
+            let element = self
+                .app
+                .root_element()
+                .query_descendants()
+                .match_predicate(move |e| e.id().is_some_and(|id| id.ends_with(&suffix)))
+                .find_all()
+                .into_iter()
+                .chain(ElementHandle::find_by_element_type_name(&self.app, crop))
+                .find(shown);
+            let Some(element) = element else {
+                bail!(
+                    "--crop: no shown element {crop:?}; an element id in ui/app.slint (scenes, \
+                     sources, mixer, transitions, controls, stage, bar), the first shown element of a \
+                     component (ControlsDock) or X,Y,W,H in window points"
+                );
+            };
+            let (at, size) = (element.absolute_position(), element.size());
+            (at.x, at.y, size.width, size.height)
+        };
+        let s = self.scale;
+        let px = |v: f32| (v * s).round().max(0.0) as u32;
+        let (x, y) = (
+            px(x).min(target.width() - 1),
+            px(y).min(target.height() - 1),
+        );
+        let w = px(w).clamp(1, target.width() - x);
+        let h = px(h).clamp(1, target.height() - y);
+        Ok((x, y, w, h))
     }
 
     /// Draw at 60 fps for `seconds` while dragging the selection box back
@@ -678,6 +807,46 @@ impl Offscreen {
 fn is_item(rgb: [u8; 3]) -> bool {
     let near = |a: [u8; 3], b: [u8; 3]| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= 6);
     near(rgb, ITEM_RGB) || near(rgb, [86, 169, 150])
+}
+
+/// The interpreter (`live-slint`) runs the window's `init` before the
+/// Rust side hides the in-window menu bar, and doesn't run `changed
+/// height` when the bar goes, so `Viewport` keeps the window's height less
+/// the bar's (the docks came out 229 points high instead of 240). A resize
+/// there and back sets it, as the compiled interface has it from the
+/// start. After every reload too, which runs `init` again.
+#[cfg(feature = "live-slint")]
+fn live_resize(window: &slint::Window, width: f32, height: f32) {
+    for h in [height + 1.0, height] {
+        window.dispatch_event(WindowEvent::Resized {
+            size: LogicalSize::new(width, h),
+        });
+        slint::platform::update_timers_and_animations();
+    }
+}
+
+/// Every .slint file under `dir` with its modification time and size.
+#[cfg(feature = "live-slint")]
+fn slint_files(dir: &Path) -> Vec<(std::path::PathBuf, std::time::SystemTime, u64)> {
+    let mut files = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "slint") {
+                let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                files.push((path, modified, meta.len()));
+            }
+        }
+    }
+    files.sort();
+    files
 }
 
 fn numbers<const N: usize>(text: &str) -> Result<[f32; N]> {

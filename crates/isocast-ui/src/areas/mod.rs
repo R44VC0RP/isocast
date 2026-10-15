@@ -48,6 +48,17 @@
 //! the real interface (open the dialog through `app.open_dialog`, select
 //! through `app.select`) over ones that set properties directly.
 //!
+//! # The layout loop
+//!
+//! `cargo build --profile ui-dev -p isocast-ui --features live-slint`
+//! builds an app that reads ui/*.slint at run time (Slint's interpreter;
+//! never shipped). `isocast-ui --snapshot-watch DIR [--state …] [--crop
+//! controls]` then redraws DIR/snapshot.png about a second after each
+//! .slint save. What the Rust side set carries over (dialogs, menus,
+//! record, stream, hide:) with the daemon's state; what lives in the
+//! interface (hover, typed text, focus, dragged splitters) does not.
+//! `--snapshot` may be repeated: one picture after each one's states.
+//!
 //! # Testing
 //!
 //! Build with your own `CARGO_TARGET_DIR`; snapshot offscreen against an
