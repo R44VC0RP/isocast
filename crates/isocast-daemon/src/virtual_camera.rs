@@ -16,6 +16,11 @@ pub(super) struct CameraOutput {
     stopping: bool,
     generation: u64,
     last: VirtualCameraStatus,
+    /// An activation request is waiting for the user to allow the camera
+    /// extension in System Settings (macOS release builds).
+    approval_pending: bool,
+    /// Start the camera when that approval arrives (cleared by Stop).
+    start_when_approved: bool,
 }
 
 impl CameraOutput {
@@ -59,6 +64,129 @@ impl Daemon {
     }
 
     pub(super) fn virtual_camera_start(self: &Arc<Self>) -> Result<VirtualCameraStatus, RpcError> {
+        let result = self.start_camera();
+        #[cfg(target_os = "macos")]
+        if let Err(error) = &result
+            && error
+                .message
+                .contains(isocast_platform_macos::virtual_camera::NOT_INSTALLED)
+            && isocast_platform_macos::virtual_camera::embedded_extension().is_some()
+        {
+            return self.activate_camera();
+        }
+        result
+    }
+
+    /// The first Start of a release build: its engine app carries the camera
+    /// extension, so ask macOS to activate it. Already allowed: start again
+    /// once it's published. Not yet: report the System Settings step and
+    /// start by itself when the user allows it (unless Stop came first).
+    #[cfg(target_os = "macos")]
+    fn activate_camera(self: &Arc<Self>) -> Result<VirtualCameraStatus, RpcError> {
+        use isocast_platform_macos::virtual_camera::{Activation, request_activation};
+        const APPROVAL: &str = "virtual_camera: allow Isocast Virtual Camera in System Settings › General › Login Items & Extensions › Camera Extensions (macOS asks once); it starts as soon as you do";
+        let mut generation = {
+            let mut state = self.state.lock().unwrap();
+            if state.camera.approval_pending {
+                state.camera.start_when_approved = true;
+                return Err(self.camera_failed(state, APPROVAL.into()));
+            }
+            state.camera.generation
+        };
+        match request_activation() {
+            Activation::Activated => {
+                // sysextd has activated it; CoreMediaIO publishes the device
+                // a moment later.
+                for _ in 0..20 {
+                    if self.state.lock().unwrap().camera.generation != generation {
+                        return Err(refused("virtual_camera: start was cancelled".into()));
+                    }
+                    match self.start_camera() {
+                        Err(error)
+                            if error.message.contains(
+                                isocast_platform_macos::virtual_camera::NOT_INSTALLED,
+                            ) =>
+                        {
+                            // Each attempt is a new generation; a Stop during
+                            // the pause makes another one.
+                            generation = self.state.lock().unwrap().camera.generation;
+                            thread::sleep(Duration::from_millis(250))
+                        }
+                        result => return result,
+                    }
+                }
+                let state = self.state.lock().unwrap();
+                Err(self.camera_failed(state, "virtual_camera: macOS activated Isocast Virtual Camera, but it isn't available yet; start it again in a few seconds".into()))
+            }
+            Activation::NeedsApproval(approval) => {
+                let mut state = self.state.lock().unwrap();
+                state.camera.approval_pending = true;
+                state.camera.start_when_approved = state.camera.generation == generation;
+                let daemon = Arc::downgrade(self);
+                thread::spawn(move || {
+                    let approved = approval.wait();
+                    let Some(daemon) = daemon.upgrade() else {
+                        return;
+                    };
+                    let start = {
+                        let mut state = daemon.state.lock().unwrap();
+                        state.camera.approval_pending = false;
+                        let wanted = std::mem::take(&mut state.camera.start_when_approved);
+                        if !approved && !state.camera.active() {
+                            // Don't Allow, a restart pending, or 15 minutes:
+                            // stop promising a start the app is waiting for.
+                            let message = "virtual_camera: macOS didn't get your approval for Isocast Virtual Camera; start it again to ask once more".to_owned();
+                            let _ = daemon.camera_failed(state, message);
+                            return;
+                        }
+                        wanted && approved && !state.camera.active()
+                    };
+                    if start {
+                        isocast_diagnostics::diagnostic!(
+                            "virtual camera: allowed in System Settings; starting it"
+                        );
+                        if let Err(error) = daemon.virtual_camera_start() {
+                            isocast_diagnostics::diagnostic!("warn"; "{}", error.message);
+                        }
+                    }
+                });
+                Err(self.camera_failed(state, APPROVAL.into()))
+            }
+            Activation::Failed(message) => {
+                let state = self.state.lock().unwrap();
+                Err(self.camera_failed(state, message))
+            }
+        }
+    }
+
+    /// Record and announce a failed start that never reached a worker.
+    #[cfg(target_os = "macos")]
+    fn camera_failed(
+        &self,
+        mut state: std::sync::MutexGuard<'_, State>,
+        message: String,
+    ) -> RpcError {
+        let status = VirtualCameraStatus {
+            state: VirtualCameraState::Failed,
+            last_error: Some(message.clone()),
+            ..Default::default()
+        };
+        // Status reads a finished worker before `last`: retire the failed
+        // one so this reason is what Status reports.
+        let mut retired = None;
+        if !state.camera.active() {
+            if state.camera.running.as_ref().is_some_and(|c| c.finished()) {
+                retired = state.camera.running.take();
+            }
+            state.camera.last = status.clone();
+        }
+        drop(state);
+        drop(retired); // Never dropped under state.
+        self.publish(Event::VirtualCamera { camera: status });
+        refused(message)
+    }
+
+    fn start_camera(self: &Arc<Self>) -> Result<VirtualCameraStatus, RpcError> {
         let (generation, previous) = {
             let mut state = self.state.lock().unwrap();
             if state.camera.active() {
@@ -164,6 +292,7 @@ impl Daemon {
         let (camera, generation) = {
             let mut state = self.state.lock().unwrap();
             state.camera.stopping = true;
+            state.camera.start_when_approved = false;
             state.camera.generation += 1;
             (state.camera.running.clone(), state.camera.generation)
         };

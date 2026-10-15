@@ -46,11 +46,42 @@ component Centred inherits VerticalLayout {
 }
 
 // The virtual camera's output: what it sends and at what size, how it is
-// doing, and, when its extension isn't installed, how to install it.
+// doing, and, when its extension isn't installed or allowed yet, what to do.
 component VirtualCameraDetails inherits VerticalLayout {
     property <bool> off: ControlsArea.vcam-state == "stopped" || ControlsArea.vcam-state == "failed";
     padding: Theme.space-2;
     spacing: 0;
+
+    if ControlsArea.vcam-approval: VerticalLayout {
+        spacing: 0;
+        GroupHeading { title: "Allow in System Settings"; }
+        Rectangle {
+            preferred-height: allow.preferred-height;
+            min-height: allow.preferred-height;
+            allow := Text {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                text: "macOS asks you once to allow Isocast Virtual Camera. In System Settings › General › Login Items & Extensions › Camera Extensions, turn on Isocast Virtual Camera. It starts as soon as you do.";
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading-sm;
+                wrap: word-wrap;
+            }
+        }
+        HorizontalLayout {
+            padding-top: Theme.space-2;
+            padding-bottom: Theme.space-2;
+            alignment: start;
+            Button {
+                size: ControlSize.small;
+                text: "Open System Settings";
+                icon: Icons.settings;
+                clicked => { ControlsArea.open-vcam-settings(); }
+            }
+        }
+    }
 
     if ControlsArea.vcam-missing: VerticalLayout {
         spacing: 0;
@@ -289,8 +320,8 @@ export component ControlsDock inherits Dock {
                 // OBS's words don't fit beside the gear in a 172px dock, so
                 // it is a toggle named as Studio Mode is (lit while on);
                 // screen readers and the tooltip get OBS's words.
-                tooltip: ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed: see how to install it" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
-                accessible-name: ControlsArea.vcam-missing ? "Virtual Camera (not installed)" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
+                tooltip: ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed: see how to install it" : ControlsArea.vcam-approval ? "Allow Isocast Virtual Camera in System Settings, then it starts" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
+                accessible-name: ControlsArea.vcam-missing ? "Virtual Camera (not installed)" : ControlsArea.vcam-approval ? "Virtual Camera (waiting for approval)" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
                 text: ControlsArea.vcam-state == "starting" ? "Starting…" : ControlsArea.vcam-state == "stopping" ? "Stopping…" : "Virtual Camera";
                 icon: Icons.camera;
                 checked: root.vcam-on;
@@ -307,9 +338,9 @@ export component ControlsDock inherits Dock {
             vcam-gear := Button {
                 width: Theme.control-h;
                 inset: 0px;
-                icon: ControlsArea.vcam-missing ? Icons.warning : Icons.settings;
+                icon: ControlsArea.vcam-missing || ControlsArea.vcam-approval ? Icons.warning : Icons.settings;
                 accessible-name: "Virtual Camera Settings";
-                tooltip: ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed" : "What the virtual camera shows, and its size";
+                tooltip: ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed" : ControlsArea.vcam-approval ? "Allow Isocast Virtual Camera in System Settings" : "What the virtual camera shows, and its size";
                 menu-open: vcam-details.open;
                 enabled: Ui.has-setup;
                 clicked => { vcam-details.show(); }

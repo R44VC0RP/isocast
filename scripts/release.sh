@@ -20,6 +20,10 @@ extra=()
 # Sparkle (#40): the released app's update feed; its EdDSA public key is in
 # scripts/sparkle/public-ed-key.txt and the private key never touches a build.
 feed_url=https://github.com/R44VC0RP/isocast/releases/latest/download/appcast.xml
+# Virtual camera (#67): Developer ID provisioning profiles for the engine
+# helper (System Extension capability) and its embedded camera extension.
+engine_profile="${ISOCAST_ENGINE_PROFILE:-$HOME/.config/isocast-release-secrets/isocast-engine.provisionprofile}"
+camera_profile="${ISOCAST_CAMERA_PROFILE:-$HOME/.config/isocast-release-secrets/isocast-camera.provisionprofile}"
 
 usage() {
     cat <<'EOF'
@@ -57,6 +61,10 @@ gh for drafts. Developer ID builds embed Sparkle (scripts/sparkle/sparkle.sh: pi
 hash-verified download) and need the real key in scripts/sparkle/public-ed-key.txt;
 --ad-hoc builds have no updater. Drafts sign the appcast with SPARKLE_ED_PRIVATE_KEY
 (CI) or the login keychain's Sparkle key (local). Credentials stay in the login keychain's isocast-notary profile.
+Developer ID builds embed the virtual camera extension and need its two Developer ID
+provisioning profiles: ISOCAST_ENGINE_PROFILE (dev.isocast.isocastd, System Extension
+capability) and ISOCAST_CAMERA_PROFILE (dev.isocast.isocastd.camera); defaults
+~/.config/isocast-release-secrets/isocast-{engine,camera}.provisionprofile.
 ISOCAST_APP_TARGET selects isocast-ui (default) or isocast-app (retired web app).
 Notarization uses the login keychain profile isocast-notary. Waits report progress
 every 20s; submission ids are saved for safe resume. Never publishes or pushes git.
@@ -117,12 +125,18 @@ engine="$app/Contents/Helpers/Isocast Engine.app"
 dmg="$output/Isocast-$version-arm64.dmg"
 entitlements="$root/scripts/release-entitlements.plist"
 app_entitlements="$root/scripts/release-app-entitlements.plist"
+camera_id=dev.isocast.isocastd.camera
+extension="$engine/Contents/Library/SystemExtensions/$camera_id.systemextension"
+camera_work="$output/work/camera"
 
 verify_app() {
     run codesign --verify --deep --strict --verbose=2 "$app"
     # The app and its engine must both be allowed to ask for the camera and
     # microphone, or macOS denies them silently with no prompt (#50).
-    [ "$dry_run" = 1 ] && return 0
+    if [ "$dry_run" = 1 ]; then
+        printf '+ python3 scripts/vcam-package.py verify-release %q %s\n' "$engine" "$ad_hoc_flag"
+        return 0
+    fi
     local bundle key
     for bundle in "$app" "$engine"; do
         for key in com.apple.security.device.camera com.apple.security.device.audio-input; do
@@ -133,6 +147,11 @@ verify_app() {
         /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$bundle/Contents/Info.plist" 2>/dev/null | grep -q . ||
             die "$bundle has no NSLocalNetworkUsageDescription; streaming to a local-network server would fail without a prompt"
     done
+    # The virtual camera (#67): extension present, signed, and (Developer ID)
+    # each bundle's profile matching its team, app id, expiry, certificate
+    # and signed entitlements. Ad-hoc builds carry it without profiles.
+    python3 scripts/vcam-package.py verify-release "$engine" ${ad_hoc_flag:+"$ad_hoc_flag"} ||
+        die 'the virtual camera extension or its provisioning profiles are missing or wrong (see above)'
 }
 verify_dmg() {
     run hdiutil verify "$dmg"
@@ -148,6 +167,25 @@ if [ "$dry_run" = 0 ]; then
     scripts/dmg/make-dmg.sh --check >/dev/null || die 'pinned dmgbuild is required for the installer DMG (see scripts/dmg/requirements.txt)'
     if [ "$ad_hoc" = 0 ]; then
         security find-identity -v -p codesigning "$keychain" | grep -Fq "$identity" || die "missing signing identity: $identity"
+    fi
+fi
+ad_hoc_flag=
+if [ "$ad_hoc" = 1 ]; then ad_hoc_flag=--ad-hoc; fi
+# The camera extension's profiles before anything is built (#67).
+if [ "$ad_hoc" = 0 ]; then
+    if [ -f "$engine_profile" ] && [ -f "$camera_profile" ]; then
+        if [ "$dry_run" = 1 ]; then
+            python3 scripts/vcam-package.py release-profiles "$engine_profile" "$camera_profile" ||
+                die 'the virtual camera provisioning profiles are wrong (see above; docs/releasing.md)'
+        else
+            python3 scripts/vcam-package.py release-profiles "$engine_profile" "$camera_profile" \
+                --identity "$identity" --keychain "$keychain" ||
+                die 'the virtual camera provisioning profiles are wrong (see above; docs/releasing.md)'
+        fi
+    elif [ "$dry_run" = 1 ]; then
+        echo "release: dry run: skipping the virtual camera profile check (no $engine_profile or $camera_profile; a real build stops here)"
+    else
+        die "missing the virtual camera's Developer ID provisioning profiles: $engine_profile and $camera_profile (set ISOCAST_ENGINE_PROFILE/ISOCAST_CAMERA_PROFILE; docs/releasing.md)"
     fi
 fi
 # The update key before anything is built: a release without it can't ship.
@@ -173,7 +211,7 @@ fi
 build_version="${ISOCAST_BUILD_VERSION:-$(date +%s)}"
 [[ "$build_version" =~ ^[0-9]+$ ]] || die 'ISOCAST_BUILD_VERSION must be numeric'
 run mkdir -p "$output/work" "$app/Contents/MacOS" "$app/Contents/Resources" \
-    "$engine/Contents/MacOS" "$engine/Contents/Resources"
+    "$engine/Contents/MacOS" "$engine/Contents/Resources" "$engine/Contents/Library/SystemExtensions"
 run env CARGO_TARGET_DIR="$target" MACOSX_DEPLOYMENT_TARGET=14.0 ISOCAST_BUILD_VERSION="$build_version" \
     nice -n 10 cargo build --locked --release --target aarch64-apple-darwin \
     -p "$app_target" -p isocast-daemon -p isocast-cli
@@ -181,6 +219,10 @@ binary_dir="$target/aarch64-apple-darwin/release"
 run cp "$binary_dir/$app_target" "$app/Contents/MacOS/$app_target"
 run cp "$binary_dir/isocast" "$app/Contents/MacOS/isocast"
 run cp "$binary_dir/isocastd" "$engine/Contents/MacOS/isocastd"
+# The CMIO camera extension (camera-extension/), embedded in the engine helper
+# that activates it (OSSystemExtensionRequest on the first Start).
+run env MACOSX_DEPLOYMENT_TARGET=14.0 sh scripts/build-camera-extension.sh "$camera_work"
+run ditto "$camera_work/$camera_id.systemextension" "$extension"
 run python3 -c 'import plistlib,sys
 from pathlib import Path
 app,engine,version,executable,build_version,bundle_id,feed,key,lsenv=sys.argv[1:]
@@ -207,7 +249,13 @@ for source,dest,identifier,name,binary in [
                  SURequireSignedFeed=True)
     if dest==app and lsenv:
         p["LSEnvironment"]=dict(line.split("=",1) for line in lsenv.splitlines() if "=" in line)
-    Path(dest,"Contents/Info.plist").write_bytes(plistlib.dumps(p))' "$app" "$engine" "$version" "$app_target" "$build_version" "$bundle_id" "$feed_url" "$sparkle_key" \
+    Path(dest,"Contents/Info.plist").write_bytes(plistlib.dumps(p))
+# The camera extension shares the engine'"'"'s versions (sysextd replaces an
+# activated extension when a newer build asks).
+ext=Path(engine,"Contents/Library/SystemExtensions/dev.isocast.isocastd.camera.systemextension/Contents/Info.plist")
+p=plistlib.loads(ext.read_bytes())
+p.update(CFBundleShortVersionString=version,CFBundleVersion=build_version)
+ext.write_bytes(plistlib.dumps(p))' "$app" "$engine" "$version" "$app_target" "$build_version" "$bundle_id" "$feed_url" "$sparkle_key" \
     "${update_test:+${ISOCAST_UPDATE_TEST_ENV:-}}"
 run xcrun actool "$root/crates/isocast-app/bundle/Isocast.icon" --compile "$app/Contents/Resources" \
     --platform macosx --minimum-deployment-target 14.0 --app-icon Isocast \
@@ -257,7 +305,19 @@ if [ -n "$sparkle_key" ]; then
     sign "${sign_args[@]}" "$sparkle/Versions/B/Updater.app"
     sign "${sign_args[@]}" "$sparkle"
 fi
-sign "${sign_args[@]}" --entitlements "$entitlements" "$engine"
+# The camera extension, then the engine that contains it. Developer ID: each
+# gets its Developer ID profile and the id/team entitlements it grants;
+# ad-hoc: no profiles and no restricted entitlements (never activatable).
+run python3 scripts/vcam-package.py release-entitlements "$camera_work/Camera.entitlements" \
+    "$output/work/camera.entitlements" "$camera_id" ${ad_hoc_flag:+"$ad_hoc_flag"}
+run python3 scripts/vcam-package.py release-entitlements "$entitlements" \
+    "$output/work/engine.entitlements" dev.isocast.isocastd ${ad_hoc_flag:+"$ad_hoc_flag"}
+if [ "$ad_hoc" = 0 ]; then
+    run cp "$camera_profile" "$extension/Contents/embedded.provisionprofile"
+    run cp "$engine_profile" "$engine/Contents/embedded.provisionprofile"
+fi
+sign "${sign_args[@]}" --entitlements "$output/work/camera.entitlements" "$extension"
+sign "${sign_args[@]}" --entitlements "$output/work/engine.entitlements" "$engine"
 sign "${sign_args[@]}" --entitlements "$entitlements" "$app/Contents/MacOS/isocast"
 sign "${sign_args[@]}" --entitlements "$app_entitlements" "$app"
 run codesign --verify --deep --strict --verbose=2 "$app"
@@ -280,9 +340,12 @@ if [ -n "$update_test" ]; then mode=update-test; fi
 run python3 -c 'import hashlib,json,subprocess,sys
 from pathlib import Path
 w=Path(sys.argv[1]); app=w/"Isocast.app"; target=sys.argv[4]
+engine="Contents/Helpers/Isocast Engine.app/Contents"
+camera=f"{engine}/Library/SystemExtensions/dev.isocast.isocastd.camera.systemextension/Contents"
 paths=[f"Contents/MacOS/{target}","Contents/MacOS/isocast","Contents/Info.plist",
-       "Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd",
-       "Contents/Helpers/Isocast Engine.app/Contents/Info.plist"]
+       f"{engine}/MacOS/isocastd",f"{engine}/Info.plist",
+       f"{camera}/MacOS/IsocastCamera",f"{camera}/Info.plist"]
+if sys.argv[3]!="ad-hoc": paths+=[f"{engine}/embedded.provisionprofile",f"{camera}/embedded.provisionprofile"]
 hashes={p:hashlib.sha256((app/p).read_bytes()).hexdigest() for p in paths}
 r=dict(schema=1,version=sys.argv[2],signing=sys.argv[3],app_target=target,
        build_version=sys.argv[5],source_commit=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),

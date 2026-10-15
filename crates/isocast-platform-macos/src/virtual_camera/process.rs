@@ -44,7 +44,7 @@ fn response(socket: &mut UnixStream, operation: &str) -> Result<bool> {
         (0, _) => Ok(true),
         (1, 7) => Ok(false),
         (-1, 1) => bail!(
-            "virtual_camera: Isocast Virtual Camera is not installed/approved; run scripts/vcam-install.sh (Start never installs it)"
+            "virtual_camera: {NOT_INSTALLED}; run scripts/vcam-install.sh (a development engine never installs it)"
         ),
         (_, 2) => bail!(
             "virtual_camera: installed device has no unique Isocast Camera Sink output stream (CoreMediaIO {status})"

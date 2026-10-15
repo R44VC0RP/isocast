@@ -151,6 +151,36 @@ jobs:
           xcrun --find notarytool
           # The app's Sparkle public key must be the real one (not the placeholder).
           scripts/sparkle/sparkle.sh public-key >/dev/null
+      # The virtual camera extension (#67) ships only with its two Developer ID
+      # provisioning profiles; fail here, before the long build, while they're
+      # missing. release.sh checks them again against the signing certificate.
+      - name: Virtual camera provisioning profiles
+        env:
+          ENGINE_PROVISIONING_PROFILE_B64: ${{ secrets.ENGINE_PROVISIONING_PROFILE_B64 }}
+          CAMERA_PROVISIONING_PROFILE_B64: ${{ secrets.CAMERA_PROVISIONING_PROFILE_B64 }}
+        run: |
+          python3 - <<'PY'
+          import base64, binascii, os, sys
+          from pathlib import Path
+          os.umask(0o077)
+          root = Path(os.environ['RUNNER_TEMP']) / 'isocast-release-signing'
+          root.mkdir(exist_ok=True)
+          paths = {}
+          for secret, name in [('ENGINE_PROVISIONING_PROFILE_B64', 'isocast-engine.provisionprofile'),
+                               ('CAMERA_PROVISIONING_PROFILE_B64', 'isocast-camera.provisionprofile')]:
+              try:
+                  data = base64.b64decode(os.environ.get(secret, '').strip(), validate=True)
+              except (binascii.Error, ValueError):
+                  data = b''
+              if not data:
+                  sys.exit(f'{secret} is missing or not base64: add the Developer ID provisioning profile (docs/releasing.md, step 4a)')
+              (root / name).write_bytes(data)
+              paths[secret] = root / name
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write(f"ISOCAST_ENGINE_PROFILE={paths['ENGINE_PROVISIONING_PROFILE_B64']}\n")
+              out.write(f"ISOCAST_CAMERA_PROFILE={paths['CAMERA_PROVISIONING_PROFILE_B64']}\n")
+          PY
+          python3 scripts/vcam-package.py release-profiles "$RUNNER_TEMP/isocast-release-signing/isocast-engine.provisionprofile" "$RUNNER_TEMP/isocast-release-signing/isocast-camera.provisionprofile"
       - name: Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -178,7 +208,7 @@ jobs:
           from pathlib import Path
           os.umask(0o077)
           root = Path(os.environ['RUNNER_TEMP']) / 'isocast-release-signing'
-          root.mkdir()
+          root.mkdir(exist_ok=True)
           team = os.environ['APPLE_TEAM_ID']
           if not re.fullmatch(r'[A-Z0-9]{10}', team):
               sys.exit('APPLE_TEAM_ID must be a 10-character team id')

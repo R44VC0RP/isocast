@@ -126,10 +126,13 @@ def destination(app):
 
 
 def prepare(repo, stage):
-    if str(stage).startswith("/Volumes/IsocastBuild/"):
+    shared = str(stage).startswith("/Volumes/IsocastBuild/")
+    if shared:
         require(Path("/Volumes/IsocastBuild").is_mount(), "mount IsocastBuild before building; no internal-disk fallback")
     stage.mkdir(parents=True, exist_ok=True)
-    require(shutil.disk_usage(stage).free >= 20 * 1024**3,
+    # The shared build disk's 20 GiB floor (agent rules). Elsewhere (a CI
+    # runner after the Rust build, exonbook) the extension needs only MBs.
+    require(not shared or shutil.disk_usage(stage).free >= 20 * 1024**3,
             "build volume has less than 20 GiB free; free space before building")
     version = next_version(stage)
     package = re.search(r"(?ms)^\[workspace\.package\]\n(.*?)(?=^\[|\Z)",
@@ -233,6 +236,138 @@ def verify(app, unsigned):
             print("Local Apple Development build: Gatekeeper distribution/notarization assessment is not applicable")
 
 
+# ---- Release builds (scripts/release.sh): the extension inside Isocast.app's
+# engine helper, Developer ID signing with Developer ID provisioning profiles.
+
+RESTRICTED_PREFIXES = ("com.apple.developer.", "com.apple.application-identifier")
+MIN_PROFILE_DAYS = 30
+
+
+def decode_profile(path):
+    require(path.is_file() and not path.is_symlink(), f"missing provisioning profile: {path}")
+    return plistlib.loads(command("/usr/bin/security", "cms", "-D", "-i", str(path)).stdout)
+
+
+def certificate_digests(profile):
+    import hashlib
+    return {hashlib.sha1(bytes(der)).hexdigest().upper() for der in profile.get("DeveloperCertificates", [])}
+
+
+def check_release_profile(path, expected, certificate=None):
+    """A Developer ID profile for exactly this bundle id, team and certificate."""
+    profile = decode_profile(path)
+    name = f"{path.name} ({expected})"
+    require(profile.get("TeamIdentifier") == [TEAM], f"{name}: profile is for team {profile.get('TeamIdentifier')}, not {TEAM}")
+    allowed = profile.get("Entitlements", {})
+    app_id = allowed.get("com.apple.application-identifier", allowed.get("application-identifier"))
+    require(app_id == f"{TEAM}.{expected}", f"{name}: profile is for app id {app_id!r}, not {TEAM}.{expected}")
+    require(allowed.get("com.apple.developer.team-identifier") == TEAM, f"{name}: profile's team-identifier is not {TEAM}")
+    require("OSX" in profile.get("Platform", []), f"{name}: not a macOS profile")
+    # Developer ID profiles run on any Mac; development/ad-hoc ones list devices.
+    require(profile.get("ProvisionsAllDevices") is True and not profile.get("ProvisionedDevices"),
+            f"{name}: not a Developer ID profile (it lists devices); make it under Distribution > Developer ID")
+    expiration = profile.get("ExpirationDate")
+    require(isinstance(expiration, datetime.datetime), f"{name}: profile has no expiration date")
+    left = expiration.replace(tzinfo=datetime.timezone.utc) - datetime.datetime.now(datetime.timezone.utc)
+    require(left.days >= MIN_PROFILE_DAYS,
+            f"{name}: profile expires {expiration:%Y-%m-%d} ({left.days} days); renew it (at least {MIN_PROFILE_DAYS} days needed)")
+    if expected == HOST:
+        require(allowed.get("com.apple.developer.system-extension.install") is True,
+                f"{name}: profile lacks the System Extension capability (com.apple.developer.system-extension.install)")
+    if certificate:
+        require(certificate.upper() in certificate_digests(profile),
+                f"{name}: profile doesn't include the signing certificate {certificate[:8]}…; regenerate it for that Developer ID Application certificate")
+    print(f"Provisioning profile checked: {name}, Developer ID, team {TEAM}, expires {expiration:%Y-%m-%d}")
+    return profile
+
+
+def identity_digest(identity, keychain):
+    """SHA-1 of the signing identity's certificate (identity: name or SHA-1)."""
+    listing = command("/usr/bin/security", "find-identity", "-v", "-p", "codesigning",
+                      *([keychain] if keychain else [])).stdout.decode()
+    found = {digest for digest, label in re.findall(r'([0-9A-F]{40}) "([^"]+)"', listing)
+             if identity in (digest, label)}
+    require(len(found) == 1, "signing identity not found (or ambiguous) in the keychain")
+    return found.pop()
+
+
+def release_profiles(engine_profile, camera_profile, identity, keychain):
+    certificate = identity_digest(identity, keychain) if identity else None
+    check_release_profile(engine_profile, HOST, certificate)
+    check_release_profile(camera_profile, EXTENSION, certificate)
+
+
+def release_entitlements(base, output, expected, team_ids=True):
+    """Signed entitlements: base (+ Xcode's id/team keys that the profile grants)."""
+    data = plistlib.loads(base.read_bytes().replace(b"TEAMID", TEAM.encode()))
+    if expected == HOST:
+        data["com.apple.developer.system-extension.install"] = True
+        data["com.apple.security.application-groups"] = [GROUP]
+    if team_ids:
+        data["com.apple.application-identifier"] = f"{TEAM}.{expected}"
+        data["com.apple.developer.team-identifier"] = TEAM
+    output.write_bytes(plistlib.dumps(data))
+
+
+def leaf_digest(bundle):
+    import hashlib
+    import tempfile
+    with tempfile.TemporaryDirectory() as folder:
+        command("/usr/bin/codesign", "-d", f"--extract-certificates={folder}/cert", str(bundle))
+        return hashlib.sha1(Path(folder, "cert0").read_bytes()).hexdigest().upper()
+
+
+def verify_release(engine, ad_hoc):
+    """The release app's engine helper and its embedded camera extension."""
+    extension = engine / "Contents/Library/SystemExtensions" / (EXTENSION + ".systemextension")
+    require(extension.is_dir() and not extension.is_symlink(),
+            f"the release app has no camera extension at {extension}")
+    folder = extension.parent
+    require(sorted(p.name for p in folder.iterdir()) == [extension.name], "unexpected items in the engine's SystemExtensions folder")
+    host_info, ext_info = plist(engine / "Contents/Info.plist"), plist(extension / "Contents/Info.plist")
+    require(host_info.get("CFBundleIdentifier") == HOST, f"engine bundle id is {host_info.get('CFBundleIdentifier')!r}, not {HOST}")
+    require(ext_info.get("CFBundleIdentifier") == EXTENSION, f"extension bundle id is {ext_info.get('CFBundleIdentifier')!r}")
+    require(ext_info.get("CFBundlePackageType") == "SYSX", "extension is not a system extension bundle (SYSX)")
+    require((extension / "Contents/MacOS" / ext_info.get("CFBundleExecutable", "?")).is_file(), "extension executable missing")
+    service = ext_info.get("CMIOExtension", {}).get("CMIOExtensionMachServiceName", "")
+    require(service == GROUP + ".camera", f"CMIOExtensionMachServiceName {service!r} must be {GROUP}.camera (app-group prefixed)")
+    require(host_info.get("CFBundleVersion") == ext_info.get("CFBundleVersion"), "engine and extension build versions differ")
+    require(host_info.get("CFBundleShortVersionString") == ext_info.get("CFBundleShortVersionString"), "engine and extension versions differ")
+    for bundle, expected in [(engine, HOST), (extension, EXTENSION)]:
+        command("/usr/bin/codesign", "--verify", "--strict", str(bundle))
+        signed = plistlib.loads(command("/usr/bin/codesign", "-d", "--entitlements", ":-", str(bundle)).stdout or plistlib.dumps({}))
+        require(signed.get("com.apple.security.application-groups") == [GROUP], f"{expected}: signed app group must be [{GROUP}]")
+        if expected == EXTENSION:
+            require(signed.get("com.apple.security.app-sandbox") is True, f"{expected}: missing com.apple.security.app-sandbox")
+        profile_path = bundle / "Contents/embedded.provisionprofile"
+        details = command("/usr/bin/codesign", "-dv", "--verbose=4", str(bundle)).stderr.decode()
+        if ad_hoc:
+            require("Signature=adhoc" in details, f"{expected}: ad-hoc build is not ad-hoc signed")
+            require(not profile_path.exists(), f"{expected}: ad-hoc build must not embed a provisioning profile")
+            restricted = [k for k in signed if k.startswith(RESTRICTED_PREFIXES)]
+            require(not restricted, f"{expected}: ad-hoc build carries restricted entitlements {restricted} (macOS would kill it)")
+            print(f"Ad-hoc camera bundle checked: {expected} (not activatable: no Developer ID profile)")
+            continue
+        require(f"TeamIdentifier={TEAM}" in details and "Authority=Developer ID Application:" in details,
+                f"{expected}: not signed with team {TEAM}'s Developer ID Application certificate")
+        require("flags=0x10000(runtime)" in details, f"{expected}: hardened runtime is off")
+        profile = check_release_profile(profile_path, expected, leaf_digest(bundle))
+        allowed = profile["Entitlements"]
+        require(signed.get("com.apple.application-identifier") == f"{TEAM}.{expected}",
+                f"{expected}: signed com.apple.application-identifier is missing or wrong")
+        require(signed.get("com.apple.developer.team-identifier") == TEAM, f"{expected}: signed team-identifier is missing")
+        if expected == HOST:
+            require(signed.get("com.apple.developer.system-extension.install") is True,
+                    f"{expected}: missing com.apple.developer.system-extension.install")
+        for key, value in signed.items():
+            if key.startswith(RESTRICTED_PREFIXES):
+                grant = allowed.get(key)
+                ok = grant == value or (isinstance(grant, list) and isinstance(value, list)
+                                        and all(any(fnmatch.fnmatchcase(v, g) for g in grant) for v in value))
+                require(ok, f"{expected}: signed entitlement {key} isn't granted by its profile")
+        print(f"Developer ID camera bundle checked: {expected}, embedded profile matches its signature")
+
+
 def check_setup(folder):
     # Only synthetic video. It neither records files nor opens real devices.
     folder.mkdir(parents=True, exist_ok=True)
@@ -296,6 +431,14 @@ def main():
     p = sub.add_parser("clean-extension"); p.add_argument("path", type=Path)
     p = sub.add_parser("replace-host"); p.add_argument("source", type=Path); p.add_argument("destination", type=Path)
     p = sub.add_parser("stamp"); p.add_argument("path", type=Path)
+    p = sub.add_parser("release-profiles", help="check both Developer ID profiles before a release build")
+    p.add_argument("engine_profile", type=Path); p.add_argument("camera_profile", type=Path)
+    p.add_argument("--identity"); p.add_argument("--keychain")
+    p = sub.add_parser("release-entitlements", help="write a release bundle's signed entitlements")
+    p.add_argument("base", type=Path); p.add_argument("output", type=Path)
+    p.add_argument("bundle", choices=[HOST, EXTENSION]); p.add_argument("--ad-hoc", action="store_true")
+    p = sub.add_parser("verify-release", help="check the release engine helper and its camera extension")
+    p.add_argument("engine", type=Path); p.add_argument("--ad-hoc", action="store_true")
     for action in ("wait", "shutdown"):
         p = sub.add_parser(action); p.add_argument("socket", type=Path)
     args = parser.parse_args()
@@ -309,6 +452,18 @@ def main():
     elif args.action == "stamp":
         data = plist(args.path); data["CFBundleVersion"] = next_version(args.path.parent.parent.parent)
         args.path.write_bytes(plistlib.dumps(data))
+    elif args.action == "release-profiles":
+        release_profiles(args.engine_profile, args.camera_profile, args.identity, args.keychain)
+    elif args.action == "release-entitlements":
+        if args.ad_hoc:
+            # Restricted entitlements without a profile make macOS kill the
+            # process; an ad-hoc engine keeps only the ordinary ones.
+            data = plistlib.loads(args.base.read_bytes().replace(b"TEAMID", TEAM.encode()))
+            if args.bundle == HOST: data["com.apple.security.application-groups"] = [GROUP]
+            args.output.write_bytes(plistlib.dumps(data))
+        else:
+            release_entitlements(args.base, args.output, args.bundle)
+    elif args.action == "verify-release": verify_release(args.engine, args.ad_hoc)
     elif args.action == "wait": wait_for_daemon(args.socket)
     elif args.action == "shutdown": control(args.socket, "shutdown")
 

@@ -22,6 +22,7 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast setup check`](#isocast-setup-check)
   - [`isocast setup schema`](#isocast-setup-schema)
   - [`isocast setup init`](#isocast-setup-init)
+  - [`isocast setup discover-obs`](#isocast-setup-discover-obs)
   - [`isocast setup import-obs`](#isocast-setup-import-obs)
 - [`isocast collection`](#isocast-collection)
   - [`isocast collection list`](#isocast-collection-list)
@@ -79,6 +80,8 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
 - [`isocast take`](#isocast-take)
 - [`isocast doctor`](#isocast-doctor)
 - [`isocast tune`](#isocast-tune)
+- [`isocast capacity`](#isocast-capacity)
+- [`isocast optimize`](#isocast-optimize)
 - [`isocast snapshot`](#isocast-snapshot)
 - [`isocast audio`](#isocast-audio)
 - [`isocast restart`](#isocast-restart)
@@ -93,6 +96,12 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast stream key`](#isocast-stream-key)
     - [`isocast stream key set`](#isocast-stream-key-set)
     - [`isocast stream key clear`](#isocast-stream-key-clear)
+  - [`isocast stream speed-test`](#isocast-stream-speed-test)
+- [`isocast replay`](#isocast-replay)
+  - [`isocast replay start`](#isocast-replay-start)
+  - [`isocast replay stop`](#isocast-replay-stop)
+  - [`isocast replay save`](#isocast-replay-save)
+  - [`isocast replay status`](#isocast-replay-status)
 - [`isocast vcam`](#isocast-vcam)
   - [`isocast vcam start`](#isocast-vcam-start)
   - [`isocast vcam stop`](#isocast-vcam-stop)
@@ -145,6 +154,8 @@ Commands:
   take         Put the preview scene on air (with its transition unless --cut, --fade MS or --transition is given); the scene that was on air moves to preview
   doctor       Check this Mac and a setup: permissions, hardware encoders, whether the setup's devices are connected, and the recording disk's space and speed. Exits with an error if anything would stop a recording
   tune         Benchmark the encoders on a setup's files (the live setup if none is given), all at once as in a recording, and say whether this Mac keeps up (fits, keeps up with no margin, or can't keep up). If it doesn't fit, try changes closest first (a smaller program file, a lower quality preset, half the frame rate, one ISO file fewer) and recommend the closest that fits, as a patch for `plan` and `apply`. `start` warns when a setup exceeds what this measured. Runs in isocastd
+  capacity     Predict, instantly and without benchmarking, whether a setup's files (the live setup's, at its sources' live formats, if none is given) fit this Mac's video encoders, from measured per-chip data, and list the closest changes that fit as patches for `plan` and `apply`. `tune` measures instead. Runs in isocastd
+  optimize     Optimize the live setup for recording, streaming or both, like OBS's Auto-Configuration Wizard: recording favours quality and ISO files; streaming sets the service and a bitrate from the upload speed (tested unless --upload-kbps is given; a custom server only with `isocast stream speed-test`). Then `tune` benchmarks this Mac and steps down where it can't keep up. Prints a one-line summary and the changes; --apply makes them. Runs in isocastd
   snapshot     Save one frame as a PNG: of a video source (an id of the live setup, or a quick source like `screen` or `camera:NAME`), of --scene ID, of --preview, or with none of them the program (while recording, the exact frame it recorded last). Runs in isocastd
   audio        Change an audio source's program mix in the live setup: gain in dB, mute, sync offset in ms (positive is later), balance (-1 left to 1 right) and monitoring (hearing it through `audio.monitoring_device`). A running recording follows all but the offset at once
   restart      Restart isocastd, for example after granting it screen recording permission. Refused, atomically by isocastd, while it records, streams, exports or feeds the virtual camera
@@ -153,6 +164,7 @@ Commands:
   plan         Show what a change to the live setup would do, without doing it: a whole setup FILE, or --patch with a JSON merge patch (lists of sources, scenes and items merge by id)
   apply        Make a change to the live setup, if it is still at --revision (from `plan` or `get`; 0 when there is no live setup yet)
   stream       Stream the program live over RTMP or RTMPS to the live setup's [stream] service, and keep its stream key in the Keychain
+  replay       The replay buffer: keep the last seconds of the program in memory, and save them to a file on demand
   vcam         Feed a picture to Isocast Virtual Camera (extension approval required once)
   debug        Developer mode, for testing a build locally: verbose logs of every API call and component, and frame timing traces while recording
   watch        Print events from isocastd as they happen, until Ctrl-C
@@ -348,11 +360,12 @@ Work with setup files
 Usage: isocast setup <COMMAND>
 
 Commands:
-  check       Validate a setup file (.toml or .json) and summarize it
-  schema      Print the JSON Schema of the setup document
-  init        Make a good starting setup from this Mac's devices: the main display, the best camera and the default microphone, with desktop audio, in scenes "Screen + Camera", "Camera" and "Screen", recording the program and ISO files of the screen and camera (in isocastd). Prints it as TOML, writes it to --output, or makes it the live setup with --apply
-  import-obs  Import an OBS Studio scene collection as a setup: its sources, scenes and items, filters and transition, matched against this Mac's devices (in isocastd). Prints the setup as TOML, or writes it to --output, and lists what couldn't come over
-  help        Print this message or the help of the given subcommand(s)
+  check         Validate a setup file (.toml or .json) and summarize it
+  schema        Print the JSON Schema of the setup document
+  init          Make a good starting setup from this Mac's devices: the main display, the best camera and the default microphone, with desktop audio, in scenes "Screen + Camera", "Camera" and "Screen", recording the program and ISO files of the screen and camera (in isocastd). Prints it as TOML, writes it to --output, or makes it the live setup with --apply
+  discover-obs  Find OBS Studio's scene collections and profiles on this Mac (in ~/Library/Application Support/obs-studio, or --folder), without importing anything: each collection with the profile an import would use, and each profile's video, recording and stream settings
+  import-obs    Import an OBS Studio scene collection as a setup: its sources, scenes and items, filters and transition, matched against this Mac's devices (in isocastd). Prints the setup as TOML, or writes it to --output, and lists what couldn't come over
+  help          Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help  Print help
@@ -404,6 +417,19 @@ Options:
       --name <NAME>              The setup's name
       --json                     Print the result (setup, notes, applied change) as JSON
   -h, --help                     Print help
+```
+
+## isocast setup discover-obs
+
+```text
+Find OBS Studio's scene collections and profiles on this Mac (in ~/Library/Application Support/obs-studio, or --folder), without importing anything: each collection with the profile an import would use, and each profile's video, recording and stream settings
+
+Usage: isocast setup discover-obs [OPTIONS]
+
+Options:
+      --folder <FOLDER>  Look in this folder instead
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast setup import-obs
@@ -556,6 +582,7 @@ Options:
       --name <NAME>                 The name to give it; its own if absent
       --canvas <WxH>                For a scene collection from OBS: import it onto this canvas, WIDTHxHEIGHT, scaling positions and sizes
       --switch                      Switch to what was imported
+      --obs-stream-key              Move the stream key OBS keeps in plain text in the OBS profile's service.json into the Keychain
       --json                        
   -h, --help                        Print help
 ```
@@ -708,6 +735,7 @@ Options:
       --name <NAME>                 The name to give it; its own if absent
       --canvas <WxH>                For a scene collection from OBS: import it onto this canvas, WIDTHxHEIGHT, scaling positions and sizes
       --switch                      Switch to what was imported
+      --obs-stream-key              Move the stream key OBS keeps in plain text in the OBS profile's service.json into the Keychain
       --json                        
   -h, --help                        Print help
 ```
@@ -1308,6 +1336,44 @@ Options:
   -h, --help             Print help
 ```
 
+## isocast capacity
+
+```text
+Predict, instantly and without benchmarking, whether a setup's files (the live setup's, at its sources' live formats, if none is given) fit this Mac's video encoders, from measured per-chip data, and list the closest changes that fit as patches for `plan` and `apply`. `tune` measures instead. Runs in isocastd
+
+Usage: isocast capacity [OPTIONS] [SETUP]
+
+Arguments:
+  [SETUP]  
+
+Options:
+      --stream            Count the stream's encode (default: the live setup's if it streams now; a given setup's if it has a stream)
+      --no-stream         Leave the stream's encode out
+      --add-iso <SOURCE>  How to turn on this source's ISO file so the setup still fits
+      --json              
+  -h, --help              Print help
+```
+
+## isocast optimize
+
+```text
+Optimize the live setup for recording, streaming or both, like OBS's Auto-Configuration Wizard: recording favours quality and ISO files; streaming sets the service and a bitrate from the upload speed (tested unless --upload-kbps is given; a custom server only with `isocast stream speed-test`). Then `tune` benchmarks this Mac and steps down where it can't keep up. Prints a one-line summary and the changes; --apply makes them. Runs in isocastd
+
+Usage: isocast optimize [OPTIONS] <GOAL>
+
+Arguments:
+  <GOAL>  recording, streaming or both
+
+Options:
+      --service <SERVICE>          Streaming: custom, twitch, youtube, kick or facebook; the live setup's if absent
+      --server <SERVER>            Streaming: the ingest server, rtmp://host/app or rtmps://…
+      --upload-kbps <UPLOAD_KBPS>  Streaming: the upload speed in kb/s, instead of testing it
+      --folder <FOLDER>            Benchmark writing to this folder instead of recording.folder
+      --apply                      Make the changes
+      --json                       
+  -h, --help                       Print help
+```
+
 ## isocast snapshot
 
 ```text
@@ -1430,11 +1496,12 @@ Stream the program live over RTMP or RTMPS to the live setup's [stream] service,
 Usage: isocast stream <COMMAND>
 
 Commands:
-  start   Go live: stream the program (the canvas and the program mix) to the live setup's [stream] service, starting the live engine if needed. Recordings start and stop without touching it. Returns once live, or says why not
-  stop    Stop streaming
-  status  Show the stream's state, bitrates, dropped frames, congestion and reconnects, and whether a stream key is set
-  key     Keep or remove the stream key (in the Keychain, never in a setup)
-  help    Print this message or the help of the given subcommand(s)
+  start       Go live: stream the program (the canvas and the program mix) to the live setup's [stream] service, starting the live engine if needed. Recordings start and stop without touching it. Returns once live, or says why not
+  stop        Stop streaming
+  status      Show the stream's state, bitrates, dropped frames, congestion and reconnects, and whether a stream key is set
+  key         Keep or remove the stream key (in the Keychain, never in a setup)
+  speed-test  Measure the upload speed to the service's ingest (a short publish of filler: Twitch's bandwidth test mode, or a custom server, which shows it for a few seconds if it relays to a live service) and recommend a stream bitrate. YouTube, Facebook and Kick have no test mode, so they get a safe bitrate instead, with the reason
+  help        Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help  Print help
@@ -1518,6 +1585,87 @@ Options:
       --server <SERVER>    For custom: the server the key belongs to (rtmp://host/app)
       --json               
   -h, --help               Print help
+```
+
+## isocast stream speed-test
+
+```text
+Measure the upload speed to the service's ingest (a short publish of filler: Twitch's bandwidth test mode, or a custom server, which shows it for a few seconds if it relays to a live service) and recommend a stream bitrate. YouTube, Facebook and Kick have no test mode, so they get a safe bitrate instead, with the reason
+
+Usage: isocast stream speed-test [OPTIONS]
+
+Options:
+      --service <SERVICE>  custom, twitch, youtube, kick or facebook
+      --server <SERVER>    For custom: the server the key belongs to (rtmp://host/app)
+      --seconds <SECONDS>  Seconds to send for, 3 to 20 (8 by default)
+      --json               
+  -h, --help               Print help
+```
+
+## isocast replay
+
+```text
+The replay buffer: keep the last seconds of the program in memory, and save them to a file on demand
+
+Usage: isocast replay <COMMAND>
+
+Commands:
+  start   Start keeping the last `recording.replay.seconds` of the program (video and the program mix) in memory, starting the live engine if needed. Recording and streaming start and stop without touching it
+  stop    Stop the replay buffer, discarding what it holds
+  save    Save what the buffer holds, up to now, to a new file in the recordings folder (the running recording's project folder, if one records). Prints the file's path
+  status  Show whether it runs, what it holds, its memory, losses and last save
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## isocast replay start
+
+```text
+Start keeping the last `recording.replay.seconds` of the program (video and the program mix) in memory, starting the live engine if needed. Recording and streaming start and stop without touching it
+
+Usage: isocast replay start [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast replay stop
+
+```text
+Stop the replay buffer, discarding what it holds
+
+Usage: isocast replay stop [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast replay save
+
+```text
+Save what the buffer holds, up to now, to a new file in the recordings folder (the running recording's project folder, if one records). Prints the file's path
+
+Usage: isocast replay save [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast replay status
+
+```text
+Show whether it runs, what it holds, its memory, losses and last save
+
+Usage: isocast replay status [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
 ```
 
 ## isocast vcam

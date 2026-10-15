@@ -199,6 +199,7 @@ One of:
 | `iso` | [IsoRecording](#isorecording) | Separate recordings of individual sources. Default `{"enabled": false, "encoder": {"bit_depth": 8, "codec": "hevc", "container": "mov", "quality": "high"}, "filename": "{SOURCE}-{date} {time}", "sources": []}`. |
 | `keep_free_gb` | number | Free space, in GB, a recording never uses: it won't start without room for its estimated size plus this, and it stops cleanly, finishing every file, when free space falls below it (or below about 10 s of its files, at least 64 MB, if that is more). Default `1.0`. |
 | `program` (required) | [ProgramRecording](#programrecording) | The composited program recording. |
+| `replay` | [ReplaySettings](#replaysettings) | The replay buffer: how much of the program it keeps. |
 
 ## IsoRecording
 
@@ -253,6 +254,14 @@ One of: `"low"`, `"medium"`, `"high"`, `"very_high"`, `"incredible"`.
 | `filename` | string | File name without extension. Tokens: {date}, {time}. Default `"{date} {time}"`. |
 | `height` | integer (optional) | |
 | `width` | integer (optional) | The program file's size, if not the canvas's: the encoder scales the canvas down to it (a different shape is letterboxed), like OBS's Output (Scaled) Resolution. ISO files keep their sources' sizes. Each side is an even number from 16 up to the canvas's. |
+
+## ReplaySettings
+
+| Field | Type | Description |
+|---|---|---|
+| `max_memory_mb` | integer | The most memory the buffer may use, in MB, from 16 to 8192. If `seconds` of the program need more (a high bitrate), the oldest seconds go and `replay_status` says the buffer is short. Default `1024`. |
+| `seconds` | integer | How many seconds of the program a save covers, from 5 to 300 (the saved file starts at the keyframe before them, so it can be up to a keyframe interval longer). Default `30`. |
+| `video_bitrate_kbps` | integer (optional) | The video bitrate, in kb/s, when the buffer encodes the program itself. Without it, about 0.1 bit per pixel (12 Mb/s at 1080p60), at most 40 Mb/s. While the setup has a `[stream]`, the buffer encodes as the stream does (its size, bitrate and keyframes), so a stream and the buffer share one encoder; this is then unused. |
 
 ## Scene
 
@@ -703,7 +712,7 @@ One of:
 
 ## Stinger
 
-A video played over the switch (OBS's Stinger). It lasts as long as the video. Transparent parts need a video with alpha that macOS decodes (ProRes 4444 or HEVC with alpha in a .mov), or a matte.
+A video played over the switch (OBS's Stinger). It lasts as long as the video. Transparent parts need a video with alpha (ProRes 4444 or HEVC with alpha in a .mov, or VP9 with alpha in a .webm, as OBS uses), or a matte.
 
 | Field | Type | Description |
 |---|---|---|

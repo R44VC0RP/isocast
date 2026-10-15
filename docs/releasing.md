@@ -14,7 +14,10 @@ No pull requests or self-hosted machines run this job. Actions are pinned
 to commit SHAs. The job has `contents: write`; workflow defaults are read-only.
 It waits at the **release** environment before receiving its secrets. A
 workflow-wide concurrency group serializes tag pushes and manual reruns.
-The camera extension remains a separate, one-time installation.
+The DMG's app carries the virtual camera's CMIO extension
+(`dev.isocast.isocastd.camera`) inside its engine helper, which activates it
+on the first Start Virtual Camera; that needs two Developer ID provisioning
+profiles (step 4a), and no build is made without them.
 
 A small **preflight** job runs first, without secrets or approval: it
 checks the version, that the tag exists, that Cargo.toml at the tag matches,
@@ -119,6 +122,56 @@ Credentials are not placed in Cargo/Homebrew caches or passed to the
 recording daemon. Rotate/revoke the certificate and API key in Apple's
 portals and replace the environment secrets when necessary.
 
+### 4a. The virtual camera's two provisioning profiles
+
+Make them as the guide in `~/dev/isocast-status/guides/virtual-camera-profiles.html`
+says (Developer ID profiles, Distribution → Developer ID), choosing **the
+Developer ID Application certificate releases are signed with**, not the
+newest one in the account. Identify it by serial number from a signed
+release (the portal lists certificates by expiry date and serial):
+
+```sh
+d="$(mktemp -d)" && codesign -d --extract-certificates="$d/c" /Applications/Isocast.app &&
+  openssl x509 -inform DER -in "$d/c0" -noout -subject -serial -enddate && rm -r "$d"
+```
+
+Today that is serial `05D0C582E2F1E2D8`, expiring 1 Feb 2027 (the
+login keychain's "Developer ID Application: Ryan Vogel (9G68SMNHEU)").
+A profile's own expiry (2044) is not the limit: the portal only lets you
+download it until its certificate expires, so **renewing or replacing the
+signing certificate means regenerating both profiles for the new one and
+replacing both secrets** (`release-profiles --identity` refuses profiles
+without the signing certificate). The profiles: **Isocast Engine Developer ID** for
+`dev.isocast.isocastd` with the **System Extension** capability, and
+**Isocast Virtual Camera Developer ID** for `dev.isocast.isocastd.camera`
+(no capabilities; the Team-ID-prefixed app group
+`9G68SMNHEU.dev.isocast.isocastd` needs no registration). Then keep them
+where local builds look and add them as two more environment secrets:
+
+```sh
+secrets="$HOME/.config/isocast-release-secrets"
+( umask 077 &&
+  mv "$HOME/Downloads/Isocast_Engine_Developer_ID.provisionprofile" "$secrets/isocast-engine.provisionprofile" &&
+  mv "$HOME/Downloads/Isocast_Virtual_Camera_Developer_ID.provisionprofile" "$secrets/isocast-camera.provisionprofile" &&
+  chmod 600 "$secrets"/isocast-*.provisionprofile )
+python3 scripts/vcam-package.py release-profiles "$secrets/isocast-engine.provisionprofile" "$secrets/isocast-camera.provisionprofile" --identity "Developer ID Application: Ryan Vogel (9G68SMNHEU)"
+base64 < "$secrets/isocast-engine.provisionprofile" | tr -d '\n' | gh secret set ENGINE_PROVISIONING_PROFILE_B64 --repo R44VC0RP/isocast --env release
+base64 < "$secrets/isocast-camera.provisionprofile" | tr -d '\n' | gh secret set CAMERA_PROVISIONING_PROFILE_B64 --repo R44VC0RP/isocast --env release
+```
+
+(Use the downloaded files' actual names in the two `mv` lines.) The check
+line must print two "Provisioning profile checked" lines: Developer ID
+(no device list), team 9G68SMNHEU, the exact app id, the System Extension
+capability on the engine's, at least 30 days left, and your signing
+certificate. Local builds read the two files from that folder (or
+`ISOCAST_ENGINE_PROFILE` / `ISOCAST_CAMERA_PROFILE`); the workflow decodes
+the secrets into its temporary signing folder and stops before building
+while either is missing. `release.sh` checks them before the build and
+again after signing (each bundle's embedded profile against its signature
+and signed entitlements), and refuses the build otherwise. Profiles aren't
+secret, but keep them only there and in 1Password. Done on 2026-10-15
+(both secrets set, profiles tied to the 2027 certificate).
+
 ### 5. Sparkle update key
 
 Updates are signed with an EdDSA key that only you hold: its public half is
@@ -155,7 +208,8 @@ cd "$HOME/dev/isocast" &&
 The printed line is the public key (fine to share). Save the keychain item
 "Private key for signing Sparkle updates" to 1Password. Until the public
 key is committed, Developer ID builds stop at once with "no Sparkle public
-key"; `gh secret list` must now show seven names.
+key"; `gh secret list` must now show nine names (step 4's six, 4a's two
+and this one).
 
 ### 6. First hosted run
 

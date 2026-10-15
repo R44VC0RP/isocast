@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-70 tools. Arguments marked required must be given; ids, not names,
+78 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -113,6 +113,24 @@ Developer mode, for testing a build locally. With no arguments, read it: whether
 |---|---|---|
 | `auto_off_hours` | integer (optional) | Hours until it turns itself off (0: never). |
 | `enabled` | boolean (optional) |  |
+
+## discover_obs
+
+Find OBS Studio's scene collections and profiles on this Mac (its settings folder, or `folder`) without importing anything: each collection with scene and source counts and the profile an import would use (`profile`, a basic.ini path), each profile's canvas, frame rate, recording encoder, format and folder, and stream service and bitrate (never the key; `key_in_file` says OBS keeps one in plain text), and files that couldn't be read. Offer the collections to the user, then import_obs_collection_or_profile with the collection's `file` and its `profile` (stream_key only if the user agreed to move the key).
+
+| Argument | Type | Description |
+|---|---|---|
+| `folder` | string (optional) | Look in this folder instead of OBS's (`~/Library/Application Support/obs-studio`, or the daemon's `$ISOCAST_OBS_FOLDER`). |
+
+## estimate_capacity
+
+Predict instantly, without benchmarking, whether a setup's files (the live setup's if none is given) fit this Mac's H.264/HEVC media engines, from measured per-chip data: `capacity` is fits, no_margin or cannot_keep_up, `load` the busiest engine's share, and `suggestions` the closest changes that fit (each a patch for plan_change, or a method like stream_stop; `after_take` ones wait for the recording to end). With add_iso, `admission` says how to turn that ISO file on so it fits (smaller, slower, or left off). tune_encoders measures instead.
+
+| Argument | Type | Description |
+|---|---|---|
+| `add_iso` | string (optional) | A video source id whose ISO file would be turned on: `admission` says how to add it so the setup still fits, and why. |
+| `setup` | object (optional) | The setup to judge; the live setup (at its sources' live formats) if absent (the shape get_setup returns). |
+| `stream` | boolean (optional) | Count the stream's encode. Default: the live setup's if it streams now; a given setup's if it has a stream. |
 
 ## export_timeline
 
@@ -252,6 +270,7 @@ Add an OBS Studio scene collection (its name in OBS's scenes folder, or an absol
 | `height` | integer (optional) |  |
 | `name` | string (optional) | The name to give them; OBS's if absent. |
 | `profile` | string (optional) | An OBS profile: its name, its folder or its basic.ini path. |
+| `stream_key` | boolean | Move the stream key OBS keeps in plain text in the profile's service.json into the Keychain, for the imported profile's service (only when the user agreed to it). Without it the key stays behind. |
 | `switch` | boolean | Switch to what was imported (refused while recording or streaming). |
 | `width` | integer (optional) | Import the collection onto a canvas this wide and high, scaling positions and sizes about the centre; its own canvas if absent. |
 
@@ -352,6 +371,19 @@ Make a timeline current (by id), so finished takes are added to it.
 |---|---|---|
 | `timeline` (required) | string | The id of the timeline to make current. |
 
+## optimize_setup
+
+Optimize the live setup for `goal` recording, streaming or both (OBS's Auto-Configuration Wizard). Recording favours quality and ISO files (HEVC High, an ISO file per captured source); streaming sets the service and a bitrate from the upload speed (upload_kbps, or measured like test_upload_speed; never for a custom server, test it first) and sizes the stream to it. Then it benchmarks this Mac like tune_encoders and steps down where it can't keep up. Returns a one-line `summary`, the optimized setup, its differences from the live setup, the benchmark and notes; with apply it becomes the live setup. Takes a minute or two; refused while recording or streaming.
+
+| Argument | Type | Description |
+|---|---|---|
+| `apply` | boolean | Make the result the live setup (refused while recording or streaming). |
+| `folder` | string (optional) | Benchmark writing to this folder instead of the setup's `recording.folder`. |
+| `goal` (required) | Goal |  |
+| `server` | string (optional) | Streaming: its ingest server, if not the service's default (needed for custom and Kick). |
+| `service` | StreamService | Streaming: the service; the live setup's stream service if absent. |
+| `upload_kbps` | integer (optional) | Streaming: the upload speed in kb/s (from `speed_test`, or known); measured with `speed_test` if absent. |
+
 ## pause_recording
 
 Pause the same recording files on a shared video/audio boundary. Streaming continues. Markers land at the paused playhead; resume before split or retake.
@@ -440,6 +472,10 @@ Rename a recording project (by id, from list_projects): its folder becomes `<dat
 | `name` (required) | string | Its new name: the folder becomes `<date> <time> <name>`. |
 | `project` (required) | string | The project's id (from `list_projects` or a `project_created` event). |
 
+## replay_status
+
+The replay buffer's state, seconds held, memory used and its limit, format, whether it shares the stream's encoder, missed frames and the last save.
+
 ## request_permissions
 
 Ask macOS for screen recording, camera and microphone access where it hasn't been decided yet (or only `permission`). Its prompts appear on the user's screen; waits up to a minute for answers and returns the permissions with next steps.
@@ -464,6 +500,10 @@ Record the last take again, on the current timeline. Not recording: take the las
 |---|---|---|
 | `folder` | string (optional) | Write the new take here; else the folder of the take it replaces (else the setup's `recording.folder`). Not while recording, where the new take goes where the recording writes. |
 | `seconds` | number (optional) | Stop on its own after this many seconds (not while recording). |
+
+## save_replay
+
+Save the replay buffer: write the last recording.replay.seconds of the program, up to this moment, to a new MOV/MP4 in the recordings folder (the running recording's project folder, if one records), without interrupting recording or streaming. Returns the file's path, length, frames and any missed frames.
 
 ## set_audio
 
@@ -512,6 +552,10 @@ Start recording the live setup (or the given setup, which then replaces the live
 | `seconds` | number (optional) | Stop on its own after this many seconds. |
 | `setup` | object (optional) | The setup to record; the live setup if absent (the shape get_setup returns; get_setup_schema has its JSON Schema). |
 
+## start_replay
+
+Start the replay buffer: keep the last recording.replay.seconds (30 by default) of the encoded program, video and program mix, in memory, starting the live engine if needed; recording and streaming are independent of it. It shares the stream's encoder when the setup has a [stream]. Then save_replay writes the last seconds to a file. Returns its status.
+
 ## start_stream
 
 Go live: stream the program (canvas and program mix) as H.264/AAC over RTMP or RTMPS to the live setup's [stream] service (twitch, youtube, kick, facebook or a custom server), starting the live engine if needed; recordings start and stop independently. Needs a stream key set. Returns the stream's status once live, or an error saying what to do. get_status shows the stream's health.
@@ -519,6 +563,10 @@ Go live: stream the program (canvas and program mix) as H.264/AAC over RTMP or R
 ## stop_recording
 
 Stop recording and finish every file. Returns the report: each file, its frames, dropped frames, audio dropouts and the manifest path.
+
+## stop_replay
+
+Stop the replay buffer, discarding what it holds (save_replay first to keep it). Returns its final status.
 
 ## stop_stream
 
@@ -549,6 +597,16 @@ Put the preview scene on air with a transition (the scene's, else the setup's, b
 | Argument | Type | Description |
 |---|---|---|
 | `transition` | Transition | How the preview scene comes on air; its transition (else the setup's) if absent. |
+
+## test_upload_speed
+
+Measure the upload speed to a streaming service's ingest (the live setup's unless `service`/`server` say) with a few seconds of filler video: Twitch's bandwidth test mode (never on air) or a custom server (a relay would put the filler on air for a few seconds: ask the user first), using the stored stream key. YouTube, Facebook and Kick have no test mode, and without a key nothing can be tested: then `measured` is false, `reason` says why, and `recommended_kbps` is a safe default. Refused while streaming.
+
+| Argument | Type | Description |
+|---|---|---|
+| `seconds` | integer (optional) | How long to send for, 3 to 20 seconds; 8 if absent. |
+| `server` | string (optional) | Its ingest server (`rtmp://host/app`); the service's default, or the live setup's, if absent. Required for custom and Kick. |
+| `service` | StreamService | The service to test against; the live setup's stream service if absent. |
 
 ## tune_encoders
 

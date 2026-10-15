@@ -3,9 +3,54 @@
 `isocast vcam start|stop|status [--json]` controls **Isocast Virtual Camera**.
 The method table and MCP use `virtual_camera_start`, `virtual_camera_stop`,
 and `virtual_camera_status`. `status.virtual_camera` and `virtual_camera`
-events report state, format, frame counts and failures. Start never installs
-anything. Installation/approval and real camera-client qualification remain
-**waiting on Ryan**; see `docs/notes.md`.
+events report state, format, frame counts and failures. The release app
+carries the camera extension and activates it on the first Start (below); a
+development engine never installs anything (use `scripts/vcam-install.sh`).
+Real activation and camera-client qualification wait on Ryan's Developer ID
+provisioning profiles; see `docs/notes.md`.
+
+## In the release app (#67)
+
+`Isocast.app/Contents/Helpers/Isocast Engine.app` (bundle id
+`dev.isocast.isocastd`) embeds `Contents/Library/SystemExtensions/
+dev.isocast.isocastd.camera.systemextension`. Both are signed with Developer
+ID and carry Developer ID provisioning profiles; the engine's grants
+`com.apple.developer.system-extension.install`. The app group is
+`9G68SMNHEU.dev.isocast.isocastd` (Team-ID prefixed: no registration for
+Developer ID) and the Mach service `9G68SMNHEU.dev.isocast.isocastd.camera`.
+`scripts/release.sh` builds, embeds, signs and checks them
+(docs/releasing.md step 4a).
+
+When a Start finds no Isocast camera and the engine carries the extension,
+the engine asks macOS to activate it (`isocastd --install-camera-extension
+--wait-for-approval`, a child with its own run loop):
+
+- **Already allowed** (for example after a reinstall): Start retries until
+  CoreMediaIO publishes the device, up to 5 s, and runs.
+- **First time:** macOS asks the user once. Start fails with "allow Isocast
+  Virtual Camera in System Settings › General › Login Items & Extensions ›
+  Camera Extensions"; the app's popover says the same, with an Open System
+  Settings button. The request stays alive for 15 minutes; when the user
+  allows it the engine starts the camera itself, unless Stop was pressed.
+  A later Start while it waits doesn't ask again.
+- **Not in /Applications** (run from the DMG): Start says to move Isocast
+  into Applications. **Refused** by macOS: Start reports macOS's reason.
+
+To remove the camera from a release install, deactivate it before
+deleting the app (macOS asks to confirm):
+
+```sh
+"/Applications/Isocast.app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd" --uninstall-camera-extension
+```
+
+Checked on isocast-m2-b (macOS 26.7, notarized Developer ID build,
+2026-10-15): moving Isocast.app to the Trash in Finder does **not**
+deactivate the camera; it stays listed (showing the waiting card) until
+deactivated. Deactivation asks for an administrator password, and it must
+come from an app carrying the **same build** as the activated extension
+(otherwise macOS answers "not found"). A Sparkle update replaces the embedded
+extension but not the activated one; asking macOS to activate the new build
+(`isocastd --install-camera-extension`) replaces it without a new approval.
 
 ## Picture and lifecycle
 
@@ -56,10 +101,16 @@ fails after a second; the per-frame DeviceIsAlive IPC has been removed.
 
 The control socket is created **0600** and Darwin peers must match the daemon's
 effective uid. The anonymous helper socket verifies its kernel peer audit
-token against the daemon's designated code requirement. The extension accepts
-only signing id **dev.isocast.isocastd** with Apple team **9G68SMNHEU**, checked
-against the live client's signature. Reservations are keyed by CMIO client id
-so a second authorization cannot overwrite the first.
+token against the daemon's designated code requirement. The extension refuses
+a producer whose CMIO signing id is another app's (CMIO reports the engine's
+as "unknown"). It checks the live client against Apple anchor + identifier
+**dev.isocast.isocastd** + team **9G68SMNHEU** when macOS allows the lookup;
+its sandbox denies that by pid on macOS 26.7, so it then requires the
+producer's executable to be an app's `Contents/MacOS/isocastd` under
+/Applications (weaker than the team check; a follow-up). Refusals are logged:
+`log stream --predicate 'subsystem == "dev.isocast.isocastd.camera"'`.
+Reservations are keyed by CMIO client id so a second authorization cannot
+overwrite the first.
 
 Samples have host-clock PTS, frame duration, Rec.709 primaries/transfer/matrix
 and full-range RGB pixels. Program PTS is the engine's canvas timestamp,

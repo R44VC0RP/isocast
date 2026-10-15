@@ -177,6 +177,12 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-15 (#67): the two Developer ID profiles exist (tied to the
+  2027 release certificate; secrets set) and a notarized Developer ID build
+  activated and streamed on isocast-m2-b. Left for Ryan: a QuickTime/Zoom/
+  FaceTime look on a Mac with a real display, and coexistence with OBS's
+  or NDI's camera (m2-b has none). m2-b still lists old Isocast builds as
+  "terminated waiting to uninstall on reboot"; they go at its next reboot.
 - 2026-10-14 (motion harness): the test Macs' desktop bridge may not post
   mouse events (no Accessibility), so `scripts/motion/pointer.swift`
   can't replay a scenario's whole path in a real window; window.py falls
@@ -1558,6 +1564,43 @@ each section. Delete entries that stop being true.
   `Method::EstimateCapacity(CapacityParams { setup: Some(candidate), stream,
   add_iso })` per ISO candidate and apply `admission.change`; `start`
   already notes a can't-keep-up prediction.
+- 2026-10-15 (#67): **The release app ships the camera extension.** It sits
+  in `Isocast Engine.app/Contents/Library/SystemExtensions` (the engine,
+  `dev.isocast.isocastd`, is the producer the extension admits and the app
+  that activates it), built with plain swiftc by
+  scripts/build-camera-extension.sh rather than Xcode, so release signing
+  stays manual Developer ID codesign with the given profiles (no Xcode
+  account/automatic signing on CI). Signed entitlements add
+  `com.apple.application-identifier` and `com.apple.developer.team-identifier`
+  (what Xcode would add; the profiles grant them) and, on the engine only,
+  system-extension.install and the Team-ID app group; the CLI keeps the plain
+  set (a restricted entitlement without a profile gets a binary killed).
+  Profiles must be Developer ID (no device list) with >=30 days left and
+  carry the signing certificate; the app group isn't required in the
+  profile (Team-ID-prefixed groups need no registration for Developer ID,
+  as the guide tells Ryan). **Start activates it** in release builds only:
+  a development engine (no embedded extension) still never installs
+  anything. Activation runs in a re-exec'd child (`--install-camera-extension
+  --wait-for-approval`) because OSSystemExtensionRequest delivers to a main
+  run loop the daemon doesn't run; after the approval prompt the child
+  keeps the request alive (15 min) so the engine can start the camera when
+  the user allows it, unless Stop came first.
+- 2026-10-15 (#67, first real activation, m2-b macOS 26.7): system
+  extensions must be **notarized** (an unnotarized Developer ID build fails
+  activation with "code signature invalid"). CMIO reports the producer's
+  signingID as "unknown", and the extension's sandbox can't look up another
+  process's code by pid (EPERM) but can read its path (proc_pidpath); the
+  extension now admits an app's Contents/MacOS/isocastd under /Applications.
+  The approval alert names "isocastd"; the password sheets name "Login
+  Items" / "Isocast Engine". Re-activating a newer build replaces the old
+  one without approval; deactivation needs an admin password and the same
+  build as the active one. Finder's Move to Trash leaves the camera active.
+  ffmpeg's avfoundation input accepts only `-framerate 240` for this camera
+  (its range check vs. the advertised 1–240 range); frames still arrive at
+  the producer's rate.
+- 2026-10-15 (#67): `x-apple.systempreferences:com.apple.LoginItems-Settings.extension`
+  opens System Settings › General › Login Items & Extensions on macOS 26.7
+  (isocast-m2-b); Camera Extensions is further down that page.
 
 - 2026-10-15 (#58): a disabled primary footer button uses the kit's
   disabled footer style (hover fill, text-disabled label) everywhere, not
@@ -1935,12 +1978,12 @@ each section. Delete entries that stop being true.
   - *Embedding*: arm64-thinned, XPC services removed (only sandboxed apps
     use them), Autoupdate/Updater.app/framework signed with hardened runtime
     and no entitlements before the app (Sparkle's sandboxing guide's order).
-  - *Camera extension*: out of scope. The released Isocast.app doesn't
-    carry it (a separate, one-time `scripts/vcam-install.sh` install), so a
-    Sparkle update never replaces or deactivates it: the activated system
-    extension keeps its installed version, and installing a newer one stays
-    vcam-install.sh's job. If a later release changes the extension's
-    protocol, its release notes must say to run vcam-install.sh again.
+  - *Camera extension*: since #67 (2026-10-15) the released app carries
+    it in its engine helper. A Sparkle update replaces the embedded copy
+    but not the activated extension, which keeps its installed version
+    until something asks macOS to activate the new one (follow-up: compare
+    versions at Start and re-request activation). If a release changes the
+    extension's protocol, that follow-up must land first.
 - 2026-10-14 (Ryan): **exonbook's "'Python' is requesting to bypass the
   system private window picker" alert stays unanswered.** Ryan doesn't use
   exonbook and leaves it open; it blocks nothing (the engine is already

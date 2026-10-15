@@ -133,7 +133,9 @@ fn main() -> ExitCode {
             isocast_platform_macos::run_main_queue(|| std::process::exit(0));
         }
         let result = match mode.as_str() {
-            "--install-camera-extension" => Some(virtual_camera::activate()),
+            "--install-camera-extension" => Some(virtual_camera::activate(
+                std::env::args().nth(2).as_deref() == Some("--wait-for-approval"),
+            )),
             "--uninstall-camera-extension" => Some(virtual_camera::deactivate()),
             "--list-virtual-camera" => Some(virtual_camera::camera_probe(false)),
             "--check-virtual-camera" => Some(virtual_camera::camera_probe(true)),

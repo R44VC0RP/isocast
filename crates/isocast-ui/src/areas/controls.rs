@@ -39,7 +39,7 @@ pub const STATES: &[&str] = &[
     "toast-drops",
     "toast-overload[:fits|EVENT.json]",
     "transition:KIND",
-    "vcam[:missing|running|failed]",
+    "vcam[:missing|approval|running|failed]",
     "replay[:running|failed|saved]",
     "pause",
     "resume",
@@ -208,6 +208,11 @@ impl Area for Controls {
             }
         });
         area.on_copy_text(|text| crate::platform::copy_text(&text));
+        area.on_open_vcam_settings(|| {
+            crate::platform::open_url(
+                "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
+            )
+        });
         let weak = Rc::downgrade(app);
         area.on_marker(move |label| {
             if let Some(app) = weak.upgrade() {
@@ -1942,6 +1947,13 @@ fn vcam_missing(error: &str) -> bool {
     error.contains("not installed")
 }
 
+/// A release build's first start asked macOS to activate the camera
+/// extension, and macOS waits for the user's approval (isocast-daemon
+/// virtual_camera.rs); the engine starts the camera when it comes.
+fn vcam_approval(error: &str) -> bool {
+    error.contains("Login Items & Extensions")
+}
+
 /// The virtual camera's button and popover: its state, its output (the
 /// setup's `virtual_camera`) and size, and why it couldn't start.
 fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
@@ -1962,8 +1974,17 @@ fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
         .and_then(|x| x.last_error.clone())
         .unwrap_or_default();
     let missing = vcam_missing(&error);
+    let approval = vcam_approval(&error);
     area.set_vcam_missing(missing);
-    area.set_vcam_error(if missing { String::new() } else { error }.into());
+    area.set_vcam_approval(approval);
+    area.set_vcam_error(
+        if missing || approval {
+            String::new()
+        } else {
+            error
+        }
+        .into(),
+    );
     let setup = s.setup.as_deref();
     let settings = setup.map(|x| x.virtual_camera.clone()).unwrap_or_default();
     area.set_vcam_targets(model(vec![
@@ -2037,9 +2058,10 @@ fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
     );
 }
 
-/// Start or stop the virtual camera. Starting never installs anything:
-/// without its extension the start fails, and the popover says how to
-/// install it.
+/// Start or stop the virtual camera. A development engine never installs
+/// anything: without its extension the start fails, and the popover says how
+/// to install it. A release engine asks macOS to activate the extension it
+/// carries; the popover then says how to allow it.
 fn toggle_vcam(app: &Rc<App>) {
     let on = {
         let mut s = app.session.borrow_mut();
@@ -2072,7 +2094,7 @@ fn toggle_vcam(app: &Rc<App>) {
         match result {
             Ok(status) => app.session.borrow_mut().vcam = Some(status),
             Err(error) => {
-                let missing = vcam_missing(&error.message);
+                let missing = vcam_missing(&error.message) || vcam_approval(&error.message);
                 {
                     let mut s = app.session.borrow_mut();
                     let status = s.vcam.get_or_insert_with(VirtualCameraStatus::default);
@@ -2149,7 +2171,11 @@ fn sample_vcam(app: &Rc<App>, which: &str) -> anyhow::Result<VirtualCameraStatus
     match which {
         "missing" => {
             status.state = VirtualCameraState::Failed;
-            status.last_error = Some("virtual_camera: Isocast Virtual Camera is not installed/approved; run scripts/vcam-install.sh (Start never installs it)".into());
+            status.last_error = Some("virtual_camera: Isocast Virtual Camera is not installed/approved; run scripts/vcam-install.sh (a development engine never installs it)".into());
+        }
+        "approval" => {
+            status.state = VirtualCameraState::Failed;
+            status.last_error = Some("virtual_camera: allow Isocast Virtual Camera in System Settings › General › Login Items & Extensions › Camera Extensions (macOS asks once); it starts as soon as you do".into());
         }
         "running" => {
             status.state = VirtualCameraState::Running;
@@ -2161,7 +2187,7 @@ fn sample_vcam(app: &Rc<App>, which: &str) -> anyhow::Result<VirtualCameraStatus
             status.state = VirtualCameraState::Failed;
             status.last_error = Some("virtual_camera.width: give an advertised size: 1920x1080, 1280x720, 2560x1440, 3840x2160, 1080x1920, 720x1280".into());
         }
-        other => anyhow::bail!("vcam takes missing, running or failed, not {other:?}"),
+        other => anyhow::bail!("vcam takes missing, approval, running or failed, not {other:?}"),
     }
     Ok(status)
 }

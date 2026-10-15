@@ -8,19 +8,57 @@ import CoreGraphics
 import CoreText
 import IOKit.audio
 import Security
+import Darwin
+import os
+
+let log = Logger(subsystem: "dev.isocast.isocastd.camera", category: "producer")
 
 // CMIO supplies signingID and pid (this SDK exposes no client audit token).
-// Check the live process's Apple anchor, identifier AND team; a same-named
-// ad-hoc binary cannot acquire the sink. The client id pins the reservation.
+// On macOS 26.7 CMIO reports signingID "unknown" for the engine's producer,
+// and the extension's sandbox denies code lookups of other processes by pid
+// (SecCodeCopyGuestWithAttributes: EPERM). So: a reported id other than the
+// engine's refuses; the live code's Apple anchor, identifier and team are
+// checked whenever macOS allows the lookup, and a failed check refuses. The
+// client id pins the reservation. Decisions are logged:
+// `log stream --predicate 'subsystem == "dev.isocast.isocastd.camera"'`.
+let producerRule = #"anchor apple generic and identifier "dev.isocast.isocastd" and certificate leaf[subject.OU] = "9G68SMNHEU""#
+
 func producerCodeAllowed(signingID: String?, pid: pid_t) -> Bool {
-    guard signingID == "dev.isocast.isocastd" else { return false }
+    guard signingID == nil || signingID == "unknown" || signingID == "dev.isocast.isocastd" else {
+        log.error("refused producer pid \(pid, privacy: .public): signing id \(signingID ?? "none", privacy: .public)")
+        return false
+    }
+    var requirement: SecRequirement?
+    guard SecRequirementCreateWithString(producerRule as CFString, SecCSFlags(rawValue: 0), &requirement) == errSecSuccess,
+          let requirement else { return false }
     var code: SecCode?
     let attributes = [kSecGuestAttributePid: NSNumber(value: pid)] as CFDictionary
-    guard SecCodeCopyGuestWithAttributes(nil, attributes, SecCSFlags(rawValue: 0), &code) == errSecSuccess, let code else { return false }
-    var requirement: SecRequirement?
-    let rule = #"anchor apple generic and identifier "dev.isocast.isocastd" and certificate leaf[subject.OU] = "9G68SMNHEU""#
-    guard SecRequirementCreateWithString(rule as CFString, SecCSFlags(rawValue: 0), &requirement) == errSecSuccess, let requirement else { return false }
-    return SecCodeCheckValidity(code, SecCSFlags(rawValue: 0), requirement) == errSecSuccess
+    let copied = SecCodeCopyGuestWithAttributes(nil, attributes, SecCSFlags(rawValue: 0), &code)
+    if copied == errSecSuccess, let code {
+        let valid = SecCodeCheckValidity(code, SecCSFlags(rawValue: 0), requirement)
+        log.notice("producer pid \(pid, privacy: .public) live signature check \(valid, privacy: .public)")
+        return valid == errSecSuccess
+    }
+    // Fallback (the sandbox allows proc_pidpath): an engine installed in
+    // /Applications, and its signature on disk when that can be read.
+    var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+    guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else {
+        log.error("refused producer pid \(pid, privacy: .public): code lookup denied (\(copied, privacy: .public)) and no path")
+        return false
+    }
+    let path = String(cString: buffer)
+    guard path.hasPrefix("/Applications/"), path.hasSuffix(".app/Contents/MacOS/isocastd") else {
+        log.error("refused producer pid \(pid, privacy: .public): \(path, privacy: .public) is not an installed Isocast engine")
+        return false
+    }
+    var file: SecStaticCode?
+    if SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, SecCSFlags(rawValue: 0), &file) == errSecSuccess, let file {
+        let valid = SecStaticCodeCheckValidity(file, SecCSFlags(rawValue: 0), requirement)
+        log.notice("producer pid \(pid, privacy: .public) at \(path, privacy: .public): signature on disk \(valid, privacy: .public)")
+        return valid == errSecSuccess
+    }
+    log.notice("producer pid \(pid, privacy: .public) at \(path, privacy: .public): accepted by path (code lookup denied: \(copied, privacy: .public))")
+    return true
 }
 
 let cameraQueue = DispatchQueue(label: "dev.isocast.camera", qos: .userInteractive,
@@ -311,8 +349,11 @@ final class CameraStream: NSObject, CMIOExtensionStreamSource {
     }
     func authorizedToStartStream(for client: CMIOExtensionClient) -> Bool {
         if direction == .sink {
-            guard producerCodeAllowed(signingID: client.signingID, pid: client.pid), owner.producer == nil,
-                  candidates.isEmpty || candidates[client.clientID] != nil else { return false }
+            guard producerCodeAllowed(signingID: client.signingID, pid: client.pid) else { return false }
+            guard owner.producer == nil, candidates.isEmpty || candidates[client.clientID] != nil else {
+                log.error("refused producer pid \(client.pid, privacy: .public): another producer holds the sink")
+                return false
+            }
             candidates[client.clientID] = client
         }
         return true

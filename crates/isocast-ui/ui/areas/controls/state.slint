@@ -40,6 +40,10 @@ export global ControlsArea {
     // The camera extension isn't installed or approved (its last start
     // said so): the button explains how to install it, never installs.
     in property <bool> vcam-missing;
+    // A release build asked macOS to activate its camera extension and is
+    // waiting for the user to allow it in System Settings; the camera
+    // starts by itself when they do.
+    in property <bool> vcam-approval;
     // Why the last start failed, when it isn't that ("" for none).
     in property <string> vcam-error;
     // program, preview, scene, source; the scene's or source's id; the
@@ -163,6 +167,8 @@ export global ControlsArea {
     callback set-vcam(string, string);
     // Put text on the clipboard (the install command).
     callback copy-text(string);
+    // Open System Settings at Login Items & Extensions (vcam-approval).
+    callback open-vcam-settings();
     // A marker with this label ("" for "Marker").
     callback marker(string);
     callback split();

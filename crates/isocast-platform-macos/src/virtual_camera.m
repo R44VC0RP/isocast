@@ -185,6 +185,7 @@ int32_t isocast_camera_validate(CVPixelBufferRef pixels, int64_t pts, uint32_t f
 @property BOOL done;
 @property int result;
 @property BOOL activating;
+@property BOOL waitForApproval;
 @end
 @implementation IsocastCameraActivation
 - (void)requestNeedsUserApproval:(OSSystemExtensionRequest *)request {
@@ -192,6 +193,12 @@ int32_t isocast_camera_validate(CVPixelBufferRef pixels, int64_t pts, uint32_t f
     fprintf(stderr, "%s\n", self.activating
         ? "Approve Isocast Virtual Camera in System Settings > General > Login Items & Extensions > Camera Extensions."
         : "Approve macOS's request to remove Isocast Virtual Camera.");
+    if (self.waitForApproval) {
+        // The engine's Start: tell the parent at once, then keep the request
+        // alive so sysextd reports the result when the user allows it.
+        fputs("needs-approval\n", stdout); fflush(stdout);
+        return;
+    }
     self.result = 2; self.done = YES; // sysextd continues after approval; don't keep a CLI waiting.
 }
 - (OSSystemExtensionReplacementAction)request:(OSSystemExtensionRequest *)request actionForReplacingExtension:(OSSystemExtensionProperties *)existing withExtension:(OSSystemExtensionProperties *)extension {
@@ -221,7 +228,9 @@ int32_t isocast_camera_validate(CVPixelBufferRef pixels, int64_t pts, uint32_t f
 }
 @end
 
-int32_t isocast_camera_manage(bool activate) {
+// wait: keep waiting (up to 15 minutes) after macOS asks the user to approve,
+// printing "needs-approval" on stdout first; otherwise return 2 at once.
+int32_t isocast_camera_manage(bool activate, bool wait) {
     @autoreleasepool {
         if (![[NSBundle mainBundle].bundlePath hasPrefix:@"/Applications/"]) {
             fprintf(stderr, "Install the signed Isocast host app in /Applications first; see docs/virtual-camera.md.\n");
@@ -229,12 +238,15 @@ int32_t isocast_camera_manage(bool activate) {
         }
         IsocastCameraActivation *delegate = [IsocastCameraActivation new];
         delegate.activating = activate;
+        delegate.waitForApproval = wait;
         OSSystemExtensionRequest *request = activate
             ? [OSSystemExtensionRequest activationRequestForExtension:@"dev.isocast.isocastd.camera" queue:dispatch_get_main_queue()]
             : [OSSystemExtensionRequest deactivationRequestForExtension:@"dev.isocast.isocastd.camera" queue:dispatch_get_main_queue()];
         request.delegate = delegate;
         [[OSSystemExtensionManager sharedManager] submitRequest:request];
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:30];
+        // Deactivation asks for an administrator password first (macOS 26.7):
+        // give the person time to type it before giving up.
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:wait ? 900 : activate ? 30 : 180];
         while (!delegate.done && deadline.timeIntervalSinceNow > 0) [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
         if (!delegate.done) { fprintf(stderr, "Isocast camera request timed out; check System Settings and retry --check.\n"); return 2; }
         return delegate.result;

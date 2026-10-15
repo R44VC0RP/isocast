@@ -784,6 +784,12 @@ native app; each verified against OBS's behaviour on a test Mac.
     account provisioning and activation intentionally remain Ryan's steps.
   - [x] **G.1 app.** Start/Stop Virtual Camera in the Slint app's
     Controls dock with its output and size; install help, never installs.
+  - [ ] **G.1c Ship the extension in the release app (#67).**
+    - [x] release.sh/workflow build, embed and Developer ID-sign it with
+      both profiles, refusing builds without them; Start activates it;
+      the app explains the System Settings approval.
+    - [ ] Developer ID activation on a test Mac, camera clients,
+      coexistence and removal (needs Ryan's two profiles).
   - [ ] **G.1b Installed camera qualification (needs Ryan).** Apple-team
     signing and explicit activation/approval, then actual camera clients,
     multi-client buffer lifetime, extension CPU/GPU and client latency.
@@ -3441,3 +3447,12 @@ One line per finished task, newest last.
   buffer) PASS locally and on m2-b, m2-b A/B program + 2 ISOs with/without
   the buffer's own encoder 3 pairs all 1200/1200, memory cap 16 MB held,
   30-min RSS flat.
+- G.1c (2026-10-15, #67): release builds embed dev.isocast.isocastd.camera
+  in Isocast Engine.app, Developer ID-signed with both Developer ID profiles
+  (checked before the build and after signing; builds refuse without
+  them); Start asks macOS to activate it, and the app explains the
+  approval. Verified: release.sh --dry-run, ad-hoc release.sh build on
+  exonbook, crafted-profile and tampered-bundle refusals, on isocast-m2-b
+  the activation request reaching sysextd (ad-hoc: "Missing entitlement")
+  and the DMG-path refusal; offscreen vcam:approval. Real activation waits
+  on the profiles.
