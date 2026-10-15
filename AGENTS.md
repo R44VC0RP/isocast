@@ -51,9 +51,6 @@ For each task:
 
 ## Ground rules
 
-- **Clean-room.** Never read, fetch or copy OBS Studio source code or its
-  shader/effect files. OBS is GPL; Isocast is MIT OR Apache-2.0. Public docs
-  (docs.obsproject.com), protocol specs and Apple's documentation are fine.
 - **macOS first, portable core.** Platform code goes in
   `isocast-platform-macos` behind traits defined in portable crates.
 - **One method table.** GUI, CLI and MCP are thin clients of the same engine

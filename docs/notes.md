@@ -1447,6 +1447,11 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-14 (Ryan): **reading OBS source is allowed; copying it isn't.**
+  Agents may clone OBS Studio and its plugins outside the repo and read them
+  to understand behaviour and compatibility. Nothing from them is copied,
+  translated or pasted into Isocast: everything committed is written by us.
+  Replaces the earlier "never read OBS source" clean-room rule.
 - 2026-10-14 (Ryan): **the delegator may use cua-driver to click inside
   Isocast's own windows on Ryan's Mac** when a step needs a click and the
   command line can't do it (for example Sparkle's Install button during an
