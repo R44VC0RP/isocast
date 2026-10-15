@@ -602,6 +602,11 @@ layout editing, Windows, release prep).
   recording (G.3), virtual camera (G.1). Replay buffer and projectors wait.
 - [x] **A.4 Graceful overload (S.3 round 3):** the program and stream stay
   whole while ISOs drop first; A/V durations equal (S.2c); stop stays fast.
+- [ ] **A.4 Split + stream losses (GitHub #60), qualification partial:**
+  synchronous native stream submission stalls now signal pressure; final
+  build's 16 post-split takes have zero protected losses. Cold stream startup
+  still loses 9–12 program/stream pictures under heavy M2 load, so the strict
+  zero-total-drop acceptance remains open. See split-drops scratch REPORT.md.
 - [x] **A.4 ISO take loss (GitHub #41):** VideoToolbox placed sessions
   started within a few milliseconds of each other (or during another's
   teardown) three to one engine, each then at ~45 fps for the whole take,
@@ -1261,6 +1266,18 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   and recording); canvas resize realtime a frame behind with 27-31 stalled
   frames, 6.3 pt p95 while recording. Verified by two identical lockstep
   runs and the window recordings.
+- A.4 / #60 (2026-10-15, partial qualification): VideoToolbox blocks inside a stream submission
+  below our eight-frame limit, hiding pressure and exhausting the program
+  pool. Publish pressure from the native call's frame-time budget too;
+  retain the start gate and bounded wait. Review found first-frame setup
+  could cut healthy ISOs (51 frames each); exclude that first submission,
+  verified with three loss-free stream starts. Final build: 16 post-split
+  takes loss-free, but 9/12 pictures lost at stream startup in two runs.
+  Stop after three investigated variants; the initial native call can block
+  beyond the pool's reserve before feedback can act. 249/249 files pass
+  ffprobe/full decode, final e2e 15/15, workspace fmt/clippy/191 tests pass.
+  Review blocker cleared; strict zero-drop bar remains open. See REPORT.md.
+
 - A.4 / #41 (2026-10-14, fixed): the cause is VideoToolbox's placement of
   hardware sessions on the M4 Max's two encode engines, decided at each
   session's first picture; a standalone VT benchmark reproduced the slow

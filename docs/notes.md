@@ -1501,6 +1501,46 @@ each section. Delete entries that stop being true.
   error" when the sender closes; it's filtered, and disconnects are judged
   by the connection count and `reconnects`. After a crash or hang the
   report shows only that failure, not what follows from it.
+- 2026-10-15 (#60): **Stream pressure must include time blocked inside
+  VideoToolbox, not just our eight-frame submission limit.** In the M5 soak,
+  bad takes had zero writer refusals and empty writer queues; compositor
+  misses rose, while the stream's callbacks slowed from ~5–11 ms to
+  ~115–123 ms with seven frames in flight and zero native encoder drops.
+  On m2-b, 4K60 + 1080p60 synthetic ISOs, 1080p60 program and a 6 Mb/s
+  local RTMP stream reproduced this: native EncodeFrame blocked with only
+  seven outstanding submissions (six at return), never reaching our check
+  for eight. Its mixed A/V tap filled and exhausted the compositor's
+  32-frame pool, dropping program pictures and stream audio while ISOs
+  stayed clean. Checking seven instead also missed it; do not guess Apple's
+  internal window. `H264Encoder::encode` now publishes pressure when the
+  native call takes a frame period, as well as before our existing bounded
+  wait. A fast submission clears it. The first native picture is excluded:
+  its initialization exceeded the budget on an otherwise idle encoder,
+  costing 51 pictures per ISO in the review's light-load control (baseline
+  0). With the exclusion, three stream starts during one healthy recording
+  have zero video/audio losses, including the ISOs. No changes to #41's start gate,
+  split/finalization, queues, codec settings, or the admission controller.
+  Before that review fix, three interleaved six-take A/B pairs (30 s splits): baseline 18/18 bad
+  program takes, 16,882 program / 18,655 stream drops and 16,629 stream
+  audio dropouts; fixed 0/18 bad, zero protected video/audio losses. The
+  overloaded M2 now sheds ISO pictures as intended (26,734 total); six
+  recording-only split takes keep all three files loss-free. The final build
+  has **zero losses through 16 post-split takes**, but two first takes lose
+  9/12 program and stream pictures during cold stream startup. In the 9-drop
+  run all losses already existed at callbacks=0 / in_flight=1: the first
+  native submission can block beyond the pool's reserve before either
+  post-call signal can act. A baseline cold-start control also loses pictures
+  immediately (20 by the first sample) and keeps losing them. Do not claim
+  the requested zero-total-drop acceptance passed. After three investigated
+  variants, stop changing policy; next investigate isolating native warmup
+  from the full program tap instead of guessing another queue threshold.
+  M2-a/macOS 27 additionally verified four pre-review candidate takes with
+  pause/scene switches, zero protected losses. All **249 files**, including
+  failed qualification runs, passed ffprobe/full decode; final e2e 15/15,
+  workspace fmt/clippy/191 tests clean. Reviewer cleared the startup
+  regression; coordinator owns the remaining acceptance decision.
+  Evidence and limitations:
+  `/Volumes/IsocastBuild/split-drops/scratch/REPORT.md`.
 
 - 2026-10-14 (Ryan): **reading OBS source is allowed; copying it isn't.**
   Agents may clone OBS Studio and its plugins outside the repo and read them

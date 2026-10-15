@@ -10,7 +10,7 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use isocast_engine::{
@@ -322,15 +322,13 @@ impl VideoEncoder for H264Encoder {
     type Frame = PixelBuffer;
 
     fn encode(&mut self, frame: &PixelBuffer, pts: Time, keyframe: bool) -> Result<()> {
-        if let Some(priority) = &mut self.priority {
-            // A partly occupied asynchronous pipeline is normal. Yield ISO
-            // capacity only when this worker must wait for a submission slot.
-            priority.set(self.output.in_flight.load(Ordering::Relaxed) >= MAX_IN_FLIGHT);
-        }
         // Apple's hardware encoder can expose MaxFrameDelayCount read-only.
         // Bound outstanding submissions ourselves so a stalled callback
         // cannot pin the compositor's entire surface pool.
         if self.output.in_flight.load(Ordering::Relaxed) >= MAX_IN_FLIGHT {
+            if let Some(priority) = &mut self.priority {
+                priority.set(true);
+            }
             if !self.low_latency {
                 let frames = self.output.frames.lock().unwrap();
                 let _ = self
@@ -353,7 +351,8 @@ impl VideoEncoder for H264Encoder {
             )
         };
         let options = keyframe.then(|| self.force_keyframe.as_opaque());
-        if !self.started {
+        let first = !self.started;
+        if first {
             // The first frame starts the hardware session: in its turn, not
             // within a few milliseconds of another session's start.
             let (width, height) = self.size;
@@ -366,6 +365,7 @@ impl VideoEncoder for H264Encoder {
             self.started = true;
         }
         self.output.in_flight.fetch_add(1, Ordering::Relaxed);
+        let submitted = Instant::now();
         let status = unsafe {
             self.session.encode_frame(
                 &frame.0,
@@ -376,6 +376,15 @@ impl VideoEncoder for H264Encoder {
                 ptr::null_mut(),
             )
         };
+        if let Some(priority) = &mut self.priority {
+            // VideoToolbox can wait inside encode_frame before our submission
+            // window fills (seven in flight on M2). Without this feedback the
+            // stream's tap pins the compositor's pool, dropping both protected
+            // outputs while the ISOs keep running. The first picture also
+            // initializes the session, even with spare capacity: that is not
+            // pressure. Keep pressure until a later submission fits its budget.
+            priority.set(!first && submitted.elapsed() >= Duration::from_secs(1) / self.fps);
+        }
         if status != 0 {
             self.output.in_flight.fetch_sub(1, Ordering::Relaxed);
             self.output.last_os_status.store(status, Ordering::Relaxed);
