@@ -294,7 +294,18 @@ impl AssetWriter {
     /// itself among them) would outlive the file, and every take's writers
     /// and their encoder sessions would pile up until the recording ends.
     pub fn create(spec: &WriterSpec) -> Result<Self> {
-        autoreleasepool(|_| Self::make(spec))
+        let writer = autoreleasepool(|_| Self::make(spec));
+        isocast_diagnostics::debug!(
+            "writer: {} {:?} {}x{}@{} ({} audio tracks): {}",
+            spec.path.display(),
+            spec.video.encoder.codec,
+            spec.video.width,
+            spec.video.height,
+            spec.video.fps,
+            spec.audio.len(),
+            if writer.is_ok() { "created" } else { "failed" }
+        );
+        writer
     }
 
     fn make(spec: &WriterSpec) -> Result<Self> {
@@ -417,6 +428,11 @@ impl FileWriter for AssetWriter {
 
     fn append_video(&mut self, frame: &PixelBuffer, pts: Time) -> Result<bool> {
         autoreleasepool(|_| self.append_frame(frame, pts))
+    }
+
+    // Developer mode (#47): frames waiting for AVAssetWriter's input.
+    fn queue_depth(&self) -> usize {
+        self.pending_video.len()
     }
 
     fn append_audio(&mut self, track: usize, samples: &[f32], pts: Time) -> Result<bool> {
@@ -632,6 +648,7 @@ impl AssetWriter {
         if unsafe { self.writer.status() } != AVAssetWriterStatus::Completed {
             return Err(writer_error(&self.writer).context("could not finish the file"));
         }
+        isocast_diagnostics::debug!("writer: finished, {repeated} tail frames repeated");
         Ok(repeated)
     }
 }

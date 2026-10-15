@@ -1,0 +1,35 @@
+// Developer mode (#47, src/areas/developer.rs): the Developer menu (shown
+// while the profile has developer mode on) and the live stats overlay over
+// the stage, from the engine's `debug_status` and `status` once a second.
+
+// A line of the overlay: what it measures and its value; `warn` colours
+// it (drops, late frames, missed ticks).
+export struct StatRow {
+    label: string,
+    value: string,
+    // The line on its own, for the narrow overlay ("frame 0.91/1.51 ms").
+    short: string,
+    warn: bool,
+}
+
+// A recording output (file) in the overlay's table, over the last second.
+export struct OutputStat {
+    name: string,
+    fps: string,
+    dropped: string,
+    late: string,
+    submit: string,
+    queue: string,
+    warn: bool,
+}
+
+export global DeveloperArea {
+    // The live setup's profile has developer mode on.
+    in property <bool> on;
+    // The stats overlay is shown (Developer › Stats Overlay).
+    in-out property <bool> overlay;
+    in property <[StatRow]> rows;
+    in property <[OutputStat]> outputs;
+    // "Engine idle" and the like, when there is nothing to measure.
+    in property <string> note;
+}

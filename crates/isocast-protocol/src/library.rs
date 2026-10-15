@@ -183,6 +183,11 @@ pub struct Profile {
     pub stream: Option<StreamSettings>,
     #[serde(default, skip_serializing_if = "crate::hotkeys::Config::is_absent")]
     pub hotkeys: crate::hotkeys::Config,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::developer::DeveloperSettings::is_default"
+    )]
+    pub developer: crate::developer::DeveloperSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -309,6 +314,7 @@ impl Setup {
                 },
             stream,
             hotkeys,
+            developer,
         } = profile;
         Setup {
             virtual_camera,
@@ -342,6 +348,7 @@ impl Setup {
             },
             stream,
             hotkeys,
+            developer,
         }
     }
 
@@ -384,6 +391,7 @@ impl Setup {
                 },
             stream,
             hotkeys,
+            developer,
         } = self;
         let collection = Collection {
             virtual_camera,
@@ -428,6 +436,7 @@ impl Setup {
             },
             stream,
             hotkeys,
+            developer,
         };
         (collection, profile)
     }
@@ -522,6 +531,7 @@ impl Profile {
             },
             stream: None,
             hotkeys: Default::default(),
+            developer: Default::default(),
         }
     }
 }

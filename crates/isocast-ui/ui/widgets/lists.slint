@@ -91,14 +91,17 @@ export component ScrollArea inherits Rectangle {
             background: thumb-ta.has-hover || thumb-ta.pressed ? Theme.scroll-thumb-hover : Theme.scroll-thumb;
             thumb-ta := TouchArea {
                 property <length> start;
+                // In window coordinates: the thumb moves under the pointer.
+                property <length> press-y;
                 pointer-event(event) => {
                     if event.kind == PointerEventKind.down {
                         self.start = flick.content-y;
+                        self.press-y = self.absolute-position.y + self.mouse-y;
                     }
                 }
                 moved => {
                     if bar.travel > 0 {
-                        flick.content-y = max(flick.height - root.total, min(0px, self.start - (self.mouse-y - self.pressed-y) * ((root.total - flick.height) / bar.travel)));
+                        flick.content-y = max(flick.height - root.total, min(0px, self.start - (self.absolute-position.y + self.mouse-y - self.press-y) * ((root.total - flick.height) / bar.travel)));
                     }
                 }
             }

@@ -24,6 +24,7 @@ use crate::client::Client;
 
 mod client;
 mod data;
+mod debug;
 mod hotkeys;
 mod library;
 mod mcp;
@@ -442,6 +443,12 @@ enum Command {
     Vcam {
         #[command(subcommand)]
         command: virtual_camera::Command,
+    },
+    /// Developer mode, for testing a build locally: verbose logs of every
+    /// API call and component, and frame timing traces while recording.
+    Debug {
+        #[command(subcommand)]
+        command: debug::Command,
     },
     /// Print events from isocastd as they happen, until Ctrl-C.
     Watch {
@@ -1118,6 +1125,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         },
         Command::Engine { command, json } => engine(command, json),
         Command::Vcam { command } => virtual_camera::run(command),
+        Command::Debug { command } => debug::run(command),
         Command::Stream { command } => match command {
             StreamCommand::Start { json } => {
                 let status: StreamStatus =

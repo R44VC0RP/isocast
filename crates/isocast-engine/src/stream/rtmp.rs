@@ -155,7 +155,9 @@ impl Connection {
             deadline: Instant::now() + timeout,
             stop,
         };
+        let began = Instant::now();
         let transport = open(server, until)?;
+        isocast_diagnostics::debug!("rtmp: connected in {:?}", began.elapsed());
         let mut connection = Self {
             transport,
             reader: ChunkReader::default(),
@@ -169,6 +171,7 @@ impl Connection {
         connection.handshake(until).context("RTMP handshake")?;
         connection.send_control(SET_CHUNK_SIZE, &(CHUNK_SIZE as u32).to_be_bytes())?;
         connection.start(server, key, until)?;
+        isocast_diagnostics::debug!("rtmp: publishing after {:?}", began.elapsed());
         connection
             .transport
             .tcp()

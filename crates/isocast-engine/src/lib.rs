@@ -28,6 +28,7 @@ pub mod stream;
 pub mod synthetic;
 mod text;
 mod time;
+pub mod trace;
 pub mod transition;
 pub mod tune;
 pub mod wasm;
@@ -628,6 +629,12 @@ pub trait FileWriter: Send {
     /// Append a video frame, waiting briefly for a busy encoder. Returns
     /// `false` if the encoder could not keep up and the frame was dropped.
     fn append_video(&mut self, frame: &Self::Frame, pts: Time) -> anyhow::Result<bool>;
+
+    /// Video frames waiting inside the writer for its encoder, for
+    /// developer mode's traces.
+    fn queue_depth(&self) -> usize {
+        0
+    }
 
     /// Append interleaved samples to audio track `track`. Returns `false` if
     /// they were dropped.

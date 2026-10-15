@@ -58,6 +58,7 @@
 pub mod canvas;
 pub mod controls;
 pub mod create;
+pub mod developer;
 pub mod hotkeys;
 pub mod library;
 pub mod mixer;
@@ -83,6 +84,7 @@ pub const STATES: &[&[&str]] = &[
     canvas::STATES,
     library::STATES,
     create::STATES,
+    developer::STATES,
 ];
 
 /// What `App` asks of an area. Everything but `connect` and `update` has

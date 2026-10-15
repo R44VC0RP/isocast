@@ -1021,4 +1021,22 @@ export component AdvancedPage inherits SetPage {
             }
         }
     }
+    // Developer mode (#47): the profile's; logs stay on this Mac.
+    SetGroup {
+        title: "Developer";
+        hint: "Logs every engine call and debug messages, and frame timing each second while recording, in logs of their own (up to 200 MB) on this Mac. Adds the Developer menu and the stats overlay.";
+        SwitchRow {
+            label: "Developer Mode";
+            place: RowPlace.first;
+            on <=> SettingsArea.developer-on;
+            toggled(on) => { SettingsArea.set-flag("developer", on); }
+        }
+        SwitchRow {
+            label: "Turn Off After 24 Hours";
+            place: RowPlace.last;
+            enabled: SettingsArea.developer-on;
+            on <=> SettingsArea.developer-auto-off;
+            toggled(on) => { SettingsArea.set-flag("developer_auto_off", on); }
+        }
+    }
 }

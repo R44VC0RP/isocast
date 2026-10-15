@@ -39,11 +39,15 @@ import { LibraryDialogs } from "areas/library/dialogs.slint";
 import { CreateArea } from "areas/create/state.slint";
 import { ClipBar } from "areas/create/clip-bar.slint";
 import { QuitDialog, QuitPrompt } from "quit.slint";
+import { DeveloperArea } from "areas/developer/state.slint";
+import { OverlaySize, StatsOverlay } from "areas/developer/overlay.slint";
 
 // What Rust sees: the globals and the structs in their models.
 export { Theme, Ui, ConnectionState, Menus, Toasts, EditCommands, SettingsForms }
 export { CanvasArea, SourcesArea, MixerArea, ControlsArea, SettingsArea, LibraryArea }
 export { CreateArea }
+export { DeveloperArea }
+export { StatRow, OutputStat } from "areas/developer/state.slint";
 export { QuitPrompt }
 export { DropdownOption, MenuEntry, MenuList, MenuEntryKind, NavTab, Segment, ToastData, ToastRow, ToastKind, FormField, FormGroup } from "kit.slint";
 export { SceneRow, ItemRow, FilterRow, PickRow } from "areas/sources/state.slint";
@@ -88,6 +92,11 @@ component Workspace inherits VerticalLayout {
     out property <length> meter-y: bar.meter-y;
     out property <length> meter-width: bar.meter-width;
     out property <length> meter-height: bar.meter-height;
+    // The dock row and the Scenes | Sources splitter, in window points
+    // (the scripted splitter drags).
+    out property <length> docks-y: docks.absolute-position.y;
+    out property <length> docks-row-height: docks.height;
+    out property <length> scenes-right: docks.absolute-position.x + scenes.x + scenes.width;
 
     // The window is redrawn whole for every change (the mixer's meters
     // 30 times a second, and every video frame with `--preview image`):
@@ -138,17 +147,98 @@ component Workspace inherits VerticalLayout {
     // 170, 228, 160, 172: 874px with the splitters, under the window's
     // 900px minimum), so Controls (172: "Start Streaming" with its icon)
     // is never cut off. They meet at 1px `line` gaps (the splitters).
+    //
+    // A column splitter's edge follows the pointer exactly (GitHub #24),
+    // whichever docks are shown. When it is pressed, each dock's width
+    // (the mixer's too) becomes the width it has on screen, so the row
+    // adds up to the window and nothing is squeezed. The dragged dock then
+    // takes room from the docks across the splitter, the mixer first,
+    // then the nearest, each down to its minimum; dragging back gives it
+    // to the first of them. The row's width never changes, so no other
+    // edge moves. Docks are numbered 0 Scenes, 1 Sources, 2 Mixer,
+    // 3 Transitions, 4 Controls (-1: none).
+    property <length> start-scenes;
+    property <length> start-sources;
+    property <length> start-mixer;
+    property <length> start-transitions;
+    property <length> start-controls;
+    // What the docks across the pressed splitter can give. A dock grows to
+    // 640pt at most by dragging, but one the layout made wider (a window
+    // with few docks shown) isn't pulled in when pressed.
+    property <length> drag-room;
+    // The mixer's width while a splitter is held; otherwise its minimum,
+    // and it takes what's left (its stretch).
+    property <length> mixer-width: 228px;
+    function shown(id: int) -> bool {
+        return id == 0 ? Ui.show-scenes : id == 1 ? Ui.show-sources : id == 2 ? Ui.show-mixer
+            : id == 3 ? Ui.show-transitions : id == 4 ? Ui.show-controls : false;
+    }
+    function start-of(id: int) -> length {
+        return id == 0 ? root.start-scenes : id == 1 ? root.start-sources : id == 2 ? root.start-mixer
+            : id == 3 ? root.start-transitions : id == 4 ? root.start-controls : 0px;
+    }
+    function min-of(id: int) -> length {
+        return id == 0 ? 140px : id == 1 ? 170px : id == 2 ? 228px : id == 3 ? 160px : 172px;
+    }
+    function room(id: int) -> length {
+        return root.shown(id) ? max(0px, root.start-of(id) - root.min-of(id)) : 0px;
+    }
+    function set-width(id: int, width: length) {
+        if id == 0 { Ui.scenes-width = width; }
+        if id == 1 { Ui.sources-width = width; }
+        if id == 2 { root.mixer-width = width; }
+        if id == 3 { Ui.transitions-width = width; }
+        if id == 4 { Ui.controls-width = width; }
+    }
+    // Dock `id` gives `need` (takes it when negative) from its width at
+    // the press, as far as it can; returns what is still needed.
+    function give(id: int, need: length) -> length {
+        if !root.shown(id) {
+            return need;
+        }
+        let taken = need < 0px ? need : min(need, root.room(id));
+        root.set-width(id, root.start-of(id) - taken);
+        return need - taken;
+    }
+    function press(a: int, b: int, c: int, d: int) {
+        // All read before any is set: each change lays the row out again.
+        root.start-scenes = Ui.show-scenes ? scenes.width : 0px;
+        root.start-sources = Ui.show-sources ? sources.width : 0px;
+        root.start-mixer = Ui.show-mixer ? mixer.width : 0px;
+        root.start-transitions = Ui.show-transitions ? transitions.width : 0px;
+        root.start-controls = Ui.show-controls ? controls.width : 0px;
+        root.set-pressed-widths();
+        root.drag-room = root.room(a) + root.room(b) + root.room(c) + root.room(d);
+    }
+    function set-pressed-widths() {
+        if Ui.show-scenes { Ui.scenes-width = root.start-scenes; }
+        if Ui.show-sources { Ui.sources-width = root.start-sources; }
+        if Ui.show-mixer { root.mixer-width = root.start-mixer; }
+        if Ui.show-transitions { Ui.transitions-width = root.start-transitions; }
+        if Ui.show-controls { Ui.controls-width = root.start-controls; }
+    }
+    function drag-to(dragged: int, width: length, a: int, b: int, c: int, d: int) {
+        root.set-width(dragged, width);
+        let r1 = root.give(a, width - root.start-of(dragged));
+        let r2 = root.give(b, r1);
+        let r3 = root.give(c, r2);
+        let r4 = root.give(d, r3);
+    }
+    function release() {
+        root.mixer-width = 228px;
+        Ui.layout-changed();
+    }
     if CreateArea.active: ClipBar {
         height: max(130px, root.docks-height);
     }
 
-    HorizontalLayout {
+    docks := HorizontalLayout {
         property <bool> shown: Ui.show-docks && !CreateArea.active;
         height: self.shown ? root.docks-height : 0px;
         visible: self.shown;
         spacing: 0;
 
-        ScenesDock {
+        scenes := ScenesDock {
             cache-rendering-hint: root.cache-docks;
             visible: Ui.show-scenes;
             preferred-width: Ui.show-scenes ? Ui.scenes-width : 0px;
@@ -159,12 +249,14 @@ component Workspace inherits VerticalLayout {
         if Ui.show-scenes && (Ui.show-sources || Ui.show-mixer || Ui.show-transitions || Ui.show-controls): ColumnSplitter {
             size: Ui.scenes-width;
             min-size: 140px;
+            max-size: min(root.start-scenes + root.drag-room, max(640px, root.start-scenes));
             locked: Ui.docks-locked;
-            changing(width) => { Ui.scenes-width = width; }
-            resized => { Ui.layout-changed(); }
+            started => { root.press(2, 1, 3, 4); }
+            changing(width) => { root.drag-to(0, width, 2, 1, 3, 4); }
+            resized => { root.release(); }
         }
 
-        SourcesDock {
+        sources := SourcesDock {
             cache-rendering-hint: root.cache-docks;
             visible: Ui.show-sources;
             preferred-width: Ui.show-sources ? Ui.sources-width : 0px;
@@ -175,15 +267,18 @@ component Workspace inherits VerticalLayout {
         if Ui.show-sources && (Ui.show-mixer || Ui.show-transitions || Ui.show-controls): ColumnSplitter {
             size: Ui.sources-width;
             min-size: 170px;
+            max-size: min(root.start-sources + root.drag-room, max(640px, root.start-sources));
             locked: Ui.docks-locked;
-            changing(width) => { Ui.sources-width = width; }
-            resized => { Ui.layout-changed(); }
+            started => { root.press(2, 3, 4, -1); }
+            changing(width) => { root.drag-to(1, width, 2, 3, 4, -1); }
+            resized => { root.release(); }
         }
 
-        MixerDock {
+        mixer := MixerDock {
             // Kept for the video frames between meter steps in image mode.
             cache-rendering-hint: !CanvasArea.native-picture;
             visible: Ui.show-mixer;
+            preferred-width: Ui.show-mixer ? root.mixer-width : 0px;
             min-width: Ui.show-mixer ? 228px : 0px;
             max-width: Ui.show-mixer ? 100000px : 0px;
             horizontal-stretch: Ui.show-mixer ? 1 : 0;
@@ -192,21 +287,25 @@ component Workspace inherits VerticalLayout {
         if Ui.show-mixer && Ui.show-transitions: ColumnSplitter {
             size: Ui.transitions-width;
             min-size: 160px;
+            max-size: min(root.start-transitions + root.drag-room, max(640px, root.start-transitions));
             sign: -1;
             locked: Ui.docks-locked;
-            changing(width) => { Ui.transitions-width = width; }
-            resized => { Ui.layout-changed(); }
+            started => { root.press(2, 1, 0, -1); }
+            changing(width) => { root.drag-to(3, width, 2, 1, 0, -1); }
+            resized => { root.release(); }
         }
         if Ui.show-mixer && !Ui.show-transitions && Ui.show-controls: ColumnSplitter {
             size: Ui.controls-width;
             min-size: 172px;
+            max-size: min(root.start-controls + root.drag-room, max(640px, root.start-controls));
             sign: -1;
             locked: Ui.docks-locked;
-            changing(width) => { Ui.controls-width = width; }
-            resized => { Ui.layout-changed(); }
+            started => { root.press(2, 1, 0, -1); }
+            changing(width) => { root.drag-to(4, width, 2, 1, 0, -1); }
+            resized => { root.release(); }
         }
 
-        TransitionsDock {
+        transitions := TransitionsDock {
             cache-rendering-hint: root.cache-docks;
             visible: Ui.show-transitions;
             preferred-width: Ui.show-transitions ? Ui.transitions-width : 0px;
@@ -217,12 +316,14 @@ component Workspace inherits VerticalLayout {
         if Ui.show-transitions && Ui.show-controls: ColumnSplitter {
             size: Ui.transitions-width;
             min-size: 160px;
+            max-size: min(root.start-transitions + root.drag-room, max(640px, root.start-transitions));
             locked: Ui.docks-locked;
-            changing(width) => { Ui.transitions-width = width; }
-            resized => { Ui.layout-changed(); }
+            started => { root.press(4, -1, -1, -1); }
+            changing(width) => { root.drag-to(3, width, 4, -1, -1, -1); }
+            resized => { root.release(); }
         }
 
-        ControlsDock {
+        controls := ControlsDock {
             cache-rendering-hint: root.cache-docks;
             visible: Ui.show-controls;
             preferred-width: Ui.show-controls ? Ui.controls-width : 0px;
@@ -275,6 +376,20 @@ export component AppWindow inherits Window {
     out property <length> master-meter-y: workspace.meter-y;
     out property <length> master-meter-width: workspace.meter-width;
     out property <length> master-meter-height: workspace.meter-height;
+    out property <length> docks-y: workspace.docks-y;
+    out property <length> docks-height: workspace.docks-row-height;
+    out property <length> scenes-right: workspace.scenes-right;
+
+    // `--drag-test`: where the scripted pointer is, as a pure cyan mark
+    // (window captures leave the pointer out), drawn over everything; and
+    // the dragged splitter's edge as laid out, pure green (1: Scenes |
+    // Sources, 2: above the docks).
+    in property <int> test-edge;
+    in property <bool> test-pointer;
+    in property <length> test-pointer-x;
+    in property <length> test-pointer-y;
+    in property <length> test-pointer-width;
+    in property <length> test-pointer-height;
 
     // Snapshots: the widget kit on one page (`--state kit`), with its menu,
     // dropdown or dialog open.
@@ -450,6 +565,18 @@ export component AppWindow inherits Window {
             title: "Tools";
             MenuItem { title: "Auto-Configuration Wizard…"; activated => { Ui.menu("start_over"); } }
         }
+        // Developer mode (#47, src/areas/developer.rs): only while the
+        // profile has it on.
+        if DeveloperArea.on: Menu {
+            title: "Developer";
+            MenuItem { title: "Stats Overlay"; checkable: true; checked: DeveloperArea.overlay; activated => { Ui.menu("dev_stats_overlay"); } }
+            MenuSeparator { }
+            MenuItem { title: "Open Logs Folder"; activated => { Ui.menu("dev_open_logs"); } }
+            MenuItem { title: "Copy Diagnostics"; activated => { Ui.menu("dev_copy_diagnostics"); } }
+            MenuItem { title: "Show Update Feed"; activated => { Ui.menu("dev_update_feed"); } }
+            MenuSeparator { }
+            MenuItem { title: "Restart Engine"; activated => { Ui.menu("dev_restart_engine"); } }
+        }
         Menu {
             title: "Window";
             MenuItem { title: "Minimize"; shortcut: @keys(Control + M); activated => { Ui.menu("minimize"); } }
@@ -518,6 +645,23 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Developer mode's stats overlay (#47), clear of the viewer line's
+    // menus and the toasts (top right), and of the picture where the stage
+    // has room: in the letterbox left of the picture (full width, else the
+    // narrow form), else under it, else at the stage's bottom left.
+    if DeveloperArea.on && DeveloperArea.overlay && root.ready: StatsOverlay {
+        property <length> margin: Theme.space-2;
+        property <length> beside: workspace.picture-left - workspace.stage-x - 2 * self.margin;
+        property <length> below: workspace.stage-y + workspace.stage-height - (workspace.picture-top + workspace.picture-height) - 2 * self.margin;
+        property <bool> under: !Ui.studio && self.beside < OverlaySize.compact && self.below >= self.height;
+        compact: !Ui.studio && self.beside >= OverlaySize.compact && self.beside < OverlaySize.full;
+        room: self.beside;
+        x: workspace.stage-x + self.margin;
+        y: self.under
+            ? workspace.picture-top + workspace.picture-height + self.margin
+            : max(workspace.stage-y + Theme.statusbar, workspace.stage-y + workspace.stage-height - self.height - self.margin);
+    }
+
     // Until the setup is read: where the window stands with isocastd, over
     // the workspace.
     if !root.ready: ConnectingState {
@@ -555,5 +699,27 @@ export component AppWindow inherits Window {
         y: Theme.statusbar + Theme.space-3;
         // A dialog's own stack shows them clear of its sheet.
         visible: Ui.dialog == "" || !Toasts.shown-in-dialog;
+    }
+
+    if root.test-edge == 1: Rectangle {
+        x: root.scenes-right - 1.5px;
+        y: root.docks-y + 30px;
+        width: 3px;
+        height: max(0px, root.docks-height - 60px);
+        background: #00ff00;
+    }
+    if root.test-edge == 2: Rectangle {
+        x: 60px;
+        y: root.docks-y - 1.5px;
+        width: 200px;
+        height: 3px;
+        background: #00ff00;
+    }
+    if root.test-pointer: Rectangle {
+        x: root.test-pointer-x;
+        y: root.test-pointer-y;
+        width: root.test-pointer-width;
+        height: root.test-pointer-height;
+        background: #00ffff;
     }
 }

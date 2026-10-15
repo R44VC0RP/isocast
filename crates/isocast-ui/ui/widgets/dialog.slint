@@ -315,6 +315,10 @@ export component Dialog inherits Rectangle {
     property <length> offset-y;
     property <length> drag-x;
     property <length> drag-y;
+    // Where the press was, in window coordinates: the header moves with
+    // the sheet, so its own mouse-x/y would count each step twice.
+    property <length> press-x;
+    property <length> press-y;
     property <int> submit: DialogKeys.submit;
 
     changed submit => {
@@ -404,11 +408,13 @@ export component Dialog inherits Rectangle {
                         if event.kind == PointerEventKind.down {
                             root.drag-x = root.offset-x;
                             root.drag-y = root.offset-y;
+                            root.press-x = self.absolute-position.x + self.mouse-x;
+                            root.press-y = self.absolute-position.y + self.mouse-y;
                         }
                     }
                     moved => {
-                        root.offset-x = root.drag-x + self.mouse-x - self.pressed-x;
-                        root.offset-y = root.drag-y + self.mouse-y - self.pressed-y;
+                        root.offset-x = root.drag-x + self.absolute-position.x + self.mouse-x - root.press-x;
+                        root.offset-y = root.drag-y + self.absolute-position.y + self.mouse-y - root.press-y;
                     }
                     double-clicked => {
                         root.offset-x = 0;
@@ -437,11 +443,13 @@ export component Dialog inherits Rectangle {
                                 if event.kind == PointerEventKind.down {
                                     root.drag-x = root.offset-x;
                                     root.drag-y = root.offset-y;
+                                    root.press-x = self.absolute-position.x + self.mouse-x;
+                                    root.press-y = self.absolute-position.y + self.mouse-y;
                                 }
                             }
                             moved => {
-                                root.offset-x = root.drag-x + self.mouse-x - self.pressed-x;
-                                root.offset-y = root.drag-y + self.mouse-y - self.pressed-y;
+                                root.offset-x = root.drag-x + self.absolute-position.x + self.mouse-x - root.press-x;
+                                root.offset-y = root.drag-y + self.absolute-position.y + self.mouse-y - root.press-y;
                             }
                             double-clicked => {
                                 root.offset-x = 0;

@@ -23,7 +23,9 @@
 //!   Sparkle would otherwise prefer) is cleared and ignored.
 
 #[cfg(target_os = "macos")]
-pub use mac::{automatic, available, check_now, set_automatic, staged, start, stopping_engine};
+pub use mac::{
+    automatic, available, check_now, feed_url, set_automatic, staged, start, stopping_engine,
+};
 
 #[cfg(not(target_os = "macos"))]
 mod other {
@@ -46,10 +48,15 @@ mod other {
     pub fn stopping_engine() -> bool {
         false
     }
+    pub fn feed_url() -> Option<String> {
+        None
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub use other::{automatic, available, check_now, set_automatic, staged, start, stopping_engine};
+pub use other::{
+    automatic, available, check_now, feed_url, set_automatic, staged, start, stopping_engine,
+};
 
 /// What keeps an update from installing now, from the engine's status:
 /// a recording (paused or not), a stream, a timeline export or the
@@ -163,6 +170,10 @@ mod mac {
             ) -> Bool {
                 const IN_BACKGROUND: isize = 1;
                 let busy = app().and_then(|app| busy(&app));
+                isocast_diagnostics::debug!(
+                    "updates: check asked (background: {}, isocastd busy: {busy:?})",
+                    check == IN_BACKGROUND
+                );
                 match busy {
                     Some(what) if check == IN_BACKGROUND => {
                         DEFERRED.set(true);
@@ -385,6 +396,13 @@ mod mac {
                 _timer: timer,
             })
         }
+    }
+
+    /// The update feed in this build's Info.plist (none in a development
+    /// build), for Developer › Show Update Feed.
+    pub fn feed_url() -> Option<String> {
+        // SAFETY: the main bundle's Info.plist, read on the main thread.
+        unsafe { info(&main_bundle(), "SUFeedURL").map(|f| rust_string(&f)) }
     }
 
     pub fn available() -> bool {

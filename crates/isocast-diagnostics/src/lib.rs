@@ -12,13 +12,20 @@ pub mod submit;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 
 const SEGMENT_BYTES: u64 = 4 << 20;
+/// Developer mode's own log budget per process family: its verbose records
+/// and traces never evict the ordinary 40 MB (daemon) history.
+pub const DEVELOPER_BUDGET: u64 = 200 << 20;
+/// Developer mode (verbose logs and per-second traces). Off by default; one
+/// relaxed load is everything a hot path pays while it is off.
+static DEVELOPER: AtomicBool = AtomicBool::new(false);
+static DEVELOPER_ERRORS: AtomicU64 = AtomicU64::new(0);
 const MAX_AGE: Duration = Duration::from_secs(7 * 86400);
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 static ERRORS: AtomicU64 = AtomicU64::new(0);
@@ -35,8 +42,18 @@ struct Logger {
     console: bool,
     previous: Vec<Value>,
     writer: Mutex<Option<Writer>>,
+    /// Developer mode's segments (`<launch>-developer-NNNN.jsonl`), opened
+    /// when the first developer record is written.
+    developer: Mutex<DeveloperWriter>,
     init_error: Option<String>,
     previous_failure: Option<Value>,
+}
+#[derive(Default)]
+struct DeveloperWriter {
+    file: Option<File>,
+    bytes: u64,
+    /// The next segment's number; the open one is `segment - 1`.
+    segment: u32,
 }
 struct Writer {
     file: File,
@@ -119,6 +136,7 @@ pub fn init(process: &str, console: bool) -> Guard {
         console,
         previous,
         writer: Mutex::new(writer),
+        developer: Mutex::default(),
         init_error,
         previous_failure,
     });
@@ -231,7 +249,7 @@ pub fn ready() {
     }
 }
 pub fn health() -> Value {
-    json!({"native_relay_pid":native::pid(),"native_relay":native::health(),"callback_records_dropped":output::dropped(),"credential_pinned_count":redact::pinned_count(),"credential_cache_evictions":redact::cache_evictions(),"write_errors":ERRORS.load(Ordering::Relaxed),"logging_cpu_ns":cfg!(unix).then(||LOG_CPU_NS.load(Ordering::Relaxed)),"launch":LOGGER.get().map(|l| &l.launch),"mode":if LOGGER.get().is_some_and(|l|l.init_error.is_none()) {"jsonl"} else {"stderr"},"init_error":LOGGER.get().and_then(|l|l.init_error.as_ref()),"previous_logging_failure":LOGGER.get().and_then(|l|l.previous_failure.as_ref()),"previous_abnormal":previous_abnormal(),"panics":PANICS.load(Ordering::Relaxed),"last_panic":LAST_PANIC.try_lock().ok().and_then(|v|v.clone())})
+    json!({"native_relay_pid":native::pid(),"native_relay":native::health(),"callback_records_dropped":output::dropped(),"credential_pinned_count":redact::pinned_count(),"credential_cache_evictions":redact::cache_evictions(),"write_errors":ERRORS.load(Ordering::Relaxed),"logging_cpu_ns":cfg!(unix).then(||LOG_CPU_NS.load(Ordering::Relaxed)),"launch":LOGGER.get().map(|l| &l.launch),"mode":if LOGGER.get().is_some_and(|l|l.init_error.is_none()) {"jsonl"} else {"stderr"},"init_error":LOGGER.get().and_then(|l|l.init_error.as_ref()),"previous_logging_failure":LOGGER.get().and_then(|l|l.previous_failure.as_ref()),"previous_abnormal":previous_abnormal(),"panics":PANICS.load(Ordering::Relaxed),"developer":developer(),"developer_write_errors":DEVELOPER_ERRORS.load(Ordering::Relaxed),"last_panic":LAST_PANIC.try_lock().ok().and_then(|v|v.clone())})
 }
 
 pub fn clean_exit() {
@@ -298,9 +316,93 @@ pub fn on_worker_warning(notify: impl Fn(String) + Send + Sync + 'static) {
     let _ = WORKER_WARNING.set(Box::new(notify));
 }
 
-pub fn emit(level: &str, component: &str, message: &str, fields: Value) {
+/// Developer mode is on: verbose records and traces are written. A single
+/// relaxed atomic load, so callers check it before building anything.
+#[inline]
+pub fn developer() -> bool {
+    DEVELOPER.load(Ordering::Relaxed)
+}
+
+/// Turn developer mode on or off for this process. Returns whether it was
+/// on. Turning it off closes the developer segment.
+pub fn set_developer(on: bool) -> bool {
+    let was = DEVELOPER.swap(on, Ordering::Relaxed);
+    if !on
+        && was
+        && let Some(log) = LOGGER.get()
+    {
+        log.developer.lock().unwrap_or_else(|p| p.into_inner()).file = None;
+    }
+    was
+}
+
+/// A developer-mode record: written to this launch's developer segments
+/// (their own 200 MB budget), never to the ordinary log, and only while
+/// developer mode is on. Redacted like every record.
+pub fn emit_developer(level: &str, component: &str, message: &str, fields: Value) {
+    if !developer() {
+        return;
+    }
     let Some(log) = LOGGER.get() else { return };
+    if log.init_error.is_some() {
+        return;
+    }
     let cpu = thread_cpu_ns();
+    let Some(bytes) = encode(log, level, component, message, fields) else {
+        return;
+    };
+    let mut dev = log.developer.lock().unwrap_or_else(|p| p.into_inner());
+    let mut rotated = false;
+    let result = (|| -> std::io::Result<()> {
+        if dev.file.is_none() || dev.bytes + bytes.len() as u64 > SEGMENT_BYTES {
+            let path = log
+                .folder
+                .join(format!("{}-developer-{:04}.jsonl", log.launch, dev.segment));
+            dev.file = Some(private_file(&path)?);
+            dev.segment += 1;
+            dev.bytes = 0;
+            rotated = true;
+        }
+        dev.file.as_mut().expect("opened").write_all(&bytes)?;
+        dev.bytes += bytes.len() as u64;
+        Ok(())
+    })();
+    if result.is_err() {
+        // A failed or partial line: start a fresh segment next time.
+        dev.file = None;
+        DEVELOPER_ERRORS.fetch_add(1, Ordering::Relaxed);
+    }
+    drop(dev);
+    LOG_CPU_NS.fetch_add(thread_cpu_ns().saturating_sub(cpu), Ordering::Relaxed);
+    if rotated && let Some(tx) = MAINTENANCE.get() {
+        let _ = tx.try_send(());
+    }
+}
+
+/// A debug-level message for developer mode (see the `debug!` macro, which
+/// checks [`developer`] before formatting anything).
+pub fn debug_message(component: &str, message: String) {
+    emit_developer("debug", component, &message, Value::Null);
+}
+
+/// Debug-level messages: nothing is formatted unless developer mode is on.
+#[macro_export]
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        if $crate::developer() {
+            $crate::debug_message(module_path!(), format!($($arg)*));
+        }
+    };
+}
+
+/// One redacted, size-bounded JSONL line (with its newline).
+fn encode(
+    log: &Logger,
+    level: &str,
+    component: &str,
+    message: &str,
+    fields: Value,
+) -> Option<Vec<u8>> {
     let mut redactor = redact::Redactor::default();
     // Learn credentials before sanitizing the message as it may echo a field.
     let fields = redactor.value(&fields);
@@ -314,7 +416,7 @@ pub fn emit(level: &str, component: &str, message: &str, fields: Value) {
         "pid":std::process::id(),"launch":log.launch,"thread":format!("{:?}",thread.id()),
         "thread_name":thread.name(),"component":component,"message":message,"fields":fields});
     let Ok(mut bytes) = serde_json::to_vec(&record) else {
-        return;
+        return None;
     };
     // Malicious calls cannot allocate an unbounded log line or exhaust the disk.
     if bytes.len() > 256 * 1024 {
@@ -333,6 +435,20 @@ pub fn emit(level: &str, component: &str, message: &str, fields: Value) {
         bytes = serde_json::to_vec(&compact).unwrap_or_default();
     }
     bytes.push(b'\n');
+    Some(bytes)
+}
+
+pub fn emit(level: &str, component: &str, message: &str, fields: Value) {
+    // The one gate: debug records exist only in developer mode, in its own
+    // segments.
+    if level == "debug" {
+        return emit_developer(level, component, message, fields);
+    }
+    let Some(log) = LOGGER.get() else { return };
+    let cpu = thread_cpu_ns();
+    let Some(bytes) = encode(log, level, component, message, fields) else {
+        return;
+    };
     let mut writer = log.writer.lock().unwrap_or_else(|p| p.into_inner());
     let Some(writer) = writer.as_mut() else {
         // Only the daemon's stderr is a log file. Console processes already
@@ -533,7 +649,9 @@ fn prune(folder: &Path) {
         .collect::<Vec<_>>();
     let family = |path: &Path| -> &'static str {
         let name = path.file_name().unwrap().to_string_lossy();
-        if name.contains("-isocastd") {
+        if name.contains("-developer-") {
+            "developer"
+        } else if name.contains("-isocastd") {
             "daemon"
         } else if name.contains("-isocast-ui") {
             "ui"
@@ -584,12 +702,19 @@ fn prune(folder: &Path) {
         }
         if active || protect_fault {
             protected.insert(path.clone());
-            for kind in ["native", "structured"] {
+            for kind in ["native", "developer", "structured"] {
                 if let Some(current) = files.iter().rev().find(|p| {
                     p.extension().is_some_and(|e| e == "jsonl")
                         && p.file_name().is_some_and(|n| {
-                            n.to_string_lossy().starts_with(&launch)
-                                && (n.to_string_lossy().contains("-native-") == (kind == "native"))
+                            let n = n.to_string_lossy();
+                            let of = if n.contains("-native-") {
+                                "native"
+                            } else if n.contains("-developer-") {
+                                "developer"
+                            } else {
+                                "structured"
+                            };
+                            n.starts_with(&launch) && of == kind
                         })
                 }) {
                     protected.insert(current.clone());
@@ -632,10 +757,10 @@ fn prune(folder: &Path) {
             .file_name()
             .is_some_and(|n| retired.iter().any(|l| n.to_string_lossy().starts_with(l)));
         let total = totals.entry(family(&path)).or_default();
-        let budget = if family(&path) == "daemon" {
-            40 << 20
-        } else {
-            8 << 20
+        let budget = match family(&path) {
+            "daemon" => 40 << 20,
+            "developer" => DEVELOPER_BUDGET,
+            _ => 8 << 20,
         };
         if !old && !retired && *total <= budget {
             continue;
@@ -647,12 +772,23 @@ fn prune(folder: &Path) {
                 .file_name()
                 .is_some_and(|n| n.to_string_lossy().starts_with(&log.launch))
         {
-            let writer = log.writer.lock().unwrap_or_else(|p| p.into_inner());
-            let Some(writer) = writer.as_ref() else {
+            let guard = log.writer.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(writer) = guard.as_ref() else {
                 continue;
             };
             if path.extension().is_some_and(|e| e == "run")
                 || path.ends_with(format!("{}-{:04}.jsonl", log.launch, writer.segment))
+            {
+                continue;
+            }
+            drop(guard);
+            let dev = log.developer.lock().unwrap_or_else(|p| p.into_inner());
+            if dev.file.is_some()
+                && path.ends_with(format!(
+                    "{}-developer-{:04}.jsonl",
+                    log.launch,
+                    dev.segment.saturating_sub(1)
+                ))
             {
                 continue;
             }

@@ -81,6 +81,7 @@ const MAX_REQUEST: usize = 16 << 20;
 use isocast_platform_macos::MacPlatform;
 
 mod data;
+mod debug;
 mod diagnostics;
 mod export;
 mod hotkeys;
@@ -1379,6 +1380,8 @@ impl Daemon {
                 message: "hotkeys_input needs a client connection".into(),
             }),
             Method::ShutdownIfIdle => self.shutdown_if_idle().and_then(to_json),
+            Method::DebugStatus => to_json(debug::status(self)),
+            Method::DebugSet(params) => debug::set(self, params).and_then(to_json),
             Method::Stop | Method::Shutdown => match self.stop() {
                 // Shutting down while idle is fine.
                 Err(err) if shutdown && err.code == RpcError::WRONG_STATE => {
@@ -1396,6 +1399,7 @@ impl Daemon {
     fn publish(&self, event: Event) {
         if matches!(event, Event::SetupChanged { .. }) {
             self.refresh_hotkeys();
+            debug::sync(self, "setup changed");
         }
         diagnostics::event(&event);
         let mut watchers = self.watchers.lock().unwrap_or_else(|p| {

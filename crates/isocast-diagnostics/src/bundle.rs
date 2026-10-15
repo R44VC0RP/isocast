@@ -223,9 +223,20 @@ pub fn generate(
     }
     // Newest segments win the bounded collection budget; reserve room for
     // crash reports and manifests instead of filling the zip with old logs.
+    // Developer mode's segments (verbose records and traces) can fill the
+    // report on their own: only each launch's newest one comes along.
+    let mut developer = HashSet::new();
     for path in all.iter().rev() {
         let name = path.file_name().unwrap().to_string_lossy();
         if launches.iter().any(|launch| name.starts_with(launch)) {
+            if let Some(at) = name.find("-developer-")
+                && !developer.insert(name[..at].to_string())
+            {
+                omitted.push(format!(
+                    "logs/{name}: older developer-mode segment omitted (isocast logs reads it)"
+                ));
+                continue;
+            }
             if path.extension().is_some_and(|e| e == "jsonl")
                 && contents.values().map(String::len).sum::<usize>() >= (24 << 20)
             {

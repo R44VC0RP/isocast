@@ -953,14 +953,18 @@ export component ClipBar inherits Rectangle {
                 border-radius: 3px;
                 background: thumb.has-hover || thumb.pressed ? Theme.scroll-thumb-hover : Theme.scroll-thumb;
                 thumb := TouchArea {
+                    // In window coordinates: the thumb moves under the
+                    // pointer.
+                    property <length> press-x;
                     pointer-event(event) => {
                         if event.kind == PointerEventKind.down {
                             bar.start = root.sx;
+                            self.press-x = self.absolute-position.x + self.mouse-x;
                         }
                     }
                     moved => {
                         if self.pressed {
-                            CreateArea.scroll-x = clamp(bar.start + (self.mouse-x - self.pressed-x) * root.max-scroll / max(1px, bar.width - 4px - bar.thumb-w), 0px, root.max-scroll);
+                            CreateArea.scroll-x = clamp(bar.start + (self.absolute-position.x + self.mouse-x - self.press-x) * root.max-scroll / max(1px, bar.width - 4px - bar.thumb-w), 0px, root.max-scroll);
                         }
                     }
                 }

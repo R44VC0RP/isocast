@@ -29,6 +29,7 @@ pub fn is_poll(method: &str) -> bool {
             | "library"
             | "library_get"
             | "report_file"
+            | "debug_status"
     )
 }
 pub fn record(method: &str, client: &Value, ms: f64, bytes: usize) {

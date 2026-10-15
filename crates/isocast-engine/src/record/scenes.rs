@@ -354,6 +354,7 @@ fn run<F: Clone>(
             input.data = false;
             (input.next.take(), std::mem::take(&mut input.sizes))
         };
+        let changed = next.is_some();
         if let Some(next) = next {
             // Sources may have reopened, or their filters changed: their
             // sizes are worked out afresh (and reported again if wrong).
@@ -389,6 +390,13 @@ fn run<F: Clone>(
         *shared.output.lock().unwrap() = Some(Arc::new(scenes));
         shared.version.store(version, Ordering::Release);
         data_due = began + Duration::from_secs(1) / fps;
+        if changed {
+            isocast_diagnostics::debug!(
+                "compositor: scenes resolved for a setup change in {:?} ({} pictures)",
+                began.elapsed(),
+                drawn.pictures
+            );
+        }
         for warning in resolver.contents.take_warnings() {
             on_warning(warning);
         }

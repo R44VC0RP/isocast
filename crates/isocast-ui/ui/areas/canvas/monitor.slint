@@ -5,7 +5,8 @@
 //
 // The selected item's box is drawn where the item is in the picture shown
 // (`shown-box-*`, the layout of the setup revision that frame was drawn
-// from), so box and picture move together. The pointer goes to the Rust
+// from), so box and picture move together; while a handle is dragged it
+// is drawn where the pointer has it, so the handle stays under it. The pointer goes to the Rust
 // side (src/areas/canvas.rs), which finds what is under it, selects,
 // moves, resizes and crops, and says what to draw while it does
 // (guides, the readout, the hovered item, the pointer's shape).

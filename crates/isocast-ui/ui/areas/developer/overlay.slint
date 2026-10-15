@@ -1,0 +1,151 @@
+// The live stats overlay (Developer › Stats Overlay): a small console
+// panel, flat with 1px lines and small mono numbers (docs/design.md). The
+// window puts it beside the picture where the stage has room (narrow,
+// `compact`, if that is all there is), else at the stage's bottom left
+// (app.slint). It takes no input, so the canvas under it still works.
+
+import { Theme } from "../../theme.slint";
+import { DeveloperArea } from "state.slint";
+
+component Mono inherits Text {
+    font-family: Theme.font-mono;
+    font-size: Theme.fs-micro;
+    font-weight: Theme.weight-light;
+    color: Theme.text-2;
+    vertical-alignment: center;
+    accessible-role: none;
+}
+
+component Label inherits Text {
+    font-size: Theme.fs-micro;
+    color: Theme.text-3;
+    vertical-alignment: center;
+    accessible-role: none;
+}
+
+// The widths it needs: full, and the narrow one-column form.
+export global OverlaySize {
+    out property <length> full: 300px;
+    out property <length> compact: 132px;
+}
+
+export component StatsOverlay inherits Rectangle {
+    // One column of self-describing lines, for the room beside a picture,
+    // `room` wide (at least OverlaySize.compact).
+    in property <bool> compact;
+    in property <length> room: OverlaySize.compact;
+    width: root.compact ? max(OverlaySize.compact, min(OverlaySize.full, root.room)) : OverlaySize.full;
+    height: root.compact ? narrow.preferred-height : body.preferred-height;
+    background: #141414e6;
+    border-width: 1px;
+    border-color: Theme.line-strong;
+    accessible-role: groupbox;
+    accessible-label: "Developer stats";
+
+    narrow := VerticalLayout {
+        visible: root.compact;
+        padding: Theme.space-2;
+        spacing: 2px;
+        Text {
+            height: 16px;
+            text: "DEVELOPER";
+            font-family: Theme.font-brand;
+            font-size: Theme.fs-micro;
+            font-weight: Theme.weight-semibold;
+            letter-spacing: Theme.tracking-tag;
+            color: Theme.text-3;
+            vertical-alignment: center;
+        }
+        Rectangle { height: 1px; background: Theme.line; }
+        for row in DeveloperArea.rows: Mono {
+            height: 14px;
+            text: row.short;
+            color: row.warn ? Theme.warning : Theme.text-2;
+            overflow: elide;
+        }
+        if DeveloperArea.note != "": Label {
+            height: 28px;
+            text: DeveloperArea.note;
+            wrap: word-wrap;
+        }
+        if DeveloperArea.outputs.length > 0: Rectangle { height: 1px; background: Theme.line; }
+        if DeveloperArea.outputs.length > 0: HorizontalLayout {
+            height: 14px;
+            Label { horizontal-stretch: 1; text: "Output"; }
+            Label { width: 22px; horizontal-alignment: right; text: "fps"; }
+            Label { width: 22px; horizontal-alignment: right; text: "drop"; }
+            Label { width: 22px; horizontal-alignment: right; text: "late"; }
+        }
+        for output in DeveloperArea.outputs: HorizontalLayout {
+            height: 14px;
+            Mono { horizontal-stretch: 1; text: output.name; overflow: elide; }
+            Mono { width: 22px; horizontal-alignment: right; text: output.fps; }
+            Mono { width: 22px; horizontal-alignment: right; text: output.dropped; color: output.warn ? Theme.warning : Theme.text-2; }
+            Mono { width: 22px; horizontal-alignment: right; text: output.late; color: output.warn ? Theme.warning : Theme.text-2; }
+        }
+    }
+
+    body := VerticalLayout {
+        visible: !root.compact;
+        padding: Theme.space-2;
+        spacing: 2px;
+
+        HorizontalLayout {
+            height: 16px;
+            Text {
+                text: "DEVELOPER";
+                font-family: Theme.font-brand;
+                font-size: Theme.fs-micro;
+                font-weight: Theme.weight-semibold;
+                letter-spacing: Theme.tracking-tag;
+                color: Theme.text-3;
+                vertical-alignment: center;
+            }
+            Label {
+                horizontal-stretch: 1;
+                horizontal-alignment: right;
+                text: "last second";
+            }
+        }
+        Rectangle { height: 1px; background: Theme.line; }
+
+        for row in DeveloperArea.rows: HorizontalLayout {
+            height: 14px;
+            Label {
+                width: 108px;
+                text: row.label;
+            }
+            Mono {
+                horizontal-stretch: 1;
+                text: row.value;
+                color: row.warn ? Theme.warning : Theme.text-2;
+                overflow: elide;
+            }
+        }
+
+        if DeveloperArea.note != "": Label {
+            height: 14px;
+            text: DeveloperArea.note;
+        }
+
+        if DeveloperArea.outputs.length > 0: Rectangle { height: 1px; background: Theme.line; }
+        if DeveloperArea.outputs.length > 0: HorizontalLayout {
+            height: 14px;
+            Label { horizontal-stretch: 1; text: "Output"; }
+            Label { width: 34px; horizontal-alignment: right; text: "fps"; }
+            Label { width: 34px; horizontal-alignment: right; text: "drop"; }
+            Label { width: 34px; horizontal-alignment: right; text: "late"; }
+            Label { width: 52px; horizontal-alignment: right; text: "submit"; }
+            Label { width: 26px; horizontal-alignment: right; text: "q"; }
+        }
+        for output in DeveloperArea.outputs: HorizontalLayout {
+            height: 14px;
+            Mono { horizontal-stretch: 1; text: output.name; overflow: elide; color: Theme.text-2; }
+            Mono { width: 34px; horizontal-alignment: right; text: output.fps; }
+            Mono { width: 34px; horizontal-alignment: right; text: output.dropped; color: output.warn ? Theme.warning : Theme.text-2; }
+            Mono { width: 34px; horizontal-alignment: right; text: output.late; color: output.warn ? Theme.warning : Theme.text-2; }
+            Mono { width: 52px; horizontal-alignment: right; text: output.submit; }
+            Mono { width: 26px; horizontal-alignment: right; text: output.queue; }
+        }
+    }
+}

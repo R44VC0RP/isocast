@@ -1,6 +1,6 @@
 //! Control/event-rate hooks; no per-frame or per-audio-buffer log writes.
 use crate::Daemon;
-use isocast_diagnostics::{emit, redact::Redactor};
+use isocast_diagnostics::{emit, emit_developer, redact::Redactor};
 use isocast_protocol::api::{Event, Response, RpcError};
 use isocast_protocol::diagnostics::{BugReport, BugReportParams};
 use serde_json::{Value, json};
@@ -34,12 +34,18 @@ impl ApiCall {
     pub fn response_bytes(&mut self, response: &Response, bytes: usize) {
         let method = self.request["method"].as_str().unwrap_or("invalid");
         if response.error.is_none() && isocast_diagnostics::poll::is_poll(method) {
-            isocast_diagnostics::poll::record(
-                method,
-                &self.client,
-                self.started.elapsed().as_secs_f64() * 1000.0,
-                bytes,
-            );
+            let ms = self.started.elapsed().as_secs_f64() * 1000.0;
+            isocast_diagnostics::poll::record(method, &self.client, ms, bytes);
+            // Developer mode: every call on its own, without the (large,
+            // frequent) payloads the summary leaves out too.
+            if isocast_diagnostics::developer() {
+                emit_developer(
+                    "debug",
+                    "api",
+                    "request completed",
+                    json!({"request":self.request,"response_bytes":bytes,"duration_ms":ms,"client":self.client}),
+                );
+            }
             self.done = true;
         } else if response.error.is_none() && matches!(method, "bug_report" | "snapshot") {
             self.value(json!({"success":true,"response_bytes":bytes}));
@@ -49,10 +55,6 @@ impl ApiCall {
     }
     pub fn value(&mut self, value: Value) {
         let error = value.get("error").is_some_and(|e| !e.is_null());
-        if !error && !isocast_diagnostics::poll::permit(&self.client) {
-            self.done = true;
-            return;
-        }
         let value = match self.request["method"].as_str() {
             // The bundle and log reader already contain diagnostics; logging
             // their payload would recursively copy all previous logs.
@@ -64,6 +66,19 @@ impl ApiCall {
             }
             _ => value,
         };
+        if !error && !isocast_diagnostics::poll::permit(&self.client) {
+            // Over the ordinary log's per-peer rate: developer mode keeps it.
+            if isocast_diagnostics::developer() {
+                emit_developer(
+                    "debug",
+                    "api",
+                    "request completed",
+                    json!({"request":self.request,"response":value,"duration_ms":self.started.elapsed().as_secs_f64()*1000.0,"client":self.client,"over_rate":true}),
+                );
+            }
+            self.done = true;
+            return;
+        }
         emit(
             if error { "error" } else { "info" },
             "api",
@@ -116,6 +131,7 @@ pub fn event(event: &Event) {
 }
 
 pub fn start(daemon: &Arc<Daemon>) {
+    crate::debug::start(daemon);
     let weak = Arc::downgrade(daemon);
     isocast_diagnostics::native::on_warning(move |message| {
         if let Some(daemon) = weak.upgrade() {
@@ -203,6 +219,7 @@ fn timeline(weak: Weak<Daemon>) {
         let started = Instant::now();
         let cpu = thread_cpu();
         let status = daemon.status();
+        crate::debug::tick(&daemon, &status);
         let folder = {
             let state = daemon.state.lock().unwrap();
             status

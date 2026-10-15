@@ -325,6 +325,17 @@ pub enum Method {
     /// camera or benchmarks encoders; a start racing it is refused instead.
     /// `isocast restart` and app updates use it. Returns null.
     ShutdownIfIdle,
+    /// Developer mode: the profile's setting, whether isocastd is writing
+    /// verbose records and traces, when it turns itself off, its logs and
+    /// the latest per-second trace. Returns
+    /// [`DeveloperStatus`](crate::developer::DeveloperStatus).
+    DebugStatus,
+    /// Turn developer mode on or off (and set when it turns itself off) in
+    /// the current profile: verbose logs of every API call and component,
+    /// and per-second frame timing traces while recording, in their own
+    /// log segments. Changing it never touches a running recording. Returns
+    /// [`DeveloperStatus`](crate::developer::DeveloperStatus).
+    DebugSet(crate::developer::DebugSetParams),
 }
 
 /// Every method's name, as requests and plugin grants spell it

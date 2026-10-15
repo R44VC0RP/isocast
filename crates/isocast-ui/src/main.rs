@@ -8,6 +8,8 @@
 //! isocast-ui --bench 30 [--check]    …measuring its CPU for 30 s (and
 //!                                    checking each frame), then quit
 //! isocast-ui --drag-test 6           …dragging the selected item for 6 s
+//!            [--drag-mode resize]    (or its corner, or a dock splitter:
+//!                                    columns, rows)
 //!                                    (--bench and --drag-test, and any run
 //!                                    with ISOCAST_BACKGROUND set, show the
 //!                                    window without taking focus)
@@ -67,6 +69,8 @@ pub struct Options {
     pub fps: u32,
     pub preview: preview::Mode,
     pub drag_test: Option<f64>,
+    /// What `--drag-test` drags.
+    pub drag_mode: window::DragMode,
     /// The window reads each frame for black, stale or misplaced boxes.
     pub frame_check: bool,
     /// Measured windows float above others unless this is set (a window
@@ -75,7 +79,7 @@ pub struct Options {
 }
 
 const USAGE: &str = "usage: isocast-ui [--bench SECONDS] [--check] [--drag-test SECONDS] [--fps N]
-                  [--preview layers|image] [--no-float]
+                  [--drag-mode move|resize|resize-select|columns|rows] [--preview layers|image] [--no-float]
        isocast-ui --snapshot OUT.png [--size WxH] [--scale N] [--state STATE]… [--a11y] [--wait-ms MS]
        isocast-ui --a11y [--state STATE]…
        isocast-ui --soak SECONDS [--no-check] [--still] [--size WxH] [--scale N]
@@ -107,6 +111,7 @@ fn parse() -> Result<Options> {
         fps: 60,
         preview: preview::Mode::default_for_platform(),
         drag_test: None,
+        drag_mode: window::DragMode::Move,
         frame_check: false,
         no_float: false,
     };
@@ -156,6 +161,20 @@ fn parse() -> Result<Options> {
                         .parse()
                         .context("--drag-test takes seconds")?,
                 )
+            }
+            "--drag-mode" => {
+                options.drag_mode = match value("--drag-mode")?.as_str() {
+                    "move" => window::DragMode::Move,
+                    "resize" => window::DragMode::Resize,
+                    "resize-select" => window::DragMode::ResizeSelect,
+                    "columns" => window::DragMode::Columns,
+                    "rows" => window::DragMode::Rows,
+                    other => {
+                        bail!(
+                            "--drag-mode takes move, resize, resize-select, columns or rows, not {other:?}"
+                        )
+                    }
+                }
             }
             "--fps" => {
                 options.fps = value("--fps")?

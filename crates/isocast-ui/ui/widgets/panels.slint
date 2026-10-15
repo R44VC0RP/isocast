@@ -108,17 +108,22 @@ export component ToolbarSeparator inherits Rectangle {
 // A vertical hairline between two docks, with a 7px grab area: dragging
 // it reports the new `size` of the dock it resizes (the caller's: `sign`
 // is 1 for the dock on its left, -1 for the one on its right), clamped.
+// The pointer is followed in window coordinates: the grab area moves with
+// the splitter, so its own `mouse-x` would count each step twice (the
+// edge trailed the pointer by half and shook, GitHub #24).
 export component ColumnSplitter inherits Rectangle {
     in property <length> size;
     in property <length> min-size: 140px;
     in property <length> max-size: 640px;
     in property <int> sign: 1;
     in property <bool> locked;
-    // While dragging, and once let go.
+    // Pressed (before `size` is read), while dragging, and once let go.
+    callback started();
     callback changing(length);
     callback resized(length);
 
     property <length> start;
+    property <length> start-pointer;
     property <length> last;
 
     width: 1px;
@@ -132,21 +137,24 @@ export component ColumnSplitter inherits Rectangle {
         mouse-cursor: root.locked ? MouseCursor.default : MouseCursor.col-resize;
         pointer-event(event) => {
             if event.kind == PointerEventKind.down {
+                root.started();
                 root.start = root.size;
+                root.start-pointer = self.absolute-position.x + self.mouse-x;
                 root.last = root.size;
             } else if event.kind == PointerEventKind.up {
                 root.resized(root.last);
             }
         }
         moved => {
-            root.last = clamp(root.start + root.sign * (self.mouse-x - self.pressed-x), root.min-size, root.max-size);
+            root.last = clamp(root.start + root.sign * (self.absolute-position.x + self.mouse-x - root.start-pointer), root.min-size, root.max-size);
             root.changing(root.last);
         }
     }
 }
 
 // The hairline above the docks, with a 7px grab area: dragging it reports
-// the docks' new height (dragging up makes them taller).
+// the docks' new height (dragging up makes them taller). In window
+// coordinates, as ColumnSplitter.
 export component RowSplitter inherits Rectangle {
     in property <length> size;
     in property <length> min-size: 120px;
@@ -156,6 +164,7 @@ export component RowSplitter inherits Rectangle {
     callback resized(length);
 
     property <length> start;
+    property <length> start-pointer;
     property <length> last;
 
     height: 1px;
@@ -170,13 +179,14 @@ export component RowSplitter inherits Rectangle {
         pointer-event(event) => {
             if event.kind == PointerEventKind.down {
                 root.start = root.size;
+                root.start-pointer = self.absolute-position.y + self.mouse-y;
                 root.last = root.size;
             } else if event.kind == PointerEventKind.up {
                 root.resized(root.last);
             }
         }
         moved => {
-            root.last = clamp(root.start - (self.mouse-y - self.pressed-y), root.min-size, root.max-size);
+            root.last = clamp(root.start - (self.absolute-position.y + self.mouse-y - root.start-pointer), root.min-size, root.max-size);
             root.changing(root.last);
         }
     }

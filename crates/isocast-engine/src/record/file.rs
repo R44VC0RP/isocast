@@ -246,6 +246,10 @@ struct OpenFile<W: FileWriter> {
     clock: Arc<RecordingClock>,
     /// Sparse-source packets actually refused by this file's input queue.
     lost_packets: u64,
+    /// Developer mode's timing trace (see trace.rs), and the age of the
+    /// frame being appended.
+    trace: Arc<crate::trace::OutputTrace>,
+    trace_age: Option<std::time::Duration>,
 }
 
 impl<W: FileWriter> OpenFile<W> {
@@ -263,7 +267,11 @@ impl<W: FileWriter> OpenFile<W> {
                 dropouts: 0,
             })
             .collect();
+        let trace =
+            crate::trace::OutputTrace::register(&plan.source, plan.take, plan.spec.video.fps);
         Self {
+            trace,
+            trace_age: None,
             writer,
             plan,
             tracks,
@@ -284,6 +292,9 @@ impl<W: FileWriter> OpenFile<W> {
     /// Append a frame; frames at or after `end`, or before the file's start,
     /// are left out.
     fn video(&mut self, frame: &W::Frame, pts: Time, end: Time) -> Result<()> {
+        if crate::trace::on() {
+            self.trace_age = crate::trace::OutputTrace::age(pts);
+        }
         let clock = self.clock.clone();
         let cuts = clock.state.read().unwrap();
         clock.inspected(pts.add_ticks(1, self.fps()));
@@ -302,6 +313,9 @@ impl<W: FileWriter> OpenFile<W> {
         }
         if self.start.is_none() {
             self.writer.start(pts)?;
+            if crate::trace::on() {
+                self.trace.started(pts);
+            }
             self.start = Some(pts);
             self.plan.start.store(pts.as_nanos(), Ordering::SeqCst);
             let end = file_end(pts, end, self.fps());
@@ -309,7 +323,16 @@ impl<W: FileWriter> OpenFile<W> {
                 self.tracks[track].append(&mut self.writer, track, &samples, at, pts, end)?;
             }
         }
+        let submit = crate::trace::on().then(std::time::Instant::now);
         let appended = self.writer.append_video(frame, pts);
+        if let Some(at) = submit {
+            self.trace.frame(
+                self.trace_age.take(),
+                at.elapsed(),
+                matches!(appended, Ok(true)),
+                self.writer.queue_depth(),
+            );
+        }
         if let Ok(true) = appended {
             self.frames += 1;
             self.plan.frames.store(self.frames, Ordering::SeqCst);

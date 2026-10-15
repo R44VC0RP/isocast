@@ -158,6 +158,10 @@ pub struct Layers {
     shape: Option<BoxShape>,
     style: BoxStyle,
     test_outline: bool,
+    /// `--drag-test`: the scripted pointer, a pure cyan mark placed the
+    /// moment the pointer moves, as the box is (window captures leave the
+    /// real pointer out).
+    test_pointer: Option<Retained<CALayer>>,
     /// Surfaces already tagged sRGB (by ring generation and slot).
     tagged: HashSet<(u64, u32)>,
     srgb: Option<CFRetained<CFType>>,
@@ -274,6 +278,14 @@ impl Layers {
         CATransaction::setDisableActions(true);
         root.insertSublayer_atIndex(&stage, 0);
         root.insertSublayer_atIndex(&meter.inside, 0);
+        let test_pointer = test_outline.then(|| {
+            let mark = layer();
+            mark.setBackgroundColor(Some(&color([0, 255, 255], 1.0)));
+            mark.setHidden(true);
+            // Over the pictures, still under Slint's layer.
+            root.insertSublayer_atIndex(&mark, 2);
+            mark
+        });
         CATransaction::commit();
         // AppKit flips the root layer of a flipped view (winit's is), so
         // its sublayers are placed top-down, as Slint's are; the stage's
@@ -298,6 +310,7 @@ impl Layers {
             shape: None,
             style: BoxStyle::default(),
             test_outline,
+            test_pointer,
             tagged: HashSet::new(),
             srgb,
             meter,
@@ -346,6 +359,19 @@ impl Layers {
         self.shape = shape;
         self.style = style;
         CATransaction::commit();
+    }
+
+    /// `--drag-test`: put the pointer's mark at `rect` (window points).
+    pub fn show_test_pointer(&self, rect: [f64; 4]) -> bool {
+        let Some(mark) = &self.test_pointer else {
+            return false;
+        };
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        mark.setFrame(self.in_root(rect));
+        mark.setHidden(false);
+        CATransaction::commit();
+        true
     }
 
     /// Show `frame` in Studio Mode's program picture.

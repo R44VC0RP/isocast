@@ -117,7 +117,7 @@ const TABS: &[(&str, &str, &str, &str, &str)] = &[
         "Advanced",
         "sheet-sliders",
         "System",
-        "What a stream does when its connection drops.",
+        "What a stream does when its connection drops, and developer mode.",
     ),
 ];
 
@@ -923,6 +923,12 @@ impl Settings {
             "iso" => json!({"recording": {"iso": {"enabled": on}}}),
             "iso_filtered" => json!({"recording": {"iso": {"filtered": on}}}),
             "reconnect" => json!({"stream": {"reconnect": {"enabled": on}}}),
+            "developer" => json!({"developer": {"enabled": on}}),
+            "developer_auto_off" => json!({"developer": {"auto_off_hours": if on {
+                isocast_protocol::developer::DEFAULT_AUTO_OFF_HOURS
+            } else {
+                0
+            }}}),
             _ => return,
         };
         self.change(app, patch);
@@ -1387,6 +1393,9 @@ impl Settings {
         area.set_reconnect_on(reconnect["enabled"] != json!(false));
         area.set_reconnect_delay(number(&reconnect["delay_seconds"], 2.0));
         area.set_reconnect_retries(number(&reconnect["max_retries"], 25.0));
+        let developer = &draft["developer"];
+        area.set_developer_on(developer["enabled"] == json!(true));
+        area.set_developer_auto_off(developer["auto_off_hours"] != json!(0));
 
         // The summary: what the draft makes, how fast its program file
         // fills the disk (the estimate the engine's free-space check uses,
@@ -2032,6 +2041,10 @@ fn pick(setup: &Value) -> Value {
     });
     if setup["stream"].is_object() {
         out["stream"] = setup["stream"].clone();
+    }
+    // Developer mode (Advanced), the profile's; absent while it is off.
+    if setup["developer"].is_object() {
+        out["developer"] = setup["developer"].clone();
     }
     out
 }

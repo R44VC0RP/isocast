@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-67 tools. Arguments marked required must be given; ids, not names,
+68 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -104,6 +104,15 @@ Delete a scene collection or profile that isn't in use (switch away first); its 
 |---|---|---|
 | `id` (required) | string |  |
 | `kind` (required) | LibraryKind |  |
+
+## developer_mode
+
+Developer mode, for testing a build locally. With no arguments, read it: whether the current profile has it on, whether isocastd is writing its verbose records and traces, when it turns itself off, its logs folder and budget, and the latest per-second trace (each recording output's frames, drops, late frames, encode submit and capture-to-submit times, writer queue; compositor and pacing). With `enabled` (and/or `auto_off_hours`, 0 for never; 24 by default), change it: every API call and debug messages are logged and frame timing traced while recording, in their own log segments (read them with get_logs). Never disturbs a running recording.
+
+| Argument | Type | Description |
+|---|---|---|
+| `auto_off_hours` | integer (optional) | Hours until it turns itself off (0: never). |
+| `enabled` | boolean (optional) |  |
 
 ## export_timeline
 

@@ -1447,6 +1447,45 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-14 (Ryan): **the delegator may use cua-driver to click inside
+  Isocast's own windows on Ryan's Mac** when a step needs a click and the
+  command line can't do it (for example Sparkle's Install button during an
+  update). Still never: answering macOS privacy/permission prompts, or
+  clicking in any other app.
+- 2026-10-14 (#47 developer mode): **Developer mode is the profile's
+  setting, its logs are separate segments, its traces are per second.**
+  - *Profile, through apply.* `[developer]` lives in the profile
+    (Setup.developer, skipped when default), so Settings, the CLI, MCP and
+    every app see one switch and a profile switch carries it. `debug_set`
+    is a convenience that applies a merge patch (retrying a raced revision
+    up to 3 times); isocastd follows the setup at once after each
+    SetupChanged and once a second from the diagnostics sampler.
+  - *One gate.* `isocast_diagnostics::developer()` is a relaxed atomic
+    load; `emit("debug", …)`, `debug!`, the per-call API records and the
+    per-frame trace counters in record/file.rs all check it first. Off
+    costs nothing measurable (A/B below).
+  - *Same log family, own segments, own budget.* Verbose records and traces
+    go to `<launch>-developer-NNNN.jsonl` (family "developer", 200 MB),
+    not a sibling *.trace.jsonl: one reader (`isocast logs`, filter by
+    component "trace" or level "debug"), one redaction path, one prune, and
+    the ordinary 40 MB history is never evicted. Bug reports take only each
+    launch's newest developer segment.
+  - *Aggregated per second.* Per-frame records would be ~240 lines/s at
+    4K60 + 3 ISOs; atomics per output (frames, drops, late, age, submit,
+    writer queue) are drained into one record a second instead: 2.9 KB/s
+    (10.4 MB/h) at 4K60 + 3 ISOs on isocast-m2-a, 2.25 KB/s (8.1 MB/h) for
+    flagship-1080. The record is written whenever the live engine runs
+    (outputs empty when not recording), ~1.5 KB/s with the app open.
+  - *Auto-off.* 24 h by default (0: never). When it was turned on is kept in
+    `<logs>/developer-mode.json`, so restarting isocastd keeps counting;
+    turning it on again restarts the clock.
+  - *What "callback latency" means for files.* AVAssetWriter has no
+    per-frame callback, so files report the append (submit) time and the
+    writer's own queue; the H.264 stream/monitor encoders' real
+    submit-to-callback latency is in `stream_encoders`. Capture-to-composite
+    isn't measured per source; `age_us` is a frame's time (capture, or the
+    program's tick) to its writer taking it.
+
 - 2026-10-14 (8.2h fix round 1, review findings): **Trust and safety
   corrections.**
   - *The EdDSA private key is the sole root of trust for installed copies.*
@@ -1622,6 +1661,23 @@ each section. Delete entries that stop being true.
   Delegator's call; Ryan can overrule. Selecting an icon shows Finder's
   blue name pill (y 274-291) just above ours (from y 293): no overlap, the
   name just appears twice while selected.
+- 2026-10-14 (resize-lag, GitHub #24): **a dragged handle's box follows
+  the pointer; a moved item's box stays with the picture.** While a resize
+  or crop handle is dragged, the box is drawn from each edit at once (the
+  picture follows about a frame later); after the drag it waits (at most
+  500 ms) for a frame that shows it there, so it never steps back. Moving
+  an item keeps the 2026-10-12 choice (box drawn at the shown frame's
+  layout). The held box belongs to the gesture's item and scene: any
+  other selection or scene drops it at once (fix round 1). Column
+  splitters set every shown dock (the mixer too) to its on-screen width
+  when pressed; the dragged dock then takes room from the shown docks
+  across the splitter, the mixer first, then the nearest, each down to its
+  minimum, so it works with any docks hidden; Transitions | Controls
+  trades between those two. A dock grows to 640pt by dragging, but one
+  laid out wider isn't pulled in on press. Monitors ask isocastd for a
+  size that keeps changing at most every 500 ms, and for one that has held
+  for 120 ms then; every request restarts the 500 ms period.
+
 - 2026-10-14 (Ryan): **GitHub issues are the work tracker now.** Known
   issues, follow-ups and roadmap items are filed on R44VC0RP/isocast
   (#2–#23), with milestones "Alpha week" (freeze: docs and fixes only) and
@@ -4246,6 +4302,18 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-14 (#47 fix round): building a `git archive` of main into the
+  same CARGO_TARGET_DIR (for "before" screenshots) left main's
+  isocast-protocol/diagnostics artifacts in place; the branch then failed
+  to compile against them until their sources were touched. Give an
+  archived checkout its own target, or touch the workspace crates after.
+- 2026-10-14 (#47): Settings' draft only carries the setup parts `pick`
+  lists (name, canvas, recording, audio, stream, now developer): a new
+  profile section shown in Settings must be added there, or its switches
+  read the default. `isocast start --seconds N` returns once the files
+  exist, not when the take ends. Offscreen `press:LABEL` finds a dialog's
+  buttons only after a render: put `type:` (renders, types nothing) first.
+
 - 2026-10-14 (8.2h): Slint's macOS menu bar (muda) rebuilds the whole
   application menu whenever a tracked property changes, so an NSMenuItem
   added once disappears. update.rs re-adds Check for Updates… on every
@@ -4355,6 +4423,30 @@ each section. Delete entries that stop being true.
   Over SSH, a test Mac's appearance can be switched without osascript via
   SkyLight's SLSSetAppearanceThemeLegacy (dlsym; tiny Swift tool in
   ~/isocast-scratch/dmg-design/appearance on isocast-m2-a/-b).
+- 2026-10-14 (resize-lag): **never drag by a TouchArea's own
+  `mouse-x - pressed-x` when the drag moves that TouchArea** (splitters,
+  dialog headers, scrollbar thumbs): the next reading already includes the
+  last step, so the thing follows about half the pointer and shakes.
+  Record the press as `absolute-position + mouse-x` and measure against
+  it. In Slint, setting a layout's preferred widths one by one re-lays the
+  row between assignments: read every width first (`let`), then set; and a
+  layout change under a pressed TouchArea in its press handler can lose
+  the drag. Measuring drags: window captures leave the pointer out, so
+  `--drag-test` marks it pure cyan, in the native layers for canvas drags
+  (Slint's own frame reaches the screen a frame after them), and
+  drag-lag.py picks the narrow cyan group nearest the last one (scaled
+  test patterns show cyan columns). On isocast-m2-b (1024pt window) the
+  docks are squeezed below their set widths; the window recorder can start
+  after the drag began on a cold app, so rest offsets are also taken after
+  the drag. Sporadic single 50-80 ms window frames show in every mode in
+  both builds there (not caused by these drags). isocastd's frame with a
+  gesture's final layout comes ~5 ms after the release on m2-b: a
+  "select right after letting go" check must select on the next turn of
+  the event loop (`--drag-mode resize-select`), or it can't see a held box
+  bug. Every dock layout is checked offscreen by sweeping the 26
+  combinations of shown docks (`--state hide:DOCK`, `drag:`), reading the
+  splitters from the snapshot.
+
 - 2026-10-14 (report worker): a Worker module may export only handlers;
   `export const` beside `export default` fails at startup ("Incorrect type
   for map entry"). Local `wrangler dev` honors a client-sent

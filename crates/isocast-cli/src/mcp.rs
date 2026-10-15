@@ -819,6 +819,33 @@ impl Isocast {
     }
 
     #[tool(
+        description = "Developer mode, for testing a build locally. With no arguments, read it: \
+                       whether the current profile has it on, whether isocastd is writing its \
+                       verbose records and traces, when it turns itself off, its logs folder and \
+                       budget, and the latest per-second trace (each recording output's frames, \
+                       drops, late frames, encode submit and capture-to-submit times, writer \
+                       queue; compositor and pacing). With `enabled` (and/or `auto_off_hours`, 0 \
+                       for never; 24 by default), change it: every API call and debug messages \
+                       are logged and frame timing traced while recording, in their own log \
+                       segments (read them with get_logs). Never disturbs a running recording.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn developer_mode(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<isocast_protocol::developer::DebugSetParams>>,
+    ) -> Result<Json<isocast_protocol::developer::DeveloperStatus>, String> {
+        if params.enabled.is_none() && params.auto_off_hours.is_none() {
+            self.call(Method::DebugStatus).await
+        } else {
+            self.call(Method::DebugSet(params)).await
+        }
+    }
+
+    #[tool(
         description = "Read virtual camera state, output format, sent/dropped frame counts, enqueue latency and last error. diagnostic-iosurface means a development probe, not an installed camera.",
         annotations(read_only_hint = true, idempotent_hint = true)
     )]

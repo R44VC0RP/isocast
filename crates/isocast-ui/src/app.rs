@@ -65,6 +65,16 @@ pub struct App {
     pub canvas: areas::canvas::Canvas,
     pub library: areas::library::Library,
     pub create: areas::create::Create,
+    pub developer: areas::developer::Developer,
+    /// `--drag-test`: how long each flush (the areas showing a change) and
+    /// each update from the daemon took on the window's thread.
+    pub work_log: RefCell<Option<WorkLog>>,
+}
+
+#[derive(Default)]
+pub struct WorkLog {
+    pub flushes: Vec<Duration>,
+    pub updates: Vec<Duration>,
 }
 
 impl App {
@@ -86,6 +96,7 @@ impl App {
             flush_timer: slint::Timer::default(),
             edit_timer: slint::Timer::default(),
             status_timer: slint::Timer::default(),
+            work_log: RefCell::new(None),
             sources: areas::sources::Sources::default(),
             mixer: areas::mixer::Mixer::default(),
             controls: areas::controls::Controls::default(),
@@ -93,6 +104,7 @@ impl App {
             canvas,
             library: areas::library::Library::default(),
             create: areas::create::Create::default(),
+            developer: areas::developer::Developer::default(),
         });
         window.set_version(env!("CARGO_PKG_VERSION").into());
         if !mode.offscreen {
@@ -129,7 +141,7 @@ impl App {
 
     /// The areas, in the order they update. Create comes first so that in
     /// its view Delete takes off the selected clip, not a scene item.
-    pub fn areas(&self) -> [&dyn Area; 7] {
+    pub fn areas(&self) -> [&dyn Area; 8] {
         [
             &self.create,
             &self.canvas,
@@ -138,6 +150,7 @@ impl App {
             &self.controls,
             &self.settings,
             &self.library,
+            &self.developer,
         ]
     }
 
@@ -260,6 +273,14 @@ impl App {
 
     /// Show what the daemon's threads delivered.
     pub fn apply(self: &Rc<Self>, update: Update) {
+        let started = Instant::now();
+        self.apply_update(update);
+        if let Some(log) = self.work_log.borrow_mut().as_mut() {
+            log.updates.push(started.elapsed());
+        }
+    }
+
+    fn apply_update(self: &Rc<Self>, update: Update) {
         match update {
             Update::Reply { id, result } => {
                 let reply = self.replies.borrow_mut().remove(&id);
@@ -472,10 +493,14 @@ impl App {
             return;
         }
         let Some(window) = self.window() else { return };
+        let started = Instant::now();
         self.drop_stale_selection();
         self.show_ui(&window, changed);
         for area in self.areas() {
             area.update(self, &window, changed);
+        }
+        if let Some(log) = self.work_log.borrow_mut().as_mut() {
+            log.flushes.push(started.elapsed());
         }
     }
 
@@ -707,24 +732,45 @@ impl App {
     }
 
     pub fn undo(self: &Rc<Self>) -> bool {
-        let previous = self.session.borrow_mut().take_undo();
-        match previous {
-            Some(setup) => {
-                self.replace_setup(setup, false);
-                true
-            }
-            None => false,
-        }
+        self.step_history(|s| s.take_undo())
     }
 
     pub fn redo(self: &Rc<Self>) -> bool {
-        let next = self.session.borrow_mut().take_redo();
-        match next {
-            Some(setup) => {
-                self.replace_setup(setup, false);
-                true
+        self.step_history(|s| s.take_redo())
+    }
+
+    /// Undo or redo one step of the setup's history. Developer mode (#47)
+    /// is never part of it: each snapshot keeps the current `developer`
+    /// value (so a toggle from Settings, the CLI, MCP or the auto-off
+    /// survives), and a step that differed only in it is passed over.
+    fn step_history(
+        self: &Rc<Self>,
+        take: impl Fn(&mut crate::session::Session) -> Option<Value>,
+    ) -> bool {
+        loop {
+            let (step, current) = {
+                let mut s = self.session.borrow_mut();
+                let step = take(&mut s);
+                (step, s.setup_json().cloned())
+            };
+            let Some(mut setup) = step else {
+                return false;
+            };
+            if let Some(map) = setup.as_object_mut() {
+                match current.as_ref().and_then(|c| c.get("developer")) {
+                    Some(developer) => {
+                        map.insert("developer".into(), developer.clone());
+                    }
+                    None => {
+                        map.remove("developer");
+                    }
+                }
             }
-            None => false,
+            if current.as_ref() == Some(&setup) {
+                continue;
+            }
+            self.replace_setup(setup, false);
+            return true;
         }
     }
 

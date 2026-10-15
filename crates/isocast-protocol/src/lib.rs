@@ -11,6 +11,7 @@ mod audio_filter;
 pub mod change;
 mod content;
 pub mod data;
+pub mod developer;
 pub mod devices;
 pub mod diagnostics;
 mod fields;
@@ -86,6 +87,12 @@ pub struct Setup {
         skip_serializing_if = "virtual_camera::VirtualCameraSettings::is_default"
     )]
     pub virtual_camera: virtual_camera::VirtualCameraSettings,
+    /// Developer mode: verbose logs and timing traces (the profile's).
+    #[serde(
+        default,
+        skip_serializing_if = "developer::DeveloperSettings::is_default"
+    )]
+    pub developer: developer::DeveloperSettings,
 }
 
 /// Audio settings for the whole setup.
@@ -1434,6 +1441,7 @@ impl Setup {
             stream: None,
             hotkeys: Default::default(),
             virtual_camera: Default::default(),
+            developer: Default::default(),
         })
     }
 

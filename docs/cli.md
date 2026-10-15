@@ -94,6 +94,10 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast vcam start`](#isocast-vcam-start)
   - [`isocast vcam stop`](#isocast-vcam-stop)
   - [`isocast vcam status`](#isocast-vcam-status)
+- [`isocast debug`](#isocast-debug)
+  - [`isocast debug on`](#isocast-debug-on)
+  - [`isocast debug off`](#isocast-debug-off)
+  - [`isocast debug status`](#isocast-debug-status)
 - [`isocast watch`](#isocast-watch)
 - [`isocast frame`](#isocast-frame)
 - [`isocast frames`](#isocast-frames)
@@ -146,6 +150,7 @@ Commands:
   apply        Make a change to the live setup, if it is still at --revision (from `plan` or `get`; 0 when there is no live setup yet)
   stream       Stream the program live over RTMP or RTMPS to the live setup's [stream] service, and keep its stream key in the Keychain
   vcam         Feed a picture to Isocast Virtual Camera (extension approval required once)
+  debug        Developer mode, for testing a build locally: verbose logs of every API call and component, and frame timing traces while recording
   watch        Print events from isocastd as they happen, until Ctrl-C
   frame        Save the live engine's newest frame of the program (the default), studio mode's preview, or a video source as a JPEG. Starts the engine if it isn't running
   frames       Record what a monitor shows: the live engine's low-latency H.264 stream of the program (the default), studio mode's preview or a video source, saved as an H.264 elementary stream (Annex B, which ffprobe and ffplay read). Starts the engine if it isn't running
@@ -1513,6 +1518,60 @@ Options:
 Output state, format, counters, enqueue latency and last error
 
 Usage: isocast vcam status [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast debug
+
+```text
+Developer mode, for testing a build locally: verbose logs of every API call and component, and frame timing traces while recording
+
+Usage: isocast debug <COMMAND>
+
+Commands:
+  on      Turn developer mode on in the current profile: every API call and debug messages logged, and frame timing traced each second while recording, in their own log segments (`isocast logs`). It turns itself off after 24 hours unless --auto-off-hours says otherwise
+  off     Turn developer mode off
+  status  Whether developer mode is on, until when, its logs and the latest trace
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## isocast debug on
+
+```text
+Turn developer mode on in the current profile: every API call and debug messages logged, and frame timing traced each second while recording, in their own log segments (`isocast logs`). It turns itself off after 24 hours unless --auto-off-hours says otherwise
+
+Usage: isocast debug on [OPTIONS]
+
+Options:
+      --auto-off-hours <AUTO_OFF_HOURS>  Hours until it turns itself off; 0 keeps it on
+      --json                             
+  -h, --help                             Print help
+```
+
+## isocast debug off
+
+```text
+Turn developer mode off
+
+Usage: isocast debug off [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast debug status
+
+```text
+Whether developer mode is on, until when, its logs and the latest trace
+
+Usage: isocast debug status [OPTIONS]
 
 Options:
       --json  

@@ -443,9 +443,16 @@ pub(crate) fn open<P: Platform>(
         timeline.clone(),
         data.clone(),
     );
-    bounded_open(format!("source {id:?}"), permission, move || {
+    let (key, began) = (format!("source {id:?}"), std::time::Instant::now());
+    let opened = bounded_open(key.clone(), permission, move || {
         open_native(&platform, &setup, &id, &timeline, &data)
-    })
+    });
+    isocast_diagnostics::debug!(
+        "capture: {key} {} after {:?}",
+        if opened.is_ok() { "opened" } else { "failed" },
+        began.elapsed()
+    );
+    opened
 }
 
 fn open_native<P: Platform>(

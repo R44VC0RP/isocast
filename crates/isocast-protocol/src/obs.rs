@@ -584,6 +584,7 @@ fn profile_from(
     };
     let profile = crate::library::Profile {
         hotkeys: Default::default(),
+        developer: Default::default(),
         version: SETUP_VERSION,
         name,
         canvas: ProfileCanvas { fps },
@@ -2958,6 +2959,7 @@ impl<'a, 'v> Importer<'a, 'v> {
         }
         let setup = Setup {
             virtual_camera: Default::default(),
+            developer: Default::default(),
             version: SETUP_VERSION,
             name: text(self.collection, "name")
                 .filter(|n| !n.is_empty())

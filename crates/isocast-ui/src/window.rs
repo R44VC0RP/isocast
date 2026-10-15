@@ -23,6 +23,24 @@ thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
     /// `--drag-test`: one step per frame from the daemon.
     static DRAG_STEP: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    /// `--drag-test`: what it dragged and how the window kept up.
+    static DRAG_RESULT: RefCell<Option<serde_json::Value>> = const { RefCell::new(None) };
+}
+
+/// What `--drag-test` drags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragMode {
+    /// The selected item, by its middle.
+    Move,
+    /// The selected item's lower right corner handle, along its diagonal.
+    Resize,
+    /// The same, then select the scene's bottom item the moment it is let
+    /// go (the pointer's mark disappears then).
+    ResizeSelect,
+    /// The splitter between the Scenes and Sources docks.
+    Columns,
+    /// The splitter above the docks.
+    Rows,
 }
 
 fn with_app(f: impl FnOnce(&Rc<App>)) {
@@ -138,7 +156,7 @@ pub fn run(options: &Options) -> Result<()> {
     }
 
     if let Some(seconds) = options.drag_test {
-        start_drag_test(&app, seconds);
+        start_drag_test(&app, seconds, options.drag_mode);
     }
 
     let bench = slint::Timer::default();
@@ -188,6 +206,7 @@ pub fn run(options: &Options) -> Result<()> {
                         "preview_fps": round(shown as f64 / wall),
                         "interface_redraws_per_s": round(renders as f64 / wall),
                         "drag_steps_sent": shell.canvas.moves.get(),
+                        "drag": DRAG_RESULT.with(|r| r.borrow_mut().take()),
                         "applies": crate::app::applies_json(&shell),
                         "cpu_percent_of_one_core": round(meter.percent()),
                         "peak_memory_mb": usage::peak_memory() / (1 << 20),
@@ -199,6 +218,7 @@ pub fn run(options: &Options) -> Result<()> {
                             "waited_for_layout": stats.waited_for_layout,
                             "shown_without_layout": stats.shown_without_layout,
                             "longest_gap_ms": round(stats.longest_gap.as_secs_f64() * 1000.0),
+                            "size_requests": stats.size_requests,
                             "lost": stats.lost,
                             "last_lost": stats.last_lost,
                         },
@@ -292,21 +312,75 @@ fn setup_when_ready(weak: slint::Weak<AppWindow>, shell: Rc<App>, setup: Setup) 
 }
 
 /// `--drag-test SECONDS`: after the picture has settled, drag the selected
-/// item back and forth with Slint pointer events (the real pointer isn't
-/// touched), as `scripts/drag-lag.py` does with the web app. The pointer
-/// moves once per frame from the daemon (60 a second, like a person's
-/// pointer on a 60 Hz display); a timer would be slowed down by macOS
-/// while the app isn't in front.
-fn start_drag_test(app: &AppWindow, seconds: f64) {
+/// item back and forth (`--drag-mode`: or its corner, or a dock splitter)
+/// with Slint pointer events (the real pointer isn't touched), as
+/// `scripts/drag-lag.py` does with the web app. The pointer moves once per
+/// frame from the daemon (60 a second, like a person's pointer on a 60 Hz
+/// display); a timer would be slowed down by macOS while the app isn't in
+/// front. A pure cyan mark shows where the pointer is (window captures
+/// leave it out), and the window's frame times are kept for `--bench`.
+fn start_drag_test(app: &AppWindow, seconds: f64, mode: DragMode) {
+    #[derive(Clone, Copy)]
+    struct Path {
+        origin: LogicalPosition,
+        /// The way the pointer swings, and how far.
+        direction: (f32, f32),
+        span: f32,
+    }
     #[derive(Clone, Copy)]
     enum Phase {
         Waiting,
         Settling(Instant),
-        Dragging(Instant, LogicalPosition, f32),
+        Dragging(Instant, Path),
         Done,
     }
     let weak = app.as_weak();
     let mut phase = Phase::Waiting;
+    let mut meter = None::<Meter>;
+    let mut steps = 0u64;
+    let mut last_step = Instant::now();
+    let mark = move |app: &AppWindow, position: LogicalPosition| {
+        app.set_test_pointer(true);
+        app.set_test_edge(match mode {
+            DragMode::Columns => 1,
+            DragMode::Rows => 2,
+            _ => 0,
+        });
+        if mode == DragMode::Rows {
+            app.set_test_pointer_x(8.0);
+            app.set_test_pointer_y(position.y - 1.5);
+            app.set_test_pointer_width(24.0);
+            app.set_test_pointer_height(3.0);
+        } else {
+            let below = match mode {
+                DragMode::Columns => app.get_docks_y() - 34.0 - position.y,
+                DragMode::Move => app.get_box_height() / 2.0 + 14.0,
+                _ => 14.0,
+            };
+            let rect = [position.x - 1.5, position.y + below, 3.0, 24.0];
+            // On the canvas, with the box: in the native layers, placed as
+            // the pointer moves (Slint's own frame reaches the screen a
+            // frame after them, so a mark it drew would trail the box).
+            let mut native = false;
+            if matches!(
+                mode,
+                DragMode::Move | DragMode::Resize | DragMode::ResizeSelect
+            ) {
+                with_app(|shell| {
+                    if let Ok(preview) = shell.canvas.preview.try_borrow()
+                        && let Some(preview) = preview.as_ref()
+                    {
+                        native = preview.show_test_pointer(rect.map(f64::from));
+                    }
+                });
+            }
+            app.set_test_pointer(!native);
+            app.set_test_pointer_x(rect[0]);
+            app.set_test_pointer_y(rect[1]);
+            app.set_test_pointer_width(rect[2]);
+            app.set_test_pointer_height(rect[3]);
+        }
+    };
     let step = move || {
         let Some(app) = weak.upgrade() else { return };
         let window = app.window();
@@ -321,34 +395,194 @@ fn start_drag_test(app: &AppWindow, seconds: f64) {
                 }
             }
             Phase::Settling(until) => {
+                let path = match mode {
+                    DragMode::Move => Path {
+                        origin: LogicalPosition::new(
+                            app.get_box_left() + app.get_box_width() / 2.0,
+                            app.get_box_top() + app.get_box_height() / 2.0,
+                        ),
+                        direction: (1.0, 0.0),
+                        span: (app.get_box_width() * 2.0).min(app.get_preview_width() / 4.0),
+                    },
+                    DragMode::Resize | DragMode::ResizeSelect => {
+                        let (w, h) = (app.get_box_width(), app.get_box_height());
+                        let length = w.hypot(h).max(1.0);
+                        Path {
+                            origin: LogicalPosition::new(
+                                app.get_box_left() + w,
+                                app.get_box_top() + h,
+                            ),
+                            direction: (w / length, h / length),
+                            span: length * 0.4,
+                        }
+                    }
+                    DragMode::Columns => {
+                        // The width on screen: a narrow window squeezes
+                        // the docks below their set widths. The swing
+                        // stays clear of Scenes' 140pt minimum.
+                        let width = app.get_scenes_right();
+                        Path {
+                            origin: LogicalPosition::new(
+                                app.get_scenes_right(),
+                                app.get_docks_y() + app.get_docks_height() / 2.0,
+                            ),
+                            direction: (1.0, 0.0),
+                            span: (width - 150.0).clamp(10.0, 80.0),
+                        }
+                    }
+                    DragMode::Rows => Path {
+                        origin: LogicalPosition::new(
+                            app.get_scenes_right() / 2.0,
+                            app.get_docks_y(),
+                        ),
+                        direction: (0.0, 1.0),
+                        span: (app.get_docks_height() - 130.0).clamp(10.0, 80.0),
+                    },
+                };
+                // The mark shows while settling, so the analysis sees
+                // where it rests against the edge.
+                mark(&app, path.origin);
                 if Instant::now() < until {
                     return;
                 }
-                let origin = LogicalPosition::new(
-                    app.get_box_left() + app.get_box_width() / 2.0,
-                    app.get_box_top() + app.get_box_height() / 2.0,
-                );
-                let span = (app.get_box_width() * 2.0).min(app.get_preview_width() / 4.0);
+                let origin = path.origin;
                 window.dispatch_event(WindowEvent::PointerMoved { position: origin });
                 window.dispatch_event(WindowEvent::PointerPressed {
                     position: origin,
                     button: PointerEventButton::Left,
                 });
-                isocast_diagnostics::diagnostic!("drag-test: dragging");
-                phase = Phase::Dragging(Instant::now(), origin, span);
+                isocast_diagnostics::diagnostic!("drag-test: dragging ({mode:?})");
+                with_app(|shell| {
+                    *shell.canvas.render_log.borrow_mut() = Some(Vec::new());
+                    *shell.work_log.borrow_mut() = Some(Default::default());
+                });
+                meter = Some(Meter::start());
+                DRAG_RESULT.with(|r| {
+                    *r.borrow_mut() = Some(serde_json::json!({
+                        "mode": format!("{mode:?}").to_lowercase(),
+                        "span_points": path.span,
+                        "direction": [path.direction.0, path.direction.1],
+                        "origin": [origin.x, origin.y],
+                    }))
+                });
+                phase = Phase::Dragging(Instant::now(), path);
             }
-            Phase::Dragging(start, origin, span) => {
+            Phase::Dragging(start, path) => {
+                // Called for each frame from the daemon and by a timer for
+                // frames that don't come (a monitor being resized): at
+                // most one pointer step a display frame.
+                if last_step.elapsed() < Duration::from_millis(12) {
+                    return;
+                }
+                last_step = Instant::now();
                 let t = start.elapsed().as_secs_f64();
-                let x = origin.x + span * (2.0 * std::f64::consts::PI * t / 1.5).sin() as f32;
-                let position = LogicalPosition::new(x, origin.y);
+                let swing = path.span * (2.0 * std::f64::consts::PI * t / 1.5).sin() as f32;
+                let position = LogicalPosition::new(
+                    path.origin.x + path.direction.0 * swing,
+                    path.origin.y + path.direction.1 * swing,
+                );
                 if t < seconds {
+                    steps += 1;
                     window.dispatch_event(WindowEvent::PointerMoved { position });
+                    mark(&app, position);
                 } else {
+                    if mode == DragMode::ResizeSelect {
+                        // A last move in the same breath as the release, as
+                        // a hand's often is: no frame of it has come yet.
+                        window.dispatch_event(WindowEvent::PointerMoved { position });
+                    }
                     window.dispatch_event(WindowEvent::PointerReleased {
                         position,
                         button: PointerEventButton::Left,
                     });
                     isocast_diagnostics::diagnostic!("drag-test: done");
+                    if mode == DragMode::ResizeSelect {
+                        // Right after the release (the next turn of the
+                        // event loop, or ISOCAST_DRAG_SELECT_MS): before
+                        // isocastd's frame showing the final size (about
+                        // 5 ms later on isocast-m2-b), as a click or key
+                        // right after letting go can be.
+                        let delay = std::env::var("ISOCAST_DRAG_SELECT_MS")
+                            .ok()
+                            .and_then(|ms| ms.parse().ok())
+                            .unwrap_or(0);
+                        let weak = app.as_weak();
+                        slint::Timer::single_shot(Duration::from_millis(delay), move || {
+                            with_app(|shell| {
+                                shell.canvas.select_bottom_item(shell);
+                                if let Ok(preview) = shell.canvas.preview.try_borrow()
+                                    && let Some(preview) = preview.as_ref()
+                                {
+                                    preview.show_test_pointer([0.0; 4]);
+                                }
+                            });
+                            if let Some(app) = weak.upgrade() {
+                                app.set_test_pointer(false);
+                            }
+                        });
+                    }
+                    let cpu = meter.take().map_or(0.0, |m| m.percent());
+                    let log = APP
+                        .with(|a| {
+                            a.borrow()
+                                .as_ref()
+                                .and_then(|shell| shell.canvas.render_log.borrow_mut().take())
+                        })
+                        .unwrap_or_default();
+                    let work = APP
+                        .with(|a| {
+                            a.borrow()
+                                .as_ref()
+                                .and_then(|shell| shell.work_log.borrow_mut().take())
+                        })
+                        .unwrap_or_default();
+                    let ms = |xs: &[Duration]| -> Vec<f64> {
+                        xs.iter().map(|d| d.as_secs_f64() * 1000.0).collect()
+                    };
+                    let (mut flushes, mut updates) = (ms(&work.flushes), ms(&work.updates));
+                    let total = |xs: &[f64]| (xs.iter().sum::<f64>()).round();
+                    let (flush_total, update_total) = (total(&flushes), total(&updates));
+                    let mut intervals: Vec<f64> = log
+                        .windows(2)
+                        .map(|w| (w[1].1 - w[0].1).as_secs_f64() * 1000.0)
+                        .collect();
+                    let mut draws: Vec<f64> = log
+                        .iter()
+                        .map(|(a, b)| (*b - *a).as_secs_f64() * 1000.0)
+                        .collect();
+                    let summary = |xs: &mut Vec<f64>| {
+                        xs.sort_by(f64::total_cmp);
+                        let at = |q: f64| {
+                            xs.get(((xs.len() as f64 - 1.0) * q).round() as usize)
+                                .map_or(0.0, |v| (v * 10.0).round() / 10.0)
+                        };
+                        serde_json::json!([at(0.5), at(0.95), at(1.0)])
+                    };
+                    DRAG_RESULT.with(|r| {
+                        if let Some(serde_json::Value::Object(result)) = r.borrow_mut().as_mut() {
+                            result.insert("seconds".into(), seconds.into());
+                            result.insert("pointer_steps".into(), steps.into());
+                            result.insert("window_frames".into(), log.len().into());
+                            result.insert(
+                                "frame_interval_ms_p50_p95_max".into(),
+                                summary(&mut intervals),
+                            );
+                            result.insert("draw_ms_p50_p95_max".into(), summary(&mut draws));
+                            result.insert("flushes".into(), flushes.len().into());
+                            result.insert("flush_ms_total".into(), flush_total.into());
+                            result.insert("flush_ms_p50_p95_max".into(), summary(&mut flushes));
+                            result.insert("daemon_updates".into(), updates.len().into());
+                            result.insert("daemon_update_ms_total".into(), update_total.into());
+                            result.insert(
+                                "daemon_update_ms_p50_p95_max".into(),
+                                summary(&mut updates),
+                            );
+                            result.insert(
+                                "cpu_percent_of_one_core".into(),
+                                ((cpu * 10.0).round() / 10.0).into(),
+                            );
+                        }
+                    });
                     phase = Phase::Done;
                 }
             }
@@ -356,4 +590,17 @@ fn start_drag_test(app: &AppWindow, seconds: f64) {
         }
     };
     DRAG_STEP.with(|s| *s.borrow_mut() = Some(Box::new(step)));
+    let backup = slint::Timer::default();
+    backup.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(17),
+        || {
+            DRAG_STEP.with(|step| {
+                if let Some(step) = step.borrow_mut().as_mut() {
+                    step();
+                }
+            })
+        },
+    );
+    std::mem::forget(backup);
 }

@@ -22,6 +22,26 @@ which drags the item with its own pointer events and draws its box as the
 same green outline; there the outline is drawn at the layout of the frame
 shown, so the expected lag is 0.
 
+--mode resize|columns|rows (Slint app only) drags the block's lower right
+corner handle along its diagonal, the splitter between the Scenes and
+Sources docks, or the splitter above the docks. The app then marks where
+its scripted pointer is with a pure cyan bar (window captures leave the
+pointer out) and draws the dragged edge pure green, and the recording is
+read for how far the edge trails the pointer:
+
+- gap: pointer to edge while moving, in window points (median, p95);
+- lag: the shift (ms) that best lines the edge up with the pointer;
+- edge and pointer moves a second;
+- glitch frames: the edge stepping against the pointer's way, standing
+  still while the pointer moves, missing, or showing twice; and frames
+  where the picture (the magenta block) is missing;
+- for resize, the same for the picture's edge (the block).
+
+With --record the test engine records the program and two ISO test
+patterns during the drag, and the report's dropped frames (and ffprobe's
+frame counts) are added. The app's own frame times and CPU while dragging
+are in "app_run.drag".
+
 The window shows on screen for about 15 s. The recording (synthetic
 content only) is kept in --work for watching. Needs the release binaries
 (`cargo build --release -p isocast-daemon -p isocast-cli -p isocast-ui`, or
@@ -332,6 +352,187 @@ def analyse(video, window_points_per_canvas_px):
     }
 
 
+AXIS = {"resize": "x", "resize-select": "x", "columns": "x", "rows": "y"}
+
+
+def track(video, mode):
+    """Per frame: the pointer mark's and the dragged edge's positions along
+    the drag's axis (recorded pixels), the picture's edge (resize), and
+    whether the edge showed twice and whether the picture (the magenta
+    block) was there at all."""
+    probe = json.loads(subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries",
+         "stream=width,height,r_frame_rate", "-of", "json", str(video)],
+        capture_output=True, text=True, check=True).stdout)["streams"][0]
+    w, h = probe["width"], probe["height"]
+    num, den = map(int, probe["r_frame_rate"].split("/"))
+    proc = subprocess.Popen(["ffmpeg", "-v", "error", "-i", str(video), "-f", "rawvideo",
+                             "-pix_fmt", "rgb24", "-"], stdout=subprocess.PIPE)
+    size = w * h * 3
+    pointer, edge, picture, double, block, outline = [], [], [], [], [], []
+    last = None
+    while True:
+        raw = proc.stdout.read(size)
+        if len(raw) < size:
+            break
+        img = np.frombuffer(raw, np.uint8).reshape(h, w, 3)
+        r, g, b = img[..., 0], img[..., 1], img[..., 2]
+        magenta = (r > 225) & (g < 90) & (b > 225)
+        block.append(bool(magenta.any()))
+        cyan = (r < 110) & (g > 225) & (b > 225)
+        green = (g > 225) & (r < 110) & (b < 110)
+        if AXIS[mode] == "y":
+            cyan, green, magenta = cyan.T, green.T, magenta.T
+        # The mark is a bar a few pixels wide; scaled test patterns in the
+        # picture can show a cyan column too: the narrow group nearest
+        # where the mark was.
+        cols = np.flatnonzero(cyan.sum(axis=0) >= 3)
+        groups = [g for g in np.split(cols, np.flatnonzero(np.diff(cols) > 2) + 1)
+                  if g.size and g[-1] - g[0] <= 8] if cols.size else []
+        if groups:
+            centres = [(g[0] + g[-1]) / 2 for g in groups]
+            if last is None:
+                at = max(range(len(groups)), key=lambda i: cyan[:, groups[i]].sum())
+            else:
+                at = min(range(len(groups)), key=lambda i: abs(centres[i] - last))
+            last = centres[at]
+            pointer.append(last)
+        else:
+            pointer.append(np.nan)
+        counts = green.sum(axis=0)
+        twice = False
+        if mode.startswith("resize"):
+            cols = np.flatnonzero(counts >= 3)
+            edge.append(cols[-1] if cols.size else np.nan)
+            outline.append(cols[-1] - cols[0] if cols.size else np.nan)
+            rows = np.flatnonzero(green.sum(axis=1) >= 3)
+            if rows.size:
+                inside = magenta[rows[0]:rows[-1] + 1]
+                pcols = np.flatnonzero(inside.sum(axis=0) >= 3)
+                picture.append(pcols[-1] if pcols.size else np.nan)
+            else:
+                picture.append(np.nan)
+        else:
+            # The splitter is the longest green line; the box's outline
+            # (also green) is shorter.
+            top = counts.max()
+            cols = np.flatnonzero(counts >= max(3, top * 0.6)) if top >= 20 else np.array([])
+            if cols.size:
+                groups = np.split(cols, np.flatnonzero(np.diff(cols) > 4) + 1)
+                twice = len(groups) > 1
+                main = max(groups, key=len)
+                edge.append((main[0] + main[-1]) / 2)
+            else:
+                edge.append(np.nan)
+            picture.append(np.nan)
+        double.append(twice)
+    proc.wait()
+    return (np.array(pointer, float), np.array(edge, float), np.array(picture, float),
+            np.array(double), np.array(block), num / den, np.array(outline, float))
+
+
+def follow(pointer, edge, start, end, fps, points_per_px):
+    """How `edge` follows `pointer` over frames start..end."""
+    ok = ~np.isnan(pointer) & ~np.isnan(edge)
+    # At rest before the drag, or after it (it ends where it began) when
+    # the recording started late.
+    rest_frames = np.arange(max(0, start - int(fps)), start)
+    rest_frames = rest_frames[ok[rest_frames]]
+    if rest_frames.size < 10:
+        after = np.arange(min(len(edge), end + int(fps * 0.5)), min(len(edge), end + int(fps * 1.5)))
+        rest_frames = after[ok[after]]
+    rest = np.median(edge[rest_frames] - pointer[rest_frames]) if rest_frames.size else 0.0
+    idx = np.arange(start, end)
+    good = idx[ok[idx]]
+    p, e = pointer[good], edge[good] - rest
+    best, best_err = 0, np.inf
+    for shift in range(0, int(fps * 0.5)):
+        err = np.mean(np.abs(e[shift:] - p[:len(p) - shift]))
+        if err < best_err:
+            best, best_err = shift, err
+    gap = np.abs(e - p) * points_per_px
+    # Glitches, frame by frame: the edge stepping against the way the
+    # (lag-shifted) pointer went, or standing still while it moved a
+    # point or more.
+    back = stall = 0
+    for i in range(best + 1, len(e)):
+        dp = p[i - best] - p[i - best - 1]
+        de = e[i] - e[i - 1]
+        if abs(dp) * points_per_px >= 1.0:
+            if de * dp < 0 and abs(de) * points_per_px >= 1.0:
+                back += 1
+            elif abs(de) * points_per_px < 0.25:
+                stall += 1
+    moved = lambda xs: int((np.abs(np.diff(xs)) * points_per_px >= 0.25).sum())
+    seconds = len(idx) / fps
+    return {
+        "gap_points_median": round(float(np.median(gap)), 1),
+        "gap_points_p95": round(float(np.percentile(gap, 95)), 1),
+        "lag_ms": round(best * 1000 / fps, 1),
+        "edge_moves_per_s": round(moved(e) / seconds, 1),
+        "pointer_moves_per_s": round(moved(p) / seconds, 1),
+        "back_steps": back,
+        "stalls": stall,
+        "missing": int(len(idx) - good.size),
+    }
+
+
+def analyse_edge(video, mode, span_points, direction=(1.0, 1.0)):
+    pointer, edge, picture, double, block, fps, outline = track(video, mode)
+    seen = np.flatnonzero(~np.isnan(pointer))
+    if seen.size < fps * 2:
+        sys.exit(f"drag-lag: the pointer mark showed in {seen.size} frames; is the window visible?")
+    moving = np.flatnonzero(np.abs(np.diff(pointer)) > 0.5)
+    if moving.size == 0:
+        sys.exit("drag-lag: the pointer mark never moved; the drag script didn't run")
+    start, end = moving[0], moving[-1] + 2
+    swing = np.nanmax(pointer[start:end]) - np.nanmin(pointer[start:end])
+    # The swing along the measured axis (resize goes along the diagonal).
+    along = abs(direction[1] if AXIS[mode] == "y" else direction[0]) or 1.0
+    points_per_px = 2 * span_points * along / swing if swing else 1.0
+    result = {"video": str(video), "mode": mode, "frames_measured": int(end - start),
+              "recording_fps": round(fps, 2), "points_per_recorded_px": round(points_per_px, 3)}
+    result.update(follow(pointer, edge, start, end, fps, points_per_px))
+    result["double_edge_frames"] = int(double[start:end].sum())
+    result["picture_missing_frames"] = int((~block[start:end]).sum())
+    if mode.startswith("resize"):
+        result["picture"] = follow(pointer, picture, start, end, fps, points_per_px)
+    if mode == "resize-select":
+        # The app selects the scene's bottom item (the whole canvas) as it
+        # lets go, and the mark disappears then: frames until the outline
+        # goes round that item (its width within 10% of where it ends).
+        gone = next((i for i in range(end - 2, len(pointer)) if np.isnan(pointer[i])), None)
+        final = np.nanmedian(outline[-30:]) if len(outline) >= 30 else np.nan
+        if gone is None or np.isnan(final):
+            sys.exit("drag-lag: no selection change at the end of the drag")
+        right = next((i for i in range(gone, len(outline))
+                      if not np.isnan(outline[i]) and outline[i] >= 0.9 * final), len(outline))
+        result["wrong_outline_frames"] = int(right - gone)
+        result["wrong_outline_ms"] = round((right - gone) * 1000 / fps, 1)
+    result["glitch_frames"] = (result["back_steps"] + result["missing"] + result["double_edge_frames"]
+                               + result["picture_missing_frames"])
+    return result
+
+
+def probe_files(report):
+    """The test engine's files: the report's drops and ffprobe's count."""
+    files = []
+    for f in report.get("files", []):
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
+                              "-show_entries", "stream=nb_read_packets,r_frame_rate:format=duration",
+                              "-of", "json", f["path"]], capture_output=True, text=True)
+        info = json.loads(out.stdout or "{}")
+        stream = (info.get("streams") or [{}])[0]
+        files.append({
+            "source": f["source"],
+            "frames": f["frames"],
+            "dropped_frames": f["dropped_frames"],
+            "ffprobe_packets": int(stream.get("nb_read_packets", 0)),
+            "ffprobe_duration": round(float(info.get("format", {}).get("duration", 0)), 2),
+        })
+    return files
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--work", type=Path, default=SCRATCH / "lag")
@@ -343,12 +544,31 @@ def main():
     p.add_argument("--bin-dir", type=Path, default=REPO / "target/release",
                    help="where the release binaries are")
     p.add_argument("--analyse", type=Path, help="only analyse this existing window recording")
+    p.add_argument("--drag", help="with --analyse and --mode resize|columns|rows: the run's "
+                                  "app_run.drag JSON (its span and direction)")
+    p.add_argument("--mode", choices=["move", "resize", "resize-select", "columns", "rows"],
+                   default="move",
+                   help="what to drag (resize, columns and rows: Slint app only)")
+    p.add_argument("--hide", default="",
+                   help="docks to hide, comma-separated: scenes,sources,mixer,transitions,controls")
+    p.add_argument("--record", action="store_true",
+                   help="record the program and two ISO test patterns meanwhile")
     p.add_argument("--diagnose", action="store_true",
                    help="also count layout changes reaching the engine and analyse the engine's own frames")
     args = p.parse_args()
     if args.analyse:
+        if args.mode != "move":
+            # The app's "drag" (span and direction) from that run's results.
+            if not args.drag:
+                sys.exit("drag-lag: --analyse with --mode resize|columns|rows needs --drag JSON")
+            drag = json.loads(args.drag)
+            print(json.dumps(analyse_edge(args.analyse, args.mode, drag["span_points"],
+                                          drag.get("direction", (1.0, 1.0))), indent=2))
+            return
         print(json.dumps(analyse(args.analyse, block_scale(args.analyse)), indent=2))
         return
+    if args.mode != "move" and args.app != "ui":
+        sys.exit("drag-lag: --mode resize, columns and rows need --app ui")
     work = args.work.resolve()
     if not str(work).startswith(str(SCRATCH) + "/"):
         sys.exit(f"drag-lag: --work must be under {SCRATCH}/ (ISOCAST_SCRATCH)")
@@ -386,6 +606,23 @@ def main():
     test_env = engine_env(test_sock, work / "test-live.toml")
     rec_env = engine_env(rec_sock, work / "rec-live.toml")
     run([REPO / "scripts/sign-dev.sh", daemon], test_env)
+    # Resizing wants room: a larger block, clear of the test patterns.
+    block = "x = 720, y = 300, width = 480, height = 480" if args.mode.startswith("resize") else \
+        "x = 840, y = 420, width = 240, height = 240"
+    patterns = """
+[[sources]]
+id = "bars1"
+name = "Bars 1"
+kind = "test_pattern"
+
+[[sources]]
+id = "bars2"
+name = "Bars 2"
+kind = "test_pattern"
+""" if args.record else ""
+    pattern_items = """
+  { source = "bars1", rect = { x = 40, y = 40, width = 320, height = 180 } },
+  { source = "bars2", rect = { x = 40, y = 260, width = 320, height = 180 } },""" if args.record else ""
     (work / "test.toml").write_text(f"""version = 1
 name = "Lag test"
 
@@ -407,22 +644,27 @@ kind = "color"
 color = "#ff00ff"
 width = 240
 height = 240
-
+{patterns}
 [[scenes]]
 id = "main"
 name = "Main"
 items = [
-  {{ source = "background", rect = {{ x = 0, y = 0, width = {CANVAS[0]}, height = {CANVAS[1]} }} }},
-  {{ source = "block", rect = {{ x = 840, y = 420, width = 240, height = 240 }} }},
+  {{ source = "background", rect = {{ x = 0, y = 0, width = {CANVAS[0]}, height = {CANVAS[1]} }} }},{pattern_items}
+  {{ source = "block", rect = {{ {block} }} }},
 ]
 
 [recording]
-folder = "{work}/test-rec"
+folder = "{work}/test-rec/{args.label}"
 
 [recording.program]
-enabled = false
+enabled = {"true" if args.record else "false"}
 encoder = {{ codec = "hevc", quality = 70 }}
-""")
+""" + ("""
+[recording.iso]
+enabled = true
+sources = ["bars1", "bars2"]
+encoder = { codec = "hevc", quality = 70 }
+""" if args.record else ""))
     folder = work / "runs" / args.label
     folder.mkdir(parents=True, exist_ok=True)
     (work / "rec.toml").write_text(f"""version = 1
@@ -464,19 +706,37 @@ encoder = {{ codec = "hevc", quality = 95 }}
             apply(cli, test_env, work / "test.toml")
             run([cli, "engine", "start"], test_env)
             # Background mode: the window shows without taking focus.
-            app_env = dict(test_env, ISOCAST_UI_DIR=str(ui), ISOCAST_BACKGROUND="1")
+            # Its own layout file, so every run starts from the default
+            # layout (and Ryan's is never touched).
+            prefs = work / "ui-prefs.json"
+            prefs.unlink(missing_ok=True)
+            hidden = [d for d in args.hide.split(",") if d]
+            if hidden:
+                prefs.write_text(json.dumps({d: False for d in hidden}))
+            app_env = dict(test_env, ISOCAST_UI_DIR=str(ui), ISOCAST_BACKGROUND="1",
+                           ISOCAST_UI_PREFS=str(prefs))
+            if args.record:
+                run([cli, "start"], test_env)
             if args.app == "ui":
                 # It drags after the picture has settled (3 s), measures the
                 # run (and says whether the window was covered) and quits.
-                command = [str(app), "--drag-test", str(args.seconds), "--check",
-                           "--bench", str(args.seconds + 8), "--no-float"]
+                command = [str(app), "--drag-test", str(args.seconds), "--drag-mode", args.mode,
+                           "--check", "--bench", str(args.seconds + 8), "--no-float"]
             else:
                 command = [str(app)]
             app_proc = subprocess.Popen(command, env=app_env, stdout=open(work / "app.json", "w"),
                                         stderr=open(work / "app.log", "w"))
-            time.sleep(3)  # the window and its title
+            time.sleep(1)  # the window and its title
             apply(cli, rec_env, work / "rec.toml")
-            run([cli, "start", "--seconds", str(int(args.seconds + 9))], rec_env)
+            # Soon, so the drag's resting start is recorded; a cold start (a
+            # test Mac's first run of a new build) can take longer to show
+            # the window.
+            for attempt in range(40):
+                started = run([cli, "start", "--seconds", str(int(args.seconds + 9))], rec_env,
+                              check=attempt == 39)
+                if started.returncode == 0:
+                    break
+                time.sleep(0.4)
             probes = []
             if args.diagnose:
                 # Layout changes reaching the engine, one line per event.
@@ -490,6 +750,9 @@ encoder = {{ codec = "hevc", quality = 95 }}
             time.sleep(args.seconds + 11)
             for probe in probes:
                 probe.wait(timeout=30)
+            if args.record:
+                out = run([cli, "stop", "--json"], test_env, check=False)
+                (work / "test-report.json").write_text(out.stdout)
         finally:
             if app_proc:
                 app_proc.terminate()
@@ -504,12 +767,28 @@ encoder = {{ codec = "hevc", quality = 95 }}
                  "window, or on another Space), so WebKit paused the page: the monitor let go of "
                  "its stream (as it should) and the drag stopped. Nothing to measure; keep the "
                  f"window uncovered and run again (recording in {folder})")
-    result = analyse(videos[-1], block_scale(videos[-1]))
-    result["label"] = args.label
-    result["app"] = args.app
+    app_run = None
     if args.app == "ui" and (work / "app.json").exists():
         with contextlib.suppress(ValueError):
-            result["app_run"] = json.loads((work / "app.json").read_text())
+            app_run = json.loads((work / "app.json").read_text())
+    if args.mode == "move":
+        result = analyse(videos[-1], block_scale(videos[-1]))
+    else:
+        drag = (app_run or {}).get("drag") or {}
+        if not drag.get("span_points"):
+            sys.exit(f"drag-lag: the app didn't say what it dragged; see {work}/app.log")
+        result = analyse_edge(videos[-1], args.mode, drag["span_points"],
+                              drag.get("direction", (1.0, 1.0)))
+    result["label"] = args.label
+    result["app"] = args.app
+    result["recording"] = args.record
+    result["hide"] = args.hide
+    if app_run is not None:
+        result["app_run"] = app_run
+    if args.record:
+        with contextlib.suppress(ValueError, OSError):
+            report = json.loads((work / "test-report.json").read_text())
+            result["recorded_files"] = probe_files(report)
     for line in (work / "app.log").read_text(errors="replace").splitlines():
         if "drag-lag-profile " in line:
             result["page"] = json.loads(line.split("drag-lag-profile ", 1)[1])

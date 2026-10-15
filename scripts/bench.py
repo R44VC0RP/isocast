@@ -24,7 +24,8 @@ Ryan's), records (or streams) the scenario, and measures:
 installed by that build) and --tone-filters audio filters on the synthetic
 tone (`'{ kind = "gain", gain_db = -6 }'`); the --compare-… forms are the
 baseline's. --timeline opens a timeline (`timeline new`) on --daemon's runs
-before recording, so each take is added to it, and checks it was.
+before recording, so each take is added to it, and checks it was. --developer
+turns developer mode on for --daemon's runs and reports its log bytes a second.
 
 With --compare, runs alternate between the two builds (A B A B …) so load
 from the rest of the machine hits both alike; the summary gives medians.
@@ -344,8 +345,16 @@ def measure(args, daemon, label, index, cleanup):
     folder = work / "runs" / f"{time.strftime('%Y%m%d-%H%M%S')}-{label}-{index}"
     folder.mkdir(parents=True, exist_ok=True)
     setup = work / f"setup-{args.scenario}{'-real' if args.real else ''}-{label}.toml"
-    setup.write_text(setup_toml(args.scenario, args.real, work, folder, args.camera, args.mic,
-                                tone_filters))
+    text = setup_toml(args.scenario, args.real, work, folder, args.camera, args.mic, tone_filters)
+    # --developer: developer mode on for --daemon's runs (what it costs).
+    developer = args.developer and not base
+    if developer:
+        text += "\n[developer]\nenabled = true\nauto_off_hours = 0\n"
+    setup.write_text(text)
+    logs = Path(sock).with_suffix(".logs")
+
+    def developer_bytes():
+        return sum(p.stat().st_size for p in logs.glob("*-developer-*.jsonl")) if logs.is_dir() else 0
 
     run([REPO / "scripts/sign-dev.sh", daemon], env=env)
     if run([cli, "restart"], env=env, check=False).returncode != 0:
@@ -380,11 +389,13 @@ def measure(args, daemon, label, index, cleanup):
     owned0 = process_tree(pid)
     c0, v0 = cpu_times(owned0), cpu_times(vt)
     i0, t0 = instruction_counts(owned0), time.time()
+    d0 = developer_bytes()
     time.sleep(args.seconds)
     vt = pids_of("VTEncoderXPCService") + pids_of("VTDecoderXPCService")
     owned1 = process_tree(pid)
     c1, v1 = cpu_times(owned1), cpu_times(vt)
     i1, t1 = instruction_counts(owned1), time.time()
+    d1 = developer_bytes()
     vt_delta = cpu_delta(v0, v1)
     memory = sum(rss_mb(p) for p in owned1)
     # The compositor's own timings (CPU per tick, frames sent again), from
@@ -427,6 +438,8 @@ def measure(args, daemon, label, index, cleanup):
     if timeline:
         shown = json.loads(run([cli, "timeline", "show", "--json"], env=env).stdout)
         result["timeline_clips"] = len(shown["clips"])
+    if developer:
+        result["developer_log_bytes_per_s"] = round((d1 - d0) / (t1 - t0))
     if plugins:
         result["plugins"] = str(plugins)
     if tone_filters:
@@ -510,6 +523,11 @@ def summary(results):
                   f"{sum(s['dropped_frames'] for s in streams)} dropped, "
                   f"{sum(s.get('audio_dropouts', 0) for s in streams)} audio dropouts")
     for label, rs in by.items():
+        logged = [r["developer_log_bytes_per_s"] for r in rs if "developer_log_bytes_per_s" in r]
+        if logged:
+            print(f"  {label} developer mode: {statistics.median(logged):.0f} log bytes/s "
+                  f"({statistics.median(logged) * 3600 / 1e6:.1f} MB an hour)")
+    for label, rs in by.items():
         timed = [r["timeline_clips"] for r in rs if "timeline_clips" in r]
         if timed:
             print(f"  {label} timeline: {sum(1 for n in timed if n == 1)}/{len(rs)} runs added "
@@ -538,6 +556,8 @@ def main():
     p.add_argument("--tone-filters", help='audio filters on the synthetic tone, as TOML inline tables: '
                    '\'{ kind = "gain", gain_db = -6 }\'')
     p.add_argument("--compare-tone-filters", help="the same for --compare's runs")
+    p.add_argument("--developer", action="store_true",
+                   help="developer mode on for --daemon's runs (verbose logs and traces), to measure its cost")
     p.add_argument("--timeline", action="store_true",
                    help="open a timeline on --daemon's runs before recording (each take is added to it)")
     args = p.parse_args()

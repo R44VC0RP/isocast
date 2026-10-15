@@ -726,6 +726,14 @@ layout editing, Windows, release prep).
       See REPORT.md **Process-wide escalation**, including all outliers and the
       rejected constructor-only trial. No claim of loss-free Background operation.
 
+- [x] **Developer mode (GitHub #47).** Settings › Advanced › Developer
+  mode (the profile's, off by default, auto-off after 24 h), `isocast debug
+  on|off|status [--json]`, MCP `developer_mode`, API `debug_status` and
+  `debug_set`: every API call and debug messages from capture, compositor,
+  encoders, writers, streaming and the updater, and per-second frame timing
+  traces, in their own 200 MB log segments; the Developer menu and the live
+  stats overlay. docs/developer-mode.md.
+
 ### G. OBS gaps (Ryan, 2026-10-13: "everything in OBS natively and fast")
 
 What OBS has that Isocast doesn't yet (from docs/obs-parity.md, the N.2
@@ -1080,6 +1088,48 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
 
 ### 7. Plugins
 
+**Principle (Ryan, 2026-10-14):** features made for one person's workflow
+are plugins, not core. A plugin uses what the CLI and MCP use (the one
+method table and its events) plus files it is allowed to read; the core
+adds a plugin capability only when a real plugin needs it, and nothing a
+plugin does can cost a recording. In-pipeline tiers (shader filters,
+WebAssembly audio and sources) exist only because a separate process
+can't run inside the frame or audio loop. Not planned until a plugin needs
+them: interceptor hooks, plugin UI contribution points, plugin settings
+pages, background scheduling.
+
+Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
+
+- [ ] **7.7 Plugin events and file access** (one feature, general, not
+  built around one plugin). (a) **Every state change emits an event with
+  full context**, so a plugin never has to poll or guess: recording and
+  take started/paused/resumed/finished/failed, split, retake, marker,
+  scene and preview switches, stream started/stopped/reconnecting, timeline
+  exported, project created/renamed, device added/removed, setup applied,
+  each carrying ids and, where files exist, the folder and the path of
+  every file (program, each ISO, manifest, export). (b) **A folder per
+  recording session** (`<recordings>/<date time> Untitled/` with every
+  take's files, manifests and exports), renamed only after its files are
+  finished, with `rename_project` and `list_projects` on the method table,
+  so plugins and people have one stable place per recording. (c) **Scoped
+  file grants** in the manifest, approved at install: `recordings =
+  "read"` (read recording files only) and `recordings = "write"` (also
+  add files to a session's folder, e.g. exports or transcripts; never
+  modify or delete existing media). Done when the event catalogue is
+  documented and covered by the e2e suite, a sandboxed plugin can read a
+  finished take only with the grant and write only into the session folder
+  with the write grant, and existing flat recordings are untouched.
+- [ ] **7.8 Auto Name example plugin** (later; the first plugin built on
+  7.7, not its design driver) (`examples/plugins/auto-name`): on
+  `recording.finished`, transcribe the take's mic audio on-device (Apple
+  Speech), name it with Apple's on-device model from the transcript, the
+  scene names and markers plus the user's past renames (kept in its own
+  data folder), and call `rename_project`. No network. Done when a real
+  take is renamed within a few seconds of Stop and a rename by hand is
+  used as an example next time.
+- [ ] **7.3** (below) and **7.4b** stay planned but wait for a plugin that
+  needs them; 5.7 waits for scenes as code.
+
 - [x] **7.1 Plugin model.** Manifest format and three tiers, from safest to
   most powerful: external processes that use the control API (any
   language), WGSL shader filters, and WebAssembly components (wasmtime)
@@ -1208,6 +1258,16 @@ Help → About (Ryan approved); Isocast's own code stays MIT OR Apache-2.0.
   warned, 31 clean files not warned; CLI text and MCP stop/status checked.
   Release fmt/clippy, 182 unit tests + one doctest and 13/13 zero-drop e2e
   pass on exonbook. All 204 investigation files ffprobe count/duration matched.
+- resize-lag, GitHub #24 (2026-10-14): dock splitters, dialog headers and
+  scrollbar thumbs follow the pointer exactly (window coordinates; column
+  splitters fit the docks on press), a dragged handle's box is drawn at
+  once, and monitors ask for new sizes at most twice a second. Verified with
+  scripts/drag-lag.py --mode resize|columns|rows [--record] on isocast-m2-b,
+  median of 3 interleaved runs: gap p95 4.5/25.4/46.8 -> 1.0/0.5/1.0 points,
+  lag 16.7 -> 0 ms, 0 glitch frames, 0 dropped frames while recording.
+  Fix round 1: the held resize box snaps to a new selection at once (500
+  -> 0 ms of wrong outline), and column splitters work with any docks
+  hidden (147/147 offscreen cases in all 26 dock layouts, against 112).
 
 - A.2 QA-3 R1 (2026-10-14): fill ISO audio gaps progressively on the
   pause-mapped video clock, retaining the late-input/negative-offset allowance;
@@ -3199,3 +3259,12 @@ One line per finished task, newest last.
   error toast on the stale-engine restart, quit question names a staged
   update, docs: EdDSA key as sole root of trust, full releases only, dry run
   without the key. Re-checked on isocast-m2-a; 6 takes intact.
+- #47 developer mode (2026-10-14): developer mode on the one method table
+  (debug_status/debug_set, isocast debug, MCP developer_mode, Settings >
+  Advanced), verbose logs and per-second traces in separate 200 MB
+  segments, Developer menu and stats overlay. Off: flagship-1080 A/B on
+  isocast-m2-a, median of 3 interleaved, isocastd 50.2% main vs 49.9%
+  branch, 559.2 vs 559.0 M instructions/s, 9/9 files 0 drops each. On:
+  50.0% vs 49.7% off, 560.0 vs 559.0 M instr/s, 2.25 KB/s logged; 4K60 + 3
+  ISOs 2.9 KB/s. Toggling 8 times during a 20 s recording: 3 files,
+  600/600 frames, 0 dropped (ffprobe). e2e 13/13 on isocast-m2-a.

@@ -185,6 +185,14 @@ impl H264Encoder {
             );
         };
         let session = unsafe { CFRetained::from_raw(session) };
+        isocast_diagnostics::debug!(
+            "encoder: h264 {} session {} {}x{} at {} kb/s",
+            output.purpose,
+            output.session_id,
+            spec.width,
+            spec.height,
+            spec.bitrate_kbps
+        );
         let bits = i64::from(spec.bitrate_kbps) * 1000;
         let set = |key: &CFString, value: &CFType| -> Result<()> {
             let status = unsafe { VTSessionSetProperty(&session, key, Some(value)) };

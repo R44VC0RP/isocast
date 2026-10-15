@@ -12,7 +12,7 @@
 //!   `Image`, and the box drawn by Slint, set in the same event so they
 //!   are drawn in the same frame. Slint then redraws the window per frame.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -112,9 +112,43 @@ pub struct Stats {
     pub first_sync_off: Option<String>,
     /// The longest gap between shown frames.
     pub longest_gap: Duration,
+    /// New picture sizes asked of the daemon (each makes it a new ring
+    /// of surfaces).
+    pub size_requests: u64,
     /// Times the stream was lost.
     pub lost: u64,
     pub last_lost: Option<String>,
+}
+
+/// While a monitor is being resized: the daemon is asked for a size that
+/// keeps changing at most every `RESIZE_EVERY`, and for one that has held
+/// for `RESIZE_SETTLE` at once (pausing mid-drag can ask sooner; every
+/// request, settled or not, restarts the `RESIZE_EVERY` period).
+const RESIZE_EVERY: Duration = Duration::from_millis(500);
+const RESIZE_SETTLE: Duration = Duration::from_millis(120);
+/// After a handle drag: how long the box stays where the pointer left it
+/// at most, waiting for a frame that shows it there (one that never comes
+/// if the daemon refused the change).
+const LIVE_BOX_HOLD: Duration = Duration::from_millis(500);
+
+/// A dragged handle's box: the item's (path, in `scene`) only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveBox {
+    pub scene: String,
+    pub path: String,
+    pub shape: BoxShape,
+    ended: Option<Instant>,
+}
+
+impl LiveBox {
+    pub fn new(scene: &str, path: &str, shape: BoxShape) -> Self {
+        Self {
+            scene: scene.to_string(),
+            path: path.to_string(),
+            shape,
+            ended: None,
+        }
+    }
 }
 
 /// Which monitor a preview fills.
@@ -209,9 +243,20 @@ pub struct Preview {
     target: Option<String>,
     fps: u32,
     hidden: bool,
-    /// The picture's size in pixels the frames are asked for.
+    /// The picture's size in pixels on screen; the frames are asked for it
+    /// (see `window_drawn`).
     size: (u32, u32),
+    /// A size not asked for yet (the monitor is still being resized), the
+    /// timer that asks once it settles, and when the daemon was last asked.
+    pending_size: Rc<Cell<Option<(u32, u32)>>>,
+    size_timer: slint::Timer,
+    size_asked_at: Rc<Cell<Option<Instant>>>,
+    size_requests: Rc<Cell<u64>>,
     layouts: Layouts,
+    /// The box as the pointer has it while a handle is dragged, drawn at
+    /// once instead of with the frame showing it; kept after the drag
+    /// (with when it ended) until a frame shows the box there.
+    live_box: Option<LiveBox>,
     style: BoxStyle,
     /// The frame on screen, and the one before it (its slot isn't handed
     /// back until the screen has surely moved on from it).
@@ -264,7 +309,12 @@ impl Preview {
             fps,
             hidden: false,
             size: (0, 0),
+            pending_size: Rc::default(),
+            size_timer: slint::Timer::default(),
+            size_asked_at: Rc::default(),
+            size_requests: Rc::default(),
             layouts: Layouts::default(),
+            live_box: None,
             style: BoxStyle::default(),
             showing: None,
             previous: None,
@@ -408,6 +458,23 @@ impl Preview {
         }
     }
 
+    /// A handle is being dragged: draw the box at `shape` now, not when a
+    /// frame drawn from it comes (a frame or more later, and unevenly
+    /// while the daemon is busy), so the handle stays under the pointer
+    /// (GitHub #24). None: the drag ended; the box goes back to the
+    /// frames' layout once one shows it where the drag left it.
+    pub fn set_live_box(&mut self, live: Option<LiveBox>) {
+        self.live_box = match (live, self.live_box.take()) {
+            (Some(live), _) => Some(live),
+            (None, Some(held)) => Some(LiveBox {
+                ended: held.ended.or(Some(Instant::now())),
+                ..held
+            }),
+            (None, None) => None,
+        };
+        self.redraw_box();
+    }
+
     /// The selection or the window's layout changed: the box again, over
     /// the same frame.
     pub fn redraw_box(&mut self) {
@@ -420,6 +487,19 @@ impl Preview {
         let revision = self.showing.as_ref().and_then(|f| f.revision);
         let rect = self.box_rect(&app, revision);
         self.put(&app, None, rect);
+    }
+
+    /// `--drag-test`: the pointer's mark in the native layers, with the
+    /// box (false: no layers, Slint draws it).
+    pub fn show_test_pointer(&self, rect: [f64; 4]) -> bool {
+        match &self.output {
+            #[cfg(target_os = "macos")]
+            Output::Layers(layers) => layers.borrow().show_test_pointer(rect),
+            _ => {
+                let _ = rect;
+                false
+            }
+        }
     }
 
     /// Slint is about to draw the window: if its layout moved or resized
@@ -441,7 +521,7 @@ impl Preview {
         let size = (size.0.max(16) as u32, size.1.max(16) as u32);
         if size != self.size {
             self.size = size;
-            self.feed.set_size(size.0, size.1);
+            self.ask_size(size);
         }
         #[cfg(target_os = "macos")]
         if self.role == Role::Editor
@@ -452,16 +532,80 @@ impl Preview {
         }
     }
 
-    fn box_rect(&self, app: &AppWindow, revision: Option<u64>) -> Option<BoxShape> {
+    /// Ask the daemon for frames of `size`. Each new size makes it a new
+    /// ring of surfaces, so while the monitor is being resized (a splitter
+    /// or the window dragged: a new size every frame, GitHub #24) it is
+    /// asked at most every `RESIZE_EVERY` and once the size settles; the
+    /// layers (or the image) scale the frames meanwhile.
+    fn ask_size(&mut self, size: (u32, u32)) {
+        let due = self
+            .size_asked_at
+            .get()
+            .is_none_or(|at| at.elapsed() >= RESIZE_EVERY);
+        if due {
+            self.pending_size.set(None);
+            self.size_timer.stop();
+            self.size_asked_at.set(Some(Instant::now()));
+            self.feed.set_size(size.0, size.1);
+            self.size_requests.set(self.size_requests.get() + 1);
+            return;
+        }
+        self.pending_size.set(Some(size));
+        let (feed, pending, requests, asked_at) = (
+            self.feed.clone(),
+            self.pending_size.clone(),
+            self.size_requests.clone(),
+            self.size_asked_at.clone(),
+        );
+        self.size_timer
+            .start(slint::TimerMode::SingleShot, RESIZE_SETTLE, move || {
+                if let Some((width, height)) = pending.take() {
+                    asked_at.set(Some(Instant::now()));
+                    feed.set_size(width, height);
+                    requests.set(requests.get() + 1);
+                }
+            });
+    }
+
+    pub fn stats(&self) -> Stats {
+        Stats {
+            size_requests: self.size_requests.get(),
+            ..self.stats.clone()
+        }
+    }
+
+    fn box_rect(&mut self, app: &AppWindow, revision: Option<u64>) -> Option<BoxShape> {
         let ui = app.global::<Ui>();
         let selected = ui.get_selected_item();
+        let scene = ui.get_editing_scene();
+        // Held only for the item and scene it was dragged in: another
+        // selection (or scene) shows its own box at once.
+        if self
+            .live_box
+            .as_ref()
+            .is_some_and(|live| live.path != selected.as_str() || live.scene != scene.as_str())
+        {
+            self.live_box = None;
+        }
         if selected.is_empty() {
             return None;
+        }
+        if let Some(live) = &self.live_box {
+            let caught_up = self
+                .layouts
+                .at(revision)
+                .filter(|layout| layout.scene == scene.as_str())
+                .and_then(|layout| layout.rects.get(selected.as_str()))
+                == Some(&live.shape);
+            match live.ended {
+                Some(at) if caught_up || at.elapsed() > LIVE_BOX_HOLD => self.live_box = None,
+                _ => return Some(live.shape),
+            }
         }
         // Only over a picture of the scene being edited.
         self.layouts
             .at(revision)
-            .filter(|layout| layout.scene == ui.get_editing_scene().as_str())
+            .filter(|layout| layout.scene == scene.as_str())
             .and_then(|layout| layout.rects.get(selected.as_str()).copied())
     }
 

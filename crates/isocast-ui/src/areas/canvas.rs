@@ -13,9 +13,10 @@
 //!   freely), with guides and a readout while dragging;
 //! - locked items (and a locked preview) can be selected, not changed;
 //! - right-click: the item's menu, or the preview's;
-//! - each step of a gesture is a keyed live edit, pipelined (app.rs), and
-//!   the box is drawn at the layout of the frame shown, so box and picture
-//!   move together;
+//! - each step of a gesture is a keyed live edit, pipelined (app.rs); a
+//!   moved item's box is drawn at the layout of the frame shown, so box and
+//!   picture move together, while a dragged handle's box is drawn at once,
+//!   so the handle stays under the pointer;
 //! - Studio Mode: the edited monitor shows `preview`, a second picture the
 //!   program; the preview's rate follows Settings → General (30 fps saves
 //!   power except while working on the canvas).
@@ -36,7 +37,7 @@ use crate::gpu::Gpu;
 use crate::kit::MenuBuilder;
 use crate::model;
 use crate::picture::{Scene as TestScene, TestPicture};
-use crate::preview::{BoxShape, BoxStyle, Output, Preview, Role};
+use crate::preview::{BoxShape, BoxStyle, LiveBox, Output, Preview, Role};
 use crate::session::EditOptions;
 use crate::{AppWindow, CanvasArea, CanvasBox, CanvasGuide, Menus, Ui};
 
@@ -249,6 +250,9 @@ pub struct Canvas {
     pub frames: Cell<u64>,
     /// Drag steps sent to the daemon.
     pub moves: Cell<u64>,
+    /// `--drag-test`: when each window frame started and finished drawing.
+    pub render_log: RefCell<Option<Vec<(Instant, Instant)>>>,
+    render_started: Cell<Option<Instant>>,
     /// The newest confirmed layout handed to the preview (revision, scene).
     shown_layout: RefCell<(u64, String)>,
     gesture: RefCell<Option<Gesture>>,
@@ -272,6 +276,8 @@ impl Canvas {
             clock,
             frames: Cell::new(0),
             moves: Cell::new(0),
+            render_log: RefCell::new(None),
+            render_started: Cell::new(None),
             shown_layout: RefCell::default(),
             gesture: RefCell::new(None),
             gesture_tail: Cell::new(None),
@@ -286,7 +292,7 @@ impl Canvas {
         self.preview
             .borrow()
             .as_ref()
-            .map(|p| p.stats.clone())
+            .map(|p| p.stats())
             .unwrap_or_default()
     }
 
@@ -478,6 +484,21 @@ impl Canvas {
             && let Some(preview) = preview.as_mut()
         {
             preview.layout(s.revision, &scene, rects);
+        }
+    }
+
+    /// Select the bottom item of the scene being edited (the drag test's
+    /// background, after a resize).
+    pub fn select_bottom_item(&self, app: &Rc<App>) {
+        let path = {
+            let s = app.session.borrow();
+            s.editing_scene()
+                .and_then(|id| s.setup.as_ref().and_then(|x| model::find_scene(x, &id)))
+                .and_then(|scene| scene.items.first())
+                .map(|item| model::key(item).to_string())
+        };
+        if let Some(path) = path {
+            app.select(&path);
         }
     }
 
@@ -809,10 +830,15 @@ impl Canvas {
         canvas.set_readout(step.readout.into());
         canvas.set_readout_x(step.at.0);
         canvas.set_readout_y(step.at.1);
-        let (scene, path, key) = {
+        let (scene, path, key, handle) = {
             let gesture = self.gesture.borrow();
             let Some(g) = gesture.as_ref() else { return };
-            (g.scene.clone(), g.path.clone(), g.key.clone())
+            (
+                g.scene.clone(),
+                g.path.clone(),
+                g.key.clone(),
+                !matches!(g.kind, Kind::Move),
+            )
         };
         let patch = {
             let s = app.session.borrow();
@@ -835,11 +861,30 @@ impl Canvas {
                 ..EditOptions::default()
             },
         );
+        // A dragged handle stays under the pointer: the box is drawn from
+        // the edit at once and the picture follows. A moved item's box
+        // stays with the picture (docs/notes.md 2026-10-12, "Drag lag").
+        if handle {
+            let live = app.session.borrow().selected(|_, chain| {
+                let shape = Placement::of(chain[chain.len() - 1], origin_of(chain)).shape();
+                LiveBox::new(&scene, &path, shape)
+            });
+            self.set_live_box(live);
+        }
+    }
+
+    fn set_live_box(&self, live: Option<LiveBox>) {
+        if let Ok(mut preview) = self.preview.try_borrow_mut()
+            && let Some(preview) = preview.as_mut()
+        {
+            preview.set_live_box(live);
+        }
     }
 
     fn pointer_up(&self, app: &Rc<App>) {
         let Some(window) = app.window() else { return };
         let had = self.gesture.borrow_mut().take();
+        self.set_live_box(None);
         let canvas = window.global::<CanvasArea>();
         self.guides.set_vec(Vec::new());
         canvas.set_readout("".into());
@@ -1260,6 +1305,7 @@ impl Area for Canvas {
                 let Some(app) = weak.upgrade() else { return };
                 match state {
                     slint::RenderingState::BeforeRendering => {
+                        app.canvas.render_started.set(Some(Instant::now()));
                         if let Some(window) = app.window() {
                             app.canvas.draw_picture(&window);
                         }
@@ -1273,7 +1319,12 @@ impl Area for Canvas {
                         }
                     }
                     slint::RenderingState::AfterRendering => {
-                        app.canvas.frames.set(app.canvas.frames.get() + 1)
+                        app.canvas.frames.set(app.canvas.frames.get() + 1);
+                        if let Some(log) = app.canvas.render_log.borrow_mut().as_mut()
+                            && let Some(started) = app.canvas.render_started.take()
+                        {
+                            log.push((started, Instant::now()));
+                        }
                     }
                     _ => {}
                 }

@@ -155,6 +155,17 @@ A named diagnostic worker panics and is contained five seconds after startup.
 immediately (71), testing relay durability; it does not invoke a Rust panic.
 Unset the variables before restarting. Use a test Mac for fault injection.
 
+## Developer mode
+
+Developer mode (Settings › Advanced, `isocast debug on`, MCP
+`developer_mode`; see docs/developer-mode.md) adds `level: "debug"`
+records, every API call, and a frame timing `trace` record each second
+while the engine runs, in each launch's `<launch>-developer-NNNN.jsonl`
+segments. They have their own 200 MiB budget, so they never evict the
+ordinary history, and pass through the same redaction. A report takes
+only each launch's newest developer segment; `isocast logs` reads them
+all. It turns itself off after 24 hours unless set otherwise.
+
 ## Metrics and availability
 
 One record per second while the engine runs (one per five seconds while idle):
