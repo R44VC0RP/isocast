@@ -6,6 +6,12 @@
 #                                         files, with uncommitted edits)
 #   scripts/testmac.sh build              sync, cargo build --release, sign
 #                                         the dev app (scripts/sign-dev.sh)
+#   scripts/testmac.sh push [BIN_DIR]     sync, copy already built release
+#                                         binaries (isocastd, isocast,
+#                                         isocast-ui; default
+#                                         $CARGO_TARGET_DIR/release) into
+#                                         target/release there and sign the
+#                                         dev app: build's result, no rebuild
 #   scripts/testmac.sh run '<command>'    sync, then run <command> (one shell
 #                                         string) in the checkout there
 #   scripts/testmac.sh gui '<command>'    the same, but inside the logged-in
@@ -68,6 +74,21 @@ build)
     ssh "$host" "$remote_env
 cargo build --release 2>&1 | tail -3 && scripts/sign-dev.sh target/release/isocastd"
     ;;
+push)
+    # Binaries from Ryan's Mac or exonbook (scripts/remote-build.sh) are the
+    # same arch and macOS target as a build there.
+    bin_dir="${2:-${CARGO_TARGET_DIR:-$here/target}/release}"
+    [ -f "$bin_dir/isocastd" ] || { echo "testmac push: no isocastd in $bin_dir" >&2; exit 2; }
+    set --
+    for bin in isocastd isocast isocast-ui; do
+        [ -f "$bin_dir/$bin" ] && set -- "$@" "$bin_dir/$bin"
+    done
+    sync
+    ssh "$host" "mkdir -p \"\$HOME/$remote_dir/target/release\""
+    rsync -az -e ssh "$@" "$host:$remote_dir/target/release/"
+    ssh "$host" "$remote_env
+scripts/sign-dev.sh target/release/isocastd && echo \"pushed $# binaries to $host:$remote_dir/target/release\""
+    ;;
 run)
     [ $# -ge 2 ] || { echo "usage: scripts/testmac.sh run '<command>'" >&2; exit 2; }
     sync
@@ -115,7 +136,7 @@ install-bridge)
     ssh "$host" "sh \"\$HOME/$remote_dir/scripts/testmac-bridge.sh\" install"
     ;;
 *)
-    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

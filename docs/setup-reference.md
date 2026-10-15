@@ -703,7 +703,7 @@ One of:
 
 ## Stinger
 
-A video played over the switch (OBS's Stinger). It lasts as long as the video. Transparent parts need a video with alpha that macOS decodes (ProRes 4444 or HEVC with alpha in a .mov), or a matte.
+A video played over the switch (OBS's Stinger). It lasts as long as the video. Transparent parts need a video with alpha (ProRes 4444 or HEVC with alpha in a .mov, or VP9 with alpha in a .webm, as OBS uses), or a matte.
 
 | Field | Type | Description |
 |---|---|---|

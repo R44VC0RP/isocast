@@ -9,6 +9,12 @@
 #                               and grant permissions
 #   scripts/vm.sh sh CMD...     run a command in it (isocast on PATH,
 #                               ISOCAST_MONITOR_SILENT=1)
+#   scripts/vm.sh e2e [ARGS]    scripts/e2e.py in it on this checkout's
+#                               release isocastd ($ISOCAST_BIN_DIR, default
+#                               $CARGO_TARGET_DIR/release), synthetic sources;
+#                               ARGS go to e2e.py (--only NAME, --hosted…);
+#                               the report comes back to $ISOCAST_VM_OUT
+#                               (default /Volumes/IsocastBuild/vm/e2e-<time>)
 #   scripts/vm.sh status        state, address and permissions
 #   scripts/vm.sh down          shut it down
 #   scripts/vm.sh save          make the current VM the clean copy (stops it)
@@ -37,14 +43,31 @@ VM_USER=lume
 VM_PASSWORD=lume
 
 ip() {
+  # lume's own state goes stale when the VM was started by an earlier
+  # `lume run` process (it then reports "stopped" with no address), so fall
+  # back to the host's DHCP lease for the VM's MAC address.
   lume get "$VM" --format json 2>/dev/null | python3 -c '
-import json, sys
+import json, os, re, sys
 d = json.load(sys.stdin)
 d = d[0] if isinstance(d, list) else d
-print(d.get("ipAddress") or "")'
+ip = d.get("ipAddress") or ""
+if not ip:
+    try:
+        mac = json.load(open(os.path.expanduser("~/.lume/" + sys.argv[1] + "/config.json")))["macAddress"]
+        want = ":".join(p.lstrip("0") or "0" for p in mac.lower().split(":"))
+        for block in open("/var/db/dhcpd_leases").read().split("}"):
+            m = re.search(r"ip_address=(\S+)", block)
+            if m and "hw_address=1," + want + "\n" in block:
+                ip = m.group(1)
+                break
+    except (OSError, KeyError, ValueError):
+        pass
+print(ip)' "$VM"
 }
 
-running() { lume get "$VM" --format json 2>/dev/null | grep -q '"running"'; }
+running() {
+  lume get "$VM" --format json 2>/dev/null | grep -q '"running"' || pgrep -f "lume run $VM( |$)" >/dev/null
+}
 
 ssh_vm() {
   ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
@@ -121,6 +144,33 @@ sh)
   shift
   ssh_vm "export PATH=/usr/local/bin:\$PATH ISOCAST_MONITOR_SILENT=1; $*"
   ;;
+e2e)
+  shift
+  bin="${ISOCAST_BIN_DIR:-${CARGO_TARGET_DIR:-target}/release}"
+  out="${ISOCAST_VM_OUT:-$HOME_DIR/e2e-$(date +%Y%m%d-%H%M%S)}"
+  [ -f "$bin/isocastd" ] || { echo "vm: no $bin/isocastd (cargo build --release -p isocast-daemon)" >&2; exit 2; }
+  running || { echo "vm: $VM isn't running; scripts/vm.sh up" >&2; exit 1; }
+  mkdir -p "$out"
+  ssh_vm 'export PATH=/opt/homebrew/bin:$PATH; command -v ffprobe >/dev/null ||
+    HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg >/dev/null; mkdir -p ~/isocast-e2e/src/target/release'
+  # Tracked files (e2e.py reads the daemon's Info.plist and the example
+  # plugin) and the binary under test.
+  git ls-files -z | perl -0 -ne 'chomp; print "$_\0" if -f $_' |
+    rsync -a --from0 --files-from=- -e "ssh -i $KEY -o BatchMode=yes -o UserKnownHostsFile=$HOME_DIR/known_hosts" \
+      ./ "$VM_USER@$(ip):isocast-e2e/src/"
+  rsync -a -e "ssh -i $KEY -o BatchMode=yes -o UserKnownHostsFile=$HOME_DIR/known_hosts" \
+    "$bin/isocastd" "$VM_USER@$(ip):isocast-e2e/src/target/release/"
+  set +e
+  ssh_vm "export PATH=/opt/homebrew/bin:/usr/local/bin:\$PATH; cd ~/isocast-e2e/src && rm -rf ~/isocast-e2e/work &&
+    mkdir -p ~/isocast-e2e/work && python3 scripts/e2e.py --daemon target/release/isocastd \
+      --work ~/isocast-e2e/work --report ~/isocast-e2e/e2e-report.json $*"
+  status=$?
+  set -e
+  rsync -a -e "ssh -i $KEY -o BatchMode=yes -o UserKnownHostsFile=$HOME_DIR/known_hosts" \
+    "$VM_USER@$(ip):isocast-e2e/e2e-report.json" "$out/" || true
+  echo "vm: e2e exit $status; report $out/e2e-report.json"
+  exit "$status"
+  ;;
 status)
   if running; then
     echo "vm: $VM running at $(ip)"
@@ -148,7 +198,7 @@ reset)
   echo "vm: $VM is a fresh copy of $CLEAN; \`scripts/vm.sh up\` to boot it"
   ;;
 *)
-  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
   ;;
 esac

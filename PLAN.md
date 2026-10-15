@@ -826,6 +826,10 @@ native app; each verified against OBS's behaviour on a test Mac.
 - [ ] **G.7 Later items from section 9, when Ryan asks:** a second
   (vertical) canvas, SRT/WHIP streaming, NDI, Syphon, Audio Unit
   plugins.
+- [x] **G.8 WebM and MKV media (#61).** Media sources and stingers play
+  Matroska/WebM (sniffed by content): VP9 with alpha (OBS's stinger
+  format), AV1 where the Mac decodes it, H.264/HEVC in MKV, Opus and AAC
+  sound; clear errors for VP8, Vorbis and the rest.
 
 ### T. Themes (Ryan, 2026-10-13)
 
@@ -1238,6 +1242,14 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- G.8 (2026-10-15, #61): WebM/MKV media sources and stingers through our
+  own EBML reader and VideoToolbox/AudioToolbox; AVFoundation keeps every
+  other file. Verified with an isolated engine on an M5 Max: a 1080p60
+  VP9-alpha stinger composites transparent (scene pixels exact) for its
+  120 frames; 709/601/full-range colours within 1 code; flash/beep clips
+  as VP9/Opus, AV1/Opus and H.264/AAC MKV loop in sync (<= 0.04 ms); 120 s
+  looping alpha media: 0 drops, flat RSS, 11.7% of a core.
 
 - Motion harness fix round 2 (2026-10-14, re-review): no path outside
   the run folder is touched (plain names, no recursive removal, symlinks

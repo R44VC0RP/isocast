@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let ui = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("ui");
     println!("cargo:rerun-if-changed={}", ui.display());
     let mut files = Vec::new();
     collect(&ui, &mut files);

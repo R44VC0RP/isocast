@@ -30,6 +30,7 @@ pub mod hotkeys;
 mod join;
 mod jpeg;
 mod keychain;
+mod matroska;
 mod media;
 mod output;
 mod pacing;
@@ -39,6 +40,7 @@ mod stream;
 mod system;
 mod termination;
 pub mod virtual_camera;
+mod webm;
 mod writer;
 
 use isocast_engine::{

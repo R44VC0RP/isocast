@@ -5,6 +5,23 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-15: Lane speed (audit /Volumes/IsocastBuild/agent-audit/REPORT.md).
+  exonbook builds: `scripts/remote-build.sh` keeps one source + target per
+  lane in `~/isocast-builds/<lane>` there (nice 15, lane lock, refuses
+  below 40 GB free; `status`, `prune`); never touches `~/dev/isocast` or
+  the dev engine there. Binaries it fetches are minos 11.0 / sdk 27.0,
+  ad-hoc linker-signed like local ones; `testmac.sh push` and e2e/bench
+  sign their own dev apps. Nightly hardware queue:
+  `/Volumes/IsocastBuild/hw-queue/` (`scripts/hw-batch.py`), cronctl job
+  `isocast-hw-nightly` 01:30 New York, registered paused until merged; on
+  the M2s it uses `~/dev/isocast-worktrees/hw-batch` and
+  `~/isocast-scratch/hw-batch/<job>`. Test VM: lume can report
+  `isocast-vm` "stopped" while an older `lume run` still runs it
+  (`lume run` then fails with "Failed to lock auxiliary storage"); vm.sh
+  falls back to the DHCP lease (192.168.64.5). The VM has Homebrew ffmpeg
+  since 2026-10-15 (not in `isocast-vm-clean`; `vm.sh e2e` reinstalls it).
+  Strict e2e drops frames in `projects` in the VM; use `--hosted`.
+
 - 2026-10-13: OBS Studio on the test Macs (for S.1): isocast-m2-a has
   32.2.2 in /Applications from the Homebrew cask `obs`; exonbook keeps
   Ryan's own 32.0.4 in /Applications (with his profiles, NDI and other
@@ -513,6 +530,11 @@ each section. Delete entries that stop being true.
   fade.
 
 ## Questions for Ryan
+
+- 2026-10-15 (#61): may the EBML reader (`matroska.rs`) get unit tests
+  with tiny byte-level fixtures built in the test (lacing kinds,
+  unknown-size clusters, truncated files, BlockAdditions, Cues)? It was
+  verified with real ffmpeg files only. Nothing waits on it.
 
 - 2026-10-11: Ryan's primary camera is "Studio Video" and his mic "Studio
   Audio" (XLR, network); `examples/recording.toml` now uses them instead of
@@ -1461,6 +1483,22 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-15 (#61, WebM/MKV): Matroska and WebM files (EBML magic in the
+  first four bytes, whatever the extension) bypass AVFoundation:
+  `matroska.rs` (our own EBML reader; matroska-demuxer, the maintained
+  crate, drops BlockAdditions, where VP9 alpha lives) feeds
+  `webm.rs` (VideoToolbox, AudioToolbox). Untagged VP9 is treated as
+  Rec. 709, like untagged video everywhere in the engine (and OBS 28+);
+  ffmpeg's RGB->YUV default is 601, so an untagged ffmpeg-made file's
+  reds look slightly orange (G=24 for pure red), same as an untagged
+  MP4. A file's duration is its last video frame's end (from the last
+  cue point on) unless the stated Duration is >100 ms longer: Matroska's
+  Duration includes AAC/Opus padding, which held the last frame and
+  broke beep cadence (21 ms per loop) on looping MKVs. Audio past that
+  end is cut. Alpha is written into VideoToolbox's own BGRA buffer when
+  it says the buffer is modifiable (it always did here), else into a
+  pool copy. There is no seeking API, so Cues are only read for the end.
 
 - 2026-10-14 (motion harness, fix round 2): suites are trusted input
   but boxed: plain scenario names, run folders only as plain children of
@@ -4509,6 +4547,21 @@ each section. Delete entries that stop being true.
   not one tool per API call.
 
 ## Gotchas
+
+- 2026-10-15 (#61, WebM/MKV): Apple's Opus AudioConverter drops the
+  first 120 samples it decodes (2.5 ms; macOS 27.2) and reports no
+  PrimeInfo, so applying the full OpusHead pre-skip put sound 2.5 ms
+  early. The reader decodes the first packet alone on a throwaway
+  converter and subtracts what's missing from the pre-skip;
+  AudioConverterReset does NOT bring the drop back (a reset converter
+  measured 120 and then played 120 late), so playback uses a fresh one.
+  AAC's magic cookie must be an ES descriptor (esds) around the
+  AudioSpecificConfig: the raw ASC from CodecPrivate is rejected with
+  '!dat'. VideoToolbox has no VP8 decoder; VP9 profile 1 (4:4:4) fails
+  with -12910; AV1 needs VTIsHardwareDecodeSupported (M3+; true on the M5
+  Max). A VP9-alpha 1080p stinger costs ~130 MB more RSS than its ProRes
+  4444 twin (two hardware VP9 sessions' surfaces, BGRA output), flat over
+  time.
 
 - 2026-10-14 (motion harness, fix round 3): a gain computed as an
   unaligned regression drops for a late edge (0.79 at 14 frames) and

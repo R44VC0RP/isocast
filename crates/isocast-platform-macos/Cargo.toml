@@ -181,6 +181,8 @@ objc2-video-toolbox = { version = "0.3.2", default-features = false, features = 
     "VTPixelTransferSession",
     "VTSession",
     "VTUtilities",
+    "VTDecompressionSession",
+    "VTDecompressionProperties",
     "VTVideoEncoderList",
 ] }
 objc2-image-io = { version = "0.3.2", default-features = false, features = [

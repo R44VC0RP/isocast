@@ -1,7 +1,8 @@
 //! Embed the privacy-attribution plist and immutable build provenance.
 fn main() {
     // Keep the embedded plist: permission attribution must survive this hook.
-    let plist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Info.plist");
+    let plist = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
+        .join("Info.plist");
     println!("cargo:rerun-if-changed={}", plist.display());
     println!("cargo:rerun-if-env-changed=ISOCAST_BUILD_VERSION");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
