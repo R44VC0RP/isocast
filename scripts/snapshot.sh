@@ -18,9 +18,12 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/isocast-snapshot.XXXXXX")"
 export ISOCAST_SOCKET="$work/engine.sock"
 # A dev app that doesn't exist, so the CLI starts the isocastd beside it.
 export ISOCAST_DEV_APP="$work/none.app"
+engine_pid=""
 cleanup() {
     "$bin/isocast" engine stop >/dev/null 2>&1 || true
-    pkill -f "$work" 2>/dev/null || true
+    # The engine's command line doesn't name the scratch folder, so stop it
+    # by the pid it reported, in case `engine stop` didn't.
+    [ -n "$engine_pid" ] && kill "$engine_pid" 2>/dev/null || true
     rm -rf "${work:?}"
 }
 trap cleanup EXIT INT TERM
@@ -29,6 +32,7 @@ cp "$here/screenshots/offscreen.toml" "$here/screenshots/landscape.jpg" "$here/s
 sed -i '' "s|^folder = \"recordings\"|folder = \"$work/recordings\"|" "$work/offscreen.toml"
 "$bin/isocast" apply --revision 0 "$work/offscreen.toml" >/dev/null
 "$bin/isocast" engine start >/dev/null
+engine_pid="$("$bin/isocast" status --json | /usr/bin/python3 -c 'import json,sys; print((json.load(sys.stdin).get("daemon") or {}).get("pid") or "")')"
 "$bin/isocast" scene main --cut >/dev/null
 "$bin/isocast" preview intro >/dev/null
 "$bin/isocast-ui" "$@"
