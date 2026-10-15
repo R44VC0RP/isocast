@@ -5,7 +5,9 @@
 // round ✕. They fade after a few seconds (errors and warnings 8 s), held
 // while the pointer is over one (the app's src/toasts.rs keeps the list and
 // the timers). A toast can carry an action ("Undo", "Details") and a small
-// table of rows (dropped frames per file).
+// table of rows (dropped frames per file). A notice has a second action
+// ("Don't show again"): both sit in a footer, the main one last, and it
+// stays until dismissed.
 
 import { Theme, Motion } from "../theme.slint";
 import { Icon, Icons } from "../icons.slint";
@@ -28,6 +30,9 @@ export struct ToastData {
     // An action button's label, or "".
     action: string,
     rows: [ToastRow],
+    // A second action's label, or "": a notice with a choice ("Don't
+    // show again"), which stays until dismissed.
+    action2: string,
 }
 
 export global Toasts {
@@ -35,6 +40,7 @@ export global Toasts {
     in-out property <[ToastData]> items;
     callback dismiss(int);
     callback action(int);
+    callback action2(int);
     // The pointer went over toast `id` (true) or left it.
     callback hover(int, bool);
     // An open dialog shows them beside or under its sheet, so the
@@ -74,7 +80,7 @@ export component Toast inherits Rectangle {
     TouchArea {
         changed has-hover => { Toasts.hover(root.toast.id, self.has-hover); }
 
-        row := HorizontalLayout {
+        row := VerticalLayout {
             x: 1px;
             y: 1px;
             width: parent.width - 2px;
@@ -82,100 +88,121 @@ export component Toast inherits Rectangle {
             padding: Theme.space-3;
             spacing: Theme.space-2;
 
-            VerticalLayout {
-                padding-top: root.one-line ? (Theme.icon-button-sm - Theme.icon) / 2 : (Theme.lh - Theme.icon) / 2;
-                alignment: start;
-                Icon {
-                    path: root.toast.kind == ToastKind.error ? Icons.alert : root.toast.kind == ToastKind.warning ? Icons.warning : root.toast.kind == ToastKind.success ? Icons.check : Icons.info;
-                    color: root.toast.kind == ToastKind.error ? Theme.danger-text : root.toast.kind == ToastKind.warning ? Theme.warning : root.toast.kind == ToastKind.success ? Theme.onair-text : Theme.text-2;
-                }
-            }
-            // The title, its message and the rows 2px apart (Paper).
-            VerticalLayout {
-                horizontal-stretch: 1;
-                spacing: 2px;
-                alignment: start;
-                padding-top: root.one-line ? (Theme.icon-button-sm - Theme.lh) / 2 : 0px;
-                Text {
-                    min-height: Theme.lh;
-                    vertical-alignment: center;
-                    text: root.toast.title;
-                    color: Theme.text;
-                    font-size: Theme.fs;
-                    letter-spacing: Theme.tracking;
-                    line-height-factor: Theme.leading;
-                    font-weight: Theme.weight-semibold;
-                    wrap: word-wrap;
-                }
-                if root.toast.message != "": Text {
-                    min-height: Theme.lh-sm;
-                    vertical-alignment: center;
-                    text: root.toast.message;
-                    color: Theme.text-2;
-                    font-size: Theme.fs-sm;
-                    letter-spacing: Theme.tracking-sm;
-                    line-height-factor: Theme.leading-sm;
-                    wrap: word-wrap;
-                }
-                if root.toast.rows.length > 0: VerticalLayout {
-                    padding-top: Theme.space-1;
-                    spacing: 0;
-                    for r in root.toast.rows: HorizontalLayout {
-                        spacing: Theme.space-3;
-                        Text {
-                            horizontal-stretch: 1;
-                            height: Theme.lh-sm;
-                            vertical-alignment: center;
-                            text: r.label;
-                            color: Theme.text-2;
-                            font-size: Theme.fs-sm;
-                            letter-spacing: Theme.tracking-sm;
-                            overflow: elide;
-                        }
-                        Text {
-                            height: Theme.lh-sm;
-                            vertical-alignment: center;
-                            text: r.value;
-                            color: r.tone == "bad" ? Theme.danger-text : r.tone == "warn" ? Theme.warning : Theme.text-2;
-                            font-size: Theme.fs-sm;
-                            letter-spacing: Theme.tracking-sm;
-                            horizontal-alignment: right;
-                        }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+
+                VerticalLayout {
+                    padding-top: root.one-line ? (Theme.icon-button-sm - Theme.icon) / 2 : (Theme.lh - Theme.icon) / 2;
+                    alignment: start;
+                    Icon {
+                        path: root.toast.kind == ToastKind.error ? Icons.alert : root.toast.kind == ToastKind.warning ? Icons.warning : root.toast.kind == ToastKind.success ? Icons.check : Icons.info;
+                        color: root.toast.kind == ToastKind.error ? Theme.danger-text : root.toast.kind == ToastKind.warning ? Theme.warning : root.toast.kind == ToastKind.success ? Theme.onair-text : Theme.text-2;
                     }
                 }
-            }
-            // The action (22px) and the ✕ (24px) on a 24px line at the top,
-            // 8px apart.
-            VerticalLayout {
-                horizontal-stretch: 0;
-                alignment: start;
-                Rectangle {
-                    width: actions.preferred-width;
-                    height: Theme.icon-button-sm;
-                    actions := HorizontalLayout {
-                        x: 0;
-                        y: 0;
-                        width: self.preferred-width;
-                        height: Theme.icon-button-sm;
-                        spacing: Theme.space-2;
-                        if root.toast.action != "": VerticalLayout {
-                            alignment: center;
-                            Button {
-                                text: root.toast.action;
-                                variant: ButtonVariant.quiet;
-                                size: ControlSize.small;
-                                inset: Theme.space-2;
-                                clicked => { Toasts.action(root.toast.id); }
+                // The title, its message and the rows 2px apart (Paper).
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 2px;
+                    alignment: start;
+                    padding-top: root.one-line ? (Theme.icon-button-sm - Theme.lh) / 2 : 0px;
+                    Text {
+                        min-height: Theme.lh;
+                        vertical-alignment: center;
+                        text: root.toast.title;
+                        color: Theme.text;
+                        font-size: Theme.fs;
+                        letter-spacing: Theme.tracking;
+                        line-height-factor: Theme.leading;
+                        font-weight: Theme.weight-semibold;
+                        wrap: word-wrap;
+                    }
+                    if root.toast.message != "": Text {
+                        min-height: Theme.lh-sm;
+                        vertical-alignment: center;
+                        text: root.toast.message;
+                        color: Theme.text-2;
+                        font-size: Theme.fs-sm;
+                        letter-spacing: Theme.tracking-sm;
+                        line-height-factor: Theme.leading-sm;
+                        wrap: word-wrap;
+                    }
+                    if root.toast.rows.length > 0: VerticalLayout {
+                        padding-top: Theme.space-1;
+                        spacing: 0;
+                        for r in root.toast.rows: HorizontalLayout {
+                            spacing: Theme.space-3;
+                            Text {
+                                horizontal-stretch: 1;
+                                height: Theme.lh-sm;
+                                vertical-alignment: center;
+                                text: r.label;
+                                color: Theme.text-2;
+                                font-size: Theme.fs-sm;
+                                letter-spacing: Theme.tracking-sm;
+                                overflow: elide;
+                            }
+                            Text {
+                                height: Theme.lh-sm;
+                                vertical-alignment: center;
+                                text: r.value;
+                                color: r.tone == "bad" ? Theme.danger-text : r.tone == "warn" ? Theme.warning : Theme.text-2;
+                                font-size: Theme.fs-sm;
+                                letter-spacing: Theme.tracking-sm;
+                                horizontal-alignment: right;
                             }
                         }
-                        IconButton {
-                            small: true;
-                            icon: Icons.x;
-                            label: "Dismiss";
-                            show-tooltip: false;
-                            clicked => { Toasts.dismiss(root.toast.id); }
+                    }
+                }
+                // The action (22px) and the ✕ (24px) on a 24px line at the top,
+                // 8px apart.
+                VerticalLayout {
+                    horizontal-stretch: 0;
+                    alignment: start;
+                    Rectangle {
+                        width: actions.preferred-width;
+                        height: Theme.icon-button-sm;
+                        actions := HorizontalLayout {
+                            x: 0;
+                            y: 0;
+                            width: self.preferred-width;
+                            height: Theme.icon-button-sm;
+                            spacing: Theme.space-2;
+                            if root.toast.action != "" && root.toast.action2 == "": VerticalLayout {
+                                alignment: center;
+                                Button {
+                                    text: root.toast.action;
+                                    variant: ButtonVariant.quiet;
+                                    size: ControlSize.small;
+                                    inset: Theme.space-2;
+                                    clicked => { Toasts.action(root.toast.id); }
+                                }
+                            }
+                            IconButton {
+                                small: true;
+                                icon: Icons.x;
+                                label: "Dismiss";
+                                show-tooltip: false;
+                                clicked => { Toasts.dismiss(root.toast.id); }
+                            }
                         }
                     }
+                }
+            }
+            // A notice's two actions in a footer, the main one last.
+            if root.toast.action2 != "": HorizontalLayout {
+                spacing: Theme.space-2;
+                alignment: end;
+                Button {
+                    text: root.toast.action2;
+                    variant: ButtonVariant.quiet;
+                    size: ControlSize.small;
+                    clicked => { Toasts.action2(root.toast.id); }
+                }
+                if root.toast.action != "": Button {
+                    text: root.toast.action;
+                    variant: ButtonVariant.secondary;
+                    size: ControlSize.small;
+                    clicked => { Toasts.action(root.toast.id); }
                 }
             }
         }

@@ -9,10 +9,11 @@ use clap::{Parser, Subcommand};
 use isocast_client::DaemonError;
 use isocast_engine::record::{LiveStatus, RecordOptions, Report};
 use isocast_protocol::api::{
-    Applied, ApplyParams, Capacity, CheckStatus, DoctorParams, EngineInfo, EngineState, Event,
-    EventKind, Frame, FrameParams, FramesParams, ImportObsParams, Live, Marked, Method, Plan,
-    Refreshed, RpcError, Snapshot, SnapshotParams, SourceRun, StartParams, Started, Status,
-    StreamKey, StreamKeyParams, StreamKeyTarget, Switched, TuneParams, Tuning, WatchParams,
+    Applied, ApplyParams, Capacity, CapacityEstimate, CapacityParams, CheckStatus, DoctorParams,
+    EngineInfo, EngineState, Event, EventKind, Frame, FrameParams, FramesParams, ImportObsParams,
+    Live, Marked, Method, Plan, Refreshed, RpcError, Snapshot, SnapshotParams, SourceRun,
+    StartParams, Started, Status, StreamKey, StreamKeyParams, StreamKeyTarget, Switched,
+    TuneParams, Tuning, WatchParams,
 };
 use isocast_protocol::change::{Change, Difference, DifferenceOp};
 use isocast_protocol::devices::Devices;
@@ -341,6 +342,26 @@ enum Command {
         /// Benchmark writing to this folder instead of recording.folder.
         #[arg(long)]
         folder: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Predict, instantly and without benchmarking, whether a setup's files
+    /// (the live setup's, at its sources' live formats, if none is given)
+    /// fit this Mac's video encoders, from measured per-chip data, and list
+    /// the closest changes that fit as patches for `plan` and `apply`.
+    /// `tune` measures instead. Runs in isocastd.
+    Capacity {
+        setup: Option<PathBuf>,
+        /// Count the stream's encode (default: the live setup's if it
+        /// streams now; a given setup's if it has a stream).
+        #[arg(long, conflicts_with = "no_stream")]
+        stream: bool,
+        /// Leave the stream's encode out.
+        #[arg(long)]
+        no_stream: bool,
+        /// How to turn on this source's ISO file so the setup still fits.
+        #[arg(long, value_name = "SOURCE")]
+        add_iso: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1130,6 +1151,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
             folder,
             json,
         } => tune(setup.as_deref(), folder, json),
+        Command::Capacity {
+            setup,
+            stream,
+            no_stream,
+            add_iso,
+            json,
+        } => capacity(
+            setup.as_deref(),
+            (stream || no_stream).then_some(stream),
+            add_iso,
+            json,
+        ),
         Command::Optimize {
             goal,
             service,
@@ -1358,11 +1391,15 @@ fn check(path: &Path, json: bool) -> Result<ExitCode> {
         ExitCode::FAILURE
     };
 
+    // Whether its files fit this Mac's encoders (#66): a warning, never a
+    // failure.
+    let capacity = issues.is_empty().then(|| capacity_check(&setup)).flatten();
     if json {
         let report = serde_json::json!({
             "valid": issues.is_empty(),
             "issues": issues,
             "setup": setup,
+            "capacity": capacity,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(code);
@@ -1391,7 +1428,28 @@ fn check(path: &Path, json: bool) -> Result<ExitCode> {
     if iso.enabled {
         println!("iso: {} → {:?}", iso.sources.join(", "), iso.encoder.codec);
     }
+    if let Some(check) = &capacity {
+        if check.status == CheckStatus::Ok {
+            println!("encoders: {}", check.detail);
+        } else {
+            isocast_diagnostics::diagnostic!("warn"; "encoders: {}", check.detail);
+            if let Some(fix) = &check.fix {
+                isocast_diagnostics::diagnostic!("warn"; "  fix: {fix}");
+            }
+        }
+    }
     Ok(code)
+}
+
+/// Whether `setup`'s files fit this Mac's encoders, by per-chip data.
+#[cfg(target_os = "macos")]
+fn capacity_check(setup: &Setup) -> Option<isocast_protocol::api::Check> {
+    isocast_engine::estimate::check(&isocast_platform_macos::MacPlatform, setup, None)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capacity_check(_setup: &Setup) -> Option<isocast_protocol::api::Check> {
+    None
 }
 
 fn import_obs(
@@ -2376,6 +2434,101 @@ fn tune(setup: Option<&Path>, folder: Option<PathBuf>, json: bool) -> Result<Exi
     Ok(ExitCode::SUCCESS)
 }
 
+fn capacity(
+    setup: Option<&Path>,
+    stream: Option<bool>,
+    add_iso: Option<String>,
+    json: bool,
+) -> Result<ExitCode> {
+    let setup = setup
+        .map(|path| load(path).with_context(|| format!("{} is not a valid setup", path.display())))
+        .transpose()?;
+    let estimate: CapacityEstimate =
+        Client::connect_or_launch()?.call(Method::EstimateCapacity(Box::new(CapacityParams {
+            setup,
+            stream,
+            add_iso,
+        })))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&estimate)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!(
+        "{}: {} H.264/HEVC engine(s), {:.0} Mpx/s each",
+        estimate.chip,
+        estimate.encode_engines,
+        estimate.engine_pixels_per_second / 1e6
+    );
+    println!("  ({})", estimate.basis);
+    for o in &estimate.outputs {
+        println!(
+            "  {:<14} {}×{}@{} {:?}{}  {:>5.0} Mpx/s{}",
+            o.output,
+            o.width,
+            o.height,
+            o.fps,
+            o.codec,
+            if o.protected { ", protected" } else { "" },
+            o.pixels_per_second / 1e6,
+            if o.assumed { " (size assumed)" } else { "" }
+        );
+    }
+    let verdict = match estimate.capacity {
+        Capacity::Fits => "fits",
+        Capacity::NoMargin => "keeps up, no margin",
+        Capacity::CannotKeepUp => "can't keep up",
+    };
+    println!(
+        "Verdict: {verdict}, busiest engine at {:.0}%{}",
+        estimate.load * 100.0,
+        if estimate.streaming {
+            ", stream counted"
+        } else {
+            ""
+        }
+    );
+    let mut summary = estimate.summary.clone();
+    if let Some(first) = summary.get(..1) {
+        summary.replace_range(..1, &first.to_uppercase());
+    }
+    println!("{summary}.");
+    if let Some(measured) = &estimate.measured {
+        println!("note: {measured}");
+    }
+    for s in &estimate.suggestions {
+        let how = match (&s.change, &s.method) {
+            (Some(change), _) => {
+                format!("isocast plan --patch '{}'", serde_json::to_string(change)?)
+            }
+            (None, Some(method)) => format!("method {method}"),
+            _ => String::new(),
+        };
+        println!(
+            "Fix: {} ({:.0}%{}): {how}",
+            s.description,
+            s.load * 100.0,
+            if s.after_take {
+                ", after this take"
+            } else {
+                ""
+            }
+        );
+    }
+    if let Some(a) = &estimate.admission {
+        println!("Add ISO: {}", a.description);
+        if let Some(reason) = &a.reason {
+            println!("  because {reason}");
+        }
+        if let Some(change) = &a.change {
+            println!(
+                "  isocast plan --patch '{}'",
+                serde_json::to_string(change)?
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn human(bytes: f64) -> String {
     isocast_engine::space::human(bytes)
 }
@@ -3311,6 +3464,22 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                 serde_json::to_value(kind)?.as_str().unwrap_or_default(),
                 serde_json::to_value(action)?.as_str().unwrap_or_default()
             ),
+            Event::EncoderOverload { overload } => {
+                println!(
+                    "encoder overload in take {}: {}",
+                    overload.take, overload.reason
+                );
+                for fix in overload.estimate.iter().flat_map(|e| &e.suggestions) {
+                    match &fix.change {
+                        Some(change) => println!(
+                            "  fix: {}: isocast plan --patch '{}'",
+                            fix.description,
+                            serde_json::to_string(change)?
+                        ),
+                        None => println!("  fix: {}", fix.description),
+                    }
+                }
+            }
         }
     }
     // Events end only when isocastd hangs up; a watcher must not mistake

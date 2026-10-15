@@ -330,7 +330,7 @@ impl App {
         self.refresh_status(false);
     }
 
-    fn event(self: &Rc<Self>, event: Event) {
+    pub(crate) fn event(self: &Rc<Self>, event: Event) {
         match &event {
             Event::SetupChanged { revision } => {
                 let stale = {
@@ -492,6 +492,8 @@ impl App {
                 }
             }
             Event::Marker { .. } => {}
+            // The Controls area shows its notice.
+            Event::EncoderOverload { .. } => {}
         }
         for area in self.areas() {
             area.event(self, &event);

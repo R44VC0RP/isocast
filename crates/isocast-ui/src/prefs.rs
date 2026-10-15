@@ -152,3 +152,42 @@ pub fn reset(window: &AppWindow, docks_only: bool) {
         ui.set_preview_scale("window".into());
     }
 }
+
+/// Notices the viewer chose not to see again (the encoder overload notice
+/// for one setup's workload, #66), kept beside the layout in their own
+/// file so saving the layout leaves them alone.
+fn notices_path() -> PathBuf {
+    path().with_file_name("isocast-ui-notices.json")
+}
+
+/// Whether notice `key` was hidden for good.
+pub fn notice_hidden(key: &str) -> bool {
+    std::fs::read_to_string(notices_path())
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|saved| saved.get("hidden").cloned())
+        .and_then(|hidden| hidden.as_array().cloned())
+        .is_some_and(|hidden| hidden.iter().any(|k| k.as_str() == Some(key)))
+}
+
+/// Hide notice `key` for good.
+pub fn hide_notice(key: &str) {
+    let path = notices_path();
+    let mut saved = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let hidden = saved["hidden"].as_array().cloned().unwrap_or_default();
+    if hidden.iter().any(|k| k.as_str() == Some(key)) {
+        return;
+    }
+    let mut hidden = hidden;
+    hidden.push(json!(key));
+    saved["hidden"] = Value::Array(hidden);
+    if let Some(folder) = path.parent() {
+        let _ = std::fs::create_dir_all(folder);
+    }
+    // Not kept is fine: the notice shows again, once per take.
+    let _ = std::fs::write(&path, format!("{saved:#}\n"));
+}

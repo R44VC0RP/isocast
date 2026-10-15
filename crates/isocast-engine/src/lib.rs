@@ -12,6 +12,7 @@ mod content;
 pub mod data;
 pub mod doctor;
 pub(crate) mod draw_list;
+pub mod estimate;
 pub mod filter;
 pub mod gpu;
 pub mod hotkeys;

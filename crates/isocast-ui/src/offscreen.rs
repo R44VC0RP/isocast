@@ -288,7 +288,8 @@ impl Offscreen {
     /// `drag:X1,Y1,X2,Y2` (a pointer drag in window points), `hover:X,Y`
     /// (the pointer moved there, not pressed), `hide:DOCK`
     /// (scenes, sources, mixer, transitions, controls, toolbar, status),
-    /// `wait:MS` (for the daemon), `quit:WHAT` (the quit question).
+    /// `wait:MS` (for the daemon), `quit:WHAT` (the quit question),
+    /// `events:FILE` (replay `isocast watch --json` lines).
     fn state(&mut self, state: &str) -> Result<()> {
         let (name, arg) = state.split_once(':').unwrap_or((state, ""));
         let app = &self.app;
@@ -390,6 +391,16 @@ impl Offscreen {
                     "no dock {other:?}; one of scenes, sources, mixer, transitions, controls, toolbar, status"
                 ),
             },
+            // Replay daemon events saved by `isocast watch --json` (one per
+            // line), as if they had just come.
+            "events" => {
+                let text = std::fs::read_to_string(arg).with_context(|| format!("events:{arg}"))?;
+                for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                    let event: isocast_protocol::api::Event =
+                        serde_json::from_str(line).with_context(|| format!("events:{arg}"))?;
+                    self.hub.event(event);
+                }
+            }
             "wait" => {
                 let ms: u64 = arg.parse().context("wait:MS takes milliseconds")?;
                 let until = Instant::now() + Duration::from_millis(ms);

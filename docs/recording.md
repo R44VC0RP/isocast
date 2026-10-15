@@ -63,6 +63,39 @@ frames in a 24 s take); 30 fps 1.75× (`fits`, recommended, 720/720). A lower
 quality preset barely changes VideoToolbox HEVC's speed (1.02× vs 1.04×), so
 it helps the disk, not the encoders.
 
+## A quick answer without benchmarking (`isocast capacity`)
+
+`isocast capacity [SETUP] [--stream|--no-stream] [--add-iso SOURCE] [--json]`
+(MCP `estimate_capacity`, method `estimate_capacity`) predicts instantly
+from per-chip data (`crates/isocast-engine/src/media_engines.json`): each
+H.264/HEVC encoder (program, stream, every ISO file) runs on one of the
+chip's encode engines for its whole life, the largest first on the least
+busy engine, and `load` is the busiest engine's pixel rate over what one
+engine encodes in real time. Up to 0.85 `fits`, up to 1 `no_margin`, over 1
+`cannot_keep_up` (ISO files drop first; `iso_drop_percent` is a floor).
+ProRes runs on engines of its own and isn't counted. A tune measurement
+that couldn't keep up overrules it.
+
+`suggestions` lists the closest changes that fit (a camera or test pattern
+captured smaller or slower, the program or stream smaller, half the frame
+rate, the stream stopped, an ISO file off), each a patch for `plan` or a
+method; `after_take` ones wait for the recording to end. `--add-iso`
+answers "how do I turn this ISO file on so it still fits": as is, at a
+smaller size or rate, or not at all, with the reason. `setup check` and
+`doctor` print it as the "encoder capacity" check (a warning, never a
+failure), `start` notes it when nothing was measured and it can't keep
+up, and while recording the engine sends `encoder_overload` once per take
+when files drop because the encoders fell behind.
+
+On a base M2 (isocast-m2-b, 25 s synthetic takes, 2026-10-15): a 4K60 ISO
+plus a 1080p60 program, 0.78 `fits`, dropped nothing; adding a 1080p60
+ISO, 0.93 `no_margin`, dropped nothing; adding a 1080p60 stream, 1.23
+`cannot_keep_up`, dropped half the ISO frames (and `encoder_overload`
+came); the first suggestion (the 4K ISO at 1920×1080, 0.76) dropped
+nothing. H.264 counts 1.9× HEVC per picture: `tune` on the same Mac ran
+the same ISO files about 1.8× slower as H.264, so H.264 files are offered
+HEVC, never the reverse.
+
 ## Quality
 
 `quality` accepts exactly these five names, or an integer from **1–100**.

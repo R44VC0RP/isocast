@@ -160,6 +160,8 @@ pub fn doctor<P: Platform>(platform: &P, setup: Option<&Setup>, folder: Option<&
             Some("pick a codec listed under hardware encoders"),
         ));
     }
+    // Whether the files fit the media engines (#66).
+    checks.extend(crate::estimate::check(platform, setup, None));
 
     // Every source the recording uses, resolved to a device: ISO files
     // and their audio, and the program's audio (a recording won't start

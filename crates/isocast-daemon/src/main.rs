@@ -30,12 +30,13 @@ use isocast_engine::record::{
 use isocast_engine::stream::{KEY_ENV, LEGACY_KEY_SERVICE, OnChange, Stream};
 use isocast_protocol::api::InitParams;
 use isocast_protocol::api::{
-    Applied, ApplyParams, EngineInfo, EngineState, Event, EventKind, EventKinds, Frame,
-    FrameParams, FrameRate, FrameStream, FramesParams, GetParams, ImportObsParams, Live,
-    LiveStatus, Marked, Method, Notification, Plan, Refreshed, Report, Request, Resolved, Response,
-    RpcError, SharedFrameStream, SharedFramesParams, Snapshot, SnapshotParams, StartParams,
-    Started, Status, StreamKey, StreamKeyParams, StreamKeyTarget, Switched, TakeCause, TuneParams,
-    Tuning, WatchParams, lock_path, shared, socket_path,
+    Applied, ApplyParams, CapacityEstimate, CapacityParams, EngineInfo, EngineState, Event,
+    EventKind, EventKinds, Frame, FrameParams, FrameRate, FrameStream, FramesParams, GetParams,
+    ImportObsParams, Live, LiveStatus, Marked, Method, Notification, Overload, OverloadedFile,
+    Plan, Refreshed, Report, Request, Resolved, Response, RpcError, SharedFrameStream,
+    SharedFramesParams, Snapshot, SnapshotParams, StartParams, Started, Status, StreamKey,
+    StreamKeyParams, StreamKeyTarget, Switched, TakeCause, TuneParams, Tuning, WatchParams,
+    lock_path, shared, socket_path,
 };
 use isocast_protocol::change::{Change, diff, merge_patch, missing_removals};
 use isocast_protocol::devices::{PermissionKind, PermissionsReport};
@@ -1444,6 +1445,7 @@ impl Daemon {
             Method::DebugSet(params) => debug::set(self, params).and_then(to_json),
             Method::ListProjects(params) => to_json(self.list_projects(params.unwrap_or_default())),
             Method::RenameProject(params) => self.rename_project(params).and_then(to_json),
+            Method::EstimateCapacity(params) => self.estimate_capacity(*params).and_then(to_json),
             Method::Stop | Method::Shutdown => match self.stop() {
                 // Shutting down while idle is fine.
                 Err(err) if shutdown && err.code == RpcError::WRONG_STATE => {
@@ -2906,11 +2908,14 @@ impl Daemon {
                 });
             };
             let reported = Mutex::new(Vec::<(u64, u64)>::new());
+            let overload = Mutex::new(OverloadWatch::default());
             let on_status = |status: &LiveStatus| {
                 *live.lock().unwrap() = Some(status.clone());
                 for message in status.new_drops(&mut reported.lock().unwrap()) {
                     daemon.publish(Event::Warning { message });
                 }
+                let take = takes.current.lock().unwrap().number;
+                daemon.note_overload(&overload, take, status);
                 daemon.publish(Event::Status {
                     live: status.clone(),
                 });
@@ -2993,23 +2998,217 @@ impl Daemon {
     }
 
     /// A warning if the recording that just started asks more of the
-    /// hardware encoders than `tune` measured they manage on this Mac.
+    /// hardware encoders than `tune` measured they manage on this Mac, or,
+    /// with nothing measured, than the chip's numbers say they manage.
     fn capacity_warning(&self, engine: &dyn LiveEngine) -> Option<String> {
         let (setup, memory) = {
             let state = self.state.lock().unwrap();
             let memory = capacity::memory_path(state.file.legacy());
             (state.setup.clone()?, memory)
         };
-        if !memory.exists() {
+        if memory.exists() {
+            // The ISO sources are running by now, at the formats they record.
+            let info = engine.info();
+            let measured = capacity::workload(&setup, |id| {
+                let source = info.sources.iter().find(|s| s.source == id)?;
+                Some((source.width?, source.height?, source.fps?))
+            })
+            .and_then(|workload| capacity::start_warning(&memory, machine_key()?, &workload));
+            if measured.is_some() {
+                return measured;
+            }
+        }
+        // Else what the chip's numbers predict, with the stream if it runs
+        // (#66): only when it can't keep up, so a fitting setup never nags.
+        let streaming = self.state.lock().unwrap().streaming();
+        let estimate =
+            estimate_capacity(&setup, Some(engine), streaming, true, &memory, None).ok()?;
+        if estimate.capacity != isocast_protocol::api::Capacity::CannotKeepUp {
             return None;
         }
-        // The ISO sources are running by now, at the formats they record.
-        let info = engine.info();
-        let workload = capacity::workload(&setup, |id| {
-            let source = info.sources.iter().find(|s| s.source == id)?;
-            Some((source.width?, source.height?, source.fps?))
-        })?;
-        capacity::start_warning(&memory, machine_key()?, &workload)
+        let mut text = estimate.summary;
+        if let Some(fix) = estimate.suggestions.first() {
+            text.push_str(&format!("; to fit, {}", fix.description));
+            if let Some(change) = &fix.change {
+                text.push_str(&format!(
+                    " (isocast plan --patch '{change}', after this take)"
+                ));
+            }
+        }
+        Some(text)
+    }
+
+    /// `estimate_capacity`: whether a setup's files (the live setup's, at
+    /// its sources' live formats) fit this Mac's encoders, by per-chip data.
+    fn estimate_capacity(&self, params: CapacityParams) -> Result<CapacityEstimate, RpcError> {
+        let (setup, streaming, recording, engine, memory) = {
+            let state = self.state.lock().unwrap();
+            let live = params.setup.is_none();
+            let Some(setup) = params.setup.or_else(|| state.setup.clone()) else {
+                return Err(state.no_setup("no setup to judge (or give one)"));
+            };
+            let streaming = params.stream.unwrap_or(if live {
+                state.streaming()
+            } else {
+                setup.stream.is_some()
+            });
+            let recording = live && state.session.is_some();
+            let engine = state.engine.clone().filter(|_| live);
+            let memory = capacity::memory_path(state.file.legacy());
+            (setup, streaming, recording, engine, memory)
+        };
+        estimate_capacity(
+            &setup,
+            engine.as_deref(),
+            streaming,
+            recording,
+            &memory,
+            params.add_iso.as_deref(),
+        )
+        .map_err(|message| RpcError {
+            code: RpcError::INVALID_PARAMS,
+            message,
+        })
+    }
+
+    /// Once per take, when the take's files drop frames and the disk isn't
+    /// behind: the encoders are at capacity. Says which files drop, why,
+    /// and the live setup's fixes (#66).
+    fn note_overload(
+        self: &Arc<Self>,
+        watch: &Mutex<OverloadWatch>,
+        take: u32,
+        status: &LiveStatus,
+    ) {
+        let mut watch = watch.lock().unwrap();
+        if watch.take != take {
+            *watch = OverloadWatch {
+                take,
+                baseline: status
+                    .files
+                    .iter()
+                    .map(|f| (f.source.clone(), f.frames, f.dropped_frames))
+                    .collect(),
+                stream_baseline: None,
+                stream_now: watch.stream_now,
+                sent: false,
+            };
+        }
+        // The recording's own thread: never wait for the state lock (a
+        // busy request keeps the last reading instead).
+        let (stream_dropped, stream_sent) = match self.state.try_lock() {
+            Ok(state) => {
+                let now = stream_status(&state)
+                    .filter(|s| s.is_active())
+                    .map_or((0, 0), |s| (s.dropped_frames, s.frames_sent));
+                watch.stream_now = now;
+                now
+            }
+            Err(_) => watch.stream_now,
+        };
+        let stream_baseline = *watch
+            .stream_baseline
+            .get_or_insert((stream_dropped, stream_sent));
+        if watch.sent || status.paused {
+            return;
+        }
+        // A slow disk drops frames too, and has its own warning.
+        if status.disk.as_ref().is_some_and(|d| d.behind()) {
+            return;
+        }
+        let mut dropping: Vec<OverloadedFile> = Vec::new();
+        for file in &status.files {
+            let (frames0, dropped0) = watch
+                .baseline
+                .iter()
+                .find(|(s, ..)| *s == file.source)
+                .map_or((0, 0), |(_, f, d)| (*f, *d));
+            let dropped = file.dropped_frames.saturating_sub(dropped0);
+            let due = file.frames.saturating_sub(frames0) + dropped;
+            if overloaded(dropped, due) {
+                dropping.push(OverloadedFile {
+                    output: file.source.clone(),
+                    dropped_frames: dropped,
+                    percent: dropped as f64 * 100.0 / due.max(1) as f64,
+                });
+            }
+        }
+        // Only the take's files say the encoders are behind: the stream's
+        // count also holds frames a congested or reconnecting connection
+        // dropped, which have their own warnings. With a file dropping,
+        // the stream's drops are a detail.
+        if dropping.is_empty() {
+            return;
+        }
+        let stream_dropped = stream_dropped.saturating_sub(stream_baseline.0);
+        let stream_due = stream_sent.saturating_sub(stream_baseline.1) + stream_dropped;
+        if overloaded(stream_dropped, stream_due) {
+            dropping.push(OverloadedFile {
+                output: "stream".into(),
+                dropped_frames: stream_dropped,
+                percent: stream_dropped as f64 * 100.0 / stream_due.max(1) as f64,
+            });
+        }
+        watch.sent = true;
+        drop(watch);
+        // Off the recording's thread: probing sources can take a moment.
+        let daemon = self.clone();
+        let elapsed_seconds = status.elapsed_seconds;
+        thread::spawn(move || daemon.publish_overload(take, elapsed_seconds, dropping));
+    }
+
+    fn publish_overload(&self, take: u32, elapsed_seconds: f64, mut dropping: Vec<OverloadedFile>) {
+        dropping.sort_by(|a, b| b.percent.total_cmp(&a.percent));
+        // The program file only: the stream's drops may be the network's.
+        let protected_dropping = dropping.iter().any(|f| f.output == PROGRAM);
+        let estimate = self.estimate_capacity(CapacityParams::default()).ok();
+        let names: Vec<String> = dropping
+            .iter()
+            .map(|f| format!("{} ({:.0}%)", f.output, f.percent))
+            .collect();
+        let verb = if names.len() == 1 { "is" } else { "are" };
+        let at_capacity = estimate
+            .as_ref()
+            .is_none_or(|e| e.capacity != isocast_protocol::api::Capacity::Fits);
+        let mut reason = if at_capacity {
+            format!(
+                "this Mac's video encoders are at capacity, so {} {verb} dropping frames",
+                names.join(", ")
+            )
+        } else {
+            // By the chip's numbers these files fit: something else is
+            // using the encoders, or they fell behind for a while.
+            format!(
+                "the video encoders fell behind, so {} {verb} dropping frames, though this \
+                 Mac's encoders should keep up with these files (another app using them, or a \
+                 busy Mac, can do this)",
+                names.join(", ")
+            )
+        };
+        if !protected_dropping {
+            reason.push_str("; the program and stream are kept whole");
+        }
+        if let Some(fix) = estimate.as_ref().and_then(|e| e.suggestions.first()) {
+            reason.push_str(&format!("; to fit, {}", fix.description));
+            if fix.after_take {
+                reason.push_str(" (applies once this take ends)");
+            }
+        }
+        let workload_key = estimate
+            .as_ref()
+            .map(|e| e.workload_key.clone())
+            .unwrap_or_default();
+        self.publish(Event::EncoderOverload {
+            overload: Box::new(Overload {
+                take,
+                elapsed_seconds,
+                dropping,
+                protected_dropping,
+                reason,
+                estimate,
+                workload_key,
+            }),
+        });
     }
 
     /// The live engine, started with the live setup if it isn't running.
@@ -3906,6 +4105,82 @@ fn open_permission_settings(permission: PermissionKind) -> Result<String> {
 #[cfg(not(target_os = "macos"))]
 fn open_permission_settings(_permission: PermissionKind) -> Result<String> {
     bail!("permissions are only supported on macOS so far")
+}
+
+/// A take's drop counts when it began, and whether its overload was said.
+#[derive(Default)]
+struct OverloadWatch {
+    take: u32,
+    /// (source, frames, dropped frames) as the take began.
+    baseline: Vec<(String, u64, u64)>,
+    /// The stream's (dropped, sent) as the take began, and at the last
+    /// reading.
+    stream_baseline: Option<(u64, u64)>,
+    stream_now: (u64, u64),
+    sent: bool,
+}
+
+/// Whether `dropped` of `due` pictures is an overload rather than a hiccup:
+/// at least a second's worth at 30 fps and 2% of them.
+fn overloaded(dropped: u64, due: u64) -> bool {
+    dropped >= 30 && dropped * 50 >= due
+}
+
+/// This Mac's chip and encoders.
+#[cfg(target_os = "macos")]
+fn this_machine() -> Option<&'static isocast_protocol::api::Machine> {
+    static MACHINE: std::sync::OnceLock<isocast_protocol::api::Machine> =
+        std::sync::OnceLock::new();
+    Some(MACHINE.get_or_init(|| MacPlatform.machine()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn this_machine() -> Option<&'static isocast_protocol::api::Machine> {
+    None
+}
+
+/// Estimate `setup`'s capacity: sources at their live formats in `engine`
+/// (if it runs this setup), else probed.
+fn estimate_capacity(
+    setup: &Setup,
+    engine: Option<&dyn LiveEngine>,
+    streaming: bool,
+    recording: bool,
+    memory: &Path,
+    add_iso: Option<&str>,
+) -> Result<CapacityEstimate, String> {
+    let Some(machine) = this_machine() else {
+        return Err("capacity estimates are only supported on macOS so far".into());
+    };
+    let live: HashMap<String, (u32, u32, u32)> = engine
+        .map(|engine| {
+            engine
+                .info()
+                .sources
+                .into_iter()
+                .filter_map(|s| Some((s.source, (s.width?, s.height?, s.fps?))))
+                .collect()
+        })
+        .unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    let probed =
+        isocast_engine::estimate::probed_formats(&MacPlatform, setup, &|id| live.contains_key(id));
+    #[cfg(not(target_os = "macos"))]
+    let probed: HashMap<String, (u32, u32, u32)> = HashMap::new();
+    let formats = |id: &str| live.get(id).or_else(|| probed.get(id)).copied();
+    let kept = capacity::Memory::load(memory);
+    let key = machine_key();
+    isocast_engine::estimate::estimate(
+        &isocast_engine::estimate::Inputs {
+            machine,
+            setup,
+            formats: &formats,
+            streaming,
+            memory: key.map(|key| (&kept, key)),
+            recording,
+        },
+        add_iso,
+    )
 }
 
 /// Which Mac (and macOS) `tune`'s measurements here hold for.

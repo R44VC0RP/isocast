@@ -1,0 +1,46 @@
+{
+  "about": "How much video each Apple chip's H.264/HEVC encode engines take in real time, for `estimate_capacity` (crates/isocast-engine/src/estimate.rs). A file's encoder runs on one engine for its whole life. Rates are 8-bit HEVC pixels a second per engine at Isocast's settings (real-time mode, no B-frames, constant quality), on synthetic content. Add a chip by measuring it (docs/notes.md, #66): record files of known sizes on it and find where ISO files start dropping.",
+  "fits_below": 0.85,
+  "codec_cost": {
+    "hevc": 1.0,
+    "h264": 1.9,
+    "basis": "measured with `isocast tune` on isocast-m2-b (hard content, HEVC program): the same ISO files ran 1.28x real time as HEVC and 0.72x as H.264 (4K60 ISO), 1.04x and 0.60x (4K60 + 1080p60 ISOs), so an H.264 picture costs 1.90-1.96x an HEVC one; the stream's H.264 encode is counted the same, though its bitrate-limited real-time encode hasn't been measured on its own"
+  },
+  "chips": [
+    {
+      "chip": "Apple M2",
+      "encode_engines": 1,
+      "engine_pixels_per_second": 800000000,
+      "basis": "measured on base M2s (isocast-m2-a/b): a 4K60 and a 1080p60 ISO plus a 1080p60 program (747 Mpx/s) record with no drops; adding a 1080p60 stream (983 Mpx/s, its H.264 at 1.9x) or a 4K60 program (1120 Mpx/s) drops frames; `tune` read 1.04x and 0.70x real time for the same files on hard content"
+    },
+    {
+      "chip": "Apple M4 Max",
+      "encode_engines": 2,
+      "engine_pixels_per_second": 1250000000,
+      "basis": "measured on an M4 Max (exonbook): two 4K and two 1080p HEVC sessions at 120 fps each (2488 Mpx/s) all hold real time when started apart (#41)"
+    },
+    {
+      "chip": "Apple M5 Max",
+      "encode_engines": 2,
+      "engine_pixels_per_second": 1050000000,
+      "basis": "measured on an M5 Max: sixteen 1080p60 HEVC ISO files (1990 Mpx/s) record with no drops; adding the program drops frames"
+    }
+  ],
+  "generations": [
+    { "generation": "M1", "engine_pixels_per_second": 800000000 },
+    { "generation": "M2", "engine_pixels_per_second": 800000000 },
+    { "generation": "M3", "engine_pixels_per_second": 800000000 },
+    { "generation": "M4", "engine_pixels_per_second": 1250000000 },
+    { "generation": "M5", "engine_pixels_per_second": 1050000000 }
+  ],
+  "tiers": [
+    { "tier": "", "encode_engines": 1 },
+    { "tier": "Pro", "encode_engines": 1 },
+    { "tier": "Max", "encode_engines": 2 },
+    { "tier": "Ultra", "encode_engines": 4 }
+  ],
+  "unknown": {
+    "encode_engines": 1,
+    "engine_pixels_per_second": 500000000
+  }
+}

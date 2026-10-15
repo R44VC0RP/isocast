@@ -626,6 +626,13 @@ layout editing, Windows, release prep).
   which tripped the pressure controller. Sessions now start in order
   (program, then largest first), 25 ms apart, and a split's old files stay
   open 200 ms past the split. Evidence: iso-drops-2 scratch REPORT.md.
+- [x] **A.4 ISO capacity (GitHub #66):** `estimate_capacity` (API, CLI
+  `isocast capacity`, MCP) predicts from per-chip data whether a setup's
+  files fit this Mac's encoders, with fixes as patches and `add_iso`
+  admission; setup check/doctor warn, start notes it, `encoder_overload`
+  comes once per take, the app shows one notice with a fix (after the take
+  while recording) and "don't show again for this setup", and turning an
+  ISO file on picks a fitting size or leaves it off.
 - [x] **A.5 Timeline MVP (C.1, C.2):** takes append, retake, remove,
   reorder, export one joined file; a simple Create view in the app.
 - [x] **A.6 Log everything, report bugs in one click.**
@@ -1263,6 +1270,14 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 
 ## Log
 
+- A.4 / #66 (2026-10-15): capacity estimate, overload notice, safe ISO
+  defaults. On isocast-m2-b (25 s synthetic takes) the estimate matched
+  three setups: 4K60 ISO + 1080p60 program 0.78 fits -> 0 drops; + 1080p60
+  ISO 0.93 no margin -> 0; + 1080p60 local stream 1.23 can't keep up ->
+  49% ISO drops and one encoder_overload event; its first fix (4K ISO at
+  1920x1080, 0.76) -> 0 drops in every file and the stream. H.264 costs
+  1.9x HEVC (tune on m2-b). App notice verified offscreen in every state,
+  including the real m2-b event; hosted e2e 16/16 in the VM.
 - P.3 (2026-10-15, #46): first launch finds OBS and optimizes. Engine:
   `obs_discover` (ISOCAST_OBS_FOLDER for isolated engines),
   `library_import_obs` `stream_key`, `speed_test` (RTMP filler publish,

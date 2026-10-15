@@ -8,7 +8,9 @@
 
 use std::rc::Rc;
 
-use isocast_protocol::api::{Method, SnapshotParams};
+use isocast_protocol::api::{
+    CapacityEstimate, CapacityParams, IsoAdmission, Method, SnapshotParams,
+};
 use isocast_protocol::{SceneItem, Setup};
 use serde_json::{Map, Value, json};
 
@@ -434,8 +436,79 @@ pub fn is_iso(setup: &Setup, id: &str) -> bool {
 }
 
 /// Record source `id` to its own file, or stop (turning ISO recording on
-/// if it was off).
+/// if it was off). Turning one on asks the engine how it fits this Mac's
+/// encoders first: at a smaller size or rate, or not at all, and says why
+/// (#66). If it can't say, the file goes on as asked.
 pub fn set_iso(app: &Rc<App>, id: &str, on: bool) {
+    if on {
+        let id = id.to_string();
+        app.call_as(
+            Method::EstimateCapacity(Box::new(CapacityParams {
+                setup: None,
+                stream: None,
+                add_iso: Some(id.clone()),
+            })),
+            move |app, result: Result<CapacityEstimate, _>| match result
+                .ok()
+                .and_then(|e| e.admission)
+            {
+                Some(admission) => admit_iso(app, &id, admission),
+                None => set_iso_now(app, &id, true),
+            },
+        );
+        return;
+    }
+    set_iso_now(app, id, on);
+}
+
+/// Turn the ISO file on as the engine said it fits.
+fn admit_iso(app: &Rc<App>, id: &str, admission: IsoAdmission) {
+    let name = {
+        let s = app.session.borrow();
+        s.setup
+            .as_ref()
+            .and_then(|setup| model::find_source(setup, id))
+            .map(|source| model::source_name(source).to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| id.to_string())
+    };
+    let reason = admission
+        .reason
+        .as_deref()
+        .map(crate::app::sentence)
+        .unwrap_or_default();
+    match (admission.on, admission.change) {
+        (true, Some(change)) => {
+            let as_is = admission.as_is;
+            let format = match (admission.width, admission.height, admission.fps) {
+                (Some(w), Some(h), Some(fps)) => format!("at {w}×{h}, {fps} fps"),
+                _ => "smaller".into(),
+            };
+            app.edit_then(change, EditOptions::default(), move |app, applied| {
+                if applied && !as_is {
+                    app.toast(
+                        ToastKind::Warning,
+                        &format!("“{name}” captures smaller to fit"),
+                        format!(
+                            "It now captures {format}, in its ISO file and wherever scenes \
+                             show it. {reason}."
+                        ),
+                    );
+                }
+            });
+        }
+        (true, None) => {}
+        (false, _) => {
+            app.toast(
+                ToastKind::Warning,
+                &format!("“{name}” isn’t recorded to its own file"),
+                format!("{reason}. Turn off another ISO file, or lower the program’s size, first."),
+            );
+        }
+    }
+}
+
+fn set_iso_now(app: &Rc<App>, id: &str, on: bool) {
     let patch = {
         let s = app.session.borrow();
         let Some(setup) = s.setup.clone() else { return };

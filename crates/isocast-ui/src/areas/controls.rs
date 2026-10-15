@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use isocast_protocol::api::{EngineState, Event, LiveFile, Method};
+use isocast_protocol::api::{Capacity, EngineState, Event, LiveFile, Method, Overload};
 use isocast_protocol::replay::{ReplaySaved, ReplayState, ReplayStatus};
 use isocast_protocol::stream::{StreamService, StreamState, StreamStatus};
 use isocast_protocol::virtual_camera::{
@@ -37,6 +37,7 @@ pub const STATES: &[&str] = &[
     "details:rec|live",
     "toasts",
     "toast-drops",
+    "toast-overload[:fits|EVENT.json]",
     "transition:KIND",
     "vcam[:missing|running|failed]",
     "replay[:running|failed|saved]",
@@ -151,6 +152,14 @@ pub struct Controls {
     paused_for: Since,
     /// A pause or resume is on its way.
     busy_pause: Cell<bool>,
+    /// This take's encoder overload (#66), once one came: its notice shows
+    /// once, and the drops toast stays quiet for the rest of the take.
+    overload: RefCell<Option<Overload>>,
+    /// A fix chosen while recording, applied when the recording stops:
+    /// its description and patch.
+    pending_fix: RefCell<Option<(String, Value)>>,
+    /// Overload notices hidden for good this run (and in the prefs).
+    hidden: RefCell<Vec<String>>,
 }
 
 impl Area for Controls {
@@ -319,7 +328,10 @@ impl Area for Controls {
             Event::Started { .. } => {
                 self.drops.borrow_mut().files.clear();
                 self.pauses.borrow_mut().clear();
+                // Once per take.
+                self.overload.replace(None);
             }
+            Event::EncoderOverload { overload } => self.overload_came(app, overload),
             Event::RecordingPaused { recording, .. } => {
                 {
                     let mut pauses = self.pauses.borrow_mut();
@@ -348,7 +360,10 @@ impl Area for Controls {
                 }
                 self.stream_on.set(on);
             }
-            Event::Stopped { .. } => self.drops_stopped(app),
+            Event::Stopped { .. } => {
+                self.drops_stopped(app);
+                self.apply_pending_fix(app);
+            }
             _ => {}
         }
     }
@@ -534,9 +549,84 @@ impl Area for Controls {
                     ]),
                 );
             }
+            // The encoder overload notice (#66), as the soak's base M2
+            // sends it; "fits" when the chip table says it should fit; or
+            // an `encoder_overload` event saved by `isocast watch --json`.
+            "toast-overload" => {
+                let overload = if arg.ends_with(".json") {
+                    match std::fs::read_to_string(arg)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|text| Ok(serde_json::from_str::<Event>(&text)?))
+                    {
+                        Ok(Event::EncoderOverload { overload }) => *overload,
+                        Ok(_) => {
+                            return Some(Err(anyhow::anyhow!(
+                                "{arg}: not an encoder_overload event"
+                            )));
+                        }
+                        Err(error) => return Some(Err(error)),
+                    }
+                } else {
+                    sample_overload(arg == "fits")
+                };
+                self.overload_came(app, &overload);
+            }
             _ => return None,
         }
         Some(Ok(()))
+    }
+}
+
+/// The overload a base M2 reports recording a 4K60 and a 1080p60 ISO and
+/// a 1080p60 program while streaming (the hardware soak), for snapshots.
+fn sample_overload(fits: bool) -> Overload {
+    use isocast_protocol::api::{CapacityEstimate, CapacitySuggestion, OverloadedFile};
+    let fix = CapacitySuggestion {
+        description: "capture screen at 2560×1440".into(),
+        change: Some(json!({ "sources": [{ "id": "screen", "width": 2560, "height": 1440 }] })),
+        method: None,
+        load: 0.74,
+        capacity: Capacity::Fits,
+        after_take: true,
+    };
+    Overload {
+        take: 1,
+        elapsed_seconds: 3.0,
+        dropping: vec![
+            OverloadedFile {
+                output: "screen".into(),
+                dropped_frames: 74,
+                percent: 41.0,
+            },
+            OverloadedFile {
+                output: "facecam".into(),
+                dropped_frames: 73,
+                percent: 40.5,
+            },
+        ],
+        protected_dropping: false,
+        reason: String::new(),
+        estimate: Some(CapacityEstimate {
+            chip: "Apple M2".into(),
+            encode_engines: 1,
+            engine_pixels_per_second: 8e8,
+            basis: "measured".into(),
+            outputs: Vec::new(),
+            load: if fits { 0.6 } else { 1.09 },
+            capacity: if fits {
+                Capacity::Fits
+            } else {
+                Capacity::CannotKeepUp
+            },
+            streaming: true,
+            iso_drop_percent: 13.0,
+            summary: String::new(),
+            suggestions: if fits { Vec::new() } else { vec![fix] },
+            admission: None,
+            measured: None,
+            workload_key: "sample".into(),
+        }),
+        workload_key: "sample".into(),
     }
 }
 
@@ -1121,6 +1211,7 @@ impl Controls {
                 return;
             }
             let setup = app.session.borrow().setup.clone();
+            let quiet = self.overload.borrow().is_some();
             let mut rows = Vec::new();
             let mut frames = drops.stream;
             for (source, dropped, audio) in &drops.files {
@@ -1141,6 +1232,14 @@ impl Controls {
                 rows.push(("Stream".into(), format!("{} dropped", drops.stream), "bad"));
             }
             drops.rows = Some(rows.clone());
+            if quiet {
+                drop(drops);
+                // The overload notice says why; it updates while it shows.
+                if app.toasts.has_key("drops") {
+                    self.show_overload(app);
+                }
+                return;
+            }
             (frames, rows)
         };
         let (frames, rows) = rows;
@@ -1174,6 +1273,13 @@ impl Controls {
 
     /// The recording stopped: a drops toast still up says so.
     fn drops_stopped(&self, app: &Rc<App>) {
+        if self.overload.borrow().is_some() {
+            // Its fix can apply now.
+            if app.toasts.has_key("drops") {
+                self.show_overload(app);
+            }
+            return;
+        }
         let rows = self.drops.borrow().rows.clone();
         if let Some(rows) = rows
             && app.toasts.has_key("drops")
@@ -1188,6 +1294,163 @@ impl Controls {
                 .rows(rows),
             );
         }
+    }
+}
+
+impl Controls {
+    /// The engine says the encoders can't keep up (once per take): show
+    /// the notice, unless it was hidden for this setup.
+    fn overload_came(&self, app: &Rc<App>, overload: &Overload) {
+        let hidden =
+            !overload.workload_key.is_empty() && hidden_notice(app, &overload.workload_key);
+        self.overload.replace(Some(overload.clone()));
+        if !hidden {
+            self.show_overload(app);
+        }
+    }
+
+    /// The overload notice: what's dropping, why, and one fix.
+    fn show_overload(&self, app: &Rc<App>) {
+        let Some(overload) = self.overload.borrow().clone() else {
+            return;
+        };
+        let recording = app
+            .session
+            .borrow()
+            .status
+            .as_ref()
+            .is_some_and(|s| s.state == EngineState::Recording);
+        let setup = app.session.borrow().setup.clone();
+        // The take's counts so far, else what the engine reported.
+        let mut rows = self.drops.borrow().rows.clone().unwrap_or_default();
+        rows.retain(|r| r.2 == "bad");
+        if rows.is_empty() {
+            rows = overload
+                .dropping
+                .iter()
+                .map(|f| {
+                    let label = if f.output == "stream" {
+                        "Stream".to_string()
+                    } else {
+                        file_label(setup.as_deref(), &f.output)
+                    };
+                    (label, format!("{} dropped", f.dropped_frames), "bad")
+                })
+                .collect();
+        }
+        let estimate = overload.estimate.as_ref();
+        let at_capacity = estimate.is_none_or(|e| e.capacity != Capacity::Fits);
+        let fix = estimate.and_then(|e| e.suggestions.first()).cloned();
+        let (title, mut message) = if at_capacity {
+            (
+                "This Mac can’t keep up with every file",
+                if overload.protected_dropping {
+                    "Its video encoders are full, so files are dropping frames.".to_string()
+                } else {
+                    "Its video encoders are full, so ISO files drop frames to keep the program \
+                     and stream whole."
+                        .to_string()
+                },
+            )
+        } else {
+            (
+                "The encoders fell behind",
+                "ISO files are dropping frames to keep the program and stream whole, though \
+                 this setup should fit. Another app using the encoders can do this."
+                    .to_string(),
+            )
+        };
+        if let Some(fix) = &fix {
+            message.push_str(&format!(" To fit, {}.", fix.description));
+        }
+        let mut toast = Toast::new(ToastKind::Warning, title, message)
+            .key("drops")
+            .rows(rows);
+        toast = match fix {
+            Some(fix) if fix.method.as_deref() == Some("stream_stop") => {
+                toast.action("Stop Stream", |app| {
+                    // Only ever stops: it may have stopped meanwhile.
+                    let live = app
+                        .session
+                        .borrow()
+                        .stream
+                        .as_ref()
+                        .is_some_and(StreamStatus::is_active);
+                    if live {
+                        toggle_stream(app);
+                    }
+                })
+            }
+            Some(fix) if fix.change.is_some() => {
+                let change = fix.change.clone().unwrap_or_default();
+                let description = fix.description.clone();
+                if recording {
+                    toast.action("Fix After This Take", move |app| {
+                        app.controls
+                            .set_pending_fix(app, description.clone(), change.clone());
+                    })
+                } else {
+                    toast.action("Apply Fix", move |app| {
+                        apply_fix(app, &description, change.clone());
+                    })
+                }
+            }
+            _ => toast.action("Details", move |app| {
+                open_details(app, if recording { "rec" } else { "live" });
+            }),
+        };
+        // Without a key (the estimate failed) there's no setup to name, and
+        // hiding "" would hide every other key-less notice.
+        let key = overload.workload_key.clone();
+        if !key.is_empty() {
+            toast = toast.action2("Don’t Show Again for This Setup", move |app| {
+                hide_notice(app, &key);
+            });
+        }
+        app.show_toast(toast);
+    }
+
+    /// Keep `change` to apply when the recording stops.
+    pub fn set_pending_fix(&self, app: &Rc<App>, description: String, change: Value) {
+        app.toast(
+            ToastKind::Info,
+            "The fix applies when this take ends",
+            crate::app::sentence(&description),
+        );
+        self.pending_fix.replace(Some((description, change)));
+    }
+
+    fn apply_pending_fix(&self, app: &Rc<App>) {
+        if let Some((description, change)) = self.pending_fix.take() {
+            apply_fix(app, &description, change);
+        }
+    }
+}
+
+/// Apply a capacity fix to the live setup (undoable), and say so.
+fn apply_fix(app: &Rc<App>, description: &str, change: Value) {
+    let description = description.to_string();
+    app.edit_then(change, EditOptions::default(), move |app, applied| {
+        if applied {
+            app.toast(
+                ToastKind::Success,
+                "Fixed for the next take",
+                crate::app::sentence(&description),
+            );
+        }
+    });
+}
+
+/// Whether the viewer hid the overload notice for this workload.
+fn hidden_notice(app: &Rc<App>, key: &str) -> bool {
+    app.controls.hidden.borrow().iter().any(|k| k == key)
+        || (!app.mode.offscreen && crate::prefs::notice_hidden(key))
+}
+
+fn hide_notice(app: &Rc<App>, key: &str) {
+    app.controls.hidden.borrow_mut().push(key.to_string());
+    if !app.mode.offscreen {
+        crate::prefs::hide_notice(key);
     }
 }
 

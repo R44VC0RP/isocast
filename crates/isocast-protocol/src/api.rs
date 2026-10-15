@@ -348,6 +348,13 @@ pub enum Method {
     /// writes into it. Manifests and timelines keep resolving. Returns
     /// [`ProjectRenamed`](crate::project::ProjectRenamed).
     RenameProject(crate::project::RenameProjectParams),
+    /// Predict, without benchmarking, whether a setup's files (the live
+    /// setup's, at its sources' live formats, if none is given) fit this
+    /// Mac's media engines, from measured per-chip data (and what `tune`
+    /// measured here, if it did), with the closest changes that fit. With
+    /// `add_iso`, how to turn on that source's ISO file so it fits. Allowed
+    /// while recording. Returns [`CapacityEstimate`].
+    EstimateCapacity(Box<CapacityParams>),
     /// Look for OBS Studio's scene collections and profiles on this Mac
     /// (its settings folder, or `folder`), without importing anything:
     /// each collection with its scene and source counts and the profile an
@@ -1036,6 +1043,10 @@ pub enum Event {
     Replay { replay: crate::replay::ReplayStatus },
     /// The replay buffer saved a file.
     ReplaySaved { saved: crate::replay::ReplaySaved },
+    /// The hardware encoders can't keep up: files of the take are dropping
+    /// frames (ISO files first; the program and stream are protected), and
+    /// the disk isn't the cause. Comes at most once per take.
+    EncoderOverload { overload: Box<Overload> },
 }
 
 /// What began a take, in `started` events.
@@ -1097,11 +1108,12 @@ pub enum EventKind {
     DeviceChanged,
     Replay,
     ReplaySaved,
+    EncoderOverload,
 }
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 28] = [
+    pub const NAMES: [&str; 29] = [
         "setup_changed",
         "started",
         "status",
@@ -1130,6 +1142,7 @@ impl EventKind {
         "device_changed",
         "replay",
         "replay_saved",
+        "encoder_overload",
     ];
 
     /// The kind's name, as events and `watch` spell it.
@@ -1169,6 +1182,7 @@ impl Event {
             Self::DeviceChanged { .. } => EventKind::DeviceChanged,
             Self::Replay { .. } => EventKind::Replay,
             Self::ReplaySaved { .. } => EventKind::ReplaySaved,
+            Self::EncoderOverload { .. } => EventKind::EncoderOverload,
         }
     }
 }
@@ -2474,6 +2488,175 @@ pub struct Variant {
     pub feasible: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CapacityParams {
+    /// The setup to judge; the live setup, at its sources' live formats,
+    /// if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<Setup>,
+    /// Count the stream's encode too. If absent: for the live setup,
+    /// whether it streams now; for a given setup, whether it has a stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    /// A source id whose ISO file would be turned on: `admission` says how
+    /// to add it so the setup still fits (at a smaller size or frame rate,
+    /// or not at all), and why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_iso: Option<String>,
+}
+
+/// Whether a setup's files fit this Mac's media engines, predicted from
+/// per-chip data without benchmarking (`tune` measures).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CapacityEstimate {
+    /// This Mac's chip, as macOS names it.
+    pub chip: String,
+    /// H.264/HEVC encode engines on the chip. Each file's encoder runs on
+    /// one of them for its whole life (ProRes has engines of its own).
+    pub encode_engines: u32,
+    /// Pixels a second one engine encodes in real time (8-bit HEVC at
+    /// Isocast's settings) before files drop frames.
+    pub engine_pixels_per_second: f64,
+    /// Where those numbers come from: which Mac they were measured on, or
+    /// that they are assumed from the chip's family.
+    pub basis: String,
+    /// The video encodes the setup asks for.
+    pub outputs: Vec<EstimatedOutput>,
+    /// The busiest engine's work over what it manages in real time: up to
+    /// 0.85 fits, up to 1 keeps up with no margin, over 1 drops frames.
+    pub load: f64,
+    pub capacity: Capacity,
+    /// Whether the stream's encode is counted.
+    pub streaming: bool,
+    /// At least this share of ISO pictures can't be encoded, in percent
+    /// (the program and stream are served first; 0 when it keeps up).
+    pub iso_drop_percent: f64,
+    /// The verdict in words.
+    pub summary: String,
+    /// When it doesn't fit (or has no margin): the closest changes that
+    /// fit, closest first; or, if none does, those that come closest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<CapacitySuggestion>,
+    /// With `add_iso`: how to turn that ISO file on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<IsoAdmission>,
+    /// What `tune` measured for these files on this Mac, if it did; a
+    /// measured "can't keep up" overrules the prediction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured: Option<String>,
+    /// The same for setups that ask the same of the encoders (the files'
+    /// sizes, rates and codecs, and the stream): what a client remembers
+    /// for "don't show again for this setup".
+    pub workload_key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputKind {
+    Program,
+    Stream,
+    Iso,
+}
+
+/// One video encode of a setup.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EstimatedOutput {
+    /// `program`, `stream`, or the ISO file's source id.
+    pub output: String,
+    pub kind: OutputKind,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub codec: crate::Codec,
+    /// Kept whole under overload (the program and the stream); ISO files
+    /// drop pictures first.
+    pub protected: bool,
+    /// Its work on the H.264/HEVC engines, in HEVC-equivalent pixels a
+    /// second; 0 for ProRes, which has engines of its own.
+    pub pixels_per_second: f64,
+    /// The size or rate wasn't known (the source isn't running), so the
+    /// canvas's was assumed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub assumed: bool,
+}
+
+/// A change that makes a setup ask less of the encoders.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CapacitySuggestion {
+    /// What it changes, like "capture facecam at 1280×720".
+    pub description: String,
+    /// A patch for `plan`/`apply` that makes it, if it's a setup change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<serde_json::Value>,
+    /// A method that makes it instead, like `stream_stop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// The load with it (see [`CapacityEstimate::load`]).
+    pub load: f64,
+    pub capacity: Capacity,
+    /// Applying it now would change a running recording's sources or
+    /// canvas, so apply it once the take ends (a setup change applied
+    /// while recording takes effect from the next take anyway).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub after_take: bool,
+}
+
+/// How to turn on a source's ISO file so the setup still fits.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct IsoAdmission {
+    pub source: String,
+    /// Whether the ISO file goes on at all.
+    pub on: bool,
+    /// Whether it goes on as the source is (no smaller size or rate).
+    pub as_is: bool,
+    /// A patch for `plan`/`apply`: turns the ISO file on (maybe with the
+    /// source at a smaller size or rate), or nothing if it stays off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<serde_json::Value>,
+    /// What it does, like "facecam's ISO file at 1280×720, 30 fps".
+    pub description: String,
+    /// The ISO file's size and rate when it goes on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    /// Why it isn't added as it is, if it isn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Files dropping frames because the encoders are at capacity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Overload {
+    pub take: u32,
+    /// Seconds into the take when it was noticed.
+    pub elapsed_seconds: f64,
+    /// The files dropping frames so far, worst first.
+    pub dropping: Vec<OverloadedFile>,
+    /// Whether the program or stream drops too, not just ISO files.
+    pub protected_dropping: bool,
+    /// Why, in words.
+    pub reason: String,
+    /// The live setup's estimate, with the fixes: apply a suggestion's
+    /// `change` with `plan`/`apply` (once the take ends if `after_take`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<CapacityEstimate>,
+    /// See [`CapacityEstimate::workload_key`].
+    pub workload_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct OverloadedFile {
+    /// `program`, `stream` or the ISO file's source id.
+    pub output: String,
+    pub dropped_frames: u64,
+    /// Of the pictures due so far.
+    pub percent: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

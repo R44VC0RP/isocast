@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use isocast_protocol::api::{
-    Applied, ApplyParams, Doctor, DoctorParams, EngineInfo, Frame, FrameParams, ImportObsParams,
-    Live, Marked, Method, Plan, Refreshed, Report, Snapshot, SnapshotParams, StartParams, Started,
-    Status, StreamKey, StreamKeyParams, StreamKeyTarget, Switched, TuneParams, Tuning,
+    Applied, ApplyParams, CapacityEstimate, CapacityParams, Doctor, DoctorParams, EngineInfo,
+    Frame, FrameParams, ImportObsParams, Live, Marked, Method, Plan, Refreshed, Report, Snapshot,
+    SnapshotParams, StartParams, Started, Status, StreamKey, StreamKeyParams, StreamKeyTarget,
+    Switched, TuneParams, Tuning,
 };
 use isocast_protocol::change::Change;
 use isocast_protocol::data::{DataGetParams, DataRevision, DataSetParams, DataValues};
@@ -132,6 +133,21 @@ struct CheckSetupParams {
     setup: Option<serde_json::Value>,
     /// Check this folder instead of the setup's recording.folder.
     folder: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EstimateCapacityParams {
+    /// The setup to judge; the live setup (at its sources' live formats)
+    /// if absent (the shape get_setup returns).
+    #[serde(default)]
+    #[schemars(schema_with = "setup_schema")]
+    setup: Option<serde_json::Value>,
+    /// Count the stream's encode. Default: the live setup's if it streams
+    /// now; a given setup's if it has a stream.
+    stream: Option<bool>,
+    /// A video source id whose ISO file would be turned on: `admission`
+    /// says how to add it so the setup still fits, and why.
+    add_iso: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1156,6 +1172,29 @@ impl Isocast {
         self.call(Method::Doctor(Box::new(DoctorParams {
             setup: parse_setup(params.setup)?,
             folder: params.folder.map(Into::into),
+        })))
+        .await
+    }
+
+    #[tool(
+        description = "Predict instantly, without benchmarking, whether a setup's files (the \
+                       live setup's if none is given) fit this Mac's H.264/HEVC media engines, \
+                       from measured per-chip data: `capacity` is fits, no_margin or \
+                       cannot_keep_up, `load` the busiest engine's share, and `suggestions` \
+                       the closest changes that fit (each a patch for plan_change, or a \
+                       method like stream_stop; `after_take` ones wait for the recording to \
+                       end). With add_iso, `admission` says how to turn that ISO file on so it \
+                       fits (smaller, slower, or left off). tune_encoders measures instead.",
+        annotations(read_only_hint = true)
+    )]
+    async fn estimate_capacity(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<EstimateCapacityParams>>,
+    ) -> Result<Json<CapacityEstimate>, String> {
+        self.call(Method::EstimateCapacity(Box::new(CapacityParams {
+            setup: parse_setup(params.setup)?,
+            stream: params.stream,
+            add_iso: params.add_iso,
         })))
         .await
     }

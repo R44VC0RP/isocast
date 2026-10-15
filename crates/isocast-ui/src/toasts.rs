@@ -29,6 +29,9 @@ pub struct Toast {
     pub key: Option<String>,
     /// A small table: label, value, and "", "bad" or "warn".
     pub rows: Vec<(String, String, &'static str)>,
+    /// A second action ("Don't show again"): a notice like that stays
+    /// until it's dismissed or acted on.
+    pub action2: Option<(String, ToastAction)>,
 }
 
 impl Toast {
@@ -40,7 +43,13 @@ impl Toast {
             action: None,
             key: None,
             rows: Vec::new(),
+            action2: None,
         }
+    }
+
+    pub fn action2(mut self, label: impl Into<String>, run: impl Fn(&Rc<App>) + 'static) -> Self {
+        self.action2 = Some((label.into(), Box::new(run)));
+        self
     }
 
     pub fn action(mut self, label: impl Into<String>, run: impl Fn(&Rc<App>) + 'static) -> Self {
@@ -67,8 +76,9 @@ struct Shown {
     key: Option<String>,
     data: ToastData,
     action: Option<ToastAction>,
-    /// How long it shows.
-    lasts: Duration,
+    action2: Option<ToastAction>,
+    /// How long it shows; none for a notice, which stays.
+    lasts: Option<Duration>,
     // Dismisses it when it fires (dropped with it; none while hovered).
     timer: Option<slint::Timer>,
 }
@@ -118,7 +128,13 @@ impl ToastList {
         let weak = Rc::downgrade(app);
         window.global::<Toasts>().on_action(move |id| {
             if let Some(app) = weak.upgrade() {
-                app.toasts.run_action(&app, id);
+                app.toasts.run_action(&app, id, false);
+            }
+        });
+        let weak = Rc::downgrade(app);
+        window.global::<Toasts>().on_action2(move |id| {
+            if let Some(app) = weak.upgrade() {
+                app.toasts.run_action(&app, id, true);
             }
         });
     }
@@ -147,6 +163,10 @@ impl ToastList {
             Some((label, run)) => (label, Some(run)),
             None => (String::new(), None),
         };
+        let (action2_label, action2) = match toast.action2 {
+            Some((label, run)) => (label, Some(run)),
+            None => (String::new(), None),
+        };
         let data = ToastData {
             id,
             kind: toast.kind,
@@ -158,13 +178,17 @@ impl ToastList {
                 value: value.into(),
                 tone: SharedString::from(tone),
             })),
+            action2: action2_label.into(),
         };
-        // Warnings and errors get time to be read.
-        let lasts = Duration::from_secs(match toast.kind {
-            ToastKind::Warning | ToastKind::Error => 8,
-            _ => 4,
+        // Warnings and errors get time to be read; a notice with a choice
+        // waits for it.
+        let lasts = action2.is_none().then(|| {
+            Duration::from_secs(match toast.kind {
+                ToastKind::Warning | ToastKind::Error => 8,
+                _ => 4,
+            })
         });
-        let timer = Some(dismiss_after(app, id, lasts));
+        let timer = lasts.map(|lasts| dismiss_after(app, id, lasts));
         let entry = Shown {
             id,
             kind: toast.kind,
@@ -173,6 +197,7 @@ impl ToastList {
             key: toast.key,
             data,
             action,
+            action2,
             lasts,
             timer,
         };
@@ -210,7 +235,10 @@ impl ToastList {
     fn hover(&self, app: &Rc<App>, id: i32, over: bool) {
         let mut shown = self.shown.borrow_mut();
         if let Some(s) = shown.iter_mut().find(|s| s.id == id) {
-            s.timer = (!over).then(|| dismiss_after(app, id, s.lasts));
+            s.timer = s
+                .lasts
+                .filter(|_| !over)
+                .map(|lasts| dismiss_after(app, id, lasts));
         }
     }
 
@@ -222,14 +250,20 @@ impl ToastList {
             .any(|s| s.key.as_deref() == Some(key))
     }
 
-    fn run_action(&self, app: &Rc<App>, id: i32) {
+    fn run_action(&self, app: &Rc<App>, id: i32, second: bool) {
         // Taken out while it runs: the action may show other toasts.
         let action = self
             .shown
             .borrow_mut()
             .iter_mut()
             .find(|s| s.id == id)
-            .and_then(|s| s.action.take());
+            .and_then(|s| {
+                if second {
+                    s.action2.take()
+                } else {
+                    s.action.take()
+                }
+            });
         if let Some(action) = action {
             self.dismiss(app, id);
             action(app);

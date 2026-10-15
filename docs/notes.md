@@ -1534,6 +1534,30 @@ each section. Delete entries that stop being true.
   Save Replay, between recording and the virtual camera, OBS's order)
   moves Exit beside Settings below a 272 px dock row and tightens spacing
   below 240 px. Settings › Output has a Replay Buffer group (length, memory).
+- 2026-10-15 (#66): **capacity estimate = per-chip data, not a benchmark.**
+  `estimate_capacity` packs every H.264/HEVC encoder (program, stream, ISO
+  files) onto the chip's encode engines, largest first onto the least busy
+  (a session stays on one engine, #41), and judges the busiest engine's
+  pixel rate against `media_engines.json`: fits <= 0.85, no margin <= 1.
+  H.264 costs 1.9x HEVC per picture (tune on m2-b: the same ISO files
+  1.28x vs 0.72x and 1.04x vs 0.60x real time), so H.264 files are offered
+  HEVC and never the reverse; the stream's H.264 is counted the same
+  (unmeasured on its own). ProRes isn't counted (tune ran ProRes ISOs at
+  3.2x beside an HEVC program on the M2: its own engines). Chips not
+  in the table get their generation's per-engine rate and their tier's
+  engine count (base/Pro 1, Max 2, Ultra 4), labelled "assumed". A tune
+  measurement that couldn't keep up overrules the prediction. Suggestions
+  are tune's closeness costs, singles and pairs, at most one per target;
+  "lower an ISO's size/fps" only exists for cameras and test patterns (a
+  screen records at its own size). Adding an ISO file (Sources dock) only
+  ever changes that source: as is if it keeps up (no margin counts), else
+  smaller/slower, else off, and says why. "Don't show again for this
+  setup" keys on `workload_key` (the outputs' sizes, rates and codecs) in
+  `isocast-ui-notices.json` beside the layout prefs. Integration point for
+  first-launch Optimize (#46) and the record button: call
+  `Method::EstimateCapacity(CapacityParams { setup: Some(candidate), stream,
+  add_iso })` per ISO candidate and apply `admission.change`; `start`
+  already notes a can't-keep-up prediction.
 
 - 2026-10-15 (#58): a disabled primary footer button uses the kit's
   disabled footer style (hover fill, text-disabled label) everywhere, not
@@ -4666,6 +4690,24 @@ each section. Delete entries that stop being true.
   audio track AVFoundation drops ~600 samples of the edit list's start
   (its audio came out 13 ms short of the video). Check muxed files with
   AVAssetReader, not only ffprobe.
+- 2026-10-15 (#66): **ISO files can drop with a stream on even when the
+  encoders have room.** On the M5 Max (load 0.47 by the table) a 6 s take of
+  a 4K60 + 1080p60 ISO, 1080p60 program and a local stream dropped ~69% of
+  ISO frames (program and stream whole): the stream encoder's pressure
+  (#60) cut the ISO share and it recovers at +1%/500 ms. On m2-b the same
+  takes without a stream were clean and the predicted-fitting fix with the
+  stream was clean, so the M2 numbers stand, but the overload notice says
+  "the encoders fell behind, though this setup should fit" rather than
+  blaming capacity when the table says it fits. Worth a look by whoever
+  owns the admission controller.
+- 2026-10-15 (#66): **remote-build lanes seeded from another lane can
+  reuse that lane's crates.** A new lane's target is an APFS clone of the
+  last-used lane's; cargo judges freshness by mtime, so a checkout whose
+  files are older than that lane's last build (a fresh `git worktree add`
+  of an older commit) compiled against the other lane's protocol (a base
+  build of main failed on this branch's `EstimateCapacity`). Fix used:
+  `ISOCAST_LANE=<lane> scripts/remote-build.sh cargo clean --release -p
+  <every workspace crate>` once, then build.
 
 - 2026-10-15 (#58): System Settings' sheets (the password prompt, "Quit &
   Reopen") are separate layer-0 windows of its pid, in front of the main
