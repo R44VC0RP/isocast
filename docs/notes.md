@@ -6404,6 +6404,22 @@ each section. Delete entries that stop being true.
 - 2026-10-11: objc2 0.3 renamed many C functions to methods (for example
   `CMClock::host_time_clock().time()`); the free functions are deprecated.
 
+- 2026-10-15: README screenshots (scripts/screenshots/take.sh): take them on
+  isocast-m2-b, not exonbook. On exonbook display-mode.swift has no HiDPI
+  mode, the app window comes out 1440x867, and Finder's sidebar shows
+  Ryan's favourites. On m2-b the first run builds Isocast.app there
+  (ui-dev.sh --release) for more than 10 minutes, so `testmac.sh gui` gives
+  up ("no answer from the desktop-session bridge") while remote.sh carries
+  on: wait for it, then `scp 'isocast-m2-b:isocast-scratch/docs-shots/out/*.png'`
+  and run take.sh's trim step by hand. Hold /Volumes/IsocastBuild/.bench.lock
+  (`lockf`) so the hardware queue doesn't start on it meanwhile. Since
+  recordings go into project folders, shoot.sh opens the take's project
+  folder itself. Dialogs that need a fake OBS folder (the first-launch
+  sheet) or a benchmark (the Optimize summary) are drawn offscreen with
+  scripts/snapshot.sh: `ISOCAST_OBS_FOLDER=… --state wizard-first-launch`,
+  and `--state wizard:goal --state wizard-sample:OPTIMIZED.json` (the
+  sample needs the wizard open first).
+
 ## Verification recipes
 
 - The sheets against Paper's Screens boards (N.5.1b): in

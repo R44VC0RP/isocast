@@ -163,6 +163,7 @@ stop() {
         [ "$w" = "$(window_of Terminal isocast-shots)" ] && break
     done
     close_window Finder Recordings
+    close_window Finder Untitled
     if [ -e "$S/terminal-default" ]; then
         defaults write com.apple.Terminal "Default Window Settings" "$(cat "$S/terminal-default")"
         defaults write com.apple.Terminal "Startup Window Settings" "$(cat "$S/terminal-default")"

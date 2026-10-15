@@ -10,6 +10,9 @@ sleep 3
 front Terminal cli.command
 grab cli Terminal cli.command
 
+# The replay buffer running beside the take (its button lit).
+"$isocast" replay start >/dev/null || log "couldn't start the replay buffer"
+sleep 2
 front Isocast
 grab app Isocast
 
@@ -29,23 +32,26 @@ grab settings Isocast
 w="$(window_of Isocast)"
 cua press_key "{\"pid\":${w#* },\"window_id\":${w% *},\"key\":\"escape\",\"session\":\"$(sid)\"}" >/dev/null
 
-# Stop, then the take's files in Finder: File > Show Recordings reveals the
-# folder in its parent; open it, in the list view.
+# Stop, then the take's files in Finder: each recording has its own
+# project folder under the recordings folder; open it, in the list view,
+# without the sidebar (it would show the test Mac's own favourites).
 sleep 2
+"$isocast" replay stop >/dev/null 2>&1
 "$isocast" stop >/dev/null
 sleep 2
-menu Isocast File "Show Recordings"
+project="$(ls -d /Users/Shared/Recordings/*/ | head -1)"
+project="${project%/}"
+open "$project"
 sleep 3
-w="$(window_of Finder Shared)"
-[ -n "$w" ] && cua hotkey "{\"pid\":${w#* },\"window_id\":${w% *},\"keys\":[\"cmd\",\"down\"],\"session\":\"$(sid)\"}" >/dev/null
-sleep 2
+title="$(basename "$project")"
 menu Finder View "as List" || log "couldn't switch Finder to the list view"
-frame Finder 60 80 840 400 Recordings
-front Finder Recordings
-grab recordings Finder Recordings
+menu Finder View "Hide Sidebar" || log "the sidebar was hidden already"
+frame Finder 60 80 840 400 "$title"
+front Finder "$title"
+grab recordings Finder "$title"
 
 # What was recorded, for the log.
-for f in /Users/Shared/Recordings/*.mov; do
+for f in "$project"/*.mov; do
     command -v ffprobe >/dev/null || break
     log "$(basename "$f"): $(ffprobe -v error -show_entries stream=codec_name,width,height,r_frame_rate -show_entries format=duration -of compact=p=0:nk=1 "$f" | tr '\n' ' ')"
 done
