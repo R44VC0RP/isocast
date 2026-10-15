@@ -1332,6 +1332,11 @@ pub fn socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("ISOCAST_SOCKET") {
         return PathBuf::from(path);
     }
+    default_socket_path()
+}
+
+/// The user's own engine's socket, whatever `$ISOCAST_SOCKET` says.
+pub fn default_socket_path() -> PathBuf {
     support_folder().join("isocastd.sock")
 }
 

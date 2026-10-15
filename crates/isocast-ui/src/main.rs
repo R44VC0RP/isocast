@@ -261,6 +261,7 @@ fn main() {
             || options.a11y
             || options.soak.is_some()
         {
+            refuse_real_engine()?;
             offscreen::run(&options)
         } else {
             window::run(&options)
@@ -274,6 +275,33 @@ fn main() {
         }
     };
     exit(code)
+}
+
+/// Offscreen runs drive the app's states for real (`record` starts a
+/// recording, `go-live` a stream), so they must never reach the user's own
+/// engine: one did, and recorded Ryan's camera, mic and screen for three
+/// hours. They need `ISOCAST_SOCKET` pointing at a throwaway engine, as
+/// scripts/snapshot.sh and scripts/visual-shots.sh set up.
+fn refuse_real_engine() -> Result<()> {
+    let socket = isocast_protocol::api::socket_path();
+    let own = isocast_protocol::api::default_socket_path();
+    // The same folder reached through a symlink still counts as the same.
+    let folder = |p: &std::path::Path| p.parent().and_then(|p| p.canonicalize().ok());
+    let same = socket == own
+        || (socket.file_name() == own.file_name()
+            && folder(&socket).is_some()
+            && folder(&socket) == folder(&own));
+    let default = std::env::var_os("ISOCAST_SOCKET").is_none() || same;
+    if default {
+        bail!(
+            "offscreen runs (--snapshot, --snapshot-watch, --a11y, --soak) never use your own \
+             engine at {}: their states start recordings and streams for real. Use \
+             scripts/snapshot.sh, which starts a throwaway engine with synthetic sources, or set \
+             ISOCAST_SOCKET to an engine of your own in a scratch folder",
+            socket.display()
+        );
+    }
+    Ok(())
 }
 
 /// Leaves without running thread-local destructors. Slint keeps its

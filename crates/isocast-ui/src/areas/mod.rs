@@ -40,7 +40,8 @@
 //!
 //! # Snapshot states
 //!
-//! `isocast-ui --snapshot OUT.png --state NAME[:ARG]…` runs each state in
+//! `scripts/snapshot.sh --snapshot OUT.png --state NAME[:ARG]…` (a throwaway
+//! engine; isocast-ui refuses offscreen runs on the user's own) runs each state in
 //! order, offscreen, against the daemon (see offscreen.rs for the
 //! window-wide ones). To add one for your area, answer it in `state`:
 //! return `Some(Ok(()))` when you handled `name`, `Some(Err(…))` when it
