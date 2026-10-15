@@ -286,6 +286,14 @@ struct ImportDocumentsParams {
     switch: bool,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct RequestPermissionsToolParams {
+    /// Only this one: screen_recording, camera or microphone (all three
+    /// not decided yet if left out).
+    #[serde(default)]
+    permission: Option<isocast_protocol::devices::PermissionKind>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct OpenPermissionSettingsParams {
     /// screen_recording, camera or microphone.
@@ -1289,16 +1297,25 @@ impl Isocast {
 
     #[tool(
         description = "Ask macOS for screen recording, camera and microphone access where it \
-                       hasn't been decided yet. Its prompts appear on the user's screen; waits up \
-                       to a minute for answers and returns the permissions with next steps.",
+                       hasn't been decided yet (or only `permission`). Its prompts appear on the \
+                       user's screen; waits up to a minute for answers and returns the \
+                       permissions with next steps.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = true
         )
     )]
-    async fn request_permissions(&self) -> Result<Json<PermissionsReport>, String> {
-        self.call(Method::RequestPermissions).await
+    async fn request_permissions(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<RequestPermissionsToolParams>>,
+    ) -> Result<Json<PermissionsReport>, String> {
+        self.call(Method::RequestPermissions(params.permission.map(
+            |permission| isocast_protocol::api::RequestPermissionsParams {
+                permission: Some(permission),
+            },
+        )))
+        .await
     }
 
     #[tool(

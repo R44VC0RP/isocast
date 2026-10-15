@@ -239,6 +239,19 @@ pub struct PermissionDetail {
     /// Granting it takes effect once isocastd restarts (`isocast restart`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub restart_after_granting: bool,
+    /// The app macOS lists this permission under in System Settings (the
+    /// one to turn on), like "Isocast"; it can differ by permission.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app: String,
+    /// That app's bundle, to drag into System Settings' list when it isn't
+    /// listed there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_path: Option<String>,
+    /// macOS refused it without showing its prompt (the app isn't allowed
+    /// to ask, as Isocast 0.0.2 wasn't for the camera): asking again won't
+    /// help; `next_step` says what will.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub denied_without_prompt: bool,
 }
 
 /// What to do about a permission.
@@ -253,4 +266,7 @@ pub enum PermissionAction {
     OpenSettings,
     /// A policy blocks it; only the Mac's administrator can change that.
     AskAdministrator,
+    /// It is granted in System Settings but takes effect only once
+    /// isocastd restarts (`isocast restart`, `shutdown_if_idle`).
+    Restart,
 }

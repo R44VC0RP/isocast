@@ -1,0 +1,53 @@
+// Area H: the permissions step (src/areas/permissions.rs). Screen
+// Recording, Camera and Microphone, each with what it is for, its live
+// status (the engine's `permissions`, read every second while shown) and
+// one action. Shown before Welcome on the first launch, whenever the live
+// setup needs a permission it lacks, from Settings › General and from a
+// source's warning.
+
+// One permission's row.
+export struct PermissionItem {
+    // screen_recording, camera, microphone (the API's names).
+    id: string,
+    icon: string,
+    title: string,
+    // What it is for.
+    purpose: string,
+    // allowed, not-asked, denied, relaunch, blocked, silent.
+    status: string,
+    // The status in words: "Allowed", "Not asked yet"…
+    status-label: string,
+    // What happened and what to do, in plain words ("" when allowed or
+    // nothing needs saying).
+    detail: string,
+    // ask, open, relaunch, update ("" for none).
+    action: string,
+    action-label: string,
+    // The action is under way (a prompt is up, the engine restarts).
+    busy: bool,
+    // The live setup (or a first setup) uses it.
+    needed: bool,
+}
+
+export global PermissionsArea {
+    // Showing over the window.
+    in-out property <bool> shown;
+    // Read from the engine at least once.
+    in property <bool> checked;
+    in property <[PermissionItem]> items;
+    // Every permission that's needed is allowed: Continue.
+    in property <bool> ready;
+    // What macOS lists them under ("Isocast").
+    in property <string> app-name;
+    // The first launch (Continue leads on to Welcome) or later (Done).
+    in property <bool> first-launch;
+    // The floating helper beside System Settings is showing.
+    in property <bool> helper-shown;
+    // The width a row's detail wraps at (set by the sheet).
+    in-out property <length> detail-width: 560px;
+    // A row's action: its id and the action ("ask", "open", "relaunch",
+    // "update").
+    callback act(string, string);
+    callback finish();
+    callback skip();
+}

@@ -397,12 +397,19 @@ enum Command {
     Restart,
     /// Show the screen recording, camera and microphone permissions and
     /// what to do about each that isn't granted; with --request, ask macOS
-    /// for the ones not decided yet (its prompts appear) and wait up to a
-    /// minute for the answers; with --open, open the System Settings pane
-    /// where one is turned on.
+    /// for the ones not decided yet (its prompts appear; --request camera
+    /// asks for that one only) and wait up to a minute for the answers;
+    /// with --open, open the System Settings pane where one is turned on.
     Permissions {
-        #[arg(long, conflicts_with = "open")]
-        request: bool,
+        /// screen_recording, camera or microphone; all three if left out.
+        #[arg(
+            long,
+            conflicts_with = "open",
+            value_name = "PERMISSION",
+            num_args = 0..=1,
+            value_parser = parse_permission
+        )]
+        request: Option<Option<isocast_protocol::devices::PermissionKind>>,
         /// screen_recording, camera or microphone.
         #[arg(long, value_name = "PERMISSION", value_parser = parse_permission)]
         open: Option<isocast_protocol::devices::PermissionKind>,
@@ -2335,10 +2342,12 @@ fn restart() -> Result<ExitCode> {
 }
 
 fn permissions(
-    request: bool,
+    request: Option<Option<isocast_protocol::devices::PermissionKind>>,
     open: Option<isocast_protocol::devices::PermissionKind>,
     json: bool,
 ) -> Result<ExitCode> {
+    let only = request.flatten();
+    let request = request.is_some();
     // Ask the daemon: it records, so its permissions are the ones that count.
     let mut client = Client::connect_or_launch()?;
     if let Some(permission) = open {
@@ -2357,10 +2366,10 @@ fn permissions(
     if request && !json {
         // Only when macOS has something to ask.
         let now: isocast_protocol::devices::PermissionsReport = client.call(Method::Permissions)?;
-        let undecided = now
-            .details
-            .iter()
-            .any(|d| d.state == isocast_protocol::devices::Permission::NotDetermined);
+        let undecided = now.details.iter().any(|d| {
+            d.state == isocast_protocol::devices::Permission::NotDetermined
+                && only.is_none_or(|only| only == d.permission)
+        });
         if undecided {
             isocast_diagnostics::diagnostic!(
                 "Asking macOS; answer its prompts (waiting up to a minute)…"
@@ -2368,7 +2377,11 @@ fn permissions(
         }
     }
     let report: isocast_protocol::devices::PermissionsReport = if request {
-        client.call(Method::RequestPermissions)?
+        client.call(Method::RequestPermissions(only.map(|permission| {
+            isocast_protocol::api::RequestPermissionsParams {
+                permission: Some(permission),
+            }
+        })))?
     } else {
         client.call(Method::Permissions)?
     };

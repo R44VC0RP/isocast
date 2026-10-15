@@ -171,22 +171,33 @@ pub(crate) fn inventory() -> Result<Devices> {
 }
 
 /// Ask macOS for screen recording, camera and microphone access where it
-/// hasn't been decided, showing its prompts, and wait up to `timeout` for
-/// the answers. Returns the permissions afterwards.
-pub(crate) fn request_permissions(timeout: Duration) -> Result<Permissions> {
+/// hasn't been decided (only `only`, if given), showing its prompts, and
+/// wait up to `timeout` for the answers. Returns the permissions afterwards.
+pub(crate) fn request_permissions(
+    timeout: Duration,
+    only: Option<PermissionKind>,
+) -> Result<Permissions> {
+    let wanted = |kind| only.is_none_or(|only| only == kind);
     // Opens the prompt (or System Settings) the first time; no answer to
     // wait for, since macOS applies it to the next launch.
-    if !CGPreflightScreenCaptureAccess() {
+    if wanted(PermissionKind::ScreenRecording) && !CGPreflightScreenCaptureAccess() {
         CGRequestScreenCaptureAccess();
     }
     let (tx, rx) = mpsc::channel();
     let mut asked = 0;
-    for media_type in [unsafe { AVMediaTypeVideo }, unsafe { AVMediaTypeAudio }] {
-        if authorization(media_type)? != Permission::NotDetermined {
+    let media = [
+        (PermissionKind::Camera, unsafe { AVMediaTypeVideo }),
+        (PermissionKind::Microphone, unsafe { AVMediaTypeAudio }),
+    ];
+    for (kind, media_type) in media {
+        if !wanted(kind) || authorization(media_type)? != Permission::NotDetermined {
             continue;
         }
         let tx = tx.clone();
-        let handler = RcBlock::new(move |_granted: Bool| {
+        let asked_at = Instant::now();
+        let handler = RcBlock::new(move |granted: Bool| {
+            // Refused before a prompt could even be read: macOS showed none.
+            crate::permissions::answered(kind, granted.as_bool(), asked_at.elapsed());
             let _ = tx.send(());
         });
         let media_type = media_type.context("AVFoundation media type constant is missing")?;

@@ -1566,6 +1566,25 @@ each section. Delete entries that stop being true.
   a Finder rename or a kill between the folder rename and the timeline
   writes heals itself. Export manifests are not healed after a Finder
   rename (they are rewritten only by `rename_project`).
+- 2026-10-15 (#51 permissions onboarding): the permissions step is area H
+  (src/areas/permissions.rs, ui/areas/permissions/), shown before Welcome
+  on the first launch, at launch when the live setup needs a missing
+  permission (once per run; Skip hides it until next launch), from
+  Settings › General › Review… and from a source's permission warning
+  (`Ui.menu("permissions")`). The first run's Permissions step draws the
+  same rows. Rows layout over three columns (compared in real snapshots):
+  statuses and actions line up in one lane, details get the full width.
+  Per-row actions: Allow… = `request_permissions` with one permission on a
+  connection of its own (the engine waits up to a minute; the window's
+  calls must not); Open Settings = the exact pane plus the floating
+  helper; Relaunch = `shutdown_if_idle` (the app itself never needs to
+  relaunch: isocastd is its own responsible process and the only one
+  holding the stale answer); Check for Updates… for a refusal without a
+  prompt. The helper is a native non-activating NSPanel (src/helper.rs)
+  placed by CGWindowListCopyWindowInfo (System Settings' pid, layer 0),
+  drawn as Console's floating surface with Mona Sans; it drags a file URL
+  of `app_path`. Radii follow theme.slint (sheets 12px), not design.md's
+  superseded 3px.
 
 - 2026-10-14 (8.2h fix round 1, review findings): **Trust and safety
   corrections.**
@@ -4402,6 +4421,41 @@ each section. Delete entries that stop being true.
 - 2026-10-14 (7.7): SBPL rules are last-match-wins; `regex` filters take a
   POSIX regex in `#"..."` (no `"` possible), so the recordings root is
   regex-escaped and a root with a quote gets no write rule.
+- 2026-10-15 (#51): macOS 27 attributes every privacy permission of the
+  bundled engine to the outer Isocast.app (tccd log: "executable path
+  …/Isocast Engine.app/Contents/MacOS/isocastd resolves to attributed
+  bundle: …/Isocast.app/", team ids matched), for screen recording too, so
+  System Settings lists "Isocast" and the helper drags Isocast.app. A
+  first reading on m2-a looked like screen recording went to the engine's
+  own bundle; that was the dev app's TCC entry for the shared
+  dev.isocast.isocastd id. tccd's reasons: `sudo log show --predicate
+  'subsystem == "com.apple.TCC"' --info` (BUNDLE_ATTRIBUTION lines).
+- 2026-10-15 (#51): any grant made in System Settings while isocastd
+  runs reaches only processes started afterwards: screen recording ("may
+  not be able to record … until it is quit") and also camera and
+  microphone turned on after Don't Allow ("will not have access … until
+  it is quit"; isocast-m2-b, macOS 26.7). macOS's Quit & Reopen quits
+  only the UI, never isocastd. A child that inherits isocastd's
+  responsibility inherits the stale answer too: the
+  `--preflight-permissions` child disclaims responsibility and exits with
+  a bit per permission it lacks; any it has and the engine doesn't gets
+  action `restart`.
+- 2026-10-15 (#51): an app without the camera/audio-input entitlement
+  (0.0.2) gets its media request answered "denied" in a few ms with no
+  prompt; the engine marks requests refused within 600 ms
+  `denied_without_prompt` (reproduced with an ad-hoc copy of the release
+  app on m2-a). `tccutil reset` needs the bundle registered first
+  (`lsregister -f`), else "No such bundle identifier".
+- 2026-10-15 (#51): on isocast-m2-a, cua-driver's desktop `drag` performs
+  a real drag into System Settings' privacy list (it asks for the admin
+  password, typed with desktop `press_key` per character; `type_text`
+  can't reach the auth sheet), and Finder windows cover the dock. Resetting
+  dev.isocast.isocastd there also resets the shared dev app's grants;
+  after the #51 run camera, microphone and screen recording were granted
+  to Isocast Dev again (same certificate, so every worktree's dev app).
+  If it held Input Monitoring or Accessibility before (hotkey tests), those
+  were reset too and not restored: grant them again if a hotkey run on
+  m2-a says so.
 
 - 2026-10-14 (8.2h): Slint's macOS menu bar (muda) rebuilds the whole
   application menu whenever a tracked property changes, so an NSMenuItem

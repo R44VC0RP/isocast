@@ -10,6 +10,7 @@
 //! | E the canvas | `canvas.rs` (+ preview.rs, layers.rs, frames.rs, picture.rs) | `canvas/` | `CanvasArea` |
 //! | F scene collections and profiles | `library.rs` | `library/` | `LibraryArea` |
 //! | G the Create view (clip bar) | `create.rs` (+ thumbs.rs) | `create/` | `CreateArea` |
+//! | H the permissions step | `permissions.rs` (+ helper.rs) | `permissions/` | `PermissionsArea` |
 //!
 //! What is shared lives outside the areas and changes rarely: the widget
 //! kit (ui/kit.slint, ui/widgets/), the tokens (ui/theme.slint), icons
@@ -62,6 +63,7 @@ pub mod developer;
 pub mod hotkeys;
 pub mod library;
 pub mod mixer;
+pub mod permissions;
 pub mod report;
 pub mod settings;
 pub mod sources;
@@ -85,6 +87,7 @@ pub const STATES: &[&[&str]] = &[
     library::STATES,
     create::STATES,
     developer::STATES,
+    permissions::STATES,
 ];
 
 /// What `App` asks of an area. Everything but `connect` and `update` has

@@ -112,9 +112,12 @@ pub trait Platform: Clone + Send + Sync + 'static {
     }
 
     /// Ask the OS for screen recording, camera and microphone access where
-    /// it hasn't been decided, showing its prompts, and wait a while for
-    /// the answers. Returns the permissions afterwards.
-    fn request_permissions(&self) -> anyhow::Result<PermissionsReport>;
+    /// it hasn't been decided (only `only`, if given), showing its prompts,
+    /// and wait a while for the answers. Returns the permissions afterwards.
+    fn request_permissions(
+        &self,
+        only: Option<PermissionKind>,
+    ) -> anyhow::Result<PermissionsReport>;
 
     /// Open the settings where `permission` is turned on by hand. Returns
     /// what was opened.

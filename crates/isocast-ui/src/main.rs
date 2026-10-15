@@ -28,6 +28,7 @@ mod daemon;
 mod form;
 mod frames;
 mod gpu;
+mod helper;
 mod keys;
 mod kit;
 #[cfg(target_os = "macos")]

@@ -124,12 +124,15 @@ impl Platform for MacPlatform {
     }
 
     fn permissions(&self) -> anyhow::Result<PermissionsReport> {
-        Ok(permissions::report(devices::permissions()?))
+        Ok(permissions::live_report(devices::permissions()?))
     }
 
-    fn request_permissions(&self) -> anyhow::Result<PermissionsReport> {
-        let permissions = devices::request_permissions(std::time::Duration::from_secs(60))?;
-        Ok(permissions::report(permissions))
+    fn request_permissions(
+        &self,
+        only: Option<PermissionKind>,
+    ) -> anyhow::Result<PermissionsReport> {
+        let permissions = devices::request_permissions(std::time::Duration::from_secs(60), only)?;
+        Ok(permissions::live_report(permissions))
     }
 
     fn open_permission_settings(&self, permission: PermissionKind) -> anyhow::Result<String> {
@@ -378,6 +381,19 @@ static MAIN_LOOP: OnceLock<()> = OnceLock::new();
 /// Declare that this process's main thread is about to run
 /// [`run_main_queue`], so main-thread work asked for before it starts waits
 /// for it instead of being skipped.
+/// `isocastd --preflight-permissions`: the permissions this new process
+/// has, as an exit status with a bit for each one not granted (0: all), for
+/// a running engine to learn that a grant made in System Settings waits for
+/// its restart. Never prompts.
+pub fn preflight_permissions() -> Option<u8> {
+    (std::env::args().nth(1).as_deref() == Some(permissions::PREFLIGHT_ARG)).then(|| {
+        devices::permissions()
+            .map(|p| permissions::preflight_status(&p))
+            // Unreadable: "unknown" to the parent (not a bit pattern).
+            .unwrap_or(u8::MAX)
+    })
+}
+
 pub fn will_run_main_queue() {
     let _ = MAIN_LOOP.set(());
 }

@@ -191,9 +191,15 @@ export component SourcesDock inherits Dock {
                         size: Theme.icon-sm;
                         color: Theme.danger-text;
                     }
+                    // Waiting for a permission: the warning opens the
+                    // permissions step (area H) that allows it.
+                    if item.state == "waiting for permission": TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { Ui.menu("permissions"); }
+                    }
                     Tooltip {
                         Tip {
-                            text: item.error;
+                            text: item.state == "waiting for permission" ? item.error + " Click to allow it." : item.error;
                         }
                     }
                 }

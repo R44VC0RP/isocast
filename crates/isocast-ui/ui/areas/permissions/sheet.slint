@@ -1,0 +1,307 @@
+// The permissions step: a sheet over the window (Welcome's and the first
+// run's manners: 120px down, the brand title, 1px lines between rows, the
+// one yellow button in the footer). Each row is a permission with what it
+// is for, its live status and one action; the rows flip to Allowed on
+// their own while the sheet is open.
+
+import { Theme } from "../../theme.slint";
+import { Icon, Icons } from "../../icons.slint";
+import { Button, ButtonVariant, DialogFooter, Spinner } from "../../kit.slint";
+import { PermissionsArea, PermissionItem } from "state.slint";
+
+// The status: a dot and its word, in the status's colour.
+component Status inherits HorizontalLayout {
+    in property <PermissionItem> item;
+    property <color> tone: root.item.status == "allowed" ? Theme.onair-text
+        : root.item.status == "relaunch" ? Theme.accent-text
+        : root.item.status == "not-asked" ? Theme.text-3
+        : Theme.danger-text;
+    spacing: 6px;
+    alignment: start;
+    VerticalLayout {
+        alignment: center;
+        if root.item.status == "allowed": Icon {
+            path: Icons.check;
+            size: Theme.icon-sm;
+            color: root.tone;
+        }
+        if root.item.status != "allowed": Rectangle {
+            width: Theme.icon-sm;
+            height: Theme.icon-sm;
+            Rectangle {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: root.item.status == "not-asked" ? transparent : root.tone;
+                border-width: root.item.status == "not-asked" ? 1px : 0;
+                border-color: root.tone;
+            }
+        }
+    }
+    Text {
+        text: root.item.status-label;
+        color: root.tone;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        font-weight: Theme.weight-medium;
+        vertical-alignment: center;
+    }
+}
+
+// The row's one action (or a spinner while it works).
+component Action inherits HorizontalLayout {
+    in property <PermissionItem> item;
+    alignment: end;
+    if root.item.busy: HorizontalLayout {
+        spacing: Theme.space-2;
+        VerticalLayout {
+            alignment: center;
+            Spinner {
+                small: true;
+            }
+        }
+        Text {
+            text: root.item.action == "relaunch" ? "Relaunching…" : root.item.action == "ask" ? "Waiting for you…" : "Opening…";
+            color: Theme.text-3;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            vertical-alignment: center;
+        }
+    }
+    if !root.item.busy && root.item.action != "": VerticalLayout {
+        alignment: center;
+        Button {
+            text: root.item.action-label;
+            icon: root.item.action == "open" ? Icons.settings : root.item.action == "relaunch" ? Icons.refresh : root.item.action == "update" ? Icons.download : "";
+            accessible-name: root.item.action-label + " (" + root.item.title + ")";
+            clicked => { PermissionsArea.act(root.item.id, root.item.action); }
+        }
+    }
+}
+
+component Detail inherits Text {
+    color: Theme.text-2;
+    font-size: Theme.fs-sm;
+    letter-spacing: Theme.tracking-sm;
+    line-height-factor: Theme.leading-sm;
+    wrap: word-wrap;
+}
+
+// One permission a row, the status and action in fixed
+// lanes on the right so they line up down the list; what happened, when
+// there is something to say, on the full width under it.
+component Rows inherits VerticalLayout {
+    spacing: 0;
+    for item[i] in PermissionsArea.items: VerticalLayout {
+        spacing: 0;
+        if i > 0: Rectangle {
+            height: 1px;
+            background: Theme.line;
+        }
+        VerticalLayout {
+            padding-top: Theme.space-4;
+            padding-bottom: Theme.space-4;
+            spacing: Theme.space-2;
+            HorizontalLayout {
+                min-height: 40px;
+                spacing: Theme.space-4;
+                VerticalLayout {
+                    alignment: start;
+                    padding-top: 1px;
+                    Icon {
+                        path: Icons.named(item.icon);
+                        size: Theme.icon-lg;
+                        stroke-width: 1.65px;
+                        color: item.status == "allowed" ? Theme.text-3 : Theme.text-2;
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: item.title;
+                        color: Theme.text;
+                        font-weight: Theme.weight-semibold;
+                    }
+                    Text {
+                        text: item.purpose;
+                        color: Theme.text-3;
+                        font-size: Theme.fs-sm;
+                        letter-spacing: Theme.tracking-sm;
+                        wrap: word-wrap;
+                    }
+                }
+                Status {
+                    width: 136px;
+                    item: item;
+                }
+                Action {
+                    width: 176px;
+                    item: item;
+                }
+            }
+            if item.detail != "": HorizontalLayout {
+                padding-left: Theme.icon-lg + Theme.space-4;
+                Detail {
+                    // Its own width, not the layout's: wrapped lines are
+                    // measured with it, so the row (and the card) is as
+                    // tall as the lines it shows.
+                    width: PermissionsArea.detail-width;
+                    text: item.detail;
+                }
+            }
+        }
+    }
+}
+
+// The rows, with "Checking…" until the first answer (also the first
+// run's Permissions step). Rows rather than three columns side by side
+// (compared in real snapshots, 2026-10-15): the statuses and actions line
+// up down one lane, and a row's plain-words detail gets the full width.
+export component PermissionRows inherits VerticalLayout {
+    if !PermissionsArea.checked: HorizontalLayout {
+        min-height: 72px;
+        spacing: Theme.space-3;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Spinner { }
+        }
+        Text {
+            text: "Checking…";
+            color: Theme.text-2;
+            vertical-alignment: center;
+        }
+    }
+    if PermissionsArea.checked: Rows { }
+}
+
+export component PermissionsSheet inherits Rectangle {
+    background: Theme.scrim;
+    TouchArea { }
+
+    keys := FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                if PermissionsArea.ready {
+                    PermissionsArea.finish();
+                } else {
+                    PermissionsArea.skip();
+                }
+                return accept;
+            }
+            reject
+        }
+    }
+
+    card := Rectangle {
+        width: min(780px, root.width - 40px);
+        height: min(column.preferred-height + 2px, root.height - 40px);
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-5, min(Theme.welcome-top, root.height - self.height - Theme.space-5));
+        background: Theme.surface-overlay;
+        border-width: 1px;
+        border-color: Theme.line-strong;
+        border-radius: Theme.r-panel;
+        drop-shadow-color: Theme.shadow-sheet-color;
+        drop-shadow-blur: Theme.shadow-sheet-blur;
+        drop-shadow-offset-y: Theme.shadow-sheet-y;
+        clip: true;
+        accessible-role: groupbox;
+        accessible-label: "Permissions";
+
+        // The width a row's detail wraps at (see Rows).
+        changed width => { PermissionsArea.detail-width = self.width - 2 * Theme.space-8 - Theme.icon-lg - Theme.space-4; }
+        init => { PermissionsArea.detail-width = self.width - 2 * Theme.space-8 - Theme.icon-lg - Theme.space-4; }
+
+        column := VerticalLayout {
+            // Inside the 1px edge, as wide as the card less it, so wrapped
+            // lines are measured at the width they get (as Welcome does).
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: parent.height - 2px;
+            spacing: 0;
+
+            VerticalLayout {
+                padding-top: Theme.space-8;
+                padding-left: Theme.space-8 - 1px;
+                padding-right: Theme.space-8 - 1px;
+                padding-bottom: Theme.space-6;
+                spacing: Theme.space-2;
+                Text {
+                    text: "Let " + PermissionsArea.app-name + " see and hear";
+                    font-family: Theme.font-brand;
+                    font-size: Theme.fs-display;
+                    font-weight: Theme.weight-semibold;
+                    letter-spacing: Theme.tracking-display;
+                    color: Theme.text;
+                    accessible-role: AccessibleRole.text;
+                }
+                Text {
+                    text: "macOS asks once for each. " + PermissionsArea.app-name + " only records the screens, cameras and microphones you add to a scene.";
+                    color: Theme.text-2;
+                    line-height-factor: Theme.leading-welcome;
+                    wrap: word-wrap;
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.line;
+            }
+            PermissionRows {
+                padding-left: Theme.space-8 - 1px;
+                padding-right: Theme.space-8 - 1px;
+            }
+            // While the helper floats beside System Settings: what to do
+            // with it.
+            if PermissionsArea.helper-shown: VerticalLayout {
+                Rectangle {
+                    height: 1px;
+                    background: Theme.line;
+                }
+                HorizontalLayout {
+                    padding-top: Theme.space-3;
+                    padding-bottom: Theme.space-3;
+                    padding-left: Theme.space-8 - 1px;
+                    padding-right: Theme.space-8 - 1px;
+                    spacing: Theme.space-3;
+                    VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            path: Icons.info;
+                            size: Theme.icon-sm;
+                            color: Theme.accent-text;
+                        }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "In System Settings, drag " + PermissionsArea.app-name + " from the small window beside it into the list, then switch it on. This updates by itself.";
+                        color: Theme.text-2;
+                        font-size: Theme.fs-sm;
+                        letter-spacing: Theme.tracking-sm;
+                        line-height-factor: Theme.leading-sm;
+                        wrap: word-wrap;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.line;
+            }
+            DialogFooter {
+                inset: Theme.space-8 - 1px;
+                extra-text: PermissionsArea.ready ? "" : "Skip for now";
+                cancel-text: "";
+                ok-text: PermissionsArea.first-launch ? "Continue" : "Done";
+                ok-enabled: PermissionsArea.ready;
+                note: PermissionsArea.ready ? "" : "You can allow these later from Settings › General.";
+                extra => { PermissionsArea.skip(); }
+                ok => { PermissionsArea.finish(); }
+            }
+        }
+    }
+}

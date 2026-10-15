@@ -66,6 +66,7 @@ pub struct App {
     pub library: areas::library::Library,
     pub create: areas::create::Create,
     pub developer: areas::developer::Developer,
+    pub permissions: areas::permissions::PermissionsStep,
     /// `--drag-test`: how long each flush (the areas showing a change) and
     /// each update from the daemon took on the window's thread.
     pub work_log: RefCell<Option<WorkLog>>,
@@ -105,6 +106,7 @@ impl App {
             library: areas::library::Library::default(),
             create: areas::create::Create::default(),
             developer: areas::developer::Developer::default(),
+            permissions: areas::permissions::PermissionsStep::default(),
         });
         window.set_version(env!("CARGO_PKG_VERSION").into());
         if !mode.offscreen {
@@ -141,7 +143,7 @@ impl App {
 
     /// The areas, in the order they update. Create comes first so that in
     /// its view Delete takes off the selected clip, not a scene item.
-    pub fn areas(&self) -> [&dyn Area; 8] {
+    pub fn areas(&self) -> [&dyn Area; 9] {
         [
             &self.create,
             &self.canvas,
@@ -151,6 +153,7 @@ impl App {
             &self.settings,
             &self.library,
             &self.developer,
+            &self.permissions,
         ]
     }
 
@@ -1047,8 +1050,13 @@ impl App {
             }
             Err(error) => {
                 let connected = app.session.borrow().link == Some(Link::Connected);
-                // Not while an update stops the engine on purpose.
-                if !quiet && connected && !crate::update::stopping_engine() {
+                // Not while an update, or the permissions step's Relaunch,
+                // stops the engine on purpose.
+                if !quiet
+                    && connected
+                    && !crate::update::stopping_engine()
+                    && !app.permissions.relaunching()
+                {
                     app.failed("Couldn’t read the engine’s status", &error);
                 }
             }

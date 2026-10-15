@@ -155,6 +155,23 @@ export component GeneralPage inherits SetPage {
             }
         }
     }
+    SetGroup {
+        title: "Permissions";
+        hint: "What macOS lets Isocast record. Each is asked for once; what you skipped or turned off can be allowed here.";
+        GroupRow {
+            label: "Screen, Camera, Microphone";
+            place: RowPlace.only;
+            trailing-pad: Theme.space-2;
+            Centred {
+                Button {
+                    text: "Review…";
+                    size: ControlSize.small;
+                    on-control: true;
+                    clicked => { Ui.menu("permissions"); }
+                }
+            }
+        }
+    }
 }
 
 // ---------- Stream ----------

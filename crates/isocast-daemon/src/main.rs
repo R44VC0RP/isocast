@@ -105,6 +105,10 @@ fn main() -> ExitCode {
         };
     }
     #[cfg(target_os = "macos")]
+    if let Some(code) = isocast_platform_macos::preflight_permissions() {
+        return ExitCode::from(code);
+    }
+    #[cfg(target_os = "macos")]
     if let Some(mode) = std::env::args().nth(1) {
         use isocast_platform_macos::virtual_camera;
         if mode == "--virtual-camera-sink-child" {
@@ -1295,7 +1299,11 @@ impl Daemon {
             }),
             Method::Engine { running } => self.hold_engine(running).and_then(to_json),
             Method::Permissions => permissions().map_err(failed).and_then(to_json),
-            Method::RequestPermissions => request_permissions().map_err(failed).and_then(to_json),
+            Method::RequestPermissions(params) => {
+                request_permissions(params.and_then(|p| p.permission))
+                    .map_err(failed)
+                    .and_then(to_json)
+            }
             Method::OpenPermissionSettings { permission } => open_permission_settings(permission)
                 .map(|url| isocast_protocol::api::Opened { url })
                 .map_err(failed)
@@ -3714,12 +3722,12 @@ fn permissions() -> Result<PermissionsReport> {
 }
 
 #[cfg(target_os = "macos")]
-fn request_permissions() -> Result<PermissionsReport> {
-    MacPlatform.request_permissions()
+fn request_permissions(only: Option<PermissionKind>) -> Result<PermissionsReport> {
+    MacPlatform.request_permissions(only)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn request_permissions() -> Result<PermissionsReport> {
+fn request_permissions(_only: Option<PermissionKind>) -> Result<PermissionsReport> {
     bail!("permissions are only supported on macOS so far")
 }
 

@@ -41,6 +41,8 @@ import { ClipBar } from "areas/create/clip-bar.slint";
 import { QuitDialog, QuitPrompt } from "quit.slint";
 import { DeveloperArea } from "areas/developer/state.slint";
 import { OverlaySize, StatsOverlay } from "areas/developer/overlay.slint";
+import { PermissionsArea } from "areas/permissions/state.slint";
+import { PermissionsSheet } from "areas/permissions/sheet.slint";
 
 // What Rust sees: the globals and the structs in their models.
 export { Theme, Ui, ConnectionState, Menus, Toasts, EditCommands, SettingsForms }
@@ -48,6 +50,7 @@ export { CanvasArea, SourcesArea, MixerArea, ControlsArea, SettingsArea, Library
 export { CreateArea }
 export { DeveloperArea }
 export { StatRow, OutputStat } from "areas/developer/state.slint";
+export { PermissionsArea, PermissionItem } from "areas/permissions/state.slint";
 export { QuitPrompt }
 export { DropdownOption, MenuEntry, MenuList, MenuEntryKind, NavTab, Segment, ToastData, ToastRow, ToastKind, FormField, FormGroup } from "kit.slint";
 export { SceneRow, ItemRow, FilterRow, PickRow } from "areas/sources/state.slint";
@@ -673,7 +676,7 @@ export component AppWindow inherits Window {
 
     // Over the window: Welcome (no setup yet), the dialogs, the gallery,
     // the menu and the toasts.
-    if Ui.loaded && !Ui.has-setup && !Ui.onboarding: Welcome { }
+    if Ui.loaded && !Ui.has-setup && !Ui.onboarding && !PermissionsArea.shown: Welcome { }
     if Ui.onboarding: Onboarding { }
 
     SourcesDialogs { }
@@ -683,6 +686,9 @@ export component AppWindow inherits Window {
         version: root.version;
     }
     LibraryDialogs { }
+    // The permissions step (area H), over Welcome, the first run and
+    // Settings, which open it.
+    if PermissionsArea.shown: PermissionsSheet { }
     QuitDialog { }
 
     if root.kit-gallery: KitGallery {

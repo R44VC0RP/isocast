@@ -1209,6 +1209,11 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
     DMG in the draft; never installs during a recording/stream/export.
     Proved end to end on isocast-m2-a with a throwaway key; the real key is
     Ryan's (docs/releasing.md step 5).
+  - [x] **8.2i Permissions onboarding for 0.0.3 (GitHub #51).** A
+    permissions step before Welcome (and from Settings and a source's
+    warning) with live statuses and one action each, the floating drag
+    helper beside System Settings, Relaunch for a grant that waits for the
+    engine, and plain words for a refusal without a prompt.
 - [x] **8.3** Docs: getting started, setup reference, MCP tools, plugins.
   (With the user-facing README and its screenshots, licences and
   THIRD_PARTY_NOTICES, and the .github templates.)
@@ -1241,6 +1246,14 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   engine ratio 1.00 every take; m2-a interleaved A/B unchanged (healthy 0
   drops, overload ISO losses retained); e2e 13/13 on both.
 - A.4 / #41 (2026-10-14, blocked, superseded above): baseline six-take repro lost 9,416 ISO
+- 8.2i / #51 (2026-10-15): the permissions step and the drag helper work
+  end to end on a Developer ID build on isocast-m2-a (macOS 27) from fresh
+  grants: camera and microphone prompts from Allow…, rows flipping live,
+  Open Settings + helper + a real cua drag of Isocast.app into the list,
+  Needs relaunch → Relaunch → Allowed, then Start with this Mac and a
+  recording with screen, synthetic camera and tone ISOs (HEVC 60 fps, AAC,
+  5.83 s each, 0 dropped). Offscreen 1440x900@2 shots of every state.
+- A.4 / #41 (2026-10-14, blocked): baseline six-take repro lost 9,416 ISO
   frames, zero program frames. Native submission stalls precede the shared
   controller's 1000→132 cut; independent takes reset all priority counters.
   Relative timestamps, late look-ahead=0, power-efficiency=false and explicit

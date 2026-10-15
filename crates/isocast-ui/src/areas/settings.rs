@@ -103,7 +103,7 @@ const TABS: &[(&str, &str, &str, &str, &str)] = &[
         "General",
         "sun",
         "System",
-        "This setup's name, snapping in the preview, how often the preview draws, and app updates.",
+        "This setup's name, snapping in the preview, how often the preview draws, app updates and permissions.",
     ),
     (
         "hotkeys",
@@ -1627,6 +1627,8 @@ impl Settings {
         // Ask for the devices now, so they're there by the second step.
         app.load_devices(true);
         self.check_permissions(app);
+        // The Permissions step draws the permissions step's rows (area H).
+        app.permissions.check(app);
         if !app.mode.offscreen {
             let weak = Rc::downgrade(app);
             self.permissions_timer.start(
@@ -1683,7 +1685,7 @@ impl Settings {
     fn ask_permissions(&self, app: &Rc<App>) {
         self.first_run.borrow_mut().asking = true;
         self.show_first_run(app);
-        app.call_as::<PermissionsReport>(Method::RequestPermissions, |app, result| {
+        app.call_as::<PermissionsReport>(Method::RequestPermissions(None), |app, result| {
             {
                 let mut run = app.settings.first_run.borrow_mut();
                 run.asking = false;

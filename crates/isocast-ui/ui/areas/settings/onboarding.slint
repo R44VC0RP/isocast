@@ -14,6 +14,7 @@ import {
     RowPlace, ScrollArea, Segmented, Spinner, Switch, TextField,
 } from "../../kit.slint";
 import { SettingsArea } from "state.slint";
+import { PermissionRows } from "../permissions/sheet.slint";
 
 // A step in the header: its dot (the number, or a check once done) and
 // its name.
@@ -321,6 +322,8 @@ component StepTitle inherits VerticalLayout {
     }
 }
 
+// The permissions, as the permissions step (area H) shows them: live, one
+// action each.
 component PermissionsStep inherits VerticalLayout {
     spacing: 0;
     alignment: start;
@@ -332,127 +335,10 @@ component PermissionsStep inherits VerticalLayout {
         height: 1px;
         background: Theme.line;
     }
-    if !SettingsArea.checked: HorizontalLayout {
-        min-height: 64px;
-        spacing: Theme.space-3;
-        alignment: start;
-        VerticalLayout {
-            alignment: center;
-            Spinner { }
-        }
-        Text {
-            text: "Checking…";
-            color: Theme.text-2;
-            vertical-alignment: center;
-        }
-    }
-    for permission[i] in SettingsArea.permissions: VerticalLayout {
-        spacing: 0;
-        if i > 0: Rectangle {
-            height: 1px;
-            background: Theme.line;
-        }
-        HorizontalLayout {
-            min-height: 64px;
-            padding-top: Theme.space-3;
-            padding-bottom: Theme.space-3;
-            spacing: Theme.space-3;
-            VerticalLayout {
-                alignment: center;
-                Icon {
-                    path: Icons.named(permission.icon);
-                    size: Theme.icon-lg;
-                    stroke-width: 1.65px;
-                    color: Theme.text-2;
-                }
-            }
-            VerticalLayout {
-                alignment: center;
-                horizontal-stretch: 1;
-                spacing: 2px;
-                Text {
-                    text: permission.title;
-                    color: Theme.text;
-                    font-weight: Theme.weight-semibold;
-                }
-                Text {
-                    text: permission.hint;
-                    color: Theme.text-3;
-                    font-size: Theme.fs-sm;
-                    letter-spacing: Theme.tracking-sm;
-                    line-height-factor: Theme.leading-sm;
-                    wrap: word-wrap;
-                }
-                // What to do, then the link that finishes its sentence
-                // ("… Then restart the engine.") on the line under it: a
-                // text can't hold a link, and beside it the link floated
-                // away from its sentence.
-                if permission.todo != "": VerticalLayout {
-                    padding-top: 2px;
-                    spacing: 2px;
-                    Text {
-                        text: permission.todo;
-                        color: Theme.text-2;
-                        font-size: Theme.fs-sm;
-                        letter-spacing: Theme.tracking-sm;
-                        line-height-factor: Theme.leading-sm;
-                        wrap: word-wrap;
-                    }
-                    if permission.restart: HorizontalLayout {
-                        alignment: start;
-                        LinkButton {
-                            text: "restart the engine.";
-                            clicked => { SettingsArea.ob-restart-engine(); }
-                        }
-                    }
-                }
-            }
-            HorizontalLayout {
-                spacing: 6px;
-                alignment: end;
-                if permission.granted: VerticalLayout {
-                    alignment: center;
-                    Icon {
-                        path: Icons.check;
-                        size: Theme.icon-sm;
-                        color: Theme.onair-text;
-                    }
-                }
-                Text {
-                    text: permission.state;
-                    color: permission.granted ? Theme.onair-text : permission.denied ? Theme.danger-text : Theme.text-2;
-                    font-size: Theme.fs-sm;
-                    letter-spacing: Theme.tracking-sm;
-                    vertical-alignment: center;
-                }
-            }
-            if permission.open-settings: VerticalLayout {
-                alignment: center;
-                Button {
-                    text: "Open Settings";
-                    clicked => { SettingsArea.ob-open-settings(permission.id); }
-                }
-            }
-        }
-    }
+    PermissionRows { }
     Rectangle {
         height: 1px;
         background: Theme.line;
-    }
-    HorizontalLayout {
-        padding-top: Theme.space-4;
-        padding-left: Theme.space-8;
-        spacing: Theme.space-2;
-        alignment: start;
-        if SettingsArea.any-to-ask: Button {
-            text: SettingsArea.asking ? "Waiting for your answers…" : "Allow access…";
-            enabled: !SettingsArea.asking;
-            clicked => { SettingsArea.ob-ask(); }
-        }
-        Button {
-            text: "Check again";
-            clicked => { SettingsArea.ob-check(); }
-        }
     }
 }
 

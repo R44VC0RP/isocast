@@ -168,9 +168,11 @@ pub enum Method {
     Permissions,
     /// Ask macOS for screen recording, camera and microphone access where
     /// it hasn't been decided (its prompts appear on screen) and wait up to
-    /// a minute for the answers. Returns
-    /// [`PermissionsReport`](crate::devices::PermissionsReport).
-    RequestPermissions,
+    /// a minute for the answers; with `permission`, only for that one.
+    /// Returns [`PermissionsReport`](crate::devices::PermissionsReport).
+    /// Its params are optional: `{"method": "request_permissions"}` asks
+    /// for all three.
+    RequestPermissions(Option<RequestPermissionsParams>),
     /// Open the System Settings pane where a permission is turned on by
     /// hand. Returns [`Opened`].
     OpenPermissionSettings {
@@ -555,6 +557,16 @@ pub struct GetParams {
     /// Also return where every item is drawn, as laid out (`resolved`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resolved: bool,
+}
+
+/// What `request_permissions` asks for.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequestPermissionsParams {
+    /// Only this permission (screen_recording, camera or microphone); all
+    /// three that haven't been decided if left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<crate::devices::PermissionKind>,
 }
 
 /// Parameters of `watch`: which kinds of events (their `type`) to send.
