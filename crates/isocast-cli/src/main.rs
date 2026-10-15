@@ -28,6 +28,7 @@ mod debug;
 mod hotkeys;
 mod library;
 mod mcp;
+mod optimize;
 mod plugin;
 mod project;
 #[cfg(target_os = "macos")]
@@ -342,6 +343,36 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Optimize the live setup for recording, streaming or both, like
+    /// OBS's Auto-Configuration Wizard: recording favours quality and ISO
+    /// files; streaming sets the service and a bitrate from the upload
+    /// speed (tested unless --upload-kbps is given; a custom server only
+    /// with `isocast stream speed-test`). Then `tune` benchmarks
+    /// this Mac and steps down where it can't keep up. Prints a one-line
+    /// summary and the changes; --apply makes them. Runs in isocastd.
+    Optimize {
+        /// recording, streaming or both.
+        #[arg(value_parser = optimize::parse_goal)]
+        goal: isocast_protocol::optimize::Goal,
+        /// Streaming: custom, twitch, youtube, kick or facebook; the live
+        /// setup's if absent.
+        #[arg(long, value_parser = parse_service)]
+        service: Option<StreamService>,
+        /// Streaming: the ingest server, rtmp://host/app or rtmps://…
+        #[arg(long)]
+        server: Option<String>,
+        /// Streaming: the upload speed in kb/s, instead of testing it.
+        #[arg(long)]
+        upload_kbps: Option<u32>,
+        /// Benchmark writing to this folder instead of recording.folder.
+        #[arg(long)]
+        folder: Option<PathBuf>,
+        /// Make the changes.
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Save one frame as a PNG: of a video source (an id of the live setup,
     /// or a quick source like `screen` or `camera:NAME`), of --scene ID, of
     /// --preview, or with none of them the program (while recording, the
@@ -594,6 +625,20 @@ enum StreamCommand {
         #[command(subcommand)]
         command: StreamKeyCommand,
     },
+    /// Measure the upload speed to the service's ingest (a short publish
+    /// of filler: Twitch's bandwidth test mode, or a custom server, which
+    /// shows it for a few seconds if it relays to a live service) and
+    /// recommend a stream bitrate. YouTube, Facebook and Kick have no test
+    /// mode, so they get a safe bitrate instead, with the reason.
+    SpeedTest {
+        #[command(flatten)]
+        target: KeyTargetArgs,
+        /// Seconds to send for, 3 to 20 (8 by default).
+        #[arg(long)]
+        seconds: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -697,6 +742,17 @@ enum SetupCommand {
         #[arg(long)]
         name: Option<String>,
         /// Print the result (setup, notes, applied change) as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Find OBS Studio's scene collections and profiles on this Mac (in
+    /// ~/Library/Application Support/obs-studio, or --folder), without
+    /// importing anything: each collection with the profile an import
+    /// would use, and each profile's video, recording and stream settings.
+    DiscoverObs {
+        /// Look in this folder instead.
+        #[arg(long)]
+        folder: Option<PathBuf>,
         #[arg(long)]
         json: bool,
     },
@@ -893,6 +949,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Command::Setup { command } => match command {
             SetupCommand::Check { path, json } => check(&path, json),
+            SetupCommand::DiscoverObs { folder, json } => optimize::discover(folder, json),
             SetupCommand::Schema => {
                 println!("{}", serde_json::to_string_pretty(&Setup::json_schema())?);
                 Ok(ExitCode::SUCCESS)
@@ -1066,6 +1123,25 @@ fn run(cli: Cli) -> Result<ExitCode> {
             folder,
             json,
         } => tune(setup.as_deref(), folder, json),
+        Command::Optimize {
+            goal,
+            service,
+            server,
+            upload_kbps,
+            folder,
+            apply,
+            json,
+        } => optimize::optimize(
+            isocast_protocol::optimize::OptimizeParams {
+                goal,
+                service,
+                server,
+                upload_kbps,
+                folder: folder.map(std::path::absolute).transpose()?,
+                apply,
+            },
+            json,
+        ),
         Command::Split { json } => split(json),
         Command::Marker { label, json } => marker(label, json),
         Command::Refresh { source, json } => refresh(source, json),
@@ -1145,6 +1221,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Vcam { command } => virtual_camera::run(command),
         Command::Debug { command } => debug::run(command),
         Command::Stream { command } => match command {
+            StreamCommand::SpeedTest {
+                target,
+                seconds,
+                json,
+            } => optimize::speed_test(target.service, target.server, seconds, json),
             StreamCommand::Start { json } => {
                 let status: StreamStatus =
                     Client::connect_or_launch()?.call(Method::StreamStart)?;

@@ -89,6 +89,7 @@ mod diagnostics;
 mod export;
 mod hotkeys;
 mod library;
+mod optimize;
 mod plugins;
 mod projects;
 mod recovery;
@@ -1240,6 +1241,7 @@ impl Daemon {
                 | Method::VirtualCameraStart
                 | Method::Resume
                 | Method::Tune(_)
+                | Method::Optimize(_)
         )
         .then(|| self.starting.read().unwrap_or_else(|e| e.into_inner()));
         if self.shutting_down.load(Ordering::SeqCst)
@@ -1309,6 +1311,9 @@ impl Daemon {
                 .map_err(failed)
                 .and_then(to_json),
             Method::ImportObs(params) => import_obs(*params).and_then(to_json),
+            Method::ObsDiscover(params) => self.obs_discover(params).and_then(to_json),
+            Method::SpeedTest(params) => self.speed_test(*params).and_then(to_json),
+            Method::Optimize(params) => self.optimize(*params).and_then(to_json),
             Method::InitSetup(params) => self.init_setup(*params).and_then(to_json),
             Method::Doctor(params) => check_folder(params.folder.as_deref()).and_then(|()| {
                 let setup = params

@@ -11,6 +11,7 @@
 //! | F scene collections and profiles | `library.rs` | `library/` | `LibraryArea` |
 //! | G the Create view (clip bar) | `create.rs` (+ thumbs.rs) | `create/` | `CreateArea` |
 //! | H the permissions step | `permissions.rs` (+ helper.rs) | `permissions/` | `PermissionsArea` |
+//! | I the setup wizard (OBS, optimize) | `wizard.rs` | `wizard/` | `WizardArea` |
 //!
 //! What is shared lives outside the areas and changes rarely: the widget
 //! kit (ui/kit.slint, ui/widgets/), the tokens (ui/theme.slint), icons
@@ -78,6 +79,7 @@ pub mod permissions;
 pub mod report;
 pub mod settings;
 pub mod sources;
+pub mod wizard;
 
 use std::rc::Rc;
 
@@ -99,6 +101,7 @@ pub const STATES: &[&[&str]] = &[
     create::STATES,
     developer::STATES,
     permissions::STATES,
+    wizard::STATES,
 ];
 
 /// What `App` asks of an area. Everything but `connect` and `update` has

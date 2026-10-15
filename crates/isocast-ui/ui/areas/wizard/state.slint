@@ -1,0 +1,81 @@
+// Area I: the setup wizard (src/areas/wizard.rs, #46). On the first launch
+// (after the permissions step) and from Welcome: OBS's scene collections,
+// found on this Mac, to import with their profiles. Then, there and from
+// Tools › Auto-Configuration Wizard…: optimize for recording, streaming or
+// both (an upload test for streaming), benchmark this Mac, and a one-line
+// summary to apply. The engine's `obs_discover`, `library_import_obs`,
+// `speed_test`, `optimize` and `apply`.
+
+// An OBS scene collection to offer.
+export struct ObsCollectionRow {
+    name: string,
+    // "2 scenes · 3 sources", and "In use in OBS" for OBS's current one.
+    meta: string,
+    // Its profile's settings in a line ("" if none matched).
+    profile: string,
+    selected: bool,
+    // Its profile keeps a stream key in plain text.
+    key-in-file: bool,
+}
+
+// One change the optimized setup makes.
+export struct ChangeRow {
+    label: string,
+    from: string,
+    to: string,
+}
+
+export global WizardArea {
+    in-out property <bool> shown;
+    // obs, goal, summary.
+    in property <string> step: "goal";
+    // The OBS step is part of this run (the header shows three steps).
+    in property <bool> with-obs;
+    // A setup is live: Close and Escape are offered.
+    in property <bool> can-close;
+
+    // From OBS.
+    in property <[ObsCollectionRow]> collections;
+    in property <bool> discovering;
+    // Where OBS's settings were looked for.
+    in property <string> obs-folder;
+    // Files that couldn't be read, a line each.
+    in property <string> obs-errors;
+    in property <int> selected-count;
+    // A selected collection's profile keeps its stream key in plain text.
+    in property <bool> any-key;
+    in property <bool> move-key;
+    in property <bool> importing;
+    in property <string> import-error;
+
+    // Goal.
+    in property <string> goal: "recording";
+    in property <string> service: "twitch";
+    in property <string> server;
+    // Custom and Kick need a server.
+    in property <bool> needs-server;
+    in property <bool> testing;
+    // The upload test's result in words, and why it couldn't measure.
+    in property <string> speed;
+    in property <string> speed-note;
+
+    // Summary.
+    in property <bool> optimizing;
+    in property <string> summary;
+    // What the benchmark found ("Fits with room to spare: 1.9× real time").
+    in property <string> verdict;
+    in property <[ChangeRow]> changes;
+    in property <string> notes;
+    in property <string> error;
+    in property <bool> applying;
+
+    callback toggle(int);
+    callback set(string, string);
+    callback import();
+    callback skip-obs();
+    callback back();
+    callback test-upload();
+    callback optimize();
+    callback apply();
+    callback close();
+}

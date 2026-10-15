@@ -110,6 +110,9 @@ pub(crate) struct Connection {
     server_window: Option<u32>,
     /// Bytes written to the socket, protocol included.
     pub(crate) bytes_sent: u64,
+    /// The server's first and latest acknowledgement (when, and its byte
+    /// count), for the upload test.
+    acks: Option<((Instant, u32), (Instant, u32))>,
 }
 
 /// When waiting for the server while connecting ends: at the deadline, or
@@ -167,6 +170,7 @@ impl Connection {
             acknowledged: 0,
             server_window: None,
             bytes_sent: 0,
+            acks: None,
         };
         connection.handshake(until).context("RTMP handshake")?;
         connection.send_control(SET_CHUNK_SIZE, &(CHUNK_SIZE as u32).to_be_bytes())?;
@@ -392,7 +396,12 @@ impl Connection {
                     self.send_control(USER_CONTROL, &pong)?;
                 }
             }
-            ACKNOWLEDGEMENT => {}
+            ACKNOWLEDGEMENT => {
+                if let Some(count) = u32_at(0) {
+                    let now = (Instant::now(), count);
+                    self.acks = Some(self.acks.map_or((now, now), |(first, _)| (first, now)));
+                }
+            }
             _ => return Ok(Some(message)),
         }
         Ok(None)
@@ -421,6 +430,18 @@ impl Connection {
             }
         }
         Ok(())
+    }
+
+    /// Ask the server to acknowledge every `window` bytes it receives (the
+    /// upload test measures by them).
+    pub(crate) fn ask_acknowledgements(&mut self, window: u32) -> Result<()> {
+        self.send_control(WINDOW_ACK_SIZE, &window.to_be_bytes())
+    }
+
+    /// The server's first and latest acknowledgement: when, and how many
+    /// bytes it had received.
+    pub(crate) fn acknowledgements(&self) -> Option<((Instant, u32), (Instant, u32))> {
+        self.acks
     }
 
     /// Describe the stream (`@setDataFrame onMetaData`).

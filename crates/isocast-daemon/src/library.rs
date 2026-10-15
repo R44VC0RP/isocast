@@ -926,6 +926,13 @@ impl Daemon {
         let mut unsupported = Vec::new();
         let mut notes = Vec::new();
         let mut iso = None;
+        // A stream key OBS keeps in plain text, moved only when asked.
+        let mut stream_key = None;
+        if params.stream_key && params.profile.is_none() {
+            return Err(invalid(
+                "stream_key: give the OBS `profile` whose service.json holds the key",
+            ));
+        }
         if let Some(collection) = &params.collection {
             let devices = devices();
             let options = obs::Options {
@@ -977,6 +984,21 @@ impl Daemon {
             let imported = obs::import_profile(profile, home.as_deref())
                 .map_err(|message| invalid(format!("profile: {message}")))?;
             let mut part = imported.profile;
+            if params.stream_key {
+                match (&part.stream, obs::plain_stream_key(&imported.path)) {
+                    (Some(stream), Some(key)) => stream_key = Some((stream.clone(), key)),
+                    (None, _) => notes.push(
+                        "stream_key: the OBS profile has no stream Isocast can use, so its key \
+                         stayed behind"
+                            .into(),
+                    ),
+                    (Some(_), None) => notes.push(
+                        "stream_key: OBS keeps no stream key in this profile's service.json \
+                         (or keeps it in the Keychain), so set it with `isocast stream key set`"
+                            .into(),
+                    ),
+                }
+            }
             if let Some(name) = &params.name {
                 part.name = check_name("name", name)?;
             }
@@ -988,6 +1010,36 @@ impl Daemon {
             unsupported.extend(imported.unsupported);
             notes.extend(imported.notes);
         }
-        self.add_documents(documents, params.switch, unsupported, notes)
+        let mut change = self.add_documents(documents, params.switch, unsupported, notes)?;
+        if let Some((stream, key)) = stream_key {
+            let server = (stream.service == isocast_protocol::stream::StreamService::Custom)
+                .then(|| stream.server.clone())
+                .flatten();
+            let params = isocast_protocol::api::StreamKeyParams {
+                key,
+                target: isocast_protocol::api::StreamKeyTarget {
+                    service: Some(stream.service),
+                    server,
+                },
+            };
+            match self.stream_key_set(params) {
+                Ok(stored) => {
+                    // The profile's own note says the key stayed behind.
+                    change
+                        .notes
+                        .retain(|n| !n.contains("its stream key stays in OBS"));
+                    change.notes.push(format!(
+                        "moved the stream key from OBS's service.json to the Keychain (account \
+                     {:?}); OBS's copy is untouched",
+                        stored.account
+                    ))
+                }
+                Err(err) => change.notes.push(format!(
+                    "imported, but the stream key couldn't be kept in the Keychain: {}",
+                    err.message
+                )),
+            }
+        }
+        Ok(change)
     }
 }

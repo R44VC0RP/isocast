@@ -67,6 +67,7 @@ pub struct App {
     pub create: areas::create::Create,
     pub developer: areas::developer::Developer,
     pub permissions: areas::permissions::PermissionsStep,
+    pub wizard: areas::wizard::Wizard,
     /// `--drag-test`: how long each flush (the areas showing a change) and
     /// each update from the daemon took on the window's thread.
     pub work_log: RefCell<Option<WorkLog>>,
@@ -107,6 +108,7 @@ impl App {
             create: areas::create::Create::default(),
             developer: areas::developer::Developer::default(),
             permissions: areas::permissions::PermissionsStep::default(),
+            wizard: areas::wizard::Wizard::default(),
         });
         window.set_version(env!("CARGO_PKG_VERSION").into());
         if !mode.offscreen {
@@ -149,7 +151,7 @@ impl App {
 
     /// The areas, in the order they update. Create comes first so that in
     /// its view Delete takes off the selected clip, not a scene item.
-    pub fn areas(&self) -> [&dyn Area; 9] {
+    pub fn areas(&self) -> [&dyn Area; 10] {
         [
             &self.create,
             &self.canvas,
@@ -160,6 +162,7 @@ impl App {
             &self.library,
             &self.developer,
             &self.permissions,
+            &self.wizard,
         ]
     }
 

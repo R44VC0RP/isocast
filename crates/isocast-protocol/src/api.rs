@@ -348,6 +348,33 @@ pub enum Method {
     /// writes into it. Manifests and timelines keep resolving. Returns
     /// [`ProjectRenamed`](crate::project::ProjectRenamed).
     RenameProject(crate::project::RenameProjectParams),
+    /// Look for OBS Studio's scene collections and profiles on this Mac
+    /// (its settings folder, or `folder`), without importing anything:
+    /// each collection with its scene and source counts and the profile an
+    /// import would take its settings from, each profile's video,
+    /// recording and stream settings (never a stream key; `key_in_file`
+    /// says whether OBS keeps one in plain text), and files that couldn't
+    /// be read. Its params are optional. Returns
+    /// [`Discovery`](crate::obs::Discovery).
+    ObsDiscover(Option<crate::optimize::ObsDiscoverParams>),
+    /// Measure the upload speed to a streaming service's ingest with a
+    /// short publish of filler data (Twitch's bandwidth test mode, or a
+    /// custom server, which shows it if it relays to a live service), and
+    /// recommend a stream bitrate. Services that would
+    /// put a test on air (YouTube, Facebook, Kick), or a missing stream
+    /// key, give a documented fallback instead (`measured` false, with
+    /// the reason). Returns [`SpeedTest`](crate::optimize::SpeedTest).
+    SpeedTest(Box<crate::optimize::SpeedTestParams>),
+    /// Optimize the live setup for recording, streaming or both (OBS's
+    /// Auto-Configuration Wizard): favour quality and ISO files for
+    /// recording; for streaming, set the service and a bitrate from the
+    /// upload speed (measured if not given); then benchmark this Mac
+    /// (`tune`) and step down where it can't keep up. A custom server is
+    /// tested only through `speed_test`, never implicitly. Applies it if
+    /// asked (refused if the setup changed meanwhile).
+    /// Refused while recording. Returns
+    /// [`Optimized`](crate::optimize::Optimized), with a one-line summary.
+    Optimize(Box<crate::optimize::OptimizeParams>),
 }
 
 /// Every method's name, as requests and plugin grants spell it

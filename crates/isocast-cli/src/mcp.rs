@@ -19,7 +19,10 @@ use isocast_protocol::library::{
     Library, LibraryChange, LibraryCreateParams, LibraryDocument, LibraryImportObsParams,
     LibraryImportParams, LibraryRenameParams, LibrarySwitchParams, LibraryTarget,
 };
-use isocast_protocol::obs::Imported;
+use isocast_protocol::obs::{Discovery, Imported};
+use isocast_protocol::optimize::{
+    ObsDiscoverParams, OptimizeParams, Optimized, SpeedTest, SpeedTestParams,
+};
 use isocast_protocol::plugin::{PluginAddParams, PluginChange, PluginTarget, Plugins};
 use isocast_protocol::project::{
     ListProjectsParams, ProjectRenamed, Projects, RenameProjectParams,
@@ -1208,6 +1211,67 @@ impl Isocast {
             })
             .await?;
         Ok(Json(LiveEngine { engine }))
+    }
+
+    #[tool(
+        description = "Find OBS Studio's scene collections and profiles on this Mac (its \
+                       settings folder, or `folder`) without importing anything: each \
+                       collection with scene and source counts and the profile an import would \
+                       use (`profile`, a basic.ini path), each profile's canvas, frame rate, \
+                       recording encoder, format and folder, and stream service and bitrate \
+                       (never the key; `key_in_file` says OBS keeps one in plain text), and \
+                       files that couldn't be read. Offer the collections to the user, then \
+                       import_obs_collection_or_profile with the collection's `file` and its \
+                       `profile` (stream_key only if the user agreed to move the key).",
+        annotations(read_only_hint = true)
+    )]
+    async fn discover_obs(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ObsDiscoverParams>>,
+    ) -> Result<Json<Discovery>, String> {
+        self.call(Method::ObsDiscover(Some(params))).await
+    }
+
+    #[tool(
+        description = "Measure the upload speed to a streaming service's ingest (the live \
+                       setup's unless `service`/`server` say) with a few seconds of filler \
+                       video: Twitch's bandwidth test mode (never on air) or a custom server \
+                       (a relay would put the filler on air for a few seconds: ask the user \
+                       first), using the stored stream key. YouTube, Facebook and Kick have no test \
+                       mode, and without a key nothing can be tested: then `measured` is false, \
+                       `reason` says why, and `recommended_kbps` is a safe default. Refused \
+                       while streaming.",
+        annotations(read_only_hint = true)
+    )]
+    async fn test_upload_speed(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<SpeedTestParams>>,
+    ) -> Result<Json<SpeedTest>, String> {
+        self.call(Method::SpeedTest(Box::new(params))).await
+    }
+
+    #[tool(
+        description = "Optimize the live setup for `goal` recording, streaming or both (OBS's \
+                       Auto-Configuration Wizard). Recording favours quality and ISO files \
+                       (HEVC High, an ISO file per captured source); streaming sets the \
+                       service and a bitrate from the upload speed (upload_kbps, or measured \
+                       like test_upload_speed; never for a custom server, test it first) and sizes \
+                       the stream to it. Then it benchmarks \
+                       this Mac like tune_encoders and steps down where it can't keep up. \
+                       Returns a one-line `summary`, the optimized setup, its differences from \
+                       the live setup, the benchmark and notes; with apply it becomes the live \
+                       setup. Takes a minute or two; refused while recording or streaming.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn optimize_setup(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<OptimizeParams>>,
+    ) -> Result<Json<Optimized>, String> {
+        self.call(Method::Optimize(Box::new(params))).await
     }
 
     #[tool(

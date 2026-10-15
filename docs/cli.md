@@ -148,7 +148,7 @@ Commands:
   snapshot     Save one frame as a PNG: of a video source (an id of the live setup, or a quick source like `screen` or `camera:NAME`), of --scene ID, of --preview, or with none of them the program (while recording, the exact frame it recorded last). Runs in isocastd
   audio        Change an audio source's program mix in the live setup: gain in dB, mute, sync offset in ms (positive is later), balance (-1 left to 1 right) and monitoring (hearing it through `audio.monitoring_device`). A running recording follows all but the offset at once
   restart      Restart isocastd, for example after granting it screen recording permission. Refused, atomically by isocastd, while it records, streams, exports or feeds the virtual camera
-  permissions  Show the screen recording, camera and microphone permissions and what to do about each that isn't granted; with --request, ask macOS for the ones not decided yet (its prompts appear) and wait up to a minute for the answers; with --open, open the System Settings pane where one is turned on
+  permissions  Show the screen recording, camera and microphone permissions and what to do about each that isn't granted; with --request, ask macOS for the ones not decided yet (its prompts appear; --request camera asks for that one only) and wait up to a minute for the answers; with --open, open the System Settings pane where one is turned on
   get          Print the live setup (TOML, or JSON with --json) and its revision; with --resolved, also where layout put every item (each item's rect in its parent and its box on the canvas)
   plan         Show what a change to the live setup would do, without doing it: a whole setup FILE, or --patch with a JSON merge patch (lists of sources, scenes and items merge by id)
   apply        Make a change to the live setup, if it is still at --revision (from `plan` or `get`; 0 when there is no live setup yet)
@@ -1364,15 +1364,15 @@ Options:
 ## isocast permissions
 
 ```text
-Show the screen recording, camera and microphone permissions and what to do about each that isn't granted; with --request, ask macOS for the ones not decided yet (its prompts appear) and wait up to a minute for the answers; with --open, open the System Settings pane where one is turned on
+Show the screen recording, camera and microphone permissions and what to do about each that isn't granted; with --request, ask macOS for the ones not decided yet (its prompts appear; --request camera asks for that one only) and wait up to a minute for the answers; with --open, open the System Settings pane where one is turned on
 
 Usage: isocast permissions [OPTIONS]
 
 Options:
-      --request            
-      --open <PERMISSION>  screen_recording, camera or microphone
-      --json               
-  -h, --help               Print help
+      --request [<PERMISSION>]  screen_recording, camera or microphone; all three if left out
+      --open <PERMISSION>       screen_recording, camera or microphone
+      --json                    
+  -h, --help                    Print help
 ```
 
 ## isocast get

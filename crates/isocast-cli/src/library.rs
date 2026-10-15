@@ -98,6 +98,10 @@ pub enum LibraryCommand {
         /// Switch to what was imported.
         #[arg(long)]
         switch: bool,
+        /// Move the stream key OBS keeps in plain text in the OBS
+        /// profile's service.json into the Keychain.
+        #[arg(long, requires = "obs")]
+        obs_stream_key: bool,
         #[arg(long)]
         json: bool,
     },
@@ -193,6 +197,7 @@ pub fn run(kind: LibraryKind, command: LibraryCommand) -> Result<ExitCode> {
             name,
             canvas,
             switch,
+            obs_stream_key,
             json,
         } => {
             let change: LibraryChange = match (file, obs) {
@@ -234,6 +239,7 @@ pub fn run(kind: LibraryKind, command: LibraryCommand) -> Result<ExitCode> {
                         width,
                         height,
                         switch,
+                        stream_key: obs_stream_key,
                     })))?
                 }
                 _ => bail!(

@@ -647,9 +647,321 @@ pub struct Options<'a> {
     pub home: Option<&'a str>,
 }
 
-/// Where OBS keeps its settings on this Mac.
+/// Look for OBS's settings in this folder instead of the home folder's
+/// (isolated engines and tests, so they never read the user's OBS).
+pub const FOLDER_ENV: &str = "ISOCAST_OBS_FOLDER";
+
+/// Where OBS keeps its settings on this Mac: `$ISOCAST_OBS_FOLDER` if set.
 pub fn obs_folder(home: &Path) -> PathBuf {
-    home.join("Library/Application Support/obs-studio")
+    match std::env::var_os(FOLDER_ENV) {
+        Some(folder) if !folder.is_empty() => PathBuf::from(folder),
+        _ => home.join("Library/Application Support/obs-studio"),
+    }
+}
+
+/// What [`discover`] found in OBS's settings folder.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Discovery {
+    /// The folder looked in.
+    pub folder: String,
+    /// Whether the folder is there (OBS has run on this Mac).
+    pub found: bool,
+    /// The scene collections, OBS's current one first, then by name.
+    pub collections: Vec<FoundCollection>,
+    /// The profiles, OBS's current one first, then by name.
+    pub profiles: Vec<FoundProfile>,
+    /// Files that couldn't be read, each with why.
+    pub errors: Vec<FoundError>,
+}
+
+/// An OBS scene collection, for offering it before importing it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FoundCollection {
+    /// OBS's name for it, like "Recording".
+    pub name: String,
+    /// Its .json file (give it, or the name, to `import_obs` or
+    /// `library_import_obs`).
+    pub file: String,
+    pub scenes: usize,
+    /// Sources other than scenes and groups.
+    pub sources: usize,
+    /// OBS's scene collection in use.
+    pub current: bool,
+    /// The profile an import takes its settings from (a [`FoundProfile`]'s
+    /// `path`): named like the collection, else OBS's current one, else one
+    /// with the collection's canvas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+/// An OBS profile's video, recording and stream settings (never its stream
+/// key).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FoundProfile {
+    pub name: String,
+    /// Its basic.ini.
+    pub path: String,
+    /// OBS's profile in use.
+    pub current: bool,
+    /// The base (canvas) resolution, width and height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas: Option<[u32; 2]>,
+    /// The size recordings are written at, if not the canvas's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<[u32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f64>,
+    /// OBS's recording encoder id, like `apple_h264` or `obs_x264`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder: Option<String>,
+    /// The recording format, like `mkv` or `fragmented_mp4`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_folder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<FoundStream>,
+    /// The settings in a line, like "1920×1080 · 60 fps · H.264 · MKV ·
+    /// Twitch 6000 kb/s".
+    pub summary: String,
+}
+
+/// Where an OBS profile streams to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FoundStream {
+    /// The Isocast service it becomes; absent if Isocast has none for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<crate::stream::StreamService>,
+    /// OBS's name for the service, like "Twitch" (or its kind, like
+    /// `rtmp_custom`).
+    pub obs_service: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_kbps: Option<u32>,
+    /// OBS keeps a stream key in plain text in the profile's service.json:
+    /// `library_import_obs` with `stream_key` moves it to the Keychain.
+    pub key_in_file: bool,
+}
+
+/// A file in OBS's folder that couldn't be read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FoundError {
+    pub file: String,
+    pub message: String,
+}
+
+/// Look through OBS's settings folder (`obs`, from [`obs_folder`]) for
+/// scene collections and profiles, without importing anything.
+pub fn discover(obs: &Path) -> Discovery {
+    let mut found = Discovery {
+        folder: obs.display().to_string(),
+        found: obs.is_dir(),
+        ..Discovery::default()
+    };
+    if !found.found {
+        return found;
+    }
+    let global = ["user.ini", "global.ini"]
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(obs.join(file)).ok())
+        .collect::<Vec<_>>();
+    let setting = |key: &str| {
+        global.iter().find_map(|text| {
+            text.lines()
+                .find_map(|line| line.trim().strip_prefix(key))
+                .map(|value| value.trim().to_string())
+        })
+    };
+    let current_collection = setting("SceneCollectionFile=");
+    let current_profile = setting("ProfileDir=");
+
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(obs.join("basic/profiles"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    entries.sort();
+    for folder in entries {
+        let path = folder.join("basic.ini");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                found.errors.push(FoundError {
+                    file: path.display().to_string(),
+                    message: format!("couldn't read the profile: {err}"),
+                });
+                continue;
+            }
+        };
+        let mut profile = Profile::parse(&text);
+        profile.read_stream(&folder);
+        let dir = dir_name(&path).to_string();
+        let name = if profile.name.is_empty() {
+            dir.clone()
+        } else {
+            profile.name.clone()
+        };
+        let stream = profile.stream.as_ref().map(|s| FoundStream {
+            service: stream_settings(&profile, &mut Findings::default()).map(|s| s.service),
+            obs_service: s.service.clone().unwrap_or_else(|| s.kind.clone()),
+            server: s.server.clone(),
+            video_kbps: s.video_kbps,
+            key_in_file: plain_stream_key(&path).is_some(),
+        });
+        found.profiles.push(FoundProfile {
+            summary: profile_summary(&profile, stream.as_ref()),
+            name,
+            path: path.display().to_string(),
+            current: current_profile.as_deref() == Some(dir.as_str()),
+            canvas: profile.canvas.map(|(w, h)| [w, h]),
+            output: profile
+                .output
+                .filter(|o| Some(*o) != profile.canvas)
+                .map(|(w, h)| [w, h]),
+            fps: profile.fps,
+            encoder: profile.encoder.clone(),
+            container: profile.container.clone(),
+            recording_folder: profile.folder.clone(),
+            stream,
+        });
+    }
+    found
+        .profiles
+        .sort_by(|a, b| b.current.cmp(&a.current).then(a.name.cmp(&b.name)));
+
+    let mut files: Vec<PathBuf> = std::fs::read_dir(obs.join("basic/scenes"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("json"))
+        .collect();
+    files.sort();
+    for file in files {
+        let read = std::fs::read_to_string(&file)
+            .map_err(|err| format!("couldn't read the scene collection: {err}"))
+            .and_then(|text| {
+                serde_json::from_str::<Value>(&text)
+                    .map_err(|err| format!("not a scene collection (not JSON: {err})"))
+            })
+            .and_then(|json| match json.get("sources").and_then(Value::as_array) {
+                Some(_) => Ok(json),
+                None => Err("not a scene collection (no `sources` list)".to_string()),
+            });
+        let json = match read {
+            Ok(json) => json,
+            Err(message) => {
+                found.errors.push(FoundError {
+                    file: file.display().to_string(),
+                    message,
+                });
+                continue;
+            }
+        };
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let name = text(&json, "name")
+            .filter(|n| !n.is_empty())
+            .unwrap_or(&stem)
+            .to_string();
+        let sources = json["sources"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let kind = |s: &Value| text(s, "id").unwrap_or_default().to_string();
+        let scenes = sources.iter().filter(|s| kind(s) == "scene").count();
+        let others = sources
+            .iter()
+            .filter(|s| !matches!(kind(s).as_str(), "scene" | "group"))
+            .count();
+        let profile =
+            find_profile(obs, &name, resolution(&json)).map(|(path, _)| path.display().to_string());
+        found.collections.push(FoundCollection {
+            current: current_collection.as_deref() == Some(stem.as_str()),
+            name,
+            file: file.display().to_string(),
+            scenes,
+            sources: others,
+            profile,
+        });
+    }
+    found
+        .collections
+        .sort_by(|a, b| b.current.cmp(&a.current).then(a.name.cmp(&b.name)));
+    found
+}
+
+/// The stream key OBS keeps in plain text in a profile's service.json
+/// (`profile`: its basic.ini), if it does. Never log or show it.
+pub fn plain_stream_key(profile: &Path) -> Option<String> {
+    let folder = profile.parent()?;
+    let file = std::fs::read_to_string(folder.join("service.json")).ok()?;
+    let json: Value = serde_json::from_str(&file).ok()?;
+    let key = text(json.get("settings")?, "key")?.trim();
+    (!key.is_empty()).then(|| key.to_string())
+}
+
+/// An OBS profile's settings in a line.
+fn profile_summary(profile: &Profile, stream: Option<&FoundStream>) -> String {
+    let mut parts = Vec::new();
+    match (profile.canvas, profile.output) {
+        (Some((w, h)), Some((ow, oh))) if (ow, oh) != (w, h) => {
+            parts.push(format!("{w}×{h} → {ow}×{oh}"))
+        }
+        (Some((w, h)), _) => parts.push(format!("{w}×{h}")),
+        _ => {}
+    }
+    if let Some(fps) = profile.fps {
+        if (fps - fps.round()).abs() < 0.001 {
+            parts.push(format!("{} fps", fps.round()));
+        } else {
+            parts.push(format!("{fps:.2} fps"));
+        }
+    }
+    if let Some(encoder) = &profile.encoder {
+        parts.push(encoder_label(encoder));
+    }
+    if let Some(container) = &profile.container {
+        parts.push(match container.as_str() {
+            "fragmented_mp4" => "MP4 (fragmented)".to_string(),
+            "fragmented_mov" => "MOV (fragmented)".to_string(),
+            "hybrid_mp4" => "MP4 (hybrid)".to_string(),
+            other => other.to_uppercase(),
+        });
+    }
+    if let Some(stream) = stream {
+        let service = stream.obs_service.as_str();
+        let service = match service {
+            "rtmp_custom" => "Custom server",
+            other => other,
+        };
+        match stream.video_kbps {
+            Some(kbps) => parts.push(format!("{service} {kbps} kb/s")),
+            None => parts.push(service.to_string()),
+        }
+    }
+    parts.join(" · ")
+}
+
+/// OBS's encoder ids in words.
+fn encoder_label(id: &str) -> String {
+    let lower = id.to_lowercase();
+    if lower.contains("prores") {
+        "ProRes".into()
+    } else if lower.contains("hevc") || lower.contains("265") {
+        "HEVC".into()
+    } else if lower.contains("av1") {
+        "AV1".into()
+    } else if lower.contains("x264") {
+        "x264".into()
+    } else if lower.contains("264") || lower.contains("avc") {
+        "H.264".into()
+    } else {
+        id.to_string()
+    }
 }
 
 /// Read a scene collection file, or one named in OBS's scenes folder, and

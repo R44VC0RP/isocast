@@ -23,6 +23,7 @@ pub mod library;
 pub mod located;
 pub mod manifest;
 pub mod obs;
+pub mod optimize;
 pub mod plugin;
 pub mod project;
 mod source;

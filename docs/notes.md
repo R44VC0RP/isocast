@@ -1501,6 +1501,44 @@ each section. Delete entries that stop being true.
   on who launched the engine: a Terminal-started engine on the Mac's screen
   does get prompts, so a fast refusal there is still a real no-prompt.
 
+- 2026-10-15 (#46, first launch and Auto-Configuration): the flow is a
+  wizard sheet (area I, src/areas/wizard.rs), chosen from three variants
+  drawn in the real app (scratch/shots/variants in the lane's folder):
+  A, a "Found in OBS" list inside Welcome; B, the sheet opening on From
+  OBS before Welcome; C, Welcome's primary button importing OBS's current
+  collection. B because it is the first run's own sheet (same header
+  steps, footer and size, so no new visual language), it has room for
+  choosing several collections, the stream-key consent and OBS's
+  unreadable files, it continues straight into Goal and Summary, and
+  Tools › Auto-Configuration Wizard… reuses it (OBS opens its wizard the
+  same way). A crowded Welcome and had no room for the key or errors; C
+  hid the other collections and every profile's settings. The order is
+  permissions (area H), then the sheet if OBS has collections, else
+  Welcome; Not Now leads to Welcome, whose Import from OBS… reopens the
+  sheet (a file picker when nothing was found). Start with this Mac's
+  Create setup leads on to Goal. Tools › Set Up from This Mac… keeps the
+  old "start over" (the device steps).
+- 2026-10-15 (#46): optimize's rules (isocast_protocol::optimize):
+  recording favours quality, HEVC High (ProRes or a better preset kept)
+  for the program and ISO files, and ISO files of every captured source
+  when none are listed; streaming uses 75% of the upload in 500 kb/s
+  steps, within the service's ceiling (Twitch 6000, YouTube 12000 at
+  60 fps/9000 at 30, Facebook 9000, Kick 8000, custom 12000), sends
+  1080p from 6 Mb/s at 60 fps (4.5 at 30), 720p from 2.5, else 480p;
+  streaming alone turns ISO files off and drops to 30 fps under 4.5 Mb/s;
+  Both keeps the recording's rate and ISO files. Then `tune` checks the
+  result and its change is folded in; the summary line is built from the
+  final setup. The stream's encoder isn't benchmarked (tune knows
+  recording files only): a note says so.
+- 2026-10-15 (#46): the upload test publishes filler H.264 (SPS/PPS, one
+  black IDR so ffmpeg-like receivers learn the size, then filler NALs) and
+  measures by the server's RTMP acknowledgements (window 256 KB), falling
+  back to bytes sent in the second half; capped at 50 Mb/s, 8 s by
+  default. Only Twitch (its `?bandwidthtest=true` publish never goes on
+  air) and custom servers are tested; YouTube, Facebook and Kick have no
+  test mode, so a test would go live: they, and a missing key, get 6 Mb/s
+  (within the ceiling) and the reason. Applying in the app is one
+  undoable edit (replace_setup_then), not a second optimize.
 - 2026-10-15 (#61, WebM/MKV): Matroska and WebM files (EBML magic in the
   first four bytes, whatever the extension) bypass AVFoundation:
   `matroska.rs` (our own EBML reader; matroska-demuxer, the maintained
@@ -4583,6 +4621,21 @@ each section. Delete entries that stop being true.
   isocast-m2-b, TCC reads camera and microphone as denied for every app
   (not "not determined"), so no request is made there at all.
 
+- 2026-10-15 (#46): `scripts/remote-build.sh` on a new lane clones the
+  most recent lane's target and keeps local mtimes, so crates edited
+  before that lane's last build look up to date and the build fails with
+  "no `optimize` in isocast_protocol" (or worse, links stale code).
+  `git diff --name-only main...HEAD | grep '\.rs$' | xargs touch` before
+  the first remote build of a lane fixes it.
+- 2026-10-15 (#46): over SSH a test Mac's login keychain is locked, so
+  moving a stream key fails (-25293); `scripts/testmac.sh gui` works.
+  Don't read the item with `security find-generic-password -w` there: it
+  prompts (the item belongs to isocastd) and blocks.
+- 2026-10-15 (#46): test Macs have no `timeout` (coreutils); bound remote
+  scripts with the local `timeout` around testmac.sh instead.
+- 2026-10-15 (#46): a speed-test key that is a common word ("test") makes
+  the redactor blank that word everywhere in messages; use an odd key in
+  ISOCAST_STREAM_KEY for local tests.
 - 2026-10-15 (#61, WebM/MKV): Apple's Opus AudioConverter drops the
   first 120 samples it decodes (2.5 ms; macOS 27.2) and reports no
   PrimeInfo, so applying the full OpusHead pre-skip put sound 2.5 ms

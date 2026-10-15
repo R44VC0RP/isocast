@@ -1,0 +1,663 @@
+// The setup wizard's sheet (#46), in the first run's manners (Onboarding:
+// a sheet 120px down, the mark and the steps in the header, one height for
+// every step, Back and the one yellow button in the footer): From OBS
+// (each collection found, with its profile's settings), Goal (recording,
+// streaming or both, with the service and an upload test) and Summary
+// (the benchmark's one line and what changes).
+
+import { Theme } from "../../theme.slint";
+import { BrandMark, Icon, Icons } from "../../icons.slint";
+import {
+    Button, ButtonVariant, Callout, CalloutKind, Checkbox, ControlSize, DialogFooter, FocusRing, GroupRow,
+    IconButton, RowGroup, RowPlace, ScrollArea, Segmented, Spinner, Switch, Tag, TextField,
+} from "../../kit.slint";
+import { WizardArea } from "state.slint";
+
+component StepItem inherits HorizontalLayout {
+    in property <int> index;
+    in property <int> number;
+    in property <string> label;
+    in property <int> current;
+    property <bool> on: root.current == root.index;
+    property <bool> done: root.current > root.index;
+    spacing: Theme.space-2;
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            background: root.on ? Theme.accent-fill : root.done ? Theme.control : transparent;
+            border-width: root.on || root.done ? 0 : 1px;
+            border-color: Theme.outline;
+            if root.done: Icon {
+                path: Icons.check;
+                size: Theme.icon-xs;
+                color: Theme.text-2;
+            }
+            if !root.done: Text {
+                text: root.number;
+                color: root.on ? Theme.on-accent : Theme.text-3;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-xs;
+                font-weight: Theme.weight-semibold;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    Text {
+        text: root.label;
+        color: root.on ? Theme.text : root.done ? Theme.text-2 : Theme.text-3;
+        font-size: Theme.fs-sm;
+        letter-spacing: Theme.tracking-sm;
+        font-weight: Theme.weight-medium;
+        vertical-alignment: center;
+    }
+}
+
+component StepTitle inherits VerticalLayout {
+    in property <string> title;
+    in property <string> lead;
+    spacing: Theme.space-2;
+    padding-bottom: Theme.space-5;
+    Text {
+        text: root.title;
+        font-family: Theme.font-brand;
+        font-size: Theme.fs-display;
+        font-weight: Theme.weight-semibold;
+        letter-spacing: Theme.tracking-display;
+        color: Theme.text;
+        wrap: word-wrap;
+        accessible-role: AccessibleRole.text;
+    }
+    if root.lead != "": Text {
+        max-width: 600px;
+        text: root.lead;
+        color: Theme.text-2;
+        font-size: Theme.fs;
+        letter-spacing: Theme.tracking;
+        line-height-factor: Theme.leading-welcome;
+        wrap: word-wrap;
+    }
+}
+
+// A dim line of small text.
+component Dim inherits Text {
+    color: Theme.text-3;
+    font-size: Theme.fs-sm;
+    letter-spacing: Theme.tracking-sm;
+    line-height-factor: Theme.leading-sm;
+    wrap: word-wrap;
+}
+
+// An OBS collection: a checkbox, its name and counts, its profile's line.
+component CollectionItem inherits Rectangle {
+    in property <string> name;
+    in property <string> meta;
+    in property <string> profile;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback toggled();
+
+    height: max(48px, row.preferred-height);
+    background: root.selected ? Theme.selected : ta.has-hover ? Theme.hover : transparent;
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    accessible-role: checkbox;
+    accessible-label: "Import “" + root.name + "”";
+    accessible-description: root.meta + ". " + root.profile;
+    accessible-checkable: true;
+    accessible-checked: root.selected;
+    accessible-action-default => { root.toggled(); }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.toggled(); }
+    }
+    row := HorizontalLayout {
+        padding-top: Theme.space-2;
+        padding-bottom: Theme.space-2;
+        padding-left: Theme.space-3;
+        padding-right: Theme.space-3;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 0;
+            Checkbox {
+                checked: root.selected;
+                enabled: root.enabled;
+                label: root.name;
+                toggled => { root.toggled(); }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 2px;
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Text {
+                    text: root.name;
+                    color: Theme.text;
+                    font-weight: Theme.weight-medium;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.meta;
+                    color: Theme.text-3;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+            }
+            if root.profile != "": Text {
+                text: root.profile;
+                color: root.selected ? Theme.text-2 : Theme.text-3;
+                font-size: Theme.fs-xs;
+                letter-spacing: Theme.tracking-xs;
+                font-family: Theme.font-mono;
+                overflow: elide;
+                accessible-role: none;
+            }
+        }
+    }
+}
+
+component ObsStep inherits VerticalLayout {
+    spacing: 0;
+    alignment: start;
+    StepTitle {
+        title: WizardArea.collections.length == 1 ? "Import “" + WizardArea.collections[0].name + "” from OBS?" : "Bring your scenes from OBS";
+        lead: WizardArea.collections.length == 0 ? "" : "Isocast found OBS on this Mac. Each scene collection comes in with its profile's canvas, frame rate, recording and stream settings. OBS itself is left as it is.";
+    }
+    if WizardArea.discovering: HorizontalLayout {
+        spacing: Theme.space-2;
+        alignment: start;
+        Spinner { small: true; }
+        Dim { text: "Looking for OBS…"; vertical-alignment: center; }
+    }
+    if !WizardArea.discovering && WizardArea.collections.length == 0: VerticalLayout {
+        spacing: Theme.space-2;
+        Text {
+            text: "No OBS scene collections on this Mac.";
+            color: Theme.text-2;
+        }
+        Dim { text: "Looked in " + WizardArea.obs-folder + ". Continue to set up from this Mac instead."; }
+    }
+    if WizardArea.collections.length > 0: Rectangle {
+        height: 1px;
+        background: Theme.line;
+    }
+    for c[i] in WizardArea.collections: VerticalLayout {
+        CollectionItem {
+            name: c.name;
+            meta: c.meta;
+            profile: c.profile;
+            selected: c.selected;
+            enabled: !WizardArea.importing;
+            toggled => { WizardArea.toggle(i); }
+        }
+        Rectangle {
+            height: 1px;
+            background: Theme.line;
+        }
+    }
+    if WizardArea.any-key: HorizontalLayout {
+        padding-top: Theme.space-4;
+        spacing: Theme.space-3;
+        VerticalLayout {
+            alignment: start;
+            Switch {
+                on: WizardArea.move-key;
+                label: "Move the stream key to the Keychain";
+                toggled(on) => { WizardArea.set("move_key", on ? "true" : "false"); }
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            Text {
+                text: "Move the stream key to the Keychain";
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+            }
+            Dim {
+                text: "OBS keeps it in plain text in its profile. Isocast never writes it to a file; OBS's copy stays where it is.";
+            }
+        }
+    }
+    if WizardArea.obs-errors != "": VerticalLayout {
+        padding-top: Theme.space-4;
+        Callout {
+            kind: CalloutKind.info;
+            title: "Some of OBS's files couldn't be read";
+            message: WizardArea.obs-errors;
+        }
+    }
+    if WizardArea.import-error != "": VerticalLayout {
+        padding-top: Theme.space-4;
+        Callout {
+            kind: CalloutKind.error;
+            title: "Couldn’t import";
+            message: WizardArea.import-error;
+        }
+    }
+}
+
+// Recording, Streaming or Both: a tile with its icon, name and what it
+// favours.
+component GoalTile inherits Rectangle {
+    in property <string> goal;
+    in property <string> icon;
+    in property <string> icon2;
+    in property <string> title;
+    in property <string> hint;
+    property <bool> on: WizardArea.goal == root.goal;
+
+    forward-focus: fs;
+    property <bool> keyboard;
+
+    horizontal-stretch: 1;
+    min-width: 0px;
+    preferred-width: 0px;
+    // As tall as the tallest tile.
+    min-height: column.preferred-height;
+    border-radius: Theme.r;
+    background: root.on ? Theme.selected : ta.has-hover ? Theme.hover : Theme.surface-inset;
+    border-width: 1px;
+    border-color: root.on ? Theme.accent : Theme.line;
+    accessible-role: radio-button;
+    accessible-label: root.title;
+    accessible-description: root.hint;
+    accessible-checkable: true;
+    accessible-checked: root.on;
+    accessible-action-default => { WizardArea.set("goal", root.goal); }
+
+    ta := TouchArea {
+        clicked => { WizardArea.set("goal", root.goal); }
+    }
+    fs := FocusScope {
+        focus-on-click: false;
+        focus-gained(reason) => { root.keyboard = reason == FocusReason.tab-navigation; }
+        focus-lost => { root.keyboard = false; }
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                WizardArea.set("goal", root.goal);
+                return accept;
+            }
+            reject
+        }
+    }
+    column := VerticalLayout {
+        padding: Theme.space-4;
+        spacing: Theme.space-2;
+        alignment: start;
+        HorizontalLayout {
+            spacing: Theme.space-1;
+            alignment: start;
+            Icon {
+                path: root.icon;
+                size: 18px;
+                color: root.on ? Theme.accent-text : Theme.text-2;
+            }
+            if root.icon2 != "": Icon {
+                path: root.icon2;
+                size: 18px;
+                color: root.on ? Theme.accent-text : Theme.text-2;
+            }
+        }
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-weight: Theme.weight-semibold;
+            accessible-role: none;
+        }
+        Text {
+            text: root.hint;
+            color: root.on ? Theme.text-2 : Theme.text-3;
+            font-size: Theme.fs-sm;
+            letter-spacing: Theme.tracking-sm;
+            line-height-factor: Theme.leading-sm;
+            wrap: word-wrap;
+            accessible-role: none;
+        }
+    }
+    FocusRing {
+        inset: true;
+        radius: Theme.r;
+        shown: fs.has-focus && root.keyboard;
+    }
+}
+
+component GoalStep inherits VerticalLayout {
+    spacing: 0;
+    alignment: start;
+    StepTitle {
+        title: "What is this setup for?";
+        lead: "Isocast picks the settings, then benchmarks this Mac's encoders and steps down only where it has to.";
+    }
+    HorizontalLayout {
+        spacing: Theme.space-3;
+        GoalTile {
+            goal: "recording";
+            icon: Icons.record;
+            title: "Recording";
+            hint: "Best quality: HEVC High, and every screen and camera in its own ISO file.";
+        }
+        GoalTile {
+            goal: "streaming";
+            icon: Icons.broadcast;
+            title: "Streaming";
+            hint: "A bitrate your upload carries, and a size that looks good at it.";
+        }
+        GoalTile {
+            goal: "both";
+            icon: Icons.record;
+            icon2: Icons.broadcast;
+            title: "Both";
+            hint: "Record in full quality and ISO files while you stream.";
+        }
+    }
+    if WizardArea.goal != "recording": VerticalLayout {
+        padding-top: Theme.space-6;
+        RowGroup {
+            GroupRow {
+                label: "Service";
+                place: WizardArea.needs-server ? RowPlace.first : RowPlace.first;
+                VerticalLayout {
+                    alignment: center;
+                    Segmented {
+                        small: true;
+                        options: [
+                            { value: "twitch", label: "Twitch" },
+                            { value: "youtube", label: "YouTube" },
+                            { value: "kick", label: "Kick" },
+                            { value: "facebook", label: "Facebook" },
+                            { value: "custom", label: "Custom" },
+                        ];
+                        value: WizardArea.service;
+                        label: "Service";
+                        selected(value) => { WizardArea.set("service", value); }
+                    }
+                }
+            }
+            if WizardArea.needs-server: GroupRow {
+                label: "Server";
+                VerticalLayout {
+                    alignment: center;
+                    TextField {
+                        width: Theme.field-path;
+                        small: true;
+                        mono: true;
+                        text: WizardArea.server;
+                        placeholder: "rtmp://host/app";
+                        label: "Server";
+                        committed(text) => { WizardArea.set("server", text); }
+                    }
+                }
+            }
+            GroupRow {
+                label: "Upload";
+                place: RowPlace.last;
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: WizardArea.testing ? "Sending test data…" : WizardArea.speed != "" ? WizardArea.speed : "Not tested yet";
+                        color: WizardArea.speed != "" ? Theme.text : Theme.text-3;
+                        font-size: Theme.fs-sm;
+                        letter-spacing: Theme.tracking-sm;
+                        overflow: elide;
+                    }
+                }
+                if WizardArea.testing: VerticalLayout {
+                    alignment: center;
+                    Spinner { small: true; }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Button {
+                        text: WizardArea.speed == "" || WizardArea.speed-note != "" ? "Test Upload" : "Test Again";
+                        size: ControlSize.small;
+                        on-control: true;
+                        enabled: !WizardArea.testing;
+                        clicked => { WizardArea.test-upload(); }
+                    }
+                }
+            }
+        }
+        if WizardArea.speed == "" && WizardArea.speed-note == "" && WizardArea.service == "custom" && !WizardArea.testing: VerticalLayout {
+            padding-top: Theme.space-2;
+            padding-left: Theme.space-3;
+            Dim { text: "Test Upload sends a few seconds of filler video to your server. If it relays to a live service, viewers may see it."; }
+        }
+        if WizardArea.speed-note != "": VerticalLayout {
+            padding-top: Theme.space-2;
+            padding-left: Theme.space-3;
+            Dim { text: WizardArea.speed-note; }
+        }
+    }
+}
+
+component SummaryStep inherits VerticalLayout {
+    spacing: 0;
+    alignment: start;
+    if WizardArea.optimizing: VerticalLayout {
+        spacing: Theme.space-4;
+        StepTitle {
+            title: "Measuring this Mac…";
+            lead: "Isocast encodes busy test pictures with the settings it picked, all files at once, as a recording would. It takes about a minute.";
+        }
+        HorizontalLayout {
+            alignment: start;
+            Spinner { }
+        }
+    }
+    if !WizardArea.optimizing && WizardArea.error != "": VerticalLayout {
+        StepTitle {
+            title: "Couldn’t optimize";
+            lead: "Nothing was changed.";
+        }
+        Callout {
+            kind: CalloutKind.error;
+            title: "The engine said";
+            message: WizardArea.error;
+        }
+    }
+    if !WizardArea.optimizing && WizardArea.error == "": VerticalLayout {
+        spacing: 0;
+        Tag {
+            text: "READY TO APPLY";
+        }
+        Text {
+            text: WizardArea.summary;
+            font-family: Theme.font-brand;
+            font-size: Theme.fs-display;
+            font-weight: Theme.weight-semibold;
+            letter-spacing: Theme.tracking-display;
+            color: Theme.text;
+            wrap: word-wrap;
+        }
+        Dim {
+            text: WizardArea.verdict;
+        }
+        VerticalLayout {
+            padding-top: Theme.space-5;
+            if WizardArea.changes.length == 0: Dim { text: "The setup already matches; nothing to change."; }
+            if WizardArea.changes.length > 0: RowGroup {
+                for change[i] in WizardArea.changes: GroupRow {
+                    label: change.label;
+                    place: WizardArea.changes.length == 1 ? RowPlace.only : i == 0 ? RowPlace.first : i == WizardArea.changes.length - 1 ? RowPlace.last : RowPlace.middle;
+                    HorizontalLayout {
+                        spacing: Theme.space-2;
+                        alignment: end;
+                        Text {
+                            text: change.from;
+                            color: Theme.text-3;
+                            font-size: Theme.fs-sm;
+                            letter-spacing: Theme.tracking-sm;
+                            vertical-alignment: center;
+                        }
+                        Icon {
+                            y: (parent.height - self.height) / 2;
+                            path: Icons.arrow-right;
+                            size: Theme.icon-xs;
+                            color: Theme.text-3;
+                        }
+                        Text {
+                            text: change.to;
+                            color: Theme.text;
+                            font-size: Theme.fs-sm;
+                            letter-spacing: Theme.tracking-sm;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+        if WizardArea.notes != "": VerticalLayout {
+            padding-top: Theme.space-3;
+            padding-left: Theme.space-3;
+            Dim { text: WizardArea.notes; }
+        }
+    }
+}
+
+export component WizardSheet inherits Rectangle {
+    property <int> index: WizardArea.step == "obs" ? 0 : WizardArea.step == "goal" ? 1 : 2;
+    background: Theme.scrim;
+    TouchArea { }
+
+    keys := FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.Escape && WizardArea.can-close {
+                WizardArea.close();
+                return accept;
+            }
+            reject
+        }
+    }
+
+    card := Rectangle {
+        width: min(760px, root.width - 40px);
+        height: min(560px, root.height - 40px);
+        x: (root.width - self.width) / 2;
+        y: max(Theme.space-5, min(Theme.welcome-top, root.height - self.height - Theme.space-5));
+        background: Theme.surface-overlay;
+        border-width: 1px;
+        border-color: Theme.line-strong;
+        border-radius: Theme.r-panel;
+        drop-shadow-color: Theme.shadow-sheet-color;
+        drop-shadow-blur: Theme.shadow-sheet-blur;
+        drop-shadow-offset-y: Theme.shadow-sheet-y;
+        clip: true;
+        accessible-role: groupbox;
+        accessible-label: "Auto-Configuration";
+
+        VerticalLayout {
+            padding: 1px;
+            spacing: 0;
+            HorizontalLayout {
+                height: 64px - 1px;
+                padding-left: Theme.space-8 - 1px;
+                padding-right: Theme.space-4 - 1px;
+                spacing: Theme.space-4;
+                VerticalLayout {
+                    alignment: center;
+                    BrandMark { size: 28px; }
+                }
+                HorizontalLayout {
+                    horizontal-stretch: 1;
+                    spacing: Theme.space-5;
+                    alignment: start;
+                    if WizardArea.with-obs: StepItem {
+                        index: 0;
+                        number: 1;
+                        label: "From OBS";
+                        current: root.index;
+                    }
+                    StepItem {
+                        index: 1;
+                        number: WizardArea.with-obs ? 2 : 1;
+                        label: "Goal";
+                        current: root.index;
+                    }
+                    StepItem {
+                        index: 2;
+                        number: WizardArea.with-obs ? 3 : 2;
+                        label: "Summary";
+                        current: root.index;
+                    }
+                }
+                if WizardArea.can-close: VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        icon: Icons.x;
+                        label: "Close";
+                        clicked => { WizardArea.close(); }
+                    }
+                }
+            }
+            Rectangle {
+                height: 1px;
+                background: Theme.line;
+            }
+            ScrollArea {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding-top: Theme.space-6;
+                    padding-bottom: Theme.space-6;
+                    padding-left: Theme.space-8 - 1px;
+                    padding-right: Theme.space-8 - 1px;
+                    if WizardArea.step == "obs": ObsStep { }
+                    if WizardArea.step == "goal": GoalStep { }
+                    if WizardArea.step == "summary": SummaryStep { }
+                }
+            }
+            DialogFooter {
+                inset: Theme.space-8 - 1px;
+                extra-text: WizardArea.step == "obs" ? (WizardArea.collections.length == 0 ? "" : "Not Now")
+                    : WizardArea.step == "goal" ? (WizardArea.with-obs ? "Back" : WizardArea.can-close ? "Cancel" : "")
+                    : "Back";
+                extra-enabled: !WizardArea.importing && !WizardArea.optimizing && !WizardArea.applying;
+                cancel-text: "";
+                ok-text: WizardArea.step == "obs" ? (WizardArea.collections.length == 0 ? "Continue"
+                        : WizardArea.selected-count > 1 ? "Import " + WizardArea.selected-count : "Import")
+                    : WizardArea.step == "goal" ? "Optimize"
+                    : !WizardArea.optimizing && (WizardArea.changes.length == 0 || WizardArea.error != "") ? "Done" : "Apply";
+                ok-enabled: WizardArea.step == "obs" ? !WizardArea.importing && !WizardArea.discovering && (WizardArea.selected-count > 0 || WizardArea.collections.length == 0)
+                    : WizardArea.step == "goal" ? !WizardArea.testing && (!WizardArea.needs-server || WizardArea.goal == "recording" || WizardArea.server != "")
+                    : !WizardArea.optimizing && !WizardArea.applying;
+                note: WizardArea.importing ? "Importing…" : WizardArea.applying ? "Applying…" : "";
+                extra => {
+                    if WizardArea.step == "obs" {
+                        WizardArea.skip-obs();
+                    } else if WizardArea.step == "goal" && !WizardArea.with-obs {
+                        WizardArea.close();
+                    } else {
+                        WizardArea.back();
+                    }
+                }
+                ok => {
+                    if WizardArea.step == "obs" {
+                        if WizardArea.collections.length == 0 {
+                            WizardArea.skip-obs();
+                        } else {
+                            WizardArea.import();
+                        }
+                    } else if WizardArea.step == "goal" {
+                        WizardArea.optimize();
+                    } else {
+                        WizardArea.apply();
+                    }
+                }
+            }
+        }
+    }
+}

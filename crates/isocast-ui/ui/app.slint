@@ -43,6 +43,8 @@ import { DeveloperArea } from "areas/developer/state.slint";
 import { OverlaySize, StatsOverlay } from "areas/developer/overlay.slint";
 import { PermissionsArea } from "areas/permissions/state.slint";
 import { PermissionsSheet } from "areas/permissions/sheet.slint";
+import { WizardArea } from "areas/wizard/state.slint";
+import { WizardSheet } from "areas/wizard/sheet.slint";
 
 // What Rust sees: the globals and the structs in their models.
 export { Theme, Ui, ConnectionState, Menus, Toasts, EditCommands, SettingsForms }
@@ -51,6 +53,7 @@ export { CreateArea }
 export { DeveloperArea }
 export { StatRow, OutputStat } from "areas/developer/state.slint";
 export { PermissionsArea, PermissionItem } from "areas/permissions/state.slint";
+export { WizardArea, ObsCollectionRow, ChangeRow } from "areas/wizard/state.slint";
 export { QuitPrompt }
 export { DropdownOption, MenuEntry, MenuList, MenuEntryKind, NavTab, Segment, ToastData, ToastRow, ToastKind, FormField, FormGroup } from "kit.slint";
 export { SceneRow, ItemRow, FilterRow, PickRow } from "areas/sources/state.slint";
@@ -566,7 +569,8 @@ export component AppWindow inherits Window {
         }
         Menu {
             title: "Tools";
-            MenuItem { title: "Auto-Configuration Wizard…"; activated => { Ui.menu("start_over"); } }
+            MenuItem { title: "Auto-Configuration Wizard…"; activated => { Ui.menu("auto_config"); } }
+            MenuItem { title: "Set Up from This Mac…"; activated => { Ui.menu("start_over"); } }
         }
         // Developer mode (#47, src/areas/developer.rs): only while the
         // profile has it on.
@@ -676,8 +680,11 @@ export component AppWindow inherits Window {
 
     // Over the window: Welcome (no setup yet), the dialogs, the gallery,
     // the menu and the toasts.
-    if Ui.loaded && !Ui.has-setup && !Ui.onboarding && !PermissionsArea.shown: Welcome { }
+    if Ui.loaded && !Ui.has-setup && !Ui.onboarding && !PermissionsArea.shown && !WizardArea.shown: Welcome { }
     if Ui.onboarding: Onboarding { }
+    // The setup wizard (area I): OBS's collections on the first launch,
+    // and Tools › Auto-Configuration Wizard….
+    if WizardArea.shown && !PermissionsArea.shown: WizardSheet { }
 
     SourcesDialogs { }
     MixerDialogs { }

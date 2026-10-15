@@ -442,7 +442,11 @@ Rename a recording project (by id, from list_projects): its folder becomes `<dat
 
 ## request_permissions
 
-Ask macOS for screen recording, camera and microphone access where it hasn't been decided yet. Its prompts appear on the user's screen; waits up to a minute for answers and returns the permissions with next steps.
+Ask macOS for screen recording, camera and microphone access where it hasn't been decided yet (or only `permission`). Its prompts appear on the user's screen; waits up to a minute for answers and returns the permissions with next steps.
+
+| Argument | Type | Description |
+|---|---|---|
+| `permission` | PermissionKind | Only this one: screen_recording, camera or microphone (all three not decided yet if left out). |
 
 ## restart_isocastd
 

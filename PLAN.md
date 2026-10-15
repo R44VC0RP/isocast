@@ -405,6 +405,12 @@ and N.4 are parked under 9.
   recording or streaming is refused or deferred with a clear reason.
 - [x] **P.2 App.** Profile and Scene Collection menus as in OBS, in the
   Slint app (after N.2) and the web app until N.3.
+- [x] **P.3 First launch finds OBS; Auto-Configuration (#46).** On the
+  first launch (after the permissions step) OBS's scene collections are
+  found and offered with their profiles' settings; then optimize for
+  recording, streaming (upload test) or both, benchmarked with `tune`,
+  with a one-line summary; also Tools › Auto-Configuration Wizard….
+  `obs_discover`, `speed_test`, `optimize` on the method table.
 
 ### C. Create timeline (Ryan, 2026-10-13)
 
@@ -1255,6 +1261,23 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- P.3 (2026-10-15, #46): first launch finds OBS and optimizes. Engine:
+  `obs_discover` (ISOCAST_OBS_FOLDER for isolated engines),
+  `library_import_obs` `stream_key`, `speed_test` (RTMP filler publish,
+  server acknowledgements), `optimize` (rules in
+  isocast_protocol::optimize, then `tune`), on the API, CLI and MCP. App:
+  area I's wizard sheet (From OBS, Goal, Summary), Tools ›
+  Auto-Configuration Wizard…. Verified: scratch OBS folders (several,
+  none, errors, m2-a's copy) imported in an isolated engine and a 4 s
+  take ffprobed (HEVC 1080p60, 4.000 s); speed test 7988 kb/s through an
+  8000 kb/s throttle, 3995 through 4000 on m2-a; optimize on m2-a: a 4K
+  H.264 setup became "1440p60, HEVC High, 3 ISO files" (tune: program
+  2560×1440, 1.73×; a separate tune of the applied setup 1.74×, fits),
+  its take HEVC 2560×1440 + 3 ISO files at 60 fps, 4.000 s; streaming at
+  4 Mb/s became 30 fps with a 2.5 Mbps 720p stream; stream key moved to
+  the Keychain in m2-a's desktop session (and cleared). Offscreen
+  snapshots of every step; visual-shots base vs head unchanged.
 
 - G.8 (2026-10-15, #61): WebM/MKV media sources and stingers through our
   own EBML reader and VideoToolbox/AudioToolbox; AVFoundation keeps every

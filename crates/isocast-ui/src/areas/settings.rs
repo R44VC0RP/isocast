@@ -1507,8 +1507,13 @@ impl Settings {
         }
     }
 
-    /// Ask for an OBS scene collection and make it the live setup.
+    /// Ask for an OBS scene collection and make it the live setup (or,
+    /// when OBS's own were found, offer those: area I).
     fn import_obs(&self, app: &Rc<App>) {
+        if app.wizard.has_found() {
+            app.wizard.open_obs(app);
+            return;
+        }
         if let Some(path) = choose_file(app, &["json"], "Import") {
             self.import_obs_path(app, &path);
         }
@@ -1683,6 +1688,8 @@ impl Settings {
                     app.reload();
                     app.refresh_status(false);
                     app.settings.close_first_run(app);
+                    // Then optimize it (area I).
+                    app.wizard.open_goal(app);
                     let scenes = made["setup"]["scenes"].as_array().map_or(0, Vec::len);
                     app.toast(
                         ToastKind::Success,

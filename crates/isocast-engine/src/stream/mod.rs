@@ -19,6 +19,7 @@ mod amf;
 pub(crate) mod flv;
 mod queue;
 mod rtmp;
+pub mod speed;
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

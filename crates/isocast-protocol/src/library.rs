@@ -730,6 +730,11 @@ pub struct LibraryImportObsParams {
     /// streaming).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub switch: bool,
+    /// Move the stream key OBS keeps in plain text in the profile's
+    /// service.json into the Keychain, for the imported profile's service
+    /// (only when the user agreed to it). Without it the key stays behind.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stream_key: bool,
 }
 
 /// A scene collection or profile as a document, for export or to read one
