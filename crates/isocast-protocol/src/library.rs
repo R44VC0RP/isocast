@@ -208,6 +208,12 @@ pub struct ProfileRecording {
     /// Free space, in GB, a recording never uses.
     #[serde(default = "default_keep_free_gb")]
     pub keep_free_gb: f64,
+    /// The replay buffer: how much of the program it keeps.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::replay::ReplaySettings::is_default"
+    )]
+    pub replay: crate::replay::ReplaySettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -311,6 +317,7 @@ impl Setup {
                             filtered,
                         },
                     keep_free_gb,
+                    replay,
                 },
             stream,
             hotkeys,
@@ -345,6 +352,7 @@ impl Setup {
                     filtered,
                 },
                 keep_free_gb,
+                replay,
             },
             stream,
             hotkeys,
@@ -388,6 +396,7 @@ impl Setup {
                             filtered,
                         },
                     keep_free_gb,
+                    replay,
                 },
             stream,
             hotkeys,
@@ -433,6 +442,7 @@ impl Setup {
                     filtered,
                 },
                 keep_free_gb,
+                replay,
             },
             stream,
             hotkeys,
@@ -451,6 +461,7 @@ const PROFILE_FIELDS: &[&str] = &[
     "stream",
     "recording.folder",
     "recording.keep_free_gb",
+    "recording.replay",
     "recording.program.enabled",
     "recording.program.filename",
     "recording.program.encoder",
@@ -528,6 +539,7 @@ impl Profile {
                     ..ProfileIso::default()
                 },
                 keep_free_gb: default_keep_free_gb(),
+                replay: Default::default(),
             },
             stream: None,
             hotkeys: Default::default(),

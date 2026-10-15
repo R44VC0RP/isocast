@@ -13,11 +13,17 @@
 //
 // Start/Stop Virtual Camera sits under recording, as OBS has it, with a
 // gear beside it that opens its output choice (program, preview, a scene
-// or a video source) and size in a popover. Six buttons need 208px under
+// or a video source) and size in a popover. Seven buttons need 240px under
 // the header, so they are 4px apart with 10px above and below (Paper's
 // board has five, 6px apart, 12px down); in a shorter dock Exit becomes a
 // square button beside Settings (Quit Isocast in the app menu does the
-// same).
+// same), and in the shortest (a window under 900px tall) the six rows
+// left are 2px apart with 6px above and below.
+//
+// The replay buffer (G.2) sits between recording and the virtual camera,
+// as OBS has it: a toggle named as Virtual Camera is (lit while it keeps
+// the program), with Save Replay beside it, a square button with OBS's
+// words in its tooltip, usable while the buffer runs.
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
@@ -180,21 +186,25 @@ export component ControlsDock inherits Dock {
     property <bool> recording: ControlsArea.record-state == "recording";
     property <bool> room-for-words: Ui.controls-width >= 224px && Viewport.width >= Ui.scenes-width + Ui.sources-width + Ui.transitions-width + Ui.controls-width + 232px;
     property <bool> vcam-on: ControlsArea.vcam-state == "running" || ControlsArea.vcam-state == "starting";
+    property <bool> replay-on: ControlsArea.replay-state == "running" || ControlsArea.replay-state == "starting";
     property <int> vcam-serial: ControlsArea.vcam-details-serial;
     // The dock row's height as app.slint's Workspace sets it (read from
     // the window, not this dock's layout, so it can't loop).
     property <length> row-height: Ui.docks-height > 0 ? Ui.docks-height : round(min(320px, max(224px, Viewport.height * 4 / 15)) / 1px) * 1px;
+    // Exit beside Settings below this; the rows closer together below 240px.
+    property <bool> exit-beside: root.row-height < 272px;
+    property <bool> tight: root.row-height < 240px;
     changed vcam-serial => { vcam-details.show(); }
 
     title: "Controls";
 
     VerticalLayout {
         vertical-stretch: 1;
-        padding-top: 10px;
-        padding-bottom: 10px;
+        padding-top: root.tight ? 6px : 10px;
+        padding-bottom: root.tight ? 6px : 10px;
         padding-left: Theme.pane-x;
         padding-right: Theme.pane-x;
-        spacing: Theme.space-1;
+        spacing: root.tight ? 2px : Theme.space-1;
         alignment: start;
 
         DockButton {
@@ -243,6 +253,32 @@ export component ControlsDock inherits Dock {
                 accessible-name: "Marker";
                 tooltip: "Add a marker at this moment";
                 clicked => { ControlsArea.marker(""); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Theme.space-1;
+            DockButton {
+                horizontal-stretch: 1;
+                shrinks: true;
+                tooltip: root.replay-on ? "Stop Replay Buffer" : "Start Replay Buffer: keep " + ControlsArea.replay-length + " of the program in memory";
+                accessible-name: root.replay-on ? "Stop Replay Buffer" : "Start Replay Buffer";
+                text: ControlsArea.replay-state == "starting" ? "Starting…" : ControlsArea.replay-state == "stopping" ? "Stopping…" : "Replay Buffer";
+                icon: Icons.history;
+                checked: root.replay-on;
+                toggle: true;
+                enabled: Ui.has-setup && !ControlsArea.busy-replay;
+                clicked => { ControlsArea.toggle-replay(); }
+            }
+            Button {
+                width: Theme.control-h;
+                inset: 0px;
+                icon: Icons.download;
+                accessible-name: "Save Replay";
+                tooltip: ControlsArea.replay-state == "running"
+                    ? "Save Replay: " + ControlsArea.replay-length + " to the recordings folder" + (ControlsArea.replay-counts != "" ? " (" + ControlsArea.replay-counts + ")" : "")
+                    : "Save Replay: start the replay buffer first";
+                enabled: ControlsArea.replay-state == "running" && !ControlsArea.saving-replay;
+                clicked => { ControlsArea.save-replay(); }
             }
         }
         HorizontalLayout {
@@ -303,7 +339,7 @@ export component ControlsDock inherits Dock {
                 icon: Icons.settings;
                 clicked => { Ui.open-dialog("settings", ""); }
             }
-            if root.row-height < 240px: Button {
+            if root.exit-beside: Button {
                 width: Theme.control-h;
                 inset: 0px;
                 icon: Icons.log-out;
@@ -313,7 +349,7 @@ export component ControlsDock inherits Dock {
                 clicked => { Ui.quit(); }
             }
         }
-        if root.row-height >= 240px: DockButton {
+        if !root.exit-beside: DockButton {
             text: "Exit";
             icon: Icons.log-out;
             variant: ButtonVariant.quiet;

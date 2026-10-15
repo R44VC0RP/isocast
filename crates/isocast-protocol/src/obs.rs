@@ -612,6 +612,7 @@ fn profile_from(
                 ..ProfileIso::default()
             },
             keep_free_gb: default_keep_free_gb(),
+            replay: Default::default(),
         },
         stream,
     };
@@ -3220,6 +3221,7 @@ impl<'a, 'v> Importer<'a, 'v> {
                 ..IsoRecording::default()
             },
             keep_free_gb: default_keep_free_gb(),
+            replay: Default::default(),
         }
     }
 

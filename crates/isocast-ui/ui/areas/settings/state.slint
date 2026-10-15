@@ -190,6 +190,9 @@ export global SettingsArea {
     in-out property <float> program-quality;
     in-out property <float> iso-quality;
     in-out property <float> keep-free;
+    // The replay buffer's length (s) and memory limit (MB).
+    in-out property <float> replay-seconds: 30;
+    in-out property <float> replay-memory: 1024;
     in-out property <bool> program-on;
     in-out property <string> program-codec;
     in-out property <string> program-container;

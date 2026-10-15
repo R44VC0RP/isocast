@@ -60,6 +60,16 @@ export global ControlsArea {
     // extension).
     in property <int> vcam-details-serial;
 
+    // ---- The replay buffer (G.2): off, starting, running, stopping,
+    // failed. Save Replay writes its last seconds to a file.
+    in property <string> replay-state: "off";
+    in property <bool> busy-replay;
+    in property <bool> saving-replay;
+    // "the last 30 s" (its length as set), for its words.
+    in property <string> replay-length: "the last 30 s";
+    // "12.4 s held · 18 MB" while it runs, else "".
+    in property <string> replay-counts;
+
     // ---- Scene Transitions
     in property <[DropdownOption]> transitions;
     in property <string> transition: "cut";
@@ -146,6 +156,8 @@ export global ControlsArea {
     callback toggle-record();
     callback toggle-pause();
     callback toggle-vcam();
+    callback toggle-replay();
+    callback save-replay();
     // Change the camera's output: field "target", "scene", "source" or
     // "size", and its new value.
     callback set-vcam(string, string);

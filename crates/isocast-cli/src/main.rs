@@ -31,6 +31,7 @@ mod mcp;
 mod optimize;
 mod plugin;
 mod project;
+mod replay;
 #[cfg(target_os = "macos")]
 mod shared_frames;
 mod timeline;
@@ -486,6 +487,12 @@ enum Command {
     Stream {
         #[command(subcommand)]
         command: StreamCommand,
+    },
+    /// The replay buffer: keep the last seconds of the program in memory,
+    /// and save them to a file on demand.
+    Replay {
+        #[command(subcommand)]
+        command: replay::Command,
     },
     /// Feed a picture to Isocast Virtual Camera (extension approval required once).
     Vcam {
@@ -1219,6 +1226,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         },
         Command::Engine { command, json } => engine(command, json),
         Command::Vcam { command } => virtual_camera::run(command),
+        Command::Replay { command } => replay::run(command),
         Command::Debug { command } => debug::run(command),
         Command::Stream { command } => match command {
             StreamCommand::SpeedTest {
@@ -1915,6 +1923,7 @@ fn status(json: bool) -> Result<ExitCode> {
             timeline_problem: None,
             export: None,
             virtual_camera: None,
+            replay: None,
             recording_free_bytes: None,
             program_bytes_per_second: None,
             daemon: None,
@@ -3136,6 +3145,8 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                 print_stream_lines(&stream);
             }
             Event::VirtualCamera { camera } => virtual_camera::print(&camera),
+            Event::Replay { replay } => replay::print(&replay),
+            Event::ReplaySaved { saved } => println!("replay saved: {}", saved.path),
             Event::SceneChanged {
                 scene,
                 take,

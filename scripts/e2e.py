@@ -53,7 +53,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "timeline",
              "data", "plugin", "hotkeys", "shutdown", "pause", "bug_report", "projects",
-             "plugin_files")
+             "plugin_files", "replay")
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -1139,6 +1139,136 @@ def scenario_pause(e, cfg, evidence):
     evidence["files"] = check_take(path, m, evidence=evidence)
     require(2.8 < evidence["files"][0]["video_seconds"] < 3.8, "pause was not removed from file duration")
     evidence.update(paused=paused, resumed=resumed)
+
+
+def check_replay(saved, seconds, keyframe_seconds, fps):
+    """A saved replay: H.264 + AAC from a keyframe at 0, at least `seconds`
+    long (at most a keyframe interval more), A/V equal, decoding cleanly,
+    every flash with its beep."""
+    path = Path(saved["path"])
+    require(path.is_file() and not path.name.startswith("."), f"replay not saved under its name: {path}")
+    info = probe(path)
+    video = next(s for s in info["streams"] if s["codec_type"] == "video")
+    audio = [s for s in info["streams"] if s["codec_type"] == "audio"]
+    require(video["codec_name"] == "h264" and [a["codec_name"] for a in audio] == ["aac"],
+            f"{path.name}: streams {video['codec_name']} / {[a['codec_name'] for a in audio]}")
+    vd, ad = float(video["duration"]), float(audio[0]["duration"])
+    first = json.loads(command(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_packets",
+                                "-read_intervals", "%+#1", "-show_entries", "packet=flags,pts_time",
+                                "-of", "json", path]).stdout)["packets"][0]
+    require("K" in first["flags"] and abs(float(first["pts_time"])) < 1e-6,
+            f"{path.name}: doesn't start with a keyframe at 0: {first}")
+    if not saved.get("short"):
+        require(seconds - 1e-6 <= vd <= seconds + keyframe_seconds + 2 / fps,
+                f"{path.name}: {vd:.3f} s for a {seconds} s buffer")
+    require(abs(vd - ad) < 0.025, f"{path.name}: A/V durations differ: {vd} / {ad}")
+    frames = int(video["nb_read_frames"])
+    require(frames == saved["frames"] and abs(frames + saved["dropped_frames"] - round(vd * fps)) <= 1,
+            f"{path.name}: {frames} frames (+{saved['dropped_frames']} missed) for {vd:.3f} s")
+    decoded = ffmpeg("-xerror", "-i", path, "-map", "0", "-f", "null", "-", timeout=90)
+    require(not decoded.stderr.strip(), f"{path.name}: decode warnings: {decoded.stderr.decode()}")
+    # Pulses cut by either end don't count; every other flash has its beep.
+    values = video_samples(path, "crop=iw:ih/4:0:ih*3/4")
+    flashes = [t for i, (t, v) in enumerate(values) if v > 128 and (i == 0 or values[i - 1][1] <= 128)]
+    samples = pcm(path)
+    beeps, quiet = [], RATE
+    for i, sample in enumerate(samples):
+        if abs(sample) > 0.01:
+            if quiet >= RATE // 20:
+                beeps.append(i / RATE)
+            quiet = 0
+        else:
+            quiet += 1
+    inner = [t for t in flashes if 0.15 < t < vd - 0.2]
+    require(len(inner) >= int(vd) - 2, f"{path.name}: missing flashes {flashes}")
+    offsets = [min((abs(t - b) for b in beeps), default=1) for t in inner]
+    require(all(d <= 1 / fps + 1 / RATE for d in offsets),
+            f"{path.name}: flash/beep apart by {max(offsets) * 1000:.2f} ms")
+    return {"file": path.name, "seconds": round(vd, 4), "frames": frames,
+            "dropped": saved["dropped_frames"], "bytes": saved["bytes"],
+            "max_sync_ms": round(max(offsets, default=0) * 1000, 3),
+            "last_flash_to_end": round(vd - flashes[-1], 4) if flashes else None}
+
+
+def scenario_replay(e, cfg, evidence):
+    """The replay buffer beside a recording and a stream: the same take and
+    stream without it, then with it and saves during them. Every output
+    keeps the loss bar in both; each save is checked. (ISOs stay off: with
+    a stream they shed pictures by design while #41 stands.)"""
+    width, height, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    if not evidence["capabilities"]["h264"]:
+        raise Skip("no hardware encoder on this runner (H.264 replay buffer)")
+    try:
+        e.optional("replay_save")
+        raise Failure("replay_save worked with no buffer running")
+    except RpcError as exc:
+        require("isn't running" in exc.error.get("message", ""), f"replay_save while off: {exc}")
+    seconds = 5
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    cfg["recording"]["replay"] = {"seconds": seconds}
+    cfg["stream"] = {"service": "custom", "server": f"rtmp://127.0.0.1:{port}/live",
+                     "video_bitrate_kbps": 6000, "audio_bitrate_kbps": 160,
+                     "width": width, "height": height, "keyframe_interval_seconds": 2}
+    e.apply(cfg)
+    e.rpc("engine", {"running": True})
+    time.sleep(1)
+    passes = {}
+    for with_replay in (False, True):
+        name = "with_replay" if with_replay else "without_replay"
+        output = e.root / f"{name}.flv"
+        with open(e.root / f"{name}-listener.log", "wb") as log:
+            listener = subprocess.Popen(["ffmpeg", "-nostdin", "-hide_banner", "-v", "warning",
+                                         "-listen", "1", "-i", f"rtmp://127.0.0.1:{port}/live/e2e",
+                                         "-c", "copy", "-y", str(output)], stdout=log, stderr=log)
+            try:
+                time.sleep(0.5)
+                require(listener.poll() is None, "RTMP listener failed to start")
+                if with_replay:
+                    require(e.rpc("replay_start")["state"] == "running", "replay buffer didn't start")
+                e.rpc("stream_start")
+                if with_replay:
+                    require(e.rpc("replay_status")["shared_encoder"],
+                            "the buffer should share the stream's encoder (same format)")
+                started = e.rpc("start", {"seconds": seconds + 6})
+                saves = []
+                if with_replay:
+                    time.sleep(seconds + 1.5)
+                    for pause in (0, 0.4, 1.1):
+                        time.sleep(pause)
+                        saves.append(e.rpc("replay_save"))
+                manifest = until(lambda: finished(started["manifest"]), seconds + 40, "take finalization")
+                until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
+                final = e.rpc("stream_stop")
+                listener.wait(timeout=10)
+            finally:
+                if listener.poll() is None:
+                    listener.kill()
+                    listener.wait(timeout=5)
+        slots = final["frames_sent"] + final["dropped_frames"]
+        loss = {"output": f"stream ({name})", "frames": final["frames_sent"],
+                "dropped": final["dropped_frames"], "slots": slots,
+                "ratio": final["dropped_frames"] / slots if slots else None, "repeated": 0,
+                "audio_dropouts": final["audio_dropouts"], "target_fps": fps,
+                "delivered_fps": final["frames_sent"] / final["elapsed_seconds"]}
+        evidence.setdefault("drops", {})[str(output)] = loss
+        check_loss(loss, loss_limit(evidence))
+        files = check_take(Path(started["manifest"]), manifest, evidence=evidence)
+        ffmpeg("-xerror", "-i", output, "-f", "null", "-")
+        replays = [check_replay(saved, seconds, 2, fps) for saved in saves]
+        passes[name] = {"files": files, "stream_dropped": final["dropped_frames"],
+                        "recording_dropped": sum(r["dropped"] for r in drop_metrics(manifest)),
+                        "replays": replays}
+    # After the stream stops the buffer keeps its encoder (no one else's).
+    status = e.rpc("replay_status")
+    require(status["state"] == "running" and not status["shared_encoder"],
+            f"the buffer should run on after the stream: {status}")
+    require(status["memory_bytes"] > 0 and (status["dropped_frames"] == 0 or loss_limit(evidence)),
+            f"replay status: {status}")
+    final = e.rpc("replay_stop")
+    require(final["state"] == "off" and final["saves"] == 3, f"replay stop: {final}")
+    evidence.update(passes=passes, replay=final)
 
 
 def scenario_bug_report(e, cfg, evidence):

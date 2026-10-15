@@ -93,6 +93,7 @@ mod optimize;
 mod plugins;
 mod projects;
 mod recovery;
+mod replay;
 mod store;
 mod timeline;
 mod virtual_camera;
@@ -874,6 +875,8 @@ fn process_cpu_seconds() -> Option<f64> {
 #[derive(Default)]
 struct State {
     camera: virtual_camera::CameraOutput,
+    /// The replay buffer, running or the last (for its final status).
+    replay: replay::ReplayOutput,
     /// The recording, if one runs (on the live engine).
     session: Option<Session>,
     /// The live engine, while something needs it.
@@ -1022,6 +1025,13 @@ trait LiveEngine: Send + Sync {
         &self,
         on_change: isocast_engine::record::OnCameraChange,
     ) -> Result<isocast_engine::record::VirtualCamera>;
+    /// Keep the program in a replay buffer.
+    fn replay(
+        &self,
+        settings: &isocast_protocol::replay::ReplaySettings,
+        stream: Option<&StreamSettings>,
+        on_change: isocast_engine::replay::OnChange,
+    ) -> Result<isocast_engine::replay::ReplayBuffer>;
     fn stop(&self);
 }
 
@@ -1091,6 +1101,15 @@ impl<P: Platform<SharedSurface = Surface>> LiveEngine for LiveEngineOf<P> {
 
     fn stop(&self) {
         LiveEngineOf::stop(self);
+    }
+
+    fn replay(
+        &self,
+        settings: &isocast_protocol::replay::ReplaySettings,
+        stream: Option<&StreamSettings>,
+        on_change: isocast_engine::replay::OnChange,
+    ) -> Result<isocast_engine::replay::ReplayBuffer> {
+        isocast_engine::replay::start(self, settings, stream, on_change)
     }
 
     fn virtual_camera(
@@ -1217,6 +1236,13 @@ impl Daemon {
                 "feeding the virtual camera (a call may be using it); stop it first (`isocast vcam stop`, or MCP's virtual_camera_stop)".into(),
             );
         }
+        if state.replay.active() {
+            return Some(
+                "keeping a replay buffer; save it if needed, then stop it (`isocast replay stop`, \
+                 or MCP's stop_replay)"
+                    .into(),
+            );
+        }
         if state.tuning {
             return Some("benchmarking the encoders (`tune`); wait for it to finish".into());
         }
@@ -1239,6 +1265,7 @@ impl Daemon {
                 | Method::StreamStart
                 | Method::TimelineExport(_)
                 | Method::VirtualCameraStart
+                | Method::ReplayStart
                 | Method::Resume
                 | Method::Tune(_)
                 | Method::Optimize(_)
@@ -1342,6 +1369,10 @@ impl Daemon {
             Method::VirtualCameraStart => self.virtual_camera_start().and_then(to_json),
             Method::VirtualCameraStop => to_json(self.virtual_camera_stop()),
             Method::VirtualCameraStatus => to_json(self.virtual_camera_status()),
+            Method::ReplayStart => self.replay_start().and_then(to_json),
+            Method::ReplayStop => self.replay_stop().and_then(to_json),
+            Method::ReplaySave => self.replay_save().and_then(to_json),
+            Method::ReplayStatus => to_json(self.replay_status()),
             Method::StreamKeySet(params) => self.stream_key_set(*params).and_then(to_json),
             Method::StreamKeyClear(target) => self.stream_key_clear(*target).and_then(to_json),
             Method::Library => to_json(self.library()),
@@ -2362,6 +2393,7 @@ impl Daemon {
                 .map(str::to_string),
             export: self.export_running(),
             virtual_camera: Some(state.camera.status_for(state.setup.as_ref())),
+            replay: Some(state.replay.status_for(state.setup.as_ref())),
             recording_free_bytes: None,
             program_bytes_per_second: state
                 .setup
@@ -3223,6 +3255,7 @@ impl Daemon {
     /// Stop the live engine (after the recording, if one runs).
     fn stop_engine(&self) {
         self.virtual_camera_stop();
+        let _ = self.replay_stop();
         let engine = self.state.lock().unwrap().engine.take();
         if let Some(engine) = engine {
             engine.stop();
@@ -3237,6 +3270,7 @@ impl Daemon {
             let mut state = self.state.lock().unwrap();
             let idle = state.session.is_none()
                 && !state.camera.active()
+                && !state.replay.active()
                 && !state.streaming()
                 && state.streams_starting == 0
                 && !state.hold
@@ -3257,6 +3291,7 @@ impl Daemon {
         loop {
             thread::sleep(Duration::from_secs(1));
             self.warn_stream_drops();
+            self.warn_replay_drops();
             self.stop_idle_engine_now();
         }
     }
@@ -3353,6 +3388,9 @@ fn engine_info(state: &State) -> Option<EngineInfo> {
     }
     if state.camera.active() {
         info.outputs.push("virtual_camera".into());
+    }
+    if state.replay.active() {
+        info.outputs.push("replay".into());
     }
     Some(info)
 }
@@ -3624,6 +3662,20 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
             "a stream is running: it keeps its current [stream] settings until it stops; the \
              changes take effect at the next start (`isocast stream stop`, then `isocast stream \
              start`, or MCP's stop_stream and start_stream)"
+                .into(),
+        );
+    }
+    if state.replay.active()
+        && changes.iter().any(|change| {
+            change.path.starts_with("recording.replay")
+                || change.path == "stream"
+                || change.path.starts_with("stream.")
+        })
+    {
+        notes.push(
+            "the replay buffer is running: it keeps its current format and length until it \
+             stops; the changes take effect at its next start (`isocast replay stop`, then \
+             `isocast replay start`)"
                 .into(),
         );
     }

@@ -718,6 +718,43 @@ export component OutputPage inherits SetPage {
             toggled(on) => { SettingsArea.set-flag("iso_filtered", on); }
         }
     }
+    SetGroup {
+        title: "Replay Buffer";
+        resettable: true;
+        reset-label: "Put Replay Buffer back as saved";
+        reset => { SettingsArea.revert-group("replay"); }
+        hint: "Replay Buffer in the Controls dock keeps the program’s last seconds in memory; Save Replay beside it writes them to the recordings folder. It shares the stream’s encoder when you stream. Changes apply at its next start.";
+        GroupRow {
+            label: "Maximum Replay Time";
+            place: RowPlace.first;
+            Centred {
+                Stepper {
+                    value: SettingsArea.replay-seconds;
+                    minimum: 5;
+                    maximum: 300;
+                    step: 5;
+                    unit: "s";
+                    label: "Maximum Replay Time";
+                    changed(value) => { SettingsArea.set-number("replay_seconds", value); }
+                }
+            }
+        }
+        GroupRow {
+            label: "Maximum Memory";
+            place: RowPlace.last;
+            Centred {
+                Stepper {
+                    value: SettingsArea.replay-memory;
+                    minimum: 16;
+                    maximum: 8192;
+                    step: 64;
+                    unit: "MB";
+                    label: "Maximum Memory";
+                    changed(value) => { SettingsArea.set-number("replay_memory", value); }
+                }
+            }
+        }
+    }
 }
 
 // ---------- Audio ----------

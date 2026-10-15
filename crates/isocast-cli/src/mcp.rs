@@ -45,6 +45,8 @@ use crate::client::Client;
 
 mod events;
 
+use isocast_protocol::replay::{ReplaySaved, ReplayStatus};
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CameraNoArgs {}
@@ -820,6 +822,62 @@ impl Isocast {
     )]
     async fn start_stream(&self) -> Result<Json<StreamStatus>, String> {
         self.call(Method::StreamStart).await
+    }
+
+    #[tool(
+        description = "Start the replay buffer: keep the last recording.replay.seconds (30 by \
+                       default) of the encoded program, video and program mix, in memory, \
+                       starting the live engine if needed; recording and streaming are \
+                       independent of it. It shares the stream's encoder when the setup has a \
+                       [stream]. Then save_replay writes the last seconds to a file. Returns \
+                       its status.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn start_replay(&self) -> Result<Json<ReplayStatus>, String> {
+        self.call(Method::ReplayStart).await
+    }
+
+    #[tool(
+        description = "Stop the replay buffer, discarding what it holds (save_replay first to \
+                       keep it). Returns its final status.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    async fn stop_replay(&self) -> Result<Json<ReplayStatus>, String> {
+        self.call(Method::ReplayStop).await
+    }
+
+    #[tool(
+        description = "Save the replay buffer: write the last recording.replay.seconds of the \
+                       program, up to this moment, to a new MOV/MP4 in the recordings folder \
+                       (the running recording's project folder, if one records), without \
+                       interrupting recording or streaming. Returns the file's path, length, \
+                       frames and any missed frames.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn save_replay(&self) -> Result<Json<ReplaySaved>, String> {
+        self.call(Method::ReplaySave).await
+    }
+
+    #[tool(
+        description = "The replay buffer's state, seconds held, memory used and its limit, \
+                       format, whether it shares the stream's encoder, missed frames and the \
+                       last save.",
+        annotations(read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn replay_status(&self) -> Result<Json<ReplayStatus>, String> {
+        self.call(Method::ReplayStatus).await
     }
 
     #[tool(

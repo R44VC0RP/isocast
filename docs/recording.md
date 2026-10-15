@@ -188,3 +188,50 @@ The recording disk check is a capacity/speed budget, not a prediction of
 typical file size. Constant-quality rates depend strongly on motion, noise,
 fine detail, codec, depth and the Mac's encoder. Measure a representative
 take before budgeting a long recording.
+
+## Replay buffer
+
+Like OBS's: while it runs, the buffer keeps the last
+`recording.replay.seconds` (30 by default, 5–300) of the program, its
+picture and the program mix, in memory as compressed H.264 and AAC, apart
+from any recording or stream. A save writes them, up to the moment it was
+asked for, to a new file without encoding again.
+
+```sh
+isocast replay start          # Controls dock: Replay Buffer
+isocast replay save --json    # Save Replay, or the replay.save hotkey
+isocast replay status
+isocast replay stop
+```
+
+MCP has `start_replay`, `save_replay`, `replay_status` and `stop_replay`;
+hotkey actions are `replay.start`, `replay.stop`, `replay.toggle` and
+`replay.save` (suggested: ctrl+alt+cmd+Y saves).
+
+- **The file** is `Replay <date> <time>.mov` (or `.mp4`, as
+  `recording.program.encoder.container`) in the running recording's project
+  folder, or else the recordings folder. It starts on a keyframe at or
+  before `seconds` ago, so it is up to a keyframe interval longer, and ends
+  at the save. It is written under a hidden temporary name and named when
+  complete, and needs room for itself plus `recording.keep_free_gb`.
+  Saving never touches a recording or a stream; saves can follow each
+  other at once.
+- **The encoder.** While the setup has a `[stream]`, the buffer encodes as
+  the stream does (its size, bitrate and 2 s keyframes), so a running
+  stream and the buffer share one hardware encoder session. Otherwise it
+  encodes on its own: the program file's size, 1 s keyframes, about 0.1
+  bit per pixel (12 Mb/s at 1080p60, at most 40 Mb/s) unless
+  `recording.replay.video_bitrate_kbps` says. Recordings encode inside
+  their file writers, so the buffer can't share theirs yet.
+- **Memory** is the bitrate times `seconds`, plus up to 3 s and a
+  keyframe interval; `recording.replay.max_memory_mb` (1024 by default)
+  caps it, and `replay_status` reports `memory_bytes` and says
+  `memory_limited` when the cap keeps it short. Frames the buffer missed
+  are counted in `dropped_frames` (warned about like the stream's), and a
+  saved file reports its own.
+
+```toml
+[recording.replay]
+seconds = 60
+max_memory_mb = 512
+```

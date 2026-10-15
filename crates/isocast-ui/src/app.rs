@@ -393,6 +393,17 @@ impl App {
                 self.session.borrow_mut().vcam = Some(camera.clone());
                 self.changed(Changed::VCAM);
             }
+            Event::Replay { replay } => {
+                self.session.borrow_mut().replay = Some(replay.clone());
+                self.changed(Changed::REPLAY);
+            }
+            // The window that asked says so itself; a hotkey's or another
+            // client's save gets the same toast here.
+            Event::ReplaySaved { saved } => {
+                if !self.session.borrow().saving_replay {
+                    crate::areas::controls::replay_saved(self, saved);
+                }
+            }
             Event::Started { .. } => self.refresh_status(true),
             // Plugin-facing context; the app refreshes on `started` and
             // `stopped`.
@@ -1047,6 +1058,9 @@ impl App {
                     if !s.busy_vcam {
                         s.vcam = status.virtual_camera.clone();
                     }
+                    if !s.busy_replay {
+                        s.replay = status.replay.clone();
+                    }
                     s.status = Some(status);
                 }
                 app.changed(
@@ -1054,7 +1068,8 @@ impl App {
                         | Changed::SCENES
                         | Changed::RUNNING
                         | Changed::STREAM
-                        | Changed::VCAM,
+                        | Changed::VCAM
+                        | Changed::REPLAY,
                 );
             }
             Err(error) => {

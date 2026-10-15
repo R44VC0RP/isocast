@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use isocast_protocol::api::{EngineState, Event, LiveFile, Method};
+use isocast_protocol::replay::{ReplaySaved, ReplayState, ReplayStatus};
 use isocast_protocol::stream::{StreamService, StreamState, StreamStatus};
 use isocast_protocol::virtual_camera::{
     SIZES as VCAM_SIZES, Target as VcamTarget, VirtualCameraState, VirtualCameraStatus,
@@ -38,6 +39,7 @@ pub const STATES: &[&str] = &[
     "toast-drops",
     "transition:KIND",
     "vcam[:missing|running|failed]",
+    "replay[:running|failed|saved]",
     "pause",
     "resume",
 ];
@@ -179,6 +181,18 @@ impl Area for Controls {
             }
         });
         let weak = Rc::downgrade(app);
+        area.on_toggle_replay(move || {
+            if let Some(app) = weak.upgrade() {
+                toggle_replay(&app);
+            }
+        });
+        let weak = Rc::downgrade(app);
+        area.on_save_replay(move || {
+            if let Some(app) = weak.upgrade() {
+                save_replay(&app);
+            }
+        });
+        let weak = Rc::downgrade(app);
         area.on_set_vcam(move |field, value| {
             if let Some(app) = weak.upgrade() {
                 set_vcam(&app, &field, &value);
@@ -256,6 +270,9 @@ impl Area for Controls {
         }
         if changed.any(Changed::VCAM | Changed::BUSY | Changed::SETUP | Changed::STATUS) {
             show_vcam(app, &area);
+        }
+        if changed.any(Changed::REPLAY | Changed::BUSY | Changed::SETUP | Changed::STATUS) {
+            show_replay(app, &area);
         }
         if changed.any(Changed::SETUP) {
             show_transition(app, &area);
@@ -430,6 +447,52 @@ impl Area for Controls {
                     area.set_vcam_details_serial(area.get_vcam_details_serial() + 1);
                 }
             }
+            // Start the replay buffer through the Controls dock; with an
+            // argument, as the daemon reports that state.
+            "replay" => match arg {
+                "" => {
+                    let on = app
+                        .session
+                        .borrow()
+                        .replay
+                        .as_ref()
+                        .is_some_and(|r| r.state == ReplayState::Running);
+                    if !on {
+                        toggle_replay(app);
+                    }
+                }
+                "running" | "failed" => {
+                    let mut status = app.session.borrow().replay.clone().unwrap_or_default();
+                    status.seconds = status.seconds.max(30);
+                    if arg == "running" {
+                        status.state = ReplayState::Running;
+                        status.buffered_seconds = 33.0;
+                        status.memory_bytes = 61_400_000;
+                        (status.width, status.height, status.fps) = (1920, 1080, 60);
+                    } else {
+                        status.state = ReplayState::Failed;
+                        status.last_error =
+                            Some("the live engine stopped, and the replay buffer with it".into());
+                    }
+                    app.session.borrow_mut().replay = Some(status);
+                    app.changed(Changed::REPLAY);
+                }
+                "saved" => replay_saved(
+                    app,
+                    &ReplaySaved {
+                        path: "~/Movies/Isocast/Replay 2026-10-15 14-32-18.mov".into(),
+                        seconds: 30.4,
+                        frames: 1824,
+                        bytes: 46_100_000,
+                        ..Default::default()
+                    },
+                ),
+                other => {
+                    return Some(Err(anyhow::anyhow!(
+                        "replay takes running, failed or saved, not {other:?}"
+                    )));
+                }
+            },
             "toasts" => {
                 // The web app's 42-toasts: four kinds; the oldest goes.
                 app.toast(
@@ -1838,6 +1901,152 @@ fn sample_vcam(app: &Rc<App>, which: &str) -> anyhow::Result<VirtualCameraStatus
         other => anyhow::bail!("vcam takes missing, running or failed, not {other:?}"),
     }
     Ok(status)
+}
+
+/// The replay buffer's button and Save Replay: its state, its length and
+/// what it holds.
+fn show_replay(app: &Rc<App>, area: &ControlsArea) {
+    let s = app.session.borrow();
+    let status = s.replay.as_ref();
+    area.set_replay_state(
+        match status.map(|x| x.state) {
+            _ if s.busy_replay => {
+                if status.is_some_and(|x| x.state == ReplayState::Running) {
+                    "stopping"
+                } else {
+                    "starting"
+                }
+            }
+            Some(ReplayState::Running) => "running",
+            Some(ReplayState::Failed) => "failed",
+            _ => "off",
+        }
+        .into(),
+    );
+    area.set_busy_replay(s.busy_replay);
+    area.set_saving_replay(s.saving_replay);
+    let seconds = status
+        .filter(|x| x.state == ReplayState::Running)
+        .map(|x| x.seconds)
+        .or_else(|| s.setup.as_ref().map(|x| x.recording.replay.seconds))
+        .unwrap_or(30);
+    area.set_replay_length(format!("the last {}", duration_words(seconds)).into());
+    area.set_replay_counts(
+        status
+            .filter(|x| x.state == ReplayState::Running)
+            .map(|x| {
+                format!(
+                    "{:.0} s held · {}",
+                    x.buffered_seconds.min(f64::from(x.seconds)),
+                    megabytes(x.memory_bytes)
+                )
+            })
+            .unwrap_or_default()
+            .into(),
+    );
+}
+
+/// "30 s", "2 min", "1 min 30 s".
+fn duration_words(seconds: u32) -> String {
+    match (seconds / 60, seconds % 60) {
+        (0, s) => format!("{s} s"),
+        (m, 0) => format!("{m} min"),
+        (m, s) => format!("{m} min {s} s"),
+    }
+}
+
+/// "61 MB", "1.2 GB".
+fn megabytes(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else {
+        format!("{:.0} MB", bytes as f64 / 1e6)
+    }
+}
+
+/// Start or stop the replay buffer.
+fn toggle_replay(app: &Rc<App>) {
+    let on = {
+        let mut s = app.session.borrow_mut();
+        if s.busy_replay {
+            return;
+        }
+        s.busy_replay = true;
+        s.replay
+            .as_ref()
+            .is_some_and(|x| x.state == ReplayState::Running)
+    };
+    app.changed(Changed::BUSY | Changed::REPLAY);
+    let method = if on {
+        Method::ReplayStop
+    } else {
+        Method::ReplayStart
+    };
+    app.call_as::<ReplayStatus>(method, move |app, result| {
+        app.session.borrow_mut().busy_replay = false;
+        match result {
+            Ok(status) => app.session.borrow_mut().replay = Some(status),
+            Err(error) => {
+                app.failed(
+                    if on {
+                        "Couldn’t stop the replay buffer"
+                    } else {
+                        "Couldn’t start the replay buffer"
+                    },
+                    &error,
+                );
+                app.refresh_status(true);
+            }
+        }
+        app.changed(Changed::BUSY | Changed::REPLAY);
+    });
+}
+
+/// Save Replay: the buffer's last seconds to a file; a toast says where.
+fn save_replay(app: &Rc<App>) {
+    {
+        let mut s = app.session.borrow_mut();
+        if s.saving_replay {
+            return;
+        }
+        s.saving_replay = true;
+    }
+    app.changed(Changed::REPLAY);
+    app.call_as::<ReplaySaved>(Method::ReplaySave, |app, result| {
+        app.session.borrow_mut().saving_replay = false;
+        match result {
+            Ok(saved) => replay_saved(app, &saved),
+            Err(error) => app.failed("Couldn’t save the replay", &error),
+        }
+        app.changed(Changed::REPLAY);
+    });
+}
+
+/// The toast for a saved replay (this window's, a hotkey's or another
+/// client's).
+pub fn replay_saved(app: &Rc<App>, saved: &ReplaySaved) {
+    let name = std::path::Path::new(&saved.path)
+        .file_name()
+        .map_or(saved.path.clone(), |n| n.to_string_lossy().into_owned());
+    let mut message = format!(
+        "{name}: {:.1} s, {}.",
+        saved.seconds,
+        megabytes(saved.bytes)
+    );
+    if saved.short {
+        message.push_str(" Shorter than asked: the buffer hadn’t filled yet.");
+    }
+    if saved.dropped_frames > 0 {
+        message.push_str(&format!(
+            " {} frame(s) missed show the picture before.",
+            saved.dropped_frames
+        ));
+    }
+    let shown = saved.path.clone();
+    app.show_toast(
+        Toast::new(ToastKind::Success, "Replay saved", message)
+            .action("Show in Finder", move |_| reveal(&shown)),
+    );
 }
 
 fn toggle_stream(app: &Rc<App>) {

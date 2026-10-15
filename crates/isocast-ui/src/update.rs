@@ -59,13 +59,14 @@ pub use other::{
 };
 
 /// What keeps an update from installing now, from the engine's status:
-/// a recording (paused or not), a stream, a timeline export or the
-/// virtual camera (a call may be showing it). The engine's
+/// a recording (paused or not), a stream, a timeline export, the virtual
+/// camera (a call may be showing it) or the replay buffer. The engine's
 /// `shutdown_if_idle` decides the same atomically before it stops.
 fn busy_with(
     status: Option<&isocast_protocol::api::Status>,
     stream_active: bool,
     camera_active: bool,
+    replay_active: bool,
 ) -> Option<&'static str> {
     use isocast_protocol::api::EngineState;
     use isocast_protocol::virtual_camera::VirtualCameraState;
@@ -92,6 +93,12 @@ fn busy_with(
             })
     {
         Some("the virtual camera")
+    } else if replay_active
+        || status
+            .and_then(|s| s.replay.as_ref())
+            .is_some_and(|r| r.state == isocast_protocol::replay::ReplayState::Running)
+    {
+        Some("the replay buffer")
     } else {
         None
     }
@@ -325,7 +332,11 @@ mod mac {
             use isocast_protocol::virtual_camera::VirtualCameraState as V;
             matches!(c.state, V::Starting | V::Running | V::Stopping)
         });
-        super::busy_with(s.status.as_ref(), stream, camera)
+        let replay = s.busy_replay
+            || s.replay
+                .as_ref()
+                .is_some_and(|r| r.state == isocast_protocol::replay::ReplayState::Running);
+        super::busy_with(s.status.as_ref(), stream, camera, replay)
     }
 
     /// Start Sparkle if this bundle carries it (released builds do).

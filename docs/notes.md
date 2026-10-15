@@ -539,6 +539,19 @@ each section. Delete entries that stop being true.
 
 ## Questions for Ryan
 
+- 2026-10-15 (#18): with a `[stream]` in the profile the replay buffer
+  always encodes as the stream does (its size, bitrate, 2 s keyframes),
+  even while not streaming, so it can share the stream's encoder: a profile
+  streaming 720p/6 Mb/s gets 720p replays of a 4K program. Keep that, or
+  use the stream's format only while a stream runs (a
+  `recording.replay.follow_stream` switch)? Nothing waits on it.
+
+- 2026-10-15 (#18): may `replay/mp4.rs` and the replay ring's trimming get
+  unit tests (box layout, edit lists, keyframe/memory trimming with
+  synthetic samples)? They were verified with real saves (ffprobe, ffmpeg
+  -xerror, AVFoundation decoding every sample) and the e2e `replay`
+  scenario only. Nothing waits on it.
+
 - 2026-10-15 (#61): may the EBML reader (`matroska.rs`) get unit tests
   with tiny byte-level fixtures built in the test (lacing kinds,
   unknown-size clusters, truncated files, BlockAdditions, Cues)? It was
@@ -1491,6 +1504,36 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-15 (#18, G.2): **the replay buffer is a sink of a shared program
+  encoder.** The stream's H.264/AAC encode thread became
+  `stream/encoder.rs`: outputs with an equal `EncoderSpec` subscribe to one
+  running encoder (one hardware session, #41/#60), the last to leave stops
+  it, as OBS's outputs share encoders. The buffer asks for the stream's spec
+  whenever the setup has a `[stream]`, so stream + replay is one session
+  whichever starts first, and the buffer keeps the encoder when the stream
+  stops; without a `[stream]` it encodes on its own (program file size,
+  1 s keyframes, ~0.1 bit/pixel up to 40 Mb/s). Recordings encode inside
+  AVAssetWriter, so sharing the program *recording's* encoder needs our own
+  VT session feeding a passthrough writer (G.3b's direction): follow-up.
+  Not chosen: handing the buffer from its own encoder to the stream's
+  mid-run (two parameter sets in one buffer, a gap at each handover).
+- 2026-10-15 (#18): **saved replays are muxed by our own MOV/MP4 writer**
+  (`replay/mp4.rs`, ~500 lines), not AVAssetWriter passthrough: every
+  sample is in memory, so `moov` goes first with exact offsets and no
+  CMSampleBuffer/format-description FFI is needed; files are written under
+  a hidden `.partial` name, fsynced, then hard-linked to a free
+  `Replay <date> <time>` name (rename fallback where hard links fail).
+  A save ends at the picture showing when it was asked for (waiting up to
+  3 s for it and its audio to leave the encoder); it starts at the newest
+  keyframe at least `seconds` before that. It goes into the running
+  recording's project folder, else the recordings folder (as OBS saves
+  beside recordings). The buffer's own H.264 encoder publishes pressure
+  like the stream's (protected ahead of ISOs).
+- 2026-10-15 (#18, app): the Controls dock's seventh row (Replay Buffer +
+  Save Replay, between recording and the virtual camera, OBS's order)
+  moves Exit beside Settings below a 272 px dock row and tightens spacing
+  below 240 px. Settings › Output has a Replay Buffer group (length, memory).
 
 - 2026-10-15 (#58): a disabled primary footer button uses the kit's
   disabled footer style (hover fill, text-disabled label) everywhere, not
@@ -4614,6 +4657,15 @@ each section. Delete entries that stop being true.
   not one tool per API call.
 
 ## Gotchas
+
+- 2026-10-15 (#18): **AAC in a .mov for AVFoundation** needs QuickTime's
+  version 1 sound description (compression id -2, 1024 samples per packet)
+  with the `esds` inside a `wave` atom (`frma`, `mp4a`, `esds`,
+  terminator); version 0 with a bare `esds` (fine for ffmpeg) fails to open
+  with -11829/-12848. And without an `sgpd`/`sbgp` `roll` of -1 on the
+  audio track AVFoundation drops ~600 samples of the edit list's start
+  (its audio came out 13 ms short of the video). Check muxed files with
+  AVAssetReader, not only ffprobe.
 
 - 2026-10-15 (#58): System Settings' sheets (the password prompt, "Quit &
   Reopen") are separate layer-0 windows of its pid, in front of the main

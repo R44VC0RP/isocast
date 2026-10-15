@@ -784,8 +784,9 @@ native app; each verified against OBS's behaviour on a test Mac.
     off-state selection cleanup and developer-only diagnostics. Reviewer
     lifecycle/churn repros and installer dry-run rerun; actual installed
     camera clients, full provisioned-host capture and replacement stay in G.1b.
-- [ ] **G.2 Replay buffer.** Keep the last N seconds of the program (and
-  ISOs) in memory; save on command or hotkey.
+- [x] **G.2 Replay buffer.** Keep the last N seconds of the program (and
+  ISOs) in memory; save on command or hotkey. Program only; ISOs in the
+  buffer and sharing the recording's encoder are follow-ups.
 - [x] **G.3 Pause recording.** Pause/resume a take without a new file;
   A/V stay in sync; the manifest records the pauses.
   - [x] **G.3 app.** Pause/Resume in the Slint app's Controls dock and
@@ -3408,3 +3409,15 @@ One line per finished task, newest last.
   VIEWS/SIZES subsets. Verified: 86900ef's fix redone in watch mode
   (0.87 s to the clipped picture, 0.91 s to the fixed one); 0 changed
   pixels base vs head and live vs compiled across all 15 views.
+- G.2 (2026-10-15, #18): the replay buffer keeps the last
+  `recording.replay.seconds` of the encoded program (H.264 + AAC GOPs,
+  memory-capped) as a sink of a new shared program encoder (the stream's,
+  when the setup has a `[stream]`: one hardware session for both); saves
+  end at the request, start on a keyframe, are muxed by our own MOV/MP4
+  writer and named atomically; API, CLI `isocast replay`, MCP, hotkeys,
+  Controls dock and Settings. Verified: isolated-engine saves (keyframe at
+  0, >= N s, A/V equal, ffmpeg and AVFoundation decode, end = request
+  within one frame), e2e `replay` (record + stream with and without the
+  buffer) PASS locally and on m2-b, m2-b A/B program + 2 ISOs with/without
+  the buffer's own encoder 3 pairs all 1200/1200, memory cap 16 MB held,
+  30-min RSS flat.

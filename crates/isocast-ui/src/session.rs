@@ -50,6 +50,8 @@ impl Changed {
     pub const BUSY: Self = Self(1 << 10);
     /// The virtual camera's state (`virtual_camera` events, Status).
     pub const VCAM: Self = Self(1 << 11);
+    /// The replay buffer's state (`replay` events, Status).
+    pub const REPLAY: Self = Self(1 << 12);
     pub const ALL: Self = Self(u32::MAX);
 
     /// Whether any of `other`'s changes are in this.
@@ -185,6 +187,12 @@ pub struct Session {
     pub vcam: Option<isocast_protocol::virtual_camera::VirtualCameraStatus>,
     /// Its start or stop is on its way.
     pub busy_vcam: bool,
+    /// The replay buffer, from Status and `replay` events.
+    pub replay: Option<isocast_protocol::replay::ReplayStatus>,
+    /// Its start or stop is on its way.
+    pub busy_replay: bool,
+    /// A save is on its way.
+    pub saving_replay: bool,
     /// When this window last switched scenes itself (a status read just
     /// after may predate the switch).
     pub(crate) switched_at: Option<Instant>,

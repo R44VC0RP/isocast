@@ -26,6 +26,7 @@ pub mod obs;
 pub mod optimize;
 pub mod plugin;
 pub mod project;
+pub mod replay;
 mod source;
 pub mod stream;
 pub mod timeline;
@@ -812,6 +813,9 @@ pub struct Recording {
     /// its files, at least 64 MB, if that is more).
     #[serde(default = "default_keep_free_gb")]
     pub keep_free_gb: f64,
+    /// The replay buffer: how much of the program it keeps.
+    #[serde(default, skip_serializing_if = "replay::ReplaySettings::is_default")]
+    pub replay: replay::ReplaySettings,
 }
 
 fn default_keep_free_gb() -> f64 {
@@ -1439,6 +1443,7 @@ impl Setup {
                     ..IsoRecording::default()
                 },
                 keep_free_gb: default_keep_free_gb(),
+                replay: Default::default(),
             },
             stream: None,
             hotkeys: Default::default(),
@@ -1724,6 +1729,7 @@ impl Setup {
                 "give width and height together, or neither to record the canvas's size",
             ),
         }
+        rec.replay.check(&mut issues);
         if !(rec.keep_free_gb >= 0.0 && rec.keep_free_gb <= 1e6) {
             issues.add(
                 "recording.keep_free_gb",

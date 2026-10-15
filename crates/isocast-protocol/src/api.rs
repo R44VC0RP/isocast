@@ -375,6 +375,23 @@ pub enum Method {
     /// Refused while recording. Returns
     /// [`Optimized`](crate::optimize::Optimized), with a one-line summary.
     Optimize(Box<crate::optimize::OptimizeParams>),
+    /// Start the replay buffer: keep the last `recording.replay.seconds`
+    /// of the encoded program (video and the program mix) in memory, apart
+    /// from any recording or stream. Shares the stream's encoder when one
+    /// runs with the same format. Returns
+    /// [`ReplayStatus`](crate::replay::ReplayStatus).
+    ReplayStart,
+    /// Stop the replay buffer, discarding what it holds. Returns its final
+    /// [`ReplayStatus`](crate::replay::ReplayStatus).
+    ReplayStop,
+    /// Save what the replay buffer holds, up to this moment, to a new file
+    /// in the recordings folder (the running recording's project folder,
+    /// if one records). Never interrupts a recording or stream. Returns
+    /// [`ReplaySaved`](crate::replay::ReplaySaved).
+    ReplaySave,
+    /// The replay buffer's state, memory and counters. Returns
+    /// [`ReplayStatus`](crate::replay::ReplayStatus).
+    ReplayStatus,
 }
 
 /// Every method's name, as requests and plugin grants spell it
@@ -1015,6 +1032,10 @@ pub enum Event {
         id: String,
         name: String,
     },
+    /// The replay buffer started, stopped or failed.
+    Replay { replay: crate::replay::ReplayStatus },
+    /// The replay buffer saved a file.
+    ReplaySaved { saved: crate::replay::ReplaySaved },
 }
 
 /// What began a take, in `started` events.
@@ -1074,11 +1095,13 @@ pub enum EventKind {
     ProjectCreated,
     ProjectRenamed,
     DeviceChanged,
+    Replay,
+    ReplaySaved,
 }
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 26] = [
+    pub const NAMES: [&str; 28] = [
         "setup_changed",
         "started",
         "status",
@@ -1105,6 +1128,8 @@ impl EventKind {
         "project_created",
         "project_renamed",
         "device_changed",
+        "replay",
+        "replay_saved",
     ];
 
     /// The kind's name, as events and `watch` spell it.
@@ -1142,6 +1167,8 @@ impl Event {
             Self::ProjectCreated { .. } => EventKind::ProjectCreated,
             Self::ProjectRenamed { .. } => EventKind::ProjectRenamed,
             Self::DeviceChanged { .. } => EventKind::DeviceChanged,
+            Self::Replay { .. } => EventKind::Replay,
+            Self::ReplaySaved { .. } => EventKind::ReplaySaved,
         }
     }
 }
@@ -1242,6 +1269,9 @@ pub struct Status {
     /// Camera output state (installation is explicit, never automatic).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtual_camera: Option<crate::virtual_camera::VirtualCameraStatus>,
+    /// The replay buffer: running or not, what it holds, its last save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<crate::replay::ReplayStatus>,
     /// Free space on the disk the live setup records to (its
     /// `recording.folder`, or the nearest folder above it that exists;
     /// with no setup yet, `~/Movies/Isocast`'s, where a new one records),

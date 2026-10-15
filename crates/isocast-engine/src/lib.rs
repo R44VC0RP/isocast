@@ -21,6 +21,7 @@ mod picture;
 pub mod project;
 pub mod record;
 pub mod render;
+pub mod replay;
 pub mod scene;
 pub mod snapshot;
 pub(crate) mod source;

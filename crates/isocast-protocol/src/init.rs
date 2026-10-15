@@ -386,6 +386,7 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
                 ..IsoRecording::default()
             },
             keep_free_gb: 1.0,
+            replay: Default::default(),
         },
     };
     let problems = setup.validate();

@@ -643,6 +643,16 @@ impl Daemon {
                         Method::StreamStart
                     }
                 }
+                "replay.start" => Method::ReplayStart,
+                "replay.stop" => Method::ReplayStop,
+                "replay.save" => Method::ReplaySave,
+                "replay.toggle" => {
+                    if self.state.lock().unwrap().replay.active() {
+                        Method::ReplayStop
+                    } else {
+                        Method::ReplayStart
+                    }
+                }
                 "transition.take" => Method::Take { transition: None },
                 "timeline.close" => Method::TimelineClose,
                 "studio.toggle" => {

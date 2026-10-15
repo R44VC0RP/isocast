@@ -889,6 +889,13 @@ impl Settings {
             "program_quality" => json!({"recording": {"program": {"encoder": {"quality": whole}}}}),
             "iso_quality" => json!({"recording": {"iso": {"encoder": {"quality": whole}}}}),
             "keep_free" => json!({"recording": {"keep_free_gb": value as f64}}),
+            "replay_seconds" => json!({"recording": {"replay": {"seconds": whole.clamp(
+                i64::from(isocast_protocol::replay::MIN_SECONDS),
+                i64::from(isocast_protocol::replay::MAX_SECONDS),
+            )}}}),
+            "replay_memory" => {
+                json!({"recording": {"replay": {"max_memory_mb": whole.clamp(16, 8192)}}})
+            }
             "canvas_width" => json!({"canvas": {"width": whole}}),
             "canvas_height" => json!({"canvas": {"height": whole}}),
             "reconnect_delay" => json!({"stream": {"reconnect": {"delay_seconds": whole}}}),
@@ -1238,6 +1245,8 @@ impl Settings {
         area.set_folder(text(&rec["folder"]).into());
         area.set_folder_short(middle_short(&text(&rec["folder"])).into());
         area.set_keep_free(number(&rec["keep_free_gb"], 1.0));
+        area.set_replay_seconds(number(&rec["replay"]["seconds"], 30.0));
+        area.set_replay_memory(number(&rec["replay"]["max_memory_mb"], 1024.0));
         let program_on = program["enabled"] != json!(false);
         let iso_on = iso["enabled"] == json!(true);
         let codec = |encoder: &Value| encoder["codec"].as_str().unwrap_or("hevc").to_string();
@@ -1450,6 +1459,7 @@ impl Settings {
             ],
             "program" => &[&["recording", "program"]],
             "iso" => &[&["recording", "iso"]],
+            "replay" => &[&["recording", "replay"]],
             _ => return,
         };
         if let Some(d) = self.draft.borrow_mut().as_mut() {

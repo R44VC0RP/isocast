@@ -328,6 +328,10 @@ impl Binding {
             | "streaming.start"
             | "streaming.stop"
             | "streaming.toggle"
+            | "replay.start"
+            | "replay.stop"
+            | "replay.toggle"
+            | "replay.save"
             | "studio.toggle"
             | "transition.take"
             | "timeline.close"
@@ -419,6 +423,18 @@ pub fn catalogue() -> Catalogue {
         }
     }
     for (id, label) in [
+        ("start", "Start replay buffer"),
+        ("stop", "Stop replay buffer"),
+        ("toggle", "Toggle replay buffer"),
+        ("save", "Save replay"),
+    ] {
+        actions.push(action::<Empty>(
+            &format!("replay.{id}"),
+            label,
+            "Replay Buffer",
+        ));
+    }
+    for (id, label) in [
         ("pause", "Pause recording"),
         ("resume", "Resume recording"),
         ("pause_toggle", "Toggle pause"),
@@ -488,6 +504,7 @@ pub fn catalogue() -> Catalogue {
         ),
         ("studio", "ctrl+alt+cmd+d", "studio.toggle", json!({})),
         ("take", "ctrl+alt+cmd+return", "transition.take", json!({})),
+        ("replay", "ctrl+alt+cmd+y", "replay.save", json!({})),
     ]
     .into_iter()
     .map(|(id, keys, action, args)| {

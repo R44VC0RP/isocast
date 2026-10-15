@@ -341,6 +341,9 @@ struct Inner<P: Platform> {
     timings: Mutex<CompositorTimings>,
     /// Measured write speeds by folder, and when.
     speeds: Mutex<HashMap<PathBuf, (Time, f64)>>,
+    /// The program's shared H.264/AAC encoders (the stream's and the
+    /// replay buffer's).
+    encoders: crate::stream::encoder::Encoders,
 }
 
 struct State<P: Platform> {
@@ -567,6 +570,7 @@ impl<P: Platform> Engine<P> {
             program_fps: AtomicU64::new(0),
             timings: Mutex::default(),
             speeds: Mutex::new(HashMap::new()),
+            encoders: Default::default(),
         });
         reconcile(&inner, setup);
 
@@ -1066,6 +1070,11 @@ impl<P: Platform> Engine<P> {
         }
     }
 
+    /// The program's shared encoders, for outputs that take it compressed.
+    pub(crate) fn encoders(&self) -> &crate::stream::encoder::Encoders {
+        &self.inner.encoders
+    }
+
     /// Whether a recording is running.
     pub fn is_recording(&self) -> bool {
         self.inner.recording.load(Ordering::SeqCst)
@@ -1176,8 +1185,8 @@ fn canvas_refusal<P: Platform>(inner: &Inner<P>, current: &Canvas, new: &Canvas)
     let canvas = |c: &Canvas| (c.width, c.height, c.fps);
     (canvas(current) != canvas(new) && !inner.program_video.is_empty()).then(|| {
         format!(
-            "the canvas stays {}×{} at {} fps while recording or streaming; change it once \
-             they stop",
+            "the canvas stays {}×{} at {} fps while recording, streaming or keeping a replay \
+             buffer; change it once they stop",
             current.width, current.height, current.fps
         )
     })
