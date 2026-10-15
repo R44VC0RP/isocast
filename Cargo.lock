@@ -2969,7 +2969,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "isocast-app"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
@@ -2988,7 +2988,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-cli"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3012,7 +3012,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-client"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "isocast-diagnostics",
@@ -3026,7 +3026,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-daemon"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3044,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-diagnostics"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-engine"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3081,7 +3081,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-platform-macos"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3117,7 +3117,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-protocol"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "schemars",
  "serde",
@@ -3129,7 +3129,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-surfaces"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "mach2",
@@ -3141,7 +3141,7 @@ dependencies = [
 
 [[package]]
 name = "isocast-ui"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "block2 0.6.2",

@@ -129,6 +129,9 @@ verify_app() {
             codesign -d --entitlements - --xml "$bundle" 2>/dev/null | grep -q "<key>$key</key>" ||
                 die "$bundle is missing the $key entitlement; camera/microphone would be denied without a prompt"
         done
+        # Without it macOS denies the local network silently (#57).
+        /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$bundle/Contents/Info.plist" 2>/dev/null | grep -q . ||
+            die "$bundle has no NSLocalNetworkUsageDescription; streaming to a local-network server would fail without a prompt"
     done
 }
 verify_dmg() {
@@ -183,7 +186,10 @@ from pathlib import Path
 app,engine,version,executable,build_version,bundle_id,feed,key,lsenv=sys.argv[1:]
 usage={"NSCameraUsageDescription":"Isocast records cameras and capture cards into your scenes and recordings.",
        "NSMicrophoneUsageDescription":"Isocast records microphones and audio interfaces into your scenes and recordings.",
-       "NSScreenCaptureUsageDescription":"Isocast captures the displays, windows and desktop audio you select for scenes and recordings."}
+       "NSScreenCaptureUsageDescription":"Isocast captures the displays, windows and desktop audio you select for scenes and recordings.",
+       # Without it macOS keeps the engine off the local network with no
+       # prompt: a LAN RTMP server fails with "No route to host" (#57).
+       "NSLocalNetworkUsageDescription":"Isocast streams to servers on your local network, such as an RTMP server on another computer."}
 for source,dest,identifier,name,binary in [
     ("crates/isocast-ui/Info.plist" if executable=="isocast-ui" else "crates/isocast-app/bundle/Info.plist",app,bundle_id,"Isocast",executable),
     ("crates/isocast-daemon/Info.plist",engine,"dev.isocast.isocastd","Isocast Engine","isocastd")]:

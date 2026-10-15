@@ -32,6 +32,8 @@
 	<string>Isocast captures the displays and windows you choose for your scenes.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Isocast captures the system or application audio you choose for your scenes.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Isocast streams to servers on your local network, such as an RTMP server on another computer.</string>
 	<key>CFBundleIconFile</key>
 	<string>Isocast</string>
 	<key>CFBundleIconName</key>

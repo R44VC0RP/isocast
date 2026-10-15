@@ -357,10 +357,16 @@ pub fn bug_report(daemon: &Daemon, params: &BugReportParams) -> Result<BugReport
             kind: isocast_protocol::library::LibraryKind::Profile,
             id: entry.id.clone(),
         }) && let Some(stream) = document.profile.and_then(|p| p.stream)
-            && let Ok(Some(key)) =
-                crate::secret(isocast_engine::stream::KEY_SERVICE, &stream.key_account())
         {
-            credentials.push(key);
+            // This build's key and an old one it may still read (#63).
+            for service in [
+                crate::key_service(),
+                isocast_engine::stream::LEGACY_KEY_SERVICE,
+            ] {
+                if let Ok(Some(key)) = crate::secret(service, &stream.key_account()) {
+                    credentials.push(key);
+                }
+            }
         }
     }
     let profile = library.profile.as_ref().and_then(|id| {

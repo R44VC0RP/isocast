@@ -607,6 +607,13 @@ layout editing, Windows, release prep).
   build's 16 post-split takes have zero protected losses. Cold stream startup
   still loses 9–12 program/stream pictures under heavy M2 load, so the strict
   zero-total-drop acceptance remains open. See split-drops scratch REPORT.md.
+- [x] **A.4 LAN streaming (GitHub #57):** both bundles declare
+  NSLocalNetworkUsageDescription (release.sh refuses one without it); the
+  RTMP connect tries every address, IPv6 and IPv4 alternating; .local
+  lookup and "no route" to a private address name the Local Network setting.
+- [x] **A.4 Stream key per build (GitHub #63):** keys live under
+  `<app bundle id>.stream`; a readable 0.0.3 key under `dev.isocast.stream`
+  moves once, one another build saved is ignored, so Save Key works.
 - [x] **A.4 ISO take loss (GitHub #41):** VideoToolbox placed sessions
   started within a few milliseconds of each other (or during another's
   teardown) three to one engine, each then at ~45 fps for the whole take,
@@ -1251,6 +1258,14 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   as VP9/Opus, AV1/Opus and H.264/AAC MKV loop in sync (<= 0.04 ms); 120 s
   looping alpha media: 0 drops, flat RSS, 11.7% of a core.
 
+- #57 / #63 stream fixes (2026-10-15): LAN streaming and per-build
+  stream keys work. Verified on isocast-m2-a (macOS 27) with Developer ID
+  builds: main's build fails rtmp://Mac-mini.local with "could not look up"
+  once Local Network is denied; the fixed build names the setting, and
+  streams 5.7 s of H.264+AAC to it once allowed. A key a different app
+  owns under the old service blocked main's Save Key (-25244); the fixed
+  build ignores it, saves under dev.isocast.release.stream, and moves a
+  key main's release build saved. Settings › Stream banner checked offscreen.
 - Motion harness fix round 2 (2026-10-14, re-review): no path outside
   the run folder is touched (plain names, no recursive removal, symlinks
   refused, state allowlist, isolated engine required); an flock for the

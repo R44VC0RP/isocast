@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -570,26 +570,108 @@ fn connect(server: &ServerUrl, until: Until) -> Result<TcpStream> {
     }
 }
 
+/// Look up `host` (IPv4 and IPv6) and try each address in turn, the
+/// families alternating, until one connects (#57).
 fn connect_now(host: &str, port: u16, deadline: Instant) -> Result<TcpStream> {
-    let addresses: Vec<_> = (host, port)
+    let found: Vec<_> = (host, port)
         .to_socket_addrs()
-        .with_context(|| format!("could not look up {host}"))?
+        .map_err(|err| {
+            let hint = if host.ends_with(".local") || host.ends_with(".local.") {
+                LOCAL_NETWORK_HINT
+            } else {
+                ""
+            };
+            anyhow!("could not look up {host}: {err}{hint}")
+        })?
         .collect();
-    let mut last = None;
-    for address in &addresses {
+    let addresses = alternate_families(found);
+    let mut last: Option<(SocketAddr, io::Error)> = None;
+    for (i, address) in addresses.iter().enumerate() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
         }
-        match TcpStream::connect_timeout(address, remaining) {
+        // An address that never answers mustn't use up the time the
+        // others have; the last one gets all that's left.
+        let wait = if i + 1 < addresses.len() {
+            remaining.min(ATTEMPT_TIMEOUT)
+        } else {
+            remaining
+        };
+        match TcpStream::connect_timeout(address, wait) {
             Ok(stream) => return Ok(stream),
-            Err(err) => last = Some(err),
+            Err(err) => last = Some((*address, err)),
         }
     }
+    let tried = addresses
+        .iter()
+        .map(|a| a.ip().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     Err(match last {
-        Some(err) => anyhow!("could not connect to {host} port {port}: {err}"),
+        Some((address, err)) => {
+            // macOS's Local Network privacy refuses a private address with
+            // EHOSTUNREACH, without a prompt if the app can't ask.
+            let hint = if blocked_locally(&address, &err) {
+                LOCAL_NETWORK_HINT
+            } else {
+                ""
+            };
+            anyhow!("could not connect to {host} port {port} (tried {tried}): {err}{hint}")
+        }
         None => anyhow!("could not connect to {host} port {port} in time"),
     })
+}
+
+/// The longest one address may take to connect while others remain.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// What to do when macOS keeps Isocast off the local network.
+const LOCAL_NETWORK_HINT: &str = if cfg!(target_os = "macos") {
+    "; if the server is on your local network, macOS may be blocking Isocast from it: turn on \
+     Isocast (or Isocast Engine) in System Settings → Privacy & Security → Local Network, then \
+     start the stream again"
+} else {
+    ""
+};
+
+/// `addresses` in the resolver's order, but IPv6 and IPv4 taking turns, so
+/// a family that doesn't work costs one attempt rather than all of them.
+fn alternate_families(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let mut unique = Vec::new();
+    for address in addresses {
+        if !unique.contains(&address) {
+            unique.push(address);
+        }
+    }
+    let first_v6 = unique.first().is_some_and(SocketAddr::is_ipv6);
+    let (mut first, mut second): (Vec<_>, Vec<_>) =
+        unique.into_iter().partition(|a| a.is_ipv6() == first_v6);
+    first.reverse();
+    second.reverse();
+    let mut out = Vec::with_capacity(first.len() + second.len());
+    while let Some(a) = first.pop() {
+        out.push(a);
+        if let Some(b) = second.pop() {
+            out.push(b);
+        }
+    }
+    out.extend(second.into_iter().rev());
+    out
+}
+
+/// Whether `err` connecting to `address` looks like the local network
+/// being off limits: "no route" to a private or link-local address.
+fn blocked_locally(address: &SocketAddr, err: &io::Error) -> bool {
+    let unreachable = matches!(
+        err.kind(),
+        io::ErrorKind::HostUnreachable | io::ErrorKind::NetworkUnreachable
+    );
+    let local = match address.ip() {
+        IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
+        IpAddr::V6(ip) => ip.is_unicast_link_local() || ip.is_unique_local(),
+    };
+    unreachable && local
 }
 
 /// The info object of a `_result`, `_error` or `onStatus`: the first
@@ -807,6 +889,37 @@ fn random_bytes(n: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn addresses_alternate_families_and_name_local_network_trouble() {
+        let a = |s: &str| s.parse::<SocketAddr>().unwrap();
+        let found = vec![
+            a("[fe80::1%1]:1935"),
+            a("[fd00::2]:1935"),
+            a("[fd00::3]:1935"),
+            a("10.0.0.5:1935"),
+            a("[fe80::1%1]:1935"),
+        ];
+        assert_eq!(
+            alternate_families(found),
+            vec![
+                a("[fe80::1%1]:1935"),
+                a("10.0.0.5:1935"),
+                a("[fd00::2]:1935"),
+                a("[fd00::3]:1935"),
+            ]
+        );
+        assert_eq!(
+            alternate_families(vec![a("10.0.0.5:1"), a("10.0.0.6:1"), a("[::1]:1")]),
+            vec![a("10.0.0.5:1"), a("[::1]:1"), a("10.0.0.6:1")]
+        );
+        let unreachable = io::Error::from_raw_os_error(libc::EHOSTUNREACH);
+        assert!(blocked_locally(&a("10.0.10.165:1935"), &unreachable));
+        assert!(blocked_locally(&a("[fe80::1%1]:1935"), &unreachable));
+        assert!(!blocked_locally(&a("8.8.8.8:1935"), &unreachable));
+        let refused = io::Error::from(io::ErrorKind::ConnectionRefused);
+        assert!(!blocked_locally(&a("10.0.10.165:1935"), &refused));
+    }
 
     #[test]
     fn messages_round_trip_through_chunks_of_any_size() {

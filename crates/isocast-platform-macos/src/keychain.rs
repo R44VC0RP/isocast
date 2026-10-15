@@ -3,9 +3,14 @@
 //! The daemon runs in the background, so it never lets the Keychain show a
 //! prompt: an item another build of Isocast stored (a different code
 //! signature) can't be read without one, so reading it fails with a way
-//! out, and storing a key replaces the item so this build owns it.
+//! out, and storing a key replaces the item so this build owns it. Each
+//! build keeps its keys under a service of its own (see [`app_identifier`]),
+//! so builds don't fight over one item (#63).
+
+use std::path::Path;
 
 use anyhow::{Result, anyhow};
+use objc2_foundation::{NSBundle, NSString};
 use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
 use security_framework::os::macos::keychain::SecKeychain;
 use security_framework::passwords;
@@ -44,8 +49,8 @@ pub fn secret(service: &str, account: &str) -> Result<Option<String>> {
         Err(err) if err.code() == NOT_FOUND => Ok(None),
         Err(err) if [NEEDS_PERMISSION, AUTH_FAILED].contains(&err.code()) => Err(anyhow!(
             "the stream key in the Keychain was stored by another build of Isocast, which this \
-             one may not read without asking; enter it again in Settings → Stream (or `isocast \
-             stream key set`)"
+             one may not read without asking; remove the \"{service}\" item in Keychain Access, \
+             then set the key again in Settings → Stream (or `isocast stream key set`)"
         )),
         Err(err) => Err(keychain_error("read", service, &err)),
     }
@@ -96,4 +101,24 @@ fn keychain_error(
         err.message().unwrap_or_else(|| "unknown error".into()),
         err.code()
     )
+}
+
+/// The bundle identifier of the outermost app this executable is in:
+/// `dev.isocast.release` for the engine inside Isocast.app, the dev app's
+/// own for the development engine; `None` for a bare binary. The bundled
+/// engine's own identifier is the same in every build, so it can't tell
+/// them apart.
+pub fn app_identifier() -> Option<String> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let app = exe
+        .ancestors()
+        .filter(|dir| dir.extension().is_some_and(|ext| ext == "app"))
+        .last()?;
+    bundle_identifier(app)
+}
+
+fn bundle_identifier(app: &Path) -> Option<String> {
+    let path = NSString::from_str(app.to_str()?);
+    let bundle = NSBundle::bundleWithPath(&path)?;
+    Some(bundle.bundleIdentifier()?.to_string()).filter(|id| !id.is_empty())
 }

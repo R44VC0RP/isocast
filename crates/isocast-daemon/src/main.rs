@@ -27,7 +27,7 @@ use isocast_engine::record::{
     RecordOptions, SessionControl, SharedEvent, SharedFeed, SplitTake, SplitTiming, expand_home,
     interrupted_note, interrupted_sessions,
 };
-use isocast_engine::stream::{KEY_ENV, KEY_SERVICE, OnChange, Stream};
+use isocast_engine::stream::{KEY_ENV, LEGACY_KEY_SERVICE, OnChange, Stream};
 use isocast_protocol::api::InitParams;
 use isocast_protocol::api::{
     Applied, ApplyParams, EngineInfo, EngineState, Event, EventKind, EventKinds, Frame,
@@ -2400,7 +2400,7 @@ impl Daemon {
         let account = settings.key_account();
         let key = match std::env::var(KEY_ENV) {
             Ok(key) if !key.trim().is_empty() => key.trim().to_string(),
-            _ => match secret(KEY_SERVICE, &account) {
+            _ => match stream_key(&account) {
                 Ok(Some(key)) => key,
                 Ok(None) => {
                     return Err(failed(anyhow::anyhow!(
@@ -2412,7 +2412,7 @@ impl Daemon {
                 Err(err) => return Err(failed(err)),
             },
         };
-        isocast_diagnostics::redact::remember_secret(KEY_SERVICE, &account, &key);
+        isocast_diagnostics::redact::remember_secret(key_service(), &account, &key);
         // Starting the engine happens outside the lock; until the stream is
         // in the state, this keeps the engine from idling out.
         state.streams_starting += 1;
@@ -2515,9 +2515,10 @@ impl Daemon {
             )));
         }
         let (service, account) = self.key_target(params.target)?;
-        set_secret(KEY_SERVICE, &account, key).map_err(failed)?;
+        set_secret(key_service(), &account, key).map_err(failed)?;
+        retire_legacy_key(&account);
         forget_key_problem();
-        isocast_diagnostics::redact::remember_secret(KEY_SERVICE, &account, key);
+        isocast_diagnostics::redact::remember_secret(key_service(), &account, key);
         Ok(StreamKey {
             service,
             account,
@@ -2527,7 +2528,8 @@ impl Daemon {
 
     fn stream_key_clear(&self, target: StreamKeyTarget) -> Result<StreamKey, RpcError> {
         let (service, account) = self.key_target(target)?;
-        delete_secret(KEY_SERVICE, &account).map_err(failed)?;
+        delete_secret(key_service(), &account).map_err(failed)?;
+        retire_legacy_key(&account);
         forget_key_problem();
         Ok(StreamKey {
             service,
@@ -3404,7 +3406,7 @@ fn stream_status(state: &State) -> Option<StreamStatus> {
     let settings = stream_settings(state)?;
     let from_env = std::env::var(KEY_ENV).is_ok_and(|key| !key.trim().is_empty());
     let account = settings.key_account();
-    let key_set = from_env || has_secret(KEY_SERVICE, &account).unwrap_or(false);
+    let key_set = from_env || has_stream_key(&account).unwrap_or(false);
     let mut status = StreamStatus::offline(&settings, key_set);
     if key_set && !from_env {
         status.key_problem = key_problem(&account);
@@ -3426,12 +3428,13 @@ fn key_problem(account: &str) -> Option<String> {
     {
         return problem.clone();
     }
-    let problem = match secret(KEY_SERVICE, account) {
-        Err(err) if format!("{err:#}").contains("another build") => Some(
-            "The saved key was stored by another build of Isocast, which this one can't read \
-             without asking. Enter it again."
-                .to_string(),
-        ),
+    let problem = match secret(key_service(), account) {
+        Err(err) if format!("{err:#}").contains("another build") => Some(format!(
+            "The saved key was stored by a differently signed copy of this Isocast, and macOS \
+             lets only that copy use or replace it. Open Keychain Access, delete the “{}” item, \
+             then paste the key and press Save Key.",
+            key_service()
+        )),
         _ => None,
     };
     *checked = Some((
@@ -3665,6 +3668,113 @@ fn now() -> Time {
 #[cfg(not(target_os = "macos"))]
 fn now() -> Time {
     Time::from_nanos(0)
+}
+
+/// The Keychain service this build keeps stream keys under:
+/// `<app bundle id>.stream` (`dev.isocast.release.stream` for Isocast.app),
+/// so each build owns its own items. One shared service let a key saved by
+/// the dev build block the release build, which may neither read nor
+/// replace it (#63).
+fn key_service() -> &'static str {
+    static SERVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SERVICE.get_or_init(|| match app_identifier() {
+        Some(id) => format!("{id}.stream"),
+        None => "dev.isocast.unbundled.stream".to_string(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn app_identifier() -> Option<String> {
+    isocast_platform_macos::app_identifier()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn app_identifier() -> Option<String> {
+    None
+}
+
+/// The stream key for `account`: this build's own, or one an older Isocast
+/// kept under the shared legacy service, moved here once if this build may
+/// read it without asking.
+fn stream_key(account: &str) -> Result<Option<String>> {
+    match secret(key_service(), account)? {
+        Some(key) => Ok(Some(key)),
+        None => Ok(migrate_legacy_key(account)),
+    }
+}
+
+/// Whether a key for `account` is stored for this build (moving a readable
+/// legacy one here first).
+fn has_stream_key(account: &str) -> Result<bool> {
+    Ok(has_secret(key_service(), account)? || migrate_legacy_key(account).is_some())
+}
+
+/// Accounts whose legacy item this build can't read: ignored, not asked
+/// about again until the daemon restarts.
+static LEGACY_IGNORED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Move the legacy item for `account` to this build's service when it can
+/// be read without a prompt, and remove it, so a key cleared later doesn't
+/// come back. One another build saved is ignored: the user saves the key
+/// again, under this build's own service.
+fn migrate_legacy_key(account: &str) -> Option<String> {
+    let mut ignored = LEGACY_IGNORED.lock().unwrap();
+    if ignored.iter().any(|a| a == account)
+        || key_service() == LEGACY_KEY_SERVICE
+        || !has_secret(LEGACY_KEY_SERVICE, account).unwrap_or(false)
+    {
+        return None;
+    }
+    let key = match secret(LEGACY_KEY_SERVICE, account) {
+        Ok(Some(key)) => key,
+        Ok(None) => return None,
+        Err(err) => {
+            isocast_diagnostics::diagnostic!(
+                "warn";
+                "isocastd: ignoring the stream key for {account} under the old Keychain service \
+                 {LEGACY_KEY_SERVICE}: {err:#}"
+            );
+            ignored.push(account.to_string());
+            return None;
+        }
+    };
+    if let Err(err) = set_secret(key_service(), account, &key) {
+        isocast_diagnostics::diagnostic!(
+            "warn";
+            "isocastd: could not move the stream key for {account} to the Keychain service {}: \
+             {err:#}",
+            key_service()
+        );
+        // Still usable this time; moving is tried again next time.
+        return Some(key);
+    }
+    isocast_diagnostics::diagnostic!(
+        "isocastd: moved the stream key for {account} from the Keychain service \
+         {LEGACY_KEY_SERVICE} to {}",
+        key_service()
+    );
+    drop(ignored);
+    retire_legacy_key(account);
+    Some(key)
+}
+
+/// Remove the legacy item for `account` if this build may (it saved it);
+/// one another build saved stays, ignored.
+fn retire_legacy_key(account: &str) {
+    if key_service() == LEGACY_KEY_SERVICE {
+        return;
+    }
+    if let Err(err) = delete_secret(LEGACY_KEY_SERVICE, account) {
+        isocast_diagnostics::diagnostic!(
+            "warn";
+            "isocastd: left the old Keychain item {LEGACY_KEY_SERVICE} for {account} alone: \
+             {err:#}"
+        );
+        let mut ignored = LEGACY_IGNORED.lock().unwrap();
+        if !ignored.iter().any(|a| a == account) {
+            ignored.push(account.to_string());
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

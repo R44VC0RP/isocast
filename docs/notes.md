@@ -1499,6 +1499,18 @@ each section. Delete entries that stop being true.
   end is cut. Alpha is written into VideoToolbox's own BGRA buffer when
   it says the buffer is modifiable (it always did here), else into a
   pool copy. There is no seeking API, so Cues are only read for the end.
+- 2026-10-15 (#63): stream keys live under `<outermost app's bundle id>.stream`
+  (`dev.isocast.release.stream`, `dev.isocast.isocastd.stream` for the dev
+  app, `dev.isocast.update-test.stream`, `dev.isocast.unbundled.stream` for
+  a bare isocastd). The engine's own bundle id is `dev.isocast.isocastd` in
+  every build, so it can't separate them; the enclosing Isocast.app can. A
+  key under the 0.0.3 service `dev.isocast.stream` moves once if readable
+  without a prompt (then the old item is removed, so a cleared key can't
+  come back); an unreadable one is ignored for the daemon's lifetime. Set
+  and clear also remove the old item when this build may.
+- 2026-10-15 (#57): Local Network isn't in `isocast permissions`: macOS has
+  no API to read its state without triggering the prompt (NWBrowser or a
+  connect is the only probe), so it'd be a guess.
 
 - 2026-10-14 (motion harness, fix round 2): suites are trusted input
   but boxed: plain scenario names, run folders only as plain children of
@@ -4562,6 +4574,23 @@ each section. Delete entries that stop being true.
   Max). A VP9-alpha 1080p stinger costs ~130 MB more RSS than its ProRes
   4444 twin (two hardware VP9 sessions' surfaces, BGRA output), flat over
   time.
+- 2026-10-15 (#57): macOS 27 asks "Allow “Isocast Engine” to find devices
+  on local networks?" (UserNotificationCenter alert) on the engine's first
+  .local lookup even without NSLocalNetworkUsageDescription; while it's
+  unanswered getaddrinfo blocks (stream stays "connecting"), after Don't
+  Allow the lookup fails ("nodename nor servname"). The Mac's own LAN
+  address is not restricted, so a one-machine test can only show the
+  .local half; the AWS test Macs can't reach another LAN host. The switch
+  is "Isocast Engine" in Privacy & Security → Local Network (cua-driver
+  sees it as AXCheckBox "Isocast Engine_Toggle").
+- 2026-10-15 (#63): Keychain items a Developer ID engine creates trust it
+  by designated requirement (path recorded, not checked): a copy at
+  another path and another build with the same requirement read it
+  silently. Deleting a same-team item works; a different signer's
+  (e.g. `security add-generic-password`) can't be deleted (-25244). Once,
+  a 0.0.3-saved item failed to read from the fixed build (ignored as
+  designed); two repeats moved fine. `isocast status --json` prints only
+  state and files; the stream's key_set is in the `status` RPC.
 
 - 2026-10-14 (motion harness, fix round 3): a gain computed as an
   unaligned regression drops for a late edge (0.79 at 14 frames) and

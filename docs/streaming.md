@@ -44,9 +44,22 @@ leaves live. Warnings do not change the configured bitrate or rate control.
 
 The stream key is never part of a setup, `get`, `status`, logs, errors or
 `--json` output (errors have it replaced by `<stream key>`). It is a
-generic password in the login Keychain: service `dev.isocast.stream`,
+generic password in the login Keychain: service `<app bundle id>.stream`
+(`dev.isocast.release.stream` for Isocast.app, `dev.isocast.isocastd.stream`
+for the dev app, `dev.isocast.unbundled.stream` for a bare `isocastd`),
 account the service name (`twitch`), or the server address for `custom`.
+Each build has its own service because macOS lets only the build that saved
+an item replace it. Up to 0.0.3 every build used `dev.isocast.stream`; a
+build moves a key from there to its own service once, when it may read it
+without a prompt, and ignores one another build saved (#63).
 For local testing the daemon also takes a key from `ISOCAST_STREAM_KEY`.
+
+A server on the local network (an RTMP relay or another Mac) needs macOS's
+Local Network permission: the first stream to it asks to allow "Isocast
+Engine". Turned off, a `.local` name can't be looked up and an address
+fails with "No route to host"; the error says where to turn it on (System Settings → Privacy & Security → Local
+Network). Isocast can't read that setting, so `isocast permissions` doesn't
+list it (#57).
 
 ## Service presets
 

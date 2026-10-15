@@ -30,6 +30,8 @@
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Isocast streams to servers on your local network, such as an RTMP server on another computer.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Isocast contributors. MIT OR Apache-2.0.</string>
 </dict>

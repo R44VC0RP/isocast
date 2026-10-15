@@ -306,17 +306,18 @@ export component StreamPage inherits SetPage {
         kind: CalloutKind.info;
         title: "Changes apply the next time you start streaming.";
     }
-    // A key stored by another build (an update, a move to Isocast.app)
-    // can't be read without asking: say so, and take it again below.
+    // A key this build's Keychain item holds but may not read (a copy of
+    // the same build signed differently): the engine's message says which
+    // item to delete in Keychain Access before saving the key again (#63).
     if SettingsArea.has-stream && SettingsArea.key-problem != "": Callout {
         kind: CalloutKind.error;
         title: "The saved stream key can’t be used";
-        message: SettingsArea.key-problem + " Paste it in Stream Key and press Save Key.";
+        message: SettingsArea.key-problem;
     }
     if !SettingsArea.has-stream: ChooseService { }
     if SettingsArea.has-stream: SetGroup {
         title: "Service";
-        hint: SettingsArea.server-hint + " " + (SettingsArea.key-problem != "" ? "Paste the key from your service’s dashboard again; it replaces the one this build can’t read." : SettingsArea.key-saved ? "The key is saved in the Keychain; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.");
+        hint: SettingsArea.server-hint + " " + (SettingsArea.key-problem != "" ? "Once the old Keychain item is deleted, paste the key from your service’s dashboard and press Save Key." : SettingsArea.key-saved ? "The key is saved in the Keychain; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.");
         GroupRow {
             label: "Service";
             place: RowPlace.first;

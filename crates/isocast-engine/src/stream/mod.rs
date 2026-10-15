@@ -41,9 +41,11 @@ use queue::{Kind, Media, SendQueue};
 
 pub use rtmp::CA_FILE_ENV;
 
-/// The Keychain service stream keys are kept under; the account is
-/// [`StreamSettings::key_account`].
-pub const KEY_SERVICE: &str = "dev.isocast.stream";
+/// The Keychain service every build kept stream keys under up to 0.0.3
+/// (the account is [`StreamSettings::key_account`]). Builds now keep them
+/// under `<app bundle id>.stream` and move a key from here once, when they
+/// may read it (#63).
+pub const LEGACY_KEY_SERVICE: &str = "dev.isocast.stream";
 /// For local testing: a stream key the daemon takes from its environment
 /// instead of the Keychain.
 pub const KEY_ENV: &str = "ISOCAST_STREAM_KEY";

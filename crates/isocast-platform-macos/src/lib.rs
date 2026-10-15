@@ -63,6 +63,7 @@ pub use camera::CameraCapture;
 pub use capture::DisplayCapture;
 pub use frames::{FramePool, PixelBuffer};
 pub use gpu::MetalImporter;
+pub use keychain::app_identifier;
 pub use stream::{AacEncoder, H264Encoder};
 pub use writer::AssetWriter;
 

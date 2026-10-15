@@ -32,7 +32,7 @@ pub const STATES: &[&str] = &[
     "stop-record",
     "go-live",
     "stop-stream",
-    "stream:live|reconnecting|connecting|short",
+    "stream:live|reconnecting|connecting|short|key-problem",
     "details:rec|live",
     "toasts",
     "toast-drops",
@@ -392,7 +392,7 @@ impl Area for Controls {
                     Ok(stream) => stream,
                     Err(error) => return Some(Err(error)),
                 };
-                self.stream_on.set(true);
+                self.stream_on.set(stream.is_active());
                 app.session.borrow_mut().stream = Some(stream);
                 app.changed(Changed::STREAM | Changed::STATUS);
             }
@@ -1857,9 +1857,7 @@ fn toggle_stream(app: &Rc<App>) {
         } else if s.stream.as_ref().is_some_and(|x| !x.key_set) {
             Some("Add your stream key first. It’s kept in the Keychain, never in the setup.")
         } else if s.stream.as_ref().is_some_and(|x| x.key_problem.is_some()) {
-            Some(
-                "Enter your stream key again: the saved one was stored by another build of Isocast.",
-            )
+            Some("The saved stream key can’t be read. Settings › Stream says how to fix it.")
         } else {
             None
         };
@@ -1938,8 +1936,16 @@ fn sample_stream(which: &str) -> anyhow::Result<StreamStatus> {
             "key_set": true, "elapsed_seconds": 61, "total_kbps": 6100,
             "frames_sent": 1800, "dropped_frames": 0, "congestion": 0.02, "reconnects": 0
         }),
+        // Offline, with a saved key this build may not read (#63).
+        "key-problem" => json!({
+            "state": "offline", "service": "twitch", "server": "live.twitch.tv",
+            "key_set": true,
+            "key_problem": "The saved key was stored by a differently signed copy of this \
+                Isocast, and macOS lets only that copy use or replace it. Open Keychain Access, \
+                delete the “dev.isocast.release.stream” item, then paste the key and press Save Key."
+        }),
         other => anyhow::bail!(
-            "no sample stream {other:?}; one of live, reconnecting, connecting, short"
+            "no sample stream {other:?}; one of live, reconnecting, connecting, short, key-problem"
         ),
     };
     Ok(serde_json::from_value(value)?)
