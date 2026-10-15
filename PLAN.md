@@ -1230,6 +1230,12 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
     warning) with live statuses and one action each, the floating drag
     helper beside System Settings, Relaunch for a grant that waits for the
     engine, and plain words for a refusal without a prompt.
+  - [x] **8.2j Permissions onboarding follow-ups (GitHub #58).** The helper
+    stays beside System Settings' main window; Refused without asking
+    offers Open Settings and isn't flagged outside a screen session; no
+    restart for a bare isocastd; dead first-run plumbing gone; a disabled
+    primary footer button looks disabled; Review… keeps Settings' edits;
+    dev builds say "Isocast".
 - [x] **8.3** Docs: getting started, setup reference, MCP tools, plugins.
   (With the user-facing README and its screenshots, licences and
   THIRD_PARTY_NOTICES, and the .github templates.)
@@ -1317,6 +1323,13 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   engine ratio 1.00 every take; m2-a interleaved A/B unchanged (healthy 0
   drops, overload ISO losses retained); e2e 13/13 on both.
 - A.4 / #41 (2026-10-14, blocked, superseded above): baseline six-take repro lost 9,416 ISO
+- 8.2j / #58 (2026-10-15): on isocast-m2-b (Developer ID build) the
+  helper stays put while System Settings' password sheet (a 260x373 window
+  of its own, in front) shows; a bare isocastd's `permissions` call drops
+  from 23 to 9.6 ms (no preflight child), the bundled one still checks
+  (60 ms); ssh sessions lack sessionHasGraphicAccess (0x5020 vs 0x6030 in
+  the desktop). Offscreen before/after for the rest; visual-shots 15/15
+  views unchanged.
 - 8.2i / #51 (2026-10-15): the permissions step and the drag helper work
   end to end on a Developer ID build on isocast-m2-a (macOS 27) from fresh
   grants: camera and microphone prompts from Allow…, rows flipping live,

@@ -353,8 +353,11 @@ mod mac {
         }
     }
 
-    /// Where System Settings' frontmost window is, in Core Graphics' global
-    /// coordinates (top-left origin, y down), if it has one on screen.
+    /// Where System Settings' main window is, in Core Graphics' global
+    /// coordinates (top-left origin, y down), if it has one on screen: its
+    /// largest normal-level window, not the frontmost, because its sheets
+    /// (the password prompt, "Quit & Reopen") are windows of their own in
+    /// front of it, and following them put the helper over the list.
     fn settings_window() -> Option<CGRect> {
         // SAFETY: Foundation/AppKit queries on the main thread; the window
         // list is +1 and released by `Retained`.
@@ -375,7 +378,7 @@ mod mac {
                     msg_send![info, objectForKey: &*ns_string(key)];
                 Some(msg_send![&*value?, doubleValue])
             };
-            // Front to back: the first normal-level window is the one shown.
+            let mut largest: Option<CGRect> = None;
             for i in 0..count {
                 let info: Retained<AnyObject> = msg_send![&*list, objectAtIndex: i];
                 if number(&info, "kCGWindowOwnerPID") != Some(f64::from(pid))
@@ -385,16 +388,23 @@ mod mac {
                 }
                 let bounds: Option<Retained<AnyObject>> =
                     msg_send![&*info, objectForKey: &*ns_string("kCGWindowBounds")];
-                let bounds = bounds?;
-                let rect = CGRect::new(
-                    CGPoint::new(number(&bounds, "X")?, number(&bounds, "Y")?),
-                    CGSize::new(number(&bounds, "Width")?, number(&bounds, "Height")?),
-                );
-                if rect.size.width > 100.0 && rect.size.height > 100.0 {
-                    return Some(rect);
+                let Some(rect) = bounds.and_then(|b| {
+                    Some(CGRect::new(
+                        CGPoint::new(number(&b, "X")?, number(&b, "Y")?),
+                        CGSize::new(number(&b, "Width")?, number(&b, "Height")?),
+                    ))
+                }) else {
+                    continue;
+                };
+                let area = |r: &CGRect| r.size.width * r.size.height;
+                if rect.size.width > 100.0
+                    && rect.size.height > 100.0
+                    && largest.is_none_or(|l| area(&rect) > area(&l))
+                {
+                    largest = Some(rect);
                 }
             }
-            None
+            largest
         }
     }
 

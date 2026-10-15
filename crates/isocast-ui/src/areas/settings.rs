@@ -12,15 +12,12 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::time::Duration;
 
 use isocast_protocol::api::{
     ApplyParams, ImportObsParams, InitParams, Method, StreamKeyParams, StreamKeyTarget,
 };
 use isocast_protocol::change::{Change, merge_patch};
-use isocast_protocol::devices::{
-    CameraKind, Devices, Permission, PermissionAction, PermissionKind, PermissionsReport,
-};
+use isocast_protocol::devices::{CameraKind, Devices, Permission};
 use isocast_protocol::init::{InitOptions, Layout};
 use isocast_protocol::stream::{StreamService, StreamState};
 use isocast_protocol::{EncoderQuality, QualityPreset, Setup};
@@ -28,14 +25,14 @@ use serde_json::{Map, Value, json};
 use slint::{ComponentHandle, SharedString};
 
 use super::{Area, Changed};
-use crate::app::{App, sentence};
+use crate::app::App;
 use crate::daemon::{Link, Update};
 use crate::kit::{self, model};
 use crate::platform::{self, Choose};
 use crate::session::EditOptions;
 use crate::{
     AppWindow, DeviceChoice, DropdownOption, HotkeyGroup, HotkeyRow, IsoChoice, MicRow, NavTab,
-    PermissionRow, ServiceChoice, SettingsArea, ToastKind, Ui,
+    ServiceChoice, SettingsArea, ToastKind, Ui,
 };
 
 /// Snapshot states (`--state NAME[:ARG]`).
@@ -344,8 +341,6 @@ struct FirstRun {
     folder: String,
     name: String,
     creating: bool,
-    report: Option<PermissionsReport>,
-    asking: bool,
 }
 
 impl Default for FirstRun {
@@ -362,8 +357,6 @@ impl Default for FirstRun {
             folder: "~/Movies/Isocast".into(),
             name: "My setup".into(),
             creating: false,
-            report: None,
-            asking: false,
         }
     }
 }
@@ -371,14 +364,14 @@ impl Default for FirstRun {
 #[derive(Default)]
 pub struct Settings {
     draft: RefCell<Option<Draft>>,
+    /// The draft kept while the permissions step stands in for Settings
+    /// (its Review…), for Settings to open with again.
+    parked: RefCell<Option<Draft>>,
     first_run: RefCell<FirstRun>,
     /// Looking for devices again (Audio, the first run).
     looking: std::cell::Cell<bool>,
     /// Welcome's choice that is working ("obs", "file").
     welcome_busy: RefCell<String>,
-    /// Checks the permissions every few seconds while the first run's
-    /// first step shows (granted in System Settings meanwhile).
-    permissions_timer: slint::Timer,
     /// The Hotkeys page (src/areas/hotkeys.rs).
     pub hotkeys: super::hotkeys::HotkeysPage,
     /// Help › Report a Bug… (src/areas/report.rs).
@@ -545,26 +538,6 @@ impl Area for Settings {
             app.settings.show_first_run(&app);
         });
         on!(on_ob_create, |app| app.settings.create_setup(&app));
-        on!(on_ob_check, |app| app.settings.check_permissions(&app));
-        on!(on_ob_ask, |app| app.settings.ask_permissions(&app));
-        on!(on_ob_restart_engine, |app| app
-            .settings
-            .restart_engine(&app));
-        on!(on_ob_open_settings, |app, permission| {
-            let kind = match permission.as_str() {
-                "screen_recording" => PermissionKind::ScreenRecording,
-                "camera" => PermissionKind::Camera,
-                _ => PermissionKind::Microphone,
-            };
-            app.call(
-                Method::OpenPermissionSettings { permission: kind },
-                |app, result| {
-                    if let Err(error) = result {
-                        app.failed("Couldn’t open System Settings", &error);
-                    }
-                },
-            );
-        });
         on!(on_ob_set, |app, field, value| app
             .settings
             .first_run_set(&app, &field, &value));
@@ -641,16 +614,22 @@ impl Area for Settings {
         } else {
             TABS[0].0
         };
-        let prefs = Prefs::read(&window.global::<Ui>());
-        let base = app.session.borrow().setup_json().map(pick);
-        *self.draft.borrow_mut() = base.map(|base| Draft {
-            draft: base.clone(),
-            base,
-            prefs_base: prefs.clone(),
-            prefs,
-            notice,
-            ..Draft::default()
-        });
+        let parked = self.parked.borrow_mut().take();
+        if let Some(parked) = parked {
+            // Back from the permissions step: its edits as they were.
+            *self.draft.borrow_mut() = Some(parked);
+        } else {
+            let prefs = Prefs::read(&window.global::<Ui>());
+            let base = app.session.borrow().setup_json().map(pick);
+            *self.draft.borrow_mut() = base.map(|base| Draft {
+                draft: base.clone(),
+                base,
+                prefs_base: prefs.clone(),
+                prefs,
+                notice,
+                ..Draft::default()
+            });
+        }
         area.set_tab(tab.into());
         area.set_quality_advanced(false);
         self.tab_shown(app, tab);
@@ -757,6 +736,12 @@ impl Area for Settings {
 
 impl Settings {
     // ---------- The Settings dialog ----------
+
+    /// Keep the open draft, unsaved edits and all, for the next time
+    /// Settings opens (the permissions step stands in for it a while).
+    pub fn park(&self) {
+        *self.parked.borrow_mut() = self.draft.borrow_mut().take();
+    }
 
     /// Close Settings, dropping its draft and why it opened.
     fn close(&self, app: &Rc<App>) {
@@ -1626,97 +1611,16 @@ impl Settings {
         }
         // Ask for the devices now, so they're there by the second step.
         app.load_devices(true);
-        self.check_permissions(app);
-        // The Permissions step draws the permissions step's rows (area H).
+        // The Permissions step draws the permissions step's rows (area H),
+        // which read the permissions every second while it shows.
         app.permissions.check(app);
-        if !app.mode.offscreen {
-            let weak = Rc::downgrade(app);
-            self.permissions_timer.start(
-                slint::TimerMode::Repeated,
-                Duration::from_secs(4),
-                move || {
-                    if let Some(app) = weak.upgrade() {
-                        let checking = app.settings.first_run.borrow().step == 0;
-                        if checking {
-                            app.settings.check_permissions(&app);
-                        }
-                    }
-                },
-            );
-        }
         self.show_first_run(app);
     }
 
     fn close_first_run(&self, app: &Rc<App>) {
-        self.permissions_timer.stop();
         if let Some(window) = app.window() {
             window.global::<Ui>().set_onboarding(false);
         }
-    }
-
-    fn check_permissions(&self, app: &Rc<App>) {
-        app.call_as::<PermissionsReport>(Method::Permissions, |app, result| match result {
-            Ok(next) => {
-                let granted = |r: &PermissionsReport| {
-                    r.details
-                        .iter()
-                        .filter(|d| d.state == Permission::Granted)
-                        .count()
-                };
-                let more = {
-                    let mut run = app.settings.first_run.borrow_mut();
-                    let more = run
-                        .report
-                        .as_ref()
-                        .is_some_and(|before| granted(&next) > granted(before));
-                    run.report = Some(next);
-                    more
-                };
-                // Newly allowed: what can be listed changed.
-                if more {
-                    app.load_devices(true);
-                }
-                app.settings.show_first_run(app);
-            }
-            Err(error) => app.failed("Couldn’t check permissions", &error),
-        });
-    }
-
-    fn ask_permissions(&self, app: &Rc<App>) {
-        self.first_run.borrow_mut().asking = true;
-        self.show_first_run(app);
-        app.call_as::<PermissionsReport>(Method::RequestPermissions(None), |app, result| {
-            {
-                let mut run = app.settings.first_run.borrow_mut();
-                run.asking = false;
-                if let Ok(report) = &result {
-                    run.report = Some(report.clone());
-                }
-            }
-            if let Err(error) = result {
-                app.failed("Couldn’t ask for permissions", &error);
-            }
-            app.settings.show_first_run(app);
-        });
-    }
-
-    /// Restart isocastd so it picks up a permission granted while it ran;
-    /// the link reconnects (and launches it) by itself.
-    fn restart_engine(&self, app: &Rc<App>) {
-        app.call(Method::Shutdown, |app, _| {
-            app.reload();
-            app.toast(
-                ToastKind::Info,
-                "Restarting the engine",
-                "It picks up the new permission when it starts again.",
-            );
-            let weak = Rc::downgrade(app);
-            slint::Timer::single_shot(Duration::from_secs(3), move || {
-                if let Some(app) = weak.upgrade() {
-                    app.settings.check_permissions(&app);
-                }
-            });
-        });
     }
 
     fn first_run_set(&self, app: &Rc<App>, field: &str, value: &str) {
@@ -1807,85 +1711,6 @@ impl Settings {
         area.set_step(run.step);
         area.set_can_close(s.setup.is_some());
         area.set_creating(run.creating);
-        area.set_asking(run.asking);
-
-        // Permissions
-        area.set_checked(run.report.is_some());
-        let report = run.report.as_ref();
-        let details = report.map(|r| r.details.as_slice()).unwrap_or_default();
-        area.set_any_to_ask(
-            details
-                .iter()
-                .any(|d| d.action == PermissionAction::Request),
-        );
-        let app_name = report.map_or("Isocast", |r| r.app.as_str());
-        area.set_permissions(model(details.iter().map(|d| {
-            let (icon, title, why, pane) = match d.permission {
-                PermissionKind::ScreenRecording => (
-                    "display",
-                    "Screen recording",
-                    "Displays, windows and system audio",
-                    "Screen & System Audio Recording",
-                ),
-                PermissionKind::Camera => (
-                    "camera",
-                    "Camera",
-                    "Cameras, capture cards and iPhones",
-                    "Camera",
-                ),
-                PermissionKind::Microphone => (
-                    "mic",
-                    "Microphone",
-                    "Microphones and audio interfaces",
-                    "Microphone",
-                ),
-            };
-            let granted = d.state == Permission::Granted;
-            let todo = match d.action {
-                PermissionAction::OpenSettings => format!(
-                    "Turn on “{app_name}” in System Settings → Privacy & Security → {pane}.{}",
-                    if d.restart_after_granting {
-                        " Then"
-                    } else {
-                        ""
-                    }
-                ),
-                PermissionAction::AskAdministrator => {
-                    "A policy on this Mac blocks it; ask its administrator.".to_string()
-                }
-                _ => String::new(),
-            };
-            let state = match d.state {
-                Permission::Granted => "Allowed",
-                Permission::Denied => "Turned off",
-                Permission::NotDetermined => "Not asked yet",
-                Permission::Restricted => "Blocked by a policy",
-                _ => "Not allowed",
-            };
-            let hint = if d.needed_for.is_empty() {
-                why.to_string()
-            } else {
-                sentence(&d.needed_for)
-            };
-            PermissionRow {
-                id: PermissionKind::NAMES[PermissionKind::ALL
-                    .iter()
-                    .position(|k| *k == d.permission)
-                    .unwrap_or(0)]
-                .into(),
-                icon: icon.into(),
-                title: title.into(),
-                hint: hint.into(),
-                todo: if granted { String::new() } else { todo }.into(),
-                restart: !granted
-                    && d.action == PermissionAction::OpenSettings
-                    && d.restart_after_granting,
-                state: state.into(),
-                granted,
-                denied: d.state == Permission::Denied,
-                open_settings: d.action == PermissionAction::OpenSettings,
-            }
-        })));
 
         // Devices
         let devices = s.devices.as_ref();

@@ -23,6 +23,10 @@ export struct PermissionItem {
     // ask, open, relaunch, update ("" for none).
     action: string,
     action-label: string,
+    // A second way, under the action ("open" when refused without
+    // asking; "" for none).
+    alt-action: string,
+    alt-label: string,
     // The action is under way (a prompt is up, the engine restarts).
     busy: bool,
     // The live setup (or a first setup) uses it.
@@ -38,7 +42,7 @@ export global PermissionsArea {
     // Every permission that's needed is allowed: Continue.
     in property <bool> ready;
     // What macOS lists them under ("Isocast").
-    in property <string> app-name;
+    in property <string> app-name: "Isocast";
     // The first launch (Continue leads on to Welcome) or later (Done).
     in property <bool> first-launch;
     // The floating helper beside System Settings is showing.

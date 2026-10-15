@@ -1484,6 +1484,15 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-15 (#58): a disabled primary footer button uses the kit's
+  disabled footer style (hover fill, text-disabled label) everywhere, not
+  only in the permissions step: at 40% opacity the yellow read as enabled.
+  "Refused without asking" is flagged only in a login session with a
+  screen (SessionGetInfo's sessionHasGraphicAccess): over ssh nobody can be
+  asked, so "update" was the wrong advice. That keys on the session, not
+  on who launched the engine: a Terminal-started engine on the Mac's screen
+  does get prompts, so a fast refusal there is still a real no-prompt.
+
 - 2026-10-15 (#61, WebM/MKV): Matroska and WebM files (EBML magic in the
   first four bytes, whatever the extension) bypass AVFoundation:
   `matroska.rs` (our own EBML reader; matroska-demuxer, the maintained
@@ -4559,6 +4568,12 @@ each section. Delete entries that stop being true.
   not one tool per API call.
 
 ## Gotchas
+
+- 2026-10-15 (#58): System Settings' sheets (the password prompt, "Quit &
+  Reopen") are separate layer-0 windows of its pid, in front of the main
+  window; pick its largest window to find the main one. Over ssh on
+  isocast-m2-b, TCC reads camera and microphone as denied for every app
+  (not "not determined"), so no request is made there at all.
 
 - 2026-10-15 (#61, WebM/MKV): Apple's Opus AudioConverter drops the
   first 120 samples it decodes (2.5 ms; macOS 27.2) and reports no

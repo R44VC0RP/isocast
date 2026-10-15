@@ -201,12 +201,12 @@ impl PermissionsStep {
             // A dialog is a popup, drawn over everything in the window, so
             // the step would open unseen under it (Settings › General ›
             // Review…): it takes the dialog's place, and the dialog comes
-            // back when the step closes (its unsaved edits don't, as when
-            // any other dialog replaces Settings).
+            // back when the step closes, Settings with its unsaved edits.
             let ui = window.global::<Ui>();
             let dialog = ui.get_dialog().to_string();
             if !dialog.is_empty() {
                 let arg = if dialog == "settings" {
+                    app.settings.park();
                     window.global::<SettingsArea>().get_tab().to_string()
                 } else {
                     ui.get_dialog_arg().to_string()
@@ -391,7 +391,7 @@ impl PermissionsStep {
                     let weak = Rc::downgrade(app);
                     let shown = Helper::show(
                         std::path::Path::new(&path),
-                        &helper_line(&detail.app, !listed),
+                        &helper_line(shown_name(&detail), !listed),
                         move || {
                             if let Some(app) = weak.upgrade() {
                                 // Back in Isocast (or System Settings quit).
@@ -483,7 +483,12 @@ impl PermissionsStep {
         let Some(window) = app.window() else { return };
         let area = window.global::<PermissionsArea>();
         let report = self.report.borrow();
-        let needed = needed(app);
+        // The first launch's sample has no setup yet: it needs all three.
+        let needed = if self.sample.get() && self.first_launch.get() {
+            [true; 3]
+        } else {
+            needed(app)
+        };
         area.set_checked(report.is_some());
         area.set_first_launch(self.first_launch.get());
         area.set_helper_shown(helper);
@@ -491,7 +496,14 @@ impl PermissionsStep {
             area.set_ready(false);
             return;
         };
-        area.set_app_name(report.app.as_str().into());
+        area.set_app_name(
+            if report.app == "isocastd" {
+                "Isocast"
+            } else {
+                report.app.as_str()
+            }
+            .into(),
+        );
         area.set_ready(
             report
                 .details
@@ -532,7 +544,8 @@ fn row(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem
             "Microphone",
         ),
     };
-    let app = &d.app;
+    let app = shown_name(d);
+    let mut alt = ("", "");
     let (status, label, detail, action, action_label) = if d.state == Permission::Granted {
         ("allowed", "Allowed", String::new(), "", "")
     } else if d.action == PermissionAction::Restart {
@@ -546,13 +559,16 @@ fn row(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem
             "Relaunch",
         )
     } else if d.denied_without_prompt {
+        // Or it was turned off before (another copy, a reset): System
+        // Settings may still turn it on.
+        alt = ("open", "Open Settings");
         (
             "silent",
             "Refused without asking",
             format!(
                 "macOS said no without showing you its question, because this copy of {app} \
                  isn’t allowed to ask for it, so asking again won’t help. Install the latest \
-                 {app}, then allow it here."
+                 {app}, then allow it here, or switch it on in System Settings › {pane}."
             ),
             "update",
             "Check for Updates…",
@@ -603,6 +619,8 @@ fn row(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem
         detail: detail.into(),
         action: action.into(),
         action_label: action_label.into(),
+        alt_action: alt.0.into(),
+        alt_label: alt.1.into(),
         busy: busy.is_some(),
         needed,
     }
@@ -614,6 +632,17 @@ fn helper_line(app: &str, drag: bool) -> String {
         format!("Drag {app} into the list, then switch it on")
     } else {
         format!("Switch on {app} in the list (or drag it in)")
+    }
+}
+
+/// The name to show for the app: the one macOS lists, or "Isocast" for a
+/// bare isocastd (a development build), whose name means nothing to a
+/// person.
+fn shown_name(d: &PermissionDetail) -> &str {
+    if d.app_path.is_none() && d.app == "isocastd" {
+        "Isocast"
+    } else {
+        &d.app
     }
 }
 

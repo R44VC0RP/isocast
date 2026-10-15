@@ -85,7 +85,8 @@ export component Button inherits Rectangle {
     property <bool> pressed: ((ta.pressed || root.shown == ShownState.pressed) && root.enabled) || root.menu-open;
     // A sheet's disabled footer button (Apply) is drawn, not faded: the
     // `hover` fill with a `text-disabled` label (Paper's Settings sheet).
-    property <bool> footer-off: root.footer && !root.enabled && root.variant != ButtonVariant.primary;
+    // The yellow one too: faded, it read as enabled (#58).
+    property <bool> footer-off: root.footer && !root.enabled;
     property <color> fill: root.footer-off ? Theme.hover
         : root.checked ? Theme.accent-soft
         : root.variant == ButtonVariant.primary ? (root.pressed ? Theme.accent-fill-active : root.hovered ? Theme.accent-fill-hover : Theme.accent-fill)

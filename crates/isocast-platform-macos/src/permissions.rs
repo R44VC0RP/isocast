@@ -141,10 +141,33 @@ fn index(kind: PermissionKind) -> usize {
 }
 
 /// Note how a request for `kind` was answered: refused faster than anyone
-/// could read a prompt means macOS never showed one.
+/// could read a prompt means macOS never showed one. Only in a session
+/// with a screen: an engine started over ssh is refused at once because
+/// there is nobody to ask (and its grants read as denied), which an
+/// update wouldn't change.
 pub(crate) fn answered(kind: PermissionKind, granted: bool, after: Duration) {
-    let unasked = !granted && after < Duration::from_millis(600);
+    let unasked = !granted && after < Duration::from_millis(600) && graphic_session();
     UNASKED[index(kind)].store(unasked, Ordering::Relaxed);
+}
+
+/// Whether this process runs in a login session that can show windows
+/// (the app's, or a Terminal on the Mac's screen), not an ssh session's.
+fn graphic_session() -> bool {
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        fn SessionGetInfo(session: u32, id: *mut u32, attributes: *mut u32) -> i32;
+    }
+    /// `callerSecuritySession` and `sessionHasGraphicAccess` (AuthSession.h).
+    const CALLER: u32 = u32::MAX;
+    const HAS_GRAPHIC_ACCESS: u32 = 0x0010;
+    static GRAPHIC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *GRAPHIC.get_or_init(|| {
+        let (mut id, mut attributes) = (0, 0);
+        // SAFETY: plain out-parameters, valid for the call.
+        let status = unsafe { SessionGetInfo(CALLER, &mut id, &mut attributes) };
+        // Unreadable: assume a screen (the app's case), as before.
+        status != 0 || attributes & HAS_GRAPHIC_ACCESS != 0
+    })
 }
 
 /// The argument isocastd is run with to read the permissions afresh (see
@@ -284,9 +307,12 @@ fn wait_status(pid: libc::pid_t, limit: Duration) -> Option<u8> {
 
 /// Each permission with its next step, as this process sees them now,
 /// and which grants wait for a restart (a fresh process is asked only
-/// when something isn't granted here).
+/// when something isn't granted here, and only from an app bundle: a bare
+/// isocastd's grants are the terminal's that started it, while the
+/// disclaimed child is checked as itself, so their answers differ for
+/// good and a restart wouldn't help).
 pub(crate) fn live_report(permissions: Permissions) -> PermissionsReport {
-    let missing = preflight_status(&permissions) != 0;
+    let missing = bundled() && preflight_status(&permissions) != 0;
     let fresh = missing.then(granted_after_restart).flatten();
     let waiting: [bool; 3] = std::array::from_fn(|i| {
         fresh.is_some_and(|fresh| fresh[i])

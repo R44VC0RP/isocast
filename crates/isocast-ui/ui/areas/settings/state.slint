@@ -67,23 +67,6 @@ export struct ReportFileRow {
     size: string,
 }
 
-// First run: a permission and where it stands.
-export struct PermissionRow {
-    id: string,
-    icon: string,
-    title: string,
-    hint: string,
-    // What to do, if it isn't allowed ("" when nothing).
-    todo: string,
-    // The engine restarts to pick it up (a link after `todo`).
-    restart: bool,
-    state: string,
-    granted: bool,
-    denied: bool,
-    // "Open Settings" is the way to allow it.
-    open-settings: bool,
-}
-
 // First run: one choice of a device column.
 export struct DeviceChoice {
     value: string,
@@ -305,11 +288,6 @@ export global SettingsArea {
     // A live setup exists: the first run can be closed.
     in-out property <bool> can-close;
     in-out property <bool> creating;
-    // Permissions: read at least once, and asking now.
-    in-out property <bool> checked;
-    in-out property <bool> asking;
-    in-out property <bool> any-to-ask;
-    in-out property <[PermissionRow]> permissions;
     // Devices: listed at least once.
     in-out property <bool> devices-listed;
     in-out property <[DeviceChoice]> displays;
@@ -330,10 +308,6 @@ export global SettingsArea {
     callback ob-back();
     callback ob-next();
     callback ob-create();
-    callback ob-ask();
-    callback ob-check();
-    callback ob-restart-engine();
-    callback ob-open-settings(string);
     // A choice: the field ("display", "camera", "microphone",
     // "system_audio", "layout", "canvas", "fps", "folder", "name") and
     // its value.
