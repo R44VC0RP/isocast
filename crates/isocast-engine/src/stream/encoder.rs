@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::queue::{Kind, Media};
 use super::{AudioTrack, Ended, Interleaver, TAP_DEPTH, flv};
@@ -34,6 +34,10 @@ pub struct EncoderSpec {
 /// An output of a shared encoder. Called on the encoder's thread; each
 /// call must return quickly (no waiting on a network or a disk).
 pub(crate) trait Sink: Send + Sync {
+    /// A real output needs continuous media; a warm reservation does not.
+    fn keeps_encoding(&self) -> bool {
+        true
+    }
     /// `frames` program frames never reached the encoder (the tap was
     /// full, or the program missed them).
     fn missed(&self, frames: u64);
@@ -61,8 +65,10 @@ pub(crate) struct Hub {
     /// Ended by itself (the program stopped or it failed): new outputs
     /// don't join it.
     ended: AtomicBool,
+    /// At least one native picture has completed, so the session is placed.
+    ready: AtomicBool,
     sinks: Mutex<Vec<(u64, Arc<dyn Sink>)>>,
-    /// How many sinks there are, read without `sinks` (callers may hold
+    /// How many real outputs there are, read without `sinks` (callers may hold
     /// their own locks, which sinks take while `sinks` is held).
     sink_count: AtomicU64,
     next_sink: AtomicU64,
@@ -82,6 +88,45 @@ pub(crate) struct Subscription {
 }
 
 impl Encoders {
+    /// Place the shared encoder before a recording's hardware writers start.
+    /// Complete one picture, then park until a live output joins. The returned
+    /// subscription keeps the session placed through the recording's splits.
+    pub(crate) fn warm<P: Platform>(
+        &self,
+        engine: &Engine<P>,
+        spec: &EncoderSpec,
+        stop: &AtomicBool,
+    ) -> Result<Subscription> {
+        struct Warm;
+        impl Sink for Warm {
+            fn keeps_encoding(&self) -> bool {
+                false
+            }
+            fn missed(&self, _: u64) {}
+            fn encoder_dropped(&self, _: u64) {}
+            fn push(&self, _: &[Media]) {}
+            fn ended(&self, ended: &Ended) {
+                if let Ended::Failed(message) = ended {
+                    isocast_diagnostics::diagnostic!("warn";
+                        "the recording's warm encoder stopped: {message}");
+                }
+            }
+        }
+        let subscription =
+            self.subscribe(engine, spec, "the recording's warm encoder", Arc::new(Warm))?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !subscription.hub.ready.load(Ordering::SeqCst) {
+            if stop.load(Ordering::SeqCst) {
+                bail!("the recording was stopped while preparing its live encoder");
+            }
+            if subscription.hub.ended.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                bail!("the program's H.264 encoder did not complete its first picture");
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        Ok(subscription)
+    }
+
     /// Join the running encoder of `spec`, or start one. `what` names the
     /// output in errors ("the stream").
     pub(crate) fn subscribe<P: Platform>(
@@ -106,7 +151,13 @@ impl Encoders {
             }
             let id = hub.next_sink.fetch_add(1, Ordering::Relaxed);
             sinks.push((id, sink));
-            hub.sink_count.store(sinks.len() as u64, Ordering::SeqCst);
+            hub.sink_count.store(
+                sinks
+                    .iter()
+                    .filter(|(_, sink)| sink.keeps_encoding())
+                    .count() as u64,
+                Ordering::SeqCst,
+            );
             drop(sinks);
             isocast_diagnostics::debug!(
                 "encoder: {what} shares the program encoder ({}x{} at {} kb/s)",
@@ -129,12 +180,14 @@ impl Encoders {
             .create_audio_encoder(&spec.audio)
             .with_context(|| format!("could not start {what}'s AAC encoder"))?;
         let tap = engine.tap_program(TAP_DEPTH);
+        let sink_count = u64::from(sink.keeps_encoding());
         let hub = Arc::new(Hub {
             spec: *spec,
             stop: AtomicBool::new(false),
             ended: AtomicBool::new(false),
+            ready: AtomicBool::new(false),
             sinks: Mutex::new(vec![(0, sink)]),
-            sink_count: AtomicU64::new(1),
+            sink_count: AtomicU64::new(sink_count),
             next_sink: AtomicU64::new(1),
             want_keyframe: AtomicBool::new(false),
             tap_audio_dropped: tap.missed_audio_chunks.clone(),
@@ -214,9 +267,13 @@ impl Drop for Subscription {
         let last = {
             let mut sinks = self.hub.sinks();
             sinks.retain(|(id, _)| *id != self.id);
-            self.hub
-                .sink_count
-                .store(sinks.len() as u64, Ordering::SeqCst);
+            self.hub.sink_count.store(
+                sinks
+                    .iter()
+                    .filter(|(_, sink)| sink.keeps_encoding())
+                    .count() as u64,
+                Ordering::SeqCst,
+            );
             let last = sinks.is_empty();
             if last {
                 self.hub.stop.store(true, Ordering::SeqCst);
@@ -269,12 +326,37 @@ fn encode<P: Platform>(
     let mut config: Option<Arc<Vec<u8>>> = None;
     let mut track = AudioTrack::new(audio.delay());
     let mut order = Interleaver::default();
+    let mut warm_pts = None;
+    let mut video_offset = 0;
+    let mut live = false;
     loop {
         if hub.stop.load(Ordering::SeqCst) {
             return Ok(Ended::Stopped);
         }
+        // One picture places the native session. Until an output first joins,
+        // discard the tap without submitting more work to the hardware.
+        // Once used, keep running until the recording ends rather than
+        // restarting the audio timeline or stranding native pressure on Stop.
+        if !live {
+            live = hub.sinks().iter().any(|(_, sink)| sink.keeps_encoding());
+        }
         match tap.packets.recv_timeout(Duration::from_millis(5)) {
+            Ok(Packet::Video { frame, pts }) if !live => {
+                if warm_pts.is_none() {
+                    video.encode(&frame, pts, true)?;
+                    warm_pts = Some(pts);
+                }
+            }
+            Ok(Packet::Audio { .. }) if !live => {}
             Ok(Packet::Video { frame, pts }) => {
+                if let Some(warm) = warm_pts
+                    && last_frame.is_none()
+                {
+                    // VT budgets bitrate in submitted PTS time. A parked gap
+                    // looks like unspent budget and produces huge first packets.
+                    // Keep its clock contiguous; the live timeline stays intact.
+                    video_offset = pts.as_nanos() - warm.add_ticks(1, spec.video.fps).as_nanos();
+                }
                 // Frames come one per canvas tick; any between this and the
                 // last never reached the encoder (the tap was full, or the
                 // program missed them), so they count as dropped.
@@ -306,7 +388,11 @@ fn encode<P: Platform>(
                 }
                 let keyframe = forced || due || keyframe_missed;
                 let dropped = video.dropped();
-                video.encode(&frame, pts, keyframe)?;
+                video.encode(
+                    &frame,
+                    Time::from_nanos(pts.as_nanos() - video_offset),
+                    keyframe,
+                )?;
                 keyframe_missed = keyframe && video.dropped() > dropped;
             }
             Ok(Packet::Audio { samples, pts, .. }) => {
@@ -315,7 +401,14 @@ fn encode<P: Platform>(
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(Ended::Program),
         }
-        while let Some(frame) = video.receive()? {
+        while let Some(mut frame) = video.receive()? {
+            hub.ready.store(true, Ordering::SeqCst);
+            if !live || warm_pts == Some(frame.pts) {
+                continue;
+            }
+            // Restore the host clock before interleaving with unshifted AAC.
+            frame.pts = Time::from_nanos(frame.pts.as_nanos() + video_offset);
+            frame.dts = Time::from_nanos(frame.dts.as_nanos() + video_offset);
             if let Some(record) = frame
                 .parameter_sets
                 .as_ref()

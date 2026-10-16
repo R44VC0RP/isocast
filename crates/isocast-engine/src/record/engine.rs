@@ -1088,7 +1088,7 @@ impl<P: Platform> Engine<P> {
         if inner.recording.swap(true, Ordering::SeqCst) {
             bail!("already recording; stop the current recording first");
         }
-        let result = isocast_diagnostics::contain("recording", || record(inner, options))
+        let result = isocast_diagnostics::contain("recording", || record(self, options))
             .map_err(anyhow::Error::msg)
             .and_then(|r| r);
         {
@@ -2379,7 +2379,8 @@ fn drop_percent(dropped: u64, expected: u64) -> String {
     }
 }
 
-fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result<Report> {
+fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Report> {
+    let inner = &engine.inner;
     let platform = &inner.platform;
     let control = &inner.control;
     let setup = inner.state.lock().unwrap().setup.clone();
@@ -2623,6 +2624,29 @@ fn record<P: Platform>(inner: &Arc<Inner<P>>, options: &RecordOptions) -> Result
 
     // Stopped while getting ready (sources opening, the disk test): no
     // files yet, so nothing to finish.
+    if options.stop.load(Ordering::SeqCst) {
+        bail!("the recording was stopped before it started, so nothing was recorded");
+    }
+    // VideoToolbox places sessions on their first picture. Reserve the shared
+    // stream/replay encoder before starting the recording writers, even when
+    // the live output will only join later (#68). No output configured: no cost.
+    let _warm = if setup.stream.is_some() || !setup.recording.replay.is_default() {
+        let spec =
+            crate::replay::encoder_spec(engine, &setup.recording.replay, setup.stream.as_ref());
+        match inner.encoders.warm(engine, &spec, &options.stop) {
+            Ok(subscription) => Some(subscription),
+            Err(error) => {
+                // A missing optional H.264 encoder must not prevent an otherwise
+                // valid recording (for example ProRes on a hosted Mac).
+                warnings.push(format!(
+                    "could not prepare the live encoder before recording: {error:#}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
     if options.stop.load(Ordering::SeqCst) {
         bail!("the recording was stopped before it started, so nothing was recorded");
     }

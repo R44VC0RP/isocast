@@ -608,11 +608,12 @@ layout editing, Windows, release prep).
   recording (G.3), virtual camera (G.1). Replay buffer and projectors wait.
 - [x] **A.4 Graceful overload (S.3 round 3):** the program and stream stay
   whole while ISOs drop first; A/V durations equal (S.2c); stop stays fast.
-- [ ] **A.4 ISO admission over-shedding (GitHub #68), blocked:** M2 fitting
-  load already clean; M4 record-first loss persists through 181 s and splits,
-  but disabling pressure loses ~50% of protected frames. Two admission
-  candidates worsened long M4 runs and were removed. Investigate native
-  placement/start order before weakening #60 feedback (iso-overshed report).
+- [x] **A.4 ISO admission over-shedding (GitHub #68):** place the configured
+  stream/replay encoder with one picture before the recording writers, park
+  it until an output joins, and retain it through splits. M4 record-first:
+  three short runs, 181 s and six split takes lose no ISO/program/stream
+  pictures. M2 fitting load stays clean; overload sheds ISOs only, including
+  cold startup. Admission and native writer policy unchanged.
 - [ ] **A.4 Split + stream losses (GitHub #60), qualification partial:**
   synchronous native stream submission stalls now signal pressure; final
   build's 16 post-split takes have zero protected losses. Cold stream startup
@@ -1280,6 +1281,17 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- A.4 / #68 review B1 (2026-10-15): keep the pre-placed encoder's native
+  clock contiguous across parking; restore host PTS/DTS before muxing so
+  VT cannot spend the idle gap as a bitrate burst. 150 s park: first packet
+  4,935 B, memory +0.84 MiB, no stream loss; stream e2e now checks startup
+  packet size and bytes/second as well as drops. Re-review evidence in REPORT.md.
+
+- A.4 / #68 (2026-10-15): pre-place and park the shared stream/replay encoder
+  before recording writers; M4 record-first short/181 s/split runs have zero
+  ISO drops, M2 fitting load has zero drops and overload protects program and
+  stream. Real media probe/decode and idle CPU evidence in iso-overshed REPORT.md.
 
 - A.4 / #66 (2026-10-15): capacity estimate, overload notice, safe ISO
   defaults. On isocast-m2-b (25 s synthetic takes) the estimate matched

@@ -1511,6 +1511,50 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-15 (#68 review B1): **Exclude a parked gap from the native H.264
+  timeline, not the engine timeline.** VT's bitrate controller treated the
+  gap after the warm picture as unused budget (3 s: 1.96 MB first packet;
+  reviewer 150 s: 13.6 MB and a ~0.9 GB memory spike). On the first live
+  picture, subtract its distance from `warm_pts + frame_duration` from all
+  native submissions, then add the offset back to returned PTS/DTS before
+  interleaving. AAC, keyframe scheduling and loss accounting stay on the host
+  clock. Always discard the warm output, even if a subscriber joins before
+  it returns. A 150 s park now starts with 4,935 B, memory grows 0.84 MiB,
+  and both streams/replay/recordings remain clean. Native cold CBR normally
+  averages ~3 Mb/s in the first second at a 6 Mb/s target, then 6 Mb/s
+  (also measured on main); do not call that a regression or hide an upper
+  burst. The existing stream e2e now records first and checks first-packet
+  size plus the first two seconds' rates. Q4's parked-tap optimization is
+  deferred: retapping must preserve typed receiver ownership, audio-drop
+  counter baselines and engine-stop notification, beyond this timestamp fix.
+
+- 2026-10-15 (#68, iso-overshed follow-up): **Place, then park the shared
+  H.264 session before recording writers.** With `[stream]` or non-default
+  replay settings, recording reserves the existing shared program encoder,
+  waits for one native picture to complete, then starts its writers. The
+  reservation survives every split and ends with recording; actual stream
+  and replay subscribers keep the session when recording ends. Before any
+  real subscriber joins, discard tap packets and warm output, and do not
+  feed AAC or advance live timestamps. Once used, keep encoding through the
+  recording (including stream Stop) to preserve audio continuity and native
+  pressure cleanup. The reservation is not counted in `shared_encoder`.
+  A failed optional warmup warns instead of preventing a valid recording;
+  readiness waits at most 3 s and honors Stop. The first continuous-encode
+  reservation fixed M4 losses but retained M2 startup program drops; parking
+  after one picture fixed both. Final: M4 heavy record-first 6 s ×3, 181 s,
+  6×30 s splits all outputs 0 drops; M2 fit 0 and heavy program/stream 0,
+  with ISO overload still counted. No admission/gate/native codec changes.
+  On exonbook (14 cores), three interleaved 30 s recording-only trials with
+  a configured-but-unused 720p60 stream: daemon CPU 2.266% → 2.319% of the
+  whole machine (+0.743 percentage points of one core); continuous warming
+  was 2.863%. ISO-only (program disabled), three 20 s pairs: 1.376% → 1.963%
+  machine-wide (+8.230 core-points), all files loss-free. A parked encoder's
+  tap still keeps the otherwise-idle compositor at full rate; optimizing
+  that tap is a follow-up. This is CPU, not a watt/energy measurement. Default replay
+  settings are always present in the model, so only non-default replay
+  settings trigger a reservation without `[stream]`. Evidence and prior
+  rejected-policy investigation: `/Volumes/IsocastBuild/iso-overshed/scratch/`.
+
 - 2026-10-15 (#18, G.2): **the replay buffer is a sink of a shared program
   encoder.** The stream's H.264/AAC encode thread became
   `stream/encoder.rs`: outputs with an equal `EncoderSpec` subscribe to one

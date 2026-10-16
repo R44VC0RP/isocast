@@ -565,6 +565,10 @@ def scenario_stream(e, cfg, evidence):
     e.apply(cfg)
     e.rpc("engine", {"running": True})
     time.sleep(1)
+    # Record first so the stream joins a parked native encoder (#68). Its
+    # bitrate budget must not accumulate while nobody consumes its output.
+    started = e.rpc("start", {})
+    time.sleep(3)
     output = e.root / evidence.get("stream_name", "received.flv")
     with open(e.root / "listener.log", "wb") as log:
         listener = subprocess.Popen(["ffmpeg", "-nostdin", "-hide_banner", "-v", "warning",
@@ -590,6 +594,9 @@ def scenario_stream(e, cfg, evidence):
             if listener.poll() is None:
                 listener.kill()
                 listener.wait(timeout=5)
+    e.rpc("stop")
+    manifest = until(lambda: finished(started["manifest"]), description="stream take finalization")
+    evidence.setdefault("files", []).extend(check_take(Path(started["manifest"]), manifest, evidence=evidence))
     packets = json.loads(command(["ffprobe", "-v", "error", "-show_packets", "-of", "json", output]).stdout)["packets"]
     rates = {}
     keyframes = []
@@ -597,6 +604,22 @@ def scenario_stream(e, cfg, evidence):
         rows = [p for p in packets if p["codec_type"] == kind]
         require(bool(rows), f"stream has no {kind}")
         times = [float(p["pts_time"]) for p in rows]
+        if kind == "video":
+            first_size = int(rows[0]["size"])
+            require(first_size <= target * 1000 / 8 / 4,
+                    f"first video packet {first_size} bytes exceeds a quarter-second bitrate budget")
+            evidence["first_video_bytes"] = first_size
+        initial_kbps = [sum(int(p["size"]) for p in rows
+                            if times[0] + second <= float(p["pts_time"]) < times[0] + second + 1)
+                        * 8 / 1000 for second in range(2)]
+        # VT's ordinary cold CBR startup averages half the target in its first
+        # second, then reaches the target. Bound the upper rate from frame one;
+        # don't mistake that normal ramp for the parked-session budget burst.
+        first_min = 0.40 if kind == "video" else 0.75
+        require(first_min <= initial_kbps[0] / target <= 1.25
+                and 0.75 <= initial_kbps[1] / target <= 1.25,
+                f"{kind} initial bitrate {initial_kbps}, target {target} kb/s (cold ramp allowed)")
+        evidence.setdefault("initial_kbps", {})[kind] = initial_kbps
         require(all(b > a for a, b in zip(times, times[1:])), f"{kind} timestamps not monotonic")
         if kind == "video" and final["dropped_frames"]:
             # Loss explains missing video slots, never backwards/off-grid PTS
