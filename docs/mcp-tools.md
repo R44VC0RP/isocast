@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-78 tools. Arguments marked required must be given; ids, not names,
+92 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -77,6 +77,7 @@ Remove the stored stream key for a streaming service (the live setup's by defaul
 
 | Argument | Type | Description |
 |---|---|---|
+| `destination` | string (optional) | A destination ("main", or an id from get_status's streams). |
 | `server` | string (optional) | For "custom": the server the key belongs to. |
 | `service` | StreamService | The service; the live setup's [stream] service if absent. |
 
@@ -104,6 +105,16 @@ Delete a scene collection or profile that isn't in use (switch away first); its 
 |---|---|---|
 | `id` (required) | string |  |
 | `kind` (required) | LibraryKind |  |
+
+## delete_range
+
+Take `start_seconds` to `end_seconds` (on the timeline) out and close the gap (ripple delete): clips across its ends are trimmed, clips in it taken off. The takes' files are untouched; one undoable edit. Returns the timeline.
+
+| Argument | Type | Description |
+|---|---|---|
+| `end_seconds` (required) | number |  |
+| `start_seconds` (required) | number | Where the span starts and ends, in seconds on the timeline, each rounded to the frame grid of the clip there. |
+| `timeline` | string (optional) | The timeline's id; the current one if absent. |
 
 ## developer_mode
 
@@ -134,7 +145,7 @@ Predict instantly, without benchmarking, whether a setup's files (the live setup
 
 ## export_timeline
 
-Join a timeline's clips (the current one unless `timeline` is given), in order, into one program file and one file per ISO source every clip has (video copied as recorded, audio re-encoded once so it stays in sync at every join), plus an .export.json manifest, next to the first take (or in `folder`). Sources some clips lack are skipped, saying why. It runs in the background: returns at once with the files it will write; get_events shows export_progress and export_finished.
+Join a timeline's clips (the current one unless `timeline` is given), in order, into one program file and one file per ISO source every clip has, each cut frame-accurately to the clips' in and out points (video copied as recorded except from a cut to the next keyframe; audio re-encoded once and cross-faded so it stays in sync at every join), an EDITED file when clips show other angles (set_angle), plus an .export.json manifest, next to the first take (or in `folder`). Sources some clips lack are skipped, saying why. It runs in the background: returns at once with the files it will write; get_events shows export_progress and export_finished.
 
 | Argument | Type | Description |
 |---|---|---|
@@ -242,7 +253,7 @@ Add a scene collection and/or profile from documents (as get_collection_or_profi
 
 | Argument | Type | Description |
 |---|---|---|
-| `collection` | object (optional) | Or a scene collection, as get_collection_or_profile returns one: the setup's version, name, canvas.width/height, sources, scenes, transition and recording.program.audio / recording.iso.sources / recording.iso.audio. |
+| `collection` | object (optional) | Or a scene collection, as get_collection_or_profile returns one: the setup's version, name, canvas.width/height, sources, scenes, transition and recording.program.audio / recording.iso.sources / recording.iso.audio / recording.iso.source_audio. |
 | `name` | string (optional) | The name to give them; their own if absent. |
 | `profile` | object (optional) | And/or a profile: version, name, canvas.fps, audio, stream and the rest of recording (folder, keep_free_gb, program and iso settings). |
 | `setup` | object (optional) | A whole setup (as get_setup returns one): its collection part and its profile part are both imported. |
@@ -357,11 +368,11 @@ Make a timeline (optional `name`) and make it current: from now on every take th
 
 ## open_permission_settings
 
-Open System Settings on the user's screen at the pane where a permission (screen_recording, camera or microphone) is turned on by hand, for one that was refused.
+Open System Settings on the user's screen at the pane where a permission (screen_recording, camera, microphone or system_audio) is turned on by hand, for one that was refused.
 
 | Argument | Type | Description |
 |---|---|---|
-| `permission` (required) | PermissionKind | screen_recording, camera or microphone. |
+| `permission` (required) | PermissionKind | screen_recording, camera, microphone or system_audio. |
 
 ## open_timeline
 
@@ -427,6 +438,14 @@ Read a UTF-8 page (default 4096 bytes, max 16384) from a redacted bug-report pre
 | `offset` | integer |  |
 | `preview_id` (required) | string |  |
 
+## redo_edit
+
+Put back the last edit undo_edit took back. Returns the timeline.
+
+| Argument | Type | Description |
+|---|---|---|
+| `timeline` | string (optional) | A timeline's id (`timeline_list` has them); the current one if absent. |
+
 ## refresh_browser
 
 Reload a browser source's page in the running recording, bypassing the cache, for example after changing the page or when it stopped updating.
@@ -482,7 +501,7 @@ Ask macOS for screen recording, camera and microphone access where it hasn't bee
 
 | Argument | Type | Description |
 |---|---|---|
-| `permission` | PermissionKind | Only this one: screen_recording, camera or microphone (all three not decided yet if left out). |
+| `permission` | PermissionKind | Only this one: screen_recording, camera, microphone or system_audio (all not decided yet if left out). |
 
 ## restart_isocastd
 
@@ -504,6 +523,17 @@ Record the last take again, on the current timeline. Not recording: take the las
 ## save_replay
 
 Save the replay buffer: write the last recording.replay.seconds of the program, up to this moment, to a new MOV/MP4 in the recordings folder (the running recording's project folder, if one records), without interrupting recording or streaming. Returns the file's path, length, frames and any missed frames.
+
+## set_angle
+
+Choose what the edited video shows from `start_seconds` to `end_seconds` on the timeline: `source` is `program` or an ISO source every clip there recorded (clips are split at the span's ends). export_timeline then writes an edited file with these angles and the program's sound. One undoable edit. Returns the timeline.
+
+| Argument | Type | Description |
+|---|---|---|
+| `end_seconds` (required) | number |  |
+| `source` (required) | string | What the edited video shows over the span: `program`, or an ISO source's id that every clip in the span recorded. |
+| `start_seconds` (required) | number | Where the span starts and ends, in seconds on the timeline, each rounded to the frame grid of the clip there. |
+| `timeline` | string (optional) | The timeline's id; the current one if absent. |
 
 ## set_audio
 
@@ -528,15 +558,34 @@ Set data keys to JSON values, several at once (all of them, or none if one is re
 | `persist` | boolean (optional) | Keep these keys with the scene collection, so they come back after a restart (`true`), or stop keeping them (`false`). If absent, a key keeps what it had; a new key isn't kept. |
 | `values` (required) | object | Keys and their new values (any JSON), set together: all of them or, if one is refused, none. |
 
+## set_iso_audio
+
+Choose the audio tracks of one source's ISO file in the live setup (recording.iso.source_audio): a camera's file with the mic only, a screen's with desktop audio only. Other ISO files keep recording.iso.audio, or their own sound. Applies from the next recording; the manifest lists each file's tracks.
+
+| Argument | Type | Description |
+|---|---|---|
+| `audio` | array (optional) | The audio sources' ids that file carries, in track order ([] for no audio). Null or absent puts it back to recording.iso.audio (or, without that list, the source's own sound). |
+| `source` (required) | string | The id of a video source in the live setup: its ISO file. |
+
 ## set_stream_key
 
 Keep a stream key in the macOS Keychain for a streaming service (the live setup's by default). It is never written to setups, logs or status. Returns where it is kept, not the key.
 
 | Argument | Type | Description |
 |---|---|---|
+| `destination` | string (optional) | A destination ("main", or an id from get_status's streams): its own key (with service and server only for one not applied yet). |
 | `key` (required) | string | The stream key from the service's dashboard. It goes into the Keychain and is never shown again; prefer `isocast stream key set` in a terminal, which keeps it out of this conversation. |
 | `server` | string (optional) | For "custom": the server it belongs to (rtmp://host/app). |
 | `service` | StreamService | The service it is for; the live setup's [stream] service if absent. |
+
+## split_clip
+
+Cut the clip at `at_seconds` (on the timeline, rounded to the frames there) in two; the second gets a new id. One undoable edit. Returns the timeline.
+
+| Argument | Type | Description |
+|---|---|---|
+| `at_seconds` (required) | number | Where to cut, in seconds on the timeline (0 is its start), rounded to the frame grid of the clip there. |
+| `timeline` | string (optional) | The timeline's id; the current one if absent. |
 
 ## split_take
 
@@ -558,7 +607,11 @@ Start the replay buffer: keep the last recording.replay.seconds (30 by default) 
 
 ## start_stream
 
-Go live: stream the program (canvas and program mix) as H.264/AAC over RTMP or RTMPS to the live setup's [stream] service (twitch, youtube, kick, facebook or a custom server), starting the live engine if needed; recordings start and stop independently. Needs a stream key set. Returns the stream's status once live, or an error saying what to do. get_status shows the stream's health.
+Go live: stream the program (canvas and program mix) as H.264/AAC over RTMP or RTMPS to the live setup's [stream] destinations (twitch, youtube, kick, facebook or custom servers; every enabled one, or `only` those ids), starting the live engine if needed; destinations already live are left alone, and recordings start and stop independently. Destinations with the same bitrate and size share one encoder. Each needs its stream key set. Returns the first destination's status plus every destination's (`destinations`) once each is live or failed, or an error saying what to do. get_status shows each one's health (`streams`).
+
+| Argument | Type | Description |
+|---|---|---|
+| `only` | list of string | Destination ids (`main` and the ids in `stream.destinations`); every enabled one (or for a stop, every one streaming) if empty. A destination named here starts even if it is turned off. |
 
 ## stop_recording
 
@@ -570,7 +623,49 @@ Stop the replay buffer, discarding what it holds (save_replay first to keep it).
 
 ## stop_stream
 
-Stop streaming. Returns the stream's final status: frames sent and dropped, reconnects and the last error.
+Stop streaming (to every destination, or `only` those ids; the others keep going). Returns the final status of the first stopped, plus every destination's: frames sent and dropped, reconnects and the last error.
+
+| Argument | Type | Description |
+|---|---|---|
+| `only` | list of string | Destination ids (`main` and the ids in `stream.destinations`); every enabled one (or for a stop, every one streaming) if empty. A destination named here starts even if it is turned off. |
+
+## stream_destination_add
+
+Add a stream destination to the live setup: a service (twitch, youtube, kick, facebook, custom), its server (custom and kick need one; never with the key in it), optional id (made from the service), enabled, and its own video_bitrate_kbps or width/height (else the main destination's; a different bitrate or size needs an encoder of its own, refused at start when this Mac's encoders lack room). The first one becomes the [stream] section itself (id main). Then set_stream_key with its destination id. Returns every destination's status.
+
+| Argument | Type | Description |
+|---|---|---|
+| `clear` | list of string | Fields to reset: `server` (to the service's), `video_bitrate_kbps` and `size` (to the main destination's; for `main`, the defaults). |
+| `enabled` | boolean (optional) |  |
+| `height` | integer (optional) |  |
+| `id` | string (optional) | The destination's id. For `add`, made from the service if absent (`youtube`, `youtube-2`); required for `set`. |
+| `server` | string (optional) |  |
+| `service` | StreamService | Required for `add`. |
+| `video_bitrate_kbps` | integer (optional) |  |
+| `width` | integer (optional) |  |
+
+## stream_destination_remove
+
+Remove a stream destination by id (not main: turn it off with stream_destination_set instead; not while it streams). Its stored key stays in the Keychain until clear_stream_key. Returns every destination's status.
+
+| Argument | Type | Description |
+|---|---|---|
+| `id` (required) | string | The destination's id, from get_status's streams. |
+
+## stream_destination_set
+
+Change a stream destination by id (main is the [stream] section): service, server, enabled, video_bitrate_kbps, width/height, or `clear` some of server, video_bitrate_kbps, size. Takes effect at its next start. Returns every destination's status.
+
+| Argument | Type | Description |
+|---|---|---|
+| `clear` | list of string | Fields to reset: `server` (to the service's), `video_bitrate_kbps` and `size` (to the main destination's; for `main`, the defaults). |
+| `enabled` | boolean (optional) |  |
+| `height` | integer (optional) |  |
+| `id` | string (optional) | The destination's id. For `add`, made from the service if absent (`youtube`, `youtube-2`); required for `set`. |
+| `server` | string (optional) |  |
+| `service` | StreamService | Required for `add`. |
+| `video_bitrate_kbps` | integer (optional) |  |
+| `width` | integer (optional) |  |
 
 ## switch_collection_or_profile
 
@@ -608,6 +703,17 @@ Measure the upload speed to a streaming service's ingest (the live setup's unles
 | `server` | string (optional) | Its ingest server (`rtmp://host/app`); the service's default, or the live setup's, if absent. Required for custom and Kick. |
 | `service` | StreamService | The service to test against; the live setup's stream service if absent. |
 
+## trim_clip
+
+Move a clip's in and/or out point (`in_seconds`, `out_seconds`, on the clip's take's own clock, rounded to its frames). Only the timeline changes, never the take's files; one undoable edit. Returns the timeline.
+
+| Argument | Type | Description |
+|---|---|---|
+| `clip` (required) | string | The clip's id, like `c2`. |
+| `in_seconds` | number (optional) | Where the clip starts, in seconds on its take's own clock (0 is the take's start); unchanged if absent. Rounded to the take's frame grid. |
+| `out_seconds` | number (optional) | Where the clip ends, on its take's clock, up to the take's length; unchanged if absent. Rounded to the take's frame grid. |
+| `timeline` | string (optional) | The timeline's id; the current one if absent. |
+
 ## tune_encoders
 
 Benchmark the hardware encoders on a setup's video files (the live setup if none is given), all at once as in a recording, and say whether this Mac keeps up: `capacity` is fits, no_margin (keeps up, nothing to spare) or cannot_keep_up (frames will drop). If it doesn't fit, it benchmarks changes closest first (a smaller program file, a lower quality preset, half the frame rate, one ISO file fewer) and recommends the closest that fits as `change`, a patch for plan_change. start_recording warns when a setup exceeds what this measured. Takes up to a minute or two; refused while recording.
@@ -616,6 +722,18 @@ Benchmark the hardware encoders on a setup's video files (the live setup if none
 |---|---|---|
 | `folder` | string (optional) | Check this folder instead of the setup's recording.folder. |
 | `setup` | object (optional) | The setup to check; the live setup if absent (the shape get_setup returns; get_setup_schema has its JSON Schema). |
+
+## undo_edit
+
+Take back the last edit of a timeline (trim, split, delete, angle, remove, move; not a recorded take). Returns the timeline, with how many edits can still be undone and redone.
+
+| Argument | Type | Description |
+|---|---|---|
+| `timeline` | string (optional) | A timeline's id (`timeline_list` has them); the current one if absent. |
+
+## virtual_camera_remove
+
+Remove Isocast Virtual Camera from macOS (the release app's camera extension), for deleting Isocast cleanly: stops the camera, then macOS asks the user for an administrator password; waits for it (up to about 4 minutes). Ask the user first. A later virtual_camera_start installs it again.
 
 ## virtual_camera_start
 
@@ -628,3 +746,22 @@ Read virtual camera state, output format, sent/dropped frame counts, enqueue lat
 ## virtual_camera_stop
 
 Stop feeding Isocast Virtual Camera. Other applications see the extension's Isocast waiting card.
+
+## websocket_disable
+
+Turn off the obs-websocket server, disconnecting its clients. Returns its status.
+
+## websocket_enable
+
+Turn on the obs-websocket v5 server (off by default; kept across restarts), optionally setting port (4455), bind (127.0.0.1, this Mac only; 0.0.0.0 for every network), password (kept in the Keychain) or no_password (loopback bind only; web pages are then refused). Without a stored password one is generated and returned once as generated_password, for the user to enter in the OBS tool. Returns its status.
+
+| Argument | Type | Description |
+|---|---|---|
+| `bind` | string (optional) | The address to listen on (an IPv4 or IPv6 address of this Mac; 0.0.0.0 for every network). |
+| `no_password` | boolean | Remove the password: any program on this Mac that reaches the port may connect, except web pages (connections with an Origin header are refused). Only with a loopback bind (127.0.0.1 or ::1). |
+| `password` | string (optional) | The password clients authenticate with, kept in the Keychain. Left out, the stored one stays; when none is stored one is generated and returned once as `generated_password`. |
+| `port` | integer (optional) | The TCP port, 1–65535. |
+
+## websocket_status
+
+The obs-websocket v5 compatibility server (OBS tools such as Stream Deck, Touch Portal and Streamer.bot drive Isocast through it): whether it is on and listening, its ws:// address, whether it asks for a password, connected clients, and why it isn't listening if it should be.

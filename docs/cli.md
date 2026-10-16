@@ -61,6 +61,12 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast timeline remove`](#isocast-timeline-remove)
   - [`isocast timeline move`](#isocast-timeline-move)
   - [`isocast timeline export`](#isocast-timeline-export)
+  - [`isocast timeline trim`](#isocast-timeline-trim)
+  - [`isocast timeline split`](#isocast-timeline-split)
+  - [`isocast timeline delete`](#isocast-timeline-delete)
+  - [`isocast timeline angle`](#isocast-timeline-angle)
+  - [`isocast timeline undo`](#isocast-timeline-undo)
+  - [`isocast timeline redo`](#isocast-timeline-redo)
 - [`isocast project`](#isocast-project)
   - [`isocast project list`](#isocast-project-list)
   - [`isocast project rename`](#isocast-project-rename)
@@ -84,6 +90,7 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
 - [`isocast optimize`](#isocast-optimize)
 - [`isocast snapshot`](#isocast-snapshot)
 - [`isocast audio`](#isocast-audio)
+- [`isocast iso-audio`](#isocast-iso-audio)
 - [`isocast restart`](#isocast-restart)
 - [`isocast permissions`](#isocast-permissions)
 - [`isocast get`](#isocast-get)
@@ -93,6 +100,10 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast stream start`](#isocast-stream-start)
   - [`isocast stream stop`](#isocast-stream-stop)
   - [`isocast stream status`](#isocast-stream-status)
+  - [`isocast stream destination`](#isocast-stream-destination)
+    - [`isocast stream destination add`](#isocast-stream-destination-add)
+    - [`isocast stream destination remove`](#isocast-stream-destination-remove)
+    - [`isocast stream destination set`](#isocast-stream-destination-set)
   - [`isocast stream key`](#isocast-stream-key)
     - [`isocast stream key set`](#isocast-stream-key-set)
     - [`isocast stream key clear`](#isocast-stream-key-clear)
@@ -102,10 +113,15 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast replay stop`](#isocast-replay-stop)
   - [`isocast replay save`](#isocast-replay-save)
   - [`isocast replay status`](#isocast-replay-status)
+- [`isocast websocket`](#isocast-websocket)
+  - [`isocast websocket status`](#isocast-websocket-status)
+  - [`isocast websocket enable`](#isocast-websocket-enable)
+  - [`isocast websocket disable`](#isocast-websocket-disable)
 - [`isocast vcam`](#isocast-vcam)
   - [`isocast vcam start`](#isocast-vcam-start)
   - [`isocast vcam stop`](#isocast-vcam-stop)
   - [`isocast vcam status`](#isocast-vcam-status)
+  - [`isocast vcam remove`](#isocast-vcam-remove)
 - [`isocast debug`](#isocast-debug)
   - [`isocast debug on`](#isocast-debug-on)
   - [`isocast debug off`](#isocast-debug-off)
@@ -158,13 +174,15 @@ Commands:
   optimize     Optimize the live setup for recording, streaming or both, like OBS's Auto-Configuration Wizard: recording favours quality and ISO files; streaming sets the service and a bitrate from the upload speed (tested unless --upload-kbps is given; a custom server only with `isocast stream speed-test`). Then `tune` benchmarks this Mac and steps down where it can't keep up. Prints a one-line summary and the changes; --apply makes them. Runs in isocastd
   snapshot     Save one frame as a PNG: of a video source (an id of the live setup, or a quick source like `screen` or `camera:NAME`), of --scene ID, of --preview, or with none of them the program (while recording, the exact frame it recorded last). Runs in isocastd
   audio        Change an audio source's program mix in the live setup: gain in dB, mute, sync offset in ms (positive is later), balance (-1 left to 1 right) and monitoring (hearing it through `audio.monitoring_device`). A running recording follows all but the offset at once
+  iso-audio    Choose the audio sources an ISO file carries, in the live setup: `isocast iso-audio camera mic` gives the camera's ISO file the mic only, --none no audio, --default back to recording.iso.audio (or, without it, the source's own sound). Without a source, list each video source's ISO tracks
   restart      Restart isocastd, for example after granting it screen recording permission. Refused, atomically by isocastd, while it records, streams, exports or feeds the virtual camera
-  permissions  Show the screen recording, camera and microphone permissions and what to do about each that isn't granted; with --request, ask macOS for the ones not decided yet (its prompts appear; --request camera asks for that one only) and wait up to a minute for the answers; with --open, open the System Settings pane where one is turned on
+  permissions  Show the screen recording, camera, microphone and system audio recording permissions and what to do about each that isn't granted; with --request, ask macOS for the ones not decided yet (its prompts appear; --request camera asks for that one only) and wait up to a minute for the answers; with --open, open the System Settings pane where one is turned on
   get          Print the live setup (TOML, or JSON with --json) and its revision; with --resolved, also where layout put every item (each item's rect in its parent and its box on the canvas)
   plan         Show what a change to the live setup would do, without doing it: a whole setup FILE, or --patch with a JSON merge patch (lists of sources, scenes and items merge by id)
   apply        Make a change to the live setup, if it is still at --revision (from `plan` or `get`; 0 when there is no live setup yet)
   stream       Stream the program live over RTMP or RTMPS to the live setup's [stream] service, and keep its stream key in the Keychain
   replay       The replay buffer: keep the last seconds of the program in memory, and save them to a file on demand
+  websocket    The obs-websocket v5 server, so OBS tools (Stream Deck, Touch Portal, Streamer.bot, scripts) drive Isocast. Off until enabled
   vcam         Feed a picture to Isocast Virtual Camera (extension approval required once)
   debug        Developer mode, for testing a build locally: verbose logs of every API call and component, and frame timing traces while recording
   watch        Print events from isocastd as they happen, until Ctrl-C
@@ -932,7 +950,13 @@ Commands:
   show    Show a timeline (the current one unless an id is given): its clips in order, each with its take and files, and the takes taken off it
   remove  Take a clip off the timeline (by id, like c2). Its take's files stay where they are
   move    Move a clip (by id) to POSITION, counting from 1 (the first)
-  export  Join the clips, in order, into one program file and one file per ISO source every clip has (the video as recorded, no re-encoding), plus an .export.json manifest; waits for it unless --background
+  export  Join the clips, in order, into one program file and one file per ISO source every clip has, each cut to the clips' in and out points (the video as recorded except the frames from a cut to the next keyframe), an EDITED file when clips show other angles, and an .export.json manifest; waits for it unless --background
+  trim    Move a clip's in and/or out point, in seconds on its take's own clock (rounded to its frames). The take's files are untouched
+  split   Cut the clip at SECONDS on the timeline in two
+  delete  Take START to END (seconds on the timeline) out, closing the gap
+  angle   Show SOURCE (`program` or an ISO source's id) in the edited video from START to END (seconds on the timeline)
+  undo    Take back the last edit (trim, split, delete, angle, remove, move)
+  redo    Put back the last edit undone
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -1044,7 +1068,7 @@ Options:
 ## isocast timeline export
 
 ```text
-Join the clips, in order, into one program file and one file per ISO source every clip has (the video as recorded, no re-encoding), plus an .export.json manifest; waits for it unless --background
+Join the clips, in order, into one program file and one file per ISO source every clip has, each cut to the clips' in and out points (the video as recorded except the frames from a cut to the next keyframe), an EDITED file when clips show other angles, and an .export.json manifest; waits for it unless --background
 
 Usage: isocast timeline export [OPTIONS]
 
@@ -1052,6 +1076,101 @@ Options:
       --timeline <TIMELINE>  The timeline's id; the current one if absent
       --folder <FOLDER>      Write the files here (made if missing); else next to the first clip's take
       --background           Return once it has started; `isocast watch --kinds export_progress,export_finished` follows it
+      --json                 
+  -h, --help                 Print help
+```
+
+## isocast timeline trim
+
+```text
+Move a clip's in and/or out point, in seconds on its take's own clock (rounded to its frames). The take's files are untouched
+
+Usage: isocast timeline trim [OPTIONS] <CLIP>
+
+Arguments:
+  <CLIP>  
+
+Options:
+      --in <SECONDS>         The new in point (0 is the take's start)
+      --out <SECONDS>        The new out point (up to the take's length)
+      --timeline <TIMELINE>  
+      --json                 
+  -h, --help                 Print help
+```
+
+## isocast timeline split
+
+```text
+Cut the clip at SECONDS on the timeline in two
+
+Usage: isocast timeline split [OPTIONS] <SECONDS>
+
+Arguments:
+  <SECONDS>  
+
+Options:
+      --timeline <TIMELINE>  
+      --json                 
+  -h, --help                 Print help
+```
+
+## isocast timeline delete
+
+```text
+Take START to END (seconds on the timeline) out, closing the gap
+
+Usage: isocast timeline delete [OPTIONS] <START> <END>
+
+Arguments:
+  <START>  
+  <END>    
+
+Options:
+      --timeline <TIMELINE>  
+      --json                 
+  -h, --help                 Print help
+```
+
+## isocast timeline angle
+
+```text
+Show SOURCE (`program` or an ISO source's id) in the edited video from START to END (seconds on the timeline)
+
+Usage: isocast timeline angle [OPTIONS] <SOURCE> <START> <END>
+
+Arguments:
+  <SOURCE>  
+  <START>   
+  <END>     
+
+Options:
+      --timeline <TIMELINE>  
+      --json                 
+  -h, --help                 Print help
+```
+
+## isocast timeline undo
+
+```text
+Take back the last edit (trim, split, delete, angle, remove, move)
+
+Usage: isocast timeline undo [OPTIONS]
+
+Options:
+      --timeline <TIMELINE>  
+      --json                 
+  -h, --help                 Print help
+```
+
+## isocast timeline redo
+
+```text
+Put back the last edit undone
+
+Usage: isocast timeline redo [OPTIONS]
+
+Options:
+      --timeline <TIMELINE>  
       --json                 
   -h, --help                 Print help
 ```
@@ -1138,7 +1257,7 @@ Arguments:
   [SETUP]  Setup file (.toml or .json)
 
 Options:
-      --source <SPEC>      Record without a setup file: screen, display[:NAME_OR_ID], camera:NAME_OR_ID, mic[:NAME_OR_ID], system-audio, test-pattern[:WIDTHxHEIGHT[@FPS]] or tone[:HZ]. Repeat for more sources; every audio source goes into every file
+      --source <SPEC>      Record without a setup file: screen, display[:NAME_OR_ID], camera:NAME_OR_ID, mic[:NAME_OR_ID], system-audio[:except=APP[,APP]], window:APP, app-audio:APP, test-pattern[:WIDTHxHEIGHT[@FPS]] or tone[:HZ]. Repeat for more sources; every audio source goes into every file
       --seconds <SECONDS>  Stop after this many seconds
       --folder <FOLDER>    Record into a new project folder in this folder instead of the setup's recording.folder (or into this folder, if it is a project's)
       --json               Print the result as JSON
@@ -1416,6 +1535,24 @@ Options:
   -h, --help               Print help
 ```
 
+## isocast iso-audio
+
+```text
+Choose the audio sources an ISO file carries, in the live setup: `isocast iso-audio camera mic` gives the camera's ISO file the mic only, --none no audio, --default back to recording.iso.audio (or, without it, the source's own sound). Without a source, list each video source's ISO tracks
+
+Usage: isocast iso-audio [OPTIONS] [SOURCE] [AUDIO]...
+
+Arguments:
+  [SOURCE]    A video source's id
+  [AUDIO]...  Audio source ids, in track order
+
+Options:
+      --default  
+      --none     
+      --json     
+  -h, --help     Print help
+```
+
 ## isocast restart
 
 ```text
@@ -1430,13 +1567,13 @@ Options:
 ## isocast permissions
 
 ```text
-Show the screen recording, camera and microphone permissions and what to do about each that isn't granted; with --request, ask macOS for the ones not decided yet (its prompts appear; --request camera asks for that one only) and wait up to a minute for the answers; with --open, open the System Settings pane where one is turned on
+Show the screen recording, camera, microphone and system audio recording permissions and what to do about each that isn't granted; with --request, ask macOS for the ones not decided yet (its prompts appear; --request camera asks for that one only) and wait up to a minute for the answers; with --open, open the System Settings pane where one is turned on
 
 Usage: isocast permissions [OPTIONS]
 
 Options:
-      --request [<PERMISSION>]  screen_recording, camera or microphone; all three if left out
-      --open <PERMISSION>       screen_recording, camera or microphone
+      --request [<PERMISSION>]  screen_recording, camera, microphone or system_audio; all if left out
+      --open <PERMISSION>       screen_recording, camera, microphone or system_audio
       --json                    
   -h, --help                    Print help
 ```
@@ -1496,12 +1633,13 @@ Stream the program live over RTMP or RTMPS to the live setup's [stream] service,
 Usage: isocast stream <COMMAND>
 
 Commands:
-  start       Go live: stream the program (the canvas and the program mix) to the live setup's [stream] service, starting the live engine if needed. Recordings start and stop without touching it. Returns once live, or says why not
-  stop        Stop streaming
-  status      Show the stream's state, bitrates, dropped frames, congestion and reconnects, and whether a stream key is set
-  key         Keep or remove the stream key (in the Keychain, never in a setup)
-  speed-test  Measure the upload speed to the service's ingest (a short publish of filler: Twitch's bandwidth test mode, or a custom server, which shows it for a few seconds if it relays to a live service) and recommend a stream bitrate. YouTube, Facebook and Kick have no test mode, so they get a safe bitrate instead, with the reason
-  help        Print this message or the help of the given subcommand(s)
+  start        Go live: stream the program (the canvas and the program mix) to the live setup's [stream] destinations (every enabled one), starting the live engine if needed. Recordings start and stop without touching it. Returns once each is live or failed, or says why not
+  stop         Stop streaming (to every destination, or --only those)
+  status       Show each destination's state, bitrates, dropped frames, congestion and reconnects, and whether its stream key is set
+  destination  Add, remove or change the places the program streams to
+  key          Keep or remove the stream key (in the Keychain, never in a setup)
+  speed-test   Measure the upload speed to the service's ingest (a short publish of filler: Twitch's bandwidth test mode, or a custom server, which shows it for a few seconds if it relays to a live service) and recommend a stream bitrate. YouTube, Facebook and Kick have no test mode, so they get a safe bitrate instead, with the reason
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help  Print help
@@ -1510,37 +1648,131 @@ Options:
 ## isocast stream start
 
 ```text
-Go live: stream the program (the canvas and the program mix) to the live setup's [stream] service, starting the live engine if needed. Recordings start and stop without touching it. Returns once live, or says why not
+Go live: stream the program (the canvas and the program mix) to the live setup's [stream] destinations (every enabled one), starting the live engine if needed. Recordings start and stop without touching it. Returns once each is live or failed, or says why not
 
 Usage: isocast stream start [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --only <ID>  Only this destination (main, or an id from `stream status`); repeat for several. A turned-off destination starts too
+      --json       
+  -h, --help       Print help
 ```
 
 ## isocast stream stop
 
 ```text
-Stop streaming
+Stop streaming (to every destination, or --only those)
 
 Usage: isocast stream stop [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --only <ID>  Only this destination; repeat for several. The others keep going
+      --json       
+  -h, --help       Print help
 ```
 
 ## isocast stream status
 
 ```text
-Show the stream's state, bitrates, dropped frames, congestion and reconnects, and whether a stream key is set
+Show each destination's state, bitrates, dropped frames, congestion and reconnects, and whether its stream key is set
 
 Usage: isocast stream status [OPTIONS]
 
 Options:
       --json  
   -h, --help  Print help
+```
+
+## isocast stream destination
+
+```text
+Add, remove or change the places the program streams to
+
+Usage: isocast stream destination <COMMAND>
+
+Commands:
+  add     Add a destination (the first makes the setup's [stream] section, id main). Set its key next: `isocast stream key set --destination ID`
+  remove  Remove a destination (not main; not while it streams)
+  set     Change a destination (main is the [stream] section itself)
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## isocast stream destination add
+
+```text
+Add a destination (the first makes the setup's [stream] section, id main). Set its key next: `isocast stream key set --destination ID`
+
+Usage: isocast stream destination add [OPTIONS] <SERVICE>
+
+Arguments:
+  <SERVICE>  custom, twitch, youtube, kick or facebook
+
+Options:
+      --id <ID>
+          Its id; made from the service if absent (youtube, youtube-2)
+      --server <SERVER>
+          The ingest server without the key (rtmp://host/app or rtmps://…); required for custom and kick
+      --video-bitrate-kbps <VIDEO_BITRATE_KBPS>
+          Its own video bitrate in kb/s (else main's). A bitrate or size of its own needs an encoder of its own
+      --width <WIDTH>
+          Its own size sent (with --height; else main's)
+      --height <HEIGHT>
+          Its own height sent (with --width)
+      --disabled
+          Add it turned off (`stream start` skips it unless --only names it)
+      --json
+          
+  -h, --help
+          Print help
+```
+
+## isocast stream destination remove
+
+```text
+Remove a destination (not main; not while it streams)
+
+Usage: isocast stream destination remove [OPTIONS] <ID>
+
+Arguments:
+  <ID>  
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast stream destination set
+
+```text
+Change a destination (main is the [stream] section itself)
+
+Usage: isocast stream destination set [OPTIONS] <ID>
+
+Arguments:
+  <ID>  
+
+Options:
+      --service <SERVICE>
+          
+      --server <SERVER>
+          The ingest server without the key (rtmp://host/app or rtmps://…); required for custom and kick
+      --video-bitrate-kbps <VIDEO_BITRATE_KBPS>
+          Its own video bitrate in kb/s (else main's). A bitrate or size of its own needs an encoder of its own
+      --width <WIDTH>
+          Its own size sent (with --height; else main's)
+      --height <HEIGHT>
+          Its own height sent (with --width)
+      --enabled <ENABLED>
+          Turn it on or off for `stream start` [possible values: true, false]
+      --clear <FIELD>
+          Reset a field: server, video_bitrate_kbps or size (a destination then uses main's; main the defaults). Repeat for several
+      --json
+          
+  -h, --help
+          Print help
 ```
 
 ## isocast stream key
@@ -1567,10 +1799,11 @@ Store the stream key for the live setup's service (or --service). Reads it from 
 Usage: isocast stream key set [OPTIONS]
 
 Options:
-      --service <SERVICE>  custom, twitch, youtube, kick or facebook
-      --server <SERVER>    For custom: the server the key belongs to (rtmp://host/app)
-      --json               
-  -h, --help               Print help
+      --destination <DESTINATION>  A destination of the live setup (main, or an id from `stream status`): its own key
+      --service <SERVICE>          custom, twitch, youtube, kick or facebook
+      --server <SERVER>            For custom: the server the key belongs to (rtmp://host/app)
+      --json                       
+  -h, --help                       Print help
 ```
 
 ## isocast stream key clear
@@ -1581,10 +1814,11 @@ Remove the stored stream key for the live setup's service (or --service)
 Usage: isocast stream key clear [OPTIONS]
 
 Options:
-      --service <SERVICE>  custom, twitch, youtube, kick or facebook
-      --server <SERVER>    For custom: the server the key belongs to (rtmp://host/app)
-      --json               
-  -h, --help               Print help
+      --destination <DESTINATION>  A destination of the live setup (main, or an id from `stream status`): its own key
+      --service <SERVICE>          custom, twitch, youtube, kick or facebook
+      --server <SERVER>            For custom: the server the key belongs to (rtmp://host/app)
+      --json                       
+  -h, --help                       Print help
 ```
 
 ## isocast stream speed-test
@@ -1595,11 +1829,12 @@ Measure the upload speed to the service's ingest (a short publish of filler: Twi
 Usage: isocast stream speed-test [OPTIONS]
 
 Options:
-      --service <SERVICE>  custom, twitch, youtube, kick or facebook
-      --server <SERVER>    For custom: the server the key belongs to (rtmp://host/app)
-      --seconds <SECONDS>  Seconds to send for, 3 to 20 (8 by default)
-      --json               
-  -h, --help               Print help
+      --destination <DESTINATION>  A destination of the live setup (main, or an id from `stream status`): its own key
+      --service <SERVICE>          custom, twitch, youtube, kick or facebook
+      --server <SERVER>            For custom: the server the key belongs to (rtmp://host/app)
+      --seconds <SECONDS>          Seconds to send for, 3 to 20 (8 by default)
+      --json                       
+  -h, --help                       Print help
 ```
 
 ## isocast replay
@@ -1668,6 +1903,63 @@ Options:
   -h, --help  Print help
 ```
 
+## isocast websocket
+
+```text
+The obs-websocket v5 server, so OBS tools (Stream Deck, Touch Portal, Streamer.bot, scripts) drive Isocast. Off until enabled
+
+Usage: isocast websocket <COMMAND>
+
+Commands:
+  status   Show whether the obs-websocket server is on and listening, where, whether it asks for a password, and how many clients are connected
+  enable   Turn the server on (kept across restarts). The first time, a password is generated and shown once: enter it, with the address, in the OBS tool's WebSocket settings
+  disable  Turn the server off, disconnecting its clients
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## isocast websocket status
+
+```text
+Show whether the obs-websocket server is on and listening, where, whether it asks for a password, and how many clients are connected
+
+Usage: isocast websocket status [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast websocket enable
+
+```text
+Turn the server on (kept across restarts). The first time, a password is generated and shown once: enter it, with the address, in the OBS tool's WebSocket settings
+
+Usage: isocast websocket enable [OPTIONS]
+
+Options:
+      --port <PORT>  The TCP port (OBS's is 4455)
+      --bind <BIND>  The address to listen on: 127.0.0.1 (this Mac only, the default), an address of this Mac, or 0.0.0.0 (every network)
+      --password     Set a new password: read from stdin, or asked for without echo
+      --no-password  Let clients connect without a password (any program on this Mac, but not web pages); only with a loopback --bind
+      --json         
+  -h, --help         Print help
+```
+
+## isocast websocket disable
+
+```text
+Turn the server off, disconnecting its clients
+
+Usage: isocast websocket disable [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
 ## isocast vcam
 
 ```text
@@ -1679,6 +1971,7 @@ Commands:
   start   Start the live setup's virtual_camera selection. Never installs anything
   stop    Stop feeding the camera, restoring the Isocast waiting card
   status  Output state, format, counters, enqueue latency and last error
+  remove  Remove the camera from macOS before deleting Isocast (release app): stops it, then macOS asks for an administrator password
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -1715,6 +2008,18 @@ Options:
 Output state, format, counters, enqueue latency and last error
 
 Usage: isocast vcam status [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast vcam remove
+
+```text
+Remove the camera from macOS before deleting Isocast (release app): stops it, then macOS asks for an administrator password
+
+Usage: isocast vcam remove [OPTIONS]
 
 Options:
       --json  

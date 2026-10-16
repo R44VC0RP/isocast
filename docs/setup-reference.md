@@ -207,11 +207,12 @@ ISO ("isolated") recording: each listed source is written to its own file at its
 
 | Field | Type | Description |
 |---|---|---|
-| `audio` | list of string (optional) | Audio sources written into every ISO file. Omitted: each ISO uses its own source's sound. An explicit list (including []) preserves the chosen shared routing. A source's audio.iso can override its own sound. |
+| `audio` | list of string (optional) | Audio sources written into every ISO file without a list of its own in `source_audio`. Omitted: each ISO uses its own source's sound. An explicit list (including []) preserves the chosen shared routing. A source's audio.iso can override its own sound. |
 | `enabled` | boolean |  Default `false`. |
 | `encoder` | [Encoder](#encoder) |  Default `{"bit_depth": 8, "codec": "hevc", "container": "mov", "quality": "high"}`. |
 | `filename` | string | File name without extension. Tokens: {SOURCE} (upper-case id), {source}, {date}, {time}. Default `"{SOURCE}-{date} {time}"`. |
 | `filtered` | boolean | Record sources with filters as filtered (as the program shows them) rather than as captured, and audio with its audio filters (all but sidechain ducking). Keyed-out areas come out black, since the files have no transparency. |
+| `source_audio` | map of list of string | Audio sources for one ISO file, by its video source's id, instead of `audio`: `{ camera = ["mic"], screen = ["desktop"] }`. An empty list records that file without audio. Sources not listed follow `audio`; a source's audio.iso still adds or drops its own sound. |
 | `sources` | list of string | Video sources to record separately. Default `[]`. |
 
 ## Encoder
@@ -712,7 +713,7 @@ One of:
 
 ## Stinger
 
-A video played over the switch (OBS's Stinger). It lasts as long as the video. Transparent parts need a video with alpha (ProRes 4444 or HEVC with alpha in a .mov, or VP9 with alpha in a .webm, as OBS uses), or a matte.
+A video played over the switch (OBS's Stinger). It lasts as long as the video. Transparent parts need a video with alpha (ProRes 4444 or HEVC with alpha in a .mov, or VP9 or VP8 with alpha in a .webm, as OBS uses), or a matte.
 
 | Field | Type | Description |
 |---|---|---|
@@ -1159,9 +1160,11 @@ A microphone or audio interface input.
 
 ## SystemAudioSource
 
-Audio the computer is playing.
+Audio the computer is playing, optionally leaving some apps out.
 
-Type: object.
+| Field | Type | Description |
+|---|---|---|
+| `exclude` | list of string | Apps whose sound is left out: names or bundle ids, or parts of names, as for `application_audio`'s `app` (`isocast devices` lists the apps that have opened audio). |
 
 ## ColorSource
 
@@ -1239,6 +1242,8 @@ Streaming the program (the canvas and the program mix) to a service over RTMP or
 | Field | Type | Description |
 |---|---|---|
 | `audio_bitrate_kbps` | integer | AAC audio bitrate in kb/s, held constant (silence too, as services expect): 64, 96, 128, 160, 192, 256 or 320. Default `160`. |
+| `destinations` | list of [StreamDestination](#streamdestination) | More places to stream the same program to at once, each with its own key, state and reconnects. A destination with the same encode settings as another shares its encoder; one with its own `video_bitrate_kbps` or size gets an encoder of its own if this Mac's encoders have room. |
+| `enabled` | boolean | Whether `stream start` (without `only`) streams to this section's own service, the main destination (id `main`). Its encode settings stay the other destinations' defaults while it is off. |
 | `height` | integer (optional) | |
 | `keyframe_interval_seconds` | integer | Seconds between keyframes. Twitch and YouTube ask for 2. Default `2`. |
 | `rate_control` | [RateControl](#ratecontrol) (optional) | How the encoder keeps to `video_bitrate_kbps`: `constant` (the default: the full rate every second, padding still scenes, as YouTube's and Twitch's guidelines ask) or `average` (fewer bits when the picture is still, overshooting very busy scenes a little less). |
@@ -1247,6 +1252,30 @@ Streaming the program (the canvas and the program mix) to a service over RTMP or
 | `service` (required) | [StreamService](#streamservice) | Where to stream. A service fills in its ingest server; `custom` needs `server`. |
 | `video_bitrate_kbps` | integer | Video bitrate in kb/s, held near constant as services ask. Default `6000`. |
 | `width` | integer (optional) | The size sent, if not the canvas's: the encoder scales the program to it. Without it, a canvas larger than 1920×1080 (1080×1920 upright) is scaled down to fit, as most services take 1080p at most. Each side is an even number from 16 to 4096. |
+
+## StreamDestination
+
+Another place to stream the program to (see [`StreamSettings::destinations`]). What it doesn't set comes from the `[stream]` section: rate control, keyframes, audio and reconnecting always do.
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | boolean | Whether `stream start` (without `only`) streams here. |
+| `height` | integer (optional) | |
+| `id` (required) | string | Its id (lowercase letters, digits and dashes; not `main`), as `isocast stream start --only` and the key commands name it. |
+| `server` | string (optional) | The ingest server without the stream key, as for `[stream]`. |
+| `service` (required) | [StreamService](#streamservice) | |
+| `video_bitrate_kbps` | integer (optional) | Its own video bitrate; `[stream]`'s if absent. |
+| `width` | integer (optional) | Its own size sent; `[stream]`'s if absent. Give both or neither. |
+
+## StreamService
+
+A streaming service. Presets use the service's documented RTMPS ingest (see `docs/streaming.md`).
+
+One of:
+
+- `"twitch"` \| `"youtube"` \| `"facebook"`
+- `"custom"`: Any RTMP or RTMPS server, given as `server`.
+- `"kick"`: Kick: give your channel's Stream URL (Creator Dashboard → Channel → Stream URL and Key) as `server`.
 
 ## RateControl
 
@@ -1266,16 +1295,6 @@ Reconnecting after the connection to the server drops.
 | `delay_seconds` | integer | Seconds to wait before each attempt. Default `2`. |
 | `enabled` | boolean |  Default `true`. |
 | `max_retries` | integer | Attempts before giving up (the stream then shows `failed`). Default `25`. |
-
-## StreamService
-
-A streaming service. Presets use the service's documented RTMPS ingest (see `docs/streaming.md`).
-
-One of:
-
-- `"twitch"` \| `"youtube"` \| `"facebook"`
-- `"custom"`: Any RTMP or RTMPS server, given as `server`.
-- `"kick"`: Kick: give your channel's Stream URL (Creator Dashboard → Channel → Stream URL and Key) as `server`.
 
 ## VirtualCameraSettings
 

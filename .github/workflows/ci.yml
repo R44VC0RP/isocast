@@ -56,6 +56,11 @@ jobs:
       - name: Third-party notices up to date
         run: scripts/third-party-notices.sh --check
 
+      - name: CLI, setup and MCP references up to date
+        run: |
+          cargo build --locked -p isocast-cli
+          python3 scripts/reference-docs.py target/debug/isocast --check
+
   motion:
     # The motion harness (docs/motion-testing.md): the real interface drawn
     # offscreen, scripted drags replayed on a virtual clock, every frame
