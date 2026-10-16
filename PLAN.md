@@ -614,6 +614,12 @@ layout editing, Windows, release prep).
   three short runs, 181 s and six split takes lose no ISO/program/stream
   pictures. M2 fitting load stays clean; overload sheds ISOs only, including
   cold startup. Admission and native writer policy unchanged.
+- [x] **A.4 Parked program tap (GitHub #77):** detach after the warm
+  picture; synchronously re-tap on the first real join, with canvas ownership
+  serialized against edits. ISO-only parked recordings draw no program
+  frames; M2-b interleaved CPU saves 4.48 points of one core. Heavy/fit
+  record-first matrix keeps protected outputs clean; 150 s park, changed
+  canvas then join, and ten join/edit races verified. Tier-1 re-review passed.
 - [ ] **A.4 Split + stream losses (GitHub #60), qualification partial:**
   synchronous native stream submission stalls now signal pressure; final
   build's 16 post-split takes have zero protected losses. Cold stream startup
@@ -1317,6 +1323,17 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 
 ## Log
 
+- A.4 / #77 (2026-10-16): a warm reservation no longer keeps a program
+  tap; first real join restores it synchronously without recreating the
+  native encoder or resetting counters/timestamps. M2-b final CPU baseline /
+  fixed / no-stream 2.919 / 2.359 / 2.432% whole-machine; program draws
+  1219–1220 / 0 / 0 per 20 s. Fit/heavy short, 181 s and six split takes:
+  program/stream/audio losses 0, fitting ISO losses 0. 150 s park starts
+  with 5,406 B; 64 files probe/decode, ten immediate join/canvas edits
+  refused, changed-canvas heavy join clean. Review B1 reproduced and fixed;
+  re-review approves. Workspace gates 206 tests; full e2e once 15/16
+  (intermittent replay 33.31 ms sync failure), baseline/head replay controls
+  2/2 each and final stream/replay 2/2 pass. Follow-up retained in report.
 - #76 flock (2026-10-16): crash-safe takes refuse a file only when its
   lock is held elsewhere (WouldBlock); a share that refuses flock records
   with a logged warning. Verified on an NFS `nolocks` mount (ENOTSUP):

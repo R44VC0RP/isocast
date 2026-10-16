@@ -1582,6 +1582,26 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-16 (#77): **Detach the warm program tap, not the native session.**
+  After the warm picture completes, remove both routes before publishing
+  readiness. A typed `ProgramTapSource` observes engine stop while parked;
+  first real join restores the routes synchronously and hands the tap to the
+  worker on a one-slot channel. Share the sinks lock with parking and the
+  engine-state lock with canvas updates: asynchronous re-tap let a running
+  60-fps replay accept a 30-fps canvas edit (review B1, reproduced with four
+  drops); ten final attempts refuse it. Keep the original audio-loss counter
+  and #68's contiguous native timeline. Once used, continue encoding until
+  all outputs/reservations leave, as before. A parked canvas edit is allowed;
+  changed-FPS joining can use another session while the old reservation
+  survives the take. Heavy M2-b edit→join qualification has no stream/ISO
+  loss. Final CPU median old/fixed/no-stream: 2.919/2.359/2.432% of eight
+  cores, program draws 1219–1220/0/0 per 20 s. 150 s park: 5,406 B first
+  packet, +1.91 MiB RSS over 20 s after join, zero losses. Tier-1 re-review
+  approves; full gates 206 tests. Full strict e2e was 15/16 (replay sync
+  33.31 ms, not reproduced by two baseline/two fixed controls or the final
+  targeted stream/replay pass); do not claim an established baseline cause.
+  Evidence: `/Volumes/IsocastBuild/parked-tap/scratch/REPORT.md`.
+
 - 2026-10-16 (#76): crash-safe files carry the take's start as creation
   and modification time in `mvhd`, `tkhd` and `mdhd` (QuickTime epoch,
   whole seconds; version 1 headers only when a time or duration passes

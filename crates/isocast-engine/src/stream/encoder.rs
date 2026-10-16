@@ -9,7 +9,7 @@
 //! and video by time and hands each batch to every [`Sink`].
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -18,7 +18,7 @@ use anyhow::{Context, Result, bail};
 
 use super::queue::{Kind, Media};
 use super::{AudioTrack, Ended, Interleaver, TAP_DEPTH, flv};
-use crate::record::{Engine, Packet, ProgramTap};
+use crate::record::{Engine, Packet, ProgramTap, ProgramTapSource};
 use crate::{AudioEncoder, LiveAudioSpec, LiveVideoSpec, Platform, Time, VideoEncoder};
 
 /// What a shared encoder makes. Outputs share an encoder only when their
@@ -71,6 +71,10 @@ pub(crate) struct Hub {
     /// How many real outputs there are, read without `sinks` (callers may hold
     /// their own locks, which sinks take while `sinks` is held).
     sink_count: AtomicU64,
+    /// Changed under `sinks`, so parking and the first real join cannot race.
+    tapped: AtomicBool,
+    /// Acquire fresh typed routes synchronously, then hand them to the worker.
+    retap: Box<dyn Fn() -> Result<()> + Send + Sync>,
     next_sink: AtomicU64,
     want_keyframe: AtomicBool,
     /// Mix chunks the tap lost, counted even while the encoder stalls.
@@ -149,6 +153,12 @@ impl Encoders {
             if hub.stop.load(Ordering::SeqCst) || hub.ended.load(Ordering::SeqCst) {
                 continue;
             }
+            if sink.keeps_encoding() && !hub.tapped.load(Ordering::SeqCst) {
+                // Own the canvas before reporting a live output: an immediate
+                // canvas edit must not slip in before the worker wakes.
+                (hub.retap)()?;
+                hub.tapped.store(true, Ordering::SeqCst);
+            }
             let id = hub.next_sink.fetch_add(1, Ordering::Relaxed);
             sinks.push((id, sink));
             hub.sink_count.store(
@@ -180,6 +190,10 @@ impl Encoders {
             .create_audio_encoder(&spec.audio)
             .with_context(|| format!("could not start {what}'s AAC encoder"))?;
         let tap = engine.tap_program(TAP_DEPTH);
+        let program = engine.program_tap_source();
+        let retap_program = program.clone();
+        let retap_audio = tap.missed_audio_chunks.clone();
+        let (tap_tx, retapped) = sync_channel(1);
         let sink_count = u64::from(sink.keeps_encoding());
         let hub = Arc::new(Hub {
             spec: *spec,
@@ -188,6 +202,16 @@ impl Encoders {
             ready: AtomicBool::new(false),
             sinks: Mutex::new(vec![(0, sink)]),
             sink_count: AtomicU64::new(sink_count),
+            tapped: AtomicBool::new(true),
+            retap: Box::new(move || {
+                if tap_tx
+                    .send(retap_program.tap(TAP_DEPTH, retap_audio.clone()))
+                    .is_err()
+                {
+                    bail!("the program's encoder stopped before joining");
+                }
+                Ok(())
+            }),
             next_sink: AtomicU64::new(1),
             want_keyframe: AtomicBool::new(false),
             tap_audio_dropped: tap.missed_audio_chunks.clone(),
@@ -202,7 +226,7 @@ impl Encoders {
                     // Keeps pace with the program, ahead of background work.
                     platform.real_time_thread();
                     let encoded = isocast_diagnostics::contain("program encoder", || {
-                        encode::<P>(video, audio, tap, &hub)
+                        encode::<P>(video, audio, tap, retapped, program, &hub)
                     });
                     let ended = match encoded {
                         Ok(Ok(ended)) => ended,
@@ -303,6 +327,8 @@ fn encode<P: Platform>(
     mut video: P::VideoEncoder,
     mut audio: P::AudioEncoder,
     tap: ProgramTap<P::Frame>,
+    retapped: Receiver<ProgramTap<P::Frame>>,
+    program: ProgramTapSource<P>,
     hub: &Hub,
 ) -> Result<Ended> {
     let spec = &hub.spec;
@@ -329,18 +355,37 @@ fn encode<P: Platform>(
     let mut warm_pts = None;
     let mut video_offset = 0;
     let mut live = false;
+    let mut tap = Some(tap);
     loop {
         if hub.stop.load(Ordering::SeqCst) {
             return Ok(Ended::Stopped);
         }
-        // One picture places the native session. Until an output first joins,
-        // discard the tap without submitting more work to the hardware.
+        if program.stopped() {
+            return Ok(Ended::Program);
+        }
+        // One picture places the native session. Drop its tap while parked,
+        // so a reservation alone does not keep the compositor drawing.
         // Once used, keep running until the recording ends rather than
         // restarting the audio timeline or stranding native pressure on Stop.
         if !live {
-            live = hub.sinks().iter().any(|(_, sink)| sink.keeps_encoding());
+            live = hub.sink_count.load(Ordering::SeqCst) > 0;
         }
-        match tap.packets.recv_timeout(Duration::from_millis(5)) {
+        if tap.is_none() {
+            match retapped.recv_timeout(Duration::from_millis(5)) {
+                Ok(joined) => {
+                    tap = Some(joined);
+                    live = true;
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return Ok(Ended::Stopped),
+            }
+        }
+        match tap
+            .as_ref()
+            .unwrap()
+            .packets
+            .recv_timeout(Duration::from_millis(5))
+        {
             Ok(Packet::Video { frame, pts }) if !live => {
                 if warm_pts.is_none() {
                     video.encode(&frame, pts, true)?;
@@ -402,6 +447,15 @@ fn encode<P: Platform>(
             Err(RecvTimeoutError::Disconnected) => return Ok(Ended::Program),
         }
         while let Some(mut frame) = video.receive()? {
+            if !live {
+                // Release the routes before warm() can return and recording
+                // writers start, unless a real output joined in this loop.
+                let sinks = hub.sinks();
+                if !sinks.iter().any(|(_, sink)| sink.keeps_encoding()) {
+                    tap = None;
+                    hub.tapped.store(false, Ordering::SeqCst);
+                }
+            }
             hub.ready.store(true, Ordering::SeqCst);
             if !live || warm_pts == Some(frame.pts) {
                 continue;

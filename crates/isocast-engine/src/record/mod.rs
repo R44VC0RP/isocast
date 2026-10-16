@@ -43,6 +43,7 @@ mod timings;
 mod virtual_camera;
 pub use virtual_camera::{CameraSink, OnCameraChange, VirtualCamera};
 
+pub(crate) use engine::ProgramTapSource;
 pub use engine::{Engine, EngineEvent, JpegFrame, OnEngineEvent, ProgramTap};
 pub use frame_stream::{FeedRate, FrameFeed};
 pub use shared_frames::{DEFAULT_SLOTS, SharedControl, SharedEvent, SharedFeed};

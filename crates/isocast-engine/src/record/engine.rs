@@ -281,6 +281,57 @@ impl<F: Clone> Drop for ProgramTap<F> {
     }
 }
 
+/// A way to re-tap the program without keeping a route (and the compositor)
+/// active. This keeps the inner state, not the Engine: dropping the Engine
+/// still stops it, which a parked encoder can observe without a receiver.
+#[derive(Clone)]
+pub(crate) struct ProgramTapSource<P: Platform>(Arc<Inner<P>>);
+
+impl<P: Platform> ProgramTapSource<P> {
+    pub(crate) fn stopped(&self) -> bool {
+        self.0.stopping.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn tap(
+        &self,
+        depth: usize,
+        missed_audio_chunks: Arc<AtomicU64>,
+    ) -> ProgramTap<P::Frame> {
+        let inner = &self.0;
+        // Serialize acquiring the canvas with update's refusal check.
+        let _state = inner.state.lock().unwrap();
+        let (tx, packets) = sync_channel(depth);
+        let from = inner.platform.now();
+        let missed_frames = Arc::new(AtomicU64::new(0));
+        let keys = (
+            inner.program_video.add_counted(
+                tx.clone(),
+                0,
+                from,
+                None,
+                Some(missed_frames.clone()),
+                false,
+            ),
+            inner.program_audio.add_counted(
+                tx,
+                0,
+                from,
+                None,
+                Some(missed_audio_chunks.clone()),
+                false,
+            ),
+        );
+        ProgramTap {
+            packets,
+            missed_frames,
+            missed_audio_chunks,
+            video: inner.program_video.clone(),
+            audio: inner.program_audio.clone(),
+            keys,
+        }
+    }
+}
+
 /// A running engine. Dropping it stops everything.
 pub struct Engine<P: Platform> {
     inner: Arc<Inner<P>>,
@@ -1037,37 +1088,12 @@ impl<P: Platform> Engine<P> {
     /// The program's frames and mix for an output like a stream, from the
     /// next frame on, queueing up to `depth` packets.
     pub fn tap_program(&self, depth: usize) -> ProgramTap<P::Frame> {
-        let inner = &self.inner;
-        let (tx, packets) = sync_channel(depth);
-        let from = inner.platform.now();
-        let missed_frames = Arc::new(AtomicU64::new(0));
-        let missed_audio_chunks = Arc::new(AtomicU64::new(0));
-        let keys = (
-            inner.program_video.add_counted(
-                tx.clone(),
-                0,
-                from,
-                None,
-                Some(missed_frames.clone()),
-                false,
-            ),
-            inner.program_audio.add_counted(
-                tx,
-                0,
-                from,
-                None,
-                Some(missed_audio_chunks.clone()),
-                false,
-            ),
-        );
-        ProgramTap {
-            packets,
-            missed_frames,
-            missed_audio_chunks,
-            video: inner.program_video.clone(),
-            audio: inner.program_audio.clone(),
-            keys,
-        }
+        self.program_tap_source()
+            .tap(depth, Arc::new(AtomicU64::new(0)))
+    }
+
+    pub(crate) fn program_tap_source(&self) -> ProgramTapSource<P> {
+        ProgramTapSource(self.inner.clone())
     }
 
     /// The program's shared encoders, for outputs that take it compressed.
