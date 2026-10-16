@@ -16,6 +16,7 @@ use super::{
     SPLIT_FINISH_DELAY, Shared,
 };
 use crate::record::FileReport;
+use crate::source::FrameSlot;
 use crate::{FileWriter, RepairedFile, SAMPLE_RATE, Time};
 
 #[derive(Clone, Copy)]
@@ -68,7 +69,10 @@ pub(super) fn write_files<W: FileWriter>(
     shared: &Shared,
     clock: Arc<RecordingClock>,
     missed_audio: Arc<AtomicU64>,
-) {
+    source: Option<Arc<FrameSlot<W::Frame>>>,
+) where
+    W::Frame: Clone,
+{
     thread::scope(|scope| {
         // Finishing a file can take a while (writing its final movie
         // header), so it happens on its own thread while the next take's
@@ -96,6 +100,13 @@ pub(super) fn write_files<W: FileWriter>(
         let mut failure = Ok(());
         let written = isocast_diagnostics::contain("file writer", || {
             for packet in packets {
+                // Audio can keep this receiver alive after its video capture
+                // has stopped. Close that file instead of accepting splits
+                // whose first video frame can never arrive.
+                if let Some(reason) = source.as_ref().and_then(|slot| slot.stopped()) {
+                    failure = Err(anyhow!("the capture stopped: {reason}"));
+                    break;
+                }
                 file.lost_packets += missed_audio.swap(0, Ordering::Relaxed);
                 if next.is_none()
                     && let Ok(split) = splits.try_recv()
@@ -254,6 +265,11 @@ pub(super) fn write_files<W: FileWriter>(
         if let Err(message) = written {
             failure = Err(anyhow!(message));
         }
+        if failure.is_ok()
+            && let Some(reason) = source.as_ref().and_then(|slot| slot.stopped())
+        {
+            failure = Err(anyhow!("the capture stopped: {reason}"));
+        }
         if let Some(c) = closing {
             finish(c.file, c.at.min(shared.end()), c.take, c.failure);
         }
@@ -263,6 +279,9 @@ pub(super) fn write_files<W: FileWriter>(
             .into_iter()
             .chain(splits.try_iter().map(|split| (split.take, split.writer)))
             .collect();
+        // Refuse further handoffs while the native finalizers are still
+        // closing. Otherwise a split could enter a receiver never read again.
+        drop(splits);
         for (take, writer) in never {
             writer.cancel();
             let _ = done.send(Done {

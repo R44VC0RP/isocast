@@ -924,6 +924,18 @@ fn test_pattern<P: Platform>(
 ) -> Result<Opened<P>> {
     let &TestPatternSource { width, height, fps } = settings;
     let pattern = TestPattern::new(id, width, height, fps);
+    // Opt-in fault exercise for an isolated developer-mode engine: e.g.
+    // ISOCAST_TEST_PATTERN_FAIL_AFTER=bars=5 stops that synthetic capture
+    // five seconds into the live clock. Real capture sources are unaffected.
+    let fail_after = std::env::var("ISOCAST_TEST_PATTERN_FAIL_AFTER")
+        .ok()
+        .and_then(|value| {
+            let (source, seconds) = value.split_once('=')?;
+            let seconds: f64 = seconds.parse().ok()?;
+            (source == id && seconds.is_finite() && seconds >= 0.0)
+                .then(|| Duration::try_from_secs_f64(seconds).ok())
+                .flatten()
+        });
     let mut clock = timeline
         .clocks
         .start(format!("source:{id}:video"), Duration::from_secs(1) / fps);
@@ -955,6 +967,10 @@ fn test_pattern<P: Platform>(
                     continue;
                 }
                 let since_start = pts.saturating_since(start);
+                if fail_after.is_some_and(|after| since_start >= after) && crate::trace::on() {
+                    slot.stop("test_pattern: injected capture failure (developer mode)".into());
+                    return;
+                }
                 match pool.draw(&mut |pixels, stride| pattern.draw(n, since_start, pixels, stride))
                 {
                     Ok(Some(frame)) => slot.push(frame, pts),

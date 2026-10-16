@@ -501,6 +501,11 @@ come later (clips already carry in/out points on their take).
     file decoded and accounted, latency and memory/thread/fd growth.
     Findings (at-limit ISO losses, rapid splits, refused-start state) in
     docs/benchmarks.md "Stress suite".
+  - [x] S.2 rapid controls (#80, #81): keep one split handover in flight,
+    honor its announced files on Stop, and clear a refused Start before
+    answering it. M2-b: two full cycles/disk runs, 0 phantom files, split
+    starts 504–1496 ms ahead, 0 stale-busy starts; concurrent controls,
+    kill/ownership matrix, full strict e2e and workspace gates pass.
   - [x] S.2 #79 Capacity-limit isolation: recording-native submission
     pressure sheds ISO work before mixed A/V channels fill, including queued
     startup pictures; M2 capacity accounts for per-picture session overhead
@@ -1388,6 +1393,15 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   clean; strict e2e 17/17; gates 214 tests. The two soaks' early losses were
   external load (another lane's engine; softwareupdated): see notes.
 
+- S.2 rapid controls / #80 / #81 (2026-10-16): splits stay busy until the
+  new writers start and the previous ones finalize; normal Stop preserves
+  the newest announced take. A startup refusal follows session cleanup.
+  Final M2-b binaries: 200 split attempts (78 accepted, 122 busy), no phantom
+  files or VT errors, 388 stress files checked, eight disk refusals with
+  the correct reason, 40 concurrent-control files checked; seven kill modes
+  and 11 ownership controls, strict e2e 16/16, fmt/clippy and 212 tests pass.
+  Tier-1 review remains with the coordinator; evidence in rapid-splits
+  scratch REPORT.md.
 - Engine hardening (#27/#30/#31/#35, 2026-10-16): explicit critical-state
   recovery replaces lock poisoning; the monitor callback is lock/heap-free;
   AVAssetWriter append exceptions are contained and both VT session types

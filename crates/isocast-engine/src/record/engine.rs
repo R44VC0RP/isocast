@@ -2834,6 +2834,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 split_senders.push(split_tx);
                 let done = done_tx.clone();
                 let clock = clock.clone();
+                let source = slots.get(&plan.source).cloned();
                 scope.spawn(move || {
                     platform.real_time_thread();
                     write_files(
@@ -2846,6 +2847,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                         shared,
                         clock,
                         missed_audio,
+                        source,
                     )
                 })
             })
@@ -2858,6 +2860,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             .collect();
 
         let mut all_started = false;
+        let mut handover = false;
         // A pause's commit barrier under way: its generation, cut and deadline.
         let mut pending_commit: Option<(u64, Time, Time)> = None;
         let disk_probe = DiskProbe::start(platform, &folder);
@@ -3019,7 +3022,10 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                     && current
                         .plans
                         .iter()
-                        .all(|p| p.start.load(Ordering::SeqCst) != i64::MIN)
+                        .zip(&current.results)
+                        .all(|(p, result)| {
+                            p.start.load(Ordering::SeqCst) != i64::MIN || result.is_some()
+                        })
                 {
                     all_started = true;
                     // Best effort: the final manifest is written at the end.
@@ -3029,7 +3035,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 // time: the split is then refused, rather than announcing a take
                 // the stop ends before it begins.
                 if options.stop.load(Ordering::SeqCst) {
-                    shared.stop_at(now.max(shared.epoch + MIN_TAKE));
+                    shared.stop_at(now.max(current.epoch + MIN_TAKE));
                 }
                 // A split: the next take's files start at a moment on every
                 // file's frame grid (the next whole second on the recording's
@@ -3041,7 +3047,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                         .and_then(|plan| Ok((create_writers(platform, &plan.plans)?, plan)))
                         .map_err(|err| SplitRefused {
                             ending: false,
-                            message: format!("{err:#}"),
+                            busy: false,
+                            message: format!("split refused; the current take continues: {err:#}"),
                         })
                         .and_then(|(writers, plan)| {
                             // Timed once the files exist, so none of them misses
@@ -3055,20 +3062,21 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                                 .map(|plan| plan.spec.video.fps)
                                 .collect();
                             let at = split_time(shared.epoch, current.epoch, &rates, timing, now);
-                            if at >= shared.end() {
+                            if options.stop.load(Ordering::SeqCst) || at + MIN_TAKE > shared.end() {
                                 writers.into_iter().for_each(FileWriter::cancel);
                                 return Err(SplitRefused {
                                     ending: true,
-                                    message: "the recording ends before a new take could start"
-                                        .into(),
+                                    busy: false,
+                                    message:
+                                        "the recording ends before a new take could be recorded"
+                                            .into(),
                                 });
                             }
                             Ok((plan, writers, at, now))
                         });
                     match next {
                         Ok((plan, writers, at, now)) => {
-                            let files: Vec<PathBuf> =
-                                plan.plans.iter().map(|p| p.spec.path.clone()).collect();
+                            let mut files = Vec::new();
                             let manifest = plan.manifest_path.clone();
                             let index = takes.len();
                             let mut gone = Vec::new();
@@ -3078,6 +3086,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                                 .zip(plan.plans.clone())
                                 .enumerate()
                             {
+                                let path = file.spec.path.clone();
                                 let sent = split.send(Split {
                                     at,
                                     take: index,
@@ -3089,7 +3098,20 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                                 if let Err(mpsc::SendError(split)) = sent {
                                     split.writer.cancel();
                                     gone.push(i);
+                                } else {
+                                    files.push(path);
                                 }
+                            }
+                            if files.is_empty() {
+                                control.state.lock().splitting = false;
+                                let _ = reply.send(Err(SplitRefused {
+                                    ending: true,
+                                    busy: false,
+                                    message:
+                                        "the recording's writers stopped before it could split"
+                                            .into(),
+                                }));
+                                continue;
                             }
                             let started_at = Local::now() + at.saturating_since(now);
                             takes.last_mut().expect("a take").end = Some(at);
@@ -3103,6 +3125,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                             }
                             takes.push(take);
                             control.begin_take(at);
+                            handover = true;
                             let _ =
                                 write(takes.last().expect("a take"), SessionStatus::Recording, &[]);
                             all_started = false;
@@ -3146,6 +3169,21 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                         take.manifest = Some(manifest);
                     }
                 }
+                // Keep at most one handover in flight. A scheduled take isn't
+                // recording yet, and its predecessor still owns native encoder
+                // sessions until finalization. Accepting more splits here used
+                // to queue future takes faster than time could reach them.
+                // A failed source or stalled finalizer must not disable
+                // Split/Pause forever. After this take's minimum length its
+                // start is in the past, so releasing cannot queue future
+                // starts faster than the recording clock reaches them.
+                if handover
+                    && ((all_started && takes[..earlier].iter().all(|take| take.finalized))
+                        || now >= takes.last().expect("a take").epoch + MIN_TAKE)
+                {
+                    control.state.lock().splitting = false;
+                    handover = false;
+                }
                 // Finished takes, in order. One whose split comes after the
                 // recording's end isn't: the end rewrites it.
                 while reported < earlier
@@ -3158,12 +3196,13 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                     }
                     reported += 1;
                 }
-                // Stop when asked (a stop right after the start still gives
-                // every announced file a moment; checked again here for one
+                // Stop when asked (even just after a split's reply, every
+                // announced file gets a moment; checked again here for one
                 // asked for since the split above), or when every file has
                 // stopped (for example because the disk is full).
                 if options.stop.load(Ordering::SeqCst) {
-                    shared.stop_at(now.max(shared.epoch + MIN_TAKE));
+                    let current = takes.last().expect("a take");
+                    shared.stop_at(now.max(current.epoch + MIN_TAKE));
                 }
                 if writer_threads.iter().all(|t| t.is_finished()) {
                     shared.stop_at(now.max(shared.epoch));

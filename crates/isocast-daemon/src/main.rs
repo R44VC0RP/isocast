@@ -2186,7 +2186,7 @@ impl Daemon {
             }
             Ok(Err(why)) => Err(refused(
                 why.ending,
-                match why.ending {
+                match why.ending || why.busy {
                     true => RpcError::WRONG_STATE,
                     false => RpcError::FAILED,
                 },
@@ -2872,8 +2872,7 @@ impl Daemon {
                 isocast_diagnostics::contain("recording coordinator", || engine.record(&options))
                     .and_then(|r| r.map_err(|err| format!("{err:#}")));
             daemon.session_over(&takes);
-            if let Err(message) = &ended {
-                let _ = started_tx.send(Err(message.clone()));
+            if ended.is_err() {
                 discard(&project);
             }
             daemon.publish(Event::Stopped {
@@ -2883,7 +2882,13 @@ impl Daemon {
                 project: project.folder.exists().then(|| project.id.clone()),
                 folder: project.folder.exists().then(|| project.folder.clone()),
             });
+            let error = ended.as_ref().err().cloned();
             daemon.ended(id, ended);
+            // A refused Start is final: a client may retry as soon as it
+            // receives the error, so release the session before answering.
+            if let Some(message) = error {
+                let _ = started_tx.send(Err(message));
+            }
         });
 
         match started_rx.recv_timeout(START_TIMEOUT) {

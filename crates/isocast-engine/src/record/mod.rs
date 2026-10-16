@@ -289,6 +289,8 @@ pub struct SplitRefused {
     /// The recording is ending (stopping, at its time limit, or the disk
     /// filling) or has ended, so no new take can begin in it.
     pub ending: bool,
+    /// Another split still owns the handover; retry once its files are ready.
+    pub busy: bool,
     pub message: String,
 }
 
@@ -345,7 +347,11 @@ impl SessionControl {
         if state.splitting
             || (state.takes.len() > 1 && state.takes.last().is_some_and(|at| *at > now))
         {
-            return Err("recording: a take is starting; retry pause/resume after it begins".into());
+            return Err(
+                "recording: a take is starting or the previous take is finishing; retry \
+                 pause/resume after the handover"
+                    .into(),
+            );
         }
         let clock = state
             .clock
@@ -537,6 +543,7 @@ impl SessionControl {
         if state.finished {
             let _ = tx.send(Err(SplitRefused {
                 ending: true,
+                busy: false,
                 message: "the recording has stopped".into(),
             }));
         } else if state
@@ -546,12 +553,16 @@ impl SessionControl {
         {
             let _ = tx.send(Err(SplitRefused {
                 ending: false,
+                busy: false,
                 message: "recording.paused: resume before split or retake".into(),
             }));
         } else if state.splitting {
             let _ = tx.send(Err(SplitRefused {
                 ending: false,
-                message: "a split is already on its way".into(),
+                busy: true,
+                message: "recording.split: the previous split is still starting its files or \
+                          finishing the old take; retry once it has finished; recording continues"
+                    .into(),
             }));
         } else {
             state.splitting = true;
@@ -572,6 +583,7 @@ impl SessionControl {
         if let Some((_, reply)) = state.split.take() {
             let _ = reply.send(Err(SplitRefused {
                 ending: true,
+                busy: false,
                 message: "the recording stopped before it could split".into(),
             }));
         }
@@ -711,7 +723,6 @@ impl SessionControl {
     fn begin_take(&self, at: Time) {
         let mut state = self.state.lock();
         state.takes.push(at);
-        state.splitting = false;
     }
 
     fn take_changed(&self) -> Option<u64> {
@@ -1258,7 +1269,14 @@ fn take_manifest<P: Platform>(
         files: plans
             .iter()
             .zip(results)
-            .map(|(plan, result)| {
+            .enumerate()
+            .filter(|(index, (plan, _))| {
+                // A failed handoff has no file. Keep its error in the take,
+                // not a phantom path in the file list returned to clients.
+                plan.start.load(Ordering::SeqCst) != i64::MIN
+                    || !matches!(&take.results[*index], Some(Err(_)))
+            })
+            .map(|(_, (plan, result))| {
                 let start = plan.start.load(Ordering::SeqCst);
                 ManifestFile {
                     path: plan

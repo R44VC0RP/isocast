@@ -1599,6 +1599,19 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-16 (#80, #81): **One recording split handover at a time.**
+  It owns the busy flag until the new writers start and the previous take's
+  writers finalize; early requests get WRONG_STATE with a retry explanation.
+  This bounds the scheduled start to the existing 0.5–1.5 s window instead
+  of queueing future native sessions. Normal Stop honors the newest promised
+  take's one-second minimum, not only the first take's: an immediate Stop
+  after Split can take ~2.5 s rather than delete announced files. A timed
+  end too close to fit the new take refuses the split. Pause's durable
+  commit and the minimum take are unchanged. Start's error is sent after
+  its daemon session is cleared, so an immediate retry sees the real state.
+  M2-b final verification: 0 phantom files / 0 VT errors in 200 split
+  attempts, all second-run starts 504–1496 ms ahead; 0 stale-busy refusals.
+  `/Volumes/IsocastBuild/rapid-splits/scratch/REPORT.md` (Tier-1 review pending).
 - 2026-10-16 (engine hardening, #27/#30/#31/#35): engine and daemon locks
   use parking_lot. Only selected control state uses `Critical` transactions:
   an unwound mutation marks it broken for emergency finalization; a reader
@@ -5328,6 +5341,14 @@ each section. Delete entries that stop being true.
   and `ps` for foreign engines before blaming a take start; run hardware
   soaks through hw-batch so the Mac's lock keeps other jobs off it.
   Current main's cold starts lose nothing (see the #62 log line).
+- 2026-10-16 (#80): a VideoToolbox session create that can't get file
+  descriptors fails with -12908, which the writer reports as "no hardware
+  Hevc encoder is free". isocastd inherits a 256 open-file soft limit; the
+  stress `clients` scenario (16 plugins, 32 websocket, 32 watchers) reaches
+  ~240 and its first start fails this way on every build and Mac. Raise
+  `ulimit -n` before blaming encoder leaks. Developer-mode fault hook for
+  "a source dies while recording":
+  `ISOCAST_TEST_PATTERN_FAIL_AFTER=<test_pattern id>=<seconds>`.
 
 - 2026-10-16 (#82): a third-party HAL driver that stops answering makes
   every Core Audio call into it wait for coreaudiod's 60-150 s timeouts:
