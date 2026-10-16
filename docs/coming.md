@@ -1,33 +1,35 @@
 # Coming
 
-These are being built and are not in a release yet. Each will be on the
-API, the CLI and MCP, as well as in the app.
+These are being built or planned and are not in a release yet. Each will
+be on the API, the CLI and MCP, as well as in the app.
 
-## In 0.0.5 (on main now)
+## Next
 
-- **First launch finds OBS.** OBS's scene collections are offered for
-  import, then an Optimize step picks settings this Mac keeps up with,
-  for recording, streaming or both (also Tools › Auto-Configuration
-  Wizard…).
-- **Replay buffer.** Keep the last seconds of the program in memory and
-  save them on command or hotkey ([recording](recording.md#replay-buffer)).
-- **ISO capacity warnings.** `isocast capacity`, and warnings before and
-  during a take when the encoders can't keep up with every file
-  ([recording](recording.md)).
+- **Steadier under heavy load.** An engine hardening pass (frame pools,
+  locks that can't poison, a lock-free monitor, writers that drain on
+  errors), one GPU device per process, and a stream that starts without
+  drops on a busy Mac.
+- **Faster.** More rounds of [benchmarks against OBS](benchmarks.md) and
+  the fixes they point to.
+- **0.0.5 follow-ups.** Fixes for [plugins](plugins.md),
+  [streaming](streaming.md), the [virtual camera](virtual-camera.md),
+  developer mode and automatic updates.
 
-## Virtual camera
+## Ideas
 
-The program as a macOS camera, so Zoom, Meet, FaceTime and other apps can
-use it. Start and stop it from the app, the CLI or an agent. The controls
-are in the app today; the camera extension shipped inside the app is
-being verified.
+- **Run real OBS plugins:** OBS filters and sources in a helper process
+  next to the engine.
+- Elgato Stream Deck's own protocol, so its official actions work (today
+  Stream Deck works through obs-websocket community plugins).
+- [Scenes as code](scenes-as-code.md): keyframes, shaders, TSX and live
+  data; WGSL shader filters and WebAssembly sources for
+  [plugins](plugins.md).
+- A second (vertical) canvas for shorts.
+- Projectors and a multiview grid, themes.
+- Later: SRT and WHIP streaming, NDI, Syphon, Audio Unit plugins, Windows.
 
-## Also planned
-
-- Projectors and a multiview grid.
-- WGSL shader filters and WebAssembly sources for [plugins](plugins.md).
-- Later: a second (vertical) canvas, SRT and WHIP streaming, NDI, Syphon,
-  Audio Unit plugins, Windows.
-
-Hotkeys and the Create view (View › Create, a clip bar for
-[timelines](timelines.md)) shipped in 0.0.4: see [hotkeys](hotkeys.md).
+Shipped in 0.0.5: OBS import and Optimize on first launch, the replay
+buffer, the virtual camera in the app, ISO capacity warnings, crash-safe
+takes on by default, the editor window, obs-websocket v5, several stream
+destinations at once, per-ISO audio, per-app audio and VP8 stingers. See
+the [README](../README.md#features).

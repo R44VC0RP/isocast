@@ -6,8 +6,9 @@ Isocast is a screen recorder and streaming app for macOS on Apple silicon.
 It works like OBS, with scenes, sources, transitions and an audio mixer,
 and it also saves each screen, window and camera as a separate
 full-quality file (ISO recording), all on one clock. It uses about half
-the CPU of OBS for the same recording, and it imports your OBS scene
-collections. Written in Rust, MIT or Apache 2.0.
+the CPU of OBS for the same recording, imports your OBS scene
+collections, and answers the obs-websocket tools you already use. Written
+in Rust, MIT or Apache 2.0.
 [isocast.xyz](https://isocast.xyz)
 
 ![Isocast recording: the Screen scene shows a terminal with a picture-in-picture photo and a title, above the recording timer, frame rate, dropped frames and CPU; below are the scenes, the sources with their ISO badges, the audio mixer and the Controls dock with Stop, Pause, Marker, Replay Buffer, Virtual Camera and Studio Mode](docs/images/app.png)
@@ -24,8 +25,14 @@ collections. Written in Rust, MIT or Apache 2.0.
 - **Lighter on your Mac.** In our benchmarks Isocast used 25–29% of a core
   where OBS used 58–71%, and 88–356 MiB of memory where OBS used
   619–1344 MiB ([how it was measured](docs/benchmarks.md)).
-- **Bring your OBS setup.** Import OBS scene collections and profiles;
-  anything that can't come over is listed with the reason.
+- **Edit what you recorded.** The editor window lays every ISO file out
+  on one timeline: trim, split and switch angles, then export
+  frame-accurately without re-encoding what you didn't cut.
+- **Bring your OBS setup.** On first launch Isocast finds your OBS scene
+  collections and profiles and imports them; anything that can't come
+  over is listed with the reason. Tools that speak obs-websocket (Touch
+  Portal, community Stream Deck plugins, obs-websocket scripts) work
+  unchanged.
 - **Scriptable.** The app, the `isocast` command and AI agents (over MCP)
   drive the same engine, so anything you can click you can automate.
 
@@ -39,14 +46,20 @@ collections. Written in Rust, MIT or Apache 2.0.
 | Each source as its own file (ISO), on one clock | Built in | Not built in (third-party Source Record plugin) |
 | CPU for the same recording ([benchmarks](docs/benchmarks.md)) | About half of OBS's | Baseline |
 | Memory, 1080p60 on a base M2 | 88 MiB | 630 MiB |
-| Control | App, `isocast` CLI and MCP, one engine | App, obs-websocket and scripts |
-| Replay buffer | Coming in 0.0.5 | Yes |
-| Virtual camera | In testing | Yes, mature |
-| Plugins | Early ([process plugins, WebAssembly audio filters](docs/plugins.md)) | Large ecosystem |
+| Edit the ISO files after recording | Built-in editor: trim, split, angles | No, use another editor |
+| Control | App, `isocast` CLI, MCP, and obs-websocket v5 (off by default) | App, obs-websocket and scripts |
+| Stream Deck | Through obs-websocket (community plugins, Touch Portal); not Elgato's official OBS actions | Official Elgato plugin |
+| Replay buffer | Yes | Yes |
+| Virtual camera | Yes, new in 0.0.5 | Yes, mature |
+| Several stream destinations at once | Built in (RTMP/RTMPS) | Third-party plugin |
+| Per-app audio | Yes (macOS 14.2+) | Yes |
+| Plugins | Early ([process plugins, WebAssembly audio filters](docs/plugins.md)); no OBS plugins | Large ecosystem |
+| Projectors, multiview, second canvas | Not yet | Yes |
 | Track record | New, in alpha | Years of polish |
 
 OBS is the better choice today if you need Windows or Linux, a specific
-OBS plugin, or a proven virtual camera. Isocast is for Mac users who want
+OBS plugin, projectors or multiview, Elgato's official Stream Deck
+actions, or years of proven polish. Isocast is for Mac users who want
 separate files per source, a lighter app, or a recorder they can script.
 
 ![Isocast compared with OBS 32.2.2: less CPU, less memory, faster stop and launch, and no skipped frames on a base M2](docs/images/benchmark.png)
@@ -59,38 +72,57 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 
 ## Features
 
-**In Isocast 0.0.4 (the current download):**
+**In Isocast 0.0.5 (the current download):**
 
 - Scenes and sources: screens, windows, cameras, microphones, desktop
-  audio, pictures, videos (including WebM and MKV), text and web pages,
-  with filters and an audio mixer.
-- Transitions, including stingers with track mattes, and Studio Mode.
+  audio, one app's audio or everything but some apps (macOS 14.2+),
+  pictures, videos (including WebM and MKV), text and web pages, with
+  filters and an audio mixer.
+- Transitions, including stingers with track mattes (WebM in VP8 or VP9,
+  with transparency), and Studio Mode.
 - ISO recording: any source as its own file, plus the program, with a
   `.session.json` that says where each file starts and where every scene
-  switch and marker falls.
-- Pause and resume in the same file, markers, fragmented files that survive a crash.
-- Streaming to Twitch, YouTube, Kick, Facebook or any RTMP/RTMPS server,
-  with stream keys kept in your Keychain.
-- Profiles and scene collections, as in OBS, and OBS import.
-- Global hotkeys, timelines (record takes in order, export one video), the
-  `isocast` CLI and MCP tools for agents.
-- Automatic updates.
-
-**Coming in 0.0.5 (on the main branch, not in a release yet):**
-
-- First launch finds your OBS scene collections and offers to import them,
-  then an **Optimize** step picks settings this Mac can keep up with, for
-  recording, streaming or both.
-- **Replay buffer:** keep the last 5–300 seconds of the program in memory
-  and save them on command or with a hotkey.
-- **ISO capacity warnings:** Isocast tells you before and during a
-  recording when this Mac's encoders can't keep up with all the files,
+  switch and marker falls. Each ISO file can carry its own sound (the
+  camera with the mic, the screen with desktop audio). Isocast warns
+  before and during a take when this Mac can't keep up with every file,
   and suggests the closest setup that fits.
-- The virtual camera shipped inside the app (still being verified).
+- Crash-safe takes: files are committed every half second, so a crash
+  loses about 0.5 s, and they are repaired on the next launch. Pause and
+  resume in the same file, and markers.
+- The editor window (**Window › Editor**, ⌘E): every ISO track of your
+  takes on one timeline, with trim, split, ripple delete, per-span
+  angles, undo and frame-accurate export. The takes are never changed.
+- **Replay buffer:** keep the last 5–300 seconds of the program in memory
+  and save them with a click or a hotkey.
+- **Virtual camera:** the program as a camera for Zoom, Meet, FaceTime
+  and other apps, updated with the app, and **Remove Virtual Camera**
+  when you're done with it.
+- Streaming to Twitch, YouTube, Kick, Facebook or any RTMP/RTMPS server,
+  or to several at once, each with its own key kept in your Keychain.
+  Starting a stream during a recording no longer drops ISO frames.
+- First launch finds your OBS scene collections and offers to import them,
+  then **Optimize** picks settings this Mac can keep up with, for
+  recording, streaming or both.
+- obs-websocket v5 compatibility (`isocast websocket enable`), so OBS
+  remotes, Touch Portal, community Stream Deck plugins and obs-websocket
+  scripts (obs-cmd, obsws-python) can drive Isocast.
+- Profiles and scene collections, as in OBS, global hotkeys, timelines
+  (record takes in order, export one video), the `isocast` CLI and MCP
+  tools for agents.
+- Automatic updates. macOS prompts name the engine "Isocast Engine".
+
+**Coming next** (not in a release yet; see [coming soon](docs/coming.md)):
+
+- Steadier under heavy load: an engine hardening pass, one GPU device per
+  app, a stream that starts cleanly on a busy Mac, and more performance
+  work against OBS.
+- Fixes from the 0.0.5 follow-ups: plugins, streaming, the virtual camera,
+  developer mode and updates.
+- Later ideas: running real OBS plugins in a helper process, Elgato
+  Stream Deck's own protocol, projectors and multiview, a second
+  (vertical) canvas, shader filters and WebAssembly sources.
 
 ## A closer look
-
-These pictures are from the main branch, so some show 0.0.5 features.
 
 **Every source in its own file.** One take: the program video, an ISO file
 per source and the session file that lines them up.
@@ -102,11 +134,22 @@ stays on air, then take it live with a cut, a fade or a stinger.
 
 ![Studio Mode while recording: the Starting soon intro in preview on the left, the live Screen scene in the program on the right, and the Transition button with Cut, Fade and Fade to Black between them](docs/images/studio.png)
 
+**Edit every angle.** The editor window shows a track per ISO source
+under the program; trim, split, pick the angle for each stretch and
+export.
+
+![The Isocast Editor window: a viewer showing the chosen angle at the playhead above a timeline with the Program track and one track per ISO source, the Split, Delete, Undo, Redo and Export buttons, and highlighted spans where another angle is used](docs/images/editor.png)
+
 **Choose what gets its own file** in Settings › Output.
 
 ![Settings, Output page: the recording path, the quality preset, the program encoder and format, and the ISO Recording switches that give the Terminal and Slides sources their own files](docs/images/settings.png)
 
-**Bring your OBS scenes** (0.0.5): on first launch Isocast offers the
+**Stream to several places at once.** Settings › Stream lists each
+destination with its own key, on or off.
+
+![Settings, Stream page: a list of stream destinations, each with its service, server and key, a switch to turn it on or off, and a button to add another](docs/images/stream.png)
+
+**Bring your OBS scenes:** on first launch Isocast offers the
 scene collections it finds, then **Optimize** picks settings this Mac can
 keep up with.
 
@@ -154,21 +197,39 @@ or an exported `.json`, and lists anything without an Isocast equivalent.
 The [OBS parity table](docs/obs-parity.md) shows how each OBS source,
 filter and transition maps.
 
+**Does it work with my Stream Deck?**
+Through obs-websocket. Run `isocast websocket enable`; it prints the
+address (`ws://127.0.0.1:4455`) and a password once. Enter both in the
+tool's OBS WebSocket settings: Touch Portal, Streamer.bot, Bitfocus
+Companion, community Stream Deck plugins that use obs-websocket, or
+scripts like obs-cmd. Elgato's official Stream Deck OBS actions use their
+own OBS plugin rather than obs-websocket, so they don't connect.
+
 **Does it support stingers and WebM?**
-Yes, since 0.0.4: stinger transitions (with track mattes), and WebM and
-MKV files in media sources and stingers. Stinger audio isn't played yet.
+Yes: stinger transitions with track mattes, and WebM (VP8 or VP9, with
+transparency) and MKV files in media sources and stingers, so older OBS
+stingers in VP8 work too. Stinger audio isn't played yet.
+
+**Can I edit in Isocast?**
+Yes, the basics. Record takes into a [timeline](docs/timelines.md), then
+open the editor (**Window › Editor**, ⌘E) to trim, split, delete spans and
+choose which ISO angle shows when. Export is frame-accurate and copies
+the video as recorded except near a cut; the original files are never
+changed. For effects, colour and titles, open the ISO files in your usual
+editor.
 
 **Can it stream to Twitch or YouTube?**
-Yes: Twitch, YouTube, Kick, Facebook or any RTMP/RTMPS server, while
-recording if you like. See [Streaming](docs/streaming.md).
+Yes: Twitch, YouTube, Kick, Facebook or any RTMP/RTMPS server, or
+several at once, while recording if you like. See [Streaming](docs/streaming.md).
 
 **Where do my recordings go?**
 To `~/Movies/Isocast` unless you choose another folder in Settings ›
 Output, one folder per recording. Each take holds the program video, one
 file per ISO source (`SCREEN-…`, `CAMERA-…`) and a `.session.json`.
-Files are written in fragments, so a crash leaves the completed
-fragments playable (a power cut can lose more; nothing is guaranteed
-then).
+Files are committed every half second, so a crash loses about the last
+0.5 s, and Isocast repairs the files on its next launch (a power cut can
+lose more; nothing is guaranteed then). [More on crash-safe
+takes](docs/crash-safe-takes.md).
 
 **Is it free? Is it open source?**
 Yes and yes: free, MIT or Apache 2.0. It's a new app written in Rust, not
