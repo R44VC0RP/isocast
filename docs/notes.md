@@ -1607,6 +1607,40 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-16 (#79): **Recording-native submission pressure, not just the
+  writer queue.** On m2-b, five 1080p60 ISOs plus program blocked all six
+  crash-safe writer threads in VTCompressionSessionEncodeFrame (~17.7 ms
+  per picture), leaving `pending_video` empty while each upstream 64-packet
+  mixed A/V channel filled. These files record the tone directly: not mixer
+  starvation. Program input age reached ~431 ms; native samples found
+  968–976/983 samples per writer in EncodeFrame. The crash-safe writer now
+  publishes a protected native submission's frame-budget overrun, excluding
+  its first picture (#60/#41), and keeps it across audio-only drains. ISO
+  startup backlogs also wait while a protected output is stalled; accepted
+  pictures are retained, audio/output still drain, and commit/finalization
+  explicitly force accepted video through. Merely time-bounding each drain
+  did not stop startup audio loss: every audio packet still submitted more
+  blocked ISO video. That experiment and diagnostic logging were removed.
+  Three interleaved 20 s A/B pairs: baseline six takes lose 48–55 program
+  frames / 494–561 audio chunks; final 0/0. Program submit ~17.7→0.35 ms,
+  input age ~431→22 ms (medians of three runs). #60/#68 controls and full
+  strict e2e 16/16 pass; final stock stress isos and workspace fmt/clippy/
+  212 tests/doctests pass. Evidence: capacity-limit/scratch/REPORT.md on the
+  build volume. Legacy AVAssetWriter is unchanged; all proof uses the
+  default crash-safe path.
+- 2026-10-16 (#79): **M2 capacity has per-picture overhead and overload
+  recovery loss.** Keep the measured 800 Mpx/s engine, add 250k equivalent
+  pixels per H.264/HEVC picture on the measured base M2 only: three sessions
+  (4K+HD ISOs, HD program) are 792 Mpx/s, while six HD sessions at the same
+  raw 747 Mpx/s are 837 Mpx/s. Both behaviors were measured; lowering the
+  engine rate alone would falsely reject the first. Four HD ISOs remain
+  loss-free. Under overload, the M2 table budgets half the theoretical spare
+  ISO share for pressure pauses and slow recovery: five HD ISOs predict
+  ~53% loss (observed 38–55% over 20 s), eight plus stream ~82% (73–87%).
+  Other chips retain their previous estimates; stream H.264's 1.9x cost
+  remains assumed. This is a cautious short-take estimate, not an exact
+  throughput forecast. No controller constants or codec settings changed.
+
 - 2026-10-16 (S.2): **The stress suite checks correctness, not speed**
   (`scripts/stress.py`, hw-batch kind `stress`). Each scenario gets its
   own engine; the bar is no lost or damaged file (every file a start or

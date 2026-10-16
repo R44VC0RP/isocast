@@ -11,7 +11,9 @@
       "chip": "Apple M2",
       "encode_engines": 1,
       "engine_pixels_per_second": 800000000,
-      "basis": "measured on base M2s (isocast-m2-a/b): a 4K60 and a 1080p60 ISO plus a 1080p60 program (747 Mpx/s) record with no drops; adding a 1080p60 stream (983 Mpx/s, its H.264 at 1.9x) or a 4K60 program (1120 Mpx/s) drops frames; `tune` read 1.04x and 0.70x real time for the same files on hard content"
+      "frame_overhead_pixels": 250000,
+      "overload_iso_efficiency": 0.5,
+      "basis": "measured on base M2s (isocast-m2-a/b), recalibrated 2026-10-16 (#79): 4K60 + 1080p60 ISOs and a 1080p60 program fit, but five 1080p60 ISOs plus program (the same 747 Mpx/s in six rather than three sessions) do not. A 250k HEVC-equivalent-pixel overhead per submitted picture puts these at 792 and 837 Mpx/s against the 800 Mpx/s engine. Four HD ISOs plus program stay loss-free. Under overload, budget half the theoretical spare ISO throughput for native pressure pauses and slow admission recovery: 20 s takes with five/six/eight HD ISOs lost 38-55/57-62/57-67%, and eight plus a 6 Mb/s HD stream lost 73-87% (program, stream and all audio clean). This is a cautious short-take estimate, not an exact loss forecast; content, startup and recovery change the realized share. H.264 files cost 1.9x HEVC from tune; the stream's cost remains assumed. ProRes uses separate engines."
     },
     {
       "chip": "Apple M4 Max",

@@ -501,6 +501,10 @@ come later (clips already carry in/out points on their take).
     file decoded and accounted, latency and memory/thread/fd growth.
     Findings (at-limit ISO losses, rapid splits, refused-start state) in
     docs/benchmarks.md "Stress suite".
+  - [x] S.2 #79 Capacity-limit isolation: recording-native submission
+    pressure sheds ISO work before mixed A/V channels fill, including queued
+    startup pictures; M2 capacity accounts for per-picture session overhead
+    and admission recovery. At/past-limit media and #60/#68 controls verified.
   - [x] S.2c Overloaded ISO tails. Repeat the last accepted picture at the
     final slot when needed, retaining all audio. `repeated_frames` is
     explicit in reports/manifests; drops remain expected minus stored plus
@@ -1350,6 +1354,17 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- S.2 / #79 (2026-10-16): native recording submission pressure protects
+  program and audio at the M2 limit. Three interleaved A/B pairs: six baseline
+  20 s takes lost 48–55 program pictures and 494–561 audio chunks each; final
+  program/audio 0/0, ISOs shed instead. Final 4/5/6/8-ISO sweeps and 7/8/9/11
+  with stream have zero protected video/audio loss; #60 light restarts,
+  recording-only six splits, #68 fit/heavy 181 s and six splits, overloaded
+  pause/split, and full strict e2e 16/16 pass. M2 predicts five HD ISOs over
+  capacity (53% ISO loss), eight plus stream ~82%, instead of 0%/56%.
+  Final stock stress isos PASS (new limit four); workspace fmt/clippy and
+  212 tests/doctests pass. Tier-1 review and commits remain the coordinator's.
 
 - A.4 / #77 (2026-10-16): a warm reservation no longer keeps a program
   tap; first real join restores it synchronously without recreating the

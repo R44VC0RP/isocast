@@ -134,6 +134,9 @@ pub struct CrashSafeWriter {
     /// A tail repeat preserves audio if the final video slots were refused.
     last_video: Option<(PixelBuffer, i64)>,
     priority: Option<EncoderPressure>,
+    /// A native video submission exceeded its frame budget. Keep this
+    /// pressure through audio-only drains until the next video submission.
+    submission_stalled: bool,
     iso_credit: u32,
     fragment: Fragment,
     held: Option<Held>,
@@ -222,6 +225,7 @@ impl CrashSafeWriter {
             pending_video: VecDeque::new(),
             last_video: None,
             priority: None,
+            submission_stalled: false,
             iso_credit: 0,
             fragment: Fragment::default(),
             held: None,
@@ -259,18 +263,18 @@ impl CrashSafeWriter {
             && PRIORITY_OUTPUTS.load(Ordering::Relaxed) > 0
         {
             if PRIORITY_PRESSURE.load(Ordering::Relaxed) > 0 {
-                self.drain_ready()?;
+                self.drain_ready(false)?;
                 return Ok(false);
             }
             self.iso_credit += ISO_SHARE.load(Ordering::Relaxed);
             if self.iso_credit < 1000 {
-                self.drain_ready()?;
+                self.drain_ready(false)?;
                 return Ok(false);
             }
             self.iso_credit -= 1000;
         }
         if self.pending_video.len() >= limit {
-            self.drain_ready()?;
+            self.drain_ready(false)?;
             if self.pending_video.len() >= limit {
                 return Ok(false);
             }
@@ -278,7 +282,7 @@ impl CrashSafeWriter {
         let time = self.ticks(pts, self.timescale as u32);
         self.pending_video.push_back((frame.clone(), time));
         self.last_video = Some((frame.clone(), time));
-        self.drain_ready()?;
+        self.drain_ready(false)?;
         Ok(true)
     }
 
@@ -290,7 +294,7 @@ impl CrashSafeWriter {
             self.fragment.bytes += packet.len();
             audio.pending.push(packet);
         }
-        self.drain_ready()?;
+        self.drain_ready(false)?;
         Ok(true)
     }
 
@@ -309,27 +313,44 @@ impl CrashSafeWriter {
     }
 
     /// Feed the encoder what it can take, collect what it has produced, and
-    /// write a fragment when one is due.
-    fn drain_ready(&mut self) -> Result<()> {
+    /// write a fragment when one is due. A commit/finalization must drain
+    /// accepted pictures even while another protected output is stalled.
+    fn drain_ready(&mut self, force_video: bool) -> Result<()> {
         if let Some(failed) = &self.failed {
             bail!("the file writer failed: {failed}");
         }
         while !self.pending_video.is_empty()
             && self.video.in_flight() < MAX_IN_FLIGHT
+            // Admission also applies to pictures queued for startup. Feeding
+            // that backlog under pressure can block an ISO's audio for >500 ms.
+            // Keep the accepted pictures; audio and encoded output still drain.
+            && (force_video
+                || self.priority.is_some()
+                || PRIORITY_PRESSURE.load(Ordering::Relaxed) == 0)
             && (self.encoding || self.may_start())
         {
+            // The first picture initializes the native session even with
+            // spare capacity; as with the stream encoder, don't time it.
+            let submitted = (self.encoding && self.priority.is_some()).then(Instant::now);
             if !self.encoding {
                 self.encoding = true;
                 self.backlog = true;
             }
             let (frame, time) = self.pending_video.pop_front().expect("not empty");
             self.video.encode(&frame, time)?;
+            if let Some(submitted) = submitted {
+                // VideoToolbox can block before MAX_IN_FLIGHT is reached.
+                // Our pending queue stays empty while the upstream mixed A/V
+                // channel fills, losing audio as well as program pictures.
+                self.submission_stalled =
+                    submitted.elapsed() >= Duration::from_secs(1) / self.spec.video.fps;
+            }
         }
         // Waiting for placement is not encoder pressure (#41).
         if let Some(priority) = &mut self.priority
             && self.encoding
         {
-            priority.set(self.pending_video.len() > 2);
+            priority.set(self.submission_stalled || self.pending_video.len() > 2);
         }
         let encoded = self.video.drain()?;
         self.collect(encoded)?;
@@ -542,7 +563,7 @@ impl CrashSafeWriter {
     fn commit_now(&mut self) -> Result<Option<Duration>> {
         let deadline = Instant::now() + COMMIT_DRAIN;
         while !self.pending_video.is_empty() {
-            self.drain_ready()?;
+            self.drain_ready(true)?;
             if self.pending_video.is_empty() || Instant::now() >= deadline {
                 break;
             }
@@ -609,7 +630,7 @@ impl CrashSafeWriter {
         }
         let deadline = Instant::now() + FINISH_WAIT;
         while !self.pending_video.is_empty() {
-            self.drain_ready()?;
+            self.drain_ready(true)?;
             if self.pending_video.is_empty() {
                 break;
             }

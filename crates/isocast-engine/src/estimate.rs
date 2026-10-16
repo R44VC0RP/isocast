@@ -55,6 +55,9 @@ struct ChipRow {
     chip: String,
     encode_engines: u32,
     engine_pixels_per_second: f64,
+    #[serde(default)]
+    frame_overhead_pixels: f64,
+    overload_iso_efficiency: Option<f64>,
     basis: String,
 }
 
@@ -90,6 +93,11 @@ pub struct Chip {
     pub name: String,
     pub engines: u32,
     pub rate: f64,
+    /// Per-picture session overhead, in HEVC-equivalent pixels.
+    pub frame_overhead: f64,
+    /// Fraction of the theoretical ISO budget retained under overload:
+    /// native pressure pauses and gradual recovery leave some capacity idle.
+    pub overload_iso_efficiency: f64,
     pub basis: String,
 }
 
@@ -103,6 +111,8 @@ pub fn chip(name: &str) -> Chip {
             name: name.into(),
             engines: row.encode_engines,
             rate: row.engine_pixels_per_second,
+            frame_overhead: row.frame_overhead_pixels,
+            overload_iso_efficiency: row.overload_iso_efficiency.unwrap_or(1.0),
             basis: row.basis.clone(),
         };
     }
@@ -125,6 +135,8 @@ pub fn chip(name: &str) -> Chip {
             name: name.into(),
             engines,
             rate: row.engine_pixels_per_second,
+            frame_overhead: 0.0,
+            overload_iso_efficiency: 1.0,
             basis: format!(
                 "assumed: {engines} encode engine(s) as on other {} chips, each as fast as \
                  measured on other {generation} chips; not measured on this chip",
@@ -142,6 +154,8 @@ pub fn chip(name: &str) -> Chip {
                 name: name.into(),
                 engines,
                 rate: newest,
+                frame_overhead: 0.0,
+                overload_iso_efficiency: 1.0,
                 basis: format!(
                     "assumed: a newer chip than any measured, taken to be as fast as the newest \
                      measured generation, with {engines} encode engine(s)"
@@ -152,6 +166,8 @@ pub fn chip(name: &str) -> Chip {
             name: name.into(),
             engines: table.unknown.encode_engines,
             rate: table.unknown.engine_pixels_per_second,
+            frame_overhead: 0.0,
+            overload_iso_efficiency: 1.0,
             basis: "assumed: a chip with no measured data, judged cautiously".into(),
         },
     }
@@ -239,7 +255,9 @@ fn judge(chip: &Chip, setup: &Setup, formats: Formats, streaming: bool) -> Judge
             fps,
             codec,
             protected: kind != OutputKind::Iso,
-            pixels_per_second: codec_cost(codec).map_or(0.0, |cost| pixels * cost),
+            pixels_per_second: codec_cost(codec).map_or(0.0, |cost| {
+                pixels * cost + f64::from(fps) * chip.frame_overhead
+            }),
             assumed,
         });
     };
@@ -329,7 +347,8 @@ fn judge(chip: &Chip, setup: &Setup, formats: Formats, streaming: bool) -> Judge
     let iso_drop = if excess <= 0.0 {
         0.0
     } else if iso > 0.0 {
-        (excess / iso).min(1.0) * 100.0
+        let available = (1.0 - excess / iso).max(0.0);
+        (1.0 - available * chip.overload_iso_efficiency) * 100.0
     } else {
         100.0
     };
@@ -1057,6 +1076,27 @@ mod tests {
         assert_eq!(over.capacity, Capacity::CannotKeepUp);
         let first = &over.suggestions[0];
         assert_eq!(first.capacity, Capacity::Fits, "{:?}", over.suggestions);
+        // Equal aggregate pixels do not imply equal native work: six HD
+        // sessions exceed the M2 where a 4K plus two HD sessions still fit.
+        let hd = [
+            ("a", 1920, 1080),
+            ("b", 1920, 1080),
+            ("c", 1920, 1080),
+            ("d", 1920, 1080),
+            ("e", 1920, 1080),
+            ("f", 1920, 1080),
+            ("g", 1920, 1080),
+            ("h", 1920, 1080),
+        ];
+        assert_ne!(
+            run(&soak(&hd[..4], false), false).capacity,
+            Capacity::CannotKeepUp
+        );
+        let five = run(&soak(&hd[..5], false), false);
+        assert_eq!(five.capacity, Capacity::CannotKeepUp);
+        assert!((45.0..60.0).contains(&five.iso_drop_percent));
+        let eight = run(&soak(&hd, true), true);
+        assert!((70.0..90.0).contains(&eight.iso_drop_percent));
     }
 
     /// H.264 ISO files cost about twice HEVC's on the M2 (tune), so a
@@ -1099,7 +1139,17 @@ mod tests {
             recording: false,
         };
         let admitted = estimate(&inputs, Some("cam2")).unwrap().admission.unwrap();
-        assert!(admitted.on && !admitted.as_is, "{admitted:?}");
+        assert!(!admitted.on && !admitted.as_is, "{admitted:?}");
         assert!(estimate(&inputs, Some("nope")).is_err());
+        let mut value = serde_json::to_value(&setup).unwrap();
+        value["sources"][1]["width"] = json!(1280);
+        value["sources"][1]["height"] = json!(720);
+        let smaller = Setup::from_value(value).unwrap();
+        let inputs = Inputs {
+            setup: &smaller,
+            ..inputs
+        };
+        let admitted = estimate(&inputs, Some("cam2")).unwrap().admission.unwrap();
+        assert!(admitted.on && !admitted.as_is, "{admitted:?}");
     }
 }
