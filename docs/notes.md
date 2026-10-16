@@ -349,6 +349,12 @@ each section. Delete entries that stop being true.
 
 ## Ready for Ryan
 
+- 2026-10-15 (#71): **OBS tools can drive Isocast.** `isocast websocket
+  enable` prints ws://127.0.0.1:4455 and a password once; enter both in the
+  tool's OBS WebSocket settings (Touch Portal, Streamer.bot, Companion,
+  obs-cmd). Elgato's official Stream Deck OBS actions use their own OBS
+  plugin, not obs-websocket, so they don't connect.
+
 - 2026-10-14 (motion harness, #24): `scripts/motion.sh` (after
   `cargo build --release -p isocast-ui -p isocast-daemon -p isocast-cli`)
   runs the motion suite headless in ~3 minutes and writes a table plus a
@@ -1562,6 +1568,36 @@ each section. Delete entries that stop being true.
   settings are always present in the model, so only non-default replay
   settings trigger a reservation without `[stream]`. Evidence and prior
   rejected-policy investigation: `/Volumes/IsocastBuild/iso-overshed/scratch/`.
+- 2026-10-15 (#49, fixes-005): **an engine older than the bundled one is
+  restarted; a newer one never is.** `isocast_client::stale_engine`
+  compares `status.daemon.build` (absent before #40: stale) with the
+  bundled helper's `CFBundleVersion`, as numbers (release.sh and build.rs
+  both number builds by time), at any executable path (an older copy's or
+  a dev engine on the default socket too). Only distributions check (a
+  bundled helper next to the binary, no `$ISOCAST_DAEMON`); dev builds'
+  plist build (`vcam-package.py stamp`) isn't the binary's, so they can't.
+  The app stops it with `shutdown_if_idle` and lets the link launch the
+  bundled one, with a notice; while busy a sticky notice says it restarts
+  after, and it does. The CLI only warns (`status`, `start`, `stream
+  start`) and suggests `isocast restart`. Two apps of different builds
+  can't ping-pong: the older one sees a newer engine and leaves it.
+- 2026-10-15 (#71, G.9): **obs-websocket is a client of the method table,
+  in-process.** Crate isocast-obsws speaks the protocol; isocastd hands it
+  an `Engine` (daemon.call with the API audit log, and an ordinary event
+  watcher). OBS events that Isocast has no event for (mute, volume, names,
+  scene items, transitions, settings) come from diffing the live setup on
+  each `setup_changed`, so they fire whoever changed it. Names and ids:
+  OBS name = Isocast name or id (later duplicates get ` [id]`); lookups
+  also take the id; uuid = SHA-256(`isocast:<kind>:<id>`) as a v8 UUID;
+  sceneItemId = 31-bit hash of scene id + item key (stable across
+  reorders). Studio mode = a staged preview, as the hotkey does. The
+  settings are per engine (`<setup>.websocket.json`), not per profile, as
+  in OBS; the password is a Keychain item (`<app id>.websocket`) and the
+  first enable generates and shows one; with auth on and no readable
+  password it stays off (fails closed). Unmapped OBS requests answer 204
+  UnknownRequestType with "Isocast does not support X" (the protocol has
+  no separate "unsupported" code). It reports obsVersion 30.2.0 and
+  obs-websocket 5.5.0, the versions whose requests it maps.
 
 - 2026-10-15 (#18, G.2): **the replay buffer is a sink of a shared program
   encoder.** The stream's H.264/AAC encode thread became
@@ -4776,6 +4812,26 @@ each section. Delete entries that stop being true.
   not one tool per API call.
 
 ## Gotchas
+
+- 2026-10-15 (#59, fixes-005): `stream stop` drops `state.stream`, but a
+  stream that *failed* stays in the status until the next start, and its
+  own status hard-codes `key_set: true` (engine stream/mod.rs). `status`
+  now takes service, server, key_set and key_problem from the live setup
+  once the stream isn't active. Test it with a failed start (nothing
+  listening), not a stop. Keychain writes on a test Mac must go through
+  the bridge (`testmac-bridge.sh queue`): over SSH the login keychain is
+  locked.
+- 2026-10-15 (#71): **obs-websocket-js uses MessagePack by default under
+  Node** (`import 'obs-websocket-js'` resolves to the msgpack build; JSON
+  is `obs-websocket-js/json`), so a JSON-only server fails its handshake
+  with HTTP 400. Typed clients (obws/obs-cmd, goobs, Streamer.bot) refuse
+  `2326.0` where OBS sends integers (durations, bytes), and expect
+  responses the docs omit: ToggleRecordPause returns `outputPaused`
+  (checked every mapped handler in obs-websocket's source; that is the
+  only one). Level meters (InputVolumeMeters) flow only while the live
+  engine runs. An unsigned rebuild of isocastd can't read the Keychain
+  password the previous build stored (as with stream keys): the server
+  stays off and says to set it again; tests use ISOCAST_WEBSOCKET_PASSWORD.
 
 - 2026-10-15 (#68, iso-overshed, BLOCKED): **Estimated spare capacity is
   not proof that stream pressure is false.** On exonbook/M4 Max, synthetic

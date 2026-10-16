@@ -98,6 +98,7 @@ mod replay;
 mod store;
 mod timeline;
 mod virtual_camera;
+mod websocket;
 
 fn main() -> ExitCode {
     if isocast_diagnostics::native::requested() {
@@ -159,6 +160,7 @@ fn main() -> ExitCode {
             diagnostics::start(&daemon);
             daemon.load_timelines();
             start_plugins(&daemon);
+            daemon.websocket.load(&daemon);
             let saver = daemon.clone();
             thread::spawn(move || saver.contain("setup saver", || saver.save_live_changes()));
             // On Ctrl-C, SIGTERM or SIGHUP, finish the files before exiting.
@@ -668,8 +670,7 @@ fn watch(
     writer.set_write_timeout(Some(WATCH_WRITE_TIMEOUT))?;
     let (tx, rx) = mpsc::sync_channel(WATCH_QUEUE_DEPTH);
     let wanted = params.wanted();
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let key = NEXT.fetch_add(1, Ordering::Relaxed);
+    let key = next_watcher_key();
     daemon
         .watchers
         .lock()
@@ -741,6 +742,12 @@ fn hung_up(stream: &UnixStream) -> bool {
                 std::io::Error::last_os_error().kind(),
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
             ))
+}
+
+/// A key for a new [`Watcher`], unique in this process.
+fn next_watcher_key() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// A connection watching events, and the kinds it wants.
@@ -823,6 +830,8 @@ struct Daemon {
     /// an export, the virtual camera); `shutdown_if_idle` write-holds it,
     /// so no start can slip between its idle check and the shutdown.
     starting: std::sync::RwLock<()>,
+    /// The obs-websocket compatibility server (`websocket_*`).
+    websocket: websocket::Runtime,
 }
 
 /// isocastd's processor use, as `status` reports it: the share of all the
@@ -1196,6 +1205,9 @@ impl Daemon {
         self.stop_engine();
         self.flush_live_save();
         self.data.flush();
+        // After the recording's end went out: OBS clients hear ExitStarted
+        // and a close, not a dropped socket.
+        self.websocket.stop();
         self.plugins.stop_all();
         let _ = std::fs::remove_file(socket_path());
         isocast_diagnostics::clean_exit();
@@ -1229,7 +1241,7 @@ impl Daemon {
                 "recording; stop it first (`isocast stop`, or MCP's stop_recording)".into(),
             );
         }
-        if stream_status(&state).is_some_and(|stream| stream.is_active()) {
+        if state.streaming() {
             return Some(
                 "streaming; stop it first (`isocast stream stop`, or MCP's stop_stream)".into(),
             );
@@ -1376,6 +1388,12 @@ impl Daemon {
             Method::ReplayStop => self.replay_stop().and_then(to_json),
             Method::ReplaySave => self.replay_save().and_then(to_json),
             Method::ReplayStatus => to_json(self.replay_status()),
+            Method::WebsocketStatus => to_json(self.websocket.status()),
+            Method::WebsocketEnable(params) => self
+                .websocket
+                .enable(self, params.unwrap_or_default())
+                .and_then(to_json),
+            Method::WebsocketDisable => self.websocket.disable().and_then(to_json),
             Method::StreamKeySet(params) => self.stream_key_set(*params).and_then(to_json),
             Method::StreamKeyClear(target) => self.stream_key_clear(*target).and_then(to_json),
             Method::Library => to_json(self.library()),
@@ -3100,7 +3118,12 @@ impl Daemon {
         // busy request keeps the last reading instead).
         let (stream_dropped, stream_sent) = match self.state.try_lock() {
             Ok(state) => {
-                let now = stream_status(&state)
+                // The running stream's own counts (no Keychain look-up
+                // for the setup's key, as `stream_status` makes).
+                let now = state
+                    .stream
+                    .as_ref()
+                    .map(|stream| stream.status())
                     .filter(|s| s.is_active())
                     .map_or((0, 0), |s| (s.dropped_frames, s.frames_sent));
                 watch.stream_now = now;
@@ -3641,17 +3664,33 @@ fn stream_settings(state: &State) -> Option<StreamSettings> {
     state.setup.as_ref().and_then(|setup| setup.stream.clone())
 }
 
-/// What `status` says about streaming: the stream's own status if one ran,
-/// else the live setup's stream, offline.
+/// What `status` says about streaming: the stream's own status while it
+/// sends or tries to; else the live setup's stream, offline. A stream that
+/// ended keeps its last state, error and counts, but the service, server
+/// and stored key (`key_set`, `key_problem`) are the live setup's: the
+/// key that a new stream would use, not the ended stream's (#59).
 fn stream_status(state: &State) -> Option<StreamStatus> {
-    if let Some(stream) = &state.stream {
-        return Some(stream.status());
+    let ended = state.stream.as_ref().map(|stream| stream.status());
+    if ended.as_ref().is_some_and(|status| status.is_active()) {
+        return ended;
     }
-    let settings = stream_settings(state)?;
+    let Some(settings) = stream_settings(state) else {
+        return ended;
+    };
     let from_env = std::env::var(KEY_ENV).is_ok_and(|key| !key.trim().is_empty());
     let account = settings.key_account();
     let key_set = from_env || has_stream_key(&account).unwrap_or(false);
-    let mut status = StreamStatus::offline(&settings, key_set);
+    let offline = StreamStatus::offline(&settings, key_set);
+    let mut status = match ended {
+        Some(ended) => StreamStatus {
+            service: offline.service,
+            server: offline.server,
+            key_set,
+            key_problem: None,
+            ..ended
+        },
+        None => offline,
+    };
     if key_set && !from_env {
         status.key_problem = key_problem(&account);
     }

@@ -80,7 +80,8 @@ them:
   starts on the shared clock, every scene switch and marker.
 
 Completed movie fragments can survive a crash; see the recovery limitations
-below. `isocast split` starts a new take without stopping anything;
+below. Power loss is not covered: the files aren't forced to the disk, so
+more than the last fragment can be lost. `isocast split` starts a new take without stopping anything;
 `isocast marker "intro done"` marks a moment. `isocast project list` shows
 the projects and `isocast project rename <id> "Rust talk"` names one once it
 has stopped (the folder becomes `2026-10-12 09-30-00 Rust talk`; manifests

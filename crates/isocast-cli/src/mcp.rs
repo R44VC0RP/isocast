@@ -47,6 +47,7 @@ use crate::client::Client;
 mod events;
 
 use isocast_protocol::replay::{ReplaySaved, ReplayStatus};
+use isocast_protocol::websocket::{WebsocketEnableParams, WebsocketStatus};
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -894,6 +895,50 @@ impl Isocast {
     )]
     async fn replay_status(&self) -> Result<Json<ReplayStatus>, String> {
         self.call(Method::ReplayStatus).await
+    }
+
+    #[tool(
+        description = "The obs-websocket v5 compatibility server (OBS tools such as Stream \
+                       Deck, Touch Portal and Streamer.bot drive Isocast through it): whether \
+                       it is on and listening, its ws:// address, whether it asks for a \
+                       password, connected clients, and why it isn't listening if it should be.",
+        annotations(read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn websocket_status(&self) -> Result<Json<WebsocketStatus>, String> {
+        self.call(Method::WebsocketStatus).await
+    }
+
+    #[tool(
+        description = "Turn on the obs-websocket v5 server (off by default; kept across \
+                       restarts), optionally setting port (4455), bind (127.0.0.1, this Mac \
+                       only; 0.0.0.0 for every network), password (kept in the Keychain) or \
+                       no_password. Without a stored password one is generated and returned \
+                       once as generated_password, for the user to enter in the OBS tool. \
+                       Returns its status.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn websocket_enable(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<WebsocketEnableParams>>,
+    ) -> Result<Json<WebsocketStatus>, String> {
+        self.call(Method::WebsocketEnable(Some(params))).await
+    }
+
+    #[tool(
+        description = "Turn off the obs-websocket server, disconnecting its clients. Returns \
+                       its status.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn websocket_disable(&self) -> Result<Json<WebsocketStatus>, String> {
+        self.call(Method::WebsocketDisable).await
     }
 
     #[tool(

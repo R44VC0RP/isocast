@@ -68,7 +68,7 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 - ISO recording: any source as its own file, plus the program, with a
   `.session.json` that says where each file starts and where every scene
   switch and marker falls.
-- Pause and resume in the same file, markers, crash-safe fragmented files.
+- Pause and resume in the same file, markers, fragmented files that survive a crash.
 - Streaming to Twitch, YouTube, Kick, Facebook or any RTMP/RTMPS server,
   with stream keys kept in your Keychain.
 - Profiles and scene collections, as in OBS, and OBS import.
@@ -167,7 +167,8 @@ To `~/Movies/Isocast` unless you choose another folder in Settings ›
 Output, one folder per recording. Each take holds the program video, one
 file per ISO source (`SCREEN-…`, `CAMERA-…`) and a `.session.json`.
 Files are written in fragments, so a crash leaves the completed
-fragments playable.
+fragments playable (a power cut can lose more; nothing is guaranteed
+then).
 
 **Is it free? Is it open source?**
 Yes and yes: free, MIT or Apache 2.0. It's a new app written in Rust, not

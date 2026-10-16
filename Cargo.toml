@@ -10,6 +10,7 @@ default-members = [
     "crates/isocast-client",
     "crates/isocast-daemon",
     "crates/isocast-engine",
+    "crates/isocast-obsws",
     "crates/isocast-platform-macos",
     "crates/isocast-protocol",
     "crates/isocast-surfaces",

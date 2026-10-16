@@ -10,7 +10,7 @@ same Mac with the same scene, measured on 2026-10-13 with
   as a camera, and a short beep every second. Synthetic clips, not real
   capture, so both apps get exactly the same input.
 - Hardware HEVC at the same quality, 1-second keyframes, Rec. 709,
-  AAC 256 kb/s, crash-safe MOV (OBS: Hybrid MOV). The stream rows send
+  AAC 256 kb/s, fragmented MOV (OBS: Hybrid MOV). The stream rows send
   H.264 at 6000 kb/s to a local RTMP listener.
 - OBS ran minimized with its preview off. Each app was launched fresh for
   each run with its own settings.

@@ -1,0 +1,22 @@
+[package]
+name = "isocast-obsws"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "An obs-websocket v5 server on top of isocastd's method table, so OBS tools drive Isocast."
+
+[dependencies]
+base64 = "0.22.1"
+isocast-protocol = { path = "../isocast-protocol" }
+# obs-websocket's second encoding (obswebsocket.msgpack), which
+# obs-websocket-js uses by default under Node.
+rmp-serde = "1.3"
+serde = "1.0.229"
+serde_json = "1.0.154"
+# Already in the build through isocast-diagnostics: the protocol's
+# authentication is base64(SHA-256(...)).
+sha2 = "0.10"
+# A small synchronous WebSocket implementation (handshake and framing);
+# the daemon is thread-based, without an async runtime.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }

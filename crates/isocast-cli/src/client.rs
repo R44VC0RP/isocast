@@ -60,6 +60,37 @@ pub fn set_audio(client: &mut Client, source: &str, change: &AudioChange) -> Res
     })))
 }
 
+/// Warn on stderr when the engine that answered (`status`'s `daemon`) is
+/// older than the one this distribution bundles: left running from before
+/// an update, it would otherwise keep serving this newer isocast silently.
+/// Restarting it is left to the person (`isocast restart`, refused while
+/// it records or streams).
+pub fn warn_if_stale(daemon: Option<&isocast_protocol::api::DaemonBuild>) {
+    if let Some(stale) = isocast_client::stale_engine(daemon) {
+        let pid = stale
+            .pid
+            .map(|pid| format!(", pid {pid}"))
+            .unwrap_or_default();
+        isocast_diagnostics::diagnostic!("warn";
+            "warning: the running isocastd {}{pid} is older than this isocast (build {}); \
+             run `isocast restart` once nothing is recording or streaming to use this version's \
+             engine",
+            stale.running, stale.expected);
+    }
+}
+
+/// [`warn_if_stale`] for a command that doesn't otherwise read `status`:
+/// asks for it only in a distribution, where there is a bundled engine to
+/// compare with.
+pub fn check_engine(client: &mut Client) {
+    if isocast_client::bundled_build().is_none() {
+        return;
+    }
+    if let Ok(status) = client.call::<isocast_protocol::api::Status>(Method::Status) {
+        warn_if_stale(status.daemon.as_ref());
+    }
+}
+
 /// Stop isocastd and start it again (after permissions change, it only
 /// sees them once restarted). The daemon refuses, atomically, while it
 /// records, streams, exports or feeds the virtual camera

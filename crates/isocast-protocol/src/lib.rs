@@ -32,6 +32,7 @@ pub mod stream;
 pub mod timeline;
 mod transition;
 pub mod virtual_camera;
+pub mod websocket;
 
 pub use animation::*;
 pub use audio_filter::*;

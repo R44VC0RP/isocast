@@ -37,6 +37,7 @@ mod replay;
 mod shared_frames;
 mod timeline;
 mod virtual_camera;
+mod websocket;
 
 #[cfg(target_os = "macos")]
 fn shared_frames(options: shared_frames::Options) -> Result<ExitCode> {
@@ -514,6 +515,12 @@ enum Command {
     Replay {
         #[command(subcommand)]
         command: replay::Command,
+    },
+    /// The obs-websocket v5 server, so OBS tools (Stream Deck, Touch
+    /// Portal, Streamer.bot, scripts) drive Isocast. Off until enabled.
+    Websocket {
+        #[command(subcommand)]
+        command: websocket::Command,
     },
     /// Feed a picture to Isocast Virtual Camera (extension approval required once).
     Vcam {
@@ -1260,6 +1267,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Engine { command, json } => engine(command, json),
         Command::Vcam { command } => virtual_camera::run(command),
         Command::Replay { command } => replay::run(command),
+        Command::Websocket { command } => websocket::run(command),
         Command::Debug { command } => debug::run(command),
         Command::Stream { command } => match command {
             StreamCommand::SpeedTest {
@@ -1268,8 +1276,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 json,
             } => optimize::speed_test(target.service, target.server, seconds, json),
             StreamCommand::Start { json } => {
-                let status: StreamStatus =
-                    Client::connect_or_launch()?.call(Method::StreamStart)?;
+                let mut client = Client::connect_or_launch()?;
+                client::check_engine(&mut client);
+                let status: StreamStatus = client.call(Method::StreamStart)?;
                 print_stream(&status, json)
             }
             StreamCommand::Stop { json } => {
@@ -1881,6 +1890,7 @@ fn start(
     // The daemon may run in another folder; give it an absolute one.
     let folder = folder.map(std::path::absolute).transpose()?;
     let mut client = Client::connect_or_launch()?;
+    client::check_engine(&mut client);
     let started: Started = client.call(Method::Start(Box::new(StartParams {
         setup,
         folder,
@@ -1959,7 +1969,11 @@ fn last_summary(report: &Report) -> String {
 
 fn status(json: bool) -> Result<ExitCode> {
     let status = match Client::connect()? {
-        Some(mut client) => client.call(Method::Status)?,
+        Some(mut client) => {
+            let status: Status = client.call(Method::Status)?;
+            client::warn_if_stale(status.daemon.as_ref());
+            status
+        }
         None => Status {
             state: EngineState::Idle,
             scene: None,
@@ -3492,6 +3506,12 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
 
 /// Read a stream key: from stdin, or asked for without echo in a terminal.
 fn read_stream_key() -> Result<String> {
+    read_secret("stream key", "Stream key")
+}
+
+/// Read a secret (`what`): from stdin, or asked for (`label`) without echo
+/// in a terminal.
+fn read_secret(what: &str, label: &str) -> Result<String> {
     use std::io::{BufRead, IsTerminal, Read, Write};
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
@@ -3499,17 +3519,17 @@ fn read_stream_key() -> Result<String> {
         stdin
             .lock()
             .read_to_string(&mut key)
-            .context("could not read the stream key from stdin")?;
+            .with_context(|| format!("could not read the {what} from stdin"))?;
         return Ok(key.trim().to_string());
     }
-    eprint!("Stream key (not shown): ");
+    eprint!("{label} (not shown): ");
     std::io::stderr().flush()?;
     let _echo = EchoOff::new();
     let mut key = String::new();
     stdin
         .lock()
         .read_line(&mut key)
-        .context("could not read the stream key")?;
+        .with_context(|| format!("could not read the {what}"))?;
     isocast_diagnostics::diagnostic!();
     Ok(key.trim().to_string())
 }

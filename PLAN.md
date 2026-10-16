@@ -863,6 +863,11 @@ native app; each verified against OBS's behaviour on a test Mac.
   Matroska/WebM (sniffed by content): VP9 with alpha (OBS's stinger
   format), AV1 where the Mac decodes it, H.264/HEVC in MKV, Opus and AAC
   sound; clear errors for VP8, Vorbis and the rest.
+- [x] **G.9 obs-websocket v5 compatibility (#71).** An obs-websocket v5
+  server (crate isocast-obsws) on the method table, so Stream Deck/Touch
+  Portal OBS actions, Streamer.bot, bots and scripts drive Isocast: auth,
+  requests, batches, events, JSON and MessagePack; 77 requests mapped, the
+  rest answer 204. Off by default; `isocast websocket status|enable|disable`.
 
 ### T. Themes (Ryan, 2026-10-13)
 
@@ -3468,3 +3473,15 @@ One line per finished task, newest last.
   the activation request reaching sysextd (ad-hoc: "Missing entitlement")
   and the DMG-path refusal; offscreen vcam:approval. Real activation waits
   on the profiles.
+- 0.0.5 fixes (2026-10-15, #49 #59 #25): the app restarts an engine older
+  than its bundled one (notice; after the take while recording or
+  streaming), the CLI warns; ended streams report the live setup's key;
+  the docs no longer claim power-loss safety. Verified on isocast-m2-b with
+  two Developer ID update-test builds (1000 running and recording, 2000
+  launched; idle; reverse), and a failed-stream key_set run there.
+- G.9 (2026-10-15, #71): obs-websocket v5 server in isocastd
+  (`websocket_*` methods, CLI, MCP; settings beside the setup, password in
+  the Keychain). Verified on an isolated engine with obs-websocket-js
+  (msgpack 82/82, JSON 77/77 checks), obsws-python (9/9) and obs-cmd/obws;
+  Get responses match protocol.json; GetVersion p50 0.07 ms, SetInputMute
+  19 ms.

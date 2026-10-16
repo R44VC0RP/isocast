@@ -399,6 +399,20 @@ pub enum Method {
     /// The replay buffer's state, memory and counters. Returns
     /// [`ReplayStatus`](crate::replay::ReplayStatus).
     ReplayStatus,
+    /// The obs-websocket v5 compatibility server: whether it is on and
+    /// listening, where, whether it asks for a password, and how many
+    /// clients are connected. Returns
+    /// [`WebsocketStatus`](crate::websocket::WebsocketStatus).
+    WebsocketStatus,
+    /// Turn on the obs-websocket v5 server (OBS tools such as Stream Deck
+    /// and Touch Portal then drive Isocast), optionally changing its port,
+    /// address or password. Without a stored password one is generated
+    /// and returned once. Kept across restarts. Returns
+    /// [`WebsocketStatus`](crate::websocket::WebsocketStatus).
+    WebsocketEnable(Option<crate::websocket::WebsocketEnableParams>),
+    /// Turn off the obs-websocket server, disconnecting its clients.
+    /// Returns [`WebsocketStatus`](crate::websocket::WebsocketStatus).
+    WebsocketDisable,
 }
 
 /// Every method's name, as requests and plugin grants spell it

@@ -373,13 +373,8 @@ fn daemon_path() -> Result<PathBuf> {
     // Resolve a CLI symlink installed on PATH. A distribution must use its own
     // engine, even on a developer's Mac with an older Isocast Dev.app present.
     let exe = exe.canonicalize().unwrap_or(exe);
-    if let Some(contents) = exe.parent().and_then(Path::parent)
-        && contents.file_name().is_some_and(|name| name == "Contents")
-    {
-        let helper = contents.join("Helpers/Isocast Engine.app/Contents/MacOS/isocastd");
-        if helper.is_file() {
-            return Ok(helper);
-        }
+    if let Some(helper) = bundled_helper(&exe) {
+        return Ok(helper);
     }
     let built = exe.with_file_name("isocastd");
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
@@ -406,6 +401,86 @@ fn daemon_path() -> Result<PathBuf> {
         );
     }
     Ok(built)
+}
+
+/// The engine a distribution bundles next to `exe` (its
+/// `Contents/MacOS/…`): `Contents/Helpers/Isocast Engine.app`'s isocastd.
+fn bundled_helper(exe: &Path) -> Option<PathBuf> {
+    let contents = exe.parent().and_then(Path::parent)?;
+    if contents.file_name().is_none_or(|name| name != "Contents") {
+        return None;
+    }
+    let helper = contents.join("Helpers/Isocast Engine.app/Contents/MacOS/isocastd");
+    helper.is_file().then_some(helper)
+}
+
+/// An isocastd older than the one this client would launch: left running
+/// from before an update (Sparkle replaced the app while it ran), or
+/// another, older copy's engine on the same socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleEngine {
+    /// The running engine's version and build, as people read it
+    /// (`0.0.4 (build 1760400000)`), or that it is too old to say.
+    pub running: String,
+    /// Its pid, when it reports one.
+    pub pid: Option<u32>,
+    /// The build this client bundles (`CFBundleVersion`).
+    pub expected: String,
+}
+
+/// Whether the engine that answered `status` (its `daemon`; `None` from an
+/// engine older than that field) is older than the one this distribution
+/// bundles. Only a distribution knows: a development client (no bundled
+/// engine, or `$ISOCAST_DAEMON`) never calls an engine stale. Builds are
+/// compared as numbers (release and development builds both number them
+/// by time), so a newer engine is never called stale and two copies of
+/// Isocast don't restart each other's engines in turn.
+pub fn stale_engine(daemon: Option<&isocast_protocol::api::DaemonBuild>) -> Option<StaleEngine> {
+    older_engine(daemon, &bundled_build()?)
+}
+
+/// The build (`CFBundleVersion`) of the engine this distribution bundles
+/// and launches; `None` for a development client or `$ISOCAST_DAEMON`.
+pub fn bundled_build() -> Option<String> {
+    if std::env::var_os("ISOCAST_DAEMON").is_some() {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let exe = exe.canonicalize().unwrap_or(exe);
+    let helper = bundled_helper(&exe)?;
+    let plist = std::fs::read_to_string(helper.parent()?.parent()?.join("Info.plist")).ok()?;
+    plist_string(&plist, "CFBundleVersion")
+}
+
+/// [`stale_engine`]'s comparison, against the bundled build `expected`.
+fn older_engine(
+    daemon: Option<&isocast_protocol::api::DaemonBuild>,
+    expected: &str,
+) -> Option<StaleEngine> {
+    let own: u64 = expected.parse().ok()?;
+    let Some(daemon) = daemon else {
+        return Some(StaleEngine {
+            running: "an engine too old to report its version".into(),
+            pid: None,
+            expected: expected.into(),
+        });
+    };
+    // A build that isn't a number ("unknown") predates numbered builds.
+    let older =
+        daemon.build.parse::<u64>().is_ok_and(|b| b < own) || daemon.build.parse::<u64>().is_err();
+    older.then(|| StaleEngine {
+        running: format!("{} (build {})", daemon.version, daemon.build),
+        pid: Some(daemon.pid),
+        expected: expected.into(),
+    })
+}
+
+/// A `<string>` value from an XML property list (as `plistlib` and the
+/// build scripts write them), by key.
+fn plist_string(plist: &str, key: &str) -> Option<String> {
+    let after = &plist[plist.find(&format!("<key>{key}</key>"))? + key.len() + 11..];
+    let value = after.trim_start().strip_prefix("<string>")?;
+    Some(value[..value.find("</string>")?].trim().to_string())
 }
 
 /// The pid of the daemon holding the socket's lock ([`lock_path`]), if one

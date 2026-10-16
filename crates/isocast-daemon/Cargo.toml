@@ -21,6 +21,7 @@ base64 = "0.22.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ctrlc = { version = "3", features = ["termination"] }
 isocast-engine = { path = "../isocast-engine" }
+isocast-obsws = { path = "../isocast-obsws" }
 isocast-protocol = { path = "../isocast-protocol" }
 isocast-surfaces = { path = "../isocast-surfaces" }
 libc = "0.2"

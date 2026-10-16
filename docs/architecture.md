@@ -27,8 +27,13 @@
 - **One clock.** The program and every ISO file share one clock; each
   recording writes a `session.json` that says where every file starts, plus
   scene switches and markers.
-- **Crash-safe files.** Recordings are written in fragments, so a crash or
-  power loss leaves playable files. The engine checks disk space before it
+- **Crash-tolerant files.** Recordings are fragmented movies (a fragment
+  every 2 s), so if isocastd or the app crashes or is killed, the fragments
+  already completed stay playable: the last seconds are lost, and a file
+  killed before its first fragment may not open. Power loss and kernel
+  panics are not covered: nothing forces the files (or the manifest) to
+  the disk, so what macOS still held in memory is lost too, and how much
+  survives isn't guaranteed (#3). The engine checks disk space before it
   starts and reports every dropped frame.
 
 ## Crates

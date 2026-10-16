@@ -201,7 +201,11 @@ the separately reproduced, intermittent raw-ISO video stalls under contention.
   ProRes uses substantially more disk bandwidth.
 
 `container` is `mov` (default) or `mp4`. Video is tagged SDR Rec.709.
-Files use 2-second movie fragments so completed fragments survive a crash.
+Files use 2-second movie fragments so completed fragments survive a crash
+or kill of the recording process (the last seconds are lost; see
+[Getting started](getting-started.md) for the limits). Power loss is not
+covered: the writer doesn't force data to the disk, so it can lose more
+than the last fragment.
 H.264 and HEVC require the hardware encoder instead of falling back to a
 CPU-heavy software encoder under contention. All recording outputs use
 AVAssetWriter's asynchronous encoding path. The earlier direct HEVC ISO path
