@@ -443,14 +443,32 @@ impl App {
                 self.changed(Changed::RUNNING);
             }
             Event::Stream { stream } => {
-                let before = self.session.borrow().stream.as_ref().map(|s| s.state);
-                self.session.borrow_mut().stream = Some(stream.clone());
+                let (before, several) = {
+                    let s = self.session.borrow();
+                    let before = s
+                        .streams
+                        .iter()
+                        .find(|x| x.id == stream.id)
+                        .map(|x| x.state);
+                    (before, s.streams.len() > 1)
+                };
+                self.session.borrow_mut().set_stream(stream.clone());
+                // Each destination says so itself when there are several.
+                let what = if several {
+                    format!("the stream to {}", stream.id)
+                } else {
+                    "the stream".to_string()
+                };
                 if stream.state == StreamState::Failed && before != Some(StreamState::Failed) {
                     let why = stream
                         .last_error
                         .clone()
                         .unwrap_or_else(|| "It couldn’t stay connected.".into());
-                    self.toast(ToastKind::Error, "The stream stopped", why);
+                    self.toast(
+                        ToastKind::Error,
+                        &format!("{} stopped", capital(&what)),
+                        why,
+                    );
                 } else if stream.state == StreamState::Reconnecting
                     && before == Some(StreamState::Live)
                 {
@@ -458,7 +476,7 @@ impl App {
                         .last_error
                         .clone()
                         .unwrap_or_else(|| "The connection dropped.".into());
-                    self.toast(ToastKind::Warning, "Reconnecting the stream", why);
+                    self.toast(ToastKind::Warning, &format!("Reconnecting {what}"), why);
                 }
                 self.changed(Changed::STREAM);
             }
@@ -1055,7 +1073,7 @@ impl App {
                         s.studio = status.preview.is_some();
                     }
                     if !s.busy_stream {
-                        s.stream = status.stream.clone();
+                        s.set_streams(status.stream.clone(), status.streams.clone());
                     }
                     if !s.busy_vcam {
                         s.vcam = status.virtual_camera.clone();
@@ -1439,4 +1457,13 @@ pub fn sentence(text: &str) -> String {
         .next()
         .map(|c| c.to_uppercase().chain(chars).collect())
         .unwrap_or_default()
+}
+
+/// `text` with its first letter capitalized ("the stream" → "The stream").
+fn capital(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }

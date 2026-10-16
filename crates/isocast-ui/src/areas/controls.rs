@@ -425,12 +425,15 @@ impl Area for Controls {
             // The web app's snapshots set a stream's status the same way
             // (there is no server to stream to).
             "stream" => {
-                let stream = match sample_stream(arg) {
-                    Ok(stream) => stream,
+                let streams = match sample_streams(arg) {
+                    Ok(streams) => streams,
                     Err(error) => return Some(Err(error)),
                 };
-                self.stream_on.set(stream.is_active());
-                app.session.borrow_mut().stream = Some(stream);
+                let mut s = app.session.borrow_mut();
+                s.set_streams(None, streams);
+                self.stream_on
+                    .set(s.stream.as_ref().is_some_and(|x| x.is_active()));
+                drop(s);
                 app.changed(Changed::STREAM | Changed::STATUS);
             }
             "details" => {
@@ -987,20 +990,34 @@ impl Controls {
         area.set_stream_dropped(format!("{} ({percent:.1}%)", count(stream.dropped_frames)).into());
         area.set_stream_dropped_bad(stream.dropped_frames > 0);
         area.set_stream_kbps(kbps(stream.total_kbps).into());
-        let level = health(stream);
+        let level = streams_health(&s.streams, stream);
         area.set_stream_health(level.into());
+        let reconnecting = s
+            .streams
+            .iter()
+            .filter(|x| x.state == StreamState::Reconnecting)
+            .count();
         let word = match level {
-            "ok" | "off" => "",
+            "ok" | "off" => String::new(),
+            // One of several destinations reconnecting: the others are live.
+            _ if s.streams.len() > 1 && reconnecting > 0 && stream.state == StreamState::Live => {
+                format!("{reconnecting} reconnecting")
+            }
             _ => match stream.state {
                 StreamState::Reconnecting => "Reconnecting",
                 StreamState::Connecting => "Connecting",
                 StreamState::Failed => "Failed",
                 _ if level == "bad" => "Poor connection",
                 _ => "Unstable",
-            },
+            }
+            .to_string(),
         };
         area.set_stream_health_word(word.into());
-        area.set_stream_rows(model(stream_rows(stream)));
+        area.set_stream_rows(model(if s.streams.len() > 1 {
+            destination_rows(&s.streams)
+        } else {
+            stream_rows(stream)
+        }));
     }
 
     /// The REC and LIVE timers (the LCD's, the details'), and the status
@@ -1075,7 +1092,7 @@ impl Controls {
             1 => " · 1 ISO file".to_string(),
             n => format!(" · {n} ISO files"),
         };
-        let health = stream.map_or("off", health);
+        let health = stream.map_or("off", |x| streams_health(&s.streams, x));
         let connection = match (stream.map(|x| x.state), health) {
             (Some(StreamState::Reconnecting), _) => "reconnecting",
             (_, "bad") => "poor connection",
@@ -1104,6 +1121,20 @@ impl Controls {
             format!("Recording to {folder}{isos}")
         } else if state == Some(EngineState::Starting) {
             "Starting the recording…".to_string()
+        } else if streaming && s.streams.len() > 1 {
+            let live = s
+                .streams
+                .iter()
+                .filter(|x| x.state == StreamState::Live)
+                .count();
+            format!(
+                "Streaming to {live} of {} destinations for {} · {connection} · not recording",
+                s.streams
+                    .iter()
+                    .filter(|x| x.enabled || x.is_active())
+                    .count(),
+                clock(self.streaming.seconds())
+            )
         } else if streaming {
             format!(
                 "Streaming for {} · {connection} · not recording",
@@ -1646,6 +1677,78 @@ fn service_name(service: StreamService) -> &'static str {
         StreamService::Facebook => "Facebook",
         StreamService::Custom => "Custom server",
     }
+}
+
+/// The worst health of the destinations streaming (or trying to): one
+/// reconnecting while the others are live makes the stream as one
+/// unstable, not fine.
+fn streams_health(streams: &[StreamStatus], summary: &StreamStatus) -> &'static str {
+    if streams.len() <= 1 {
+        return health(summary);
+    }
+    let rank = |level: &str| match level {
+        "bad" => 3,
+        "warn" => 2,
+        "ok" => 1,
+        _ => 0,
+    };
+    streams
+        .iter()
+        .filter(|x| x.is_active())
+        .map(health)
+        .max_by_key(|level| rank(level))
+        .unwrap_or_else(|| health(summary))
+}
+
+/// What the LIVE details call a destination: its service, or its id when
+/// that says more (two on one service, a custom server).
+fn destination_label(stream: &StreamStatus, all: &[StreamStatus]) -> String {
+    let shared = all.iter().filter(|x| x.service == stream.service).count() > 1;
+    let plain = (stream.id == isocast_protocol::stream::MAIN_DESTINATION
+        && stream.service != StreamService::Custom)
+        || stream.id == stream.service.id();
+    if plain && !shared {
+        service_name(stream.service).into()
+    } else {
+        stream.id.clone()
+    }
+}
+
+/// The LIVE details with several destinations: one row each, its state,
+/// rate and drops.
+fn destination_rows(streams: &[StreamStatus]) -> Vec<ToastRow> {
+    streams
+        .iter()
+        .filter(|x| x.enabled || x.state != StreamState::Offline)
+        .map(|x| {
+            let dropped = if x.dropped_frames > 0 {
+                format!(" · {} dropped", count(x.dropped_frames))
+            } else {
+                String::new()
+            };
+            let (value, tone) = match x.state {
+                StreamState::Live => (
+                    format!("Live · {}{dropped}", kbps(x.total_kbps)),
+                    if health(x) == "ok" { "" } else { "warn" },
+                ),
+                StreamState::Reconnecting => (format!("Reconnecting{dropped}"), "warn"),
+                StreamState::Connecting => ("Connecting…".to_string(), "warn"),
+                StreamState::Failed => (
+                    format!(
+                        "Failed: {}",
+                        x.last_error.as_deref().unwrap_or("it couldn’t connect")
+                    ),
+                    "bad",
+                ),
+                StreamState::Offline => ("Not streaming".to_string(), ""),
+            };
+            ToastRow {
+                label: destination_label(x, streams).into(),
+                value: value.into(),
+                tone: tone.into(),
+            }
+        })
+        .collect()
 }
 
 /// The LIVE details: where to, and how it is keeping up.
@@ -2375,13 +2478,16 @@ fn toggle_stream(app: &Rc<App>) {
     }
     app.changed(Changed::BUSY | Changed::STREAM);
     let method = if on {
-        Method::StreamStop
+        Method::StreamStop(None)
     } else {
-        Method::StreamStart
+        Method::StreamStart(None)
     };
-    app.call_as::<StreamStatus>(method, move |app, result| {
+    app.call_as::<isocast_protocol::api::Streaming>(method, move |app, result| {
         match result {
-            Ok(status) => app.session.borrow_mut().stream = Some(status),
+            Ok(status) => app
+                .session
+                .borrow_mut()
+                .set_streams(Some(status.stream), status.destinations),
             Err(error) => {
                 if error.is_unknown_method() {
                     app.toast(
@@ -2443,10 +2549,50 @@ fn sample_stream(which: &str) -> anyhow::Result<StreamStatus> {
                 delete the “dev.isocast.release.stream” item, then paste the key and press Save Key."
         }),
         other => anyhow::bail!(
-            "no sample stream {other:?}; one of live, reconnecting, connecting, short, key-problem"
+            "no sample stream {other:?}; one of live, reconnecting, connecting, short, \
+             key-problem, multi"
         ),
     };
     Ok(serde_json::from_value(value)?)
+}
+
+/// Every destination's status for a snapshot: one for the samples above,
+/// three for `multi` (YouTube and a backup server live, Twitch
+/// reconnecting).
+fn sample_streams(which: &str) -> anyhow::Result<Vec<StreamStatus>> {
+    if which != "multi" {
+        return Ok(vec![sample_stream(which)?]);
+    }
+    let values = [
+        json!({
+            "id": "main", "state": "live", "service": "youtube",
+            "server": "rtmps://a.rtmps.youtube.com/live2", "key_set": true,
+            "elapsed_seconds": 754, "width": 1920, "height": 1080, "fps": 30,
+            "video_kbps": 5980, "target_video_kbps": 6000, "audio_kbps": 160,
+            "total_kbps": 6140, "frames_sent": 22620, "dropped_frames": 0,
+            "congestion": 0.04, "reconnects": 0
+        }),
+        json!({
+            "id": "twitch", "state": "reconnecting", "service": "twitch",
+            "server": "rtmps://ingest.global-contribute.live-video.net/app", "key_set": true,
+            "elapsed_seconds": 754, "width": 1920, "height": 1080, "fps": 30,
+            "target_video_kbps": 6000, "frames_sent": 21900, "dropped_frames": 720,
+            "congestion": 0.0, "reconnects": 1,
+            "last_error": "the connection dropped: Connection reset by peer"
+        }),
+        json!({
+            "id": "backup", "state": "live", "service": "custom",
+            "server": "rtmp://relay.local/live", "key_set": true,
+            "elapsed_seconds": 754, "width": 1280, "height": 720, "fps": 30,
+            "video_kbps": 2990, "target_video_kbps": 3000, "audio_kbps": 160,
+            "total_kbps": 3150, "frames_sent": 22620, "dropped_frames": 0,
+            "congestion": 0.02, "reconnects": 0
+        }),
+    ];
+    values
+        .into_iter()
+        .map(|value| Ok(serde_json::from_value(value)?))
+        .collect()
 }
 
 #[cfg(test)]

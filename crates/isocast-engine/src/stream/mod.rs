@@ -131,6 +131,41 @@ impl StreamSpec {
     }
 }
 
+/// Place the encoders of `setup`'s enabled stream destinations that don't
+/// share the main destination's (their own bitrate or size), before a
+/// recording's writers start: one starting mid-recording then joins a
+/// placed hardware session instead of stalling the program (#68, #73).
+/// The main destination's is placed by the recording itself. A failure
+/// warns; the recording goes on.
+pub(crate) fn warm_destinations<P: Platform>(
+    engine: &Engine<P>,
+    setup: &isocast_protocol::Setup,
+    stop: &AtomicBool,
+    warnings: &mut Vec<String>,
+) -> Vec<Subscription> {
+    let Some(stream) = &setup.stream else {
+        return Vec::new();
+    };
+    let main = StreamSpec::of(engine, stream.clone()).encoder();
+    let mut placed: Vec<EncoderSpec> = vec![main];
+    let mut out = Vec::new();
+    for destination in stream.resolve().into_iter().filter(|d| d.enabled) {
+        let spec = StreamSpec::of(engine, destination.settings).encoder();
+        if placed.contains(&spec) {
+            continue;
+        }
+        placed.push(spec);
+        match engine.encoders().warm(engine, &spec, stop) {
+            Ok(subscription) => out.push(subscription),
+            Err(error) => warnings.push(format!(
+                "could not prepare stream destination {}'s encoder before recording: {error:#}",
+                destination.id
+            )),
+        }
+    }
+    out
+}
+
 /// Called on the stream's threads whenever its state or bitrate warning changes.
 pub type OnChange = Box<dyn Fn(&StreamStatus) + Send + Sync>;
 
@@ -347,9 +382,11 @@ impl Drop for Stream {
 
 /// Stream `engine`'s program with `settings`, to the server under `key`:
 /// video at the canvas rate, and the mix as audio track 0. The engine
-/// keeps its canvas while the stream taps it.
+/// keeps its canvas while the stream taps it. `id` names the destination
+/// in its status (`main` for the `[stream]` section's own).
 pub fn start<P: Platform>(
     engine: &Engine<P>,
+    id: &str,
     settings: StreamSettings,
     key: String,
     on_change: OnChange,
@@ -361,6 +398,7 @@ pub fn start<P: Platform>(
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     let settings = &spec.settings;
     let mut status = StreamStatus::offline(settings, true);
+    status.id = id.to_string();
     status.state = StreamState::Connecting;
     (status.width, status.height, status.fps) = (spec.width, spec.height, spec.fps);
     status.since = Some(now());

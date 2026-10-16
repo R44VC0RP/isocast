@@ -892,6 +892,12 @@ native app; each verified against OBS's behaviour on a test Mac.
   14.2, while System Audio Recording isn't allowed, or forced with
   `ISOCAST_AUDIO_CAPTURE=screencapturekit`); `system_audio.exclude`
   leaves apps out; the `system_audio` permission; app pickers in the app.
+- [x] **G.10 Multistream (#73).** `[stream]` is the main destination,
+  `[[stream.destinations]]` more (service, server, enabled, own key, own
+  bitrate/size); one Stream each, matching formats share one encoder, a
+  different one only if #66's estimate allows. API/CLI/MCP
+  (`stream start --only`, `stream destination add|remove|set`),
+  Settings › Stream as a destination list, per-destination LIVE details.
 
 ### T. Themes (Ryan, 2026-10-13)
 
@@ -1322,6 +1328,14 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   ffprobe creation_time and AVFoundation creationDate match the file name
   on program and ISO files (APFS, exFAT, NFS; kill-matrix 6/6, ownership
   11/11); main's files had none.
+- G.10 / #73 (2026-10-15): multistream. Isolated engine recording 1080p60
+  plus 3 local ffmpeg receivers: all decode clean, no gaps, A/V within a
+  frame; killing one receiver reconnected it (1 reconnect) with 0 drops on
+  the others and the recording; mixed 6000/6000/3000 kb/s measured as set;
+  an overloaded own-format start is refused with the estimate's reason.
+  Settings/status bar checked offscreen. Evidence and m2-b numbers:
+  /Volumes/IsocastBuild/multistream/scratch/REPORT.md.
+
 - G.3b / #3 (2026-10-15, default-on integration, awaiting coordinator review):
   preserved the reviewed fragment/repair implementation while integrating
   main 505145d; new writers take the shared first-picture gate after the

@@ -1024,6 +1024,7 @@ impl Daemon {
             let params = isocast_protocol::api::StreamKeyParams {
                 key,
                 target: isocast_protocol::api::StreamKeyTarget {
+                    destination: None,
                     service: Some(stream.service),
                     server,
                 },

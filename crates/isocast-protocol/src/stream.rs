@@ -51,6 +51,77 @@ pub struct StreamSettings {
     /// Connect again after the connection drops.
     #[serde(default, skip_serializing_if = "Reconnect::is_default")]
     pub reconnect: Reconnect,
+    /// Whether `stream start` (without `only`) streams to this section's
+    /// own service, the main destination (id `main`). Its encode settings
+    /// stay the other destinations' defaults while it is off.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    /// More places to stream the same program to at once, each with its
+    /// own key, state and reconnects. A destination with the same encode
+    /// settings as another shares its encoder; one with its own
+    /// `video_bitrate_kbps` or size gets an encoder of its own if this
+    /// Mac's encoders have room.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destinations: Vec<StreamDestination>,
+}
+
+/// The id of the destination the `[stream]` section itself describes.
+pub const MAIN_DESTINATION: &str = "main";
+
+/// The most destinations a setup may have, the main one included.
+pub const MAX_DESTINATIONS: usize = 8;
+
+/// Another place to stream the program to (see
+/// [`StreamSettings::destinations`]). What it doesn't set comes from the
+/// `[stream]` section: rate control, keyframes, audio and reconnecting
+/// always do.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StreamDestination {
+    /// Its id (lowercase letters, digits and dashes; not `main`), as
+    /// `isocast stream start --only` and the key commands name it.
+    pub id: String,
+    pub service: StreamService,
+    /// The ingest server without the stream key, as for `[stream]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// Whether `stream start` (without `only`) streams here.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    /// Its own video bitrate; `[stream]`'s if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_bitrate_kbps: Option<u32>,
+    /// Its own size sent; `[stream]`'s if absent. Give both or neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+/// A destination with everything it streams with filled in (see
+/// [`StreamSettings::resolve`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Destination {
+    pub id: String,
+    pub enabled: bool,
+    /// Its settings as a single stream: `destinations` empty.
+    pub settings: StreamSettings,
+    /// The Keychain account its key is filed under.
+    pub key_account: String,
+}
+
+/// One H.264 encode of the program and the destinations it feeds (see
+/// [`StreamSettings::encodes`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamEncode {
+    pub ids: Vec<String>,
+    pub width: u32,
+    pub height: u32,
+    pub video_bitrate_kbps: u32,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 fn default_video_bitrate() -> u32 {
@@ -204,6 +275,82 @@ impl StreamService {
 }
 
 impl StreamSettings {
+    /// Every destination, the main one first, as the single streams they
+    /// are.
+    pub fn resolve(&self) -> Vec<Destination> {
+        let base = StreamSettings {
+            destinations: Vec::new(),
+            enabled: true,
+            ..self.clone()
+        };
+        let mut out = vec![Destination {
+            id: MAIN_DESTINATION.into(),
+            enabled: self.enabled,
+            key_account: base.key_account(),
+            settings: base.clone(),
+        }];
+        for extra in &self.destinations {
+            let mut settings = StreamSettings {
+                service: extra.service,
+                server: extra.server.clone(),
+                video_bitrate_kbps: extra.video_bitrate_kbps.unwrap_or(base.video_bitrate_kbps),
+                ..base.clone()
+            };
+            if extra.width.is_some() || extra.height.is_some() {
+                settings.width = extra.width;
+                settings.height = extra.height;
+            }
+            out.push(Destination {
+                id: extra.id.clone(),
+                enabled: extra.enabled,
+                key_account: destination_key_account(
+                    &extra.id,
+                    extra.service,
+                    extra.server.as_deref(),
+                ),
+                settings,
+            });
+        }
+        out
+    }
+
+    /// The H.264 encodes the enabled destinations need: those sending the
+    /// same size at the same video bitrate share one (everything else
+    /// they encode with is the main destination's), the main one's
+    /// first.
+    pub fn encodes(&self, canvas: (u32, u32)) -> Vec<StreamEncode> {
+        let mut out: Vec<StreamEncode> = Vec::new();
+        for destination in self.resolve().into_iter().filter(|d| d.enabled) {
+            let (width, height) = destination.settings.output_size(canvas);
+            let kbps = destination.settings.video_bitrate_kbps;
+            match out
+                .iter_mut()
+                .find(|e| (e.width, e.height, e.video_bitrate_kbps) == (width, height, kbps))
+            {
+                Some(encode) => encode.ids.push(destination.id),
+                None => out.push(StreamEncode {
+                    ids: vec![destination.id],
+                    width,
+                    height,
+                    video_bitrate_kbps: kbps,
+                }),
+            }
+        }
+        out
+    }
+
+    /// The destination `id`, if there is one.
+    pub fn destination(&self, id: &str) -> Option<Destination> {
+        self.resolve().into_iter().find(|d| d.id == id)
+    }
+
+    /// Every destination's id, the main one first.
+    pub fn destination_ids(&self) -> Vec<String> {
+        std::iter::once(MAIN_DESTINATION.to_string())
+            .chain(self.destinations.iter().map(|d| d.id.clone()))
+            .collect()
+    }
+
     /// The rate control in effect: the setup's, else `constant`.
     pub fn rate_control(&self) -> RateControl {
         self.rate_control.unwrap_or(RateControl::Constant)
@@ -280,11 +427,49 @@ impl StreamSettings {
     }
 
     pub(crate) fn check(&self, issues: &mut Issues) {
+        self.check_server("stream", issues);
+        check_size("stream", self.width, self.height, issues);
+        check_video_bitrate("stream", self.video_bitrate_kbps, issues);
+        self.check_rest(issues);
+        let mut ids = std::collections::HashSet::from([MAIN_DESTINATION]);
+        if self.destinations.len() + 1 > MAX_DESTINATIONS {
+            issues.add(
+                "stream.destinations",
+                format!(
+                    "{} destinations with the main one; at most {MAX_DESTINATIONS}",
+                    self.destinations.len() + 1
+                ),
+            );
+        }
+        let resolved = self.resolve();
+        for (i, (extra, destination)) in self.destinations.iter().zip(&resolved[1..]).enumerate() {
+            let path = format!("stream.destinations[{i}]");
+            if extra.id == MAIN_DESTINATION {
+                issues.add(
+                    format!("{path}.id"),
+                    "\"main\" is the [stream] section's own destination; pick another id",
+                );
+            } else {
+                issues.check_id(format!("{path}.id"), &extra.id, &mut ids);
+            }
+            destination.settings.check_server(&path, issues);
+            if extra.width.is_some() || extra.height.is_some() {
+                check_size(&path, extra.width, extra.height, issues);
+            }
+            if let Some(kbps) = extra.video_bitrate_kbps {
+                check_video_bitrate(&path, kbps, issues);
+            }
+        }
+    }
+
+    /// The server's problems, under `{prefix}.server`.
+    fn check_server(&self, prefix: &str, issues: &mut Issues) {
+        let field = format!("{prefix}.server");
         match self.server() {
             Ok(server) => {
                 if self.service.requires_tls() && !server.secure {
                     issues.add(
-                        "stream.server",
+                        &field,
                         format!(
                             "{} only accepts RTMPS; use an rtmps:// address",
                             self.service.id()
@@ -302,7 +487,7 @@ impl StreamSettings {
                         ..server.clone()
                     };
                     issues.add(
-                        "stream.server",
+                        &field,
                         format!(
                             "this looks like it has the stream key after /{app}/; give the server \
                              alone ({alone}) and keep the key in the Keychain with `isocast \
@@ -312,7 +497,7 @@ impl StreamSettings {
                 }
                 if server.app.is_empty() {
                     issues.add(
-                        "stream.server",
+                        &field,
                         "give the application after the host, like rtmp://host/app (the stream \
                          key is set separately with `isocast stream key set`)",
                     );
@@ -320,39 +505,13 @@ impl StreamSettings {
             }
             Err(err) => {
                 let message = err.strip_prefix("stream.server: ").unwrap_or(&err);
-                issues.add("stream.server", message);
+                issues.add(&field, message);
             }
         }
-        match (self.width, self.height) {
-            (None, None) => {}
-            (Some(width), Some(height)) => {
-                for (field, value) in [("width", width), ("height", height)] {
-                    // VideoToolbox's H.264 encoder takes at most 4096 a side.
-                    if !(16..=4096).contains(&value) || value % 2 != 0 {
-                        issues.add(
-                            format!("stream.{field}"),
-                            format!(
-                                "{value} must be an even number from 16 to 4096 (the H.264 \
-                                 encoder's largest side)"
-                            ),
-                        );
-                    }
-                }
-            }
-            _ => issues.add(
-                "stream.width",
-                "give width and height together, or neither to send the canvas (at most 1080p)",
-            ),
-        }
-        if !(200..=50_000).contains(&self.video_bitrate_kbps) {
-            issues.add(
-                "stream.video_bitrate_kbps",
-                format!(
-                    "{} is outside 200 to 50000 kb/s; services suggest 3000 to 9000 for 1080p",
-                    self.video_bitrate_kbps
-                ),
-            );
-        }
+    }
+
+    /// Keyframes, audio and reconnecting: the main destination's alone.
+    fn check_rest(&self, issues: &mut Issues) {
         if !(1..=10).contains(&self.keyframe_interval_seconds) {
             issues.add(
                 "stream.keyframe_interval_seconds",
@@ -398,6 +557,53 @@ pub fn key_account(service: StreamService, server: Option<&str>) -> String {
         (StreamService::Custom, Some(Ok(server))) => server.to_string(),
         (StreamService::Custom, _) => server.unwrap_or_default().trim().to_string(),
         (service, _) => service.id().to_string(),
+    }
+}
+
+/// The Keychain account for destination `id`'s key: the service's (or
+/// custom server's) account with the id, so two Twitch channels keep two
+/// keys. The main destination keeps the plain account (see
+/// [`key_account`]), as it did before there were more.
+pub fn destination_key_account(id: &str, service: StreamService, server: Option<&str>) -> String {
+    let base = key_account(service, server);
+    if id == MAIN_DESTINATION {
+        base
+    } else {
+        format!("{base} [{id}]")
+    }
+}
+
+/// A size sent, given as `{prefix}.width` and `.height`.
+fn check_size(prefix: &str, width: Option<u32>, height: Option<u32>, issues: &mut Issues) {
+    match (width, height) {
+        (None, None) => {}
+        (Some(width), Some(height)) => {
+            for (field, value) in [("width", width), ("height", height)] {
+                // VideoToolbox's H.264 encoder takes at most 4096 a side.
+                if !(16..=4096).contains(&value) || value % 2 != 0 {
+                    issues.add(
+                        format!("{prefix}.{field}"),
+                        format!(
+                            "{value} must be an even number from 16 to 4096 (the H.264 \
+                             encoder's largest side)"
+                        ),
+                    );
+                }
+            }
+        }
+        _ => issues.add(
+            format!("{prefix}.width"),
+            "give width and height together, or neither to send the canvas (at most 1080p)",
+        ),
+    }
+}
+
+fn check_video_bitrate(prefix: &str, kbps: u32, issues: &mut Issues) {
+    if !(200..=50_000).contains(&kbps) {
+        issues.add(
+            format!("{prefix}.video_bitrate_kbps"),
+            format!("{kbps} is outside 200 to 50000 kb/s; services suggest 3000 to 9000 for 1080p"),
+        );
     }
 }
 
@@ -513,6 +719,13 @@ pub enum StreamState {
 /// A stream's state and health. Never holds the stream key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct StreamStatus {
+    /// Which destination: `main` for the `[stream]` section's own, else
+    /// the id of one of its `destinations`.
+    #[serde(default = "main_id")]
+    pub id: String,
+    /// Whether `stream start` (without `only`) streams to it.
+    #[serde(default = "yes")]
+    pub enabled: bool,
     pub state: StreamState,
     pub service: StreamService,
     /// The server, without the stream key (empty if the setup has none).
@@ -581,10 +794,25 @@ pub struct StreamStatus {
     pub key_problem: Option<String>,
 }
 
+fn main_id() -> String {
+    MAIN_DESTINATION.into()
+}
+
 impl StreamStatus {
-    /// An offline stream of `settings`.
+    /// An offline stream of `destination`.
+    pub fn offline_destination(destination: &Destination, key_set: bool) -> Self {
+        Self {
+            id: destination.id.clone(),
+            enabled: destination.enabled,
+            ..Self::offline(&destination.settings, key_set)
+        }
+    }
+
+    /// An offline stream of `settings` (the main destination).
     pub fn offline(settings: &StreamSettings, key_set: bool) -> Self {
         Self {
+            id: main_id(),
+            enabled: settings.enabled,
             state: StreamState::Offline,
             service: settings.service,
             server: settings
@@ -664,6 +892,66 @@ mod tests {
     }
 
     #[test]
+    fn destinations_inherit_main_and_share_encodes() {
+        let stream: StreamSettings = serde_json::from_value(serde_json::json!({
+            "service": "twitch",
+            "video_bitrate_kbps": 6000,
+            "destinations": [
+                { "id": "yt", "service": "youtube" },
+                { "id": "backup", "service": "custom", "server": "rtmp://host/live",
+                  "video_bitrate_kbps": 3000, "width": 1280, "height": 720 },
+                { "id": "off", "service": "twitch", "enabled": false }
+            ]
+        }))
+        .unwrap();
+        let all = stream.resolve();
+        assert_eq!(stream.destination_ids(), ["main", "yt", "backup", "off"]);
+        // The main destination keeps the account it always had.
+        assert_eq!(all[0].key_account, "twitch");
+        assert_eq!(all[1].key_account, "youtube [yt]");
+        assert_eq!(all[2].key_account, "rtmp://host/live [backup]");
+        assert_eq!(all[1].settings.video_bitrate_kbps, 6000);
+        assert_eq!(all[2].settings.output_size((1920, 1080)), (1280, 720));
+        let encodes = stream.encodes((1920, 1080));
+        assert_eq!(encodes.len(), 2);
+        assert_eq!(encodes[0].ids, ["main", "yt"]);
+        assert_eq!(encodes[1].ids, ["backup"]);
+        let mut issues = Issues::default();
+        stream.check(&mut issues);
+        assert!(issues.0.is_empty(), "{:?}", issues.0);
+        // A plain [stream] round-trips without the new fields.
+        let plain: StreamSettings =
+            serde_json::from_value(serde_json::json!({ "service": "twitch" })).unwrap();
+        let value = serde_json::to_value(&plain).unwrap();
+        assert!(value.get("enabled").is_none() && value.get("destinations").is_none());
+        // Ids are checked, and each destination's server.
+        let bad: StreamSettings = serde_json::from_value(serde_json::json!({
+            "service": "twitch",
+            "destinations": [
+                { "id": "main", "service": "youtube" },
+                { "id": "Two", "service": "kick" },
+                { "id": "a", "service": "custom", "width": 1280 }
+            ]
+        }))
+        .unwrap();
+        let mut issues = Issues::default();
+        bad.check(&mut issues);
+        let paths: Vec<&str> = issues.0.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "stream.destinations[0].id",
+                "stream.destinations[1].id",
+                "stream.destinations[1].server",
+                "stream.destinations[2].server",
+                "stream.destinations[2].width"
+            ],
+            "{:?}",
+            issues.0
+        );
+    }
+
+    #[test]
     fn presets_fill_the_server_and_file_keys_by_service() {
         let settings = |service, server: Option<&str>| StreamSettings {
             service,
@@ -675,6 +963,8 @@ mod tests {
             width: None,
             height: None,
             reconnect: Reconnect::default(),
+            enabled: true,
+            destinations: Vec::new(),
         };
         let youtube = settings(StreamService::Youtube, None);
         // Constant unless asked, as the services' guidelines ask.

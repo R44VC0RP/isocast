@@ -1350,10 +1350,11 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
             if start == active && request_type != "ToggleStream" {
                 return Err(output_state(active));
             }
+            // Every enabled destination, as Start Streaming in the app.
             ctx.act(if start {
-                Method::StreamStart
+                Method::StreamStart(None)
             } else {
-                Method::StreamStop
+                Method::StreamStop(None)
             })?;
             Ok(if request_type == "ToggleStream" {
                 json!({ "outputActive": start })

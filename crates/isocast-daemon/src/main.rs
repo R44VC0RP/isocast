@@ -44,7 +44,7 @@ use isocast_protocol::init::{self, Initialized};
 use isocast_protocol::manifest::SessionManifest;
 use isocast_protocol::obs::{self, Imported};
 use isocast_protocol::stream::{
-    STREAM_SERVICES, StreamService, StreamSettings, StreamState, StreamStatus, key_account,
+    MAIN_DESTINATION, STREAM_SERVICES, StreamService, StreamSettings, key_account,
 };
 use isocast_protocol::{Canvas, Issue, PROGRAM, Setup, SourceKind, Transition};
 use isocast_surfaces::{Exporter, Surface, Token};
@@ -96,6 +96,7 @@ mod projects;
 mod recovery;
 mod replay;
 mod store;
+mod streams;
 mod timeline;
 mod virtual_camera;
 mod websocket;
@@ -921,27 +922,19 @@ struct State {
     /// Where the live setup is kept between runs: the current scene
     /// collection and profile.
     file: store::Store,
-    /// The stream, running or ended (kept for its final status).
-    stream: Option<Stream>,
-    /// `stream_start` calls getting the engine ready for a stream that
-    /// isn't in `stream` yet; the engine mustn't idle out under them.
+    /// Each stream destination's stream, running or ended (kept for its
+    /// final status), by destination id, the main one first.
+    streams: Vec<(String, streams::Output)>,
+    /// `stream_start` calls getting the engine ready for streams that
+    /// aren't in `streams` yet; the engine mustn't idle out under them.
     streams_starting: u32,
-    /// Stream frames dropped already warned about.
-    stream_drops_reported: u64,
-    stream_audio_drops_reported: u64,
-    stream_bitrate_warned: bool,
+    /// Stream losses already warned about, per destination.
+    stream_reported: streams::ReportedMap,
     /// Temporary push-key overrides, never persisted.
     hotkey_holds: HashMap<String, (String, bool)>,
 }
 
 impl State {
-    /// A stream is running (or reconnecting), so the engine is needed.
-    fn streaming(&self) -> bool {
-        self.stream
-            .as_ref()
-            .is_some_and(|stream| stream.status().is_active())
-    }
-
     /// Scene ids of the live setup.
     fn scene_ids(&self) -> Vec<String> {
         self.setup
@@ -1031,8 +1024,14 @@ trait LiveEngine: Send + Sync {
     fn resolved(&self) -> Option<Resolved>;
     /// Why the canvas can't change to `canvas` now, if it can't.
     fn canvas_refusal(&self, canvas: &Canvas) -> Option<String>;
-    /// Stream the program with `settings` under `key`.
-    fn stream(&self, settings: StreamSettings, key: String, on_change: OnChange) -> Result<Stream>;
+    /// Stream the program with `settings` under `key`, as destination `id`.
+    fn stream(
+        &self,
+        id: &str,
+        settings: StreamSettings,
+        key: String,
+        on_change: OnChange,
+    ) -> Result<Stream>;
     fn virtual_camera(
         &self,
         on_change: isocast_engine::record::OnCameraChange,
@@ -1107,8 +1106,14 @@ impl<P: Platform<SharedSurface = Surface>> LiveEngine for LiveEngineOf<P> {
         LiveEngineOf::canvas_refusal(self, canvas)
     }
 
-    fn stream(&self, settings: StreamSettings, key: String, on_change: OnChange) -> Result<Stream> {
-        isocast_engine::stream::start(self, settings, key, on_change)
+    fn stream(
+        &self,
+        id: &str,
+        settings: StreamSettings,
+        key: String,
+        on_change: OnChange,
+    ) -> Result<Stream> {
+        isocast_engine::stream::start(self, id, settings, key, on_change)
     }
 
     fn stop(&self) {
@@ -1200,7 +1205,7 @@ impl Daemon {
                 );
             }
         }
-        let _ = self.stream_stop();
+        let _ = self.stream_stop(Default::default());
         self.stop_export("isocastd was stopped (restarted or quit) during the export");
         self.stop_engine();
         self.flush_live_save();
@@ -1277,7 +1282,7 @@ impl Daemon {
         let _starting = matches!(
             request.method,
             Method::Start(_)
-                | Method::StreamStart
+                | Method::StreamStart(_)
                 | Method::TimelineExport(_)
                 | Method::VirtualCameraStart
                 | Method::ReplayStart
@@ -1379,8 +1384,21 @@ impl Daemon {
                 message: "watch must be the first request on its connection".into(),
             }),
             Method::Start(params) => self.start(*params).and_then(to_json),
-            Method::StreamStart => self.stream_start().and_then(to_json),
-            Method::StreamStop => self.stream_stop().and_then(to_json),
+            Method::StreamStart(params) => self
+                .stream_start(params.unwrap_or_default())
+                .and_then(to_json),
+            Method::StreamStop(params) => self
+                .stream_stop(params.unwrap_or_default())
+                .and_then(to_json),
+            Method::StreamDestinationAdd(params) => {
+                self.stream_destination_add(*params).and_then(to_json)
+            }
+            Method::StreamDestinationRemove { id } => {
+                self.stream_destination_remove(id).and_then(to_json)
+            }
+            Method::StreamDestinationSet(params) => {
+                self.stream_destination_set(*params).and_then(to_json)
+            }
             Method::VirtualCameraStart => self.virtual_camera_start().and_then(to_json),
             Method::VirtualCameraStop => to_json(self.virtual_camera_stop()),
             Method::VirtualCameraStatus => to_json(self.virtual_camera_status()),
@@ -2403,6 +2421,7 @@ impl Daemon {
             collection,
             profile,
             stream: stream_status(&state),
+            streams: streams::stream_statuses(&state),
             cpu_percent: self.cpu.lock().unwrap().read(),
             data: Some(self.data.status()),
             diagnostics: Some(isocast_diagnostics::health()),
@@ -2432,136 +2451,6 @@ impl Daemon {
         drop(state);
         status.recording_free_bytes = folder.as_deref().and_then(free_bytes);
         status
-    }
-
-    /// Start streaming the live engine's program to the live setup's
-    /// `[stream]` service, starting the engine if needed.
-    fn stream_start(self: &Arc<Self>) -> Result<StreamStatus, RpcError> {
-        let wrong = |message: String| RpcError {
-            code: RpcError::WRONG_STATE,
-            message,
-        };
-        let mut state = self.state.lock().unwrap();
-        if state.streaming() {
-            return Err(wrong(
-                "already streaming; stop it first (`isocast stream stop`, or MCP's stop_stream)"
-                    .to_string(),
-            ));
-        }
-        let settings = stream_settings(&state).ok_or_else(|| {
-            wrong(
-                "the live setup has no stream; add one (for example the patch \
-                 {\"stream\": {\"service\": \"twitch\"}} with `isocast apply --patch` or MCP's \
-                 apply_change), then set the key (`isocast stream key set`, or MCP's \
-                 set_stream_key)"
-                    .to_string(),
-            )
-        })?;
-        settings
-            .server()
-            .map_err(|err| failed(anyhow::anyhow!("{err}")))?;
-        let account = settings.key_account();
-        let key = match std::env::var(KEY_ENV) {
-            Ok(key) if !key.trim().is_empty() => key.trim().to_string(),
-            _ => match stream_key(&account) {
-                Ok(Some(key)) => key,
-                Ok(None) => {
-                    return Err(failed(anyhow::anyhow!(
-                        "no stream key is set for {}; run `isocast stream key set` (it reads the \
-                         key from stdin), or MCP's set_stream_key",
-                        key_label(settings.service, &account)
-                    )));
-                }
-                Err(err) => return Err(failed(err)),
-            },
-        };
-        isocast_diagnostics::redact::remember_secret(key_service(), &account, &key);
-        // Starting the engine happens outside the lock; until the stream is
-        // in the state, this keeps the engine from idling out.
-        state.streams_starting += 1;
-        drop(state);
-        let engine = self.ensure_engine();
-        let mut state = self.state.lock().unwrap();
-        state.streams_starting -= 1;
-        let engine = engine?;
-        if state.streaming() {
-            return Err(wrong(
-                "already streaming; stop it first (`isocast stream stop`, or MCP's stop_stream)"
-                    .to_string(),
-            ));
-        }
-        // The previous stream, finished, makes way.
-        state.stream = None;
-        state.stream_drops_reported = 0;
-        state.stream_audio_drops_reported = 0;
-        state.stream_bitrate_warned = false;
-        let daemon = Arc::downgrade(self);
-        let on_change: OnChange = Box::new(move |status| {
-            if let Some(daemon) = daemon.upgrade() {
-                daemon.publish(Event::Stream {
-                    stream: status.clone(),
-                });
-            }
-        });
-        let stream = engine.stream(settings, key, on_change).map_err(failed)?;
-        // In the state while it connects, so the engine stays up for it,
-        // a second start is refused and `stream stop` can cancel it.
-        state.stream = Some(stream);
-        drop(state);
-        let deadline = std::time::Instant::now() + STREAM_START_TIMEOUT;
-        let status = loop {
-            let Some(status) = self
-                .state
-                .lock()
-                .unwrap()
-                .stream
-                .as_ref()
-                .map(Stream::status)
-            else {
-                return Err(failed(anyhow::anyhow!(
-                    "the stream was stopped before it went live"
-                )));
-            };
-            if status.state != StreamState::Connecting || std::time::Instant::now() >= deadline {
-                break status;
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
-        match status.state {
-            StreamState::Failed | StreamState::Offline => Err(failed(anyhow::anyhow!(
-                "{}",
-                status
-                    .last_error
-                    .unwrap_or_else(|| "the stream stopped".into())
-            ))),
-            _ => Ok(status),
-        }
-    }
-    fn stream_stop(&self) -> Result<StreamStatus, RpcError> {
-        let mut state = self.state.lock().unwrap();
-        let status = state.stream.as_ref().map(Stream::status);
-        if !status.as_ref().is_some_and(StreamStatus::is_active) {
-            // A stream that failed stays in the status until the next
-            // start; say so rather than only "not streaming".
-            let message = match status {
-                Some(StreamStatus {
-                    state: StreamState::Failed,
-                    last_error,
-                    ..
-                }) => format!(
-                    "not streaming: the stream already failed ({})",
-                    last_error.as_deref().unwrap_or("no reason given")
-                ),
-                _ => "not streaming".into(),
-            };
-            return Err(RpcError {
-                code: RpcError::WRONG_STATE,
-                message,
-            });
-        }
-        let stream = state.stream.take().expect("checked");
-        drop(state);
-        Ok(stream.stop())
     }
 
     fn stream_key_set(&self, params: StreamKeyParams) -> Result<StreamKey, RpcError> {
@@ -2605,6 +2494,57 @@ impl Daemon {
     /// the live setup's `[stream]`.
     fn key_target(&self, target: StreamKeyTarget) -> Result<(StreamService, String), RpcError> {
         let live = stream_settings(&self.state.lock().unwrap());
+        if let Some(id) = &target.destination {
+            // A destination not applied yet (Settings' draft) names its
+            // service (and custom server) itself.
+            if let Some(service) = target.service {
+                if id != MAIN_DESTINATION
+                    && (id.is_empty()
+                        || !id
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+                {
+                    return Err(failed(anyhow::anyhow!(
+                        "destination: {id:?} must use lowercase letters, digits and dashes"
+                    )));
+                }
+                if service == StreamService::Custom {
+                    let Some(server) = &target.server else {
+                        return Err(failed(anyhow::anyhow!(
+                            "a custom service's key belongs to its server; give the server \
+                             (like rtmp://host/app)"
+                        )));
+                    };
+                    isocast_protocol::stream::ServerUrl::parse(server)
+                        .map_err(|err| failed(anyhow::anyhow!("server: {err}")))?;
+                }
+                let server = target
+                    .server
+                    .as_deref()
+                    .filter(|_| service == StreamService::Custom);
+                return Ok((
+                    service,
+                    isocast_protocol::stream::destination_key_account(id, service, server),
+                ));
+            }
+            if target.server.is_some() {
+                return Err(failed(anyhow::anyhow!(
+                    "server: give it with the destination's service, or leave both out"
+                )));
+            }
+            let Some(settings) = &live else {
+                return Err(failed(anyhow::anyhow!(
+                    "destination: the live setup has no stream destinations"
+                )));
+            };
+            let Some(destination) = settings.destination(id) else {
+                return Err(failed(anyhow::anyhow!(
+                    "destination: no destination {id:?}; destinations: {}",
+                    settings.destination_ids().join(", ")
+                )));
+            };
+            return Ok((destination.settings.service, destination.key_account));
+        }
         let service = match (target.service, &live) {
             (Some(service), _) => service,
             (None, Some(settings)) => settings.service,
@@ -2641,52 +2581,6 @@ impl Daemon {
                 .map_err(|err| failed(anyhow::anyhow!("server: {err}")))?;
         }
         Ok((service, key_account(service, server.as_deref())))
-    }
-
-    /// Warn about stream-only losses and sustained bitrate overshoot (once
-    /// per episode), checked every second even when encoding/sending stalls.
-    fn warn_stream_drops(&self) {
-        let mut state = self.state.lock().unwrap();
-        let Some(status) = state.stream.as_ref().map(Stream::status) else {
-            return;
-        };
-        // While reconnecting, the stream's state events say why frames go.
-        if status.state != StreamState::Live {
-            state.stream_drops_reported = status.dropped_frames;
-            state.stream_audio_drops_reported = status.audio_dropouts;
-            state.stream_bitrate_warned = false;
-            return;
-        }
-        let mut warnings = Vec::new();
-        if status.dropped_frames > state.stream_drops_reported {
-            let new = status.dropped_frames - state.stream_drops_reported;
-            state.stream_drops_reported = status.dropped_frames;
-            warnings.push(format!(
-                "the stream dropped {new} frame(s) ({} so far, congestion {:.0}%); the \
-                     program and recordings are unaffected",
-                status.dropped_frames,
-                status.congestion * 100.0
-            ));
-        }
-        if status.audio_dropouts > state.stream_audio_drops_reported {
-            let new = status.audio_dropouts - state.stream_audio_drops_reported;
-            state.stream_audio_drops_reported = status.audio_dropouts;
-            warnings.push(format!(
-                "the stream dropped {new} audio chunk(s) ({} so far); \
-                 the stream encoder or connection could not keep up",
-                status.audio_dropouts,
-            ));
-        }
-        if let Some(warning) = &status.bitrate_warning
-            && !state.stream_bitrate_warned
-        {
-            warnings.push(warning.clone());
-        }
-        state.stream_bitrate_warned = status.bitrate_warning.is_some();
-        drop(state);
-        for message in warnings {
-            self.publish(Event::Warning { message });
-        }
     }
 
     fn start(self: &Arc<Self>, params: StartParams) -> Result<Started, RpcError> {
@@ -3124,12 +3018,15 @@ impl Daemon {
             Ok(state) => {
                 // The running stream's own counts (no Keychain look-up
                 // for the setup's key, as `stream_status` makes).
+                // Every destination's, added up (#73).
                 let now = state
-                    .stream
-                    .as_ref()
-                    .map(|stream| stream.status())
+                    .streams
+                    .iter()
+                    .map(|(_, output)| output.status())
                     .filter(|s| s.is_active())
-                    .map_or((0, 0), |s| (s.dropped_frames, s.frames_sent));
+                    .fold((0, 0), |(d, f), s| {
+                        (d + s.dropped_frames, f + s.frames_sent)
+                    });
                 watch.stream_now = now;
                 now
             }
@@ -3293,9 +3190,7 @@ impl Daemon {
                         let why = message.clone();
                         thread::spawn(move || {
                             daemon.contain("failed program output", || {
-                                if let Some(stream) = &daemon.state.lock().unwrap().stream {
-                                    stream.fail(why);
-                                }
+                                daemon.fail_streams(&why);
                             })
                         });
                     }
@@ -3668,49 +3563,21 @@ fn stream_settings(state: &State) -> Option<StreamSettings> {
     state.setup.as_ref().and_then(|setup| setup.stream.clone())
 }
 
-/// What `status` says about streaming: the stream's own status while it
-/// sends or tries to; else the live setup's stream, offline. A stream that
-/// ended keeps its last state, error and counts, but the service, server
-/// and stored key (`key_set`, `key_problem`) are the live setup's: the
-/// key that a new stream would use, not the ended stream's (#59).
-fn stream_status(state: &State) -> Option<StreamStatus> {
-    let ended = state.stream.as_ref().map(|stream| stream.status());
-    if ended.as_ref().is_some_and(|status| status.is_active()) {
-        return ended;
-    }
-    let Some(settings) = stream_settings(state) else {
-        return ended;
-    };
-    let from_env = std::env::var(KEY_ENV).is_ok_and(|key| !key.trim().is_empty());
-    let account = settings.key_account();
-    let key_set = from_env || has_stream_key(&account).unwrap_or(false);
-    let offline = StreamStatus::offline(&settings, key_set);
-    let mut status = match ended {
-        Some(ended) => StreamStatus {
-            service: offline.service,
-            server: offline.server,
-            key_set,
-            key_problem: None,
-            ..ended
-        },
-        None => offline,
-    };
-    if key_set && !from_env {
-        status.key_problem = key_problem(&account);
-    }
-    Some(status)
-}
+use streams::stream_status;
 
-/// What `key_problem` last found: the account, when, and the problem.
-static KEY_CHECKED: Mutex<Option<(String, std::time::Instant, Option<String>)>> = Mutex::new(None);
+/// When `key_problem` last asked about an account, and what it found.
+type KeyCheck = (std::time::Instant, Option<String>);
+
+/// What `key_problem` last found, per account.
+static KEY_CHECKED: Mutex<Option<HashMap<String, KeyCheck>>> = Mutex::new(None);
 
 /// Whether the stored key for `account` can be read without a prompt (a
 /// key stored by another build can't): why not, if not. Asked again at
 /// most every 10 s per account, and at once after a key is set or cleared.
 fn key_problem(account: &str) -> Option<String> {
     let mut checked = KEY_CHECKED.lock().unwrap();
-    if let Some((which, at, problem)) = checked.as_ref()
-        && which == account
+    let checked = checked.get_or_insert_with(HashMap::new);
+    if let Some((at, problem)) = checked.get(account)
         && at.elapsed() < Duration::from_secs(10)
     {
         return problem.clone();
@@ -3724,11 +3591,10 @@ fn key_problem(account: &str) -> Option<String> {
         )),
         _ => None,
     };
-    *checked = Some((
+    checked.insert(
         account.to_string(),
-        std::time::Instant::now(),
-        problem.clone(),
-    ));
+        (std::time::Instant::now(), problem.clone()),
+    );
     problem
 }
 
@@ -3925,20 +3791,29 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
     }
     // A stream key pasted into stream.server is refused (a problem says
     // so), and the plan mustn't show it either.
-    if let Some(key) = setup
+    let pasted: Vec<String> = setup
         .as_ref()
         .and_then(|setup| setup.stream.as_ref())
-        .and_then(StreamSettings::pasted_key)
-    {
+        .map(|stream| {
+            stream
+                .resolve()
+                .iter()
+                .filter_map(|d| d.settings.pasted_key())
+                .collect()
+        })
+        .unwrap_or_default();
+    for key in pasted {
         for change in &mut changes {
             for value in [&mut change.from, &mut change.to].into_iter().flatten() {
                 redact_value(value, &key);
             }
         }
-        if let Some(stream) = setup.as_mut().and_then(|setup| setup.stream.as_mut())
-            && let Some(server) = &mut stream.server
-        {
-            *server = isocast_engine::stream::redact(server, &key);
+        if let Some(stream) = setup.as_mut().and_then(|setup| setup.stream.as_mut()) {
+            let servers = std::iter::once(&mut stream.server)
+                .chain(stream.destinations.iter_mut().map(|d| &mut d.server));
+            for server in servers.flatten() {
+                *server = isocast_engine::stream::redact(server, &key);
+            }
         }
     }
     Ok(Plan {

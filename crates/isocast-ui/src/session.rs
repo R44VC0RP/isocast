@@ -171,7 +171,11 @@ pub struct Session {
     redo: Vec<Option<Value>>,
     last_undo: Option<(String, Instant)>,
     pub status: Option<Status>,
+    /// The stream as one: the only destination's status, or every
+    /// destination's together (see [`summarize`]).
     pub stream: Option<StreamStatus>,
+    /// Each stream destination's own status, the main one first (#73).
+    pub streams: Vec<StreamStatus>,
     pub devices: Option<Devices>,
     /// The live engine's sources by id.
     pub running: HashMap<String, SourceStatus>,
@@ -334,5 +338,83 @@ impl Session {
         self.undo.push(self.shown.clone());
         self.last_undo = None;
         Some(next)
+    }
+}
+
+impl Session {
+    /// Take every destination's status (from `status`, or a start or
+    /// stop), and the stream as one from them.
+    pub fn set_streams(&mut self, main: Option<StreamStatus>, streams: Vec<StreamStatus>) {
+        self.streams = if streams.is_empty() {
+            main.into_iter().collect()
+        } else {
+            streams
+        };
+        self.stream = summarize(&self.streams);
+    }
+
+    /// One destination's status changed (a `stream` event).
+    pub fn set_stream(&mut self, status: StreamStatus) {
+        match self.streams.iter_mut().find(|s| s.id == status.id) {
+            Some(slot) => *slot = status,
+            None => self.streams.push(status),
+        }
+        self.stream = summarize(&self.streams);
+    }
+}
+
+/// The stream as one, for the Controls dock, the LCD and the status bar:
+/// the only destination as it is; for several, live when any is (else
+/// reconnecting, connecting, failed, offline), with their rates, frames
+/// and drops added up and the main one's service and server. Its key is
+/// set only when every enabled destination has one.
+pub fn summarize(streams: &[StreamStatus]) -> Option<StreamStatus> {
+    use isocast_protocol::stream::StreamState;
+    match streams {
+        [] => None,
+        [only] => Some(only.clone()),
+        all => {
+            let mut out = all[0].clone();
+            let rank = |state: StreamState| match state {
+                StreamState::Live => 4,
+                StreamState::Reconnecting => 3,
+                StreamState::Connecting => 2,
+                StreamState::Failed => 1,
+                StreamState::Offline => 0,
+            };
+            out.state = all
+                .iter()
+                .map(|s| s.state)
+                .max_by_key(|state| rank(*state))
+                .unwrap_or(StreamState::Offline);
+            let active: Vec<&StreamStatus> = all.iter().filter(|s| s.is_active()).collect();
+            let counted: Vec<&StreamStatus> = if active.is_empty() {
+                all.iter().collect()
+            } else {
+                active
+            };
+            out.elapsed_seconds = counted
+                .iter()
+                .map(|s| s.elapsed_seconds)
+                .fold(0.0, f64::max);
+            out.video_kbps = counted.iter().map(|s| s.video_kbps).sum();
+            out.audio_kbps = counted.iter().map(|s| s.audio_kbps).sum();
+            out.total_kbps = counted.iter().map(|s| s.total_kbps).sum();
+            out.frames_sent = counted.iter().map(|s| s.frames_sent).sum();
+            out.dropped_frames = counted.iter().map(|s| s.dropped_frames).sum();
+            out.audio_dropouts = counted.iter().map(|s| s.audio_dropouts).sum();
+            out.reconnects = counted.iter().map(|s| s.reconnects).sum();
+            out.bytes_sent = counted.iter().map(|s| s.bytes_sent).sum();
+            out.congestion = counted.iter().map(|s| s.congestion).fold(0.0, f64::max);
+            out.key_set = all.iter().filter(|s| s.enabled).all(|s| s.key_set);
+            out.key_problem = all.iter().find_map(|s| s.key_problem.clone());
+            out.bitrate_warning = counted.iter().find_map(|s| s.bitrate_warning.clone());
+            out.last_error = all
+                .iter()
+                .filter(|s| s.state == StreamState::Failed || s.state == StreamState::Reconnecting)
+                .find_map(|s| s.last_error.clone())
+                .or(out.last_error);
+            Some(out)
+        }
     }
 }

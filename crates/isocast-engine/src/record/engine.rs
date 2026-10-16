@@ -2659,6 +2659,11 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     } else {
         None
     };
+    // Stream destinations with their own bitrate or size have encoders of
+    // their own (#73): place those too, so one starting mid-recording
+    // joins a placed session rather than stalling the writers.
+    let _warm_destinations =
+        crate::stream::warm_destinations(engine, setup, &options.stop, &mut warnings);
     if options.stop.load(Ordering::SeqCst) {
         bail!("the recording was stopped before it started, so nothing was recorded");
     }

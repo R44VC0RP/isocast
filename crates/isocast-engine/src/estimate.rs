@@ -256,14 +256,41 @@ fn judge(chip: &Chip, setup: &Setup, formats: Formats, streaming: bool) -> Judge
         );
     }
     if streaming {
-        let (w, h) = stream_size(setup);
-        push(
-            "stream".into(),
-            OutputKind::Stream,
-            (w, h, fps),
-            Codec::H264,
-            false,
-        );
+        // One encode per distinct format among the enabled destinations
+        // (#73): the main one's is `stream`, others `stream:<id>`.
+        let canvas = (setup.canvas.width, setup.canvas.height);
+        let encodes = setup
+            .stream
+            .as_ref()
+            .map(|s| s.encodes(canvas))
+            .unwrap_or_default();
+        if encodes.len() <= 1 {
+            let (w, h) = encodes
+                .first()
+                .map_or_else(|| stream_size(setup), |e| (e.width, e.height));
+            push(
+                "stream".into(),
+                OutputKind::Stream,
+                (w, h, fps),
+                Codec::H264,
+                false,
+            );
+        } else {
+            for (i, encode) in encodes.iter().enumerate() {
+                let name = if i == 0 {
+                    "stream".to_string()
+                } else {
+                    format!("stream:{}", encode.ids[0])
+                };
+                push(
+                    name,
+                    OutputKind::Stream,
+                    (encode.width, encode.height, fps),
+                    Codec::H264,
+                    false,
+                );
+            }
+        }
     }
     if recording.iso.enabled {
         for id in &recording.iso.sources {

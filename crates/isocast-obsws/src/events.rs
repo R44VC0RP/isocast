@@ -265,6 +265,10 @@ impl Tracker {
                 },
                 None,
             )],
+            // OBS has one stream: the main destination's (#73).
+            Event::Stream { stream } if stream.id != isocast_protocol::stream::MAIN_DESTINATION => {
+                Vec::new()
+            }
             Event::Stream { stream } => {
                 let before = std::mem::replace(&mut self.stream, stream.state);
                 if before == stream.state {

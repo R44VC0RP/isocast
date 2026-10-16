@@ -634,13 +634,13 @@ impl Daemon {
                     }
                 }
                 "recording.split" => Method::Split,
-                "streaming.start" => Method::StreamStart,
-                "streaming.stop" => Method::StreamStop,
+                "streaming.start" => Method::StreamStart(None),
+                "streaming.stop" => Method::StreamStop(None),
                 "streaming.toggle" => {
                     if self.state.lock().unwrap().streaming() {
-                        Method::StreamStop
+                        Method::StreamStop(None)
                     } else {
-                        Method::StreamStart
+                        Method::StreamStart(None)
                     }
                 }
                 "replay.start" => Method::ReplayStart,

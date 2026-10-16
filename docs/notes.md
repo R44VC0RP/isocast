@@ -1589,6 +1589,29 @@ each section. Delete entries that stop being true.
   file names use, so every file of a take shares it; it is written into the
   fragmented `moov` at creation and read back from there by `recover`, so a
   repaired file keeps it. AVFoundation reads it as `creationDate`.
+- 2026-10-15 (#73): **Multistream = one Stream per destination on the
+  shared program encoder.** `[stream]` stays the main destination (id
+  `main`, Keychain account unchanged, no migration); `[[stream.destinations]]`
+  inherit everything but service, server, enabled, bitrate and size. Each
+  destination is a full `Stream` (queue, reconnects, counters), so failures
+  stay per destination; equal `EncoderSpec`s join one hub (`encoder.rs`
+  already fanned packets out to sinks), so matching destinations are one
+  encode. Keyframe requests (a reconnect) hit every sink of the hub; queues
+  that aren't starting ignore `start_at`, so the live ones only get an
+  extra keyframe. A different format is a second encode, admitted by
+  `estimate_capacity` with the recording counted only while one runs; no
+  estimate (non-macOS) admits. Added destinations' key account is
+  `<service or server> [id]`. `status.stream` / obs-websocket stay the
+  main destination; `status.streams` has all; StreamStart/Stop return
+  `Streaming` (main status flattened, so single-destination clients parse
+  it as before, plus `destinations`). Start refuses as a whole on a missing
+  key/server (nothing half-starts); a connection or encoder failing at start
+  fails only that destination. Settings shows the per-destination state in
+  the status bar's LIVE details; a dot per destination on the dock button
+  was tried and dropped (can't name them). #68's record-first warm encoder
+  is still the main destination's spec only: an own-format destination
+  isn't pre-placed (follow-up).
+
 - 2026-10-15 (#3, G.3b 0.0.5): **default on, 500 ms, keep every frame.**
   Ryan chose a temporary `ISOCAST_CRASH_SAFE=0` legacy fallback for one
   release, not a new setup field; automatic next-launch repair suffices,
@@ -5053,6 +5076,14 @@ each section. Delete entries that stop being true.
   inputs and outputs, but a daemon started over SSH there can't play
   (afplay: AudioQueueStart 89) or write files (-12903), so audio checks
   need the M2s.
+- 2026-10-15 (#73): **check a received FLV's A/V sync from the audio's
+  first packet time.** e2e's `pcm()` numbers decoded samples from 0, but an
+  FLV has no edit list and its audio starts a few ms (up to ~50 ms on an
+  M2) after the first picture, so beep/flash "offsets" of 0.7–49 ms that
+  vary per run are that start, not drift. Adding the first audio packet's
+  pts gives <= 0.4 ms on every destination, before and after a reconnect.
+  (The lane's scratch ms.py does this; e2e's stream scenario doesn't run
+  `sync_check` on the FLV, so e2e isn't affected.)
 
 - 2026-10-15 (#59, fixes-005): `stream stop` drops `state.stream`, but a
   stream that *failed* stays in the status until the next start, and its

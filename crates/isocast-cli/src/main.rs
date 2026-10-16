@@ -12,13 +12,14 @@ use isocast_protocol::api::{
     Applied, ApplyParams, Capacity, CapacityEstimate, CapacityParams, CheckStatus, DoctorParams,
     EngineInfo, EngineState, Event, EventKind, Frame, FrameParams, FramesParams, ImportObsParams,
     Live, Marked, Method, Plan, Refreshed, RpcError, Snapshot, SnapshotParams, SourceRun,
-    StartParams, Started, Status, StreamKey, StreamKeyParams, StreamKeyTarget, Switched,
-    TuneParams, Tuning, WatchParams,
+    StartParams, Started, Status, StreamDestinationParams, StreamDestinations, StreamKey,
+    StreamKeyParams, StreamKeyTarget, StreamStartParams, Streaming, Switched, TuneParams, Tuning,
+    WatchParams,
 };
 use isocast_protocol::change::{Change, Difference, DifferenceOp};
 use isocast_protocol::devices::Devices;
 use isocast_protocol::obs::Imported;
-use isocast_protocol::stream::{StreamService, StreamState, StreamStatus};
+use isocast_protocol::stream::{MAIN_DESTINATION, StreamService, StreamState, StreamStatus};
 use isocast_protocol::{QUICK_SOURCES, Setup, Transition};
 
 use crate::client::Client;
@@ -657,23 +658,35 @@ enum Command {
 #[derive(Subcommand)]
 enum StreamCommand {
     /// Go live: stream the program (the canvas and the program mix) to the
-    /// live setup's [stream] service, starting the live engine if needed.
-    /// Recordings start and stop without touching it. Returns once live,
-    /// or says why not.
+    /// live setup's [stream] destinations (every enabled one), starting the
+    /// live engine if needed. Recordings start and stop without touching
+    /// it. Returns once each is live or failed, or says why not.
     Start {
+        /// Only this destination (main, or an id from `stream status`);
+        /// repeat for several. A turned-off destination starts too.
+        #[arg(long = "only", value_name = "ID")]
+        only: Vec<String>,
         #[arg(long)]
         json: bool,
     },
-    /// Stop streaming.
+    /// Stop streaming (to every destination, or --only those).
     Stop {
+        /// Only this destination; repeat for several. The others keep going.
+        #[arg(long = "only", value_name = "ID")]
+        only: Vec<String>,
         #[arg(long)]
         json: bool,
     },
-    /// Show the stream's state, bitrates, dropped frames, congestion and
-    /// reconnects, and whether a stream key is set.
+    /// Show each destination's state, bitrates, dropped frames, congestion
+    /// and reconnects, and whether its stream key is set.
     Status {
         #[arg(long)]
         json: bool,
+    },
+    /// Add, remove or change the places the program streams to.
+    Destination {
+        #[command(subcommand)]
+        command: DestinationCommand,
     },
     /// Keep or remove the stream key (in the Keychain, never in a setup).
     Key {
@@ -694,6 +707,68 @@ enum StreamCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum DestinationCommand {
+    /// Add a destination (the first makes the setup's [stream] section,
+    /// id main). Set its key next: `isocast stream key set --destination ID`.
+    Add {
+        /// custom, twitch, youtube, kick or facebook.
+        #[arg(value_parser = parse_service)]
+        service: StreamService,
+        /// Its id; made from the service if absent (youtube, youtube-2).
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        fields: DestinationFields,
+        /// Add it turned off (`stream start` skips it unless --only names it).
+        #[arg(long)]
+        disabled: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a destination (not main; not while it streams).
+    Remove {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change a destination (main is the [stream] section itself).
+    Set {
+        id: String,
+        #[arg(long, value_parser = parse_service)]
+        service: Option<StreamService>,
+        #[command(flatten)]
+        fields: DestinationFields,
+        /// Turn it on or off for `stream start`.
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Reset a field: server, video_bitrate_kbps or size (a destination
+        /// then uses main's; main the defaults). Repeat for several.
+        #[arg(long, value_name = "FIELD")]
+        clear: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Args)]
+struct DestinationFields {
+    /// The ingest server without the key (rtmp://host/app or rtmps://…);
+    /// required for custom and kick.
+    #[arg(long)]
+    server: Option<String>,
+    /// Its own video bitrate in kb/s (else main's). A bitrate or size of
+    /// its own needs an encoder of its own.
+    #[arg(long)]
+    video_bitrate_kbps: Option<u32>,
+    /// Its own size sent (with --height; else main's).
+    #[arg(long, requires = "height")]
+    width: Option<u32>,
+    /// Its own height sent (with --width).
+    #[arg(long, requires = "width")]
+    height: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -720,6 +795,10 @@ enum StreamKeyCommand {
 /// Which service's key; the live setup's [stream] if absent.
 #[derive(clap::Args)]
 struct KeyTargetArgs {
+    /// A destination of the live setup (main, or an id from `stream
+    /// status`): its own key.
+    #[arg(long)]
+    destination: Option<String>,
     /// custom, twitch, youtube, kick or facebook.
     #[arg(long, value_parser = parse_service)]
     service: Option<StreamService>,
@@ -731,6 +810,7 @@ struct KeyTargetArgs {
 impl KeyTargetArgs {
     fn target(self) -> StreamKeyTarget {
         StreamKeyTarget {
+            destination: self.destination,
             service: self.service,
             server: self.server,
         }
@@ -1346,18 +1426,20 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 seconds,
                 json,
             } => optimize::speed_test(target.service, target.server, seconds, json),
-            StreamCommand::Start { json } => {
+            StreamCommand::Start { only, json } => {
                 let mut client = Client::connect_or_launch()?;
                 client::check_engine(&mut client);
-                let status: StreamStatus = client.call(Method::StreamStart)?;
-                print_stream(&status, json)
+                let started: Streaming =
+                    client.call(Method::StreamStart(Some(StreamStartParams { only })))?;
+                print_streaming(&started, json)
             }
-            StreamCommand::Stop { json } => {
+            StreamCommand::Stop { only, json } => {
                 let Some(mut client) = Client::connect()? else {
                     bail!("not streaming: isocastd isn't running");
                 };
-                let status: StreamStatus = client.call(Method::StreamStop)?;
-                print_stream(&status, json)
+                let stopped: Streaming =
+                    client.call(Method::StreamStop(Some(StreamStartParams { only })))?;
+                print_streaming(&stopped, json)
             }
             StreamCommand::Status { json } => {
                 let Some(mut client) = Client::connect()? else {
@@ -1368,20 +1450,73 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     }
                     return Ok(ExitCode::SUCCESS);
                 };
-                let status: Option<StreamStatus> = client.call::<Status>(Method::Status)?.stream;
-                match status {
-                    Some(status) => print_stream(&status, json),
+                let status = client.call::<Status>(Method::Status)?;
+                match status.stream {
+                    Some(stream) => print_streaming(
+                        &Streaming {
+                            stream,
+                            destinations: status.streams,
+                        },
+                        json,
+                    ),
                     None if json => {
                         println!("null");
                         Ok(ExitCode::SUCCESS)
                     }
                     None => {
                         println!(
-                            "Not set up for streaming: the live setup has no [stream] section"
+                            "Not set up for streaming: the live setup has no [stream] section \
+                             (add one: `isocast stream destination add SERVICE`)"
                         );
                         Ok(ExitCode::SUCCESS)
                     }
                 }
+            }
+            StreamCommand::Destination { command } => {
+                let (method, json) = match command {
+                    DestinationCommand::Add {
+                        service,
+                        id,
+                        fields,
+                        disabled,
+                        json,
+                    } => (
+                        Method::StreamDestinationAdd(Box::new(StreamDestinationParams {
+                            id,
+                            service: Some(service),
+                            enabled: disabled.then_some(false),
+                            ..fields.params()
+                        })),
+                        json,
+                    ),
+                    DestinationCommand::Remove { id, json } => {
+                        (Method::StreamDestinationRemove { id }, json)
+                    }
+                    DestinationCommand::Set {
+                        id,
+                        service,
+                        fields,
+                        enabled,
+                        clear,
+                        json,
+                    } => (
+                        Method::StreamDestinationSet(Box::new(StreamDestinationParams {
+                            id: Some(id),
+                            service,
+                            enabled,
+                            clear,
+                            ..fields.params()
+                        })),
+                        json,
+                    ),
+                };
+                let changed: StreamDestinations = Client::connect_or_launch()?.call(method)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&changed)?);
+                } else {
+                    print_destinations(&changed.destinations);
+                }
+                Ok(ExitCode::SUCCESS)
             }
             StreamCommand::Key { command } => match command {
                 StreamKeyCommand::Set { target, json } => {
@@ -2058,6 +2193,7 @@ fn status(json: bool) -> Result<ExitCode> {
             collection: None,
             profile: None,
             stream: None,
+            streams: Vec::new(),
             cpu_percent: None,
             data: None,
             diagnostics: None,
@@ -2215,8 +2351,12 @@ fn status(json: bool) -> Result<ExitCode> {
             }
         }
     }
-    if let Some(stream) = &status.stream {
-        print_stream_lines(stream);
+    if status.streams.is_empty() {
+        if let Some(stream) = &status.stream {
+            print_stream_lines(stream);
+        }
+    } else {
+        print_destinations(&status.streams);
     }
     if status.state != EngineState::Idle {
         for file in &status.files {
@@ -3664,16 +3804,45 @@ fn print_stream_key(stored: &StreamKey, json: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn print_stream(status: &StreamStatus, json: bool) -> Result<ExitCode> {
-    if json {
-        println!("{}", serde_json::to_string_pretty(status)?);
-    } else {
-        print_stream_lines(status);
+impl DestinationFields {
+    fn params(self) -> StreamDestinationParams {
+        StreamDestinationParams {
+            server: self.server,
+            video_bitrate_kbps: self.video_bitrate_kbps,
+            width: self.width,
+            height: self.height,
+            ..Default::default()
+        }
     }
-    Ok(match status.state {
-        StreamState::Failed => ExitCode::FAILURE,
-        _ => ExitCode::SUCCESS,
+}
+
+/// What `stream start`, `stop` and `status` print: every destination (or
+/// the one there is). Fails when the destination they touched failed.
+fn print_streaming(streaming: &Streaming, json: bool) -> Result<ExitCode> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(streaming)?);
+    } else if streaming.destinations.is_empty() {
+        print_stream_lines(&streaming.stream);
+    } else {
+        print_destinations(&streaming.destinations);
+    }
+    // Any destination failed (a start or stop names each one's state).
+    let failed = streaming.stream.state == StreamState::Failed
+        || streaming
+            .destinations
+            .iter()
+            .any(|d| d.state == StreamState::Failed);
+    Ok(if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     })
+}
+
+fn print_destinations(destinations: &[StreamStatus]) {
+    for stream in destinations {
+        print_stream_lines(stream);
+    }
 }
 
 fn print_stream_lines(stream: &StreamStatus) {
@@ -3689,13 +3858,27 @@ fn print_stream_lines(stream: &StreamStatus) {
     } else {
         stream.server.clone()
     };
+    let main = stream.id == MAIN_DESTINATION;
     println!(
-        "Stream {state}: {} ({server}){}",
+        "Stream{} {state}: {} ({server}){}{}",
+        if main {
+            String::new()
+        } else {
+            format!(" to {}", stream.id)
+        },
         stream.service.id(),
-        if stream.key_set {
+        if stream.enabled || stream.is_active() {
             ""
         } else {
-            "; no stream key set (`isocast stream key set`)"
+            "; turned off"
+        },
+        match (stream.key_set, main) {
+            (true, _) => String::new(),
+            (false, true) => "; no stream key set (`isocast stream key set`)".into(),
+            (false, false) => format!(
+                "; no stream key set (`isocast stream key set --destination {}`)",
+                stream.id
+            ),
         }
     );
     let ended = matches!(stream.state, StreamState::Offline | StreamState::Failed);

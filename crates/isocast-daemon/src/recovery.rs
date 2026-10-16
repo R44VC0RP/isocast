@@ -65,11 +65,13 @@ impl Daemon {
                     s.stop.store(true, Ordering::SeqCst);
                     s.id
                 });
-                (id, state.stream.take(), state.engine.clone())
+                (id, std::mem::take(&mut state.streams), state.engine.clone())
             };
-            // Stop the stream as well, while its sources still run.
-            if let Some(stream) = stream {
-                let _ = isocast_diagnostics::contain("emergency stream stop", || stream.stop());
+            // Stop the streams as well, while their sources still run.
+            for (_, output) in stream {
+                if let crate::streams::Output::Running(stream) = output {
+                    let _ = isocast_diagnostics::contain("emergency stream stop", || stream.stop());
+                }
             }
             let deadline = Instant::now() + Duration::from_secs(9);
             let report = loop {

@@ -200,7 +200,7 @@ fn stop_and_quit(app: &Rc<App>) {
         });
     }
     if now.streaming {
-        app.call(Method::StreamStop, move |app, result| {
+        app.call(Method::StreamStop(None), move |app, result| {
             if let Err(error) = result {
                 app.failed("Couldn’t stop the stream, so Isocast stays open", &error);
                 failed.set(true);

@@ -7,8 +7,9 @@ use anyhow::Result;
 use isocast_protocol::api::{
     Applied, ApplyParams, CapacityEstimate, CapacityParams, Doctor, DoctorParams, EngineInfo,
     Frame, FrameParams, ImportObsParams, Live, Marked, Method, Plan, Refreshed, Report, Snapshot,
-    SnapshotParams, StartParams, Started, Status, StreamKey, StreamKeyParams, StreamKeyTarget,
-    Switched, TuneParams, Tuning,
+    SnapshotParams, StartParams, Started, Status, StreamDestinationParams, StreamDestinations,
+    StreamKey, StreamKeyParams, StreamKeyTarget, StreamStartParams, Streaming, Switched,
+    TuneParams, Tuning,
 };
 use isocast_protocol::change::Change;
 use isocast_protocol::data::{DataGetParams, DataRevision, DataSetParams, DataValues};
@@ -28,7 +29,7 @@ use isocast_protocol::plugin::{PluginAddParams, PluginChange, PluginTarget, Plug
 use isocast_protocol::project::{
     ListProjectsParams, ProjectRenamed, Projects, RenameProjectParams,
 };
-use isocast_protocol::stream::{StreamService, StreamStatus};
+use isocast_protocol::stream::StreamService;
 use isocast_protocol::timeline::{
     ExportStarted, RetakeParams, Retaken, TimelineClosed, TimelineExportParams, TimelineInfo,
     TimelineList, TimelineMoveParams, TimelineNewParams, TimelineOpenParams, TimelineRemoveParams,
@@ -345,6 +346,9 @@ struct StreamKeyToolParams {
     /// Keychain and is never shown again; prefer `isocast stream key set`
     /// in a terminal, which keeps it out of this conversation.
     key: String,
+    /// A destination ("main", or an id from get_status's streams): its
+    /// own key (with service and server only for one not applied yet).
+    destination: Option<String>,
     /// The service it is for; the live setup's [stream] service if absent.
     service: Option<StreamService>,
     /// For "custom": the server it belongs to (rtmp://host/app).
@@ -352,7 +356,16 @@ struct StreamKeyToolParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DestinationIdParams {
+    /// The destination's id, from get_status's streams.
+    id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct StreamKeyTargetParams {
+    /// A destination ("main", or an id from get_status's streams).
+    destination: Option<String>,
     /// The service; the live setup's [stream] service if absent.
     service: Option<StreamService>,
     /// For "custom": the server the key belongs to.
@@ -836,11 +849,14 @@ impl Isocast {
 
     #[tool(
         description = "Go live: stream the program (canvas and program mix) as H.264/AAC over \
-                       RTMP or RTMPS to the live setup's [stream] service (twitch, youtube, \
-                       kick, facebook or a custom server), starting the live engine if needed; \
-                       recordings start and stop independently. Needs a stream key set. Returns \
-                       the stream's status once live, or an error saying what to do. get_status \
-                       shows the stream's health.",
+                       RTMP or RTMPS to the live setup's [stream] destinations (twitch, youtube, \
+                       kick, facebook or custom servers; every enabled one, or `only` those \
+                       ids), starting the live engine if needed; destinations already live are \
+                       left alone, and recordings start and stop independently. Destinations \
+                       with the same bitrate and size share one encoder. Each needs its stream \
+                       key set. Returns the first destination's status plus every \
+                       destination's (`destinations`) once each is live or failed, or an error \
+                       saying what to do. get_status shows each one's health (`streams`).",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -848,8 +864,72 @@ impl Isocast {
             open_world_hint = true
         )
     )]
-    async fn start_stream(&self) -> Result<Json<StreamStatus>, String> {
-        self.call(Method::StreamStart).await
+    async fn start_stream(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<StreamStartParams>>,
+    ) -> Result<Json<Streaming>, String> {
+        self.call(Method::StreamStart(Some(params))).await
+    }
+
+    #[tool(
+        description = "Add a stream destination to the live setup: a service (twitch, youtube, \
+                       kick, facebook, custom), its server (custom and kick need one; never with \
+                       the key in it), optional id (made from the service), enabled, and its \
+                       own video_bitrate_kbps or width/height (else the main destination's; a \
+                       different bitrate or size needs an encoder of its own, refused at start \
+                       when this Mac's encoders lack room). The first one becomes the [stream] \
+                       section itself (id main). Then set_stream_key with its destination id. \
+                       Returns every destination's status.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn stream_destination_add(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<StreamDestinationParams>>,
+    ) -> Result<Json<StreamDestinations>, String> {
+        self.call(Method::StreamDestinationAdd(Box::new(params)))
+            .await
+    }
+
+    #[tool(
+        description = "Change a stream destination by id (main is the [stream] section): \
+                       service, server, enabled, video_bitrate_kbps, width/height, or `clear` \
+                       some of server, video_bitrate_kbps, size. Takes effect at its next \
+                       start. Returns every destination's status.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn stream_destination_set(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<StreamDestinationParams>>,
+    ) -> Result<Json<StreamDestinations>, String> {
+        self.call(Method::StreamDestinationSet(Box::new(params)))
+            .await
+    }
+
+    #[tool(
+        description = "Remove a stream destination by id (not main: turn it off with \
+                       stream_destination_set instead; not while it streams). Its stored key \
+                       stays in the Keychain until clear_stream_key. Returns every \
+                       destination's status.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    async fn stream_destination_remove(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<DestinationIdParams>>,
+    ) -> Result<Json<StreamDestinations>, String> {
+        self.call(Method::StreamDestinationRemove { id: params.id })
+            .await
     }
 
     #[tool(
@@ -953,16 +1033,20 @@ impl Isocast {
     }
 
     #[tool(
-        description = "Stop streaming. Returns the stream's final status: frames sent and \
-                       dropped, reconnects and the last error.",
+        description = "Stop streaming (to every destination, or `only` those ids; the others \
+                       keep going). Returns the final status of the first stopped, plus every \
+                       destination's: frames sent and dropped, reconnects and the last error.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = false
         )
     )]
-    async fn stop_stream(&self) -> Result<Json<StreamStatus>, String> {
-        self.call(Method::StreamStop).await
+    async fn stop_stream(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<StreamStartParams>>,
+    ) -> Result<Json<Streaming>, String> {
+        self.call(Method::StreamStop(Some(params))).await
     }
 
     #[tool(
@@ -1050,6 +1134,7 @@ impl Isocast {
         self.call(Method::StreamKeySet(Box::new(StreamKeyParams {
             key: params.key,
             target: StreamKeyTarget {
+                destination: params.destination,
                 service: params.service,
                 server: params.server,
             },
@@ -1071,6 +1156,7 @@ impl Isocast {
         Parameters(Strict(params)): Parameters<Strict<StreamKeyTargetParams>>,
     ) -> Result<Json<StreamKey>, String> {
         self.call(Method::StreamKeyClear(Box::new(StreamKeyTarget {
+            destination: params.destination,
             service: params.service,
             server: params.server,
         })))

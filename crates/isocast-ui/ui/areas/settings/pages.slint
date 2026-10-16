@@ -182,8 +182,10 @@ component ChooseService inherits VerticalLayout {
     spacing: 10px;
     alignment: start;
     if SettingsArea.needs-server == "": SetGroup {
-        title: "Service";
-        hint: "The program goes out live: the canvas and the program mix, as H.264 and AAC over RTMP or RTMPS.";
+        title: SettingsArea.adding-destination ? "Add Destination" : "Service";
+        hint: SettingsArea.adding-destination
+            ? "The program goes to this service too, at the same time, with its own key."
+            : "The program goes out live: the canvas and the program mix, as H.264 and AAC over RTMP or RTMPS.";
         for service[i] in SettingsArea.services: GroupRow {
             label: service.label;
             description: service.hint;
@@ -210,6 +212,13 @@ component ChooseService inherits VerticalLayout {
                     clicked => { SettingsArea.choose-service(service.id); }
                 }
             }
+        }
+    }
+    if SettingsArea.needs-server == "" && SettingsArea.adding-destination: HorizontalLayout {
+        alignment: end;
+        Button {
+            text: "Back";
+            clicked => { SettingsArea.server-back(); }
         }
     }
     if SettingsArea.needs-server != "": VerticalLayout {
@@ -314,51 +323,170 @@ export component StreamPage inherits SetPage {
         title: "The saved stream key can’t be used";
         message: SettingsArea.key-problem;
     }
-    if !SettingsArea.has-stream: ChooseService { }
-    if SettingsArea.has-stream: SetGroup {
-        title: "Service";
-        hint: SettingsArea.server-hint + " " + (SettingsArea.key-problem != "" ? "Once the old Keychain item is deleted, paste the key from your service’s dashboard and press Save Key." : SettingsArea.key-saved ? "The key is saved in the Keychain; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.");
-        GroupRow {
-            label: "Service";
-            place: RowPlace.first;
-            Centred {
-                Dropdown {
-                    width: Theme.field-choice;
-                    on-control: true;
-                    options: [
-                        { value: "twitch", label: "Twitch" },
-                        { value: "youtube", label: "YouTube" },
-                        { value: "kick", label: "Kick" },
-                        { value: "facebook", label: "Facebook" },
-                        { value: "custom", label: "Custom server" },
-                    ];
-                    value <=> SettingsArea.service;
-                    label: "Service";
-                    selected(value) => { SettingsArea.set-text("service", value); }
+    if !SettingsArea.has-stream || SettingsArea.adding-destination: ChooseService { }
+    if SettingsArea.has-stream && !SettingsArea.adding-destination: SetGroup {
+        title: "Destinations";
+        hint: "Start Streaming sends the program to every destination that’s on, each with its own key and connection; one failing never stops the others. Those with the same bitrate and size share one encoder. " + SettingsArea.server-hint + " " + (SettingsArea.key-problem != "" ? "Once the old Keychain item is deleted, paste the key from your service’s dashboard and press Save Key." : SettingsArea.key-saved ? "The key is saved in the Keychain; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.");
+        for d[i] in SettingsArea.destinations: VerticalLayout {
+            spacing: 1px;
+            GroupRow {
+                label: d.label;
+                place: i == 0 ? RowPlace.first : RowPlace.middle;
+                clickable: true;
+                lead-icon: d.id == SettingsArea.destination ? Icons.chevron-down : Icons.chevron-right;
+                expandable: true;
+                expanded: d.id == SettingsArea.destination;
+                description: d.status;
+                trailing-pad: Theme.space-2;
+                clicked => { SettingsArea.select-destination(d.id); }
+                Text {
+                    text: d.status;
+                    color: d.status == "Live" ? Theme.onair-text
+                        : d.status == "Failed" ? Theme.danger-text
+                        : d.status == "No key yet" && d.enabled ? Theme.warning
+                        : Theme.text-3;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+                Centred {
+                    Switch {
+                        on: d.enabled;
+                        label: "Stream to " + d.label;
+                        tooltip: d.enabled ? "Start Streaming streams here" : "Start Streaming skips it";
+                        toggled(on) => { SettingsArea.set-destination-enabled(d.id, on); }
+                    }
+                }
+            }
+            if d.id == SettingsArea.destination: GroupRow {
+                label: "Service";
+                indent: Theme.space-4;
+                Centred {
+                    Dropdown {
+                        width: Theme.field-choice;
+                        on-control: true;
+                        options: [
+                            { value: "twitch", label: "Twitch" },
+                            { value: "youtube", label: "YouTube" },
+                            { value: "kick", label: "Kick" },
+                            { value: "facebook", label: "Facebook" },
+                            { value: "custom", label: "Custom server" },
+                        ];
+                        value <=> SettingsArea.service;
+                        label: "Service";
+                        selected(value) => { SettingsArea.set-text("service", value); }
+                    }
+                }
+            }
+            if d.id == SettingsArea.destination: GroupRow {
+                label: "Server";
+                indent: Theme.space-4;
+                Centred {
+                    TextField {
+                        width: Theme.field-path - Theme.space-4;
+                        small: true;
+                        mono: true;
+                        text: SettingsArea.server;
+                        placeholder: SettingsArea.server-placeholder;
+                        label: "Server";
+                        committed(text) => { SettingsArea.set-text("server", text); }
+                    }
+                }
+            }
+            if d.id == SettingsArea.destination: StreamKeyRow {
+                indent: Theme.space-4;
+            }
+            if d.id == SettingsArea.destination && d.id != "main": GroupRow {
+                label: "Video Bitrate";
+                indent: Theme.space-4;
+                if SettingsArea.destination-own-bitrate: Centred {
+                    Stepper {
+                        value: SettingsArea.destination-bitrate;
+                        minimum: 200;
+                        maximum: 50000;
+                        step: 100;
+                        unit: "kb/s";
+                        label: "Its own video bitrate";
+                        changed(value) => { SettingsArea.set-number("destination_bitrate", value); }
+                    }
+                }
+                Centred {
+                    Segmented {
+                        small: true;
+                        options: [{ value: "main", label: "Same as main" }, { value: "own", label: "Own" }];
+                        value: SettingsArea.destination-own-bitrate ? "own" : "main";
+                        label: "Video Bitrate";
+                        selected(value) => { SettingsArea.set-text("destination_bitrate", value); }
+                    }
+                }
+            }
+            if d.id == SettingsArea.destination && d.id != "main": GroupRow {
+                label: "Output Resolution";
+                indent: Theme.space-4;
+                if SettingsArea.destination-own-size: Centred {
+                    NumberField {
+                        width: Theme.field-xs;
+                        small: true;
+                        prefix: "W";
+                        value: SettingsArea.destination-width;
+                        minimum: 16;
+                        maximum: 4096;
+                        step: 2;
+                        label: "Its own output width";
+                        changed(value) => { SettingsArea.set-number("destination_width", value); }
+                    }
+                }
+                if SettingsArea.destination-own-size: Centred {
+                    NumberField {
+                        width: Theme.field-xs;
+                        small: true;
+                        prefix: "H";
+                        value: SettingsArea.destination-height;
+                        minimum: 16;
+                        maximum: 4096;
+                        step: 2;
+                        label: "Its own output height";
+                        changed(value) => { SettingsArea.set-number("destination_height", value); }
+                    }
+                }
+                Centred {
+                    Segmented {
+                        small: true;
+                        options: [{ value: "main", label: "Same as main" }, { value: "custom", label: "Custom" }];
+                        value: SettingsArea.destination-own-size ? "custom" : "main";
+                        label: "Output Resolution";
+                        selected(value) => { SettingsArea.set-text("destination_size", value); }
+                    }
+                }
+            }
+            if d.id == SettingsArea.destination && d.id != "main": GroupRow {
+                label: SettingsArea.destination-live ? "Stop it to remove it" : "";
+                indent: Theme.space-4;
+                Centred {
+                    Button {
+                        text: "Remove Destination";
+                        size: ControlSize.small;
+                        on-control: true;
+                        variant: ButtonVariant.danger;
+                        enabled: !SettingsArea.destination-live;
+                        clicked => { SettingsArea.remove-destination(); }
+                    }
                 }
             }
         }
         GroupRow {
-            label: "Server";
-            Centred {
-                TextField {
-                    width: Theme.field-path;
-                    small: true;
-                    mono: true;
-                    text: SettingsArea.server;
-                    placeholder: SettingsArea.server-placeholder;
-                    label: "Server";
-                    committed(text) => { SettingsArea.set-text("server", text); }
-                }
-            }
-        }
-        StreamKeyRow {
+            label: "Add Destination";
             place: RowPlace.last;
+            clickable: true;
+            lead-icon: Icons.plus;
+            description: "Stream to another service at the same time";
+            clicked => { SettingsArea.add-destination(); }
         }
     }
-    if SettingsArea.has-stream: SetGroup {
+    if SettingsArea.has-stream && !SettingsArea.adding-destination: SetGroup {
         title: "Output";
-        hint: (SettingsArea.stream-custom-size ? "" : "The canvas, scaled down to fit 1080p if it is larger. ") + "Twitch suggests up to 6000 kb/s and YouTube 4500–9000 for 1080p; both ask for Constant (CBR) and a keyframe every 2 s.";
+        hint: (SettingsArea.destinations.length > 1 ? "Every destination uses these unless it has its own bitrate or size. " : "") + (SettingsArea.stream-custom-size ? "" : "The canvas, scaled down to fit 1080p if it is larger. ") + "Twitch suggests up to 6000 kb/s and YouTube 4500–9000 for 1080p; both ask for Constant (CBR) and a keyframe every 2 s.";
         GroupRow {
             label: "Video Bitrate";
             place: RowPlace.first;
@@ -460,7 +588,7 @@ export component StreamPage inherits SetPage {
             }
         }
     }
-    if SettingsArea.has-stream: HorizontalLayout {
+    if SettingsArea.has-stream && !SettingsArea.adding-destination: HorizontalLayout {
         alignment: start;
         Button {
             text: "Turn off streaming";

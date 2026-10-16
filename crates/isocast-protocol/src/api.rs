@@ -179,18 +179,34 @@ pub enum Method {
         permission: crate::devices::PermissionKind,
     },
     /// Start streaming the program (the canvas and the program mix) to the
-    /// live setup's `[stream]` service, starting the live engine if needed.
-    /// Recordings start and stop independently of it. Returns
-    /// [`StreamStatus`] once live, or an error saying what to do.
-    StreamStart,
-    /// Stop streaming. Returns the stream's final [`StreamStatus`].
-    StreamStop,
+    /// live setup's `[stream]` destinations (every enabled one, or those in
+    /// `only`), starting the live engine if needed. Destinations already
+    /// streaming are left alone. Recordings start and stop independently
+    /// of it. Returns [`Streaming`] once each has gone live or failed, or
+    /// an error saying what to do when none could start. Its params are
+    /// optional: `{"method": "stream_start"}` starts every enabled one.
+    StreamStart(Option<StreamStartParams>),
+    /// Stop streaming (to every destination, or those in `only`); the
+    /// others keep going. Returns their final [`Streaming`] status. Its
+    /// params are optional.
+    StreamStop(Option<StreamStartParams>),
     /// Keep a stream key in the Keychain for the live setup's service (or
     /// the one given). It is never logged, shown or returned. Returns
     /// [`StreamKey`].
     StreamKeySet(Box<StreamKeyParams>),
     /// Remove a stored stream key. Returns [`StreamKey`].
     StreamKeyClear(Box<StreamKeyTarget>),
+    /// Add a stream destination to the live setup (making its `[stream]`
+    /// section, as the main destination, if it has none). Returns
+    /// [`StreamDestinations`].
+    StreamDestinationAdd(Box<StreamDestinationParams>),
+    /// Remove a stream destination from the live setup (not `main`: turn it
+    /// off instead, or remove the whole `[stream]`). Returns
+    /// [`StreamDestinations`].
+    StreamDestinationRemove { id: String },
+    /// Change a stream destination (`id` required; `main` changes the
+    /// `[stream]` section itself). Returns [`StreamDestinations`].
+    StreamDestinationSet(Box<StreamDestinationParams>),
     /// The scene collections and profiles (the two parts the live setup is
     /// kept in, as in OBS) and which are current. Returns
     /// [`Library`](crate::library::Library).
@@ -462,15 +478,86 @@ impl std::fmt::Debug for StreamKeyParams {
 }
 
 /// Which stream key: the live setup's `[stream]` service (and server, for
-/// `custom`) unless given.
+/// `custom`) unless given, or a destination's.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StreamKeyTarget {
+    /// A destination (`main` or an id in `stream.destinations`): its own
+    /// key. Alone, the live setup's destination of that id; with
+    /// `service` (and `server` for custom), one not applied yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<StreamService>,
     /// For `custom`, the server the key belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
+}
+
+/// Which stream destinations `stream_start` and `stream_stop` mean.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StreamStartParams {
+    /// Destination ids (`main` and the ids in `stream.destinations`); every
+    /// enabled one (or for a stop, every one streaming) if empty. A
+    /// destination named here starts even if it is turned off.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<String>,
+}
+
+/// What `stream_start` and `stream_stop` did: the first destination they
+/// touched (the main one if it was), flattened so a single-destination
+/// client reads it as before, and every destination's status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Streaming {
+    #[serde(flatten)]
+    pub stream: StreamStatus,
+    /// Every destination of the live setup, the main one first.
+    #[serde(default)]
+    pub destinations: Vec<StreamStatus>,
+}
+
+/// A stream destination to add or change. Absent fields are left as they
+/// are (for `add`: the main destination's, or the service's defaults).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StreamDestinationParams {
+    /// The destination's id. For `add`, made from the service if absent
+    /// (`youtube`, `youtube-2`); required for `set`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Required for `add`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<StreamService>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_bitrate_kbps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// Fields to reset: `server` (to the service's), `video_bitrate_kbps`
+    /// and `size` (to the main destination's; for `main`, the defaults).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clear: Vec<String>,
+}
+
+/// The fields `StreamDestinationParams::clear` takes.
+pub const DESTINATION_CLEARABLE: [&str; 3] = ["server", "video_bitrate_kbps", "size"];
+
+/// The live setup's stream destinations after a change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct StreamDestinations {
+    /// The new live revision.
+    pub revision: u64,
+    /// The destination added or changed (absent after a removal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Every destination, the main one first.
+    pub destinations: Vec<StreamStatus>,
 }
 
 /// Where a stream key is kept, and whether one is.
@@ -1268,9 +1355,14 @@ pub struct Status {
     pub collection: Option<Current>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<Current>,
-    /// The stream, if the live setup streams or a stream is running.
+    /// The stream, if the live setup streams or a stream is running: the
+    /// main destination's (see `streams` for every destination).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<StreamStatus>,
+    /// Every stream destination, the main one first (empty without a
+    /// `[stream]` section or a running stream).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<StreamStatus>,
     /// How much of this Mac's processor isocastd used lately, in percent
     /// of all its cores (as OBS's status bar shows it): measured between
     /// readings at least a second apart.

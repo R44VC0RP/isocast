@@ -61,6 +61,71 @@ fails with "No route to host"; the error says where to turn it on (System Settin
 Network). Isocast can't read that setting, so `isocast permissions` doesn't
 list it (#57).
 
+## Several destinations at once
+
+The `[stream]` section is the main destination (id `main`). More go in
+`[[stream.destinations]]`, and `isocast stream start` streams the same
+program to every one that is on, each with its own key, connection,
+state, reconnects and counters: one failing (a wrong key, an ingest that
+drops) never stops the others or a recording.
+
+```toml
+[stream]
+service = "youtube"
+video_bitrate_kbps = 6000
+
+[[stream.destinations]]
+id = "twitch"
+service = "twitch"
+
+[[stream.destinations]]
+id = "backup"
+service = "custom"
+server = "rtmp://relay.local/live"
+video_bitrate_kbps = 3000     # its own bitrate and size need an encoder
+width = 1280                  #   of their own
+height = 720
+# enabled = false             # `stream start` skips it unless --only names it
+```
+
+A destination sets its service, server, `enabled`, and optionally its own
+`video_bitrate_kbps` and `width`/`height`; everything else (rate control,
+keyframes, audio, reconnecting) is the main destination's, which stays
+the default for the others even while the main one is turned off.
+Destinations that send the same size at the same bitrate share one H.264
+encoder (one hardware session, encoded once and sent to each connection);
+one with its own bitrate or size gets an encoder of its own only if this
+Mac's encoders have room by the capacity estimate (#66, counting the
+recording only while one runs); otherwise `stream start` refuses, naming
+those destinations and how to share an encoder instead.
+
+```sh
+isocast stream destination add twitch            # id "twitch"
+isocast stream destination add custom --id backup --server rtmp://relay.local/live \
+    --video-bitrate-kbps 3000 --width 1280 --height 720
+isocast stream destination set backup --enabled false
+isocast stream destination set backup --clear video_bitrate_kbps --clear size
+isocast stream destination remove backup         # not main, not while it streams
+isocast stream key set --destination twitch      # each has its own key
+isocast stream start [--only twitch]…            # every enabled one, or these
+isocast stream stop [--only twitch]…             # the others keep going
+isocast stream status [--json]                   # every destination
+```
+
+Each destination's key is its own Keychain item under the build's service
+(see above): the main one keeps the account it always had (`twitch`, or a
+custom server), an added one's is that account with its id (`twitch
+[alt]`), so two channels on one service keep two keys. MCP has
+`stream_destination_add`, `stream_destination_set`,
+`stream_destination_remove`, `only` on `start_stream` and `stop_stream`,
+and `destination` on the key tools. `stream_start` and `stream_stop`
+return the first destination's status (the main one's if it took part)
+with every destination's in `destinations`; `status.stream` stays the
+main destination's and `status.streams` lists them all; `stream` events
+carry the destination's `id`. Settings › Stream lists the destinations
+(on/off, state, service, server, key, own bitrate and size), and the
+status bar's LIVE details show each one's state.
+
 ## Service presets
 
 Each preset fills in the service's documented ingest server, RTMPS where

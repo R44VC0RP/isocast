@@ -16,6 +16,16 @@ export struct ServiceChoice {
     hint: string,
 }
 
+// A stream destination (Stream → Destinations, #73): its id, what to call
+// it ("YouTube", "backup"), a few words on its state ("Live", "Key saved",
+// "No key yet", "Own encoder") and whether `stream start` streams to it.
+export struct DestinationRow {
+    id: string,
+    label: string,
+    status: string,
+    enabled: bool,
+}
+
 // A video source the ISO files can record (Output → ISO Recording).
 // An audio source an ISO file can carry, and whether it does.
 export struct IsoTrack {
@@ -181,6 +191,24 @@ export global SettingsArea {
     callback server-back();
     callback save-key(string);
     callback clear-key();
+    // The destinations, the main one ([stream] itself) first; the one
+    // `destination` names is open below its row, and the Service, Server
+    // and Stream Key rows above are its. Adding one shows the services.
+    in-out property <[DestinationRow]> destinations;
+    in-out property <string> destination: "main";
+    in-out property <bool> adding-destination;
+    // The open destination streams now (it can't be removed).
+    in-out property <bool> destination-live;
+    // An added destination's own bitrate and size (else the main one's).
+    in-out property <bool> destination-own-bitrate;
+    in-out property <float> destination-bitrate;
+    in-out property <bool> destination-own-size;
+    in-out property <float> destination-width;
+    in-out property <float> destination-height;
+    callback select-destination(string);
+    callback add-destination();
+    callback remove-destination();
+    callback set-destination-enabled(string, bool);
 
     // ---- Output
     in-out property <string> folder;
