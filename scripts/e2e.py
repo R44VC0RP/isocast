@@ -29,6 +29,7 @@ renders the same hardware, qualification and loss tables used by Actions.
 import argparse
 import array
 import base64
+import bisect
 import copy
 import datetime
 import fcntl
@@ -51,7 +52,7 @@ import zipfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "timeline",
+SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "timeline", "edit",
              "data", "plugin", "hotkeys", "shutdown", "pause", "bug_report", "projects",
              "plugin_files", "replay")
 FPS = 60
@@ -683,6 +684,226 @@ def scenario_timeline(e, cfg, evidence):
         require(row["frames"] == frames, "export lost decoded pictures at a join")
         evidence["joined"].append(row)
     evidence.update(timeline=timeline, retake=retaken)
+
+
+# Gray levels that split the test pattern's 75% bars into bright (white to
+# green) and dark (magenta to black), under BT.601 and BT.709 alike.
+BAR_LEVELS = bytes(49 if v >= 96 else 48 for v in range(256))
+
+
+def pattern_frames(path, width, height):
+    """Per decoded picture of a synthetic test pattern: (pts, bar shift in
+    pixels, label cell, flash band). The bars scroll by width / (4 s * fps)
+    per source frame, so the shift names the source frame (modulo 4 s); the
+    cell is the label's fifth character, lit for "BARS2" and dark for
+    "BARS"; the band is the bottom quarter that flashes on every pulse."""
+    s = max(height // 120, 1)
+    graph = (f"[0:v]format=gray,split=3[a][b][c];[a]crop={width}:1:0:{height // 2}[row];"
+             f"[b]crop={5 * s}:{7 * s}:{30 * s}:{6 * s},scale={width}:1:flags=area[cell];"
+             f"[c]crop={width}:{height // 4}:0:{height - height // 4},scale={width}:1:flags=area[band];"
+             "[row][cell][band]vstack=3[out]")
+    raw = ffmpeg("-i", path, "-filter_complex", graph, "-map", "[out]", "-fps_mode", "passthrough",
+                 "-pix_fmt", "gray", "-f", "rawvideo", "-", timeout=90).stdout
+    times = [float(f["best_effort_timestamp_time"]) for f in json.loads(command(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames", "-show_entries",
+         "frame=best_effort_timestamp_time", "-of", "json", path], timeout=90).stdout)["frames"]]
+    size = 3 * width
+    require(len(raw) == len(times) * size, f"{path.name}: decoded pictures and timestamps disagree")
+    frames = []
+    for i, t in enumerate(times):
+        row = raw[i * size:i * size + width]
+        bits = row.translate(BAR_LEVELS)
+        rise, fall = bits.find(b"01"), bits.find(b"10")
+        if 2 < rise < width - 4:
+            shift = (width - rise - 1) % width       # black to white: bar 0 starts
+        elif 2 < fall < width - 4:
+            shift = (width // 2 - fall - 1) % width  # green to magenta: bar 4 starts
+        else:
+            raise Failure(f"{path.name}: no test-pattern bars in picture {i}")
+        cell = raw[i * size + width:i * size + 2 * width]
+        band = raw[i * size + 2 * width:(i + 1) * size]
+        frames.append((t, shift, sum(cell) / width, sum(band) / width))
+    return frames
+
+
+def beep_onsets(samples):
+    onsets, quiet = [], RATE
+    for i, sample in enumerate(samples):
+        if abs(sample) > 0.01:
+            if quiet >= RATE // 20:
+                onsets.append(i / RATE)
+            quiet = 0
+        else:
+            quiet += 1
+    return onsets
+
+
+def scenario_edit(e, cfg, evidence):
+    """C.3's edits on two program + 2 ISO takes: trim, split, ripple delete,
+    an angle, undo and redo, export. Every exported picture must be the take
+    picture on screen at its moment (by the test pattern), every pulse must
+    flash and beep together at the cuts, joins mustn't click, and the takes'
+    files must be unchanged."""
+    fps = cfg["canvas"]["fps"]
+    cfg["recording"]["iso"]["enabled"] = True
+    e.apply(cfg)
+    e.rpc("timeline_new", {"name": "E2E edit"})
+    takes = [take(e, 5) for _ in range(2)]
+    evidence["files"] = [row for path, m in takes for row in check_take(path, m, 5, evidence=evidence)]
+    timeline = e.rpc("timeline_get")
+    require([Path(c["take"]).resolve() for c in timeline["clips"]] == [p.resolve() for p, _ in takes],
+            "the two takes did not append")
+    files = {}  # (take, source) -> (file, its first frame on the take's clock)
+    for clip in timeline["clips"]:
+        for f in clip["files"]:
+            path = Path(clip["take"]).parent / f["path"]
+            files[(clip["take"], f["source"])] = (path, f.get("start_offset_seconds") or 0.0)
+    hashes = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p, _ in files.values()}
+    (c1, a, a_len), (c2, b, b_len) = ((c["id"], c["take"], c["out_seconds"]) for c in timeline["clips"])
+    require(a_len >= 4.6 and b_len >= 4.6, f"takes too short: {a_len}, {b_len}")
+    # Pulses beep for 0.1 s every second of the engine's clock, at their own
+    # phase in each take: measure where (sample-accurate) and cut around
+    # them. Cuts land in quiet stretches, except the delete's end (quiet into
+    # mid-beep: a flash and beep at the cut) and c1's end (mid-beep into
+    # quiet: a click if the join were hard).
+    pulses_in = {}  # take -> its pulses' starts on the take's clock
+    for clip in (a, b):
+        program, offset = files[(clip, "program")]
+        pulses_in[clip] = [t + offset for t in beep_onsets(pcm(program))]
+        require(len(pulses_in[clip]) >= 4, f"{program.name}: only {len(pulses_in[clip])} beeps")
+    def grid(x):
+        return round(x * fps) / fps
+    def phase(clip):  # where pulses start within a second, in [-0.5, 0.5)
+        return (pulses_in[clip][1] + 0.5) % 1 - 0.5  # [0] may be cut by the take's start
+    qa, ma, qb = grid(phase(a) + 0.5), grid(phase(a) + 3.05), grid(phase(b) + 0.5)
+
+    def expect(label, segments):
+        clips = e.rpc("timeline_get")["clips"]
+        have = [(c["take"], c["in_seconds"], c["out_seconds"], c.get("angle")) for c in clips]
+        require(len(have) == len(segments) and all(
+            h[0] == s[0] and abs(h[1] - s[1]) < 1e-4 and abs(h[2] - s[2]) < 1e-4 and h[3] == s[3]
+            for h, s in zip(have, segments)), f"after {label}: clips {have}, expected {segments}")
+        return clips
+
+    edits = [
+        ("timeline_trim", {"clip": c1, "in_seconds": qa, "out_seconds": ma + 1},
+         [(a, qa, ma + 1, None), (b, 0, b_len, None)]),
+        ("timeline_trim", {"clip": c2, "in_seconds": qb},
+         [(a, qa, ma + 1, None), (b, qb, b_len, None)]),
+        ("timeline_split", {"at_seconds": 1.0},
+         [(a, qa, qa + 1, None), (a, qa + 1, ma + 1, None), (b, qb, b_len, None)]),
+        ("timeline_delete_range", {"start_seconds": 2.0, "end_seconds": 2.0 + ma - (qa + 2)},
+         [(a, qa, qa + 1, None), (a, qa + 1, qa + 2, None), (a, ma, ma + 1, None), (b, qb, b_len, None)]),
+        ("timeline_angle", {"start_seconds": 4.0, "end_seconds": 5.0, "source": "bars2"},
+         [(a, qa, qa + 1, None), (a, qa + 1, qa + 2, None), (a, ma, ma + 1, None),
+          (b, qb, qb + 1, None), (b, qb + 1, qb + 2, "bars2"), (b, qb + 2, b_len, None)]),
+    ]
+    for method, params, segments in edits:
+        e.rpc(method, params)
+        expect(method, segments)
+    try:
+        e.rpc("timeline_angle", {"start_seconds": 4.0, "end_seconds": 5.0, "source": "nope"})
+        raise Failure("an angle from an unknown source was accepted")
+    except RpcError as err:
+        require("bars2" in str(err), f"angle error doesn't list the sources: {err}")
+    e.rpc("timeline_undo")
+    expect("timeline_undo", edits[-2][2])
+    e.rpc("timeline_redo")
+    clips = expect("timeline_redo", edits[-1][2])
+    segments, start = [], 0.0  # (timeline start, take, in, out, angle)
+    for take_path, cut_in, cut_out, angle in edits[-1][2]:
+        segments.append((start, take_path, cut_in, cut_out, angle))
+        start += cut_out - cut_in
+    duration = start
+    require(all(abs(c["start_seconds"] - s[0]) < 1e-4 for c, s in zip(clips, segments)),
+            "clip starts differ from the clips' lengths added up")
+
+    export = e.rpc("timeline_export", {"folder": str(e.root / "export")})
+    def exported():
+        value = read_json(export["manifest"])
+        return value if value["status"] != "exporting" else None
+    result = until(exported, 90, "timeline export")
+    require(result["status"] == "complete" and not result.get("errors"), f"export failed: {result}")
+    require(sorted(f["source"] for f in result["files"]) == ["bars", "bars2", "edited", "program"],
+            f"exported sources: {[f['source'] for f in result['files']]}, skipped {result.get('skipped')}")
+
+    def in_pulse(clip, x, end=False):  # x is in a pulse (its end: the pulse ran up to it)
+        return any((p < x <= p + 0.1) if end else (p <= x < p + 0.1) for p in pulses_in[clip])
+    pulses = []  # where the edited timeline should flash and beep
+    for i, (start, clip, cut_in, cut_out, _) in enumerate(segments):
+        previous = segments[i - 1] if i else None
+        if in_pulse(clip, cut_in) and not (previous and in_pulse(previous[1], previous[3], end=True)):
+            pulses.append(start)
+        pulses += [start + p - cut_in for p in pulses_in[clip] if cut_in < p < cut_out]
+    joins = [s[0] for s in segments[1:]]
+    sources = {}
+    evidence["exported"] = []
+    for f in result["files"]:
+        path, width = Path(f["path"]), f["width"]
+        require(all(abs(p["start_seconds"] - s[0]) < 1e-3 for p, s in zip(f["parts"], segments))
+                and len(f["parts"]) == len(segments), f"{path.name}: parts don't follow the clips")
+        dropped = 0
+        if loss_limit(evidence):
+            frames = int(probe(path)["streams"][0]["nb_read_frames"])
+            dropped = round(duration * fps) - frames
+        row = check_file(path, duration, fps, (cfg["canvas"]["width"], cfg["canvas"]["height"]),
+                         dropped=dropped)
+        # Every picture: the one on screen in its take at that moment.
+        out = pattern_frames(path, width, f["height"])
+        bad = []
+        for t, shift, cell, _ in out:
+            seg = next((s for s in segments if s[0] - 1e-6 <= t < s[0] + s[3] - s[2] - 1e-6), None)
+            require(seg is not None, f"{path.name}: a picture at {t:.4f} s, past the timeline")
+            source = (seg[4] or "program") if f["source"] == "edited" else f["source"]
+            src_path, offset = files[(seg[1], source)]
+            if src_path not in sources:
+                frames = pattern_frames(src_path, width, f["height"])
+                sources[src_path] = (frames, [x[0] - frames[0][0] for x in frames])
+            src, src_times = sources[src_path]
+            moment = seg[2] + (t - seg[0]) - offset
+            want = src[max(0, bisect.bisect_right(src_times, moment + 0.25 / fps) - 1)]
+            require((want[2] > 50) == (source == "bars2"), f"{src_path.name}: label cell can't tell the angles apart")
+            apart = abs(shift - want[1])
+            if min(apart, width - apart) > 3 or (cell > 50) != (want[2] > 50):
+                bad.append(f"{t:.4f} s: bars at {shift}, label {cell:.0f}; {source} at "
+                           f"{seg[2] + t - seg[0]:.4f} s of its take has {want[1]}, {want[2]:.0f}")
+        require(not bad, f"{path.name}: {len(bad)} of {len(out)} pictures aren't their take's "
+                         f"at that moment: {bad[:4]}")
+        # Pulses: each expected one flashes and beeps; nothing else does.
+        flashes = [t for i, (t, _, _, band) in enumerate(out) if band > 128 and (i == 0 or out[i - 1][3] <= 128)]
+        samples = pcm(path)
+        beeps = beep_onsets(samples)
+        end = out[-1][0] + 1 / fps
+        def inner(xs):
+            return [x for x in xs if 0.15 < x < end - 0.15]
+        def near(x, xs, tolerance):
+            return min((abs(x - y) for y in xs), default=1) <= tolerance
+        for x in inner(pulses):
+            require(near(x, flashes, 1.5 / fps) and near(x, beeps, 1.5 / fps),
+                    f"{path.name}: no flash or beep at {x:.4f} s (flashes {flashes}, beeps {beeps})")
+        for x in inner(flashes) + inner(beeps):
+            require(near(x, pulses, 1.5 / fps), f"{path.name}: unexpected pulse at {x:.4f} s")
+        offsets = [min(abs(x - y) for y in beeps) for x in inner(flashes)]
+        require(max(offsets) <= 1 / fps + 1 / RATE,
+                f"{path.name}: flash/beep apart by {max(offsets) * 1000:.2f} ms")
+        # Clicks: no sample step near a join larger than the tone's own.
+        window = RATE // 200
+        steps = [abs(y - x) for x, y in zip(samples, samples[1:])]
+        spans = [(max(0, round(t * RATE) - window), min(len(steps), round(t * RATE) + window)) for t in joins]
+        at_joins = max(max(steps[lo:hi]) for lo, hi in spans)
+        for lo, hi in spans:
+            steps[lo:hi] = [0.0] * (hi - lo)
+        tone = max(steps)
+        require(tone > 0.01, f"{path.name}: no tone")
+        require(at_joins <= tone * 1.05 + 1e-4,
+                f"{path.name}: a join clicks (step {at_joins:.4f}, the tone's largest {tone:.4f})")
+        row.update(pictures_checked=len(out), pulses=len(inner(flashes)),
+                   max_sync_ms=round(max(offsets) * 1000, 3), join_step=round(at_joins, 4),
+                   tone_step=round(tone, 4), reencoded=[p.get("reencoded_frames") for p in f["parts"]])
+        evidence["exported"].append(row)
+    changed = [p.name for p, digest in hashes.items() if hashlib.sha256(p.read_bytes()).hexdigest() != digest]
+    require(not changed, f"edits or export changed take files: {changed}")
+    evidence.update(timeline=e.rpc("timeline_get"), take_files_unchanged=len(hashes))
 
 
 def snapshot(e, name):

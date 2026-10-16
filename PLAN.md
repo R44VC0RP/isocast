@@ -3733,6 +3733,14 @@ One line per finished task, newest last.
   ruler drag scrub on the 30-min take 16.7 ms median preview latency (p95
   31.5); on a 2-min take J/L playback 27-30 pictures/s at 18-25 ms median,
   frame steps 38-41 ms; the studio's clip bar unchanged beside it.
+- e2e `edit` (2026-10-16, branch agent/e2e-edit, #70; Ryan approved):
+  `scripts/e2e.py --only edit` makes a timeline of two program + 2 ISO
+  takes, trims, splits, ripple-deletes, sets an angle, undoes and redoes,
+  exports, and checks every exported picture against its take frame by
+  the test pattern, flash/beep at every cut, clicks at joins, and the
+  takes' hashes. isocast-m2-b: 5/5 PASS strict (1080p60 HEVC, ~35 s each)
+  and PASS --hosted (720p30 H.264, 18 s); FAILs on an export cut one
+  frame late (298 of 433 pictures) and on an in point one frame late.
 - S.2d (2026-10-16): `scripts/stress.py`, nine scenarios on isolated
   engines, and hw-batch's `stress` kind; hw-batch now runs one job per
   test Mac (pinned jobs hold `.bench.lock.<mac>`). Full run on

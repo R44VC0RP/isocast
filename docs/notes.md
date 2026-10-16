@@ -576,14 +576,6 @@ each section. Delete entries that stop being true.
 
 ## Questions for Ryan
 
-- 2026-10-15 (#70): may e2e.py get an `edit` scenario (record three takes
-  of the synthetic setup, trim mid-keyframe-interval, split, ripple delete,
-  two angles, export, then check every frame against the takes by the test
-  pattern's bars, flash-to-beep at every join, no click at joins, and the
-  take files' hashes)? It was verified by hand with
-  `/Volumes/IsocastBuild/edit-view/scratch/tools/verify_edit.py`. Nothing
-  waits on it.
-
 - 2026-10-15 (#18): with a `[stream]` in the profile the replay buffer
   always encodes as the stream does (its size, bitrate, 2 s keyframes),
   even while not streaming, so it can share the stream's encoder: a profile
@@ -5220,6 +5212,14 @@ each section. Delete entries that stop being true.
   with minutes between lines). Repro without such a driver: in the test
   VM, `sudo kill -STOP $(pgrep -x coreaudiod)` for under a minute, then
   `-CONT` (scratch /Volumes/IsocastBuild/mic-timeout/scratch/vm/hang.sh).
+- 2026-10-16 (#70, e2e `edit`): the synthetic flash and beep follow the
+  engine's clock, not the take's: a second take's pulses can sit half a
+  second off the first's. Checks that cut at a chosen pulse phase must
+  measure each take's beep onsets first (e2e.py `scenario_edit` does).
+  The test pattern's bars scroll width / (4 s × fps) pixels per source
+  frame, so the bar edge in one decoded row names the source frame
+  (`pattern_frames`), and the label's fifth character tells BARS2 from
+  BARS.
 - 2026-10-16 (S.2 stress): Python's `sock.close()` doesn't close a
   socket whose `makefile()` reader is still open, so the connection stays
   up on the daemon's side (e2e.py's `Watch.close` does this). stress.py's
