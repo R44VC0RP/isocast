@@ -18,10 +18,11 @@
 
 mod mp4;
 
+use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -227,7 +228,7 @@ impl Sink for Shared {
     }
 
     fn push(&self, ready: &[Media]) {
-        let mut ring = self.ring.lock().unwrap();
+        let mut ring = self.ring.lock();
         for media in ready {
             ring.push(media, self.keep, self.max_bytes);
         }
@@ -237,7 +238,7 @@ impl Sink for Shared {
 
     fn ended(&self, ended: &Ended) {
         // Nothing can be saved once it fails: let go of the memory now.
-        *self.ring.lock().unwrap() = Ring {
+        *self.ring.lock() = Ring {
             ended: true,
             ..Ring::default()
         };
@@ -247,7 +248,7 @@ impl Sink for Shared {
             _ => "the live engine stopped, and the replay buffer with it".into(),
         };
         let status = {
-            let mut status = self.status.lock().unwrap();
+            let mut status = self.status.lock();
             status.state = ReplayState::Failed;
             status.last_error = Some(message);
             status.since = Some(now());
@@ -299,7 +300,7 @@ pub fn start<P: Platform>(
         engine
             .encoders()
             .subscribe(engine, &spec, "the replay buffer", shared.clone())?;
-    *shared.subscription.lock().unwrap() = Some(subscription);
+    *shared.subscription.lock() = Some(subscription);
     let platform = engine.platform().clone();
     let replay = ReplayBuffer {
         shared,
@@ -314,16 +315,16 @@ impl ReplayBuffer {
     /// Its state, memory and counters now.
     pub fn status(&self) -> ReplayStatus {
         let shared = &self.shared;
-        let mut status = shared.status.lock().unwrap().clone();
+        let mut status = shared.status.lock().clone();
         {
-            let ring = shared.ring.lock().unwrap();
+            let ring = shared.ring.lock();
             status.buffered_seconds = ring.buffered().as_secs_f64();
             status.memory_bytes = ring.bytes;
             status.memory_limited = ring.memory_limited;
         }
         status.dropped_frames =
             shared.missed.load(Ordering::Relaxed) + shared.encoder_dropped.load(Ordering::Relaxed);
-        if let Some(subscription) = shared.subscription.lock().unwrap().as_ref() {
+        if let Some(subscription) = shared.subscription.lock().as_ref() {
             status.audio_dropouts = subscription.tap_audio_dropped();
             status.shared_encoder = subscription.shared();
         }
@@ -332,7 +333,7 @@ impl ReplayBuffer {
 
     /// Whether it still keeps the program (it hasn't failed or stopped).
     pub fn is_running(&self) -> bool {
-        self.shared.status.lock().unwrap().state == ReplayState::Running
+        self.shared.status.lock().state == ReplayState::Running
     }
 
     /// Stop keeping the program and let go of what it holds. Returns the
@@ -340,12 +341,12 @@ impl ReplayBuffer {
     pub fn stop(&self) -> ReplayStatus {
         let mut status = self.status();
         // Waits for the encoder's thread when nothing else uses it.
-        let subscription = self.shared.subscription.lock().unwrap().take();
+        let subscription = self.shared.subscription.lock().take();
         drop(subscription);
-        *self.shared.ring.lock().unwrap() = Ring::default();
+        *self.shared.ring.lock() = Ring::default();
         self.shared.arrived.notify_all();
         {
-            let mut current = self.shared.status.lock().unwrap();
+            let mut current = self.shared.status.lock();
             if current.state == ReplayState::Running {
                 current.state = ReplayState::Off;
                 current.since = Some(now());
@@ -358,7 +359,7 @@ impl ReplayBuffer {
         status.memory_bytes = 0;
         status.shared_encoder = false;
         // The final counters stay in the status kept for it.
-        *self.shared.status.lock().unwrap() = status.clone();
+        *self.shared.status.lock() = status.clone();
         status
     }
 
@@ -372,7 +373,7 @@ impl ReplayBuffer {
         container: Container,
         room: &dyn Fn(u64) -> Result<()>,
     ) -> Result<ReplaySaved> {
-        let _one = self.saving.lock().unwrap_or_else(|p| p.into_inner());
+        let _one = self.saving.lock();
         let at = (self.now)();
         let requested_at = now();
         let clip = self.clip(at)?;
@@ -424,7 +425,7 @@ impl ReplayBuffer {
             short,
         };
         {
-            let mut status = self.shared.status.lock().unwrap();
+            let mut status = self.shared.status.lock();
             status.saves += 1;
             status.last_saved = Some(saved.clone());
         }
@@ -438,13 +439,13 @@ impl ReplayBuffer {
         let shared = &self.shared;
         let spec = &shared.spec;
         let frame_ns = 1_000_000_000 / i64::from(spec.video.fps.max(1));
-        let want = Duration::from_secs(shared.status.lock().unwrap().seconds.into());
+        let want = Duration::from_secs(shared.status.lock().seconds.into());
         let deadline = Instant::now() + SAVE_WAIT;
-        let mut ring = shared.ring.lock().unwrap();
+        let mut ring = shared.ring.lock();
         // The picture showing at `at` (the newest frame at or before it)
         // is known once a later one, or one within a frame, has come.
         loop {
-            if shared.subscription.lock().unwrap().is_none() {
+            if shared.subscription.lock().is_none() {
                 bail!("the replay buffer is stopped; start it with `isocast replay start`");
             }
             let done = ring
@@ -457,7 +458,7 @@ impl ReplayBuffer {
             if left.is_zero() {
                 break;
             }
-            ring = shared.arrived.wait_timeout(ring, left).unwrap().0;
+            shared.arrived.wait_for(&mut ring, left);
         }
         let Some(last) = ring.video.iter().rposition(|s| s.ts <= at) else {
             bail!(
@@ -473,7 +474,7 @@ impl ReplayBuffer {
             if done || ring.ended || left.is_zero() {
                 break;
             }
-            ring = shared.arrived.wait_timeout(ring, left).unwrap().0;
+            shared.arrived.wait_for(&mut ring, left);
         }
         let target = end - want;
         // The newest keyframe at or before `seconds` ago, else the oldest.
@@ -536,7 +537,7 @@ impl ReplayBuffer {
 
 impl Drop for ReplayBuffer {
     fn drop(&mut self) {
-        let subscription = self.shared.subscription.lock().unwrap().take();
+        let subscription = self.shared.subscription.lock().take();
         drop(subscription);
     }
 }

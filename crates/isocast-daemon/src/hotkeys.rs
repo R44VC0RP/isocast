@@ -2,9 +2,10 @@
 //! native callbacks only send edges to one worker. Holds overlay the setup in
 //! memory, so a crash/restart never saves a momentary unmute into the profile.
 
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
@@ -228,7 +229,7 @@ impl Daemon {
                     Input::Key(edge, source, owner, at) => (edge, source, owner, at),
                     Input::Disconnect(owner) => {
                         let released = pressed.disconnect(owner);
-                        let mut state = daemon.state.lock().unwrap();
+                        let mut state = daemon.state.lock();
                         let count = state.hotkey_holds.len();
                         for id in released {
                             state.hotkey_holds.remove(&format!("press:{id}"));
@@ -244,7 +245,7 @@ impl Daemon {
                     }
                 };
                 let binding = {
-                    let registered = daemon.hotkeys.registered.lock().unwrap();
+                    let registered = daemon.hotkeys.registered.lock();
                     if registered.generation != edge.generation {
                         continue;
                     }
@@ -298,10 +299,10 @@ impl Daemon {
         if self.hotkeys.sender.get().is_none() {
             return;
         }
-        let _refresh = self.hotkeys.refresh.lock().unwrap();
-        let mut registered = self.hotkeys.registered.lock().unwrap();
+        let _refresh = self.hotkeys.refresh.lock();
+        let mut registered = self.hotkeys.registered.lock();
         let (identity, config) = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             let current = state.file.current();
             (
                 (
@@ -378,7 +379,7 @@ impl Daemon {
                 })
                 .collect::<Vec<_>>(),
         );
-        let mut registered = self.hotkeys.registered.lock().unwrap();
+        let mut registered = self.hotkeys.registered.lock();
         *registered = Registered {
             identity,
             bindings,
@@ -396,8 +397,8 @@ impl Daemon {
     }
 
     pub(crate) fn hotkeys_get(&self) -> Hotkeys {
-        let registered = self.hotkeys.registered.lock().unwrap();
-        let state = self.state.lock().unwrap();
+        let registered = self.hotkeys.registered.lock();
+        let state = self.state.read();
         Hotkeys {
             profile: state.file.current().map(|c| c.profile.clone()),
             revision: state.revision,
@@ -421,7 +422,7 @@ impl Daemon {
 
     pub(crate) fn hotkeys_set(&self, params: SetParams) -> Result<Hotkeys, RpcError> {
         let (revision, mut setup) = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             let setup = state
                 .setup
                 .as_ref()
@@ -486,7 +487,7 @@ impl Daemon {
 
     pub(crate) fn hotkeys_input(&self, params: InputParams, owner: u64) -> Result<Value, RpcError> {
         let chord = Chord::parse(&params.keys).map_err(|e| invalid(format!("keys: {e}")))?;
-        let registered = self.hotkeys.registered.lock().unwrap();
+        let registered = self.hotkeys.registered.lock();
         if registered.pending {
             return Err(invalid(
                 "hotkeys: registration update in progress; retry after it completes",
@@ -526,7 +527,7 @@ impl Daemon {
     }
 
     fn clear_hotkey_holds(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if state.hotkey_holds.is_empty() {
             return;
         }
@@ -545,7 +546,7 @@ impl Daemon {
         mute: bool,
         phase: Phase,
     ) -> Result<(), RpcError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let setup = state
             .setup
             .as_ref()
@@ -576,7 +577,7 @@ impl Daemon {
     }
 
     fn hotkey_patch(&self, patch: Value) -> Result<(), RpcError> {
-        let revision = self.state.lock().unwrap().revision;
+        let revision = self.state.lock().revision;
         self.apply(ApplyParams {
             revision,
             change: Change::Patch(patch),
@@ -612,7 +613,7 @@ impl Daemon {
                 "recording.pause" => Method::Pause,
                 "recording.resume" => Method::Resume,
                 "recording.pause_toggle" => {
-                    let control = self.state.lock().unwrap().control();
+                    let control = self.state.lock().control();
                     if control
                         .and_then(|control| control.pause_status(crate::now()))
                         .is_some_and(|recording| recording.paused)
@@ -623,7 +624,7 @@ impl Daemon {
                     }
                 }
                 "recording.toggle" => {
-                    if self.state.lock().unwrap().session.is_some() {
+                    if self.state.lock().session.is_some() {
                         Method::Stop
                     } else {
                         Method::Start(Box::new(StartParams {
@@ -637,7 +638,7 @@ impl Daemon {
                 "streaming.start" => Method::StreamStart(None),
                 "streaming.stop" => Method::StreamStop(None),
                 "streaming.toggle" => {
-                    if self.state.lock().unwrap().streaming() {
+                    if self.state.read().streaming() {
                         Method::StreamStop(None)
                     } else {
                         Method::StreamStart(None)
@@ -647,7 +648,7 @@ impl Daemon {
                 "replay.stop" => Method::ReplayStop,
                 "replay.save" => Method::ReplaySave,
                 "replay.toggle" => {
-                    if self.state.lock().unwrap().replay.active() {
+                    if self.state.lock().replay.active() {
                         Method::ReplayStop
                     } else {
                         Method::ReplayStart
@@ -656,7 +657,7 @@ impl Daemon {
                 "transition.take" => Method::Take { transition: None },
                 "timeline.close" => Method::TimelineClose,
                 "studio.toggle" => {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock();
                     if state.preview.is_some() {
                         state.preview = None;
                         if let Some(engine) = &state.engine {
@@ -680,7 +681,7 @@ impl Daemon {
             Arguments::Marker(args) => Method::Marker { label: args.label },
             Arguments::Scene(args) => self.hotkey_scene(action, args.scene),
             Arguments::Index(args) => {
-                let state = self.state.lock().unwrap();
+                let state = self.state.read();
                 let ids = state.scene_ids();
                 let scene = ids
                     .get(args.index as usize - 1)
@@ -705,7 +706,7 @@ impl Daemon {
                         phase,
                     );
                 }
-                let state = self.state.lock().unwrap();
+                let state = self.state.read();
                 let setup = state
                     .setup
                     .as_ref()
@@ -722,7 +723,7 @@ impl Daemon {
                     .hotkey_patch(json!({"sources":[{"id":args.source,"audio":{"muted":mute}}]}));
             }
             Arguments::Item(args) => {
-                let state = self.state.lock().unwrap();
+                let state = self.state.read();
                 let setup = state
                     .setup
                     .as_ref()
@@ -829,7 +830,7 @@ impl Daemon {
     }
 
     fn hotkey_scene(&self, action: &str, scene: String) -> Method {
-        if action.starts_with("scene.preview") || self.state.lock().unwrap().preview.is_some() {
+        if action.starts_with("scene.preview") || self.state.lock().preview.is_some() {
             Method::Preview { scene }
         } else {
             Method::SwitchScene {

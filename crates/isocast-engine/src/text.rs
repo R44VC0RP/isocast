@@ -1,8 +1,8 @@
 //! Text drawn into pictures, for text sources: shaped and rasterised with
 //! cosmic-text, with an optional background, shadow and outline under it.
 
+use parking_lot::Mutex;
 use std::f32::consts::TAU;
-use std::sync::Mutex;
 
 use cosmic_text::{
     Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, SwashCache, SwashContent,
@@ -18,7 +18,7 @@ static FONTS: Mutex<Option<(FontSystem, SwashCache)>> = Mutex::new(None);
 /// The size [`render`] draws `text` at, as `settings` say: their fixed
 /// size, or the text's own (wrapped at `wrap_width` if they give one).
 pub(crate) fn size(settings: &TextSource, text: &str) -> (u32, u32) {
-    let mut fonts = FONTS.lock().unwrap();
+    let mut fonts = FONTS.lock();
     let (font_system, _) = fonts.get_or_insert_with(fonts_found);
     let shaped = shape(font_system, settings, text);
     (shaped.width, shaped.height)
@@ -27,7 +27,7 @@ pub(crate) fn size(settings: &TextSource, text: &str) -> (u32, u32) {
 /// The narrowest picture `text` fits in as `settings` say (wrapped at
 /// every space): its widest word and the room around it.
 pub(crate) fn least_width(settings: &TextSource, text: &str) -> u32 {
-    let mut fonts = FONTS.lock().unwrap();
+    let mut fonts = FONTS.lock();
     let (font_system, _) = fonts.get_or_insert_with(fonts_found);
     let mut buffer = buffer(font_system, settings, text, Some((1.0, Wrap::Word)));
     buffer.shape_until_scroll(font_system, false);
@@ -66,7 +66,7 @@ struct Shaped {
 
 /// `text` drawn as `settings` say, at their fixed size or its own.
 pub(crate) fn render(settings: &TextSource, text: &str) -> Picture {
-    let mut fonts = FONTS.lock().unwrap();
+    let mut fonts = FONTS.lock();
     let (font_system, cache) = fonts.get_or_insert_with(fonts_found);
     let Shaped {
         mut buffer,

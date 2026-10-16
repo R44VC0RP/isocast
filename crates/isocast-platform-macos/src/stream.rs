@@ -313,7 +313,20 @@ impl Drop for H264Encoder {
         if let (false, Some(ticket)) = (self.started, self.start_ticket) {
             cancel_encoder_start(ticket);
         }
-        // No callbacks after this, so `output` can go.
+        // Drain while the callback's refcon (`output`) is still alive.
+        // Invalidation alone is not a documented callback-join barrier.
+        let invalid = CMTime {
+            value: 0,
+            timescale: 0,
+            flags: CMTimeFlags::empty(),
+            epoch: 0,
+        };
+        let status = unsafe { self.session.complete_frames(invalid) };
+        if status != 0 {
+            isocast_diagnostics::diagnostic!("warn";
+                "the H.264 encoder could not drain before invalidation (error {status})"
+            );
+        }
         unsafe { self.session.invalidate() };
     }
 }
@@ -855,4 +868,38 @@ unsafe fn get_property<T: Copy>(converter: AudioConverterRef, id: u32) -> Result
         bail!("AudioToolbox error {status}");
     }
     Ok(unsafe { value.assume_init() })
+}
+
+#[cfg(test)]
+mod teardown_tests {
+    use super::*;
+    use isocast_engine::FramePool;
+
+    #[test]
+    #[ignore = "requires a hardware H.264 encoder; run on an idle test Mac"]
+    fn streaming_drop_completes_every_submitted_callback() {
+        let mut pool = crate::frames::FramePool::new(64, 64).unwrap();
+        let frame = pool.draw(&mut |pixels, _| pixels.fill(0)).unwrap().unwrap();
+        for _ in 0..16 {
+            let mut encoder = H264Encoder::new(&LiveVideoSpec {
+                width: 64,
+                height: 64,
+                fps: 30,
+                bitrate_kbps: 1000,
+                constant_bitrate: false,
+                keyframe_interval: 30,
+                low_latency: false,
+            })
+            .unwrap();
+            let output = encoder.output.clone();
+            for n in 0..8 {
+                encoder
+                    .encode(&frame, Time::from_nanos(0).add_ticks(n, 30), n == 0)
+                    .unwrap();
+            }
+            drop(encoder);
+            assert_eq!(output.in_flight.load(Ordering::Relaxed), 0);
+            assert_eq!(Arc::strong_count(&output), 1);
+        }
+    }
 }

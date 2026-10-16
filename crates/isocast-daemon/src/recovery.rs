@@ -1,4 +1,4 @@
-//! Failure boundaries and orderly shutdown after poisoned shared state.
+//! Failure boundaries and orderly shutdown after broken shared state.
 use crate::Daemon;
 use isocast_protocol::api::{Event, socket_path};
 use std::path::PathBuf;
@@ -6,6 +6,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+
 use std::time::{Duration, Instant};
 
 impl Daemon {
@@ -22,7 +23,10 @@ impl Daemon {
             "worker panic contained",
             serde_json::json!({"error":message}),
         );
-        if self.state.is_poisoned() {
+        // Only a panic that cut a change to the control state short leaves
+        // it possibly inconsistent; one that only read it (housekeeping)
+        // leaves recordings and the stream running.
+        if self.state.is_broken() {
             self.emergency_stop(message);
         } else {
             self.publish(Event::Warning { message });
@@ -30,7 +34,7 @@ impl Daemon {
     }
 
     /// Never unwind through the recorder's ownership. Extract only stop
-    /// handles from poisoned state, finalize outside it, and then terminate.
+    /// handles from broken state, finalize outside it, and then terminate.
     pub(crate) fn emergency_stop(self: &Arc<Self>, why: String) {
         if self.emergency.swap(true, Ordering::SeqCst) {
             return;
@@ -48,7 +52,7 @@ impl Daemon {
                         "emergency finalization timed out; durable fragments retained",
                         serde_json::Value::Null,
                     );
-                    // Do not run possibly poisoned destructors or manufacture
+                    // Do not run destructors of broken state or manufacture
                     // SIGABRT. No clean marker: startup will repair manifests.
                     std::process::exit(70);
                 }
@@ -60,7 +64,7 @@ impl Daemon {
                 serde_json::json!({"reason":why}),
             );
             let (id, stream, engine) = {
-                let mut state = daemon.state.lock().unwrap_or_else(|p| p.into_inner());
+                let mut state = daemon.state.lock();
                 let id = state.session.as_ref().map(|s| {
                     s.stop.store(true, Ordering::SeqCst);
                     s.id
@@ -75,7 +79,7 @@ impl Daemon {
             }
             let deadline = Instant::now() + Duration::from_secs(9);
             let report = loop {
-                let state = daemon.state.lock().unwrap_or_else(|p| p.into_inner());
+                let state = daemon.state.read();
                 if id.is_none_or(|id| state.ended_session >= id) {
                     break state.last.clone();
                 }
@@ -168,11 +172,11 @@ impl Daemon {
                 },
             });
         }
-        *self.interrupted_unnoted.lock().unwrap() = recovered
+        *self.interrupted_unnoted.lock() = recovered
             .iter()
             .filter(|r| r.newly_detected)
             .map(|take| take.manifest.clone())
             .collect();
-        *self.interrupted.lock().unwrap() = recovered;
+        *self.interrupted.lock() = recovered;
     }
 }

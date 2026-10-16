@@ -191,10 +191,10 @@ pub fn request_permission(timeout: Duration) -> Permission {
         return Permission::NotDetermined;
     };
     let (tx, rx) = mpsc::channel();
-    let tx = std::sync::Mutex::new(tx);
+    let tx = parking_lot::Mutex::new(tx);
     // The callback's argument is a CoreFoundation Boolean (a byte).
     let answered = block2::RcBlock::new(move |granted: u8| {
-        let _ = tx.lock().map(|tx| tx.send(granted != 0));
+        let _ = tx.lock().send(granted != 0);
     });
     let service = CFString::from_str(AUDIO_CAPTURE);
     let block = block2::RcBlock::as_ptr(&answered);

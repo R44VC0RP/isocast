@@ -5,10 +5,11 @@
 //! leaves the last change, never half of one. Clips point at their takes'
 //! manifests; taking a clip off never touches the take's files.
 
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use chrono::{Local, SecondsFormat};
@@ -732,7 +733,7 @@ impl SessionTakes {
     /// Drop take `number` (the one `retake` replaces) on `timeline`;
     /// false if it already was.
     fn drop_take(&self, number: u32, timeline: &str) -> bool {
-        let mut dropped = self.dropped.lock().unwrap();
+        let mut dropped = self.dropped.lock();
         if dropped.iter().any(|(n, _)| *n == number) {
             return false;
         }
@@ -768,11 +769,11 @@ impl Daemon {
         for note in crate::export::recover(loaded.folder()) {
             eprintln!("isocastd: {note}");
         }
-        *self.timelines.lock().unwrap() = loaded;
+        *self.timelines.lock() = loaded;
     }
 
     pub(crate) fn timeline_changed(&self, id: &str, action: TimelineAction, clip: Option<String>) {
-        let timelines = self.timelines.lock().unwrap();
+        let timelines = self.timelines.lock();
         let clips = timelines.get(id).map_or(0, |t| t.clips.len());
         let current = timelines.current().map(str::to_string);
         drop(timelines);
@@ -793,7 +794,7 @@ impl Daemon {
     /// timeline there.
     pub(crate) fn heal_timelines(&self) {
         let missing: Vec<(PathBuf, Option<String>)> = {
-            let timelines = self.timelines.lock().unwrap();
+            let timelines = self.timelines.lock();
             timelines
                 .all()
                 .flat_map(|timeline| {
@@ -841,11 +842,7 @@ impl Daemon {
             }
         }
         for (from, to, id) in moves {
-            let moved = self
-                .timelines
-                .lock()
-                .unwrap()
-                .move_folder(&from, &to, Some(&id));
+            let moved = self.timelines.lock().move_folder(&from, &to, Some(&id));
             for message in crate::projects::heal_exports(&to) {
                 self.publish(Event::Warning { message });
             }
@@ -871,15 +868,14 @@ impl Daemon {
         self.heal_timelines();
         self.timelines
             .lock()
-            .unwrap()
             .info(id, notes)
             .ok_or_else(|| invalid(format!("timeline: no timeline {id:?}")))
     }
 
     pub(crate) fn timeline_new(&self, params: TimelineNewParams) -> Result<TimelineInfo, RpcError> {
-        let id = self.timelines.lock().unwrap().create(params.name)?;
+        let id = self.timelines.lock().create(params.name)?;
         self.timeline_changed(&id, TimelineAction::Created, None);
-        let recording = self.state.lock().unwrap().session.is_some();
+        let recording = self.state.lock().session.is_some();
         let notes = match recording {
             true => vec![
                 "a recording is running: its take is added to this timeline when it finishes"
@@ -891,16 +887,12 @@ impl Daemon {
     }
 
     pub(crate) fn timeline_get(&self, target: TimelineTarget) -> Result<TimelineInfo, RpcError> {
-        let id = self
-            .timelines
-            .lock()
-            .unwrap()
-            .resolve(target.timeline.as_deref())?;
+        let id = self.timelines.lock().resolve(target.timeline.as_deref())?;
         self.timeline_info(&id, Vec::new())
     }
 
     pub(crate) fn timeline_list(&self) -> TimelineList {
-        self.timelines.lock().unwrap().list()
+        self.timelines.lock().list()
     }
 
     pub(crate) fn timeline_open(
@@ -908,7 +900,7 @@ impl Daemon {
         params: TimelineOpenParams,
     ) -> Result<TimelineInfo, RpcError> {
         let id = {
-            let mut timelines = self.timelines.lock().unwrap();
+            let mut timelines = self.timelines.lock();
             timelines.reload(&params.timeline)?;
             let id = timelines.resolve(Some(&params.timeline))?;
             timelines.set_current(Some(id.clone()))?;
@@ -920,7 +912,7 @@ impl Daemon {
 
     pub(crate) fn timeline_close(&self) -> Result<TimelineClosed, RpcError> {
         let closed = {
-            let mut timelines = self.timelines.lock().unwrap();
+            let mut timelines = self.timelines.lock();
             let closed = timelines.current().map(str::to_string);
             timelines.set_current(None)?;
             closed
@@ -936,7 +928,7 @@ impl Daemon {
         params: TimelineRemoveParams,
     ) -> Result<TimelineInfo, RpcError> {
         let (id, removed) = {
-            let mut timelines = self.timelines.lock().unwrap();
+            let mut timelines = self.timelines.lock();
             let id = timelines.resolve(params.timeline.as_deref())?;
             let removed = timelines.change(&id, |timeline| {
                 let at = find(timeline, &params.clip)?;
@@ -961,7 +953,7 @@ impl Daemon {
         params: TimelineMoveParams,
     ) -> Result<TimelineInfo, RpcError> {
         let id = {
-            let mut timelines = self.timelines.lock().unwrap();
+            let mut timelines = self.timelines.lock();
             let id = timelines.resolve(params.timeline.as_deref())?;
             timelines.change(&id, |timeline| {
                 let at = find(timeline, &params.clip)?;
@@ -980,12 +972,8 @@ impl Daemon {
     /// split's): the current timeline lists it as being recorded until it
     /// finishes, so a crash meanwhile leaves a trace there.
     pub(crate) fn take_began(&self, takes: &SessionTakes, number: u32, manifest: &Path) {
-        takes
-            .begun
-            .lock()
-            .unwrap()
-            .push((number, manifest.to_path_buf()));
-        let mut timelines = self.timelines.lock().unwrap();
+        takes.begun.lock().push((number, manifest.to_path_buf()));
+        let mut timelines = self.timelines.lock();
         let Some(id) = timelines.current().map(str::to_string) else {
             return;
         };
@@ -1015,15 +1003,15 @@ impl Daemon {
         path: &Path,
         manifest: &SessionManifest,
     ) {
-        takes.begun.lock().unwrap().retain(|(n, _)| *n != number);
+        takes.begun.lock().retain(|(n, _)| *n != number);
         let dropped = {
-            let mut dropped = takes.dropped.lock().unwrap();
+            let mut dropped = takes.dropped.lock();
             dropped
                 .iter()
                 .position(|(n, _)| *n == number)
                 .map(|i| dropped.remove(i).1)
         };
-        let mut timelines = self.timelines.lock().unwrap();
+        let mut timelines = self.timelines.lock();
         for id in timelines.holding(path) {
             let _ = timelines.change(&id, |timeline| {
                 timeline.recording.retain(|take| take != path);
@@ -1055,7 +1043,7 @@ impl Daemon {
         match changed {
             Ok(clip) => {
                 if clip.is_some() {
-                    *takes.appended.lock().unwrap() = Some(path.to_path_buf());
+                    *takes.appended.lock() = Some(path.to_path_buf());
                 }
                 self.timeline_changed(&id, action, clip);
             }
@@ -1072,9 +1060,9 @@ impl Daemon {
     /// The session ended: takes it began that never finished (the
     /// recording failed) are listed as interrupted where they were noted.
     pub(crate) fn session_over(&self, takes: &SessionTakes) {
-        let unfinished = std::mem::take(&mut *takes.begun.lock().unwrap());
+        let unfinished = std::mem::take(&mut *takes.begun.lock());
         let mut changed = Vec::new();
-        let mut timelines = self.timelines.lock().unwrap();
+        let mut timelines = self.timelines.lock();
         for (_, take) in unfinished {
             for id in timelines.holding(&take) {
                 let moved = timelines.change(&id, |timeline| {
@@ -1101,11 +1089,10 @@ impl Daemon {
     /// Wait for session `session` to end (a stop finishing, or a recording
     /// at its end).
     fn wait_for_end(&self, session: u64) -> Result<(), RpcError> {
-        let state = self.state.lock().unwrap();
-        let (_state, waited) = self
-            .ended
-            .wait_timeout_while(state, crate::STOP_TIMEOUT, |s| s.ended_session < session)
-            .unwrap();
+        let mut state = self.state.lock();
+        let waited = state.wait_while_for(&self.ended, crate::STOP_TIMEOUT, |s| {
+            s.ended_session < session
+        });
         match waited.timed_out() {
             true => Err(failed(
                 "the recording did not stop in time; retake once `isocast status` says it has",
@@ -1118,10 +1105,10 @@ impl Daemon {
     pub(crate) fn retake(self: &Arc<Self>, params: RetakeParams) -> Result<Retaken, RpcError> {
         // One at a time: a second retake waits for the first, then finds
         // its new take not begun yet (or begun, and drops that).
-        let _one = self.retaking.lock().unwrap();
-        let id = self.timelines.lock().unwrap().resolve(None)?;
+        let _one = self.retaking.lock();
+        let id = self.timelines.lock().resolve(None)?;
         let running = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             state.session.as_ref().map(|session| {
                 (
                     session.id,
@@ -1137,7 +1124,7 @@ impl Daemon {
         // take is retaken as when not recording.
         let after_end = |reason: &str| {
             self.wait_for_end(session)?;
-            let appended = takes.appended.lock().unwrap().clone();
+            let appended = takes.appended.lock().clone();
             let note = match appended {
                 Some(_) => {
                     format!("{reason}, so its take finished first; that is the clip retaken")
@@ -1163,7 +1150,7 @@ impl Daemon {
                  writes (stop it first to record elsewhere or for a set time)",
             ));
         }
-        let now = takes.current.lock().unwrap().clone();
+        let now = takes.current.lock().clone();
         if now.number == 0 {
             return Err(wrong_state(
                 "the recording is still starting; retake once it has started (`isocast status` \
@@ -1249,7 +1236,7 @@ impl Daemon {
     ) -> Result<Retaken, RpcError> {
         // The retake goes into its take's folder: find it if it moved.
         self.heal_timelines();
-        let taken = self.timelines.lock().unwrap().change(&id, |timeline| {
+        let taken = self.timelines.lock().change(&id, |timeline| {
             let off = match (&take_off, timeline.clips.last()) {
                 (_, None) => false,
                 (TakeOff::Last, Some(_)) => true,
@@ -1313,7 +1300,7 @@ impl Daemon {
             Err(err) => {
                 // Nothing was recorded: the clip goes back where it was.
                 if let Some((clip, removed)) = taken {
-                    let _ = self.timelines.lock().unwrap().change(&id, |timeline| {
+                    let _ = self.timelines.lock().change(&id, |timeline| {
                         if let Some(at) = timeline.removed.iter().rposition(|r| *r == removed) {
                             timeline.removed.remove(at);
                         }

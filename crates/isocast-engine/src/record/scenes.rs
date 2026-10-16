@@ -12,9 +12,10 @@
 //! a canvas frame however often it changes; text read from a file is
 //! looked at twice a second.
 
+use parking_lot::{Condvar, Mutex};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,7 @@ use isocast_protocol::{Filter, FilterKind, Setup};
 use super::Slots;
 use crate::compiled::{CompiledScenes, LaidOut, NodeId, NodeIds, compile};
 use crate::content::{Contents, Sizer};
+use crate::critical::Critical;
 use crate::data::{DataStore, Listening};
 use crate::filter::output_size;
 use crate::layout::{Layouter, settings_size};
@@ -92,11 +94,11 @@ pub(super) struct SceneThread<F> {
 
 struct Shared<F> {
     failure: Mutex<Option<String>>,
-    input: Mutex<Waiting<F>>,
+    input: Critical<Waiting<F>>,
     wake: Condvar,
     stop: AtomicBool,
     version: AtomicU64,
-    output: Mutex<Option<Arc<ProgramScenes<F>>>>,
+    output: Critical<Option<Arc<ProgramScenes<F>>>>,
     /// How long the last resolve took, in nanoseconds.
     resolve_ns: AtomicU64,
     /// How long drawing content took the last time any was drawn.
@@ -105,7 +107,7 @@ struct Shared<F> {
     contents: AtomicU32,
     content_bytes: AtomicU64,
     /// The data keys the scenes' content shows.
-    bound: Mutex<HashSet<Arc<str>>>,
+    bound: Critical<HashSet<Arc<str>>>,
 }
 
 /// What waits for the scene thread.
@@ -131,7 +133,7 @@ impl<F: Clone + Send + 'static> SceneThread<F> {
     ) -> Self {
         let shared = Arc::new(Shared {
             failure: Mutex::new(None),
-            input: Mutex::new(Waiting {
+            input: Critical::new(Waiting {
                 next: None,
                 sizes: Vec::new(),
                 data: false,
@@ -139,12 +141,12 @@ impl<F: Clone + Send + 'static> SceneThread<F> {
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
             version: AtomicU64::new(0),
-            output: Mutex::new(None),
+            output: Critical::new(None),
             resolve_ns: AtomicU64::new(0),
             raster_ns: AtomicU64::new(0),
             contents: AtomicU32::new(0),
             content_bytes: AtomicU64::new(0),
-            bound: Mutex::new(HashSet::new()),
+            bound: Critical::new(HashSet::new()),
         });
         let listening = data.listen({
             let shared = Arc::downgrade(&shared);
@@ -153,11 +155,11 @@ impl<F: Clone + Send + 'static> SceneThread<F> {
                     return;
                 };
                 let shown = {
-                    let bound = shared.bound.lock().unwrap();
+                    let bound = shared.bound.read();
                     !bound.is_empty() && keys.iter().any(|key| bound.contains(key))
                 };
                 if shown {
-                    shared.input.lock().unwrap().data = true;
+                    shared.input.lock().data = true;
                     shared.wake.notify_all();
                 }
             })
@@ -170,14 +172,13 @@ impl<F: Clone + Send + 'static> SceneThread<F> {
                     if let Err(message) = isocast_diagnostics::contain("scene worker", || {
                         run(&shared, &frame_size, &data, &on_warning)
                     }) {
-                        *shared.failure.lock().unwrap_or_else(|p| p.into_inner()) =
-                            Some(message.clone());
+                        *shared.failure.lock() = Some(message.clone());
                         shared.stop.store(true, Ordering::SeqCst);
                         on_failed(
                             message,
-                            shared.input.is_poisoned()
-                                || shared.output.is_poisoned()
-                                || shared.bound.is_poisoned(),
+                            shared.input.is_broken()
+                                || shared.output.is_broken()
+                                || shared.bound.is_broken(),
                         );
                     }
                 }
@@ -192,14 +193,14 @@ impl<F: Clone + Send + 'static> SceneThread<F> {
 
     /// Resolve `input` (in place of any change still waiting).
     pub(super) fn submit(&self, input: SceneInput<F>) {
-        self.shared.input.lock().unwrap().next = Some(input);
+        self.shared.input.lock().next = Some(input);
         self.shared.wake.notify_all();
     }
 
     /// The pictures of these sources (by id) are these sizes, which isn't
     /// what the current layout took them to be: lay out again.
     pub(super) fn resized(&self, sizes: impl Iterator<Item = (Arc<str>, (u32, u32))>) {
-        let mut input = self.shared.input.lock().unwrap();
+        let mut input = self.shared.input.lock();
         let before = input.sizes.len();
         input.sizes.extend(sizes);
         if input.sizes.len() > before {
@@ -214,7 +215,7 @@ impl<F: Clone + Send + 'static> SceneThread<F> {
 
     /// The newest scenes resolved.
     pub(super) fn latest(&self) -> Option<Arc<ProgramScenes<F>>> {
-        self.shared.output.lock().unwrap().clone()
+        self.shared.output.read().clone()
     }
 
     /// How long the last resolve took, in microseconds.
@@ -238,31 +239,23 @@ impl<F: Clone + Send + 'static> SceneThread<F> {
         self.shared.stop.store(true, Ordering::SeqCst);
         {
             // Under the lock, so the thread can't miss the wake-up.
-            let _input = self.shared.input.lock().unwrap_or_else(|p| p.into_inner());
+            let _input = self.shared.input.read();
             self.shared.wake.notify_all();
         }
-        if let Some(thread) = self.thread.lock().unwrap().take() {
+        if let Some(thread) = self.thread.lock().take() {
             let _ = thread.join();
         }
         // Let go of the sources' frames.
-        self.shared
-            .output
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
+        self.shared.output.lock().take();
     }
 
-    pub(super) fn poisoned(&self) -> bool {
-        self.shared.input.is_poisoned()
-            || self.shared.output.is_poisoned()
-            || self.shared.bound.is_poisoned()
+    pub(super) fn broken(&self) -> bool {
+        self.shared.input.is_broken()
+            || self.shared.output.is_broken()
+            || self.shared.bound.is_broken()
     }
     pub(super) fn failure(&self) -> Option<String> {
-        self.shared
-            .failure
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        self.shared.failure.lock().clone()
     }
 }
 
@@ -315,7 +308,7 @@ fn run<F: Clone>(
     let mut data_due = Instant::now();
     loop {
         let (next, sizes) = {
-            let mut input = shared.input.lock().unwrap();
+            let mut input = shared.input.lock();
             loop {
                 if shared.stop.load(Ordering::SeqCst) {
                     return;
@@ -332,24 +325,20 @@ fn run<F: Clone>(
                     false if resolver.contents.reads_files() => Some(FILE_POLL),
                     false => None,
                 };
-                input = match wait {
+                match wait {
                     Some(wait) => {
-                        let (input, timeout) = shared.wake.wait_timeout(input, wait).unwrap();
+                        let timeout = input.wait_for(&shared.wake, wait);
                         // A file text content shows changed: resolve.
                         if timeout.timed_out()
                             && !input.data
                             && resolver.contents.reads_files()
                             && resolver.contents.files_changed()
                         {
-                            let mut input = input;
                             input.data = true;
-                            input
-                        } else {
-                            input
                         }
                     }
-                    None => shared.wake.wait(input).unwrap(),
-                };
+                    None => input.wait(&shared.wake),
+                }
             }
             input.data = false;
             (input.next.take(), std::mem::take(&mut input.sizes))
@@ -382,12 +371,12 @@ fn run<F: Clone>(
         shared.content_bytes.store(drawn.bytes, Ordering::Relaxed);
         {
             let keys = resolver.contents.keys();
-            let mut bound = shared.bound.lock().unwrap();
+            let mut bound = shared.bound.lock();
             if *bound != *keys {
                 bound.clone_from(keys);
             }
         }
-        *shared.output.lock().unwrap() = Some(Arc::new(scenes));
+        *shared.output.lock() = Some(Arc::new(scenes));
         shared.version.store(version, Ordering::Release);
         data_due = began + Duration::from_secs(1) / fps;
         if changed {

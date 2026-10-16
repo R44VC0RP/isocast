@@ -30,6 +30,7 @@ lewton = { version = "0.10.2", default-features = false }
 base64 = "0.22.1"
 libc = "0.2"
 mach2 = "0.6.0"
+parking_lot = "0.12"
 # The Keychain (stream keys). Already in the build through native-tls.
 security-framework = "3.7.0"
 objc2 = { version = "0.6.5", features = ["exception"] }

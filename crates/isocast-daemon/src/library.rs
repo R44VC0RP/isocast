@@ -208,7 +208,7 @@ impl Daemon {
     /// The library's folder and the pair in use, read under the lock so
     /// the files can be read without it.
     fn library_view(&self) -> (PathBuf, Option<CurrentFile>) {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         (
             state.file.root().to_path_buf(),
             state.file.current().cloned(),
@@ -278,7 +278,7 @@ impl Daemon {
         let (root, _) = self.library_view();
         check_exists(&root, kind, field, id)?;
         {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             let in_use = state.file.current().is_some_and(|c| match kind {
                 LibraryKind::Collection => c.collection == id,
                 LibraryKind::Profile => c.profile == id,
@@ -337,7 +337,6 @@ impl Daemon {
                     let canvas = self
                         .state
                         .lock()
-                        .unwrap()
                         .setup
                         .as_ref()
                         .map(|s| (s.canvas.width, s.canvas.height));
@@ -405,7 +404,7 @@ impl Daemon {
     /// name). Returns the id.
     fn add(&self, root: &Path, document: &Document, id: Option<&str>) -> Result<String, RpcError> {
         let kind = document.kind();
-        let _files = self.saved.lock().unwrap();
+        let _files = self.saved.lock();
         // Imports/copies can keep the same display name while receiving a
         // fresh id. Give only the incoming document a distinguishable label.
         let mut document = document.clone();
@@ -497,13 +496,13 @@ impl Daemon {
             LibraryKind::Collection => c.collection == id,
             LibraryKind::Profile => c.profile == id,
         });
-        let live = self.state.lock().unwrap().setup.is_some();
+        let live = self.state.lock().setup.is_some();
         let mut revision = None;
         let mut notes = Vec::new();
         if in_use && live && kind == LibraryKind::Collection {
             // The collection's name is the live setup's: a change like any
             // other, saved with it.
-            let at = self.state.lock().unwrap().revision;
+            let at = self.state.lock().revision;
             let applied = self.apply(ApplyParams {
                 revision: at,
                 change: Change::Patch(serde_json::json!({ "name": name })),
@@ -515,7 +514,7 @@ impl Daemon {
             // A change waiting to be saved goes first; the file then gets
             // the new name (later saves keep it).
             self.flush_live_save();
-            let _files = self.saved.lock().unwrap();
+            let _files = self.saved.lock();
             let path = store::document_path(&root, kind, &id);
             let mut document = match kind {
                 LibraryKind::Collection => store::read_document(&path).map(Document::Collection),
@@ -527,7 +526,7 @@ impl Daemon {
                 failed(format!("couldn't rename {} {id:?}: {err:#}", kind.label()))
             })?;
             if in_use && kind == LibraryKind::Profile {
-                self.state.lock().unwrap().file.renamed_profile(&name);
+                self.state.lock().file.renamed_profile(&name);
             }
         }
         self.library_changed(LibraryAction::Renamed, Some(kind), Some(&id));
@@ -546,11 +545,10 @@ impl Daemon {
         self.flush_live_save();
         let entry = self.entry(kind, &id);
         let kept = {
-            let mut files = self.saved.lock().unwrap();
+            let mut files = self.saved.lock();
             let in_use = self
                 .state
                 .lock()
-                .unwrap()
                 .file
                 .current()
                 .is_some_and(|c| match kind {
@@ -609,7 +607,7 @@ impl Daemon {
             (Some(_), None) => "the scene collection",
             (None, Some(_)) => "the profile",
         };
-        if let Some(message) = switch_refusal(&self.state.lock().unwrap(), what) {
+        if let Some(message) = switch_refusal(&self.state.lock(), what) {
             return Err(wrong_state(message));
         }
         // The pair in use has its newest change on disk before another
@@ -661,7 +659,7 @@ impl Daemon {
         let same = current
             .as_ref()
             .is_some_and(|c| c.collection == collection_id && c.profile == profile_id);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let collection_changed = state
             .file
             .current()
@@ -741,7 +739,7 @@ impl Daemon {
         let preview = state.preview.clone();
         drop(state);
         {
-            let _files = self.saved.lock().unwrap();
+            let _files = self.saved.lock();
             if let Some((file, view)) = leaving
                 && let Err(err) = store::write_view(&file, &view)
             {

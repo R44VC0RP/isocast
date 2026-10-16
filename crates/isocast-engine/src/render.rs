@@ -10,8 +10,8 @@
 //! their records uploaded between frames; [`Renderer::render`] draws a
 //! one-off list of [`Layer`]s the same way.
 
+use parking_lot::Mutex;
 use std::num::NonZeroU64;
-use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -1068,7 +1068,7 @@ impl Renderer {
         size: (u32, u32),
         clear: wgpu::Color,
     ) {
-        let mut immediate = self.immediate.lock().unwrap();
+        let mut immediate = self.immediate.lock();
         let Immediate {
             records,
             clips,

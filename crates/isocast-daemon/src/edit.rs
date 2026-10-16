@@ -413,7 +413,7 @@ impl Daemon {
     ) -> Result<TimelineInfo, RpcError> {
         self.heal_timelines();
         let (id, clip, notes) = {
-            let mut timelines = self.timelines.lock().unwrap();
+            let mut timelines = self.timelines.lock();
             let id = timelines.resolve(target)?;
             let (clip, notes) = timelines.change(&id, |timeline| {
                 let grids = grids(timeline).map_err(wrong_state)?;
@@ -508,7 +508,7 @@ impl Daemon {
     ) -> Result<TimelineInfo, RpcError> {
         self.heal_timelines();
         let (id, undone) = {
-            let mut timelines = self.timelines.lock().unwrap();
+            let mut timelines = self.timelines.lock();
             let id = timelines.resolve(target.timeline.as_deref())?;
             let undone =
                 timelines.change(&id, |timeline| step(timeline, redo).map_err(wrong_state))?;

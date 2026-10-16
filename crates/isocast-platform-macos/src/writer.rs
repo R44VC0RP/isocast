@@ -566,7 +566,9 @@ impl AssetWriter {
             for audio in &mut self.audio {
                 if !audio.pending.is_empty() && unsafe { audio.input.isReadyForMoreMediaData() } {
                     let buffer = audio.pending.pop_front().expect("not empty");
-                    if !unsafe { audio.input.appendSampleBuffer(&buffer) } {
+                    if !catch(|| unsafe { audio.input.appendSampleBuffer(&buffer) })
+                        .context("could not append audio")?
+                    {
                         return Err(writer_error(&self.writer).context("could not append audio"));
                     }
                     progressed = true;
@@ -582,10 +584,12 @@ impl AssetWriter {
                     self.backlog = true;
                 }
                 let (frame, time) = self.pending_video.pop_front().expect("not empty");
-                if !unsafe {
+                if !catch(|| unsafe {
                     self.adaptor
                         .appendPixelBuffer_withPresentationTime(&frame.0, time)
-                } {
+                })
+                .context("could not append a video frame")?
+                {
                     return Err(
                         writer_error(&self.writer).context("could not append a video frame")
                     );
@@ -959,4 +963,54 @@ fn not_plain(path: &std::path::Path) -> Option<String> {
 /// the macOS versions Isocast supports.
 fn key(constant: Option<&'static NSString>) -> &'static NSString {
     constant.expect("AVFoundation constant")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isocast_engine::{AudioTrackSpec, FramePool};
+
+    #[test]
+    fn append_exceptions_are_errors_without_unwinding_into_rust() {
+        autoreleasepool(|_| {
+            let path = std::env::temp_dir().join(format!(
+                "isocast-append-exception-{}.mov",
+                std::process::id()
+            ));
+            let writer = AssetWriter::create(&WriterSpec {
+                path,
+                container: Container::Mov,
+                video: VideoTrackSpec {
+                    width: 64,
+                    height: 64,
+                    fps: 30,
+                    encoder: isocast_protocol::Encoder {
+                        codec: Codec::H264,
+                        ..Default::default()
+                    },
+                },
+                audio: vec![AudioTrackSpec { channels: 1 }],
+                created: std::time::SystemTime::now(),
+            })
+            .unwrap();
+            let mut pool = crate::frames::FramePool::new(64, 64).unwrap();
+            let frame = pool.draw(&mut |pixels, _| pixels.fill(0)).unwrap().unwrap();
+            let at = unsafe { CMTime::new(0, 30) };
+            // Writing has started, but the source-time session has not.
+            // These are real AVFoundation exceptions, not Rust panics.
+            let video = catch(|| unsafe {
+                writer
+                    .adaptor
+                    .appendPixelBuffer_withPresentationTime(&frame.0, at)
+            });
+            let audio = &writer.audio[0];
+            let sample = audio_sample_buffer(&audio.format, 1, &[0.0; 480], at).unwrap();
+            let audio = catch(|| unsafe { audio.input.appendSampleBuffer(&sample) });
+            writer.cancel();
+            for error in [video, audio] {
+                let error = error.expect_err("append before startSession must throw");
+                assert!(error.to_string().contains("exception"), "{error:#}");
+            }
+        });
+    }
 }

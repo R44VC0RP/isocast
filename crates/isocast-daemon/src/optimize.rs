@@ -67,7 +67,7 @@ impl Daemon {
     }
 
     pub(crate) fn speed_test(&self, params: SpeedTestParams) -> Result<SpeedTest, RpcError> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         if state.streaming() {
             return Err(wrong_state(
                 "not while streaming: the test would compete with the stream for the upload",
@@ -177,7 +177,7 @@ impl Daemon {
     }
 
     pub(crate) fn optimize(&self, params: OptimizeParams) -> Result<Optimized, RpcError> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         if state.session.is_some() || state.streaming() {
             return Err(wrong_state(
                 "not while recording or streaming: the benchmark would compete for the \

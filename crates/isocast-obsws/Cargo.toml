@@ -9,6 +9,7 @@ description = "An obs-websocket v5 server on top of isocastd's method table, so 
 [dependencies]
 base64 = "0.22.1"
 isocast-protocol = { path = "../isocast-protocol" }
+parking_lot = "0.12"
 # obs-websocket's second encoding (obswebsocket.msgpack), which
 # obs-websocket-js uses by default under Node.
 rmp-serde = "1.3"

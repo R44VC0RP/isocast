@@ -47,13 +47,13 @@ impl ReplayOutput {
 
 impl Daemon {
     pub(super) fn replay_status(&self) -> ReplayStatus {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         state.replay.status_for(state.setup.as_ref())
     }
 
     pub(super) fn replay_start(self: &Arc<Self>) -> Result<ReplayStatus, RpcError> {
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             if state.replay.active() {
                 return Err(wrong(
                     "the replay buffer is already running; save it (`isocast replay save`, or \
@@ -71,7 +71,7 @@ impl Daemon {
             state.replay.starting = true;
         }
         let engine = self.ensure_engine();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.replay.starting = false;
         let engine = engine?;
         let Some(setup) = state.setup.clone() else {
@@ -99,7 +99,7 @@ impl Daemon {
 
     pub(super) fn replay_stop(&self) -> Result<ReplayStatus, RpcError> {
         let buffer = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             match &state.replay.buffer {
                 Some(buffer) if buffer.is_running() => buffer.clone(),
                 Some(buffer) => {
@@ -124,7 +124,7 @@ impl Daemon {
 
     pub(super) fn replay_save(&self) -> Result<ReplaySaved, RpcError> {
         let (buffer, folder, container, keep_free) = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             let buffer = match &state.replay.buffer {
                 Some(buffer) if buffer.is_running() => buffer.clone(),
                 _ => {
@@ -184,7 +184,7 @@ impl Daemon {
 
     /// Warn once per new loss, like the stream's.
     pub(super) fn warn_replay_drops(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let Some(status) = state.replay.buffer.as_ref().map(|b| b.status()) else {
             return;
         };

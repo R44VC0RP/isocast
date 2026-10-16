@@ -70,7 +70,6 @@ pub fn broadcast(shared: &Shared, data: Value) {
     shared
         .custom
         .lock()
-        .unwrap_or_else(|p| p.into_inner())
         .retain(|tx| tx.send(data.clone()).is_ok());
 }
 
@@ -444,11 +443,7 @@ impl Session<'_> {
                 self.tracker = Tracker::new(&self.ctx());
                 self.watch();
                 let (tx, rx) = mpsc::channel();
-                self.shared
-                    .custom
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .push(tx);
+                self.shared.custom.lock().push(tx);
                 self.custom = Some(rx);
                 Ok(vec![(
                     op::IDENTIFIED,

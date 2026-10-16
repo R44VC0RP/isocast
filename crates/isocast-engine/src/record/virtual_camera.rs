@@ -1,7 +1,8 @@
 //! A camera is an independent, bounded output. Its worker never blocks a
 //! compositor, recording or stream. There is no work while it is off.
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -42,12 +43,11 @@ pub struct VirtualCamera {
 
 impl VirtualCamera {
     pub fn status(&self) -> VirtualCameraStatus {
-        self.status.lock().unwrap().clone()
+        self.status.lock().clone()
     }
     pub fn finished(&self) -> bool {
         self.thread
             .lock()
-            .unwrap()
             .as_ref()
             .is_none_or(JoinHandle::is_finished)
     }
@@ -67,7 +67,7 @@ impl VirtualCamera {
 
     fn fail_timeout(&self, message: &str) {
         self.timed_out.store(true, Ordering::Release);
-        let mut status = self.status.lock().unwrap();
+        let mut status = self.status.lock();
         status.state = VirtualCameraState::Failed;
         status.last_error = Some(message.into());
     }
@@ -77,7 +77,7 @@ impl VirtualCamera {
     pub fn stop(&self) -> VirtualCameraStatus {
         self.stop.store(true, Ordering::Release);
         {
-            let mut status = self.status.lock().unwrap();
+            let mut status = self.status.lock();
             if matches!(
                 status.state,
                 VirtualCameraState::Starting | VirtualCameraState::Running
@@ -94,7 +94,7 @@ impl VirtualCamera {
             std::thread::sleep(Duration::from_millis(2));
         }
         let finished = if self.finished() {
-            self.thread.lock().unwrap().take()
+            self.thread.lock().take()
         } else {
             None
         };
@@ -131,10 +131,10 @@ pub(super) fn start<P: Platform>(
             let stop = stop.clone();
             move || {
                 platform.real_time_thread();
-                on_change(status.lock().unwrap().clone());
+                on_change(status.lock().clone());
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-                        let initial = status.lock().unwrap().clone();
+                        let initial = status.lock().clone();
                         let sink = platform.virtual_camera_sink(
                             initial.width,
                             initial.height,
@@ -148,11 +148,11 @@ pub(super) fn start<P: Platform>(
                             return Ok(());
                         }
                         {
-                            let mut status = status.lock().unwrap();
+                            let mut status = status.lock();
                             status.transport = sink.transport().into();
                             status.state = VirtualCameraState::Running;
                         }
-                        on_change(status.lock().unwrap().clone());
+                        on_change(status.lock().clone());
                         let mut output = Output {
                             gpu,
                             renderer,
@@ -169,7 +169,7 @@ pub(super) fn start<P: Platform>(
                         Err(anyhow::anyhow!("virtual_camera: output worker panicked"))
                     });
                 let final_status = {
-                    let mut status = status.lock().unwrap();
+                    let mut status = status.lock();
                     match result {
                         _ if status.state == VirtualCameraState::Failed => {}
                         Ok(()) => status.state = VirtualCameraState::Stopped,
@@ -207,7 +207,7 @@ fn run<P: Platform>(
     input: &impl Fn(Time) -> Result<Option<Input<P::Frame>>>,
     output: &mut Output<P>,
 ) -> Result<()> {
-    let initial = status.lock().unwrap().clone();
+    let initial = status.lock().clone();
     let size = (initial.width, initial.height);
     let fps = initial.fps;
     let period = Duration::from_secs(1) / fps;
@@ -242,13 +242,13 @@ fn run<P: Platform>(
         let now = platform.now();
         if now > tick + period * 2 {
             let current = now.ticks_since(epoch, fps).max(0) as u64;
-            status.lock().unwrap().frames_dropped += current.saturating_sub(next);
+            status.lock().frames_dropped += current.saturating_sub(next);
             next = current;
             continue;
         }
         next += 1;
         let Some(input) = input(after)? else {
-            status.lock().unwrap().frames_dropped += 1;
+            status.lock().frames_dropped += 1;
             continue;
         };
         let (frame, pts) = match input {
@@ -276,7 +276,7 @@ fn run<P: Platform>(
                 };
                 let Some((frame, _)) = compositor.draw(Feed::Preview, Some(&selected), now, now)?
                 else {
-                    status.lock().unwrap().frames_dropped += 1;
+                    status.lock().frames_dropped += 1;
                     continue;
                 };
                 (frame, tick)
@@ -284,7 +284,7 @@ fn run<P: Platform>(
         };
         after = pts;
         let Some(buffer) = output.pool.take()? else {
-            status.lock().unwrap().frames_dropped += 1;
+            status.lock().frames_dropped += 1;
             continue;
         };
         let picture = output.importer.import(&frame)?;
@@ -298,7 +298,7 @@ fn run<P: Platform>(
             timeout: Some(Duration::from_secs(1)),
         })?;
         let sent = output.sink.send(&buffer, pts)?;
-        let mut status = status.lock().unwrap();
+        let mut status = status.lock();
         if sent {
             status.frames_sent += 1;
             latencies.push(platform.now().saturating_since(pts).as_secs_f64() * 1e6);

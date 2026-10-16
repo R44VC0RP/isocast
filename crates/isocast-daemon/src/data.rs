@@ -5,10 +5,11 @@
 //! collection is switched to, and announces changes as `data_changed`
 //! events, at most 20 a second however often keys change.
 
+use parking_lot::{Condvar, Mutex};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -82,7 +83,7 @@ impl Default for Data {
         let listening = store.listen({
             let events = events.clone();
             Arc::new(move |keys: &[Arc<str>]| {
-                events.pending.lock().unwrap().extend(keys.iter().cloned());
+                events.pending.lock().extend(keys.iter().cloned());
                 events.wake.notify_all();
             })
         });
@@ -112,12 +113,12 @@ impl Data {
 
     /// Where kept keys are saved, once there is a scene collection.
     pub fn path(&self) -> Option<PathBuf> {
-        self.saving.state.lock().unwrap().path.clone()
+        self.saving.state.lock().path.clone()
     }
 
     /// Kept keys changed: save them soon.
     pub fn changed_kept(&self) {
-        self.saving.state.lock().unwrap().dirty = true;
+        self.saving.state.lock().dirty = true;
         self.saving.wake.notify_all();
     }
 
@@ -126,7 +127,7 @@ impl Data {
     /// waiting to be saved go to the file before, first.
     pub fn use_collection(&self, collection: Option<&Path>) {
         self.flush();
-        let mut state = self.saving.state.lock().unwrap();
+        let mut state = self.saving.state.lock();
         state.path = collection.map(data_path);
         if state.dirty {
             self.saving.wake.notify_all();
@@ -171,7 +172,7 @@ impl Data {
         for skipped in skipped {
             notes.push(format!("{}: skipped {skipped}", path.display()));
         }
-        let mut state = self.saving.state.lock().unwrap();
+        let mut state = self.saving.state.lock();
         state.path = Some(path);
         state.dirty = false;
         notes
@@ -180,7 +181,7 @@ impl Data {
     /// Save kept keys now if any wait to be saved (before exiting, or
     /// before another collection's are loaded).
     pub fn flush(&self) {
-        let mut state = self.saving.state.lock().unwrap();
+        let mut state = self.saving.state.lock();
         if state.dirty
             && let Some(path) = state.path.clone()
         {
@@ -194,7 +195,7 @@ impl Data {
     pub fn status(&self) -> DataStatus {
         let mut status = self.store.status();
         status.events = self.events.sent.load(Ordering::Relaxed);
-        let state = self.saving.state.lock().unwrap();
+        let state = self.saving.state.lock();
         status.file = state.path.clone();
         status.save_error = state.error.clone();
         status
@@ -207,9 +208,9 @@ fn announce(events: &Events, store: &DataStore, publish: &dyn Fn(Event)) {
     let mut last: Option<Instant> = None;
     loop {
         let keys = {
-            let mut pending = events.pending.lock().unwrap();
+            let mut pending = events.pending.lock();
             while pending.is_empty() {
-                pending = events.wake.wait(pending).unwrap();
+                events.wake.wait(&mut pending);
             }
             if let Some(last) = last {
                 let due = last + EVENT_INTERVAL;
@@ -218,7 +219,7 @@ fn announce(events: &Events, store: &DataStore, publish: &dyn Fn(Event)) {
                     if now >= due {
                         break;
                     }
-                    pending = events.wake.wait_timeout(pending, due - now).unwrap().0;
+                    events.wake.wait_for(&mut pending, due - now);
                 }
             }
             std::mem::take(&mut *pending)
@@ -236,14 +237,13 @@ fn announce(events: &Events, store: &DataStore, publish: &dyn Fn(Event)) {
 /// them.
 fn save_when_quiet(saving: &Saving, store: &DataStore) {
     loop {
-        let mut state = saving.state.lock().unwrap();
+        let mut state = saving.state.lock();
         while !(state.dirty && state.path.is_some()) {
-            state = saving.wake.wait(state).unwrap();
+            saving.wake.wait(&mut state);
         }
         let first = Instant::now();
         loop {
-            let (guard, wait) = saving.wake.wait_timeout(state, SAVE_QUIET).unwrap();
-            state = guard;
+            let wait = saving.wake.wait_for(&mut state, SAVE_QUIET);
             if wait.timed_out() || first.elapsed() >= SAVE_AT_MOST {
                 break;
             }
@@ -256,7 +256,7 @@ fn save_when_quiet(saving: &Saving, store: &DataStore) {
         drop(state);
         // Written outside the lock: setting keys never waits for the disk.
         let result = write(&path, store.persisted());
-        let mut state = saving.state.lock().unwrap();
+        let mut state = saving.state.lock();
         match result {
             Ok(()) => state.error = None,
             Err(err) => {

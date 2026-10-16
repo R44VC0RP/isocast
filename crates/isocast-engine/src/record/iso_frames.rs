@@ -81,13 +81,8 @@ impl<P: Platform> IsoFrames<P> {
         };
         let (luma, chroma) = self.importer.ycbcr_target(&out)?;
         let imported = self.importer.import(frame)?;
-        let filters = (self.source_filters.as_ref()).map(|all| {
-            all.lock()
-                .unwrap()
-                .get(&self.id)
-                .cloned()
-                .unwrap_or_default()
-        });
+        let filters = (self.source_filters.as_ref())
+            .map(|all| all.lock().get(&self.id).cloned().unwrap_or_default());
         let direct = match &imported.pixels {
             GpuPixels::Rgb(texture)
                 if filters.is_none() && (imported.width, imported.height) == self.size =>

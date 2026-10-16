@@ -7,8 +7,9 @@
 //! ([`drain`]) into one JSONL record per output, so the trace's volume is
 //! per output per second, not per frame.
 
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
@@ -107,7 +108,7 @@ impl OutputTrace {
             start: OnceLock::new(),
             start_listed: AtomicBool::new(false),
         });
-        let mut outputs = OUTPUTS.lock().unwrap_or_else(|p| p.into_inner());
+        let mut outputs = OUTPUTS.lock();
         outputs.retain(|o| o.strong_count() > 0);
         outputs.push(Arc::downgrade(&trace));
         trace
@@ -186,12 +187,12 @@ impl OutputTrace {
 /// and the outputs started since then in start order.
 pub fn drain() -> (Vec<Value>, Vec<Value>) {
     let outputs: Vec<Arc<OutputTrace>> = {
-        let mut outputs = OUTPUTS.lock().unwrap_or_else(|p| p.into_inner());
+        let mut outputs = OUTPUTS.lock();
         outputs.retain(|o| o.strong_count() > 0);
         outputs.iter().filter_map(Weak::upgrade).collect()
     };
     let records = outputs.iter().map(|o| o.take()).collect();
-    let mut starts = std::mem::take(&mut *STARTS.lock().unwrap_or_else(|p| p.into_inner()));
+    let mut starts = std::mem::take(&mut *STARTS.lock());
     starts.extend(outputs.iter().filter_map(|o| o.take_start()));
     starts.sort_by_key(|(order, _)| *order);
     starts.truncate(MAX_STARTS);
@@ -206,7 +207,7 @@ impl Drop for OutputTrace {
     /// for the next drain (at the file's end, off its frame path).
     fn drop(&mut self) {
         if let Some(start) = self.take_start() {
-            let mut starts = STARTS.lock().unwrap_or_else(|p| p.into_inner());
+            let mut starts = STARTS.lock();
             if starts.len() < MAX_STARTS {
                 starts.push(start);
             }

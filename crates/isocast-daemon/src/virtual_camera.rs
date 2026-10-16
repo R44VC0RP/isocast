@@ -93,12 +93,12 @@ impl Daemon {
     }
 
     pub(super) fn virtual_camera_status(&self) -> VirtualCameraStatus {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         state.camera.status_for(state.setup.as_ref())
     }
 
     pub(super) fn virtual_camera_start(self: &Arc<Self>) -> Result<VirtualCameraStatus, RpcError> {
-        if self.state.lock().unwrap().camera.removing {
+        if self.state.read().camera.removing {
             return Err(refused(
                 "virtual_camera: it is being removed from macOS; start it again once that finishes"
                     .into(),
@@ -145,7 +145,7 @@ impl Daemon {
             .and_then(|m| m.modified())
             .ok()?;
         {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             if state.camera.checked_extension == Some(stamp)
                 || state.camera.active()
                 || state.camera.approval_pending
@@ -154,7 +154,7 @@ impl Daemon {
             }
         }
         let checked = |daemon: &Self| {
-            daemon.state.lock().unwrap().camera.checked_extension = Some(stamp);
+            daemon.state.lock().camera.checked_extension = Some(stamp);
         };
         match extension_state() {
             Ok(ExtensionState::Outdated { active, embedded }) => {
@@ -209,7 +209,7 @@ impl Daemon {
                 return Err(refused("virtual_camera: this engine doesn't carry the camera extension; remove a development install with scripts/vcam-uninstall.sh".into()));
             }
             {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock();
                 if state.camera.removing {
                     return Err(refused(
                         "virtual_camera: already being removed; answer macOS's password prompt"
@@ -229,7 +229,7 @@ impl Daemon {
             );
             let result = request_deactivation();
             let status = {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock();
                 state.camera.removing = false;
                 state.camera.checked_extension = None;
                 if !state.camera.active() {
@@ -273,7 +273,7 @@ impl Daemon {
         use isocast_platform_macos::virtual_camera::{Activation, request_activation};
         const APPROVAL: &str = "virtual_camera: allow Isocast Virtual Camera in System Settings › General › Login Items & Extensions › Camera Extensions (macOS asks once); it starts as soon as you do";
         let mut generation = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             if state.camera.approval_pending {
                 state.camera.start_when_approved = true;
                 return Err(self.camera_failed(state, APPROVAL.into()));
@@ -285,7 +285,7 @@ impl Daemon {
                 // sysextd has activated it; CoreMediaIO publishes the device
                 // a moment later.
                 for _ in 0..20 {
-                    if self.state.lock().unwrap().camera.generation != generation {
+                    if self.state.lock().camera.generation != generation {
                         return Err(refused("virtual_camera: start was cancelled".into()));
                     }
                     match self.start_camera() {
@@ -296,17 +296,17 @@ impl Daemon {
                         {
                             // Each attempt is a new generation; a Stop during
                             // the pause makes another one.
-                            generation = self.state.lock().unwrap().camera.generation;
+                            generation = self.state.lock().camera.generation;
                             thread::sleep(Duration::from_millis(250))
                         }
                         result => return result,
                     }
                 }
-                let state = self.state.lock().unwrap();
+                let state = self.state.lock();
                 Err(self.camera_failed(state, "virtual_camera: macOS activated Isocast Virtual Camera, but it isn't available yet; start it again in a few seconds".into()))
             }
             Activation::NeedsApproval(approval) => {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock();
                 state.camera.approval_pending = true;
                 state.camera.start_when_approved = state.camera.generation == generation;
                 let removals = state.camera.removals;
@@ -317,7 +317,7 @@ impl Daemon {
                         return;
                     };
                     let start = {
-                        let mut state = daemon.state.lock().unwrap();
+                        let mut state = daemon.state.lock();
                         if state.camera.removing || state.camera.removals != removals {
                             // Remove Virtual Camera ended this request (and
                             // cleared its state; a later Start's is its own).
@@ -353,7 +353,7 @@ impl Daemon {
                 Err(self.camera_failed(state, APPROVAL.into()))
             }
             Activation::Failed(message) => {
-                let state = self.state.lock().unwrap();
+                let state = self.state.lock();
                 Err(self.camera_failed(state, message))
             }
         }
@@ -361,11 +361,7 @@ impl Daemon {
 
     /// Record and announce a failed start that never reached a worker.
     #[cfg(target_os = "macos")]
-    fn camera_failed(
-        &self,
-        mut state: std::sync::MutexGuard<'_, State>,
-        message: String,
-    ) -> RpcError {
+    fn camera_failed(&self, mut state: Transaction<'_, State>, message: String) -> RpcError {
         let status = VirtualCameraStatus {
             state: VirtualCameraState::Failed,
             last_error: Some(message.clone()),
@@ -388,7 +384,7 @@ impl Daemon {
 
     fn start_camera(self: &Arc<Self>) -> Result<VirtualCameraStatus, RpcError> {
         let (generation, previous) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             if state.camera.active() {
                 return Err(refused(
                     "virtual_camera: already running or starting; stop it first".into(),
@@ -416,7 +412,7 @@ impl Daemon {
         if let Some(previous) = previous {
             previous.stop();
             if !previous.finished() {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock();
                 state.camera.running = Some(previous);
                 state.camera.starting = false;
                 return Err(refused("virtual_camera: previous worker is still finishing; no additional worker was started".into()));
@@ -424,7 +420,7 @@ impl Daemon {
         }
         let engine = self.ensure_engine();
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             if generation != state.camera.generation {
                 state.camera.starting = false;
                 return Err(refused("virtual_camera: start was cancelled".into()));
@@ -444,11 +440,11 @@ impl Daemon {
             Ok(camera) => {
                 let camera = Arc::new(camera);
                 {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock();
                     if generation != state.camera.generation {
                         drop(state);
                         camera.stop();
-                        let mut state = self.state.lock().unwrap();
+                        let mut state = self.state.lock();
                         if !camera.finished() {
                             // A cancelled, not-yet-published worker still owns
                             // source demand until it exits. Keep its admission
@@ -478,7 +474,7 @@ impl Daemon {
                     ..Default::default()
                 };
                 {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock();
                     if generation == state.camera.generation {
                         state.camera.last = status.clone();
                     }
@@ -494,7 +490,7 @@ impl Daemon {
 
     pub(super) fn virtual_camera_stop(&self) -> VirtualCameraStatus {
         let (camera, generation) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             state.camera.stopping = true;
             state.camera.start_when_approved = false;
             state.camera.generation += 1;
@@ -505,7 +501,7 @@ impl Daemon {
             .map_or_else(|| self.virtual_camera_status(), |camera| camera.stop());
         status.removable = removable();
         let retired = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             if generation != state.camera.generation {
                 return status;
             }

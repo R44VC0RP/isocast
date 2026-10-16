@@ -89,7 +89,7 @@ impl Daemon {
     /// every folder recordings were made in lately.
     pub(crate) fn recording_roots(&self) -> Vec<PathBuf> {
         let mut roots = self.remembered_recording_folders();
-        if let Some(setup) = self.state.lock().unwrap().setup.as_ref() {
+        if let Some(setup) = self.state.lock().setup.as_ref() {
             roots.push(crate::expand_home(&setup.recording.folder));
         }
         roots.sort();
@@ -99,7 +99,7 @@ impl Daemon {
 
     /// The project the running recording writes into, if any.
     pub(crate) fn recording_project(&self) -> Option<ProjectRef> {
-        let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let state = self.state.read();
         state.session.as_ref().and_then(|s| s.project.clone())
     }
 
@@ -163,8 +163,8 @@ impl Daemon {
         // A retake picks its take's folder before it starts recording into
         // it: wait for one running. Then the lock starting a recording holds
         // while it picks its project, so neither sees the other half done.
-        let _retaking = self.retaking.lock().unwrap();
-        let _projects = self.projects.lock().unwrap();
+        let _retaking = self.retaking.lock();
+        let _projects = self.projects.lock();
         let (folder, file) = self.find_project(&params.project)?;
         if self
             .recording_project()
@@ -175,7 +175,7 @@ impl Daemon {
                 file.id
             )));
         }
-        if let Some(running) = self.export.lock().unwrap().as_ref() {
+        if let Some(running) = self.export.lock().as_ref() {
             return Err(wrong_state(format!(
                 "export {} is running and may be reading or writing this project's files; \
                  rename it once the export has finished",
@@ -232,7 +232,6 @@ impl Daemon {
         let moved = self
             .timelines
             .lock()
-            .unwrap()
             .move_folder(&folder, &target, Some(&file.id));
         if let Err(err) = moved {
             let undone = rename_exclusive(&target, &folder);
@@ -266,7 +265,7 @@ impl Daemon {
 
     /// The last recording's report (`status.last`) after its project moved.
     fn moved_last_report(&self, from: &Path, to: &Path) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let Some(last) = state.last.as_mut() else {
             return;
         };

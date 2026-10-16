@@ -7,9 +7,10 @@
 //! critical wakes do not prove ordinary sleeps have recovered. This changes
 //! neither process scheduling policy nor recording admission/startup waits.
 
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use isocast_protocol::api::{ClockPacingInfo, PacingMode, Percentiles};
@@ -42,7 +43,7 @@ impl Clocks {
             max_ns: AtomicU64::new(0),
             times: Box::new(std::array::from_fn(|_| AtomicU64::new(0))),
         });
-        let mut clocks = self.0.lock().unwrap();
+        let mut clocks = self.0.lock();
         clocks.retain(|_, clock| clock.strong_count() > 0);
         clocks.insert(id, Arc::downgrade(&stats));
         MediaClock {
@@ -56,13 +57,7 @@ impl Clocks {
     }
 
     pub(crate) fn info(&self) -> Vec<ClockPacingInfo> {
-        let clocks: Vec<_> = self
-            .0
-            .lock()
-            .unwrap()
-            .values()
-            .filter_map(Weak::upgrade)
-            .collect();
+        let clocks: Vec<_> = self.0.lock().values().filter_map(Weak::upgrade).collect();
         clocks.iter().map(|clock| clock.info()).collect()
     }
 }

@@ -13,9 +13,10 @@
 //! its filters (Filters' preview in the app), read live so each change
 //! shows at once.
 
+use parking_lot::{Condvar, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use isocast_protocol::Filter;
@@ -103,12 +104,7 @@ struct Pending {
 impl SharedControl {
     /// The viewer is done with `slot` of ring `generation`.
     pub fn release(&self, generation: u64, slot: u32) {
-        self.0
-            .pending
-            .lock()
-            .unwrap()
-            .released
-            .push((generation, slot));
+        self.0.pending.lock().released.push((generation, slot));
         self.0.changed.notify_all();
     }
 
@@ -120,26 +116,27 @@ impl SharedControl {
     /// Fit the picture in a new size from the next frame (a new ring if
     /// its size changes).
     pub fn set_size(&self, max_width: Option<u32>, max_height: Option<u32>) {
-        self.0.pending.lock().unwrap().size = Some((max_width, max_height));
+        self.0.pending.lock().size = Some((max_width, max_height));
         self.0.changed.notify_all();
     }
 
     /// Slots released and a new size, since last asked.
     fn take(&self) -> Pending {
-        std::mem::take(&mut self.0.pending.lock().unwrap())
+        std::mem::take(&mut self.0.pending.lock())
     }
 
     /// Wait up to `timeout` for a slot to come back.
     fn wait(&self, timeout: Duration) {
-        let pending = self.0.pending.lock().unwrap();
-        let _ = self
-            .0
-            .changed
-            .wait_timeout_while(pending, timeout, |pending| {
+        let mut pending = self.0.pending.lock();
+        let _ = self.0.changed.wait_while_for(
+            &mut pending,
+            |pending| {
                 pending.released.is_empty()
                     && pending.size.is_none()
                     && !self.0.closed.load(Ordering::SeqCst)
-            });
+            },
+            timeout,
+        );
     }
 }
 

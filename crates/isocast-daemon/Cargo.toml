@@ -25,6 +25,9 @@ isocast-obsws = { path = "../isocast-obsws" }
 isocast-protocol = { path = "../isocast-protocol" }
 isocast-surfaces = { path = "../isocast-surfaces" }
 libc = "0.2"
+# Locks that don't poison (already in the lock file through wgpu): one
+# contained panic must not fail every thread that shares its state (#30).
+parking_lot = "0.12"
 serde = "1.0.229"
 serde_json = "1.0.154"
 

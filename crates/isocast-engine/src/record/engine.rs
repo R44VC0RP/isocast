@@ -7,11 +7,12 @@
 //! sources it records (and the canvas) as they were when it started, and
 //! changes to them apply once it ends.
 
+use parking_lot::{Condvar, Mutex};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -43,6 +44,7 @@ use super::{
     take_manifest, wait_for_frame, write_manifest, write_manifest_durable,
 };
 use crate::audio_filter::AudioStage;
+use crate::critical::Critical;
 use crate::gpu::Gpu;
 use crate::source::{self, Audio, AudioFeed, FrameSlot, Timeline, Video};
 use crate::transition::stinger_id;
@@ -80,7 +82,9 @@ pub enum EngineEvent {
     WorkerFailed {
         name: String,
         message: String,
-        poisoned: bool,
+        /// Shared control state may be half-updated: recordings must be
+        /// finalized by the emergency path.
+        broken: bool,
     },
 }
 
@@ -90,13 +94,13 @@ pub type OnEngineEvent = Arc<dyn Fn(EngineEvent) + Send + Sync>;
 /// Where packets from one producer (a source's audio, the program's frames,
 /// the mix) go: outputs that come and go while it runs.
 pub(crate) struct Routes<F> {
-    list: Mutex<Vec<Route<F>>>,
+    list: Critical<Vec<Route<F>>>,
     next: AtomicU64,
 }
 
 struct Route<F> {
     key: u64,
-    output: Output<F>,
+    output: super::tap::Output<F>,
     track: usize,
     /// Packets from before this are left out (audio from a little before,
     /// so the first chunk can be trimmed to the start).
@@ -114,7 +118,7 @@ struct Route<F> {
 impl<F> Default for Routes<F> {
     fn default() -> Self {
         Self {
-            list: Mutex::new(Vec::new()),
+            list: Critical::new(Vec::new()),
             next: AtomicU64::new(0),
         }
     }
@@ -130,18 +134,18 @@ impl<F: Clone> Routes<F> {
         from: Time,
         filter: Option<AudioStage>,
     ) -> u64 {
-        self.add_counted(output, track, from, filter, None, false)
+        self.add_counted(output.into(), track, from, filter, None, false)
     }
 
     fn add_recording_audio(&self, output: Output<F>, track: usize, from: Time) -> u64 {
-        self.add_counted(output, track, from, None, None, true)
+        self.add_counted(output.into(), track, from, None, None, true)
     }
 
     /// As [`Routes::add`], counting in `missed` the packets the output
     /// misses because its queue is full.
     fn add_counted(
         &self,
-        output: Output<F>,
+        output: super::tap::Output<F>,
         track: usize,
         from: Time,
         filter: Option<AudioStage>,
@@ -149,7 +153,7 @@ impl<F: Clone> Routes<F> {
         recording_audio: bool,
     ) -> u64 {
         let key = self.next.fetch_add(1, Ordering::Relaxed);
-        self.list.lock().unwrap().push(Route {
+        self.list.lock().push(Route {
             key,
             output,
             track,
@@ -162,25 +166,22 @@ impl<F: Clone> Routes<F> {
     }
 
     pub(crate) fn remove(&self, key: u64) {
-        self.list
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .retain(|route| route.key != key);
+        self.list.lock().retain(|route| route.key != key);
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.list.lock().unwrap().is_empty()
+        self.list.read().is_empty()
     }
 
     /// Drop every output, so their receivers see the producer is gone.
     fn clear(&self) {
-        self.list.lock().unwrap().clear();
+        self.list.lock().clear();
     }
 
     /// Send a frame to every output. One that has fallen behind misses it
     /// rather than holding up the others.
     pub(crate) fn video(&self, frame: &F, pts: Time) {
-        for route in self.list.lock().unwrap().iter() {
+        for route in self.list.read().iter() {
             if pts >= route.from {
                 let sent = route.output.try_send(Packet::Video {
                     frame: frame.clone(),
@@ -211,7 +212,7 @@ impl<F: Clone> Routes<F> {
 
     fn audio_to(&self, samples: &Arc<[f32]>, pts: Time, recording: Option<bool>) -> bool {
         let mut live = false;
-        for route in self.list.lock().unwrap().iter_mut() {
+        for route in self.list.lock().iter_mut() {
             live |= !route.recording_audio;
             if recording.is_some_and(|recording| recording != route.recording_audio) {
                 continue;
@@ -263,9 +264,8 @@ pub struct JpegFrame {
 /// per canvas tick and the program mix (stereo, track 0), from the next
 /// frame on, until dropped.
 pub struct ProgramTap<F: Clone> {
-    pub packets: Receiver<Packet<F>>,
-    /// Program frames that never reached `packets` because it was full
-    /// (whoever reads it fell behind).
+    pub packets: super::tap::Packets<F>,
+    /// Old program frames evicted because the reader fell behind.
     pub missed_frames: Arc<AtomicU64>,
     /// Mix chunks lost to a full tap, counted even while its encoder stalls.
     pub missed_audio_chunks: Arc<AtomicU64>,
@@ -299,13 +299,13 @@ impl<P: Platform> ProgramTapSource<P> {
     ) -> ProgramTap<P::Frame> {
         let inner = &self.0;
         // Serialize acquiring the canvas with update's refusal check.
-        let _state = inner.state.lock().unwrap();
-        let (tx, packets) = sync_channel(depth);
+        let _state = inner.state.lock();
         let from = inner.platform.now();
         let missed_frames = Arc::new(AtomicU64::new(0));
+        let (tx, packets) = super::tap::channel(depth, missed_frames.clone());
         let keys = (
             inner.program_video.add_counted(
-                tx.clone(),
+                super::tap::Output::Live(tx.clone()),
                 0,
                 from,
                 None,
@@ -313,7 +313,7 @@ impl<P: Platform> ProgramTapSource<P> {
                 false,
             ),
             inner.program_audio.add_counted(
-                tx,
+                super::tap::Output::Live(tx),
                 0,
                 from,
                 None,
@@ -349,9 +349,9 @@ struct Inner<P: Platform> {
     epoch: AtomicI64,
     on_event: Option<OnEngineEvent>,
     stopping: AtomicBool,
-    state: Mutex<State<P>>,
+    state: Critical<State<P>>,
     /// The newest setup the reconciler hasn't opened sources for yet.
-    wanted: Mutex<Option<Arc<Setup>>>,
+    wanted: Critical<Option<Arc<Setup>>>,
     /// Native opens cannot be cancelled while macOS presents a prompt.
     /// Keep one in flight per source (including removed/changed sources).
     opening: Mutex<HashSet<String>>,
@@ -382,7 +382,7 @@ struct Inner<P: Platform> {
     /// The newest levels measured.
     levels: Mutex<Vec<AudioLevel>>,
     /// The loudest levels since a recording's status last read them.
-    loudest: Mutex<BTreeMap<String, (f64, f64)>>,
+    loudest: Critical<BTreeMap<String, (f64, f64)>>,
     recording: AtomicBool,
     frames_drawn: AtomicU64,
     frames_missed: AtomicU64,
@@ -464,16 +464,16 @@ impl<P: Platform> Inner<P> {
     fn worker<T>(&self, name: &str, run: impl FnOnce() -> T) -> Result<T, String> {
         let result = isocast_diagnostics::contain(name, run);
         if let Err(message) = &result {
-            self.worker_errors
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(message.clone());
-            let poisoned = self.state.is_poisoned()
-                || self.wanted.is_poisoned()
-                || self.loudest.is_poisoned()
-                || self.program_video.list.is_poisoned()
-                || self.program_audio.list.is_poisoned();
-            if poisoned {
+            self.worker_errors.lock().push(message.clone());
+            // Only a panic that cut a change to shared control state short
+            // (see `crate::critical`) needs the emergency stop; a panic
+            // that merely looked at it leaves every recording running.
+            let broken = self.state.is_broken()
+                || self.wanted.is_broken()
+                || self.loudest.is_broken()
+                || self.program_video.list.is_broken()
+                || self.program_audio.list.is_broken();
+            if broken {
                 self.emergency.store(true, Ordering::SeqCst);
             }
             if name == "compositor" {
@@ -483,7 +483,7 @@ impl<P: Platform> Inner<P> {
             self.event(EngineEvent::WorkerFailed {
                 name: name.into(),
                 message: message.clone(),
-                poisoned,
+                broken,
             });
         }
         result
@@ -568,12 +568,12 @@ impl<P: Platform> Engine<P> {
             },
             {
                 let on_event = on_event.clone();
-                Arc::new(move |message, poisoned| {
+                Arc::new(move |message, broken| {
                     if let Some(on_event) = &on_event {
                         on_event(EngineEvent::WorkerFailed {
                             name: "scenes".into(),
                             message,
-                            poisoned,
+                            broken,
                         });
                     }
                 })
@@ -591,7 +591,7 @@ impl<P: Platform> Engine<P> {
             epoch: AtomicI64::new(i64::MIN),
             on_event,
             stopping: AtomicBool::new(false),
-            state: Mutex::new(State {
+            state: Critical::new(State {
                 setup: setup.clone(),
                 sources: BTreeMap::new(),
                 stingers: HashMap::new(),
@@ -600,7 +600,7 @@ impl<P: Platform> Engine<P> {
                 pins: Vec::new(),
                 revision: 0,
             }),
-            wanted: Mutex::new(None),
+            wanted: Critical::new(None),
             opening: Mutex::new(HashSet::new()),
             wake: Condvar::new(),
             preview_scene: Mutex::new(None),
@@ -614,7 +614,7 @@ impl<P: Platform> Engine<P> {
             drawn: Arc::default(),
             monitor: Arc::new(Mutex::new(monitor)),
             levels: Mutex::new(Vec::new()),
-            loudest: Mutex::new(BTreeMap::new()),
+            loudest: Critical::new(BTreeMap::new()),
             recording: AtomicBool::new(false),
             frames_drawn: AtomicU64::new(0),
             frames_missed: AtomicU64::new(0),
@@ -630,7 +630,7 @@ impl<P: Platform> Engine<P> {
         let waiting_since = platform.now();
         loop {
             let ready = {
-                let state = inner.state.lock().unwrap();
+                let state = inner.state.read();
                 state.sources.values().all(|live| {
                     live.video.as_ref().is_none_or(|v| v.slot.has_frame())
                         && live
@@ -648,12 +648,12 @@ impl<P: Platform> Engine<P> {
         inner.timeline.set_start(epoch);
         inner.epoch.store(epoch.as_nanos(), Ordering::SeqCst);
         {
-            let mut state = inner.state.lock().unwrap();
+            let mut state = inner.state.lock();
             publish(&inner, &mut state);
         }
         // Measure the recording disk now, so the first recording starts at
         // once.
-        let folder = expand_home(&inner.state.lock().unwrap().setup.recording.folder);
+        let folder = expand_home(&inner.state.read().setup.recording.folder);
         if folder.is_dir() {
             let inner = inner.clone();
             let _ = isocast_diagnostics::spawn(
@@ -693,7 +693,7 @@ impl<P: Platform> Engine<P> {
         let inner = &self.inner;
         let setup = Arc::new(setup.clone());
         {
-            let mut state = inner.state.lock().unwrap();
+            let mut state = inner.state.lock();
             if let Some(message) = canvas_refusal(inner, &state.setup.canvas, &setup.canvas) {
                 return Err(format!("canvas: {message}"));
             }
@@ -708,7 +708,7 @@ impl<P: Platform> Engine<P> {
             state.revision = revision;
             publish(inner, &mut state);
         }
-        *inner.wanted.lock().unwrap() = Some(setup);
+        *inner.wanted.lock() = Some(setup);
         inner.wake.notify_all();
         Ok(())
     }
@@ -716,7 +716,7 @@ impl<P: Platform> Engine<P> {
     /// Why the canvas can't change to `canvas` now (a recording of the
     /// program or a stream is using the current one), if it can't.
     pub fn canvas_refusal(&self, canvas: &Canvas) -> Option<String> {
-        let state = self.inner.state.lock().unwrap();
+        let state = self.inner.state.read();
         canvas_refusal(&self.inner, &state.setup.canvas, canvas)
     }
 
@@ -726,11 +726,11 @@ impl<P: Platform> Engine<P> {
         let inner = &self.inner;
         inner.stopping.store(true, Ordering::SeqCst);
         inner.wake.notify_all();
-        for thread in self.threads.lock().unwrap().drain(..) {
+        for thread in self.threads.lock().drain(..) {
             let _ = thread.join();
         }
         let (compositor, mixer, sources, stingers) = {
-            let mut state = inner.state.lock().unwrap();
+            let mut state = inner.state.lock();
             (
                 state.compositor.take(),
                 state.mixer.take(),
@@ -747,7 +747,7 @@ impl<P: Platform> Engine<P> {
         }
         drop(sources);
         drop(stingers);
-        drop(Closing(inner.monitor.lock().unwrap().clone()));
+        drop(Closing(inner.monitor.lock().clone()));
         // A tap holds these routes itself, so they outlive the engine:
         // dropping the outputs is what tells a stream the program ended.
         inner.program_video.clear();
@@ -775,15 +775,15 @@ impl<P: Platform> Engine<P> {
 
     /// The setup the engine runs.
     pub fn setup(&self) -> Arc<Setup> {
-        self.inner.state.lock().unwrap().setup.clone()
+        self.inner.state.read().setup.clone()
     }
 
     /// What the engine is doing: its sources, canvas and counters.
     pub fn info(&self) -> EngineInfo {
         let inner = &self.inner;
-        let state = inner.state.lock().unwrap();
+        let state = inner.state.read();
         let clocks = inner.timeline.clocks.info();
-        let mut compositor = inner.timings.lock().unwrap().info();
+        let mut compositor = inner.timings.lock().info();
         if let Some(clock) = clocks.iter().find(|clock| clock.id == "program") {
             compositor.wake_lateness_us = clock.wake_lateness_us;
         }
@@ -797,7 +797,6 @@ impl<P: Platform> Engine<P> {
                 .inner
                 .worker_errors
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
                 .iter()
                 .cloned()
                 .chain(self.inner.scenes.failure())
@@ -840,12 +839,12 @@ impl<P: Platform> Engine<P> {
 
     /// Each source's state, as [`Engine::info`] reports it.
     pub fn sources(&self) -> Vec<SourceStatus> {
-        statuses(&self.inner.state.lock().unwrap())
+        statuses(&self.inner.state.read())
     }
 
     /// The first source that couldn't open, and why.
     pub fn first_failure(&self) -> Option<(String, String)> {
-        let state = self.inner.state.lock().unwrap();
+        let state = self.inner.state.read();
         state.sources.iter().find_map(|(id, live)| {
             (live.run == SourceRun::Failed)
                 .then(|| (id.clone(), live.error.clone().unwrap_or_default()))
@@ -854,13 +853,13 @@ impl<P: Platform> Engine<P> {
 
     /// The newest levels of every audio source and the program mix.
     pub fn levels(&self) -> Vec<AudioLevel> {
-        self.inner.levels.lock().unwrap().clone()
+        self.inner.levels.lock().clone()
     }
 
     /// Stage `scene` as studio mode's preview (or none).
     pub fn set_preview(&self, scene: Option<String>) {
         let scene: Option<Arc<str>> = scene.map(Into::into);
-        let mut staged = self.inner.preview_scene.lock().unwrap();
+        let mut staged = self.inner.preview_scene.lock();
         // Frames of another scene must not show as this one's.
         if *staged != scene {
             self.inner.preview.clear();
@@ -978,7 +977,7 @@ impl<P: Platform> Engine<P> {
         let filters = (filtered && !matches!(target, PROGRAM | "preview")).then(|| {
             let (inner, id) = (self.inner.clone(), target.to_string());
             Box::new(move || {
-                let setup = inner.state.lock().unwrap().setup.clone();
+                let setup = inner.state.read().setup.clone();
                 setup
                     .source(&id)
                     .map_or_else(Vec::new, |s| s.filters.clone())
@@ -1015,8 +1014,7 @@ impl<P: Platform> Engine<P> {
         settings.check_start(&setup).map_err(anyhow::Error::msg)?;
         let (width, height) = settings.size(&setup);
         let fps = setup.canvas.fps;
-        if settings.target == Target::Preview && self.inner.preview_scene.lock().unwrap().is_none()
-        {
+        if settings.target == Target::Preview && self.inner.preview_scene.lock().is_none() {
             bail!(
                 "virtual_camera.target: preview is empty; stage a scene with isocast preview ID, or choose program, scene or source"
             );
@@ -1030,9 +1028,9 @@ impl<P: Platform> Engine<P> {
         };
         let inner = self.inner.clone();
         let source_guard = if settings.target == Target::Source {
-            *inner.camera_source.lock().unwrap() = settings.source.clone();
+            *inner.camera_source.lock() = settings.source.clone();
             let guard = CameraSourceGuard(inner.clone());
-            *inner.wanted.lock().unwrap() = Some(setup.clone());
+            *inner.wanted.lock() = Some(setup.clone());
             inner.wake.notify_all();
             Some(guard)
         } else {
@@ -1086,7 +1084,8 @@ impl<P: Platform> Engine<P> {
     }
 
     /// The program's frames and mix for an output like a stream, from the
-    /// next frame on, queueing up to `depth` packets.
+    /// next frame on. Audio may queue `depth` chunks; video keeps only its
+    /// latest eight pictures so a stalled stream cannot pin the whole pool.
     pub fn tap_program(&self, depth: usize) -> ProgramTap<P::Frame> {
         self.program_tap_source()
             .tap(depth, Arc::new(AtomicU64::new(0)))
@@ -1118,12 +1117,12 @@ impl<P: Platform> Engine<P> {
             .map_err(anyhow::Error::msg)
             .and_then(|r| r);
         {
-            let mut state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            let mut state = inner.state.lock();
             state.pins.clear();
             // Changes to the sources it recorded apply now.
             let setup = state.setup.clone();
-            if !inner.state.is_poisoned() {
-                *inner.wanted.lock().unwrap_or_else(|p| p.into_inner()) = Some(setup);
+            if !inner.state.is_broken() {
+                *inner.wanted.lock() = Some(setup);
             }
         }
         inner.wake.notify_all();
@@ -1138,10 +1137,10 @@ struct CameraSourceGuard<P: Platform>(Arc<Inner<P>>);
 
 impl<P: Platform> Drop for CameraSourceGuard<P> {
     fn drop(&mut self) {
-        *self.0.camera_source.lock().unwrap() = None;
+        *self.0.camera_source.lock() = None;
         if !self.0.stopping.load(Ordering::SeqCst) {
-            let setup = self.0.state.lock().unwrap().setup.clone();
-            *self.0.wanted.lock().unwrap() = Some(setup);
+            let setup = self.0.state.read().setup.clone();
+            *self.0.wanted.lock() = Some(setup);
             self.0.wake.notify_all();
         }
     }
@@ -1255,7 +1254,7 @@ fn definition_of(setup: &Setup, id: &str) -> serde_json::Value {
 fn reconciler<P: Platform>(inner: &Arc<Inner<P>>) {
     loop {
         let setup = {
-            let mut wanted = inner.wanted.lock().unwrap();
+            let mut wanted = inner.wanted.lock();
             loop {
                 if inner.stopping.load(Ordering::SeqCst) {
                     return;
@@ -1263,7 +1262,7 @@ fn reconciler<P: Platform>(inner: &Arc<Inner<P>>) {
                 if let Some(setup) = wanted.take() {
                     break setup;
                 }
-                wanted = inner.wake.wait(wanted).unwrap();
+                wanted.wait(&inner.wake);
             }
         };
         reconcile(inner, setup);
@@ -1275,7 +1274,7 @@ fn reconciler<P: Platform>(inner: &Arc<Inner<P>>) {
 /// (unless a recording uses them), and retry those that failed.
 fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
     let mut needed = needed_sources(&setup);
-    if let Some(id) = inner.camera_source.lock().unwrap().clone()
+    if let Some(id) = inner.camera_source.lock().clone()
         && !needed.contains(&id)
     {
         needed.push(id);
@@ -1283,9 +1282,9 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
     let mut opening = Vec::new();
     let mut closed = Vec::new();
     {
-        let mut state = inner.state.lock().unwrap();
+        let mut state = inner.state.lock();
         for id in &needed {
-            if inner.opening.lock().unwrap().contains(id) {
+            if inner.opening.lock().contains(id) {
                 continue;
             }
             let definition = definition_of(&setup, id);
@@ -1320,7 +1319,7 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
     }
     drop(closed);
     for (id, definition) in opening {
-        inner.opening.lock().unwrap().insert(id.clone());
+        inner.opening.lock().insert(id.clone());
         let permission = setup
             .source(&id)
             .and_then(|s| inner.platform.source_permission(&s.kind));
@@ -1333,7 +1332,7 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
         pending.error = permission.as_ref().map(|p| format!("waiting for permission: {p}; check macOS Privacy & Security or its permission prompt"));
         let event = pending.status(&id);
         let old = {
-            let mut state = inner.state.lock().unwrap();
+            let mut state = inner.state.lock();
             let old = state.sources.insert(id.clone(), pending);
             publish(inner, &mut state);
             old
@@ -1357,12 +1356,12 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
                 })
                 .map_err(anyhow::Error::msg)
                 .and_then(|r| r);
-            let mut state = inner.state.lock().unwrap();
+            let mut state = inner.state.lock();
             let current = state.setup.clone();
             let wanted = !inner.stopping.load(Ordering::SeqCst)
                 && definition_of(&current, &id) == definition
                 && (needed_sources(&current).contains(&id)
-                    || inner.camera_source.lock().unwrap().as_ref() == Some(&id));
+                    || inner.camera_source.lock().as_ref() == Some(&id));
             let mut replaced = None;
             let event = if wanted {
                 let live = match result {
@@ -1414,9 +1413,9 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
                 state.sources.remove(&id);
                 None
             };
-            inner.opening.lock().unwrap().remove(&id);
+            inner.opening.lock().remove(&id);
             if !wanted && !inner.stopping.load(Ordering::SeqCst) {
-                *inner.wanted.lock().unwrap() = Some(current);
+                *inner.wanted.lock() = Some(current);
                 inner.wake.notify_all();
             }
             drop(state);
@@ -1429,14 +1428,7 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
 
     // Stinger videos the setup's transitions play.
     let files = stinger_files(&setup);
-    let loaded: Vec<String> = inner
-        .state
-        .lock()
-        .unwrap()
-        .stingers
-        .keys()
-        .cloned()
-        .collect();
+    let loaded: Vec<String> = inner.state.lock().stingers.keys().cloned().collect();
     let missing: Vec<&String> = files.iter().filter(|f| !loaded.contains(f)).collect();
 
     let platform = &inner.platform;
@@ -1457,7 +1449,7 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
     let mut replaced = Vec::new();
     let mut events = Vec::new();
     {
-        let mut state = inner.state.lock().unwrap();
+        let mut state = inner.state.lock();
         let current = state.setup.clone();
         let attempted: Vec<String> = missing.iter().map(|file| (*file).clone()).collect();
         let mut failed = HashMap::new();
@@ -1609,7 +1601,7 @@ impl<F: Clone + Send + 'static> AudioRun<F> {
                                 routes.audio(&samples, pts);
                             }
                             Err(RecvTimeoutError::Timeout) => {
-                                if audio.feed.stopped.lock().unwrap().is_some() {
+                                if audio.feed.stopped.lock().is_some() {
                                     break;
                                 }
                             }
@@ -1618,10 +1610,7 @@ impl<F: Clone + Send + 'static> AudioRun<F> {
                     }
                 });
                 if let Err(message) = failure {
-                    *failure_feed
-                        .stopped
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner()) = Some(message);
+                    *failure_feed.stopped.lock() = Some(message);
                 }
             }
         });
@@ -1662,12 +1651,12 @@ fn publish<P: Platform>(inner: &Arc<Inner<P>>, state: &mut State<P>) {
     let mut frames = slots;
     frames.push((PROGRAM.to_string(), inner.program.clone()));
     control.set_frames(frames);
-    *control.browsers.lock().unwrap() = state
+    *control.browsers.lock() = state
         .sources
         .iter()
         .filter_map(|(id, live)| Some((id.clone(), live.opened.as_ref()?.browser()?)))
         .collect();
-    *control.stingers.lock().unwrap() = state
+    *control.stingers.lock() = state
         .stingers
         .iter()
         .map(|(file, (_, length))| (file.clone(), *length))
@@ -1676,9 +1665,9 @@ fn publish<P: Platform>(inner: &Arc<Inner<P>>, state: &mut State<P>) {
     control.set_filters(&setup);
 
     // Another monitoring device: sources heard switch to it.
-    let monitor = inner.monitor.lock().unwrap().clone();
+    let monitor = inner.monitor.lock().clone();
     if monitor.device() != setup.audio.monitoring_device {
-        *inner.monitor.lock().unwrap() = Arc::new(Monitor::new(&setup.audio.monitoring_device));
+        *inner.monitor.lock() = Arc::new(Monitor::new(&setup.audio.monitoring_device));
         drop(Closing(monitor));
     }
 
@@ -1861,7 +1850,6 @@ fn stream_source<P: Platform>(
             inner
                 .state
                 .lock()
-                .unwrap()
                 .compositor
                 .as_ref()
                 .map(|run| run.canvas.2),
@@ -1885,13 +1873,13 @@ fn slot_of<P: Platform>(
     match target {
         PROGRAM => Ok(inner.program.clone()),
         "preview" => {
-            if inner.preview_scene.lock().unwrap().is_none() {
+            if inner.preview_scene.lock().is_none() {
                 return Err("nothing is staged in preview; stage a scene with `preview`".into());
             }
             Ok(inner.preview.clone())
         }
         id => {
-            let state = inner.state.lock().unwrap();
+            let state = inner.state.read();
             // An audio source has no frames to wait for.
             match state.sources.get(id).and_then(|live| live.video.as_ref()) {
                 Some(video) => Ok(video.slot.clone()),
@@ -2041,7 +2029,6 @@ fn run_program<P: Platform>(
             inner
                 .timings
                 .lock()
-                .unwrap()
                 .draw(draw_started.elapsed(), compositor.gpu_wait);
         } else if !monitored && !outputs {
             // Nothing wants the program: let its canvas go back to the pool.
@@ -2049,7 +2036,7 @@ fn run_program<P: Platform>(
             compositor.forget(Feed::Program);
         }
         let scene = preview_wanted
-            .then(|| inner.preview_scene.lock().unwrap().clone())
+            .then(|| inner.preview_scene.lock().clone())
             .flatten();
         match scene {
             Some(scene) if preview_rates.draws(n, fps) => {
@@ -2070,11 +2057,7 @@ fn run_program<P: Platform>(
             (gave, cpu, platform.thread_cpu_time())
         {
             let spent = to.saturating_sub(from);
-            inner
-                .timings
-                .lock()
-                .unwrap()
-                .tick(spent, reused, draws, animated);
+            inner.timings.lock().tick(spent, reused, draws, animated);
         }
         // Pictures of another size than layout took them to be: the scenes
         // are laid out again, and adopted at a coming tick.
@@ -2130,7 +2113,7 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
         let mut levels = Vec::new();
         let mut events = Vec::new();
         {
-            let mut state = inner.state.lock().unwrap();
+            let mut state = inner.state.lock();
             let now = inner.platform.now();
             if now >= next_retry {
                 next_retry = now + RETRY_INTERVAL;
@@ -2140,7 +2123,7 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                         SourceRun::Failed | SourceRun::WaitingForPermission
                     ) && !state.pins.contains(id)
                 });
-                let mut wanted = inner.wanted.lock().unwrap();
+                let mut wanted = inner.wanted.lock();
                 if failed && wanted.is_none() {
                     *wanted = Some(state.setup.clone());
                     inner.wake.notify_all();
@@ -2166,7 +2149,7 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                     .or_else(|| {
                         live.audio
                             .as_ref()
-                            .and_then(|audio| audio.feed.stopped.lock().unwrap().clone())
+                            .and_then(|audio| audio.feed.stopped.lock().clone())
                     })
                     .or_else(|| live.opened.as_ref().and_then(|o| o.failure()));
                 if let Some(reason) = stopped {
@@ -2188,7 +2171,7 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
             channels: Some(channels.map(|(peak_db, rms_db)| ChannelLevel { peak_db, rms_db })),
         });
         {
-            let mut loudest = inner.loudest.lock().unwrap();
+            let mut loudest = inner.loudest.lock();
             for level in &levels {
                 let entry = loudest
                     .entry(level.source.clone())
@@ -2197,7 +2180,7 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                 entry.1 = entry.1.max(level.rms_db);
             }
         }
-        *inner.levels.lock().unwrap() = levels.clone();
+        *inner.levels.lock() = levels.clone();
         for event in events {
             inner.event(event);
         }
@@ -2243,7 +2226,7 @@ impl<P: Platform> IsoRunner<P> {
     fn stage(&mut self, platform: &P, gpu: &IsoGpu) -> Result<&mut IsoFrames<P>> {
         if self.stage.is_none() {
             let gpu = {
-                let mut gpu = gpu.lock().unwrap();
+                let mut gpu = gpu.lock();
                 match &*gpu {
                     Some(gpu) => gpu.clone(),
                     None => gpu.insert(Gpu::new()?).clone(),
@@ -2409,7 +2392,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     let inner = &engine.inner;
     let platform = &inner.platform;
     let control = &inner.control;
-    let setup = inner.state.lock().unwrap().setup.clone();
+    let setup = inner.state.read().setup.clone();
     let setup = &*setup;
     let mut warnings = Vec::new();
     let iso = &setup.recording.iso;
@@ -2458,7 +2441,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     }
     let waiting_since = platform.now();
     loop {
-        let state = inner.state.lock().unwrap();
+        let state = inner.state.read();
         // A source the setup just changed (another device, say) is still
         // the old one until it reopens: wait for it, or the recording would
         // keep the old one to the end.
@@ -2520,7 +2503,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     let mut slots: BTreeMap<String, Arc<FrameSlot<P::Frame>>> = BTreeMap::new();
     let mut readers: BTreeMap<String, Arc<Routes<P::Frame>>> = BTreeMap::new();
     {
-        let mut state = inner.state.lock().unwrap();
+        let mut state = inner.state.lock();
         for (id, live) in &state.sources {
             if let Some(video) = &live.video {
                 let mut size = (video.width, video.height);
@@ -2640,7 +2623,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     let speed = write_speed(inner, &folder)?;
     if speed < rate {
         // One slow test (the disk was busy) mustn't refuse the next start.
-        inner.speeds.lock().unwrap().remove(&folder);
+        inner.speeds.lock().remove(&folder);
         bail!(
             "{} is too slow for this recording: it took {}/s in a test, but the files may \
              need up to {}/s at their highest likely data rate; if the disk was busy, try \
@@ -2786,7 +2769,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             // Sparse sources legitimately leave timestamp gaps, so count their
             // actual queue losses instead of treating every silent gap as loss.
             let key = reader.add_counted(
-                tx.clone(),
+                tx.clone().into(),
                 track,
                 epoch,
                 filter,
@@ -2888,8 +2871,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             loop {
                 let now = platform.now();
                 if inner.emergency.load(Ordering::SeqCst)
-                    || inner.state.is_poisoned()
-                    || inner.scenes.poisoned()
+                    || inner.state.is_broken()
+                    || inner.scenes.broken()
                 {
                     shared.stop_at(now.max(shared.epoch));
                     break;
@@ -2911,7 +2894,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 {
                     next_status = now + STATUS_INTERVAL;
                     // The loudest of each source since the last status.
-                    let levels = std::mem::take(&mut *inner.loudest.lock().unwrap())
+                    let levels = std::mem::take(&mut *inner.loudest.lock())
                         .into_iter()
                         .map(|(source, (peak_db, rms_db))| AudioLevel {
                             source,
@@ -2921,7 +2904,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                         })
                         .collect();
                     let mut status = live_status(&current.plans, levels, shared, now, &clock);
-                    status.monitor = inner.monitor.lock().unwrap().status();
+                    status.monitor = inner.monitor.lock().status();
                     // While frames or audio are being lost, see whether the
                     // disk is why.
                     let lost = status
@@ -2956,7 +2939,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                     } else {
                         write(current, SessionStatus::Recording, errors)
                     };
-                    let mut state = control.state.lock().unwrap();
+                    let mut state = control.state.lock();
                     state.manifest_error = result.err().map(|e| format!("{e:#}"));
                     if state.manifest_error.is_none() {
                         state.saved_pause_generation = generation;
@@ -2998,7 +2981,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                     let mut errors: Vec<String> = committed
                         .iter()
                         .filter(|p| p.commit_failed.load(Ordering::Acquire) >= generation)
-                        .filter_map(|p| p.commit_error.lock().unwrap().clone())
+                        .filter_map(|p| p.commit_error.lock().clone())
                         .collect();
                     let failed = !errors.is_empty();
                     if all || failed || now >= deadline || shared.end() != Time::MAX {
@@ -3016,7 +2999,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                             }
                         }
                         let recoverable = if all && !failed {
-                            let cuts = clock.state.read().unwrap();
+                            let cuts = clock.state.read();
                             committed
                                 .iter()
                                 .map(|p| p.recoverable(current.epoch, &cuts))
@@ -3026,7 +3009,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                             None
                         };
                         clock.set_recoverable(at, recoverable);
-                        control.state.lock().unwrap().pause_outcome =
+                        control.state.lock().pause_outcome =
                             Some((generation, recoverable, errors.clone()));
                         checkpoint(generation, &errors, true);
                         pending_commit = None;
@@ -3132,7 +3115,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                             }));
                         }
                         Err(refused) => {
-                            control.state.lock().unwrap().splitting = false;
+                            control.state.lock().splitting = false;
                             let _ = reply.send(Err(refused));
                         }
                     }
@@ -3231,11 +3214,11 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         drop(std::mem::replace(&mut routes, Unroute(Vec::new())));
         let mut errors = coordinator.err().into_iter().collect::<Vec<_>>();
         if inner.emergency.load(Ordering::SeqCst)
-            || inner.state.is_poisoned()
-            || inner.scenes.poisoned()
+            || inner.state.is_broken()
+            || inner.scenes.broken()
         {
             errors.push(
-                "recording interrupted: poisoned shared state; writers finalized by emergency stop"
+                "recording interrupted: broken shared state; writers finalized by emergency stop"
                     .into(),
             );
         }
@@ -3355,7 +3338,6 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         duration_seconds: clock
             .state
             .read()
-            .unwrap()
             .map(shared.end())
             .saturating_since(shared.epoch)
             .as_secs_f64(),
@@ -3377,7 +3359,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
 /// [`SPEED_TTL`].
 fn write_speed<P: Platform>(inner: &Inner<P>, folder: &Path) -> Result<f64> {
     let now = inner.platform.now();
-    if let Some((at, speed)) = inner.speeds.lock().unwrap().get(folder)
+    if let Some((at, speed)) = inner.speeds.lock().get(folder)
         && now.saturating_since(*at) < SPEED_TTL
     {
         return Ok(*speed);
@@ -3387,7 +3369,6 @@ fn write_speed<P: Platform>(inner: &Inner<P>, folder: &Path) -> Result<f64> {
     inner
         .speeds
         .lock()
-        .unwrap()
         .insert(folder.to_path_buf(), (now, speed));
     Ok(speed)
 }
@@ -3493,7 +3474,7 @@ mod tests {
         let (tx, rx) = sync_channel(2);
         let missed = Arc::new(AtomicU64::new(0));
         routes.add_counted(
-            tx,
+            tx.into(),
             0,
             Time::from_nanos(0),
             None,
@@ -3518,5 +3499,77 @@ mod tests {
         }
         assert_eq!(missed.load(Ordering::Relaxed), 4);
         assert_eq!(rx.try_iter().count(), 2);
+    }
+
+    #[test]
+    fn a_stalled_live_tap_releases_old_pictures_and_preserves_audio() {
+        // A 32-frame pool with a healthy recording consumer and a stalled
+        // stream. Keep weak references so this measures actual frame
+        // lifetimes, not the queue's own accounting.
+        let pool: Vec<_> = (0..32).map(|_| Arc::new(())).collect();
+        let routes = Routes::default();
+        let missed_video = Arc::new(AtomicU64::new(0));
+        let missed_audio = Arc::new(AtomicU64::new(0));
+        let (live, packets) = super::super::tap::channel(96, missed_video.clone());
+        let video_key = routes.add_counted(
+            super::super::tap::Output::Live(live.clone()),
+            0,
+            Time::from_nanos(0),
+            None,
+            Some(missed_video.clone()),
+            false,
+        );
+        let audio_routes = Routes::default();
+        let audio_key = audio_routes.add_counted(
+            super::super::tap::Output::Live(live),
+            0,
+            Time::from_nanos(0),
+            None,
+            Some(missed_audio.clone()),
+            false,
+        );
+        let (recording, recorded) = sync_channel(64);
+        routes.add(recording, 0, Time::from_nanos(0), None);
+        let samples: Arc<[f32]> = vec![0.25; 960].into();
+        for n in 0..60 {
+            let frame = pool
+                .iter()
+                .find(|frame| Arc::strong_count(frame) == 1)
+                .expect("a stalled stream must leave frames for recording");
+            let pts = Time::from_nanos(n);
+            routes.video(frame, pts);
+            audio_routes.audio(&samples, pts);
+            assert!(matches!(recorded.try_recv(), Ok(Packet::Video { pts: at, .. }) if at == pts));
+        }
+        assert_eq!(pool.iter().filter(|f| Arc::strong_count(f) > 1).count(), 8);
+        assert_eq!(missed_video.load(Ordering::Relaxed), 52);
+        assert_eq!(missed_audio.load(Ordering::Relaxed), 0);
+        routes.remove(video_key);
+        audio_routes.remove(audio_key);
+        let mut video = Vec::new();
+        let mut audio = 0;
+        loop {
+            match packets.recv_timeout(Duration::ZERO) {
+                Ok(Packet::Video { pts, .. }) => video.push(pts.as_nanos()),
+                Ok(Packet::Audio { .. }) => audio += 1,
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => panic!("every sender was removed"),
+            }
+        }
+        assert_eq!(video, (52..60).collect::<Vec<_>>());
+        assert_eq!(audio, 60);
+        assert!(pool.iter().all(|f| Arc::strong_count(f) == 1));
+
+        // Negative control: the old mixed 96-packet tap pins the whole
+        // pool even though its recording consumer releases every frame.
+        let (old, _receiver) = sync_channel(96);
+        for frame in &pool {
+            old.try_send(Packet::Video {
+                frame: frame.clone(),
+                pts: Time::from_nanos(0),
+            })
+            .unwrap();
+        }
+        assert!(!pool.iter().any(|f| Arc::strong_count(f) == 1));
     }
 }

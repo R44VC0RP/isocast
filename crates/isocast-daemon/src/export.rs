@@ -19,9 +19,10 @@
 //! isocastd is killed meanwhile, the next start marks it failed and removes
 //! its unfinished file.
 
+use parking_lot::Mutex;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -84,7 +85,7 @@ struct Slot<'a> {
 impl Drop for Slot<'_> {
     fn drop(&mut self) {
         if !self.started {
-            *self.daemon.export.lock().unwrap() = None;
+            *self.daemon.export.lock() = None;
         }
     }
 }
@@ -322,7 +323,7 @@ fn fit_stem(stem: &str, files: &[(String, &str)]) -> String {
 fn export_id(timeline: &str) -> String {
     static LAST: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let base = format!("{timeline}-{}", Local::now().format("%Y%m%d-%H%M%S"));
-    let mut last = LAST.lock().unwrap();
+    let mut last = LAST.lock();
     let id = (1..)
         .map(|n| match n {
             1 => base.clone(),
@@ -447,7 +448,7 @@ fn write_manifest(path: &Path, manifest: &ExportManifest) -> Result<(), String> 
 impl Daemon {
     /// The export running, as `status` shows it.
     pub(crate) fn export_running(&self) -> Option<ExportRunning> {
-        let running = self.export.lock().unwrap();
+        let running = self.export.lock();
         running
             .as_ref()
             .filter(|running| !running.export.is_empty())
@@ -462,12 +463,12 @@ impl Daemon {
     /// moment) for it to clean up: its unfinished file removed, its
     /// manifest saying why.
     pub(crate) fn stop_export(&self, reason: &str) {
-        match self.export.lock().unwrap().as_mut() {
+        match self.export.lock().as_mut() {
             Some(running) => running.stop = Some(reason.to_string()),
             None => return,
         }
         let deadline = Instant::now() + STOP_WAIT;
-        while self.export.lock().unwrap().is_some() && Instant::now() < deadline {
+        while self.export.lock().is_some() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
     }
@@ -477,14 +478,13 @@ impl Daemon {
     /// left (`recording.keep_free_gb`, or ten seconds of its data, as the
     /// engine works it out), and why, for messages.
     fn recording_floor(&self, folder: &Path) -> Option<(u64, String)> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         let session = state.session.as_ref()?;
-        let files = session.files.lock().unwrap().clone()?;
+        let files = session.files.lock().clone()?;
         let recording = files.first()?.parent()?.to_path_buf();
         let rate = session
             .live
             .lock()
-            .unwrap()
             .as_ref()
             .and_then(|live| live.disk.as_ref())
             .map_or(0.0, |disk| disk.write_bytes_per_second);
@@ -516,7 +516,7 @@ impl Daemon {
         self.heal_timelines();
         // One at a time: the slot is taken before anything is planned.
         let mut slot = {
-            let mut running = self.export.lock().unwrap();
+            let mut running = self.export.lock();
             if let Some(running) = running.as_ref() {
                 return Err(wrong_state(match running.export.is_empty() {
                     true => "another export is starting; wait for its export_finished event \
@@ -543,7 +543,7 @@ impl Daemon {
             }
         };
         let (id, timeline, markers) = {
-            let timelines = self.timelines.lock().unwrap();
+            let timelines = self.timelines.lock();
             let id = timelines.resolve(params.timeline.as_deref())?;
             let timeline = timelines.get(&id).cloned().expect("resolved");
             (id, timeline, timelines.folder().join(MARKER))
@@ -788,7 +788,7 @@ impl Daemon {
         if let Ok(json) = serde_json::to_string_pretty(&marker) {
             let _ = std::fs::write(&markers, json + "\n");
         }
-        if let Some(running) = self.export.lock().unwrap().as_mut() {
+        if let Some(running) = self.export.lock().as_mut() {
             running.export = export.clone();
             running.timeline = id.clone();
         }
@@ -814,7 +814,7 @@ impl Daemon {
         thread::spawn(move || {
             daemon.run_export(&mut manifest, &parts, &path, &watched);
             let _ = std::fs::remove_file(&markers);
-            *daemon.export.lock().unwrap() = None;
+            *daemon.export.lock() = None;
             daemon.publish(Event::ExportFinished {
                 export: manifest.export.clone(),
                 timeline: manifest.timeline.clone(),
@@ -870,7 +870,7 @@ impl Daemon {
             let output = file.path.clone();
             let mut progress = |fraction: f64| {
                 let overall = (index as f64 + fraction.clamp(0.0, 1.0)) / count;
-                if let Some(running) = self.export.lock().unwrap().as_mut() {
+                if let Some(running) = self.export.lock().as_mut() {
                     running.progress = overall;
                     if let Some(reason) = &running.stop {
                         stopped = Some(reason.clone());

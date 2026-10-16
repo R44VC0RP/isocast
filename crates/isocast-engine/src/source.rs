@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,7 @@ use isocast_protocol::{
     CameraSource, MediaSource, Setup, SlideshowSource, SourceKind, TestPatternSource, TextSource,
     ToneSource,
 };
+use parking_lot::{Condvar, Mutex};
 
 use crate::data::DataStore;
 use crate::picture::{self, Picture};
@@ -73,12 +74,12 @@ impl Timeline {
 
     /// Start tracking which sources the program has on air.
     pub(crate) fn track_on_air(&self) {
-        self.on_air.lock().unwrap().get_or_insert_with(HashMap::new);
+        self.on_air.lock().get_or_insert_with(HashMap::new);
     }
 
     /// The program shows `sources` from `at`: those new on air since then.
     pub(crate) fn set_on_air<'a>(&self, sources: impl IntoIterator<Item = &'a str>, at: Time) {
-        let mut on_air = self.on_air.lock().unwrap();
+        let mut on_air = self.on_air.lock();
         let Some(on_air) = on_air.as_mut() else {
             return;
         };
@@ -93,13 +94,13 @@ impl Timeline {
     /// Whether what's on air is known yet: with a program, once it has
     /// drawn its first frame.
     fn on_air_known(&self) -> bool {
-        self.on_air.lock().unwrap().is_none() || self.published.load(Ordering::SeqCst)
+        self.on_air.lock().is_none() || self.published.load(Ordering::SeqCst)
     }
 
     /// Since when source `id` has been on air, if it is; with no program,
     /// since the start.
     fn on_air_since(&self, id: &str) -> Option<Time> {
-        match self.on_air.lock().unwrap().as_ref() {
+        match self.on_air.lock().as_ref() {
             Some(on_air) => on_air.get(id).copied(),
             None => self.start(),
         }
@@ -122,8 +123,10 @@ pub(crate) struct FrameSlot<F> {
 }
 
 impl<F: Clone> FrameSlot<F> {
-    /// Frames kept if a frame clock falls behind.
-    const CAPACITY: usize = 6;
+    /// The compositor's newest frame and the ISO clock's half-frame older
+    /// selection, plus one arriving frame. Capture (notably SCK's eight
+    /// surfaces) needs the rest back rather than a six-frame history.
+    const CAPACITY: usize = 3;
 
     pub(crate) fn new(timeline: Arc<Timeline>) -> Self {
         Self::with_capacity(timeline, Self::CAPACITY)
@@ -145,7 +148,7 @@ impl<F: Clone> FrameSlot<F> {
 
     pub(crate) fn push(&self, frame: F, at: Time) {
         let now = Instant::now();
-        let mut arrivals = self.arrivals.lock().unwrap();
+        let mut arrivals = self.arrivals.lock();
         while arrivals
             .front()
             .is_some_and(|t| now - *t > Duration::from_secs(1))
@@ -158,7 +161,7 @@ impl<F: Clone> FrameSlot<F> {
         if self.timeline.start().is_some_and(|start| at >= start) {
             self.captured.fetch_add(1, Ordering::Relaxed);
         }
-        let mut frames = self.frames.lock().unwrap();
+        let mut frames = self.frames.lock();
         while frames.len() >= self.capacity {
             frames.pop_front();
         }
@@ -170,20 +173,19 @@ impl<F: Clone> FrameSlot<F> {
     /// The newest frame captured at or after `from`, and when, waiting up
     /// to `timeout` for one to arrive; leaves it for the frame clock.
     pub(crate) fn wait_from(&self, from: Time, timeout: Duration) -> Option<(F, Time)> {
-        let frames = self.frames.lock().unwrap();
-        let (frames, _) = self
-            .arrived
-            .wait_timeout_while(frames, timeout, |frames| {
-                frames.back().is_none_or(|(_, at)| *at < from)
-            })
-            .unwrap();
+        let mut frames = self.frames.lock();
+        self.arrived.wait_while_for(
+            &mut frames,
+            |frames| frames.back().is_none_or(|(_, at)| *at < from),
+            timeout,
+        );
         frames.back().filter(|(_, at)| *at >= from).cloned()
     }
 
     /// The newest frame captured no later than `limit`. Older frames are
     /// released, since later ticks will never choose them.
     pub(crate) fn newest_until(&self, limit: Time) -> Option<F> {
-        let mut frames = self.frames.lock().unwrap();
+        let mut frames = self.frames.lock();
         let index = frames.iter().rposition(|(_, at)| *at <= limit)?;
         frames.drain(..index);
         frames.front().map(|(frame, _)| frame.clone())
@@ -193,7 +195,7 @@ impl<F: Clone> FrameSlot<F> {
     /// tells it from the frame before), leaving it (and older ones) for the
     /// frame clock.
     pub(crate) fn peek_until_timed(&self, limit: Time) -> Option<(F, Time)> {
-        let frames = self.frames.lock().unwrap();
+        let frames = self.frames.lock();
         let (frame, at) = frames.iter().rev().find(|(_, at)| *at <= limit)?;
         Some((frame.clone(), *at))
     }
@@ -201,7 +203,7 @@ impl<F: Clone> FrameSlot<F> {
     /// The newest frame captured from `from` to `until`, and when, leaving
     /// it for the frame clock.
     pub(crate) fn peek_between(&self, from: Time, until: Time) -> Option<(F, Time)> {
-        let frames = self.frames.lock().unwrap();
+        let frames = self.frames.lock();
         let (frame, at) = frames
             .iter()
             .rev()
@@ -213,7 +215,7 @@ impl<F: Clone> FrameSlot<F> {
     /// two came, or none for half a second.
     pub(crate) fn received_fps(&self) -> f64 {
         let now = Instant::now();
-        let arrivals = self.arrivals.lock().unwrap();
+        let arrivals = self.arrivals.lock();
         let recent = arrivals
             .iter()
             .filter(|t| now - **t <= Duration::from_secs(1));
@@ -230,34 +232,30 @@ impl<F: Clone> FrameSlot<F> {
 
     /// Forget every frame.
     pub(crate) fn clear(&self) {
-        self.frames.lock().unwrap().clear();
+        self.frames.lock().clear();
     }
 
     /// The newest frame and when it was captured, leaving it for the frame
     /// clock.
     pub(crate) fn newest_timed(&self) -> Option<(F, Time)> {
-        self.frames.lock().unwrap().back().cloned()
+        self.frames.lock().back().cloned()
     }
 
     /// The newest frame, leaving it for the frame clock.
     pub(crate) fn newest(&self) -> Option<F> {
-        self.frames
-            .lock()
-            .unwrap()
-            .back()
-            .map(|(frame, _)| frame.clone())
+        self.frames.lock().back().map(|(frame, _)| frame.clone())
     }
 
     pub(crate) fn has_frame(&self) -> bool {
-        !self.frames.lock().unwrap().is_empty()
+        !self.frames.lock().is_empty()
     }
 
     pub(crate) fn stop(&self, reason: String) {
-        self.stopped.lock().unwrap().get_or_insert(reason);
+        self.stopped.lock().get_or_insert(reason);
     }
 
     pub(crate) fn stopped(&self) -> Option<String> {
-        self.stopped.lock().unwrap().clone()
+        self.stopped.lock().clone()
     }
 }
 
@@ -318,7 +316,7 @@ enum Running<P: Platform> {
 
 impl<P: Platform> Opened<P> {
     pub(crate) fn failure(&self) -> Option<String> {
-        let get = |g: &Generator| g.failure.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let get = |g: &Generator| g.failure.lock().clone();
         match &self._running {
             Running::Generator { _generator } => get(_generator),
             Running::Generators { _generators } => _generators.iter().find_map(get),
@@ -359,7 +357,7 @@ impl Generator {
                         "source worker failed",
                         serde_json::json!({"error":message}),
                     );
-                    *failure.lock().unwrap_or_else(|p| p.into_inner()) = Some(message);
+                    *failure.lock() = Some(message);
                 }
             }
         });
@@ -437,7 +435,7 @@ fn bounded_open<T: Send + 'static>(
     let token = NEXT.fetch_add(1, Ordering::Relaxed);
     let deadline = Instant::now() + OPEN_TIMEOUT;
     {
-        let mut slots = pending.0.lock().unwrap_or_else(|p| p.into_inner());
+        let mut slots = pending.0.lock();
         // With too many stuck, wait (within the same time) for one to
         // return: a device that answers again opens at once.
         loop {
@@ -455,11 +453,7 @@ fn bounded_open<T: Send + 'static>(
                     oldest.unwrap_or_default().as_secs()
                 );
             }
-            slots = pending
-                .1
-                .wait_timeout(slots, deadline - now)
-                .unwrap_or_else(|p| p.into_inner())
-                .0;
+            pending.1.wait_for(&mut slots, deadline - now);
         }
         if slots.values().map(Vec::len).sum::<usize>() >= OPENS_AT_MOST {
             bail!(
@@ -484,7 +478,7 @@ fn bounded_open<T: Send + 'static>(
     }
     impl Drop for Pending {
         fn drop(&mut self) {
-            let mut slots = self.pending.0.lock().unwrap_or_else(|p| p.into_inner());
+            let mut slots = self.pending.0.lock();
             let mut began = None;
             if let Some(running) = slots.get_mut(&self.slot) {
                 if let Some(at) = running.iter().position(|(t, _)| *t == self.token) {
@@ -913,7 +907,7 @@ fn audio_feed() -> (Arc<AudioFeed>, AudioSink, AudioChunks) {
         stopped: Box::new({
             let feed = feed.clone();
             move |reason| {
-                feed.stopped.lock().unwrap().get_or_insert(reason);
+                feed.stopped.lock().get_or_insert(reason);
             }
         }),
     };
@@ -1318,7 +1312,7 @@ fn text_data<P: Platform>(
         let (changed, key) = (changed.clone(), key.clone());
         Arc::new(move |keys: &[Arc<str>]| {
             if keys.contains(&key) {
-                *changed.0.lock().unwrap() = true;
+                *changed.0.lock() = true;
                 changed.1.notify_all();
             }
         })
@@ -1339,9 +1333,9 @@ fn text_data<P: Platform>(
             while !stop.load(Ordering::SeqCst) {
                 {
                     let (flag, wake) = &*changed;
-                    let mut flag = flag.lock().unwrap();
+                    let mut flag = flag.lock();
                     while !*flag {
-                        flag = wake.wait_timeout(flag, TEXT_DATA_WAIT).unwrap().0;
+                        wake.wait_for(&mut flag, TEXT_DATA_WAIT);
                         if stop.load(Ordering::SeqCst) {
                             return;
                         }
@@ -1507,10 +1501,7 @@ fn media<P: Platform>(
             );
             move |stop| {
                 let failed = |err: anyhow::Error| {
-                    feed.stopped
-                        .lock()
-                        .unwrap()
-                        .get_or_insert(format!("{err:#}"));
+                    feed.stopped.lock().get_or_insert(format!("{err:#}"));
                 };
                 playlist.run(
                     &platform,

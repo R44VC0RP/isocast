@@ -1599,6 +1599,37 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-16 (engine hardening, #27/#30/#31/#35): engine and daemon locks
+  use parking_lot. Only selected control state uses `Critical` transactions:
+  an unwound mutation marks it broken for emergency finalization; a reader
+  panic does not. The existing isolated panic modes add `state_read` for
+  that distinction. Monitoring uses bounded per-input rings and atomic
+  meters; input-list ownership and reclamation stay off the IO callback.
+  AVAssetWriter audio/video appends catch Objective-C exceptions, and both
+  streaming and crash-safe VT sessions drain callbacks before invalidating.
+  Live taps evict oldest video above eight pictures without spending their
+  separate audio reserve; source history is three frames. **#27 remains
+  partial:** these bounds do not establish the aggregate budget across
+  independent native encoders/file queues or isolate unconverted display
+  ISOs from capture's eight surfaces. Do not close it on this evidence.
+  Verification: 4,000 render calls during source churn allocate/reallocate/
+  free nothing; real AVFoundation append exceptions become errors; sixteen
+  eight-picture VT teardown cycles drain completely. Main's read-only panic
+  ended a take; `state_read` here preserves recording and streaming, while
+  `state` still finalizes all files and exits 70. Hosted e2e 16/16, M2-b
+  strict recording smoke 5/5; three interleaved flagship pairs have zero
+  drops and median daemon CPU 26.3% main / 26.1% head. The overloaded
+  4K60+1080p60+1080p60-program+stream split workload loses ISO pictures on
+  **both main and head**, not program/stream/audio; it is not a zero-ISO-drop
+  qualification. Evidence and remaining checks:
+  `/Volumes/IsocastBuild/hardening/scratch/REPORT.md`.
+  Final c46f6de integration: gates clean (208 tests plus the separate native
+  teardown check); strict M2-b record/ISO/pause/shutdown/stream 5/5, zero
+  drops. Silent CoreAudio monitoring for an hour with polling and source
+  churn played 172,753,920 sample frames and counted 50 underruns; its file
+  kept all 108,056 frames with equal 3601.866667 s video/audio. This is a
+  measured nonzero underrun count, not a claim of glitch-free monitoring.
+
 - 2026-10-16 (#82): **A given-up source open frees the way for a fresh
   one.** Native opens can't be cancelled, so `bounded_open` keeps each
   timed-out open's thread until macOS returns, but keys them by source and

@@ -1,12 +1,12 @@
 //! Recording sessions: start the sources a setup needs, write one file per
 //! ISO source on the shared clock, and stop cleanly.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread;
@@ -39,6 +39,7 @@ mod pause;
 mod program;
 mod scenes;
 mod shared_frames;
+mod tap;
 mod timings;
 mod virtual_camera;
 pub use virtual_camera::{CameraSink, OnCameraChange, VirtualCamera};
@@ -307,7 +308,7 @@ impl ControlState {
         let from = self.takes[i].max(first);
         let seconds = match &self.clock {
             Some(clock) => {
-                let cuts = clock.state.read().unwrap();
+                let cuts = clock.state.read();
                 cuts.map(at).saturating_since(cuts.map(from)).as_secs_f64()
             }
             None => at.saturating_since(from).as_secs_f64(),
@@ -331,7 +332,7 @@ impl SessionControl {
     /// `recording.pause_toggle` action chooses the opposite of `pause_status`.
     /// The daemon uses this same path for the Pause/Resume methods.
     pub fn set_paused(&self, paused: bool, now: Time, epoch: Time) -> Result<(Time, u64), String> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if state.epoch != Some(epoch) {
             return Err(
                 "recording: the recording changed before pause/resume; retry on the current take"
@@ -358,12 +359,12 @@ impl SessionControl {
 
     /// Identify the recording while a caller releases its own state lock.
     pub fn recording_epoch(&self) -> Option<Time> {
-        self.state.lock().unwrap().epoch
+        self.state.lock().epoch
     }
 
     /// A pause reply waits for its manifest checkpoint as well as its cut.
     pub fn pause_saved(&self, generation: u64) -> Result<bool, String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         if let Some(error) = &state.manifest_error {
             return Err(format!(
                 "recording.pauses: the cut was applied, but its manifest could not be saved: {error}"
@@ -373,13 +374,12 @@ impl SessionControl {
     }
 
     pub fn pause_status(&self, now: Time) -> Option<isocast_protocol::api::RecordingPause> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let clock = state.clock.as_ref()?;
         Some(
             clock
                 .state
                 .read()
-                .unwrap()
                 .status(now.min(state.end.unwrap_or(Time::MAX))),
         )
     }
@@ -387,7 +387,7 @@ impl SessionControl {
     /// The commit barrier's outcome for pause `generation`: the seconds
     /// every file is on disk up to, and the files' commit errors.
     pub fn pause_outcome(&self, generation: u64) -> Option<(Option<f64>, Vec<String>)> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         state
             .pause_outcome
             .as_ref()
@@ -396,11 +396,11 @@ impl SessionControl {
     }
 
     fn recording_time(&self, at: Time) -> Time {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         state
             .clock
             .as_ref()
-            .map_or(at, |clock| clock.state.read().unwrap().map(at))
+            .map_or(at, |clock| clock.state.read().map(at))
     }
 
     /// A control whose engine shows `data`'s values in bound text.
@@ -421,7 +421,7 @@ impl SessionControl {
     /// clock has started (it then counts as 0 in take 1). A marker after
     /// the recording's end isn't added: the error is where it ended.
     pub fn marker(&self, at: Time, label: String) -> Result<Option<(u32, f64)>, (u32, f64)> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.check_end(at)?;
         state.markers.push((at, label));
         state.changed = true;
@@ -437,7 +437,7 @@ impl SessionControl {
         scene: String,
         transition: Transition,
     ) -> Result<Option<(u32, f64)>, (u32, f64)> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.scenes.push((at, scene.into(), transition));
         state.changed = true;
         state.check_end(at)?;
@@ -446,7 +446,7 @@ impl SessionControl {
 
     /// The recording ends at `at`, or sooner if it was already going to.
     fn end_recording(&self, at: Time) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.end = Some(state.end.map_or(at, |end| end.min(at)));
     }
 
@@ -460,16 +460,12 @@ impl SessionControl {
         };
         let waiting_since = std::time::Instant::now();
         loop {
-            let stingers = self.stingers.lock().unwrap();
+            let stingers = self.stingers.lock();
             if let Some(length) = stingers.get(&stinger.file) {
                 transition.duration_ms = length.as_millis().clamp(1, u128::from(u32::MAX)) as u32;
                 return Ok(());
             }
-            let loading = self
-                .loading_stingers
-                .lock()
-                .unwrap()
-                .contains(&stinger.file);
+            let loading = self.loading_stingers.lock().contains(&stinger.file);
             if loading && waiting_since.elapsed() < STINGER_WAIT {
                 drop(stingers);
                 thread::sleep(Duration::from_millis(10));
@@ -481,7 +477,7 @@ impl SessionControl {
                     stinger.file
                 ));
             }
-            if let Some(reason) = self.failed_stingers.lock().unwrap().get(&stinger.file) {
+            if let Some(reason) = self.failed_stingers.lock().get(&stinger.file) {
                 return Err(format!(
                     "transition.file: the stinger video {:?} couldn't be loaded ({reason}); fix \
                      the file, or switch with another transition",
@@ -506,7 +502,7 @@ impl SessionControl {
     /// Note the stinger videos `files` as being loaded (see
     /// [`SessionControl::prepare`]).
     pub(crate) fn loading_stingers(&self, files: &[String]) {
-        let mut loading = self.loading_stingers.lock().unwrap();
+        let mut loading = self.loading_stingers.lock();
         for file in files {
             if !loading.contains(file) {
                 loading.push(file.clone());
@@ -525,9 +521,8 @@ impl SessionControl {
     ) {
         self.loading_stingers
             .lock()
-            .unwrap()
             .retain(|file| !files.contains(file) && wanted.contains(file));
-        let mut failures = self.failed_stingers.lock().unwrap();
+        let mut failures = self.failed_stingers.lock();
         failures.retain(|file, _| !files.contains(file) && wanted.contains(file));
         failures.extend(failed);
     }
@@ -538,7 +533,7 @@ impl SessionControl {
     /// has ended.
     pub fn split(&self, timing: SplitTiming) -> mpsc::Receiver<SplitReply> {
         let (tx, rx) = mpsc::channel();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if state.finished {
             let _ = tx.send(Err(SplitRefused {
                 ending: true,
@@ -547,7 +542,7 @@ impl SessionControl {
         } else if state
             .clock
             .as_ref()
-            .is_some_and(|clock| clock.state.read().unwrap().requested_pause())
+            .is_some_and(|clock| clock.state.read().requested_pause())
         {
             let _ = tx.send(Err(SplitRefused {
                 ending: false,
@@ -566,13 +561,13 @@ impl SessionControl {
     }
 
     fn take_split(&self) -> Option<(SplitTiming, mpsc::Sender<SplitReply>)> {
-        self.state.lock().unwrap().split.take()
+        self.state.lock().split.take()
     }
 
     /// The recording has ended: a split still waiting is refused, and so is
     /// any asked for from now on (until the next recording begins).
     fn finish_recording(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.finished = true;
         if let Some((_, reply)) = state.split.take() {
             let _ = reply.send(Err(SplitRefused {
@@ -586,23 +581,23 @@ impl SessionControl {
     /// sources, and its pan law, for the program mix (and filtered ISO
     /// audio) from now on. Sync offsets apply from the next recording.
     pub fn set_audio(&self, setup: &Setup) {
-        let mut audio = self.audio.lock().unwrap();
+        let mut audio = self.audio.lock();
         for source in setup.sources.iter().filter(|s| s.kind.has_audio()) {
             audio.insert(source.id.clone(), source.audio);
         }
-        *self.pan_law.lock().unwrap() = setup.audio.pan_law;
+        *self.pan_law.lock() = setup.audio.pan_law;
         self.audio_filters.set(setup);
     }
 
     /// Take `setup`'s sources' filters, for the program from its next frame.
     pub fn set_filters(&self, setup: &Setup) {
-        *self.filters.lock().unwrap() = source_filters(setup);
+        *self.filters.lock() = source_filters(setup);
     }
 
     /// Reload browser source `id`'s page, bypassing the cache. Errors list
     /// the session's browser sources.
     pub fn refresh_browser(&self, id: &str) -> Result<(), String> {
-        let browsers = self.browsers.lock().unwrap();
+        let browsers = self.browsers.lock();
         match browsers.get(id) {
             Some(page) => {
                 page.refresh();
@@ -617,16 +612,16 @@ impl SessionControl {
     }
 
     fn audio_settings(&self, id: &str) -> Option<AudioSettings> {
-        self.audio.lock().unwrap().get(id).copied()
+        self.audio.lock().get(id).copied()
     }
 
     fn pan_law(&self) -> PanLaw {
-        *self.pan_law.lock().unwrap()
+        *self.pan_law.lock()
     }
 
     /// Ids of the video sources the session captures from devices.
     pub fn captured(&self) -> Vec<String> {
-        self.frames.lock().unwrap().ids.clone()
+        self.frames.lock().ids.clone()
     }
 
     /// The newest frame the session captured from source `id`, without
@@ -635,7 +630,7 @@ impl SessionControl {
     /// it ([`PROGRAM`]) when it has none waits a moment for a fresh one.
     pub fn newest_frame<F: Clone + Send + 'static>(&self, id: &str) -> Option<F> {
         let slot = {
-            let frames = self.frames.lock().unwrap();
+            let frames = self.frames.lock();
             let slots = frames.slots.as_ref()?.downcast_ref::<Slots<F>>()?;
             let (_, slot) = slots.iter().find(|(source, _)| source == id)?;
             slot.clone()
@@ -660,14 +655,14 @@ impl SessionControl {
     }
 
     fn set_frames<F: Clone + Send + 'static>(&self, slots: Slots<F>) {
-        let mut frames = self.frames.lock().unwrap();
+        let mut frames = self.frames.lock();
         frames.ids = slots.iter().map(|(id, _)| id.clone()).collect();
         frames.slots = Some(Box::new(slots));
     }
 
     /// A recording starts at `epoch`: its first take, with no markers yet.
     fn begin_recording(&self, epoch: Time, clock: Arc<pause::RecordingClock>) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.epoch = Some(epoch);
         state.takes = vec![epoch];
         state.markers.clear();
@@ -686,7 +681,7 @@ impl SessionControl {
     /// before it (or the first scene put on air), and the transition from
     /// the scene before still under way, if any.
     fn on_air(&self, at: Time) -> Option<OnAir> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let index = state
             .scenes
             .iter()
@@ -714,24 +709,21 @@ impl SessionControl {
     }
 
     fn begin_take(&self, at: Time) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.takes.push(at);
         state.splitting = false;
     }
 
     fn take_changed(&self) -> Option<u64> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         std::mem::take(&mut state.changed).then_some(state.pause_generation)
     }
 
     /// Markers and scene switches of the take running from `from` until
     /// `until`, on its timeline. The scene on air when it starts is at 0.
     fn timeline(&self, from: Time, until: Time) -> (Vec<Marker>, Vec<SceneChange>) {
-        let state = self.state.lock().unwrap();
-        let cuts = state
-            .clock
-            .as_ref()
-            .map(|clock| clock.state.read().unwrap());
+        let state = self.state.lock();
+        let cuts = state.clock.as_ref().map(|clock| clock.state.read());
         let seconds = |at: Time| match &cuts {
             Some(cuts) => cuts.map(at).saturating_since(cuts.map(from)).as_secs_f64(),
             None => at.saturating_since(from).as_secs_f64(),
@@ -1129,7 +1121,7 @@ fn live_status(
     now: Time,
     clock: &pause::RecordingClock,
 ) -> LiveStatus {
-    let cuts = clock.state.read().unwrap();
+    let cuts = clock.state.read();
     let overdue = cuts.map((now - STALL_AFTER).min(shared.end()));
     let status = cuts.status(now.min(shared.end()));
     LiveStatus {
@@ -1255,12 +1247,11 @@ fn take_manifest<P: Platform>(
         markers,
         scenes,
         pauses: control.map_or_else(Vec::new, |c| {
-            let state = c.state.lock().unwrap();
+            let state = c.state.lock();
             state.clock.as_ref().map_or_else(Vec::new, |clock| {
                 clock
                     .state
                     .read()
-                    .unwrap()
                     .manifest(take.epoch, take.end.unwrap_or(Time::MAX))
             })
         }),

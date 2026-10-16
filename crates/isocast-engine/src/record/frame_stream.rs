@@ -11,10 +11,11 @@
 //! engines), so the CPU only hands frames over and copies the compressed
 //! bytes, a few kilobytes each.
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -81,7 +82,7 @@ const DRAWN_KEPT: usize = 32;
 
 /// Note that the frame at `tick` was drawn from `stamp`.
 pub(crate) fn drawn(drawn: &Drawn, tick: Time, stamp: Stamp) {
-    let mut drawn = drawn.lock().unwrap();
+    let mut drawn = drawn.lock();
     if drawn.len() == DRAWN_KEPT {
         drawn.pop_front();
     }
@@ -90,7 +91,7 @@ pub(crate) fn drawn(drawn: &Drawn, tick: Time, stamp: Stamp) {
 
 /// What the frame at `tick` was drawn from, if known.
 pub(crate) fn stamp_at(drawn: &Drawn, tick: Time) -> Option<Stamp> {
-    let drawn = drawn.lock().unwrap();
+    let drawn = drawn.lock();
     drawn
         .iter()
         .rev()
@@ -147,14 +148,13 @@ impl FeedRate {
 
 /// The highest rate any running stream's viewer asks for.
 pub(crate) fn highest_rate(streams: &Streams) -> Option<u32> {
-    let running = streams.lock().unwrap();
+    let running = streams.lock();
     running
         .values()
         .flat_map(|shared| {
             shared
                 .viewers
                 .lock()
-                .unwrap()
                 .iter()
                 .map(|viewer| viewer.fps.load(Ordering::Relaxed))
                 .collect::<Vec<_>>()
@@ -167,7 +167,6 @@ impl Drop for FrameFeed {
         self.shared
             .viewers
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
             .retain(|viewer| viewer.id != self.id);
     }
 }
@@ -186,7 +185,7 @@ pub(crate) fn watch<P: Platform>(
     let (tx, records) = sync_channel(VIEWER_QUEUE);
     // Held while the viewer is added, so a stream whose last viewer just
     // left can't remove itself in between.
-    let mut running = streams.lock().unwrap();
+    let mut running = streams.lock();
     let shared = match running.get(&key) {
         Some(shared) => shared.clone(),
         None => {
@@ -210,7 +209,7 @@ pub(crate) fn watch<P: Platform>(
     };
     let id = shared.next_viewer.fetch_add(1, Ordering::Relaxed);
     let fps = Arc::new(AtomicU32::new(fps.clamp(1, MAX_FPS)));
-    shared.viewers.lock().unwrap().push(Viewer {
+    shared.viewers.lock().push(Viewer {
         id,
         tx,
         fps: fps.clone(),
@@ -256,13 +255,12 @@ fn run<P: Platform>(
         let fps = shared
             .viewers
             .lock()
-            .unwrap()
             .iter()
             .map(|viewer| viewer.fps.load(Ordering::Relaxed))
             .max();
         let Some(fps) = fps else {
-            let mut running = streams.lock().unwrap();
-            if shared.viewers.lock().unwrap().is_empty() {
+            let mut running = streams.lock();
+            if shared.viewers.lock().is_empty() {
                 remove(&mut running, key, shared);
                 return;
             }
@@ -482,7 +480,7 @@ fn deliver<E>(shared: &Shared, encoding: &mut Encoding<E>, encoded: EncodedVideo
         frames::encode(frames::REVISION, seq, 0, 0, &payload).into()
     });
     let mut behind = false;
-    shared.viewers.lock().unwrap().retain_mut(|viewer| {
+    shared.viewers.lock().retain_mut(|viewer| {
         if encoded.keyframe && (!viewer.synced || config_changed) {
             viewer.synced = false;
             if let Some(config) = &encoding.config {
@@ -524,19 +522,9 @@ fn deliver<E>(shared: &Shared, encoding: &mut Encoding<E>, encoded: EncodedVideo
 
 /// Stop the stream: tell every viewer why, then close their channels.
 fn end(streams: &Streams, key: &Key, shared: &Arc<Shared>, why: &str) {
-    remove(
-        &mut streams.lock().unwrap_or_else(|p| p.into_inner()),
-        key,
-        shared,
-    );
-    streams.clear_poison();
+    remove(&mut streams.lock(), key, shared);
     let record: Record = frames::encode(frames::END, 0, 0, 0, why.as_bytes()).into();
-    for viewer in shared
-        .viewers
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .drain(..)
-    {
+    for viewer in shared.viewers.lock().drain(..) {
         let _ = viewer.tx.try_send(record.clone());
     }
 }

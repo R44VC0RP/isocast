@@ -13,10 +13,11 @@
 //! its arms in [`Processor::new`], [`Processor::set`] and
 //! [`Processor::process`].
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::f64::consts::{PI, SQRT_2};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use isocast_protocol::{AudioFilter, AudioFilterKind, Detection, Setup};
 use nnnoiseless::DenoiseState;
@@ -63,7 +64,7 @@ impl LiveAudioFilters {
             .filter(|(_, source)| !source.audio_filters.is_empty())
             .map(|(i, source)| (source.id.clone(), (i, source.audio_filters.clone())))
             .collect();
-        let mut current = self.filters.lock().unwrap();
+        let mut current = self.filters.lock();
         if *current != filters {
             *current = filters;
             self.revision.fetch_add(1, Ordering::SeqCst);
@@ -78,14 +79,14 @@ impl LiveAudioFilters {
 
     /// Source `id`'s filters.
     pub(crate) fn of(&self, id: &str) -> Vec<AudioFilter> {
-        let filters = self.filters.lock().unwrap();
+        let filters = self.filters.lock();
         filters.get(id).map(|(_, f)| f.clone()).unwrap_or_default()
     }
 
     /// Where source `id`'s chain that filters for `runs_in` (`mix` or
     /// `iso`) is, for its plugin filters' reports.
     pub(crate) fn place(&self, id: &str, runs_in: &'static str) -> Place {
-        let filters = self.filters.lock().unwrap();
+        let filters = self.filters.lock();
         Place {
             source: filters.get(id).map(|(i, _)| *i),
             runs_in,

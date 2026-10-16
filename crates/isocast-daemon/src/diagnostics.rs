@@ -5,6 +5,7 @@ use isocast_protocol::api::{Event, Response, RpcError};
 use isocast_protocol::diagnostics::{BugReport, BugReportParams};
 use serde_json::{Value, json};
 use std::sync::{Arc, Weak};
+
 use std::time::{Duration, Instant};
 pub(crate) static CONNECTION_PANIC: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -190,9 +191,17 @@ pub fn start(daemon: &Arc<Daemon>) {
                     Ok("connection") => {
                         CONNECTION_PANIC.store(true, std::sync::atomic::Ordering::SeqCst)
                     }
-                    Ok("state") => daemon.contain("debug poisoned control state", || {
-                        let _state = daemon.state.lock().unwrap();
-                        panic!("requested shared-state poison");
+                    // A panic mid-change to the control state: it may be
+                    // half-updated, so recordings end by emergency stop.
+                    Ok("state") => daemon.contain("debug broken control state", || {
+                        let _change = daemon.state.lock();
+                        panic!("requested shared-state break");
+                    }),
+                    // A panic while only looking at it (housekeeping, like
+                    // the sampler): recordings and the stream keep running.
+                    Ok("state_read") => daemon.contain("debug control-state reader", || {
+                        let _look = daemon.state.read();
+                        panic!("requested panic while reading shared state");
                     }),
                     _ => daemon.contain("debug worker", || {
                         panic!("ISOCAST_DEBUG_PANIC_AFTER: requested diagnostic worker panic")
@@ -221,7 +230,7 @@ fn timeline(weak: Weak<Daemon>) {
         let status = daemon.status();
         crate::debug::tick(&daemon, &status);
         let folder = {
-            let state = daemon.state.lock().unwrap();
+            let state = daemon.state.read();
             status
                 .files
                 .first()

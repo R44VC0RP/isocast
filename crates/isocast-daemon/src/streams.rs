@@ -169,7 +169,7 @@ impl Daemon {
         self: &Arc<Self>,
         params: StreamStartParams,
     ) -> Result<Streaming, RpcError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let settings = stream_settings(&state).ok_or_else(|| {
             wrong(
                 "the live setup has no stream; add one (for example the patch \
@@ -234,7 +234,7 @@ impl Daemon {
         state.streams_starting += 1;
         drop(state);
         let engine = self.ensure_engine();
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.streams_starting -= 1;
         let engine = engine?;
         let mut started = Vec::new();
@@ -295,7 +295,7 @@ impl Daemon {
         }
         let deadline = Instant::now() + STREAM_START_TIMEOUT;
         let finals = loop {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             let statuses: Vec<StreamStatus> = started
                 .iter()
                 .filter_map(|id| {
@@ -339,7 +339,7 @@ impl Daemon {
                 ),
             }));
         }
-        let destinations = stream_statuses(&self.state.lock().unwrap());
+        let destinations = stream_statuses(&self.state.read());
         let first = finals
             .iter()
             .find(|status| status.id == MAIN_DESTINATION)
@@ -437,7 +437,7 @@ impl Daemon {
     /// Stop streaming to every destination (or `only` those); the others
     /// keep going.
     pub(crate) fn stream_stop(&self, params: StreamStartParams) -> Result<Streaming, RpcError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if !params.only.is_empty() {
             let known: Vec<String> = stream_settings(&state)
                 .map(|s| s.destination_ids())
@@ -514,7 +514,7 @@ impl Daemon {
                 .filter_map(|handle| handle.join().ok())
                 .collect()
         });
-        let mut destinations = stream_statuses(&self.state.lock().unwrap());
+        let mut destinations = stream_statuses(&self.state.read());
         // The stopped ones as they ended (their offline status from the
         // setup loses the counters).
         for status in &finals {
@@ -543,7 +543,7 @@ impl Daemon {
 
     /// Fail every running stream (the program stopped coming).
     pub(crate) fn fail_streams(&self, why: &str) {
-        for (_, output) in &self.state.lock().unwrap().streams {
+        for (_, output) in &self.state.read().streams {
             if let Output::Running(stream) = output {
                 stream.fail(why.to_string());
             }
@@ -554,7 +554,7 @@ impl Daemon {
     /// bitrate overshoot (once per episode), checked every second even
     /// when encoding/sending stalls.
     pub(crate) fn warn_stream_drops(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let statuses: Vec<StreamStatus> = state
             .streams
             .iter()
@@ -728,8 +728,7 @@ impl Daemon {
         };
         if self
             .state
-            .lock()
-            .unwrap()
+            .read()
             .streams
             .iter()
             .any(|(other, output)| *other == id && output.is_active())
@@ -741,7 +740,7 @@ impl Daemon {
         stream.destinations.remove(index);
         let removed = self.apply_destinations(revision, setup, None)?;
         // Its ended stream goes with it: no ghost in status or `stream stop`.
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state
             .streams
             .retain(|(other, output)| *other != id || output.is_active());
@@ -842,7 +841,7 @@ impl Daemon {
 
     /// The live setup and its revision, to change.
     fn live_setup(&self) -> Result<(u64, isocast_protocol::Setup), RpcError> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         match &state.setup {
             Some(setup) => Ok((state.revision, setup.clone())),
             None => Err(state.no_setup("no setup to add a stream destination to; make one first")),
@@ -863,7 +862,7 @@ impl Daemon {
         Ok(StreamDestinations {
             revision: applied.revision,
             id,
-            destinations: stream_statuses(&self.state.lock().unwrap()),
+            destinations: stream_statuses(&self.state.read()),
         })
     }
 }

@@ -2,10 +2,11 @@
 //! source's audio filters, gain, mute and balance (leaving out those
 //! monitored only, and those only heard as sidechains), plus level meters.
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use isocast_protocol::{AudioSettings, PanLaw};
@@ -31,7 +32,7 @@ impl Meter {
 
     /// Add samples one by one, like one side of interleaved audio.
     pub(super) fn add_all(&self, samples: impl Iterator<Item = f32>) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.0.lock();
         for sample in samples {
             state.0 = state.0.max(sample.abs());
             state.1 += f64::from(sample) * f64::from(sample);
@@ -41,7 +42,7 @@ impl Meter {
 
     /// Peak and RMS level in dBFS since the last call, and reset.
     pub(super) fn take(&self) -> (f64, f64) {
-        let (peak, power, count) = std::mem::take(&mut *self.0.lock().unwrap());
+        let (peak, power, count) = std::mem::take(&mut *self.0.lock());
         let rms = if count == 0 {
             0.0
         } else {
@@ -59,7 +60,7 @@ pub(super) struct StereoMeter(Mutex<([f32; 2], [f64; 2], u64)>);
 impl StereoMeter {
     /// Add interleaved stereo frames (left, right, left, right…).
     pub(super) fn add(&self, samples: &[f32]) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.0.lock();
         for frame in samples.as_chunks::<2>().0 {
             for (channel, sample) in frame.iter().enumerate() {
                 state.0[channel] = state.0[channel].max(sample.abs());
@@ -72,7 +73,7 @@ impl StereoMeter {
     /// Peak and RMS in dBFS since the last call, both channels together
     /// and each (left, right), and reset.
     pub(super) fn take(&self) -> ((f64, f64), [(f64, f64); 2]) {
-        let (peak, power, frames) = std::mem::take(&mut *self.0.lock().unwrap());
+        let (peak, power, frames) = std::mem::take(&mut *self.0.lock());
         let rms = |power: f64, count: u64| {
             if count == 0 {
                 0.0

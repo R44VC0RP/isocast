@@ -95,7 +95,7 @@ fn password(settings: &WebsocketSettings) -> Result<Option<String>, String> {
 impl Runtime {
     /// At launch: load the settings and start the server if it is on.
     pub(super) fn load(&self, daemon: &Arc<Daemon>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         match std::fs::read(settings_path()) {
             Ok(bytes) => match serde_json::from_slice::<WebsocketSettings>(&bytes) {
                 Ok(settings) => inner.settings = settings,
@@ -122,7 +122,7 @@ impl Runtime {
     }
 
     pub(super) fn status(&self) -> WebsocketStatus {
-        status(&self.inner.lock().unwrap(), None)
+        status(&self.inner.lock(), None)
     }
 
     pub(super) fn enable(
@@ -130,7 +130,7 @@ impl Runtime {
         daemon: &Arc<Daemon>,
         params: WebsocketEnableParams,
     ) -> Result<WebsocketStatus, RpcError> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let mut settings = inner.settings.clone();
         settings.enabled = true;
         if let Some(port) = params.port {
@@ -182,7 +182,7 @@ impl Runtime {
     }
 
     pub(super) fn disable(&self) -> Result<WebsocketStatus, RpcError> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let mut settings = inner.settings.clone();
         settings.enabled = false;
         save(&settings)?;
@@ -195,7 +195,7 @@ impl Runtime {
 
     /// When isocastd quits: tell the clients (ExitStarted) and close.
     pub(super) fn stop(&self) {
-        let server = self.inner.lock().unwrap().server.take();
+        let server = self.inner.lock().server.take();
         drop(server);
     }
 }
@@ -322,7 +322,7 @@ impl Engine for Bridge {
             };
         };
         let key = next_watcher_key();
-        daemon.watchers.lock().unwrap().push(Watcher {
+        daemon.watchers.lock().push(Watcher {
             key,
             wanted: kinds,
             tx,
@@ -334,7 +334,6 @@ impl Engine for Bridge {
                     daemon
                         .watchers
                         .lock()
-                        .unwrap_or_else(|p| p.into_inner())
                         .retain(|watcher| watcher.key != self.1);
                 }
             }

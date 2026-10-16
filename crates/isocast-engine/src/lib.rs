@@ -9,6 +9,7 @@ mod audio_filter;
 pub mod capacity;
 pub(crate) mod compiled;
 mod content;
+pub mod critical;
 pub mod data;
 pub mod doctor;
 pub(crate) mod draw_list;

@@ -83,7 +83,7 @@ pub(crate) struct Shared {
     pub salt: String,
     pub isocast_version: String,
     /// Each identified session's inbox for `BroadcastCustomEvent`.
-    pub custom: std::sync::Mutex<Vec<mpsc::Sender<Value>>>,
+    pub custom: parking_lot::Mutex<Vec<mpsc::Sender<Value>>>,
 }
 
 impl Server {
@@ -100,7 +100,7 @@ impl Server {
             password: config.password.filter(|p| !p.is_empty()),
             salt: random_base64(32)?,
             isocast_version: config.isocast_version,
-            custom: std::sync::Mutex::new(Vec::new()),
+            custom: parking_lot::Mutex::new(Vec::new()),
         });
         let accept = thread::Builder::new().name("obs-websocket".into()).spawn({
             let shared = shared.clone();

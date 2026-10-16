@@ -24,14 +24,15 @@ mod rtmp;
 pub mod speed;
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{Local, SecondsFormat};
 use isocast_protocol::stream::ServerUrl;
+use parking_lot::{Condvar, Mutex};
 
 pub use isocast_protocol::stream::{StreamSettings, StreamState, StreamStatus};
 
@@ -64,11 +65,9 @@ const STOP_GRACE: Duration = Duration::from_millis(500);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// How often bitrates and counters are worked out.
 const RATE_INTERVAL: Duration = Duration::from_secs(1);
-/// A bounded stall reserve, not a playout delay. At 60 fps the tap carries
-/// 60 pictures plus 100 mix blocks per second: 16 packets covered only
-/// 100 ms, dropping audio as well as video while VideoToolbox stalled.
-/// Consumed immediately when the encoder runs; the frame pool separately
-/// bounds retained pictures, so capture and the compositor never wait.
+/// Audio's bounded stall reserve, not a playout delay. Video has a separate
+/// eight-picture budget and evicts stale pictures without dropping audio
+/// or pinning the compositor's entire frame pool.
 pub(crate) const TAP_DEPTH: usize = 96;
 /// How long one stream (audio or video) waits for the other before going
 /// out alone.
@@ -202,25 +201,11 @@ impl Shared {
     fn fail(&self, message: String) {
         self.stop.store(true, Ordering::SeqCst);
         // Only stream-private state is discarded; recording routes are separate.
-        if self.queue.is_poisoned() {
-            *self.queue.lock().unwrap_or_else(|p| p.into_inner()) = SendQueue::default();
-            self.queue.clear_poison();
-        }
-        if self.status.is_poisoned() {
-            self.status.clear_poison();
-        }
-        *self.ended.lock().unwrap_or_else(|p| p.into_inner()) =
-            Some(Ended::Failed(message.clone()));
-        self.ended.clear_poison();
-        if let Some(socket) = self
-            .socket
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-        {
+        *self.queue.lock() = SendQueue::default();
+        *self.ended.lock() = Some(Ended::Failed(message.clone()));
+        if let Some(socket) = self.socket.lock().as_ref() {
             let _ = socket.shutdown(std::net::Shutdown::Both);
         }
-        self.socket.clear_poison();
         self.queued.notify_all();
         self.set_state(StreamState::Failed, Some(message));
     }
@@ -230,14 +215,14 @@ impl Shared {
 
     /// Ask the encoder for a keyframe; the queue starts at it.
     fn request_keyframe(&self) {
-        if let Some(subscription) = self.subscription.lock().unwrap().as_ref() {
+        if let Some(subscription) = self.subscription.lock().as_ref() {
             subscription.request_keyframe();
         }
     }
 
     /// Leave the program's encoder (it stops if nothing else uses it).
     fn leave_encoder(&self) {
-        let subscription = self.subscription.lock().unwrap().take();
+        let subscription = self.subscription.lock().take();
         if let Some(subscription) = subscription {
             self.tap_audio_dropped
                 .store(subscription.tap_audio_dropped(), Ordering::Relaxed);
@@ -248,7 +233,7 @@ impl Shared {
     }
 
     fn tap_audio_dropped(&self) -> u64 {
-        match self.subscription.lock().unwrap().as_ref() {
+        match self.subscription.lock().as_ref() {
             Some(subscription) => subscription.tap_audio_dropped(),
             None => self.tap_audio_dropped.load(Ordering::Relaxed),
         }
@@ -257,7 +242,7 @@ impl Shared {
     /// Move to `state`, telling `on_change`.
     fn set_state(&self, state: StreamState, error: Option<String>) {
         let status = {
-            let mut status = self.status.lock().unwrap();
+            let mut status = self.status.lock();
             if status.state == StreamState::Failed
                 && state == StreamState::Offline
                 && error.is_none()
@@ -287,7 +272,7 @@ impl Shared {
 
     /// Bring the counters in `status` up to date.
     fn snapshot(&self, status: &mut StreamStatus) {
-        let queue = self.queue.lock().unwrap();
+        let queue = self.queue.lock();
         let dropped = queue.dropped_frames;
         let queue_audio = queue.audio_dropouts;
         drop(queue);
@@ -333,7 +318,7 @@ impl Stream {
     }
     /// Its state and counters now.
     pub fn status(&self) -> StreamStatus {
-        let mut status = self.shared.status.lock().unwrap().clone();
+        let mut status = self.shared.status.lock().clone();
         self.shared.snapshot(&mut status);
         status
     }
@@ -365,7 +350,7 @@ impl Stream {
             move |why| failed.fail(why),
         );
         if joined.recv_timeout(STOP_GRACE).is_err() {
-            if let Some(socket) = self.shared.socket.lock().unwrap().as_ref() {
+            if let Some(socket) = self.shared.socket.lock().as_ref() {
                 let _ = socket.shutdown(std::net::Shutdown::Both);
             }
             let _ = joined.recv();
@@ -421,7 +406,7 @@ pub fn start<P: Platform>(
         engine
             .encoders()
             .subscribe(engine, &spec.encoder(), "the stream", shared.clone())?;
-    *shared.subscription.lock().unwrap() = Some(subscription);
+    *shared.subscription.lock() = Some(subscription);
     (shared.on_change)(&status);
     // The sender keeps pace with the program, ahead of background work.
     let sending = {
@@ -456,7 +441,7 @@ pub fn start<P: Platform>(
 
 impl Sink for Shared {
     fn missed(&self, frames: u64) {
-        self.queue.lock().unwrap().dropped(frames);
+        self.queue.lock().dropped(frames);
     }
 
     fn encoder_dropped(&self, frames: u64) {
@@ -464,14 +449,14 @@ impl Sink for Shared {
     }
 
     fn keyframe_requested(&self, at: Time) {
-        self.queue.lock().unwrap().start_at(at);
+        self.queue.lock().start_at(at);
     }
 
     fn push(&self, ready: &[Media]) {
         if self.stopping() {
             return;
         }
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock();
         for media in ready {
             queue.push(media.clone());
         }
@@ -480,7 +465,7 @@ impl Sink for Shared {
     }
 
     fn ended(&self, ended: &Ended) {
-        *self.ended.lock().unwrap() = Some(ended.clone());
+        *self.ended.lock() = Some(ended.clone());
         self.queued.notify_all();
     }
 }
@@ -633,14 +618,14 @@ fn send(shared: &Shared, spec: &StreamSpec, server: &ServerUrl, key: &str) {
         let error = match result {
             Ok(mut connection) => {
                 if was_live {
-                    shared.status.lock().unwrap().reconnects += 1;
+                    shared.status.lock().reconnects += 1;
                 }
                 was_live = true;
-                shared.queue.lock().unwrap().restart();
+                shared.queue.lock().restart();
                 shared.request_keyframe();
                 shared.set_state(StreamState::Live, None);
                 let connected = Instant::now();
-                *shared.socket.lock().unwrap() = connection.socket().ok();
+                *shared.socket.lock() = connection.socket().ok();
                 attempts = 0;
                 let result = publish(&mut connection, shared, spec);
                 if connected.elapsed() >= STABLE {
@@ -652,7 +637,7 @@ fn send(shared: &Shared, spec: &StreamSpec, server: &ServerUrl, key: &str) {
                 if result.is_ok() {
                     connection.close(key);
                 }
-                *shared.socket.lock().unwrap() = None;
+                *shared.socket.lock() = None;
                 match result {
                     Ok(()) => break Ok(()),
                     Err(err) if !was_stable && !unreachable && short_lived >= 2 => format!(
@@ -703,7 +688,7 @@ fn send(shared: &Shared, spec: &StreamSpec, server: &ServerUrl, key: &str) {
         let resume = Instant::now() + Duration::from_secs(reconnect.delay_seconds.into());
         while Instant::now() < resume && !shared.stopping() && !program_ended(shared) {
             // Keep the queue from holding stale media meanwhile.
-            shared.queue.lock().unwrap().restart();
+            shared.queue.lock().restart();
             thread::sleep(Duration::from_millis(50));
         }
         if program_ended(shared) {
@@ -712,7 +697,7 @@ fn send(shared: &Shared, spec: &StreamSpec, server: &ServerUrl, key: &str) {
     };
     // The encoder stops with the stream.
     shared.stop.store(true, Ordering::SeqCst);
-    let ended = shared.ended.lock().unwrap().clone();
+    let ended = shared.ended.lock().clone();
     match (outcome, ended) {
         (Err(error), _) => shared.set_state(StreamState::Failed, Some(error)),
         (Ok(()), Some(Ended::Failed(error))) => {
@@ -727,7 +712,7 @@ fn send(shared: &Shared, spec: &StreamSpec, server: &ServerUrl, key: &str) {
 }
 
 fn program_ended(shared: &Shared) -> bool {
-    shared.ended.lock().unwrap().is_some()
+    shared.ended.lock().is_some()
 }
 
 /// Send the queue over `connection` until the stream stops (`Ok`) or the
@@ -755,7 +740,7 @@ fn publish(connection: &mut rtmp::Connection, shared: &Shared, spec: &StreamSpec
     let mut counted = connection.bytes_sent;
     loop {
         let media = {
-            let mut queue = shared.queue.lock().unwrap();
+            let mut queue = shared.queue.lock();
             loop {
                 if shared.stopping() {
                     return Ok(());
@@ -766,8 +751,7 @@ fn publish(connection: &mut rtmp::Connection, shared: &Shared, spec: &StreamSpec
                 if queue.is_empty() && program_ended(shared) {
                     return Ok(());
                 }
-                let (next, timeout) = shared.queued.wait_timeout(queue, POLL_INTERVAL).unwrap();
-                queue = next;
+                let timeout = shared.queued.wait_for(&mut queue, POLL_INTERVAL);
                 if timeout.timed_out() {
                     break None;
                 }
@@ -848,8 +832,8 @@ impl Rate {
         let seconds = self.since.elapsed().as_secs_f64();
         let kbps = |bytes: u64| bytes as f64 * 8.0 / seconds / 1000.0;
         let total = shared.bytes_sent.load(Ordering::Relaxed);
-        let congestion = shared.queue.lock().unwrap().take_peak();
-        let mut status = shared.status.lock().unwrap();
+        let congestion = shared.queue.lock().take_peak();
+        let mut status = shared.status.lock();
         status.video_kbps = kbps(self.video);
         status.audio_kbps = kbps(self.audio);
         if let Some(before) = self.total {

@@ -150,7 +150,9 @@ For an isolated fault-injection run, set `ISOCAST_DEBUG_PANIC_AFTER=5` on the
 daemon. Release builds honor it **only with an explicit `ISOCAST_SOCKET`**.
 A named diagnostic worker panics and is contained five seconds after startup.
 `ISOCAST_DEBUG_PANIC_MODE=connection` instead faults the next connection;
-`=state` poisons the control-state mutex to exercise emergency finalization.
+`=state` panics mid-change to the control state, marking it broken, to exercise
+emergency finalization; `=state_read` panics while only reading it, which must
+leave the recording and stream running.
 `=native_exit` writes `ISOCAST_DEBUG_NATIVE_LINE` to native stderr and exits
 immediately (71), testing relay durability; it does not invoke a Rust panic.
 Unset the variables before restarting. Use a test Mac for fault injection.

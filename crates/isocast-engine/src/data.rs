@@ -4,10 +4,11 @@
 //! it and listens for changes, so a text showing a key is drawn again when
 //! its value changes, never per frame.
 
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use isocast_protocol::api::Percentiles;
@@ -81,11 +82,7 @@ pub struct Listening {
 impl Drop for Listening {
     fn drop(&mut self) {
         if let Some(store) = self.store.upgrade() {
-            store
-                .listeners
-                .lock()
-                .unwrap()
-                .retain(|(id, _)| *id != self.id);
+            store.listeners.lock().retain(|(id, _)| *id != self.id);
         }
     }
 }
@@ -122,10 +119,7 @@ impl DataStore {
     /// returned guard is dropped.
     pub fn listen(self: &Arc<Self>, on_change: Arc<OnChange>) -> Listening {
         let id = self.next_listener.fetch_add(1, Ordering::Relaxed);
-        self.listeners
-            .lock()
-            .unwrap()
-            .push((id, Arc::downgrade(&on_change)));
+        self.listeners.lock().push((id, Arc::downgrade(&on_change)));
         Listening {
             store: Arc::downgrade(self),
             id,
@@ -140,7 +134,6 @@ impl DataStore {
         let listeners: Vec<Arc<OnChange>> = self
             .listeners
             .lock()
-            .unwrap()
             .iter()
             .filter_map(|(_, listener)| listener.upgrade())
             .collect();
@@ -151,13 +144,13 @@ impl DataStore {
 
     /// The store's revision: it counts changes.
     pub fn revision(&self) -> u64 {
-        self.values.lock().unwrap().revision
+        self.values.lock().revision
     }
 
     /// Count changes on from `revision` (if it is higher), so revisions
     /// never repeat across runs (the daemon starts them at the time).
     pub fn start_at(&self, revision: u64) {
-        let mut values = self.values.lock().unwrap();
+        let mut values = self.values.lock();
         values.revision = values.revision.max(revision);
     }
 
@@ -165,7 +158,6 @@ impl DataStore {
     pub fn get(&self, key: &str) -> Option<Arc<Value>> {
         self.values
             .lock()
-            .unwrap()
             .map
             .get(key)
             .map(|entry| entry.value.clone())
@@ -186,7 +178,7 @@ impl DataStore {
                 });
             }
         }
-        let values = self.values.lock().unwrap();
+        let values = self.values.lock();
         let mut out = DataValues {
             revision: values.revision,
             ..DataValues::default()
@@ -255,7 +247,7 @@ impl DataStore {
             sizes.push(key.len() + size);
         }
         let changed = {
-            let mut store = self.values.lock().unwrap();
+            let mut store = self.values.lock();
             let mut total = store.bytes;
             for ((key, _), size) in values.iter().zip(&sizes) {
                 let old = store.map.get(key.as_str()).map_or(0, |entry| entry.bytes);
@@ -331,7 +323,7 @@ impl DataStore {
             }
         }
         let changed = {
-            let mut store = self.values.lock().unwrap();
+            let mut store = self.values.lock();
             let mut changed = Changed::default();
             for key in keys {
                 if let Some((key, entry)) = store.map.remove_entry(key.as_str()) {
@@ -356,7 +348,6 @@ impl DataStore {
     pub fn persisted(&self) -> BTreeMap<String, Value> {
         self.values
             .lock()
-            .unwrap()
             .map
             .iter()
             .filter(|(_, entry)| entry.persist)
@@ -372,7 +363,7 @@ impl DataStore {
     pub fn replace_persisted(&self, values: BTreeMap<String, Value>) -> (Changed, Vec<String>) {
         let mut skipped = Vec::new();
         let changed = {
-            let mut store = self.values.lock().unwrap();
+            let mut store = self.values.lock();
             let mut changed = Changed::default();
             let gone: Vec<Arc<str>> = store
                 .map
@@ -433,7 +424,7 @@ impl DataStore {
     /// its file).
     pub fn status(&self) -> isocast_protocol::data::DataStatus {
         let (mut status, mut timings) = {
-            let values = self.values.lock().unwrap();
+            let values = self.values.lock();
             let status = isocast_protocol::data::DataStatus {
                 revision: values.revision,
                 keys: values.map.len() as u64,
@@ -479,10 +470,7 @@ mod tests {
         let _listening = store.listen({
             let heard = heard.clone();
             Arc::new(move |keys: &[Arc<str>]| {
-                heard
-                    .lock()
-                    .unwrap()
-                    .extend(keys.iter().map(|k| k.to_string()))
+                heard.lock().extend(keys.iter().map(|k| k.to_string()))
             })
         });
         let changed = store
@@ -535,7 +523,7 @@ mod tests {
         assert!(deleted.persisted);
         assert_eq!(store.status().persisted, 0);
         assert_eq!(
-            *heard.lock().unwrap(),
+            *heard.lock(),
             [
                 "score.home",
                 "title",

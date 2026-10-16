@@ -263,6 +263,21 @@ impl VideoSession {
 
 impl Drop for VideoSession {
     fn drop(&mut self) {
+        // Failed/cancelled writers may never reach complete(). Join native
+        // callbacks before invalidating, with their refcon still owned by
+        // self.output throughout both calls.
+        let invalid = CMTime {
+            value: 0,
+            timescale: 0,
+            flags: CMTimeFlags::empty(),
+            epoch: 0,
+        };
+        let status = unsafe { self.session.complete_frames(invalid) };
+        if status != 0 {
+            isocast_diagnostics::diagnostic!("warn";
+                "the recording encoder could not drain before invalidation (error {status})"
+            );
+        }
         unsafe { self.session.invalidate() };
     }
 }

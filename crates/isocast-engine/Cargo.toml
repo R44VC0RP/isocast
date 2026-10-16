@@ -16,6 +16,9 @@ serde_json = "1.0.154"
 # O_NOFOLLOW for files made in project folders (already in the lock file).
 libc = "0.2"
 png = "0.18.1"
+# Locks that don't poison (already in the lock file through wgpu): one
+# contained panic must not fail every thread that shares its state (#30).
+parking_lot = "0.12"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tga"] }
 cosmic-text = "0.19.0"
 # CSS flexbox, grid and block layout for scene items (MIT; already in the

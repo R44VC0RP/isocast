@@ -205,8 +205,7 @@ pub(super) fn write_files<W: FileWriter>(
                                         "{}: could not commit the file at the pause",
                                         file.plan.spec.path.display()
                                     ));
-                                    *file.plan.commit_error.lock().unwrap() =
-                                        Some(format!("{err:#}"));
+                                    *file.plan.commit_error.lock() = Some(format!("{err:#}"));
                                     file.plan.commit_failed.store(requested, Ordering::Release);
                                     result.and(Err(err))
                                 }
@@ -243,7 +242,7 @@ pub(super) fn write_files<W: FileWriter>(
                         // adding one to the last PTS can be 1 ns short of the
                         // same boundary computed from the file's start.
                         pts.ticks_since(start, file.fps()) + 1
-                            >= file_end(start, clock.state.read().unwrap().map(end), file.fps())
+                            >= file_end(start, clock.state.read().map(end), file.fps())
                                 .ticks_since(start, file.fps())
                     })
                     && file.audio_complete(end)
@@ -373,7 +372,7 @@ impl<W: FileWriter> OpenFile<W> {
             self.trace_age = crate::trace::OutputTrace::age(pts);
         }
         let clock = self.clock.clone();
-        let cuts = clock.state.read().unwrap();
+        let cuts = clock.state.read();
         clock.inspected(pts.add_ticks(1, self.fps()));
         if cuts.paused(pts) {
             return Ok(());
@@ -446,7 +445,7 @@ impl<W: FileWriter> OpenFile<W> {
     /// Append audio to `track`, up to `end`.
     fn audio(&mut self, track: usize, samples: &Arc<[f32]>, pts: Time, end: Time) -> Result<()> {
         let clock = self.clock.clone();
-        let cuts = clock.state.read().unwrap();
+        let cuts = clock.state.read();
         let channels = self.tracks[track].channels;
         let frames = (samples.len() / channels) as u64;
         clock.inspected(pts.add_ticks(frames, SAMPLE_RATE));
@@ -485,7 +484,7 @@ impl<W: FileWriter> OpenFile<W> {
     /// `Time::MAX`, after its last frame. `failure` is an earlier error,
     /// reported after finishing so that what was written stays playable.
     fn finish(mut self, end: Time, failure: Result<()>) -> Result<FileReport> {
-        let end = self.clock.state.read().unwrap().map(end);
+        let end = self.clock.state.read().map(end);
         let path = self.plan.spec.path.clone();
         let fps = self.fps();
         let Some(start) = self.start else {
@@ -564,7 +563,6 @@ impl<W: FileWriter> OpenFile<W> {
             .clock
             .state
             .read()
-            .unwrap()
             .map(Time::from_nanos(self.plan.epoch.load(Ordering::SeqCst)));
         Ok(FileReport {
             path,
@@ -583,7 +581,7 @@ impl<W: FileWriter> OpenFile<W> {
     /// Every audio track has reached `end` (rounded up to a frame
     /// boundary).
     fn audio_complete(&self, end: Time) -> bool {
-        let end = self.clock.state.read().unwrap().map(end);
+        let end = self.clock.state.read().map(end);
         let Some(start) = self.start else {
             return false;
         };

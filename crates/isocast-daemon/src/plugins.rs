@@ -26,12 +26,13 @@
 //! it exits on its own it is restarted (1 s, doubling to 60 s, counted from
 //! its last start), and turned off after 5 crashes in 5 minutes.
 
+use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -251,7 +252,7 @@ impl Scope {
             .and_then(|value| value.get("method"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("?");
-        let methods = self.methods.read().unwrap();
+        let methods = self.methods.read();
         if methods.iter().any(|m| *m == name) {
             return self.data_refusal(method);
         }
@@ -272,7 +273,7 @@ impl Scope {
         let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
         let clone = stream.try_clone().ok()?;
         let key = self.next.fetch_add(1, Ordering::SeqCst);
-        self.connections.lock().unwrap().insert(key, clone);
+        self.connections.lock().insert(key, clone);
         Some(Tracked {
             scope: self.clone(),
             key,
@@ -281,7 +282,7 @@ impl Scope {
 
     fn revoke(&self) {
         self.revoked.store(true, Ordering::SeqCst);
-        for (_, stream) in self.connections.lock().unwrap().drain() {
+        for (_, stream) in self.connections.lock().drain() {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     }
@@ -295,7 +296,7 @@ pub struct Tracked {
 
 impl Drop for Tracked {
     fn drop(&mut self) {
-        self.scope.connections.lock().unwrap().remove(&self.key);
+        self.scope.connections.lock().remove(&self.key);
     }
 }
 
@@ -416,7 +417,7 @@ impl RecordingFolders {
 
 impl Process {
     fn info(&self, dir: &Path) -> ProcessInfo {
-        let run = self.state.lock().unwrap();
+        let run = self.state.lock();
         ProcessInfo {
             state: run.phase,
             command: self.command.clone(),
@@ -436,7 +437,7 @@ impl Process {
     /// gone after a grace period. Waits for the supervisor to finish.
     fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
-        let mut run = self.state.lock().unwrap();
+        let mut run = self.state.lock();
         self.changed.notify_all();
         if let Some(pid) = run.pid {
             signal_group(pid, libc::SIGTERM);
@@ -447,17 +448,14 @@ impl Process {
             if left.is_zero() {
                 break;
             }
-            run = self.changed.wait_timeout(run, left).unwrap().0;
+            self.changed.wait_for(&mut run, left);
         }
         if !run.done {
             if let Some(pid) = run.pid {
                 signal_group(pid, libc::SIGKILL);
             }
-            run = self
-                .changed
-                .wait_timeout_while(run, Duration::from_secs(2), |run| !run.done)
-                .unwrap()
-                .0;
+            self.changed
+                .wait_while_for(&mut run, |run| !run.done, Duration::from_secs(2));
         }
         drop(run);
     }
@@ -494,7 +492,7 @@ impl Registry {
         let Ok(dirs) = std::fs::read_dir(&shared.folder) else {
             return;
         };
-        let _admin = shared.admin.lock().unwrap();
+        let _admin = shared.admin.lock();
         for dir in dirs.flatten() {
             let id = dir.file_name().to_string_lossy().into_owned();
             let dir = dir.path();
@@ -521,7 +519,7 @@ impl Registry {
                 process: None,
                 listener: None,
             };
-            shared.entries.lock().unwrap().insert(id.clone(), entry);
+            shared.entries.lock().insert(id.clone(), entry);
             if let Err(err) = shared.run(&id) {
                 isocast_diagnostics::diagnostic!("error"; "isocastd: plugin {id}: {}", err.message);
             }
@@ -533,7 +531,7 @@ impl Registry {
     /// `plan`): an installed plugin's kind used wrongly is a problem, one
     /// that is bypassed (not installed, turned off) a note.
     pub fn check_kinds(&self, setup: &Setup) -> (Vec<Issue>, Vec<String>) {
-        let entries = self.0.entries.lock().unwrap();
+        let entries = self.0.entries.lock();
         let installed: BTreeMap<String, Installed> = entries
             .values()
             .filter_map(|entry| {
@@ -553,7 +551,7 @@ impl Registry {
     /// Stop every plugin process (isocastd is exiting).
     pub fn stop_all(&self) {
         let processes: Vec<Arc<Process>> = {
-            let mut entries = self.0.entries.lock().unwrap();
+            let mut entries = self.0.entries.lock();
             entries
                 .values_mut()
                 .filter_map(|entry| {
@@ -583,7 +581,7 @@ impl Registry {
     /// The plugin a connection on the main socket belongs to, if its peer
     /// process or one of its parents is a plugin process isocastd started.
     pub fn scope_of_peer(&self, stream: &UnixStream) -> Option<Arc<Scope>> {
-        let pids = self.0.pids.lock().unwrap();
+        let pids = self.0.pids.lock();
         if pids.is_empty() {
             return None;
         }
@@ -601,7 +599,7 @@ impl Registry {
     }
 
     pub fn list(&self) -> Plugins {
-        let entries = self.0.entries.lock().unwrap();
+        let entries = self.0.entries.lock();
         Plugins {
             folder: self.0.folder.clone(),
             plugins: entries.values().map(Entry::info).collect(),
@@ -611,7 +609,7 @@ impl Registry {
     /// A `doctor` check on how plugin processes are isolated, if any are
     /// installed.
     pub fn doctor_check(&self) -> Option<Check> {
-        let entries = self.0.entries.lock().unwrap();
+        let entries = self.0.entries.lock();
         let processes = entries
             .values()
             .filter(
@@ -649,7 +647,7 @@ impl Registry {
 
     pub fn add(&self, params: PluginAddParams) -> Result<PluginChange, RpcError> {
         let shared = &self.0;
-        let _admin = shared.admin.lock().unwrap();
+        let _admin = shared.admin.lock();
         let source = params.path.clone();
         if !source.is_absolute() {
             return Err(failed(format!(
@@ -663,7 +661,6 @@ impl Registry {
         let old = shared
             .entries
             .lock()
-            .unwrap()
             .get(&id)
             .map(|entry| (entry.record.clone(), entry.version()));
         let action = match &old {
@@ -727,7 +724,7 @@ impl Registry {
             })?)
         };
         // Its process stops while its files change.
-        let running = shared.entries.lock().unwrap().get_mut(&id).map(|entry| {
+        let running = shared.entries.lock().get_mut(&id).map(|entry| {
             entry.scope.revoke();
             (entry.listener.take(), entry.process.take())
         });
@@ -838,7 +835,7 @@ impl Registry {
             process: None,
             listener: None,
         };
-        shared.entries.lock().unwrap().insert(id.clone(), entry);
+        shared.entries.lock().insert(id.clone(), entry);
         if let Err(err) = shared.run(&id) {
             notes.push(err.message);
         }
@@ -853,8 +850,8 @@ impl Registry {
 
     pub fn remove(&self, id: &str) -> Result<PluginChange, RpcError> {
         let shared = &self.0;
-        let _admin = shared.admin.lock().unwrap();
-        let entry = shared.entries.lock().unwrap().remove(id);
+        let _admin = shared.admin.lock();
+        let entry = shared.entries.lock().remove(id);
         let Some(mut entry) = entry else {
             return Err(shared.unknown(id));
         };
@@ -908,10 +905,10 @@ impl Registry {
 
     pub fn set_enabled(&self, params: PluginEnableParams) -> Result<PluginChange, RpcError> {
         let shared = &self.0;
-        let _admin = shared.admin.lock().unwrap();
+        let _admin = shared.admin.lock();
         let id = params.id.as_str();
         let stopping = {
-            let mut entries = shared.entries.lock().unwrap();
+            let mut entries = shared.entries.lock();
             let Some(entry) = entries.get_mut(id) else {
                 drop(entries);
                 return Err(shared.unknown(id));
@@ -920,7 +917,7 @@ impl Registry {
             let running = entry
                 .process
                 .as_ref()
-                .is_some_and(|process| !process.state.lock().unwrap().done);
+                .is_some_and(|process| !process.state.lock().done);
             if entry.record.enabled == params.enabled && (!params.enabled || running) {
                 let info = entry.info();
                 return Ok(PluginChange {
@@ -961,7 +958,7 @@ impl Registry {
                 // A fresh start: a manifest that changed (linked), a new
                 // crash count.
                 {
-                    let mut entries = shared.entries.lock().unwrap();
+                    let mut entries = shared.entries.lock();
                     let entry = entries.get_mut(id).expect("checked");
                     entry.manifest = load_manifest(id, &entry.dir, &entry.record);
                     entry.scope = Arc::new(Scope::new(id, &entry.record.granted));
@@ -995,7 +992,7 @@ impl Registry {
 
 impl Shared {
     fn unknown(&self, id: &str) -> RpcError {
-        let entries = self.entries.lock().unwrap();
+        let entries = self.entries.lock();
         let ids: Vec<&str> = entries.keys().map(String::as_str).collect();
         failed(format!(
             "no plugin {id:?} is installed; installed: {}",
@@ -1008,13 +1005,13 @@ impl Shared {
     }
 
     fn info(&self, id: &str) -> Option<PluginInfo> {
-        self.entries.lock().unwrap().get(id).map(Entry::info)
+        self.entries.lock().get(id).map(Entry::info)
     }
 
     /// Tell the engine which plugins' audio filters are installed, and
     /// which of them are bypassed.
     fn publish_kinds(&self) {
-        let entries = self.entries.lock().unwrap();
+        let entries = self.entries.lock();
         let filters: Vec<AudioFilterPlugin> = entries
             .values()
             .flat_map(|entry| {
@@ -1059,7 +1056,7 @@ impl Shared {
     /// Start the plugin's process (and its socket) if it should run: it
     /// has one, starts on its own, and is enabled and compatible.
     fn run(self: &Arc<Self>, id: &str) -> Result<(), RpcError> {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock();
         let Some(entry) = entries.get_mut(id) else {
             return Ok(());
         };
@@ -1113,13 +1110,12 @@ impl Shared {
             .spawn(move || shared.supervise(&supervised, &launch))
             .map_err(|err| failed(format!("{id}'s process couldn't start: {err}")))?;
         // Replies say how the first start went.
-        let run = process.state.lock().unwrap();
-        let _ = process
-            .changed
-            .wait_timeout_while(run, Duration::from_secs(2), |run| {
-                run.pid.is_none() && run.last_exit.is_none() && !run.done
-            })
-            .unwrap();
+        let mut run = process.state.lock();
+        let _ = process.changed.wait_while_for(
+            &mut run,
+            |run| run.pid.is_none() && run.last_exit.is_none() && !run.done,
+            Duration::from_secs(2),
+        );
         Ok(())
     }
 
@@ -1146,9 +1142,9 @@ impl Shared {
             let outcome = launch.start(&process.command, &recordings);
             let exit = match outcome {
                 Ok((pid, sandboxed)) => {
-                    self.pids.lock().unwrap().insert(pid, launch.scope.clone());
+                    self.pids.lock().insert(pid, launch.scope.clone());
                     {
-                        let mut run = process.state.lock().unwrap();
+                        let mut run = process.state.lock();
                         run.pid = Some(pid);
                         run.phase = ProcessState::Running;
                         run.sandboxed = sandboxed;
@@ -1159,9 +1155,9 @@ impl Shared {
                         self.changed(&id, PluginAction::Restarted);
                     }
                     let exit = wait(pid);
-                    self.pids.lock().unwrap().remove(&pid);
+                    self.pids.lock().remove(&pid);
                     let _ = std::fs::remove_file(launch.dir.join("pid"));
-                    let mut run = process.state.lock().unwrap();
+                    let mut run = process.state.lock();
                     run.pid = None;
                     run.recordings = None;
                     exit
@@ -1174,12 +1170,12 @@ impl Shared {
             }
             // Stopped for new sandbox rules: start it again at once.
             if process.refresh.swap(false, Ordering::SeqCst) {
-                process.state.lock().unwrap().restarts += 1;
+                process.state.lock().restarts += 1;
                 continue;
             }
             // It ended on its own: a crash.
             let now = Instant::now();
-            let mut run = process.state.lock().unwrap();
+            let mut run = process.state.lock();
             run.crashes.push_back(now);
             while run
                 .crashes
@@ -1214,17 +1210,17 @@ impl Shared {
                 at.saturating_duration_since(Instant::now()).as_secs_f64()
             ));
             self.changed(&id, PluginAction::Crashed);
-            let mut run = process.state.lock().unwrap();
+            let mut run = process.state.lock();
             while !process.stop.load(Ordering::SeqCst) {
                 let left = at.saturating_duration_since(Instant::now());
                 if left.is_zero() {
                     break;
                 }
-                run = process.changed.wait_timeout(run, left).unwrap().0;
+                process.changed.wait_for(&mut run, left);
             }
             run.restarts += 1;
         }
-        let mut run = process.state.lock().unwrap();
+        let mut run = process.state.lock();
         run.phase = ProcessState::Stopped;
         run.done = true;
         process.changed.notify_all();
@@ -1232,7 +1228,7 @@ impl Shared {
 
     fn refresh_sandboxes(&self) {
         let running: Vec<(Arc<Process>, Permissions)> = {
-            let entries = self.entries.lock().unwrap();
+            let entries = self.entries.lock();
             entries
                 .values()
                 .filter_map(|e| Some((e.process.clone()?, e.record.granted.clone())))
@@ -1249,7 +1245,7 @@ impl Shared {
         for (process, granted) in running {
             let now = RecordingFolders::new(&roots, &granted);
             let pid = {
-                let run = process.state.lock().unwrap();
+                let run = process.state.lock();
                 match (&run.recordings, run.pid) {
                     (Some(earlier), Some(pid)) if now.adds_to(earlier) => pid,
                     _ => continue,
@@ -1265,7 +1261,7 @@ impl Shared {
             let process = process.clone();
             thread::spawn(move || {
                 thread::sleep(STOP_GRACE);
-                if process.state.lock().unwrap().pid == Some(pid) {
+                if process.state.lock().pid == Some(pid) {
                     signal_group(pid, libc::SIGKILL);
                 }
             });
@@ -1275,7 +1271,7 @@ impl Shared {
     /// Turn a plugin off after it crashed too often (kept across restarts
     /// of isocastd until it is turned on again).
     fn turn_off(&self, id: &str, reason: &str) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock();
         let Some(entry) = entries.get_mut(id) else {
             return;
         };

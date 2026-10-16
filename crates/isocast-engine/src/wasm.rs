@@ -22,12 +22,13 @@
 //! Nothing here runs (no wasmtime engine, no threads) unless a setup uses
 //! a plugin's audio filter.
 
+use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use isocast_protocol::api::{Percentiles, PluginFilterInfo, PluginFilterState};
@@ -105,7 +106,7 @@ fn installed() -> &'static Installed {
 /// changed are made again; those of a plugin that went are bypassed.
 pub fn set_installed(plugins: Vec<AudioFilterPlugin>) {
     let installed = installed();
-    let mut kinds = installed.kinds.write().unwrap();
+    let mut kinds = installed.kinds.write();
     let mut next = HashMap::new();
     for plugin in plugins {
         let entry = Entry {
@@ -134,7 +135,7 @@ pub(crate) fn generation() -> u64 {
 }
 
 fn lookup(kind: &str) -> Option<Arc<Entry>> {
-    installed().kinds.read().unwrap().get(kind).cloned()
+    installed().kinds.read().get(kind).cloned()
 }
 
 /// A file's size and modification time, as one number (0 if it can't be
@@ -304,7 +305,7 @@ impl Log {
             chrono::Local::now().format("%H:%M:%S%.3f"),
             self.kind
         );
-        if let Some(logs) = runtime.logs.lock().unwrap().as_ref() {
+        if let Some(logs) = runtime.logs.lock().as_ref() {
             // Never waits: a full queue drops the line.
             let _ = logs.try_send((self.file.clone(), line));
         }
@@ -381,7 +382,7 @@ impl Runtime {
     /// file unchanged), else from its cached machine code, else compiled
     /// (and cached).
     fn load(&self, plugin: &AudioFilterPlugin, stamp: u64) -> Result<Arc<Loaded>, String> {
-        if let Some((loaded_stamp, loaded)) = self.loaded.lock().unwrap().get(&plugin.kind)
+        if let Some((loaded_stamp, loaded)) = self.loaded.lock().get(&plugin.kind)
             && *loaded_stamp == stamp
         {
             return Ok(loaded.clone());
@@ -398,7 +399,6 @@ impl Runtime {
         });
         self.loaded
             .lock()
-            .unwrap()
             .insert(plugin.kind.clone(), (stamp, loaded.clone()));
         Ok(loaded)
     }
@@ -446,7 +446,7 @@ impl Runtime {
 
     /// Run `job` on the thread that makes instances.
     fn spawn(&self, job: Job) {
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = self.jobs.lock();
         let sender = jobs.get_or_insert_with(|| {
             let (tx, rx) = mpsc::channel::<Job>();
             let _ = isocast_diagnostics::spawn(
@@ -669,12 +669,12 @@ pub(crate) struct Reports {
 impl Reports {
     /// Send warnings to `warn` from now on (else they are printed).
     pub(crate) fn set_warn(&self, warn: Warn) {
-        *self.warn.lock().unwrap() = Some(warn);
+        *self.warn.lock() = Some(warn);
     }
 
     fn warn(&self, message: String) {
         {
-            let mut recent = self.recent.lock().unwrap();
+            let mut recent = self.recent.lock();
             let now = Instant::now();
             recent.retain(|(at, _)| now.duration_since(*at) < Duration::from_secs(10));
             if recent.iter().any(|(_, said)| *said == message) {
@@ -682,7 +682,7 @@ impl Reports {
             }
             recent.push_back((now, message.clone()));
         }
-        let warn = self.warn.lock().unwrap().clone();
+        let warn = self.warn.lock().clone();
         match warn {
             Some(warn) => warn(message),
             None => isocast_diagnostics::diagnostic!("warn"; "isocast: {message}"),
@@ -690,14 +690,14 @@ impl Reports {
     }
 
     fn register(&self, stats: &Arc<FilterStats>) {
-        let mut filters = self.filters.lock().unwrap();
+        let mut filters = self.filters.lock();
         filters.retain(|filter| filter.strong_count() > 0);
         filters.push(Arc::downgrade(stats));
     }
 
     /// Every running plugin filter's state and counters.
     pub(crate) fn info(&self) -> Vec<PluginFilterInfo> {
-        let filters = self.filters.lock().unwrap();
+        let filters = self.filters.lock();
         let mut info: Vec<PluginFilterInfo> = filters
             .iter()
             .filter_map(Weak::upgrade)
@@ -777,7 +777,7 @@ impl FilterStats {
     }
 
     fn call(&self, took: Duration, fuel: u64) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let ns = took.as_nanos().min(u128::from(u32::MAX)) as u32;
         let fuel = fuel.min(u64::from(u32::MAX)) as u32;
         if inner.ns.len() < WINDOW {
@@ -793,19 +793,19 @@ impl FilterStats {
     }
 
     fn state(&self, state: PluginFilterState, reason: Option<String>) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.state = state;
         inner.reason = reason;
     }
 
     fn failure(&self, what: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.failures += 1;
         inner.last_failure = Some(what.to_string());
     }
 
     fn info(&self) -> PluginFilterInfo {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         let percentiles = |values: &[u32], scale: f64| {
             let mut sorted = values.to_vec();
             sorted.sort_unstable();
@@ -1229,7 +1229,7 @@ mod tests {
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let reports = Arc::new(Reports::default());
         let kept = warnings.clone();
-        reports.set_warn(Arc::new(move |message| kept.lock().unwrap().push(message)));
+        reports.set_warn(Arc::new(move |message| kept.lock().push(message)));
         let mut chain = AudioChain::new(channels);
         chain.set_place(Place {
             source: Some(0),
@@ -1262,7 +1262,7 @@ mod tests {
             for block in out.chunks_mut(960) {
                 chain.process(block, &|_| None);
             }
-            assert!(warnings.lock().unwrap().is_empty(), "{warnings:?}");
+            assert!(warnings.lock().is_empty(), "{warnings:?}");
             out
         };
         let built_in = run(&[filter(AudioFilterKind::Gain(Gain { gain_db: -6.0 }))]);
@@ -1356,7 +1356,7 @@ mod tests {
             let mut passed = 0;
             // Until it is off: each fresh copy filters 20 ms, then fails.
             let deadline = Instant::now() + Duration::from_secs(30);
-            while warnings.lock().unwrap().len() < 3 && Instant::now() < deadline {
+            while warnings.lock().len() < 3 && Instant::now() < deadline {
                 for block in input.chunks(960) {
                     let mut out = block.to_vec();
                     chain.process(&mut out, &|_| None);
@@ -1373,7 +1373,7 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            let warnings = warnings.lock().unwrap().clone();
+            let warnings = warnings.lock().clone();
             assert_eq!(warnings.len(), 3, "{fault}: {warnings:#?}");
             assert!(warnings[0].starts_with("sources[0].audio_filters[0] (gain/gain) "));
             assert!(warnings[0].contains("fresh copy"), "{}", warnings[0]);
@@ -1403,7 +1403,7 @@ mod tests {
         let mut out = vec![0.5; 480];
         chain.process(&mut out, &|_| None);
         assert_eq!(out, vec![0.5; 480]);
-        let warnings = warnings.lock().unwrap();
+        let warnings = warnings.lock();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("isn't installed"), "{}", warnings[0]);
     }

@@ -1,6 +1,6 @@
 //! A recording-only edit clock. Captures, preview and streaming keep host time.
 
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
@@ -58,7 +58,7 @@ impl RecordingClock {
     /// Record what every file had committed to the disk when the pause cut
     /// at `start` was answered: seconds of the take's saved timeline.
     pub fn set_recoverable(&self, start: Time, seconds: Option<f64>) {
-        let mut cuts = self.state.write().unwrap();
+        let mut cuts = self.state.write();
         if let Some(span) = cuts.spans.iter_mut().find(|s| s.start == start) {
             span.recoverable = seconds;
         }
@@ -66,7 +66,7 @@ impl RecordingClock {
 
     /// The uncut time of the latest pause, if the clock is paused.
     pub fn open_pause(&self) -> Option<Time> {
-        let cuts = self.state.read().unwrap();
+        let cuts = self.state.read();
         cuts.spans
             .last()
             .filter(|s| s.end.is_none())
@@ -74,7 +74,7 @@ impl RecordingClock {
     }
 
     pub fn change(&self, paused: bool, now: Time, end: Option<Time>) -> Result<Time, String> {
-        let mut cuts = self.state.write().unwrap();
+        let mut cuts = self.state.write();
         if !cuts.settled(now) {
             return Err(
                 "recording.paused: a pause/resume boundary is pending; wait for its reply".into(),

@@ -8,9 +8,10 @@
 //! unsubscribes. Its thread taps the program, encodes, interleaves audio
 //! and video by time and hands each batch to every [`Sink`].
 
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -140,7 +141,7 @@ impl Encoders {
         what: &str,
         sink: Arc<dyn Sink>,
     ) -> Result<Subscription> {
-        let mut hubs = self.0.lock().unwrap();
+        let mut hubs = self.0.lock();
         hubs.retain(|hub| hub.strong_count() > 0);
         for hub in hubs.iter().filter_map(Weak::upgrade) {
             if hub.spec != *spec || hub.ended.load(Ordering::SeqCst) {
@@ -247,7 +248,7 @@ impl Encoders {
                     }
                 })?
         };
-        *hub.thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(thread);
+        *hub.thread.lock() = Some(thread);
         hubs.push(Arc::downgrade(&hub));
         Ok(Subscription {
             hub,
@@ -260,8 +261,8 @@ impl Encoders {
 impl Hub {
     /// The sinks, even after a sink panicked holding the lock (the encoder
     /// thread catches the panic; the others must still be told it ended).
-    fn sinks(&self) -> std::sync::MutexGuard<'_, Vec<(u64, Arc<dyn Sink>)>> {
-        self.sinks.lock().unwrap_or_else(|p| p.into_inner())
+    fn sinks(&self) -> parking_lot::MutexGuard<'_, Vec<(u64, Arc<dyn Sink>)>> {
+        self.sinks.lock()
     }
 }
 
@@ -306,12 +307,7 @@ impl Drop for Subscription {
         };
         if last {
             // The thread checks `stop` every few milliseconds.
-            let thread = self
-                .hub
-                .thread
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take();
+            let thread = self.hub.thread.lock().take();
             if let Some(thread) = thread
                 && thread.thread().id() != thread::current().id()
             {

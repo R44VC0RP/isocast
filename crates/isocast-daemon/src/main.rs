@@ -5,14 +5,15 @@
 //! `isocast_protocol::api`). `isocast start` launches it when it isn't
 //! running.
 
+use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use base64::Engine;
 use isocast_engine::Platform;
 use isocast_engine::Time;
 use isocast_engine::capacity;
+use isocast_engine::critical::{Critical, Transaction};
 use isocast_engine::data::DataStore;
 use isocast_engine::record::{
     DEFAULT_SLOTS, Engine as LiveEngineOf, EngineEvent, FrameFeed, JpegFrame, OnEngineEvent,
@@ -541,7 +543,7 @@ fn stream_frames(
         // Watching keeps the engine running.
         if kept.elapsed() >= Duration::from_secs(1) {
             kept = std::time::Instant::now();
-            daemon.state.lock().unwrap().wanted_at = Some(kept);
+            daemon.state.lock().wanted_at = Some(kept);
         }
     };
     // The reader stops once the client sees the end.
@@ -651,7 +653,7 @@ fn stream_shared_frames(
         // Watching keeps the engine running.
         if kept.elapsed() >= Duration::from_secs(1) {
             kept = std::time::Instant::now();
-            daemon.state.lock().unwrap().wanted_at = Some(kept);
+            daemon.state.lock().wanted_at = Some(kept);
         }
     };
     if let Some(token) = offered {
@@ -674,17 +676,13 @@ fn watch(
     let (tx, rx) = mpsc::sync_channel(WATCH_QUEUE_DEPTH);
     let wanted = params.wanted();
     let key = next_watcher_key();
-    daemon
-        .watchers
-        .lock()
-        .unwrap()
-        .push(Watcher { key, wanted, tx });
+    daemon.watchers.lock().push(Watcher { key, wanted, tx });
     // However this ends, the watcher goes (else one asking for rare kinds
     // would stay listed until the next event of its kind).
     struct Leave<'a>(&'a Daemon, u64);
     impl Drop for Leave<'_> {
         fn drop(&mut self) {
-            let mut watchers = self.0.watchers.lock().unwrap();
+            let mut watchers = self.0.watchers.lock();
             watchers.retain(|watcher| watcher.key != self.1);
         }
     }
@@ -697,7 +695,7 @@ fn watch(
     )?;
     // A setup file that didn't load stays a warning until a change fixes it.
     if wanted.contains(EventKind::Warning)
-        && let Some(message) = daemon.state.lock().unwrap().file.load_warning()
+        && let Some(message) = daemon.state.lock().file.load_warning()
     {
         let warning = Notification::event(Event::Warning { message });
         writeln!(writer, "{}", serde_json::to_string(&warning)?)?;
@@ -796,7 +794,9 @@ struct Daemon {
     interrupted: Mutex<Vec<isocast_protocol::manifest::InterruptedRecording>>,
     /// Manifests startup recovery marked that no `start` has mentioned yet.
     interrupted_unnoted: Mutex<Vec<PathBuf>>,
-    state: Mutex<State>,
+    /// Critical (`isocast_engine::critical`): a panic that cuts a change
+    /// short finalizes recordings through the emergency stop.
+    state: Critical<State>,
     /// Signalled when a session ends.
     ended: Condvar,
     /// Signalled when the engine has started (or failed to).
@@ -832,7 +832,7 @@ struct Daemon {
     /// Read-held by every call that starts something (a take, a stream,
     /// an export, the virtual camera); `shutdown_if_idle` write-holds it,
     /// so no start can slip between its idle check and the shutdown.
-    starting: std::sync::RwLock<()>,
+    starting: parking_lot::RwLock<()>,
     /// The obs-websocket compatibility server (`websocket_*`).
     websocket: websocket::Runtime,
 }
@@ -1194,10 +1194,10 @@ impl Daemon {
     /// timeout is diagnostic, never permission to exit during an active take.
     fn graceful_shutdown(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
-        let _shutdown = self.shutdown_lock.lock().unwrap();
+        let _shutdown = self.shutdown_lock.lock();
         loop {
             let result = self.stop();
-            if self.state.lock().unwrap().session.is_none() {
+            if self.state.lock().session.is_none() {
                 break;
             }
             if let Err(error) = result {
@@ -1223,7 +1223,7 @@ impl Daemon {
     /// Agree to shut down only while nothing runs. Leaves `shutting_down`
     /// set on success (the connection then runs `graceful_shutdown`).
     fn shutdown_if_idle(&self) -> Result<(), RpcError> {
-        let _gate = self.starting.write().unwrap_or_else(|e| e.into_inner());
+        let _gate = self.starting.write();
         if self.shutting_down.swap(true, Ordering::SeqCst) {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
@@ -1242,7 +1242,7 @@ impl Daemon {
 
     /// What a shutdown would interrupt, with how to end it.
     fn busy(&self) -> Option<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         if state.session.is_some() {
             return Some(
                 "recording; stop it first (`isocast stop`, or MCP's stop_recording)".into(),
@@ -1291,7 +1291,7 @@ impl Daemon {
                 | Method::Resume
                 | Method::Optimize(_)
         )
-        .then(|| self.starting.read().unwrap_or_else(|e| e.into_inner()));
+        .then(|| self.starting.read());
         if self.shutting_down.load(Ordering::SeqCst)
             && !matches!(
                 request.method,
@@ -1322,7 +1322,7 @@ impl Daemon {
             Method::Devices => devices().map_err(failed).and_then(to_json),
             Method::Get(params) => to_json(self.get(params.unwrap_or_default())),
             Method::Plan(change) => {
-                let state = self.state.lock().unwrap();
+                let state = self.state.read();
                 plan(&state, *change, &self.plugins).and_then(to_json)
             }
             Method::Apply(params) => self.apply(*params).and_then(to_json),
@@ -1364,9 +1364,7 @@ impl Daemon {
             Method::Optimize(params) => self.optimize(*params).and_then(to_json),
             Method::InitSetup(params) => self.init_setup(*params).and_then(to_json),
             Method::Doctor(params) => check_folder(params.folder.as_deref()).and_then(|()| {
-                let setup = params
-                    .setup
-                    .or_else(|| self.state.lock().unwrap().setup.clone());
+                let setup = params.setup.or_else(|| self.state.lock().setup.clone());
                 let mut report = doctor(setup.as_ref(), params.folder.as_deref());
                 report.checks.extend(self.plugins.doctor_check());
                 to_json(report)
@@ -1520,12 +1518,7 @@ impl Daemon {
             debug::sync(self, "setup changed");
         }
         diagnostics::event(&event);
-        let mut watchers = self.watchers.lock().unwrap_or_else(|p| {
-            let mut watchers = p.into_inner();
-            watchers.clear();
-            self.watchers.clear_poison();
-            watchers
-        });
+        let mut watchers = self.watchers.lock();
         // Nobody wants it (no one watches, or every watcher left its kind
         // out): not even serialized.
         let kind = event.kind();
@@ -1554,7 +1547,7 @@ impl Daemon {
         &self,
         target: &isocast_protocol::plugin::PluginTarget,
     ) -> Result<isocast_protocol::plugin::PluginChange, RpcError> {
-        let used = match &self.state.lock().unwrap().setup {
+        let used = match &self.state.lock().setup {
             Some(setup) => isocast_protocol::plugin::uses(setup, &target.id),
             None => Vec::new(),
         };
@@ -1583,7 +1576,7 @@ impl Daemon {
     }
 
     fn get(&self, params: GetParams) -> Live {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         let (collection, profile) = state.file.current_names(state.setup.as_ref());
         let mut live = Live {
             revision: state.revision,
@@ -1608,7 +1601,7 @@ impl Daemon {
     /// that can't be loaded is left alone and reported (in `get`, `status`
     /// and to watchers), and the daemon starts without a setup.
     fn load_setup(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let loaded = state.file.load();
         for note in state.file.notes() {
             isocast_diagnostics::diagnostic!("isocastd: {note}");
@@ -1673,7 +1666,7 @@ impl Daemon {
 
     /// The file of the scene collection in use, once there is one.
     fn collection_file(&self) -> Option<PathBuf> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         let current = state.file.current()?;
         Some(state.file.path(
             isocast_protocol::library::LibraryKind::Collection,
@@ -1692,7 +1685,7 @@ impl Daemon {
     }
 
     fn apply(&self, params: ApplyParams) -> Result<Applied, RpcError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let plan = plan(&state, params.change, &self.plugins)?;
         if params.revision != state.revision {
             return Err(RpcError {
@@ -1773,7 +1766,7 @@ impl Daemon {
         if let Some((setup, target)) = to_save {
             if params.live {
                 // Saved by the saver thread once the gesture pauses.
-                *self.live_save.lock().unwrap() = Some((revision, setup, target));
+                *self.live_save.lock() = Some((revision, setup, target));
                 self.live_saved.notify_all();
                 return Ok(Applied {
                     revision,
@@ -1783,7 +1776,7 @@ impl Daemon {
             }
             notes.extend(self.save(revision, &setup, &target));
         }
-        if let Some(message) = self.state.lock().unwrap().file.info().save_error {
+        if let Some(message) = self.state.lock().file.info().save_error {
             self.publish(Event::Warning { message });
         }
         self.follow_collection();
@@ -1798,7 +1791,7 @@ impl Daemon {
     /// `target`, in revision order per file: an older change that lost a
     /// race never overwrites a newer one. Returns notes about a failure.
     fn save(&self, revision: u64, setup: &Setup, target: &store::Target) -> Vec<String> {
-        let mut saved = self.saved.lock().unwrap();
+        let mut saved = self.saved.lock();
         let newer = |path: &PathBuf| saved.get(path).is_none_or(|&last| revision > last);
         let parts = store::Parts {
             collection: newer(&target.collection),
@@ -1816,20 +1809,19 @@ impl Daemon {
                 saved.insert(path.clone(), revision);
             }
         }
-        self.state.lock().unwrap().file.saved(result)
+        self.state.lock().file.saved(result)
     }
 
     /// The saver thread: writes the newest live change once changes pause.
     fn save_live_changes(&self) {
         loop {
-            let mut pending = self.live_save.lock().unwrap();
+            let mut pending = self.live_save.lock();
             while pending.is_none() {
-                pending = self.live_saved.wait(pending).unwrap();
+                self.live_saved.wait(&mut pending);
             }
             let first = std::time::Instant::now();
             loop {
-                let (guard, wait) = self.live_saved.wait_timeout(pending, SAVE_QUIET).unwrap();
-                pending = guard;
+                let wait = self.live_saved.wait_for(&mut pending, SAVE_QUIET);
                 if wait.timed_out() || first.elapsed() >= SAVE_AT_MOST {
                     break;
                 }
@@ -1839,7 +1831,7 @@ impl Daemon {
             };
             drop(pending);
             if !self.save(revision, &setup, &target).is_empty()
-                && let Some(message) = self.state.lock().unwrap().file.info().save_error
+                && let Some(message) = self.state.lock().file.info().save_error
             {
                 self.publish(Event::Warning { message });
             }
@@ -1848,7 +1840,7 @@ impl Daemon {
 
     /// Save a live change still waiting for the saver (before exiting).
     fn flush_live_save(&self) {
-        let pending = self.live_save.lock().unwrap().take();
+        let pending = self.live_save.lock().take();
         if let Some((revision, setup, target)) = pending {
             let _ = self.save(revision, &setup, &target);
         }
@@ -1864,14 +1856,14 @@ impl Daemon {
         if !params.apply {
             return Ok(made);
         }
-        let revision = self.state.lock().unwrap().revision;
+        let revision = self.state.lock().revision;
         let mut applied = self.apply(ApplyParams {
             revision,
             change: Change::Setup(Box::new(made.setup.clone())),
             live: false,
         })?;
         if revision > 0 {
-            let file = self.state.lock().unwrap().file.info();
+            let file = self.state.lock().file.info();
             applied.notes.push(format!(
                 "replaced the live setup (revision {revision}), in the current scene collection \
                  and profile; the previous versions are kept in {}.bak{}",
@@ -1884,7 +1876,7 @@ impl Daemon {
         // A new setup starts on its first scene, not on a scene of the old
         // one that happens to share its id ("screen").
         if let Some(first) = made.setup.scenes.first() {
-            let state = self.state.lock().unwrap();
+            let state = self.state.lock();
             if state.scene.as_ref() != Some(&first.id) {
                 self.go_on_air(state, first.id.clone(), Some(Transition::default()), false)?;
             }
@@ -1895,7 +1887,7 @@ impl Daemon {
 
     fn tune(&self, params: TuneParams) -> Result<Tuning, RpcError> {
         check_folder(params.folder.as_deref())?;
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if state.session.is_some() || state.tuning || state.camera.active() {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
@@ -1932,12 +1924,12 @@ impl Daemon {
             ))
         })
         .map_err(failed);
-        self.state.lock().unwrap().tuning = false;
+        self.state.lock().tuning = false;
         result
     }
 
     fn snapshot(&self, params: SnapshotParams) -> Result<Snapshot, RpcError> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         // While the live engine runs, frames come from it.
         let setup = state.setup.clone();
         let control = state.control();
@@ -2062,7 +2054,7 @@ impl Daemon {
             message,
         };
         let (control, stop, id, epoch) = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             if !paused
                 && state
                     .setup
@@ -2076,7 +2068,7 @@ impl Daemon {
                 .session
                 .as_ref()
                 .ok_or_else(|| wrong("recording: idle; valid action: start".into()))?;
-            if session.stop.load(Ordering::SeqCst) || session.files.lock().unwrap().is_none() {
+            if session.stop.load(Ordering::SeqCst) || session.files.lock().is_none() {
                 return Err(wrong(
                     "recording: starting or stopping; wait for recording state".into(),
                 ));
@@ -2107,7 +2099,7 @@ impl Daemon {
             }
             thread::sleep(Duration::from_millis(2));
         }
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         if stop.load(Ordering::SeqCst) || state.session.as_ref().is_none_or(|s| s.id != id) {
             return Err(wrong("recording: stopped during pause/resume".into()));
         }
@@ -2146,7 +2138,7 @@ impl Daemon {
                 message: message.into(),
             },
         };
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         let (Some(session), Some(control)) = (&state.session, state.control()) else {
             return Err(refused(true, RpcError::WRONG_STATE, "not recording"));
         };
@@ -2157,7 +2149,7 @@ impl Daemon {
                 "the recording is stopping, so no new take can begin",
             ));
         }
-        if session.files.lock().unwrap().is_none() {
+        if session.files.lock().is_none() {
             return Err(refused(
                 false,
                 RpcError::WRONG_STATE,
@@ -2172,9 +2164,9 @@ impl Daemon {
         drop(state);
         match reply.recv_timeout(START_TIMEOUT) {
             Ok(Ok(split)) => {
-                *current.lock().unwrap() = Some(split.files.clone());
+                *current.lock() = Some(split.files.clone());
                 let begins_at = timeline::split_text(&split);
-                *takes.current.lock().unwrap() = timeline::TakeNow {
+                *takes.current.lock() = timeline::TakeNow {
                     number: split.take,
                     files: split.files.clone(),
                     begins: Some(std::time::Instant::now() + split.begins_in),
@@ -2216,7 +2208,7 @@ impl Daemon {
     }
 
     fn refresh_browser(&self, source: String) -> Result<Refreshed, RpcError> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         let Some(control) = state.control() else {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
@@ -2235,7 +2227,7 @@ impl Daemon {
     }
 
     fn marker(&self, label: String) -> Result<Marked, RpcError> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         let (Some(session), Some(control)) = (&state.session, state.control()) else {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
@@ -2274,14 +2266,14 @@ impl Daemon {
         scene: String,
         transition: Option<Transition>,
     ) -> Result<Switched, RpcError> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         check_scene(&state, &scene)?;
         self.go_on_air(state, scene, transition, false)
     }
 
     /// Stage `scene` in preview, for `take`.
     fn preview(&self, scene: String) -> Result<Switched, RpcError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         check_scene(&state, &scene)?;
         state.preview = Some(scene.clone());
         if let Some(engine) = &state.engine {
@@ -2302,7 +2294,7 @@ impl Daemon {
     }
 
     fn clear_preview(&self) -> Switched {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.preview = None;
         if let Some(engine) = &state.engine {
             engine.set_preview(None);
@@ -2322,7 +2314,7 @@ impl Daemon {
     /// Put the preview scene on air; the scene that was on air moves to
     /// preview.
     fn take(&self, transition: Option<Transition>) -> Result<Switched, RpcError> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let Some(scene) = state.preview.clone() else {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
@@ -2336,7 +2328,7 @@ impl Daemon {
     /// moves to preview. Nothing changes if the transition is refused.
     fn go_on_air(
         &self,
-        mut state: std::sync::MutexGuard<'_, State>,
+        mut state: Transaction<'_, State>,
         scene: String,
         transition: Option<Transition>,
         swap: bool,
@@ -2405,16 +2397,12 @@ impl Daemon {
     }
 
     fn status(&self) -> Status {
-        let state = self.state.lock().unwrap();
+        let state = self.state.read();
         let (engine, mut live, files) = match &state.session {
             None => (EngineState::Idle, None, Vec::new()),
-            Some(session) => match session.files.lock().unwrap().clone() {
+            Some(session) => match session.files.lock().clone() {
                 None => (EngineState::Starting, None, Vec::new()),
-                Some(files) => (
-                    EngineState::Recording,
-                    session.live.lock().unwrap().clone(),
-                    files,
-                ),
+                Some(files) => (EngineState::Recording, session.live.lock().clone(), files),
             },
         };
         if let (Some(live), Some(control)) = (&mut live, state.control())
@@ -2448,20 +2436,15 @@ impl Daemon {
             profile,
             stream: stream_status(&state),
             streams: streams::stream_statuses(&state),
-            cpu_percent: self.cpu.lock().unwrap().read(),
+            cpu_percent: self.cpu.lock().read(),
             data: Some(self.data.status()),
             diagnostics: Some(isocast_diagnostics::health()),
-            interrupted: self.interrupted.lock().unwrap().clone(),
+            interrupted: self.interrupted.lock().clone(),
             timeline: {
-                let timelines = self.timelines.lock().unwrap();
+                let timelines = self.timelines.lock();
                 timelines.current().and_then(|id| timelines.summary(id))
             },
-            timeline_problem: self
-                .timelines
-                .lock()
-                .unwrap()
-                .current_problem()
-                .map(str::to_string),
+            timeline_problem: self.timelines.lock().current_problem().map(str::to_string),
             export: self.export_running(),
             virtual_camera: Some(state.camera.status_for(state.setup.as_ref())),
             replay: Some(state.replay.status_for(state.setup.as_ref())),
@@ -2519,7 +2502,7 @@ impl Daemon {
     /// The service and Keychain account a key command means: as given, or
     /// the live setup's `[stream]`.
     fn key_target(&self, target: StreamKeyTarget) -> Result<(StreamService, String), RpcError> {
-        let live = stream_settings(&self.state.lock().unwrap());
+        let live = stream_settings(&self.state.read());
         if let Some(id) = &target.destination {
             // A destination not applied yet (Settings' draft) names its
             // service (and custom server) itself.
@@ -2630,7 +2613,7 @@ impl Daemon {
             }
         };
         {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             if params
                 .setup
                 .as_ref()
@@ -2655,7 +2638,7 @@ impl Daemon {
         let mut notes = Vec::new();
         if let Some(setup) = params.setup {
             let (revision, replaced) = {
-                let state = self.state.lock().unwrap();
+                let state = self.state.read();
                 let replaced = state.setup.as_ref().filter(|live| **live != setup);
                 (state.revision, replaced.map(|live| live.name.clone()))
             };
@@ -2666,7 +2649,7 @@ impl Daemon {
             })?;
             notes.extend(applied.notes);
             if let Some(name) = replaced {
-                let file = self.state.lock().unwrap().file.info();
+                let file = self.state.lock().file.info();
                 notes.push(format!(
                     "the setup given became the live setup, replacing {name:?} (revision \
                      {revision}) in the current scene collection and profile; the previous \
@@ -2679,7 +2662,7 @@ impl Daemon {
             }
         }
         let folder = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             let Some(setup) = &state.setup else {
                 return Err(state.no_setup("no setup to record (or give one)"));
             };
@@ -2701,31 +2684,20 @@ impl Daemon {
                 .iter()
                 .flat_map(|folder| interrupted_sessions(folder, true))
                 .collect();
-        for take in self
-            .interrupted_unnoted
-            .lock()
-            .unwrap()
-            .extract_if(.., |m| {
-                m.parent()
-                    .is_some_and(|p| p == root || p.parent() == Some(&root))
-            })
-        {
+        for take in self.interrupted_unnoted.lock().extract_if(.., |m| {
+            m.parent()
+                .is_some_and(|p| p == root || p.parent() == Some(&root))
+        }) {
             if !interrupted.contains(&take) {
                 interrupted.push(take);
             }
         }
         notes.extend(interrupted_note(&interrupted, true));
         // A timeline that should be current but couldn't be read.
-        notes.extend(
-            self.timelines
-                .lock()
-                .unwrap()
-                .current_problem()
-                .map(str::to_string),
-        );
+        notes.extend(self.timelines.lock().current_problem().map(str::to_string));
         // The session is in the state before the engine warms up, so
         // `status` says it is starting and `stop` can cancel it.
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if state.session.is_some() {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
@@ -2768,10 +2740,10 @@ impl Daemon {
         // can't move it meanwhile, and kept with the session (renames are
         // refused while it records there).
         let picked = {
-            let _projects = self.projects.lock().unwrap();
+            let _projects = self.projects.lock();
             let picked = projects::project_for(&folder);
             if let Ok(project) = &picked {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock();
                 if let Some(session) = state.session.as_mut().filter(|s| s.id == id) {
                     session.project = Some(project.clone());
                 }
@@ -2830,14 +2802,14 @@ impl Daemon {
         thread::spawn(move || {
             let (stop, files, live, takes) = options;
             let on_start = |paths: &[PathBuf], manifest: &Path| {
-                *takes.current.lock().unwrap() = timeline::TakeNow {
+                *takes.current.lock() = timeline::TakeNow {
                     number: 1,
                     files: paths.to_vec(),
                     begins: None,
                     begins_at: None,
                 };
                 daemon.take_began(&takes, 1, manifest);
-                *files.lock().unwrap() = Some(paths.to_vec());
+                *files.lock() = Some(paths.to_vec());
                 let _ = started_tx.send(Ok(paths.to_vec()));
                 if project.created
                     && let Some(file) = isocast_protocol::project::read(&project.folder)
@@ -2859,11 +2831,11 @@ impl Daemon {
             let reported = Mutex::new(Vec::<(u64, u64)>::new());
             let overload = Mutex::new(OverloadWatch::default());
             let on_status = |status: &LiveStatus| {
-                *live.lock().unwrap() = Some(status.clone());
-                for message in status.new_drops(&mut reported.lock().unwrap()) {
+                *live.lock() = Some(status.clone());
+                for message in status.new_drops(&mut reported.lock()) {
                     daemon.publish(Event::Warning { message });
                 }
-                let take = takes.current.lock().unwrap().number;
+                let take = takes.current.lock().number;
                 daemon.note_overload(&overload, take, status);
                 daemon.publish(Event::Status {
                     live: status.clone(),
@@ -2951,7 +2923,7 @@ impl Daemon {
     /// with nothing measured, than the chip's numbers say they manage.
     fn capacity_warning(&self, engine: &dyn LiveEngine) -> Option<String> {
         let (setup, memory) = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             let memory = capacity::memory_path(state.file.legacy());
             (state.setup.clone()?, memory)
         };
@@ -2969,7 +2941,7 @@ impl Daemon {
         }
         // Else what the chip's numbers predict, with the stream if it runs
         // (#66): only when it can't keep up, so a fitting setup never nags.
-        let streaming = self.state.lock().unwrap().streaming();
+        let streaming = self.state.lock().streaming();
         let estimate =
             estimate_capacity(&setup, Some(engine), streaming, true, &memory, None).ok()?;
         if estimate.capacity != isocast_protocol::api::Capacity::CannotKeepUp {
@@ -2991,7 +2963,7 @@ impl Daemon {
     /// its sources' live formats) fit this Mac's encoders, by per-chip data.
     fn estimate_capacity(&self, params: CapacityParams) -> Result<CapacityEstimate, RpcError> {
         let (setup, streaming, recording, engine, memory) = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.read();
             let live = params.setup.is_none();
             let Some(setup) = params.setup.or_else(|| state.setup.clone()) else {
                 return Err(state.no_setup("no setup to judge (or give one)"));
@@ -3029,7 +3001,7 @@ impl Daemon {
         take: u32,
         status: &LiveStatus,
     ) {
-        let mut watch = watch.lock().unwrap();
+        let mut watch = watch.lock();
         if watch.take != take {
             *watch = OverloadWatch {
                 take,
@@ -3046,7 +3018,7 @@ impl Daemon {
         // The recording's own thread: never wait for the state lock (a
         // busy request keeps the last reading instead).
         let (stream_dropped, stream_sent) = match self.state.try_lock() {
-            Ok(state) => {
+            Some(state) => {
                 // The running stream's own counts (no Keychain look-up
                 // for the setup's key, as `stream_status` makes).
                 // Every destination's, added up (#73).
@@ -3061,7 +3033,7 @@ impl Daemon {
                 watch.stream_now = now;
                 now
             }
-            Err(_) => watch.stream_now,
+            None => watch.stream_now,
         };
         let stream_baseline = *watch
             .stream_baseline
@@ -3173,7 +3145,7 @@ impl Daemon {
     /// other requests carry on; callers asking meanwhile wait for it, and
     /// changes made meanwhile apply once it runs.
     fn ensure_engine(self: &Arc<Self>) -> Result<Arc<dyn LiveEngine>, RpcError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         loop {
             if let Some(engine) = &state.engine {
                 return Ok(engine.clone());
@@ -3181,7 +3153,7 @@ impl Daemon {
             if !state.starting {
                 break;
             }
-            state = self.engine_ready.wait(state).unwrap();
+            state.wait(&self.engine_ready);
         }
         let Some(setup) = state
             .setup
@@ -3212,9 +3184,9 @@ impl Daemon {
                 EngineEvent::WorkerFailed {
                     name,
                     message,
-                    poisoned,
+                    broken,
                 } => {
-                    if poisoned {
+                    if broken {
                         daemon.emergency_stop(message.clone());
                     } else if matches!(name.as_str(), "mixer" | "compositor") {
                         let daemon = daemon.clone();
@@ -3241,7 +3213,7 @@ impl Daemon {
                 "the live engine panicked while starting; use `isocast logs --level error` or `isocast report`"
             ))
         });
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.starting = false;
         self.engine_ready.notify_all();
         let engine = started.map_err(failed)?;
@@ -3268,7 +3240,7 @@ impl Daemon {
 
     /// The live engine's newest frame, as asked.
     fn frame(self: &Arc<Self>, params: FrameParams) -> Result<Frame, RpcError> {
-        self.state.lock().unwrap().wanted_at = Some(std::time::Instant::now());
+        self.state.lock().wanted_at = Some(std::time::Instant::now());
         let engine = self.ensure_engine()?;
         let timeout =
             Duration::from_millis(params.timeout_ms.unwrap_or(1000).into()).min(MAX_FRAME_WAIT);
@@ -3313,7 +3285,7 @@ impl Daemon {
         self: &Arc<Self>,
         params: &FramesParams,
     ) -> Result<(FrameStream, FrameFeed), RpcError> {
-        self.state.lock().unwrap().wanted_at = Some(std::time::Instant::now());
+        self.state.lock().wanted_at = Some(std::time::Instant::now());
         let engine = self.ensure_engine()?;
         let fps = params.fps.unwrap_or(30).clamp(1, 60);
         let feed = engine
@@ -3369,7 +3341,7 @@ impl Daemon {
                 "shared frames can't be handed over here ({err:#}); use `frames` (H.264) instead"
             ),
         })?;
-        self.state.lock().unwrap().wanted_at = Some(std::time::Instant::now());
+        self.state.lock().wanted_at = Some(std::time::Instant::now());
         let engine = self.ensure_engine()?;
         let feed = engine
             .shared_frames(
@@ -3397,20 +3369,20 @@ impl Daemon {
 
     /// Keep the live engine running, or let it stop once nothing needs it.
     fn hold_engine(self: &Arc<Self>, running: bool) -> Result<Option<EngineInfo>, RpcError> {
-        self.state.lock().unwrap().hold = running;
+        self.state.lock().hold = running;
         if running {
             self.ensure_engine()?;
         } else {
             self.stop_idle_engine_now();
         }
-        Ok(engine_info(&self.state.lock().unwrap()))
+        Ok(engine_info(&self.state.lock()))
     }
 
     /// Stop the live engine (after the recording, if one runs).
     fn stop_engine(&self) {
         self.virtual_camera_stop();
         let _ = self.replay_stop();
-        let engine = self.state.lock().unwrap().engine.take();
+        let engine = self.state.lock().engine.take();
         if let Some(engine) = engine {
             engine.stop();
             self.publish(Event::EngineChanged { running: false });
@@ -3421,7 +3393,7 @@ impl Daemon {
     /// no client asking for frames lately.
     fn stop_idle_engine_now(&self) {
         let engine = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             let idle = state.session.is_none()
                 && !state.camera.active()
                 && !state.replay.active()
@@ -3453,7 +3425,7 @@ impl Daemon {
     /// Stop the running session (or cancel one still starting) and wait
     /// for its files to be finished.
     fn stop(&self) -> Result<Report, RpcError> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let Some(session) = &state.session else {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
@@ -3462,10 +3434,7 @@ impl Daemon {
         };
         session.stop.store(true, Ordering::SeqCst);
         let id = session.id;
-        let (state, timeout) = self
-            .ended
-            .wait_timeout_while(state, STOP_TIMEOUT, |s| s.ended_session < id)
-            .unwrap();
+        let timeout = state.wait_while_for(&self.ended, STOP_TIMEOUT, |s| s.ended_session < id);
         if timeout.timed_out() {
             return Err(RpcError {
                 code: RpcError::FAILED,
@@ -3488,9 +3457,9 @@ impl Daemon {
 
     /// Session `id` has ended, with its report or why it has none.
     fn ended(&self, id: u64, ended: Result<Report, String>) {
-        // A poisoned control-plane lock must not prevent a writer's completed
-        // report from reaching the emergency finalizer.
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        // Broken control state must not prevent a writer's completed report
+        // from reaching the emergency finalizer (the lock never poisons).
+        let mut state = self.state.lock();
         if state.session.as_ref().is_some_and(|s| s.id == id) {
             state.session = None;
         }
@@ -3606,7 +3575,7 @@ static KEY_CHECKED: Mutex<Option<HashMap<String, KeyCheck>>> = Mutex::new(None);
 /// key stored by another build can't): why not, if not. Asked again at
 /// most every 10 s per account, and at once after a key is set or cleared.
 fn key_problem(account: &str) -> Option<String> {
-    let mut checked = KEY_CHECKED.lock().unwrap();
+    let mut checked = KEY_CHECKED.lock();
     let checked = checked.get_or_insert_with(HashMap::new);
     if let Some((at, problem)) = checked.get(account)
         && at.elapsed() < Duration::from_secs(10)
@@ -3631,7 +3600,7 @@ fn key_problem(account: &str) -> Option<String> {
 
 /// Forget what `key_problem` found (a key was just set or cleared).
 fn forget_key_problem() {
-    *KEY_CHECKED.lock().unwrap() = None;
+    *KEY_CHECKED.lock() = None;
 }
 
 /// "twitch", or "custom (rtmp://host/app)".
@@ -3925,7 +3894,7 @@ static LEGACY_IGNORED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// come back. One another build saved is ignored: the user saves the key
 /// again, under this build's own service.
 fn migrate_legacy_key(account: &str) -> Option<String> {
-    let mut ignored = LEGACY_IGNORED.lock().unwrap();
+    let mut ignored = LEGACY_IGNORED.lock();
     if ignored.iter().any(|a| a == account)
         || key_service() == LEGACY_KEY_SERVICE
         || !has_secret(LEGACY_KEY_SERVICE, account).unwrap_or(false)
@@ -3977,7 +3946,7 @@ fn retire_legacy_key(account: &str) {
             "isocastd: left the old Keychain item {LEGACY_KEY_SERVICE} for {account} alone: \
              {err:#}"
         );
-        let mut ignored = LEGACY_IGNORED.lock().unwrap();
+        let mut ignored = LEGACY_IGNORED.lock();
         if !ignored.iter().any(|a| a == account) {
             ignored.push(account.to_string());
         }
@@ -4218,7 +4187,7 @@ type Graphics = isocast_engine::snapshot::Graphics<MacPlatform>;
 #[cfg(target_os = "macos")]
 fn with_graphics<T>(draw: impl FnOnce(&mut Graphics) -> Result<T>) -> Result<T> {
     static GRAPHICS: Mutex<Option<Graphics>> = Mutex::new(None);
-    let mut graphics = GRAPHICS.lock().unwrap();
+    let mut graphics = GRAPHICS.lock();
     let graphics = match &mut *graphics {
         Some(graphics) => graphics,
         none => none.insert(Graphics::new(&MacPlatform)?),
