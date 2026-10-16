@@ -92,6 +92,14 @@ each section. Delete entries that stop being true.
   connection up. The hardware soak (`soak.py --profile hardware`) fails on
   ISO drops while #41 stands (~40% on both ISOs with the stream on, from
   the first seconds; program and stream 0).
+- 2026-10-15: The M2s are build hosts too: `scripts/remote-build.sh`
+  picks exonbook, isocast-m2-a or isocast-m2-b (auto, sticky per lane,
+  never a Mac a hardware job holds; docs/handoff/README.md section 7).
+  Lanes live in ~/isocast-builds there as on exonbook; same Rust 1.99 and
+  SDK 27.0, so binaries are interchangeable (m2-b's passed e2e record/iso
+  strict on m2-a, run on exonbook and Ryan's Mac). The M2s idle at load
+  2-3 (WirelessRadioManagerd ~100% CPU) and their clocks are UTC.
+  exonbook peaked at load 80 from other lanes' builds that evening.
 - 2026-10-12: The test-Mac bridge must be a ProcessType Interactive launch
   agent (Astra found it): with launchd's default policy its jobs' timers
   overslept 5-8x (a 10 ms sleep took 75-85 ms on exonbook), so every

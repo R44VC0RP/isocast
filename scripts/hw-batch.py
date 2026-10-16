@@ -41,7 +41,7 @@ What to test (pick one; the default is the current HEAD, built):
   --bin-dir DIR      release binaries already built (isocastd, isocast,
                      isocast-ui); copied into the job when you submit, so
                      later builds don't change them
-  --commit REV       built on exonbook (scripts/remote-build.sh) when the
+  --commit REV       built with scripts/remote-build.sh (a free host) when the
                      job runs; default HEAD of this checkout
 The base for bench and smoke: --base-bin-dir DIR or --base-commit REV
 (default: the merge base of the commit and main). Scripts (e2e.py,
@@ -204,6 +204,37 @@ def pick_mac(want):
     return reachable[0] if reachable else None
 
 
+def reserve_builds(hosts, job_id, minutes, logf):
+    """Keep scripts/remote-build.sh off the job's test Macs: mark them
+    (~/isocast-builds/.hw-job, honored until it expires), then wait up to 20
+    min for builds already running there and stop any still going."""
+    expiry = int(time.time()) + (minutes + 60) * 60
+    live = ('n=0; for f in "$HOME"/isocast-builds/*/run.pgid; do [ -f "$f" ] && '
+            'kill -0 "-$(cat "$f")" 2>/dev/null && n=$((n+1)); done; echo $n')
+    for host in hosts:
+        ssh(host, f'mkdir -p isocast-builds && echo "{job_id} {expiry}" >isocast-builds/.hw-job')
+    for host in hosts:
+        for _ in range(40):
+            r = ssh(host, f"sh -c '{live}'")
+            if r.returncode != 0 or r.stdout.strip() in ("", "0"):
+                break
+            log(f"{job_id}: {r.stdout.strip()} remote build(s) running on {host}; waiting")
+            time.sleep(30)
+        else:
+            log(f"{job_id}: stopping remote builds still running on {host}")
+            print(f"stopped remote builds on {host}", file=logf, flush=True)
+            ssh(host, "sh -c 'for f in \"$HOME\"/isocast-builds/*/run.pgid; do "
+                      "[ -f \"$f\" ] && kill -TERM \"-$(cat \"$f\")\" 2>/dev/null; done; true'")
+
+
+def release_builds(hosts, job_id):
+    for host in hosts:
+        try:
+            ssh(host, f'f=isocast-builds/.hw-job; grep -q "^{job_id} " "$f" 2>/dev/null && rm -f "$f"; true')
+        except subprocess.TimeoutExpired:
+            log(f"{job_id}: couldn't clear the build reservation on {host} (it expires by itself)")
+
+
 def export_src(commit, dest):
     """The commit's source as a git index (testmac.sh and remote-build.sh sync
     `git ls-files`), with this runner's own testmac.sh and remote-build.sh."""
@@ -220,14 +251,16 @@ def export_src(commit, dest):
     subprocess.run(["git", "add", "-A"], cwd=dest, check=True)
 
 
-def build_on_exonbook(src, lane, bins, dest, out):
-    log(f"building {' '.join(bins)} on exonbook (lane {lane})")
+def build_remote(src, lane, bins, dest, out):
+    # remote-build.sh picks a free build host: not this job's test Macs
+    # (the batch lock and running/*.json say which).
+    log(f"building {' '.join(bins)} with scripts/remote-build.sh (lane {lane})")
     env = dict(os.environ, ISOCAST_LANE=lane)
     with open(out / "build.log", "a") as f:
         r = subprocess.run(["sh", "scripts/remote-build.sh", "build", "--to", str(dest), *bins],
                            cwd=src, env=env, stdout=f, stderr=subprocess.STDOUT, timeout=3500)
     if r.returncode != 0:
-        raise RuntimeError(f"exonbook build failed (exit {r.returncode}); see build.log")
+        raise RuntimeError(f"remote build failed (exit {r.returncode}); see build.log")
 
 
 def job_command(job, r, relay=None):
@@ -366,7 +399,7 @@ def summarize(job, out, status, seconds, host):
     lines = [f"# {job['id']}: {status}", "",
              f"- kind: {job['kind']}  lane: {job['lane']}  branch: {job['branch']}",
              f"- commit: {job['commit'][:12]}" + (f"  base: {job['base_commit'][:12]}" if job.get("base_commit") else ""),
-             f"- binaries: {('copied from ' + job['bin_from']) if job.get('bin_from') else 'built on exonbook from the commit'}",
+             f"- binaries: {('copied from ' + job['bin_from']) if job.get('bin_from') else 'built from the commit (scripts/remote-build.sh)'}",
              f"- host: {host or '-'}  took: {seconds / 60:.1f} min  exit: {job.get('exit')}  "
              f"finished: {time.strftime('%Y-%m-%d %H:%M')}"]
     if job.get("note"):
@@ -412,6 +445,7 @@ def run_job(path):
     logf = open(out / "log.txt", "a")
     proc = None
     relay = None
+    reserved = []
     try:
         with open(LOCK, "a") as lock:
             log(f"{job_id}: waiting for {LOCK}")
@@ -421,18 +455,21 @@ def run_job(path):
             export_src(job["commit"], src)
             bin_dir = Path(job["bin_dir"]) if job.get("bin_dir") else jobdir / "bin"
             if not job.get("bin_dir"):
-                build_on_exonbook(src, "hw-batch", ["isocastd", "isocast", "isocast-ui"], bin_dir, out)
+                build_remote(src, "hw-batch", ["isocastd", "isocast", "isocast-ui"], bin_dir, out)
             base_dir = None
             if job["kind"] in ("bench", "smoke"):
                 base_dir = Path(job["base_bin_dir"]) if job.get("base_bin_dir") else jobdir / "base-bin"
                 if not job.get("base_bin_dir"):
                     base_src = ROOT / "src" / "hw-batch-base"
                     export_src(job["base_commit"], base_src)
-                    build_on_exonbook(base_src, "hw-batch-base", ["isocastd"], base_dir, out)
+                    build_remote(base_src, "hw-batch-base", ["isocastd"], base_dir, out)
             host = pick_mac(job.get("mac") or "any")
             if not host:
                 raise RuntimeError("no test Mac reachable")
             job["host"] = host
+            running.write_text(json.dumps(job, indent=2) + "\n")
+            reserved = [host] + ([MACS[job["receiver"]]] if job.get("receiver") else [])
+            reserve_builds(reserved, job_id, job["timeout_min"], logf)
             log(f"{job_id}: pushing to {host}")
             env = dict(os.environ, ISOCAST_TESTMAC=host)
             subprocess.run(["sh", "scripts/testmac.sh", "push", str(bin_dir)], cwd=src, env=env,
@@ -494,6 +531,7 @@ def run_job(path):
                 stop_remote(host, job_id)
         if relay:
             relay.stop()
+        release_builds(reserved, job_id)
         logf.close()
         seconds = time.time() - start
         job["status"] = status
