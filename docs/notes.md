@@ -1607,6 +1607,14 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-16 (#82): **A given-up source open frees the way for a fresh
+  one.** Native opens can't be cancelled, so `bounded_open` keeps each
+  timed-out open's thread until macOS returns, but keys them by source and
+  device (the kind's settings) and allows 2 stuck per key (32 in all); at
+  the limit a new open waits within the same 8 s for one to return. The
+  engine retries failed sources every 5 s, so a hung driver costs at most
+  2 threads per device. Logs: "source open given up" and "given-up source
+  open returned" (with seconds and outcome).
 - 2026-10-16 (#79): **Recording-native submission pressure, not just the
   writer queue.** On m2-b, five 1080p60 ISOs plus program blocked all six
   crash-safe writer threads in VTCompressionSessionEncodeFrame (~17.7 ms
@@ -5201,6 +5209,17 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-16 (#82): a third-party HAL driver that stops answering makes
+  every Core Audio call into it wait for coreaudiod's 60-150 s timeouts:
+  on Ryan's Mac, Studio Audio (com.ryanvogel.studiondi.audio, from his
+  Studio NDI app) stalled AVCaptureSession.startRunning 05:17:51-05:29:21
+  after a 7 h take and failed with 0x10000004 (MACH_SEND_TIMED_OUT); its
+  dealloc then blocked the main queue 90 s. The unified log shows it
+  (`log show --predicate 'processID == <isocastd> AND subsystem ==
+  "com.apple.coreaudio"'`: AUHAL `SelectDevice ... connecting device`
+  with minutes between lines). Repro without such a driver: in the test
+  VM, `sudo kill -STOP $(pgrep -x coreaudiod)` for under a minute, then
+  `-CONT` (scratch /Volumes/IsocastBuild/mic-timeout/scratch/vm/hang.sh).
 - 2026-10-16 (S.2 stress): Python's `sock.close()` doesn't close a
   socket whose `makefile()` reader is still open, so the connection stays
   up on the daemon's side (e2e.py's `Watch.close` does this). stress.py's

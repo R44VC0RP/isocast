@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -380,52 +380,184 @@ impl Drop for Generator {
     }
 }
 
-/// Open the setup's source `id`, on the timeline that starts at `timeline`;
-/// text showing a data key shows `data`'s value.
-/// Bound native opening, including time spent behind macOS prompts. A
-/// timed-out native call cannot be cancelled; keep its slot until it exits
-/// so repeated requests cannot accumulate another opener for that source.
-fn bounded_open<T: Send + 'static>(
-    key: String,
+/// How long opening a source may take before it is given up on.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(8);
+/// Given-up opens of one source that may still be stuck in macOS at once.
+/// A native call can't be cancelled, so each holds its thread until macOS
+/// returns (a driver that stops answering made Core Audio wait 11 minutes,
+/// #82); a retry still starts a fresh open, since the device may answer
+/// again, but no more than this many pile up.
+const STUCK_PER_SOURCE: usize = 2;
+/// Opens, stuck or not, of all sources at once.
+const OPENS_AT_MOST: usize = 32;
+
+/// What the user can do about a source that doesn't answer.
+pub(crate) struct OpenHelp {
+    /// What is opened, for messages: `microphone "Studio Audio"`.
+    what: String,
+    /// Waiting for this permission's prompt, if one may be up.
     permission: Option<String>,
+    /// A device with a driver of its own (a camera or microphone).
+    device: bool,
+}
+
+impl OpenHelp {
+    fn context(&self) -> String {
+        match (&self.permission, self.device) {
+            (Some(p), _) => format!(
+                "waiting for permission: {p}; check the macOS permission prompt or Privacy & Security"
+            ),
+            (None, true) => "its driver, or the app that provides it, isn't answering macOS: \
+                 quit and reopen that app or unplug and replug the device (or choose another \
+                 device), then start again"
+                .into(),
+            (None, false) => "check its file/device, then start again".into(),
+        }
+    }
+}
+
+/// Run a native open on its own thread for at most [`OPEN_TIMEOUT`],
+/// including time spent behind macOS prompts. `slot` names what is opened
+/// (a source and its device): a timed-out open is given up on and the next
+/// one starts afresh, while at most [`STUCK_PER_SOURCE`] given-up opens of
+/// one slot may still be running.
+fn bounded_open<T: Send + 'static>(
+    slot: String,
+    help: OpenHelp,
     run: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    static PENDING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    /// The opens still running, by slot: each one's token and when it
+    /// began; notified as each returns.
+    type Running = (Mutex<HashMap<String, Vec<(u64, Instant)>>>, Condvar);
+    static PENDING: OnceLock<Running> = OnceLock::new();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let pending = PENDING.get_or_init(Default::default);
-    let context = permission.map(|p| format!("waiting for permission: {p}; check the macOS permission prompt or Privacy & Security"))
-        .unwrap_or_else(|| "source is still opening; check its file/device".into());
+    let context = help.context();
+    let what = &help.what;
+    let token = NEXT.fetch_add(1, Ordering::Relaxed);
+    let deadline = Instant::now() + OPEN_TIMEOUT;
     {
-        let mut slots = pending.lock().unwrap();
-        if slots.contains(&key) {
-            bail!("{key}: {context}; previous open is still pending (8 s timeout)");
+        let mut slots = pending.0.lock().unwrap_or_else(|p| p.into_inner());
+        // With too many stuck, wait (within the same time) for one to
+        // return: a device that answers again opens at once.
+        loop {
+            let running = slots.get(&slot).map_or(&[][..], Vec::as_slice);
+            if running.len() < STUCK_PER_SOURCE {
+                break;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                let oldest = running.iter().map(|(_, began)| began.elapsed()).max();
+                bail!(
+                    "{what} is not answering: {} earlier opens are still waiting on macOS \
+                     (the oldest for {} s); {context}",
+                    running.len(),
+                    oldest.unwrap_or_default().as_secs()
+                );
+            }
+            slots = pending
+                .1
+                .wait_timeout(slots, deadline - now)
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
         }
-        if slots.len() >= 32 {
-            bail!("{key}: too many pending source opens (maximum 32); check permissions/devices");
+        if slots.values().map(Vec::len).sum::<usize>() >= OPENS_AT_MOST {
+            bail!(
+                "too many sources are opening at once (at most {OPENS_AT_MOST}); check \
+                 permissions and devices"
+            );
         }
-        slots.insert(key.clone());
+        slots
+            .entry(slot.clone())
+            .or_default()
+            .push((token, Instant::now()));
     }
-    struct Pending(&'static Mutex<HashSet<String>>, String);
+    // Frees the slot when the native call returns, however late, and says
+    // how a given-up open ended (devices that wake up again, or fail).
+    struct Pending {
+        pending: &'static Running,
+        slot: String,
+        what: String,
+        token: u64,
+        abandoned: Arc<AtomicBool>,
+        outcome: Option<String>,
+    }
     impl Drop for Pending {
         fn drop(&mut self) {
-            self.0
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .remove(&self.1);
+            let mut slots = self.pending.0.lock().unwrap_or_else(|p| p.into_inner());
+            let mut began = None;
+            if let Some(running) = slots.get_mut(&self.slot) {
+                if let Some(at) = running.iter().position(|(t, _)| *t == self.token) {
+                    began = Some(running.remove(at).1);
+                }
+                if running.is_empty() {
+                    slots.remove(&self.slot);
+                }
+            }
+            drop(slots);
+            self.pending.1.notify_all();
+            if self.abandoned.load(Ordering::SeqCst) {
+                isocast_diagnostics::emit(
+                    "warn",
+                    "source",
+                    "given-up source open returned",
+                    serde_json::json!({
+                        "source": self.what,
+                        "seconds": began.map(|b| b.elapsed().as_secs_f64()),
+                        "outcome": self.outcome.as_deref().unwrap_or("crashed"),
+                    }),
+                );
+            }
         }
     }
-    let guard = Pending(pending, key.clone());
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let mut guard = Pending {
+        pending,
+        slot,
+        what: what.clone(),
+        token,
+        abandoned: abandoned.clone(),
+        outcome: None,
+    };
     let (tx, rx) = sync_channel(1);
     thread::spawn(move || {
-        let _guard = guard;
         let result = isocast_diagnostics::contain("native source open", run)
             .map_err(anyhow::Error::msg)
             .and_then(|r| r);
+        guard.outcome = Some(match &result {
+            Ok(_) => "opened, then closed".into(),
+            Err(err) => format!("failed: {err:#}"),
+        });
+        // A given-up open's capture is dropped (closed) here, unused.
         let _ = tx.send(result);
+        drop(guard);
     });
-    rx.recv_timeout(Duration::from_secs(8))
-        .with_context(|| format!("{key}: timed out opening after 8 s; {context}"))?
+    match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => {
+            abandoned.store(true, Ordering::SeqCst);
+            // It may have finished just now: then use it after all.
+            if let Ok(result) = rx.try_recv() {
+                abandoned.store(false, Ordering::SeqCst);
+                return result;
+            }
+            isocast_diagnostics::emit(
+                "warn",
+                "source",
+                "source open given up",
+                serde_json::json!({"source": what, "seconds": OPEN_TIMEOUT.as_secs()}),
+            );
+            bail!(
+                "{what} did not open within {} s; {context}",
+                OPEN_TIMEOUT.as_secs()
+            )
+        }
+        Err(RecvTimeoutError::Disconnected) => bail!("opening {what} crashed"),
+    }
 }
 
+/// Open the setup's source `id`, on the timeline that starts at `timeline`;
+/// text showing a data key shows `data`'s value.
 pub(crate) fn open<P: Platform>(
     platform: &P,
     setup: &Setup,
@@ -433,9 +565,32 @@ pub(crate) fn open<P: Platform>(
     timeline: &Arc<Timeline>,
     data: &Arc<DataStore>,
 ) -> Result<Opened<P>> {
-    let permission = setup
-        .source(id)
-        .and_then(|s| platform.source_permission(&s.kind));
+    let kind = setup.source(id).map(|s| &s.kind);
+    let permission = kind.and_then(|kind| platform.source_permission(kind));
+    // Opens are told apart by source and device, so choosing another
+    // device opens at once even while the old one is stuck.
+    let slot = format!(
+        "source {id:?} {}",
+        kind.and_then(|k| serde_json::to_string(k).ok())
+            .unwrap_or_default()
+    );
+    let help = match kind {
+        Some(SourceKind::Microphone(m)) => OpenHelp {
+            what: format!("microphone {:?}", m.device),
+            permission,
+            device: true,
+        },
+        Some(SourceKind::Camera(c)) => OpenHelp {
+            what: format!("camera {:?}", c.device),
+            permission,
+            device: true,
+        },
+        _ => OpenHelp {
+            what: "the source".into(),
+            permission,
+            device: false,
+        },
+    };
     let (platform, setup, id, timeline, data) = (
         platform.clone(),
         setup.clone(),
@@ -444,7 +599,7 @@ pub(crate) fn open<P: Platform>(
         data.clone(),
     );
     let (key, began) = (format!("source {id:?}"), std::time::Instant::now());
-    let opened = bounded_open(key.clone(), permission, move || {
+    let opened = bounded_open(slot, help, move || {
         open_native(&platform, &setup, &id, &timeline, &data)
     });
     isocast_diagnostics::debug!(
@@ -1425,7 +1580,12 @@ pub(crate) fn stinger<P: Platform>(
         file.to_string(),
         timeline.clone(),
     );
-    bounded_open(format!("stinger {id:?}"), permission, move || {
+    let help = OpenHelp {
+        what: format!("the stinger video {file:?}"),
+        permission,
+        device: false,
+    };
+    bounded_open(format!("stinger {id:?} {file:?}"), help, move || {
         stinger_native(&platform, &setup, &id, &file, &timeline)
     })
 }

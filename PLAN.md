@@ -652,6 +652,12 @@ layout editing, Windows, release prep).
   frames; M2-b interleaved CPU saves 4.48 points of one core. Heavy/fit
   record-first matrix keeps protected outputs clean; 150 s park, changed
   canvas then join, and ten join/edit races verified. Tier-1 re-review passed.
+- [x] **A.4 Hung device opens (GitHub #82):** a source open given up after
+  8 s no longer blocks every retry until macOS returns: opens are keyed by
+  source and device, a retry starts a fresh open (at most 2 stuck per
+  source, waiting within the 8 s for one to return), and the error says
+  what to do. Root cause on Ryan's Mac: the Studio Audio HAL driver stopped
+  answering Core Audio after the 7 h take (startRunning blocked 11.5 min).
 - [ ] **A.4 Split + stream losses (GitHub #60), qualification partial:**
   synchronous native stream submission stalls now signal pressure; final
   build's 16 post-split takes have zero protected losses. Cold stream startup
@@ -1359,6 +1365,13 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 
 ## Log
 
+- A.4 / #82 (2026-10-16): a microphone whose driver stops answering no
+  longer leaves "previous open is still pending" until macOS returns. Test
+  VM with coreaudiod stopped 40 s, base vs head: base repeats Ryan's
+  errors and refuses the first start after coreaudiod resumes; head gives
+  the actionable message, keeps 2 stuck opens, logs both returning, and
+  opens the mic on the first start after resuming. e2e setup, record,
+  scenes, shutdown pass on m2-b.
 - S.2 / #79 (2026-10-16): native recording submission pressure protects
   program and audio at the M2 limit. Three interleaved A/B pairs: six baseline
   20 s takes lost 48–55 program pictures and 494–561 audio chunks each; final
