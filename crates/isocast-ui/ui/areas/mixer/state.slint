@@ -38,6 +38,8 @@ export struct AudioRow {
     name: string,
     gain-db: float,
     muted: bool,
+    // Downmixed to mono in the program and monitoring (audio.mono).
+    mono: bool,
     // −1 (left) to 1 (right), and as written ("C", "L20", "R100").
     balance: float,
     balance-text: string,
@@ -87,6 +89,7 @@ export global MixerArea {
     in property <bool> iso-enabled;
     callback set-gain(string, float);
     callback set-muted(string, bool);
+    callback set-mono(string, bool);
     callback balance-moved(string, float);
     callback balance-changed(string, float);
     callback set-offset(string, float);

@@ -1569,7 +1569,8 @@ impl<'a, 'v> Importer<'a, 'v> {
             (monitor, _) => monitor,
         };
         AudioSettings {
-            mono: false,
+            // OBS_SOURCE_FLAG_FORCE_MONO (Advanced Audio Properties' Mono).
+            mono: int(obs.json, "flags").unwrap_or(0) & 2 != 0,
             iso: None,
             gain_db: (gain_db * 10.0).round() / 10.0,
             muted: obs.json.get("muted") == Some(&Value::Bool(true)),
@@ -1664,16 +1665,14 @@ impl<'a, 'v> Importer<'a, 'v> {
                     fps: None,
                 })
             }
-            "coreaudio_input_capture" => SourceKind::Microphone(MicrophoneSource {
-                device: self.microphone(&label, text(s, "device_id")),
-            }),
+            "coreaudio_input_capture" => SourceKind::Microphone(MicrophoneSource::new(
+                self.microphone(&label, text(s, "device_id")),
+            )),
             "wasapi_input_capture" | "pulse_input_capture" | "alsa_input_capture" => {
                 self.notes.push(format!(
                     "{label}: a microphone on another system; imported as the default input"
                 ));
-                SourceKind::Microphone(MicrophoneSource {
-                    device: "default".into(),
-                })
+                SourceKind::Microphone(MicrophoneSource::new("default"))
             }
             "coreaudio_output_capture" | "wasapi_output_capture" | "pulse_output_capture" => {
                 self.notes.push(format!(
@@ -3968,9 +3967,7 @@ mod tests {
         let mic = &imported.setup.sources[9];
         assert_eq!(
             mic.kind,
-            SourceKind::Microphone(MicrophoneSource {
-                device: "default".into()
-            })
+            SourceKind::Microphone(MicrophoneSource::new("default"))
         );
         assert_eq!(
             (mic.audio.gain_db, mic.audio.muted, mic.audio.offset_ms),
@@ -4036,6 +4033,7 @@ mod tests {
                 default: false,
                 sample_rates: vec![48000.0],
                 channels: 1,
+                channel_names: Vec::new(),
             }],
             ..Devices::default()
         };

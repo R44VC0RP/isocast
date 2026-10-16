@@ -4229,6 +4229,19 @@ fn devices(json: bool) -> Result<ExitCode> {
             m.channels,
             m.id
         );
+        // The channels a source's `channels` picks from, when named.
+        if !m.channel_names.is_empty() {
+            let names: Vec<String> = m
+                .channel_names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| match name.as_str() {
+                    "" => format!("{}", i + 1),
+                    name => format!("{} {name}", i + 1),
+                })
+                .collect();
+            println!("    channels: {}", names.join(", "));
+        }
     }
     println!("Audio outputs (for monitoring)");
     if devices.audio_outputs.is_empty() {

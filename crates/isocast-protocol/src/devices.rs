@@ -144,7 +144,13 @@ pub struct Microphone {
     /// The system's default input.
     pub default: bool,
     pub sample_rates: Vec<f64>,
+    /// Input channels, which a microphone source's `channels` picks from
+    /// (numbered from 1).
     pub channels: u32,
+    /// The device's names for its input channels, one per channel from
+    /// channel 1 ("" where it names none); empty when it names none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channel_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

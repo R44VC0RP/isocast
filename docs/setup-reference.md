@@ -1167,6 +1167,7 @@ A microphone or audio interface input.
 
 | Field | Type | Description |
 |---|---|---|
+| `channels` | list of integer (optional) | Which of the device's input channels to record, numbered from 1 as `isocast devices` lists them: one (`[1]`, a mic on input 1) is recorded as centred mono at full level; two (`[1, 2]`, `[3, 4]`) as left and right. Absent records the device's own signal as two channels (or one): a 2-input interface's inputs 1 and 2, but a larger one's inputs mixed down to two by macOS, so pick its inputs here. |
 | `device` | string | "default", or an id, name or part of a name from `isocast devices`. Default `"default"`. |
 
 ## SystemAudioSource

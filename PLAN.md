@@ -3947,3 +3947,14 @@ One line per finished task, newest last.
   scripts/motion/editor.toml passes realtime and lockstep; studio views
   pixel-identical to main (visual-shots, 15 pictures); real window on
   isocast-m2-b (keys, zoom, play, crop mode).
+- #89 (2026-10-16, branch agent/audio-channels): audio interface inputs.
+  Microphone sources take `channels` (1-based; one is centred mono at full
+  level, two stereo; the ISO track holds exactly those), validated against
+  the device with its channel names; `isocast devices` lists channel
+  names; the app has a Mono switch (Advanced Audio Properties, strip menu)
+  and a Channels dropdown in a microphone's Properties; OBS imports bring
+  Mono over. Verified in the test VM on BlackHole 16ch with a tone per
+  channel: [1], [3], [16] and [3, 4] land exactly in program, ISO and
+  monitoring (levels within 0.001 dB of the source, other tones below
+  -64 dB, ISO vs program 0.00 ms, 0 audio dropouts); default setups match
+  main (setup JSON, manifest and stream structure, the same mixdown).

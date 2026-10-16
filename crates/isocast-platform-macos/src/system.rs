@@ -158,7 +158,10 @@ pub fn probe(source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
             Some(Probe {
                 device: unsafe { microphone.localizedName() }.to_string(),
                 video: None,
-                channels: Some(crate::audio::microphone_channels(&microphone)),
+                channels: Some(
+                    crate::audio::microphone_format(&microphone, settings.channels.as_deref())?
+                        .channels(),
+                ),
             })
         }
         SourceKind::Window(window) => {

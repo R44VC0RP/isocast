@@ -194,7 +194,10 @@ pub fn build(ctx: &Context, fields: &[Field], value: &Map<String, Value>) -> Vec
             continue;
         }
         let mut row = control(ctx, f, &current, value, "");
-        row.lane = lane && !trailing(f, &current);
+        // A microphone's channels end where its device's dropdown does,
+        // before the refresh button.
+        row.lane =
+            (lane && !trailing(f, &current)) || (ctx.kind == "microphone" && f.name == "channels");
         groups.push(Group {
             row,
             children: Vec::new(),
@@ -364,6 +367,13 @@ fn choice_control(
             row.options = dev::microphone_options(devices, &v);
             row.value = v;
             row.refresh = true;
+        }
+        ("microphone", "channels") => {
+            let device = all.get("device").map(text_of);
+            let device = device.as_deref().unwrap_or("default");
+            let v = dev::channels_value(value);
+            row.options = dev::channel_options(devices, device, &v);
+            row.value = v;
         }
         ("display" | "application", "display") => {
             row.options = dev::display_options(devices, &v);
@@ -767,6 +777,39 @@ pub fn enum_value(f: &Field, chosen: &str) -> Value {
 
 /// The change choosing camera `device` makes: its resolution and frame
 /// rate stay only if the new camera offers them, else back to Auto.
+/// A microphone's `channels` dropdown value ("", "1", "3,4") as the
+/// setting.
+fn channels_json(chosen: &str) -> Value {
+    if chosen.is_empty() {
+        return Value::Null;
+    }
+    let channels: Vec<u32> = chosen
+        .split(',')
+        .filter_map(|c| c.trim().parse().ok())
+        .collect();
+    json!(channels)
+}
+
+/// Choosing a microphone: its channels go back to the default when the
+/// new device doesn't have them.
+fn microphone_change(
+    devices: Option<&Devices>,
+    all: &Map<String, Value>,
+    device: &str,
+) -> Map<String, Value> {
+    let mut out = one("device", json!(device));
+    let highest = all
+        .get("channels")
+        .and_then(Value::as_array)
+        .and_then(|list| list.iter().filter_map(Value::as_u64).max());
+    if let (Some(highest), Some(mic)) = (highest, dev::find_microphone(devices, device))
+        && highest > u64::from(mic.channels)
+    {
+        out.insert("channels".into(), Value::Null);
+    }
+    out
+}
+
 pub fn camera_change(
     devices: Option<&Devices>,
     all: &Map<String, Value>,
@@ -1023,6 +1066,8 @@ pub fn change(app: &Rc<App>, t: &Target, key: &str, event: FormEvent) -> Outcome
                 };
                 match (kind, f.name.as_str()) {
                     ("camera", "device") => camera_change(devices, value, &chosen),
+                    ("microphone", "device") => microphone_change(devices, value, &chosen),
+                    ("microphone", "channels") => one("channels", channels_json(&chosen)),
                     ("window", "title") => {
                         if chosen == dev::TITLE_PART {
                             t.typing.set(true);

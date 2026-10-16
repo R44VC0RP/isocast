@@ -112,7 +112,7 @@ states (in order, see src/offscreen.rs and each area's STATES):
         dialog:KIND[:ARG], menu:OWNER, menu-bar:ID, menu-bar-open:TITLE,
         toast:KIND:TITLE, kit,
         kit-dialog, kit-menu, kit-dropdown, type:TEXT, key:NAME,
-        drag:X1,Y1,X2,Y2, hover:X,Y, press:LABEL, hide:DOCK, wait:MS, events:FILE; select:PATH, rename,
+        drag:X1,Y1,X2,Y2, hover:X,Y, press:LABEL, hide:DOCK, wait:MS, events:FILE, devices:FILE; select:PATH, rename,
         cameras,
         studio, record, stop-record, go-live, stop-stream, stream:KIND,
         details:rec|live, toasts, toast-drops, transition:KIND, about,

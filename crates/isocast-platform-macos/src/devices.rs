@@ -651,6 +651,7 @@ fn microphones() -> Result<Vec<Microphone>> {
             }
             sample_rates.sort_by(f64::total_cmp);
             let (id, name, model, manufacturer) = identity(device);
+            let channel_names = crate::output::input_channel_names(&id);
             Microphone {
                 default: default_id.as_deref() == Some(id.as_str()),
                 id,
@@ -659,6 +660,7 @@ fn microphones() -> Result<Vec<Microphone>> {
                 manufacturer,
                 sample_rates,
                 channels,
+                channel_names,
             }
         })
         .collect())

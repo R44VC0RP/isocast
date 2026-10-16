@@ -132,10 +132,63 @@ pub struct MicrophoneSource {
     /// "default", or an id, name or part of a name from `isocast devices`.
     #[serde(default = "default")]
     pub device: String,
+    /// Which of the device's input channels to record, numbered from 1 as
+    /// `isocast devices` lists them: one (`[1]`, a mic on input 1) is
+    /// recorded as centred mono at full level; two (`[1, 2]`, `[3, 4]`) as
+    /// left and right. Absent records the device's own signal as two
+    /// channels (or one): a 2-input interface's inputs 1 and 2, but a larger
+    /// one's inputs mixed down to two by macOS, so pick its inputs here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<Vec<u32>>,
+}
+
+impl MicrophoneSource {
+    /// A source for `device` with its default channels.
+    pub fn new(device: impl Into<String>) -> Self {
+        Self {
+            device: device.into(),
+            channels: None,
+        }
+    }
 }
 
 impl Kind for MicrophoneSource {
     const AUDIO: bool = true;
+
+    fn check(&self, path: &str, issues: &mut Issues) {
+        let Some(channels) = &self.channels else {
+            return;
+        };
+        let path = format!("{path}.channels");
+        if !(1..=2).contains(&channels.len()) {
+            issues.add(
+                path,
+                format!(
+                    "give one channel (like [1], recorded as mono) or two (like [1, 2], \
+                     recorded as stereo), not {}; or leave it out for the device's first two",
+                    channels.len()
+                ),
+            );
+            return;
+        }
+        for (i, channel) in channels.iter().enumerate() {
+            if *channel == 0 {
+                issues.add(
+                    format!("{path}[{i}]"),
+                    "channels are numbered from 1, as `isocast devices` lists them",
+                );
+            }
+        }
+        if channels.len() == 2 && channels[0] == channels[1] {
+            issues.add(
+                format!("{path}[1]"),
+                format!(
+                    "channel {} is given twice; give it once ([{}]) for mono at full level",
+                    channels[0], channels[0]
+                ),
+            );
+        }
+    }
 }
 
 /// Audio the computer is playing, optionally leaving some apps out.

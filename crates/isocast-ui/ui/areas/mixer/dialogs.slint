@@ -1,6 +1,6 @@
 // Area B's dialogs: Advanced Audio Properties ("advanced-audio"), as in
 // OBS, drawn as a Console sheet: one grouped row per audio source (its
-// name, then its volume, mute, balance, sync offset and monitoring, and
+// name, then its volume, mute, mono, balance, sync offset and monitoring, and
 // where it is recorded: Isocast's tracks, the program mix and the ISO
 // files) under a line of column names. Put on the window by app.slint.
 
@@ -13,16 +13,16 @@ import {
 } from "../../kit.slint";
 import { AudioRow, MixerArea } from "state.slint";
 
-// The table's columns (the web app's: name ≥ 80, then 104 44 170 108 200
-// 136, 12px apart), from the sheet's width (1060, at most the window's
+// The table's columns (the web app's: name ≥ 80, then 104 44 44 170 108
+// 200 136, 12px apart), from the sheet's width (1116, at most the window's
 // less 40; less its edge and 20px sides) and a grouped row's insets (12px
 // before the name, 12px after it, 4px at the end). In a narrow window the
 // name gives way first (to 80), then Balance and Audio Monitoring.
 global Columns {
-    out property <length> dialog: 1060px;
+    out property <length> dialog: 1116px;
     out property <length> gap: 12px;
     property <length> table: min(root.dialog, Viewport.width - 40px) - 2px - 2 * Theme.sheet-pad;
-    property <length> fixed: 104px + 44px + 170px + 108px + 200px + 136px + 5 * 12px;
+    property <length> fixed: 104px + 44px + 44px + 170px + 108px + 200px + 136px + 6 * 12px;
     property <length> insets: Theme.space-3 + 12px + Theme.space-1;
     property <length> deficit: max(0px, 80px + root.fixed + root.insets - root.table);
     out property <length> name-w: max(80px, root.table - root.fixed - root.insets);
@@ -84,6 +84,16 @@ component AudioTableRow inherits GroupRow {
                 label: "Mute " + root.audio.name;
                 checked: root.audio.muted;
                 toggled(on) => { MixerArea.set-muted(root.audio.id, on); }
+            }
+        }
+        HorizontalLayout {
+            width: 44px;
+            alignment: center;
+            Checkbox {
+                label: "Mono " + root.audio.name;
+                tooltip: "Downmix to mono in the program and monitoring; ISO files keep it as captured";
+                checked: root.audio.mono;
+                toggled(on) => { MixerArea.set-mono(root.audio.id, on); }
             }
         }
         HorizontalLayout {
@@ -166,7 +176,7 @@ component AudioTableRow inherits GroupRow {
 export component MixerDialogs inherits Rectangle {
     if Ui.dialog == "advanced-audio": Dialog {
         title: "Advanced Audio Properties";
-        subtitle: "Each audio source’s volume, balance, sync and monitoring, and the files it is recorded in.";
+        subtitle: "Each audio source’s volume, mono, balance, sync and monitoring, and the files it is recorded in.";
         icon: Icons.sheet-sliders;
         dialog-width: Columns.dialog;
         ok-text: "Close";
@@ -197,6 +207,11 @@ export component MixerDialogs inherits Rectangle {
                     Head {
                         width: 44px;
                         text: "Mute";
+                        horizontal-alignment: center;
+                    }
+                    Head {
+                        width: 44px;
+                        text: "Mono";
                         horizontal-alignment: center;
                     }
                     Head {

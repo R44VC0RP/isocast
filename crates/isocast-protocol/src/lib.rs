@@ -1551,9 +1551,7 @@ impl Setup {
                 ("app-audio", Some(app)) => SourceKind::ApplicationAudio(ApplicationAudioSource {
                     app: app.to_string(),
                 }),
-                ("mic", arg) => SourceKind::Microphone(MicrophoneSource {
-                    device: arg.unwrap_or("default").to_string(),
-                }),
+                ("mic", arg) => SourceKind::Microphone(MicrophoneSource::new(arg.unwrap_or("default"))),
                 ("system-audio", None) => SourceKind::SystemAudio(SystemAudioSource::default()),
                 ("system-audio", Some(arg)) => match arg.strip_prefix("except=") {
                     Some(apps) if !apps.trim().is_empty() => {

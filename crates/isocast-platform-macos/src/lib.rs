@@ -363,8 +363,13 @@ impl Platform for MacPlatform {
         Ok((Capture::Camera(capture), format))
     }
 
-    fn capture_microphone(&self, device: &str, sink: AudioSink) -> anyhow::Result<(Capture, u32)> {
-        let (capture, channels) = audio::capture_microphone(device, sink)?;
+    fn capture_microphone(
+        &self,
+        device: &str,
+        channels: Option<&[u32]>,
+        sink: AudioSink,
+    ) -> anyhow::Result<(Capture, u32)> {
+        let (capture, channels) = audio::capture_microphone(device, channels, sink)?;
         Ok((Capture::Microphone(capture), channels))
     }
 

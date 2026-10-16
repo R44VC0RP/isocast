@@ -226,6 +226,42 @@ typical file size. Constant-quality rates depend strongly on motion, noise,
 fine detail, codec, depth and the Mac's encoder. Measure a representative
 take before budgeting a long recording.
 
+## Audio interface inputs
+
+A microphone source records its device's own signal as two channels (or
+one): a 2-input interface's inputs 1 and 2, but macOS mixes a larger
+interface's inputs down to two. `channels` picks inputs instead, numbered
+from 1 as `isocast devices` lists them (with the names the device gives
+them):
+
+```toml
+[[sources]]
+id = "vocal"
+kind = "microphone"
+device = "Scarlett 4i4"
+channels = [1]        # the mic on input 1: centred mono at full level
+
+[[sources]]
+id = "keys"
+kind = "microphone"
+device = "Scarlett 4i4"
+channels = [3, 4]     # inputs 3 and 4 as left and right
+```
+
+One channel is a mono source: the program and monitoring hear it in both
+sides at its own level (no −6 dB, unlike downmixing a stereo pair), and
+its ISO track is mono. Two channels are a stereo source and a stereo ISO
+track. The device is read whole (AVFoundation mixes when asked for fewer
+channels than a device has) and only the picked channels go on: the ISO
+track holds exactly those, before gain, mute,
+balance and Mono (which apply to the program and monitoring). `isocast
+doctor` and opening the source check that the device has the channels and
+list the valid ones. In the app: the source's Properties (Channels).
+
+`audio.mono` (the app's Mono, in Advanced Audio Properties and each mixer
+strip's menu) downmixes a stereo source to (left + right) / 2 in the
+program and monitoring; ISO files keep it as captured.
+
 ## Replay buffer
 
 Like OBS's: while it runs, the buffer keeps the last

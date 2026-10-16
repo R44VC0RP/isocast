@@ -27,7 +27,8 @@ use objc2_core_audio::{
     AudioObjectPropertyAddress, kAudioDevicePropertyDeviceUID,
     kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyStreamConfiguration,
     kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDevices,
-    kAudioObjectPropertyElementMain, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyElementMain, kAudioObjectPropertyElementName, kAudioObjectPropertyName,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
     kAudioObjectPropertyScopeOutput, kAudioObjectSystemObject,
 };
 use objc2_core_audio_types::{
@@ -76,11 +77,12 @@ fn output_devices() -> Result<Vec<(AudioObjectID, u32)>> {
 
 /// The output channels of `device` (0 for an input-only device).
 fn output_channels(device: AudioObjectID) -> u32 {
-    let Some(bytes) = property_bytes(
-        device,
-        kAudioDevicePropertyStreamConfiguration,
-        kAudioObjectPropertyScopeOutput,
-    ) else {
+    scope_channels(device, kAudioObjectPropertyScopeOutput)
+}
+
+/// The channels of `device` in `scope` (input or output).
+fn scope_channels(device: AudioObjectID, scope: u32) -> u32 {
+    let Some(bytes) = property_bytes(device, kAudioDevicePropertyStreamConfiguration, scope) else {
         return 0;
     };
     if bytes.len() < size_of::<AudioBufferList>() {
@@ -98,6 +100,69 @@ fn output_channels(device: AudioObjectID) -> u32 {
             .map(|buffer| buffer.mNumberChannels)
             .sum()
     }
+}
+
+/// The names the device with Core Audio UID `uid` gives its input
+/// channels, one per channel from channel 1 ("" where it names none), or
+/// none when it names none (most single microphones).
+pub(crate) fn input_channel_names(uid: &str) -> Vec<String> {
+    let Some(bytes) = property_bytes(
+        kAudioObjectSystemObject as AudioObjectID,
+        kAudioHardwarePropertyDevices,
+        kAudioObjectPropertyScopeGlobal,
+    ) else {
+        return Vec::new();
+    };
+    let Some(device) = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|id| AudioObjectID::from_ne_bytes(*id))
+        .find(|device| {
+            string_property(*device, kAudioDevicePropertyDeviceUID).as_deref() == Some(uid)
+        })
+    else {
+        return Vec::new();
+    };
+    let channels = scope_channels(device, kAudioObjectPropertyScopeInput);
+    let names: Vec<String> = (1..=channels)
+        .map(|channel| {
+            let address = AudioObjectPropertyAddress {
+                mSelector: kAudioObjectPropertyElementName,
+                mScope: kAudioObjectPropertyScopeInput,
+                mElement: channel,
+            };
+            element_string(device, &address).unwrap_or_default()
+        })
+        .collect();
+    if names.iter().all(|name| name.trim().is_empty()) {
+        return Vec::new();
+    }
+    names
+        .into_iter()
+        .map(|name| name.trim().to_string())
+        .collect()
+}
+
+/// A string property at `address` (a retained CFString), if it has one.
+fn element_string(object: AudioObjectID, address: &AudioObjectPropertyAddress) -> Option<String> {
+    let mut value: *const CFString = ptr::null();
+    let mut size = size_of::<*const CFString>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            object,
+            NonNull::from(address),
+            0,
+            ptr::null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut value).cast(),
+        )
+    };
+    if status != 0 || size as usize != size_of::<*const CFString>() {
+        return None;
+    }
+    let string = unsafe { CFRetained::from_raw(NonNull::new(value.cast_mut())?) };
+    Some(string.to_string())
 }
 
 pub(crate) fn default_output() -> Option<AudioObjectID> {

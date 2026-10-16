@@ -304,7 +304,7 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
             sources.push(source(
                 "mic",
                 "Mic",
-                SourceKind::Microphone(MicrophoneSource { device }),
+                SourceKind::Microphone(MicrophoneSource::new(device)),
             ));
             audio.push("mic".to_string());
         }
@@ -688,6 +688,7 @@ mod tests {
                 default: true,
                 sample_rates: vec![48000.0],
                 channels: 1,
+                channel_names: Vec::new(),
             }],
             audio_outputs: Vec::new(),
             audio_apps: Vec::new(),

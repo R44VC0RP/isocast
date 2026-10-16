@@ -237,6 +237,7 @@ impl Mixer {
                     name: setup_model::source_name(source).into(),
                     gain_db: audio.gain_db as f32,
                     muted: audio.muted,
+                    mono: audio.mono,
                     balance: audio.balance as f32,
                     balance_text: balance_text(audio.balance).into(),
                     offset_ms: audio.offset_ms as f32,
@@ -646,6 +647,20 @@ fn toggle_mute(app: &Rc<App>, id: &str) {
     }
 }
 
+/// The strip menu's Mono.
+fn toggle_mono(app: &Rc<App>, id: &str) {
+    let mono = {
+        let s = app.session.borrow();
+        s.setup
+            .as_ref()
+            .and_then(|setup| setup_model::find_source(setup, id))
+            .map(|source| source.audio.mono)
+    };
+    if let Some(mono) = mono {
+        set_audio(app, id, json!({ "mono": !mono }), EditOptions::default());
+    }
+}
+
 fn in_program_mix(app: &Rc<App>, id: &str) -> bool {
     app.session
         .borrow()
@@ -713,6 +728,12 @@ impl Area for Mixer {
             &app,
             id,
             json!({ "muted": on }),
+            EditOptions::default()
+        ));
+        on!(on_set_mono, |app, id, on: bool| set_audio(
+            &app,
+            id,
+            json!({ "mono": on }),
             EditOptions::default()
         ));
         on!(on_balance_moved, |app, id, b: f32| set_audio(
@@ -797,10 +818,11 @@ impl Area for Mixer {
             );
         }
         let id = owner.strip_prefix("mixer:strip:")?;
-        let monitor = {
+        let (monitor, mono) = {
             let s = app.session.borrow();
             let setup = s.setup.as_ref()?;
-            setup_model::find_source(setup, id)?.audio.monitor
+            let audio = setup_model::find_source(setup, id)?.audio;
+            (audio.monitor, audio.mono)
         };
         let mut monitoring = MenuBuilder::new();
         for (value, label) in MONITORING {
@@ -816,6 +838,8 @@ impl Area for Mixer {
                 .separator()
                 .item("rename", "Rename")
                 .submenu("Audio Monitoring", monitoring)
+                .item("mono", "Mono")
+                .checked(mono)
                 .item("program_mix", "Include in Program Mix")
                 .checked(in_program_mix(app, id))
                 .separator()
@@ -845,6 +869,7 @@ impl Area for Mixer {
             "unhide_all" => self.set_hidden(app, None),
             "rename" | "filters" | "properties" => app.open_dialog(id, source),
             "program_mix" => set_track(app, "program", source, !in_program_mix(app, source)),
+            "mono" => toggle_mono(app, source),
             "advanced_audio" => app.open_dialog("advanced-audio", ""),
             _ => {}
         }
@@ -884,11 +909,11 @@ impl Area for Mixer {
                 area.set_menu_serial(area.get_menu_serial() + 1);
             }
             // An item of a strip's menu, as if chosen ("tone:hide",
-            // "tone:monitor:monitor_only", "tone:program_mix").
+            // "tone:monitor:monitor_only", "tone:mono", "tone:program_mix").
             "mixer-choose" => {
                 let Some((source, item)) = arg.split_once(':') else {
                     return Some(Err(anyhow::anyhow!(
-                        "mixer-choose takes SOURCE:ITEM (hide, unhide_all, rename, monitor:VALUE, program_mix, filters, properties, advanced_audio)"
+                        "mixer-choose takes SOURCE:ITEM (hide, unhide_all, rename, monitor:VALUE, mono, program_mix, filters, properties, advanced_audio)"
                     )));
                 };
                 self.menu_chosen(app, &format!("mixer:strip:{source}"), item);

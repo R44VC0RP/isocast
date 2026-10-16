@@ -202,6 +202,17 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-16 (#89): isocast-m2-b has BlackHole 16ch installed (`brew
+  install --cask blackhole-16ch`, then `sudo killall coreaudiod` instead
+  of the restart the installer asks for). Since then any microphone source
+  there, main's default one included, never finishes opening
+  (AVCaptureSession, "did not open within 8 s") and bluetoothd's audio XPC
+  fails every 10 s; BlackHole is also m2-b's default input now, so a
+  `device = "default"` microphone there finds it and hangs instead of
+  failing at once. Needs: a reboot of isocast-m2-b (or `brew uninstall
+  --cask blackhole-16ch` and a reboot). Blocks nothing of #89 (verified in
+  the test VM instead); it may slow other lanes' microphone sources there.
+
 - 2026-10-15 (#67): the two Developer ID profiles exist (tied to the
   2027 release certificate; secrets set) and a notarized Developer ID build
   activated and streamed on isocast-m2-b. Left for Ryan: a QuickTime/Zoom/
@@ -1694,6 +1705,27 @@ each section. Delete entries that stop being true.
   elsewhere resolves differently and still restarts them; a folder first
   used with `start --folder` is a new root and restarts them as before.
   The stress clients check (zero restarts) was right; no scenario change.
+- 2026-10-16 (#89): a microphone's `channels` (1-based) picks device
+  inputs. One channel is a 1-channel source, so the mixer's existing mono
+  path plays it centred at full level (no −6 dB, unlike `audio.mono` on a
+  stereo pair); two are stereo. **The ISO track holds exactly the picked
+  channels** (a mono track for one), not a stereo copy: it is the raw
+  source an editor wants, it matches what the device delivers for that
+  input, and it halves a mono mic's AAC data; gain, balance and Mono stay
+  program and monitoring only, as for every ISO track. **AVFoundation is
+  asked for all of the device's channels** and only the picked ones go on
+  to the engine: asked for fewer than a device has, it mixes instead of
+  dropping (BlackHole 16ch asked for 2: each channel a mix of all 16 tones,
+  +7.4 dB; asked for 3 or 4: silence; asked for 16: channel 16 alone at
+  +0.001 dB). Reading 16 floats a frame costs nothing next to the encode.
+  Without `channels` the request is exactly main's (two, no pick), so on
+  a >2-input interface the default is that mixdown, not "the first two
+  inputs" as the 2026-10-11 note says; verified equal `setup check --json`
+  and manifest/stream structure against main.
+  App picker: one Channels dropdown (Default, each input as mono, each
+  odd-even pair as stereo, with Core Audio channel names) over a
+  two-dropdown Left/Right design: one choice covers the common cases,
+  can't pick a channel twice, and says mono or stereo.
 
 - 2026-10-16 (engine hardening, #27/#30/#31/#35): engine and daemon locks
   use parking_lot. Only selected control state uses `Critical` transactions:
@@ -5463,6 +5495,23 @@ each section. Delete entries that stop being true.
   before the hard one (`ulimit -S -n 64; ulimit -H -n 64`): the other order
   fails in sh and leaves the hard limit, which isocastd then raises to.
   Each obs-websocket/watch client holds 2 daemon descriptors.
+- 2026-10-16 (#89): multi-channel audio checks run in the test VM: it has
+  BlackHole 16ch (installed from Homebrew's cached pkg with `sudo
+  installer`, then `sudo killall coreaudiod`; works there without a
+  reboot), its SIP is off and the microphone is granted to dev apps signed
+  like `scripts/sign-dev.sh` does. ffmpeg plays a 16-channel WAV into it
+  over SSH (`-f audiotoolbox -audio_device_index N`). `scripts/vm.sh sh`
+  exports ISOCAST_MONITOR_SILENT=1, so unset it to hear (or record)
+  monitoring. The #89 harness: /Volumes/IsocastBuild/audio-channels/
+  scratch/hw/{t-vm.py,analyse.py}.
+- 2026-10-16 (#89): `isocast record` records in the CLI process, so on a
+  test Mac a microphone source asks TCC for the unsigned CLI (a prompt in
+  the desktop session, "Cannot use <device>" over SSH); record through
+  isocastd with `isocast start SETUP` / `isocast stop`. `isocast engine
+  stop` leaves isocastd running: kill the pid `isocast status --json`
+  reports (daemon.pid) when a scratch engine is done. Over SSH,
+  `isocast devices` can time out in ScreenCaptureKit on the M2s; in the
+  desktop session (`hw-batch … --gui`) it lists.
 
 - 2026-10-16 (#74): a CLI-stored stream key can't be read by an ad-hoc
   signed isocastd from another build (702, "stored by another build"):

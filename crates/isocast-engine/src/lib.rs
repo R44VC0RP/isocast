@@ -242,10 +242,13 @@ pub trait Platform: Clone + Send + Sync + 'static {
     ) -> anyhow::Result<(Self::Capture, CaptureFormat)>;
 
     /// Start capturing a microphone ("default", or an id, name or part of
-    /// a name from [`Platform::devices`]). Returns its channel count.
+    /// a name from [`Platform::devices`]): the input channels `channels`
+    /// picks (numbered from 1; one is delivered as mono, two as stereo),
+    /// or by default its first two. Returns the channel count delivered.
     fn capture_microphone(
         &self,
         device: &str,
+        channels: Option<&[u32]>,
         sink: AudioSink,
     ) -> anyhow::Result<(Self::Capture, u32)>;
 

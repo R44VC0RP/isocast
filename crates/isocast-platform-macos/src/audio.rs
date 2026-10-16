@@ -45,8 +45,9 @@ use crate::devices::{find_display, find_microphone, shareable_content};
 use crate::tap::{self, Backend, TapCapture, Target};
 use crate::writer::catch;
 
-/// Channels recorded from a microphone at most. Multi-channel interfaces
-/// are recorded as their first two inputs for now.
+/// Channels recorded from a microphone by default at most: what
+/// AVFoundation makes of a device as two channels (a larger interface's
+/// inputs mixed down), unless the source's `channels` picks inputs.
 const MAX_CHANNELS: u32 = 2;
 /// How long starting or stopping a stream may take.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,11 +71,17 @@ impl Drop for MicrophoneCapture {
 }
 
 /// Start capturing the microphone `query` names ("default" for the system
-/// default input). Returns the capture and its channel count.
-pub fn capture_microphone(query: &str, sink: AudioSink) -> Result<(MicrophoneCapture, u32)> {
+/// default input): the input channels `channels` picks (from 1), or by
+/// default its first two. Returns the capture and the channels delivered.
+pub fn capture_microphone(
+    query: &str,
+    channels: Option<&[u32]>,
+    sink: AudioSink,
+) -> Result<(MicrophoneCapture, u32)> {
     let device = find_microphone(query)?;
     let name = unsafe { device.localizedName() }.to_string();
-    let channels = microphone_channels(&device);
+    let format = microphone_format(&device, channels)?;
+    let channels = format.channels();
 
     let input =
         unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }.map_err(|err| {
@@ -86,10 +93,10 @@ pub fn capture_microphone(query: &str, sink: AudioSink) -> Result<(MicrophoneCap
         })?;
     let session = unsafe { AVCaptureSession::new() };
     let output = unsafe { AVCaptureAudioDataOutput::new() };
-    let delegate = AudioDelegate::new(sink, channels);
+    let delegate = AudioDelegate::new(sink, format.request, format.pick);
     let queue = DispatchQueue::new("isocast.microphone-capture", None);
     // Ask AVFoundation for the engine's format, resampled if needed.
-    let settings = pcm_settings(channels);
+    let settings = pcm_settings(format.request);
     unsafe {
         output.setAudioSettings(Some(&settings));
         output.setSampleBufferDelegate_queue(
@@ -128,9 +135,80 @@ pub fn capture_microphone(query: &str, sink: AudioSink) -> Result<(MicrophoneCap
     ))
 }
 
-/// The channels recorded from a microphone.
-pub(crate) fn microphone_channels(device: &AVCaptureDevice) -> u32 {
-    device_channels(device).clamp(1, MAX_CHANNELS)
+/// What a microphone capture asks AVFoundation for, and keeps.
+pub(crate) struct MicrophoneFormat {
+    /// The device's first `request` channels are asked for.
+    request: u32,
+    /// Which of those are delivered (from 0), in order; `None` delivers
+    /// all of them.
+    pick: Option<Vec<usize>>,
+}
+
+impl MicrophoneFormat {
+    /// The channels delivered.
+    pub(crate) fn channels(&self) -> u32 {
+        self.pick
+            .as_ref()
+            .map_or(self.request, |pick| pick.len() as u32)
+    }
+}
+
+/// How to capture `channels` (from 1; by default the first two) of a
+/// microphone. The error names the channel and lists the device's.
+pub(crate) fn microphone_format(
+    device: &AVCaptureDevice,
+    channels: Option<&[u32]>,
+) -> Result<MicrophoneFormat> {
+    let available = device_channels(device);
+    let default = available.clamp(1, MAX_CHANNELS);
+    let Some(channels) = channels else {
+        return Ok(MicrophoneFormat {
+            request: default,
+            pick: None,
+        });
+    };
+    if channels.is_empty() || channels.len() > 2 {
+        bail!("channels: give one channel (mono) or two (stereo)");
+    }
+    if let Some((i, channel)) = channels
+        .iter()
+        .enumerate()
+        .find(|(_, c)| **c == 0 || **c > available)
+    {
+        let uid = unsafe { device.uniqueID() }.to_string();
+        let names = crate::output::input_channel_names(&uid);
+        let valid: Vec<String> = (1..=available)
+            .map(
+                |c| match names.get(c as usize - 1).filter(|n| !n.is_empty()) {
+                    Some(name) => format!("{c} ({name})"),
+                    None => c.to_string(),
+                },
+            )
+            .collect();
+        bail!(
+            "channels[{i}]: {:?} has no input channel {channel}; valid: {}",
+            unsafe { device.localizedName() }.to_string(),
+            valid.join(", ")
+        );
+    }
+    // Asked for fewer channels than the device has, AVFoundation mixes
+    // them down instead of dropping the rest (BlackHole 16ch asked for 2,
+    // 3 or 4: mixes of all 16, or silence), so it is asked for all of
+    // them, unconverted, and only the picked ones go on.
+    Ok(MicrophoneFormat {
+        request: available,
+        pick: Some(channels.iter().map(|c| *c as usize - 1).collect()),
+    })
+}
+
+/// `samples`, interleaved with `channels` channels, as only the channels
+/// `pick` names (from 0), in its order.
+fn pick_channels(samples: &[f32], channels: usize, pick: &[usize]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(samples.len() / channels.max(1) * pick.len());
+    for frame in samples.chunks_exact(channels.max(1)) {
+        out.extend(pick.iter().map(|&c| frame[c]));
+    }
+    out
 }
 
 /// The most input channels any of the device's formats has.
@@ -173,6 +251,8 @@ pub struct AudioIvars {
     samples: SamplesCallback,
     stopped: Arc<dyn Fn(String) + Send + Sync>,
     channels: u32,
+    /// The channels delivered (from 0) of `channels`; all if `None`.
+    pick: Option<Vec<usize>>,
     /// The session's clock, which sample times are on; none for
     /// ScreenCaptureKit, which uses the host clock.
     clock: Mutex<Option<Retained<CMClock>>>,
@@ -223,11 +303,12 @@ define_class!(
 );
 
 impl AudioDelegate {
-    fn new(sink: AudioSink, channels: u32) -> Retained<Self> {
+    fn new(sink: AudioSink, channels: u32, pick: Option<Vec<usize>>) -> Retained<Self> {
         let this = Self::alloc().set_ivars(AudioIvars {
             samples: sink.samples,
             stopped: Arc::from(sink.stopped),
             channels,
+            pick,
             clock: Mutex::new(None),
         });
         unsafe { msg_send![super(this), init] }
@@ -237,6 +318,10 @@ impl AudioDelegate {
         let ivars = self.ivars();
         match interleaved_f32(sample, ivars.channels) {
             Ok(Some(samples)) => {
+                let samples = match &ivars.pick {
+                    Some(pick) => pick_channels(&samples, ivars.channels as usize, pick),
+                    None => samples,
+                };
                 let time = unsafe { sample.presentation_time_stamp() };
                 let clock = ivars.clock.lock().unwrap();
                 (ivars.samples)(&samples, host_time(time, clock.as_deref()));
@@ -502,7 +587,7 @@ fn capture_played_audio(
         config.setHeight(2);
         config.setMinimumFrameInterval(CMTime::new(1, 1));
     }
-    let delegate = AudioDelegate::new(sink, CHANNELS);
+    let delegate = AudioDelegate::new(sink, CHANNELS, None);
     let stream = unsafe {
         SCStream::initWithFilter_configuration_delegate(
             SCStream::alloc(),
@@ -548,4 +633,22 @@ fn capture_played_audio(
         },
         CHANNELS,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_channels_in_order() {
+        // Three frames of four channels: frame f, channel c is f * 10 + c.
+        let samples: Vec<f32> = (0..3)
+            .flat_map(|f| (0..4).map(move |c| (f * 10 + c) as f32))
+            .collect();
+        assert_eq!(pick_channels(&samples, 4, &[2]), [2.0, 12.0, 22.0]);
+        assert_eq!(
+            pick_channels(&samples, 4, &[3, 0]),
+            [3.0, 0.0, 13.0, 10.0, 23.0, 20.0]
+        );
+    }
 }

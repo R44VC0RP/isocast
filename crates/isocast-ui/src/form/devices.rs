@@ -169,6 +169,89 @@ pub fn microphone_options(devices: Option<&Devices>, value: &str) -> Vec<Choice>
     keep(options, value, "not connected")
 }
 
+/// The microphone a source's `device` names ("default": the system's).
+pub fn find_microphone<'a>(
+    devices: Option<&'a Devices>,
+    device: &str,
+) -> Option<&'a isocast_protocol::devices::Microphone> {
+    let mics = devices
+        .map(|d| d.microphones.as_slice())
+        .unwrap_or_default();
+    if device == "default" {
+        return mics.iter().find(|m| m.default);
+    }
+    match_device(mics, device)
+}
+
+/// The value a microphone's `channels` has in its dropdown: "" for the
+/// default, else the channels joined with "," ("1", "3,4").
+pub fn channels_value(channels: &serde_json::Value) -> String {
+    channels
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(crate::form::text_of)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default()
+}
+
+/// A microphone's channel choices: the default (its own stereo, a larger
+/// interface's inputs mixed down by macOS), each
+/// input alone as mono, then each odd-even pair as stereo, with the names
+/// the device gives them. `value` (as [`channels_value`] writes it) stays
+/// an option even if the device doesn't have it.
+pub fn channel_options(devices: Option<&Devices>, device: &str, value: &str) -> Vec<Choice> {
+    let mic = find_microphone(devices, device);
+    let count = mic.map_or(0, |m| m.channels);
+    let name = |c: u32| {
+        mic.and_then(|m| m.channel_names.get(c as usize - 1))
+            .filter(|n| !n.is_empty())
+            .cloned()
+    };
+    let default_detail = match count {
+        0 => String::new(),
+        1 => "input 1".to_string(),
+        2 => "inputs 1 + 2, stereo".to_string(),
+        _ => "every input mixed to stereo".to_string(),
+    };
+    let mut options = vec![choice("", "Default", default_detail)];
+    for c in 1..=count {
+        let detail = match name(c) {
+            Some(n) => format!("{n}, mono"),
+            None => "mono".to_string(),
+        };
+        options.push(choice(c.to_string(), format!("Input {c}"), detail));
+    }
+    for left in (1..count).step_by(2) {
+        let right = left + 1;
+        let detail = match (name(left), name(right)) {
+            (Some(l), Some(r)) => format!("{l} + {r}, stereo"),
+            _ => "stereo".to_string(),
+        };
+        options.push(choice(
+            format!("{left},{right}"),
+            format!("Inputs {left} + {right}"),
+            detail,
+        ));
+    }
+    if value.is_empty() || options.iter().any(|o| o.0 == value) {
+        return options;
+    }
+    let label = match value.split_once(',') {
+        Some((l, r)) => format!("Inputs {l} + {r}"),
+        None => format!("Input {value}"),
+    };
+    let detail = if mic.is_some() {
+        "not on this device"
+    } else {
+        ""
+    };
+    options.push(choice(value, label, detail));
+    options
+}
+
 /// Audio outputs (monitoring): "Default" (whichever is current), then
 /// each by name.
 pub fn output_options(devices: Option<&Devices>, value: &str) -> Vec<Choice> {

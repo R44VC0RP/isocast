@@ -677,7 +677,11 @@ fn open_native<P: Platform>(
         }
         SourceKind::Microphone(microphone) => {
             let (feed, sink, chunks) = audio_feed();
-            let (capture, channels) = platform.capture_microphone(&microphone.device, sink)?;
+            let (capture, channels) = platform.capture_microphone(
+                &microphone.device,
+                microphone.channels.as_deref(),
+                sink,
+            )?;
             Ok(captured_audio(feed, chunks, capture, channels))
         }
         SourceKind::SystemAudio(system) => {

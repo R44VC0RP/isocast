@@ -328,7 +328,9 @@ impl Offscreen {
     /// (the pointer moved there, not pressed), `hide:DOCK`
     /// (scenes, sources, mixer, transitions, controls, toolbar, status),
     /// `wait:MS` (for the daemon), `quit:WHAT` (the quit question),
-    /// `events:FILE` (replay `isocast watch --json` lines).
+    /// `events:FILE` (replay `isocast watch --json` lines),
+    /// `devices:FILE` (this Mac's devices as `isocast devices --json`
+    /// wrote them, in place of the engine's).
     fn state(&mut self, state: &str) -> Result<()> {
         let (name, arg) = state.split_once(':').unwrap_or((state, ""));
         let app = &self.app;
@@ -440,6 +442,16 @@ impl Offscreen {
                     self.hub.event(event);
                 }
             }
+            // Devices from a file (`isocast devices --json`), so a form shows
+            // a device this Mac doesn't have, such as an 8-input interface.
+            "devices" => {
+                let text =
+                    std::fs::read_to_string(arg).with_context(|| format!("devices:{arg}"))?;
+                let devices: isocast_protocol::devices::Devices =
+                    serde_json::from_str(&text).with_context(|| format!("devices:{arg}"))?;
+                self.hub.session.borrow_mut().devices = Some(devices);
+                self.hub.changed(crate::session::Changed::DEVICES);
+            }
             "wait" => {
                 let ms: u64 = arg.parse().context("wait:MS takes milliseconds")?;
                 let until = Instant::now() + Duration::from_millis(ms);
@@ -464,7 +476,7 @@ impl Offscreen {
                             .flat_map(|s| s.iter().copied())
                             .collect();
                         bail!(
-                            "unknown state {other:?}; one of dialog:KIND[:ARG], menu:OWNER, menu-bar:ID, menu-bar-open:TITLE, toast:KIND:TITLE, kit, kit-dialog, kit-menu, kit-dropdown, type:TEXT, key:NAME, drag:X1,Y1,X2,Y2, hover:X,Y, press:LABEL, hide:DOCK, wait:MS, quit:recording|streaming|both, {}",
+                            "unknown state {other:?}; one of dialog:KIND[:ARG], menu:OWNER, menu-bar:ID, menu-bar-open:TITLE, toast:KIND:TITLE, kit, kit-dialog, kit-menu, kit-dropdown, type:TEXT, key:NAME, drag:X1,Y1,X2,Y2, hover:X,Y, press:LABEL, hide:DOCK, wait:MS, quit:recording|streaming|both, events:FILE, devices:FILE, {}",
                             areas.join(", ")
                         )
                     }
