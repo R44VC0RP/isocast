@@ -280,8 +280,13 @@ hw_busy() {
     jobs=
     if ! lockf -s -k -t 0 "$hw_root/.bench.lock" true 2>/dev/null; then
         jobs="$(ls "$hw_root"/hw-queue/running/*.json 2>/dev/null || true)"
-        # Held without a running job (a bench or `now` starting): both.
-        [ -n "$jobs" ] || { printf 'isocast-m2-a\nisocast-m2-b\n'; return 0; }
+        # Held without a running job (a bench or `now` starting): both,
+        # unless the holder is the hardware batch building its own job's
+        # binaries before it picks a Mac (ISOCAST_HW_BUILDING).
+        if [ -z "$jobs" ] && [ -z "${ISOCAST_HW_BUILDING:-}" ]; then
+            printf 'isocast-m2-a\nisocast-m2-b\n'
+            return 0
+        fi
     fi
     nightly="${ISOCAST_HW_NIGHTLY:-01:30}"
     hh="$(date +%H)" mm="$(date +%M)" nh="${nightly%:*}" nm="${nightly#*:}"

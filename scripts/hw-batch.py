@@ -255,7 +255,10 @@ def build_remote(src, lane, bins, dest, out):
     # remote-build.sh picks a free build host: not this job's test Macs
     # (the batch lock and running/*.json say which).
     log(f"building {' '.join(bins)} with scripts/remote-build.sh (lane {lane})")
-    env = dict(os.environ, ISOCAST_LANE=lane)
+    # This runner holds the batch lock while it builds, before any Mac is
+    # picked; without ISOCAST_HW_BUILDING remote-build.sh would count both
+    # test Macs busy and, with exonbook away, find no host (2026-10-16).
+    env = dict(os.environ, ISOCAST_LANE=lane, ISOCAST_HW_BUILDING="1")
     with open(out / "build.log", "a") as f:
         r = subprocess.run(["sh", "scripts/remote-build.sh", "build", "--to", str(dest), *bins],
                            cwd=src, env=env, stdout=f, stderr=subprocess.STDOUT, timeout=3500)
