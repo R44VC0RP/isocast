@@ -32,25 +32,57 @@ the engine asks macOS to activate it (`isocastd --install-camera-extension
   Camera Extensions"; the app's popover says the same, with an Open System
   Settings button. The request stays alive for 15 minutes; when the user
   allows it the engine starts the camera itself, unless Stop was pressed.
-  A later Start while it waits doesn't ask again.
+  A later Start while it waits doesn't ask again. macOS's alert says
+  **"isocastd" would like to use a new camera extension**: it names the
+  requesting process's executable, not its bundle. Checked on isocast-m2-b
+  (#69): the same words with the engine helper registered with Launch
+  Services (its CFBundleName/CFBundleDisplayName are "Isocast Engine"), and
+  with the engine's responsible process being Terminal. The password sheets
+  that follow use the bundle name ("Isocast Engine is trying to modify a
+  System Extension"). Only renaming the engine's executable would change the
+  alert, and that path is pinned by the extension's producer check, the
+  CLI's engine launch and the release scripts, so it stays.
 - **Not in /Applications** (run from the DMG): Start says to move Isocast
   into Applications. **Refused** by macOS: Start reports macOS's reason.
 
-To remove the camera from a release install, deactivate it before
-deleting the app (macOS asks to confirm):
+- **After an update** (#69): Sparkle replaces the app and the extension it
+  carries, but macOS keeps running the build it activated. The first Start
+  of each installed build asks macOS which build is active
+  (`isocastd --camera-extension-state`, one JSON line); when it's another
+  build, Start asks macOS to activate this one, which replaces it without
+  asking the user again, then starts. Engine logs say
+  `camera extension build check: Current` (or the replacement).
+
+### Remove Virtual Camera
+
+Moving Isocast.app to the Trash does **not** remove the camera (checked on
+isocast-m2-b: it stays activated and listed). **Remove Virtual Camera…** in
+the camera's popover (the gear beside Virtual Camera), `isocast vcam remove
+[--json]`, MCP `virtual_camera_remove` and the API's `virtual_camera_remove`
+stop the camera and ask macOS to deactivate the extension; macOS asks for an
+administrator password and the call waits for it (about 4 minutes at most;
+the app makes it on its own connection). It returns
+`{restart_needed, message}`; a later Start installs the camera again. A
+development engine refuses (use `scripts/vcam-uninstall.sh`). Removal stops
+Start until macOS answers.
+
+macOS only deactivates the build the requesting app carries ("not found"
+otherwise). When an older build is still active (an update without a Start
+since), removal first asks macOS to activate this app's build, which needs no
+approval, and then deactivates it. The engine's own maintenance entry point
+does the same from a terminal:
 
 ```sh
 "/Applications/Isocast.app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd" --uninstall-camera-extension
 ```
 
+To delete Isocast: Remove Virtual Camera, then move the app to the Trash
+(docs/install.md, "Delete Isocast").
+
 Checked on isocast-m2-b (macOS 26.7, notarized Developer ID build,
-2026-10-15): moving Isocast.app to the Trash in Finder does **not**
-deactivate the camera; it stays listed (showing the waiting card) until
-deactivated. Deactivation asks for an administrator password, and it must
-come from an app carrying the **same build** as the activated extension
-(otherwise macOS answers "not found"). A Sparkle update replaces the embedded
-extension but not the activated one; asking macOS to activate the new build
-(`isocastd --install-camera-extension`) replaces it without a new approval.
+2026-10-15): Finder's Move to Trash leaves the camera listed (showing the
+waiting card) until deactivated. Deactivation asks for an administrator
+password.
 
 ## Picture and lifecycle
 
@@ -109,10 +141,27 @@ its sandbox denies that by pid on macOS 26.7, so it then requires the
 producer's executable to be at one of the engine's exact paths: the release
 app's `/Applications/<app>.app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd`
 or the development host's `/Applications/Isocast Camera Host.app/Contents/MacOS/isocastd`
-(weaker than the team check; a nonce is a follow-up). Refusals are logged:
+(weaker than the team check). Refusals are logged:
 `log stream --predicate 'subsystem == "dev.isocast.isocastd.camera"'`.
 Reservations are keyed by CMIO client id so a second authorization cannot
 overwrite the first.
+
+**Why not a nonce (#69).** The suggested stronger check was a secret the
+engine writes into the Team-ID app group container, presented to the
+extension as a custom stream property. It can't work: the extension runs as
+**`_cmiodalassistants`** (checked on isocast-m2-b: `ps` shows
+`_cmiodalassistants … IsocastCamera`), so its app group container is under
+`/var/db/cmiodalassistants`, not the user's `~/Library/Group Containers`,
+and the engine (the user) can't write there. Any secret the engine can store
+for itself (a file, its Keychain) is readable by another process of the same
+user or invisible to the extension's user, and CMIOExtensionClient (macOS 27
+SDK) still gives only a client id, a signing id and a pid: no audit token to
+verify the caller's code. So the producer check stays the path pin. What it
+leaves open: a process running as the same user that installs its own app
+at `/Applications/<name>.app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd`
+(writable without a password for an admin user) can feed the camera. Such a
+process can already do far more with the user's account; the camera shows
+only what a producer sends and never reads anything back.
 
 Samples have host-clock PTS, frame duration, Rec.709 primaries/transfer/matrix
 and full-range RGB pixels. Program PTS is the engine's canvas timestamp,

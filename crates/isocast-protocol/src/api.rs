@@ -339,6 +339,13 @@ pub enum Method {
     VirtualCameraStop,
     /// Camera state, output format, counters and any failure.
     VirtualCameraStatus,
+    /// Remove Isocast Virtual Camera from macOS (deactivate the release
+    /// app's camera extension) so Isocast can be deleted cleanly: stops the
+    /// camera first; macOS asks for an administrator password, and the call
+    /// waits for it (up to about 4 minutes). Returns
+    /// [`crate::virtual_camera::VirtualCameraRemoval`]. Refused by a
+    /// development engine (scripts/vcam-uninstall.sh removes its camera).
+    VirtualCameraRemove,
     /// Stop recording if needed, then exit the daemon.
     Shutdown,
     /// Recording codec labels and supported containers; returns EncoderOption[].

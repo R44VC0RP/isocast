@@ -46,6 +46,22 @@ is downloaded, it installs as the app closes and the engine finishes on
 the old version; the next launch restarts it once it is idle.
 `isocast status` shows which engine runs (`Engine: isocastd 0.0.3 (build …)`).
 
+## Delete Isocast
+
+Isocast Virtual Camera is a camera extension that stays in macOS when the
+app goes to the Trash (macOS keeps listing it until it's removed). If you
+started the virtual camera, remove it first:
+
+1. In Isocast, open the gear beside **Virtual Camera** in the Controls dock
+   and click **Remove Virtual Camera…** (or run `isocast vcam remove`).
+2. Enter an administrator password when macOS asks.
+3. Quit Isocast and move it to the Trash.
+
+If macOS says a restart finishes the removal, keep Isocast until you have
+restarted. Starting the virtual camera again installs it again. Your
+recordings, setups and settings are not removed; they live in your
+recordings folder and `~/Library/Application Support/Isocast`.
+
 ## Release maintainers
 
 `scripts/release.sh --dry-run` prints the local build/sign/DMG workflow
@@ -83,9 +99,9 @@ canonical `dev.isocast.isocastd` ID so the virtual-camera extension recognizes
 its signed producer. Engine privacy grants may carry over from a development
 build signed by the same Apple team.
 
-The optional virtual-camera system extension is provisioned and installed
-separately (see `docs/virtual-camera.md`); this DMG does not activate or
-install a system extension. Its CLI/API controls are included.
+The engine helper carries the virtual camera's system extension; the first
+**Start Virtual Camera** asks macOS to activate it, and **Remove Virtual
+Camera…** deactivates it (see `docs/virtual-camera.md`).
 
 The native Slint UI is the default, controlled by the one `app_target`
 assignment in `scripts/release.sh`. `ISOCAST_APP_TARGET=isocast-app` opts

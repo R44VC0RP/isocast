@@ -191,6 +191,8 @@ pub struct Session {
     pub vcam: Option<isocast_protocol::virtual_camera::VirtualCameraStatus>,
     /// Its start or stop is on its way.
     pub busy_vcam: bool,
+    /// `virtual_camera_remove` waits for macOS's password prompt.
+    pub removing_vcam: bool,
     /// The replay buffer, from Status and `replay` events.
     pub replay: Option<isocast_protocol::replay::ReplayStatus>,
     /// Its start or stop is on its way.

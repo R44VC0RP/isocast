@@ -210,6 +210,39 @@ component VirtualCameraDetails inherits VerticalLayout {
             + (root.off ? "" : ". Stop the camera to change its output.")
             + (ControlsArea.vcam-error != "" ? "\n" + ControlsArea.vcam-error : "");
     }
+
+    // Deleting Isocast leaves its camera in macOS: take it out first (#69).
+    if ControlsArea.vcam-removable: VerticalLayout {
+        spacing: 0;
+        GroupHeading { title: "Remove"; }
+        Rectangle {
+            preferred-height: remove.preferred-height;
+            min-height: remove.preferred-height;
+            remove := Text {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                text: "Before you delete Isocast, remove its camera from macOS. macOS asks for an administrator password. Starting the camera again installs it again.";
+                color: Theme.text-2;
+                font-size: Theme.fs-sm;
+                letter-spacing: Theme.tracking-sm;
+                line-height-factor: Theme.leading-sm;
+                wrap: word-wrap;
+            }
+        }
+        HorizontalLayout {
+            padding-top: Theme.space-2;
+            padding-bottom: Theme.space-2;
+            alignment: start;
+            Button {
+                size: ControlSize.small;
+                text: ControlsArea.vcam-removing ? "Removing…" : "Remove Virtual Camera…";
+                enabled: !ControlsArea.busy-vcam;
+                accessible-name: "Remove Virtual Camera from macOS";
+                clicked => { ControlsArea.remove-vcam(); }
+            }
+        }
+    }
 }
 
 export component ControlsDock inherits Dock {

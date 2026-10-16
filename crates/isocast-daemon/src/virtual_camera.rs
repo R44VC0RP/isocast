@@ -1,6 +1,8 @@
 use super::*;
 use isocast_engine::record::{OnCameraChange, VirtualCamera};
-use isocast_protocol::virtual_camera::{VirtualCameraState, VirtualCameraStatus};
+use isocast_protocol::virtual_camera::{
+    VirtualCameraRemoval, VirtualCameraState, VirtualCameraStatus,
+};
 
 fn refused(message: String) -> RpcError {
     RpcError {
@@ -21,6 +23,15 @@ pub(super) struct CameraOutput {
     approval_pending: bool,
     /// Start the camera when that approval arrives (cleared by Stop).
     start_when_approved: bool,
+    /// The embedded extension's Info.plist (its modification time) whose
+    /// build macOS was found to have active, so Start asks only once per
+    /// installed build (#69).
+    #[cfg(target_os = "macos")]
+    checked_extension: Option<std::time::SystemTime>,
+    /// `virtual_camera_remove` waits for macOS; Start is refused meanwhile.
+    removing: bool,
+    /// Counts removals, so an approval wait they ended stays quiet.
+    removals: u64,
 }
 
 impl CameraOutput {
@@ -53,17 +64,56 @@ impl CameraOutput {
         if status.transport.is_empty() {
             status.transport = "cmio-iosurface".into();
         }
+        status.removable = removable();
         status
     }
 }
 
+/// The engine carries the camera extension (the release app).
+fn removable() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        static CARRIES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        // macOS only manages extensions of apps in /Applications.
+        *CARRIES.get_or_init(|| {
+            isocast_platform_macos::virtual_camera::embedded_extension()
+                .is_some_and(|path| path.starts_with("/Applications/"))
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 impl Daemon {
+    /// Announce the camera's state; every status says whether it is
+    /// removable (the engine worker's own statuses don't know).
+    fn publish_camera(&self, mut camera: VirtualCameraStatus) {
+        camera.removable = removable();
+        self.publish(Event::VirtualCamera { camera });
+    }
+
     pub(super) fn virtual_camera_status(&self) -> VirtualCameraStatus {
         let state = self.state.lock().unwrap();
         state.camera.status_for(state.setup.as_ref())
     }
 
     pub(super) fn virtual_camera_start(self: &Arc<Self>) -> Result<VirtualCameraStatus, RpcError> {
+        if self.state.lock().unwrap().camera.removing {
+            return Err(refused(
+                "virtual_camera: it is being removed from macOS; start it again once that finishes"
+                    .into(),
+            ));
+        }
+        let tag = |result: Result<VirtualCameraStatus, RpcError>| {
+            result.map(|mut status| {
+                status.removable = removable();
+                status
+            })
+        };
+        #[cfg(target_os = "macos")]
+        if let Some(result) = self.update_camera_extension() {
+            return tag(result);
+        }
         let result = self.start_camera();
         #[cfg(target_os = "macos")]
         if let Err(error) = &result
@@ -72,9 +122,146 @@ impl Daemon {
                 .contains(isocast_platform_macos::virtual_camera::NOT_INSTALLED)
             && isocast_platform_macos::virtual_camera::embedded_extension().is_some()
         {
-            return self.activate_camera();
+            return tag(self.activate_camera());
         }
-        result
+        tag(result)
+    }
+
+    /// After an update (#69): Sparkle replaced the app and the extension it
+    /// carries, but macOS keeps the build it activated. When another build
+    /// is active, ask macOS to activate this one (it replaces the old one
+    /// without asking the user again), then start. Checked once per
+    /// installed build; a failed check never blocks a start.
+    #[cfg(target_os = "macos")]
+    fn update_camera_extension(self: &Arc<Self>) -> Option<Result<VirtualCameraStatus, RpcError>> {
+        use isocast_platform_macos::virtual_camera::{
+            ExtensionState, embedded_extension, extension_state,
+        };
+        let extension = embedded_extension()?;
+        if !extension.starts_with("/Applications/") {
+            return None;
+        }
+        let stamp = std::fs::metadata(extension.join("Contents/Info.plist"))
+            .and_then(|m| m.modified())
+            .ok()?;
+        {
+            let state = self.state.lock().unwrap();
+            if state.camera.checked_extension == Some(stamp)
+                || state.camera.active()
+                || state.camera.approval_pending
+            {
+                return None;
+            }
+        }
+        let checked = |daemon: &Self| {
+            daemon.state.lock().unwrap().camera.checked_extension = Some(stamp);
+        };
+        match extension_state() {
+            Ok(ExtensionState::Outdated { active, embedded }) => {
+                isocast_diagnostics::diagnostic!(
+                    "virtual camera: macOS has camera extension build {active} active; this app carries {embedded}, so it asks macOS to replace it"
+                );
+                match self.activate_camera() {
+                    Ok(status) => {
+                        checked(self);
+                        Some(Ok(status))
+                    }
+                    // macOS wants the user's approval after all: say so.
+                    Err(error) if error.message.contains("Login Items & Extensions") => {
+                        Some(Err(error))
+                    }
+                    // The old build may still work: start with it.
+                    Err(error) => {
+                        isocast_diagnostics::diagnostic!("warn"; "virtual camera: couldn't replace the active camera extension build ({}); starting with it", error.message);
+                        None
+                    }
+                }
+            }
+            Ok(state) => {
+                isocast_diagnostics::diagnostic!(
+                    "virtual camera: camera extension build check: {state:?}"
+                );
+                checked(self);
+                None
+            }
+            Err(error) => {
+                isocast_diagnostics::diagnostic!("warn"; "virtual camera: couldn't read the camera extension's state ({error}); starting anyway");
+                None
+            }
+        }
+    }
+
+    /// Take the camera extension out of macOS (#69), so deleting Isocast
+    /// leaves nothing behind: stop the camera, then ask macOS to deactivate
+    /// it, which asks for an administrator password. Blocks until macOS
+    /// answers (the app calls it on its own connection).
+    pub(super) fn virtual_camera_remove(&self) -> Result<VirtualCameraRemoval, RpcError> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(refused(
+                "virtual_camera: only macOS has a camera extension to remove".into(),
+            ))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use isocast_platform_macos::virtual_camera::{Deactivation, request_deactivation};
+            if !removable() {
+                return Err(refused("virtual_camera: this engine doesn't carry the camera extension; remove a development install with scripts/vcam-uninstall.sh".into()));
+            }
+            {
+                let mut state = self.state.lock().unwrap();
+                if state.camera.removing {
+                    return Err(refused(
+                        "virtual_camera: already being removed; answer macOS's password prompt"
+                            .into(),
+                    ));
+                }
+                state.camera.removing = true;
+                state.camera.removals += 1;
+                state.camera.start_when_approved = false;
+                // Removal ends a pending activation request; the next Start
+                // asks again rather than waiting on it.
+                state.camera.approval_pending = false;
+            }
+            self.virtual_camera_stop();
+            isocast_diagnostics::diagnostic!(
+                "virtual camera: asking macOS to remove the camera extension"
+            );
+            let result = request_deactivation();
+            let status = {
+                let mut state = self.state.lock().unwrap();
+                state.camera.removing = false;
+                state.camera.checked_extension = None;
+                if !state.camera.active() {
+                    // A failed start's reason (often "allow it in System
+                    // Settings") no longer applies.
+                    state.camera.last = VirtualCameraStatus::default();
+                }
+                state.camera.status_for(state.setup.as_ref())
+            };
+            self.publish_camera(status);
+            let removal = match result {
+                Deactivation::Removed => VirtualCameraRemoval {
+                    restart_needed: false,
+                    message: "Isocast Virtual Camera was removed from macOS. Starting it again installs it again.".into(),
+                },
+                Deactivation::Absent => VirtualCameraRemoval {
+                    restart_needed: false,
+                    message: "Isocast Virtual Camera isn't installed in macOS; nothing to remove."
+                        .into(),
+                },
+                Deactivation::RestartNeeded => VirtualCameraRemoval {
+                    restart_needed: true,
+                    message: "Isocast Virtual Camera is removed when you restart your Mac.".into(),
+                },
+                Deactivation::Failed(message) => {
+                    isocast_diagnostics::diagnostic!("warn"; "{message}");
+                    return Err(refused(message));
+                }
+            };
+            isocast_diagnostics::diagnostic!("virtual camera: {}", removal.message);
+            Ok(removal)
+        }
     }
 
     /// The first Start of a release build: its engine app carries the camera
@@ -122,6 +309,7 @@ impl Daemon {
                 let mut state = self.state.lock().unwrap();
                 state.camera.approval_pending = true;
                 state.camera.start_when_approved = state.camera.generation == generation;
+                let removals = state.camera.removals;
                 let daemon = Arc::downgrade(self);
                 thread::spawn(move || {
                     let approved = approval.wait();
@@ -130,6 +318,18 @@ impl Daemon {
                     };
                     let start = {
                         let mut state = daemon.state.lock().unwrap();
+                        if state.camera.removing || state.camera.removals != removals {
+                            // Remove Virtual Camera ended this request (and
+                            // cleared its state; a later Start's is its own).
+                            // A removal still running may have cleared it
+                            // just before this request was recorded: no
+                            // Start runs meanwhile, so clear it again.
+                            if state.camera.removing {
+                                state.camera.approval_pending = false;
+                                state.camera.start_when_approved = false;
+                            }
+                            return;
+                        }
                         state.camera.approval_pending = false;
                         let wanted = std::mem::take(&mut state.camera.start_when_approved);
                         if !approved && !state.camera.active() {
@@ -182,7 +382,7 @@ impl Daemon {
         }
         drop(state);
         drop(retired); // Never dropped under state.
-        self.publish(Event::VirtualCamera { camera: status });
+        self.publish_camera(status);
         refused(message)
     }
 
@@ -201,6 +401,12 @@ impl Daemon {
             setup.virtual_camera.check_start(setup).map_err(refused)?;
             if state.tuning {
                 return Err(refused("virtual_camera: wait for tune to finish".into()));
+            }
+            if state.camera.removing {
+                return Err(refused(
+                    "virtual_camera: it is being removed from macOS; start it again once that finishes"
+                        .into(),
+                ));
             }
             state.camera.starting = true;
             state.camera.generation += 1;
@@ -231,7 +437,7 @@ impl Daemon {
         let daemon = Arc::downgrade(self);
         let on_change: OnCameraChange = Arc::new(move |camera| {
             if let Some(daemon) = daemon.upgrade() {
-                daemon.publish(Event::VirtualCamera { camera });
+                daemon.publish_camera(camera);
             }
         });
         match engine.virtual_camera(on_change) {
@@ -259,9 +465,7 @@ impl Daemon {
                 if status.state == VirtualCameraState::Running {
                     Ok(status)
                 } else {
-                    self.publish(Event::VirtualCamera {
-                        camera: status.clone(),
-                    });
+                    self.publish_camera(status.clone());
                     Err(refused(status.last_error.unwrap_or_else(|| {
                         "virtual_camera: start was cancelled".into()
                     })))
@@ -282,7 +486,7 @@ impl Daemon {
                     // admission reserved until this start actually finishes.
                     state.camera.starting = false;
                 }
-                self.publish(Event::VirtualCamera { camera: status });
+                self.publish_camera(status);
                 Err(failed(error))
             }
         }
@@ -296,9 +500,10 @@ impl Daemon {
             state.camera.generation += 1;
             (state.camera.running.clone(), state.camera.generation)
         };
-        let status = camera
+        let mut status = camera
             .as_ref()
             .map_or_else(|| self.virtual_camera_status(), |camera| camera.stop());
+        status.removable = removable();
         let retired = {
             let mut state = self.state.lock().unwrap();
             if generation != state.camera.generation {

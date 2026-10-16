@@ -2037,6 +2037,24 @@ each section. Delete entries that stop being true.
   ffmpeg's avfoundation input accepts only `-framerate 240` for this camera
   (its range check vs. the advertised 1–240 range); frames still arrive at
   the producer's rate.
+- 2026-10-16 (#69, m2-b macOS 26.7, notarized Developer ID builds): an
+  `OSSystemExtensionRequest` for properties lists every build sysextd knows
+  (enabled, awaiting approval, uninstalling); `isocastd
+  --camera-extension-state` prints it as JSON. Start replaces another active
+  build with the app's in about 1.3 s with no prompt, and the camera runs
+  (151/151 distinct frames). Removal from a newer or older app copy works
+  after replacing the active build first; deactivating when nothing is active
+  still shows a password prompt, so removal now answers "already absent"
+  from the properties instead. A deactivation from an engine started over
+  ssh (no login session) fails at once with OSSystemExtensionErrorDomain 13
+  (authorization required) and no prompt; run the engine in the desktop
+  session (`scripts/testmac.sh gui`) to test removal. The approval alert
+  names the requesting executable ("isocastd") even with the helper
+  registered in Launch Services and Terminal as the responsible process; the
+  password sheets name the bundle ("Isocast Engine"). The extension runs as
+  `_cmiodalassistants`, so it shares no app group container with the user's
+  engine (no nonce channel). The SecurityAgent password sheet is not in
+  screenshots; type into it blind (the typepw helper) after it appears.
 - 2026-10-15 (#67): `x-apple.systempreferences:com.apple.LoginItems-Settings.extension`
   opens System Settings › General › Login Items & Extensions on macOS 26.7
   (isocast-m2-b); Camera Extensions is further down that page.

@@ -43,7 +43,7 @@ pub enum DragMode {
     Rows,
 }
 
-fn with_app(f: impl FnOnce(&Rc<App>)) {
+pub(crate) fn with_app(f: impl FnOnce(&Rc<App>)) {
     APP.with(|app| {
         if let Some(app) = app.borrow().as_ref() {
             f(app);

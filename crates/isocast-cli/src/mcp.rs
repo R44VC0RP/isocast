@@ -1187,6 +1187,21 @@ impl Isocast {
     }
 
     #[tool(
+        description = "Remove Isocast Virtual Camera from macOS (the release app's camera extension), for deleting Isocast cleanly: stops the camera, then macOS asks the user for an administrator password; waits for it (up to about 4 minutes). Ask the user first. A later virtual_camera_start installs it again.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true
+        )
+    )]
+    async fn virtual_camera_remove(
+        &self,
+        Parameters(Strict(_)): Parameters<Strict<CameraNoArgs>>,
+    ) -> Result<Json<isocast_protocol::virtual_camera::VirtualCameraRemoval>, String> {
+        self.call(Method::VirtualCameraRemove).await
+    }
+
+    #[tool(
         description = "Developer mode, for testing a build locally. With no arguments, read it: \
                        whether the current profile has it on, whether isocastd is writing its \
                        verbose records and traces, when it turns itself off, its logs folder and \

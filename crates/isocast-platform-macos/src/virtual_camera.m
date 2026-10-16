@@ -181,6 +181,12 @@ int32_t isocast_camera_validate(CVPixelBufferRef pixels, int64_t pts, uint32_t f
     return valid ? 0 : -2;
 }
 
+static int32_t probe_result(NSDictionary *values, int32_t status) {
+    NSData *json = [NSJSONSerialization dataWithJSONObject:values options:NSJSONWritingSortedKeys error:nil];
+    if (json) { fwrite(json.bytes, 1, json.length, stdout); fputc('\n', stdout); }
+    return status;
+}
+
 @interface IsocastCameraActivation : NSObject <OSSystemExtensionRequestDelegate>
 @property BOOL done;
 @property int result;
@@ -223,33 +229,152 @@ int32_t isocast_camera_validate(CVPixelBufferRef pixels, int64_t pts, uint32_t f
         self.result = 0; self.done = YES;
         return;
     }
+    if ([error.domain isEqualToString:OSSystemExtensionErrorDomain] && error.code == OSSystemExtensionErrorAuthorizationRequired) {
+        // Seen from an engine started over ssh: no login session to ask in.
+        fprintf(stderr, "Isocast camera %s failed: macOS couldn't ask for an administrator password (run it from the Mac's logged-in session)\n", self.activating ? "activation" : "deactivation");
+        self.result = 1; self.done = YES;
+        return;
+    }
     fprintf(stderr, "Isocast camera %s failed: %s\n", self.activating ? "activation" : "deactivation", error.localizedDescription.UTF8String);
     self.result = 1; self.done = YES;
 }
 @end
 
+// What sysextd knows about this app's camera extension (#69): every build
+// it has activated or is waiting on, from an OSSystemExtensionRequest for
+// properties (macOS 12+), which needs this process's main run loop.
+@interface IsocastCameraProperties : NSObject <OSSystemExtensionRequestDelegate>
+@property BOOL done;
+@property NSArray<OSSystemExtensionProperties *> *found;
+@property NSError *error;
+@end
+@implementation IsocastCameraProperties
+- (void)requestNeedsUserApproval:(OSSystemExtensionRequest *)request { (void)request; }
+- (OSSystemExtensionReplacementAction)request:(OSSystemExtensionRequest *)request actionForReplacingExtension:(OSSystemExtensionProperties *)existing withExtension:(OSSystemExtensionProperties *)extension {
+    (void)request; (void)existing; (void)extension; return OSSystemExtensionReplacementActionCancel;
+}
+- (void)request:(OSSystemExtensionRequest *)request foundProperties:(NSArray<OSSystemExtensionProperties *> *)properties {
+    (void)request; self.found = properties; self.done = YES;
+}
+- (void)request:(OSSystemExtensionRequest *)request didFinishWithResult:(OSSystemExtensionRequestResult)result {
+    (void)request; (void)result; self.done = YES;
+}
+- (void)request:(OSSystemExtensionRequest *)request didFailWithError:(NSError *)error {
+    (void)request; self.error = error; self.done = YES;
+}
+@end
+
+static NSString *embedded_version(void) {
+    NSURL *url = [[NSBundle mainBundle].bundleURL URLByAppendingPathComponent:@"Contents/Library/SystemExtensions/dev.isocast.isocastd.camera.systemextension"];
+    return [[NSBundle bundleWithURL:url] objectForInfoDictionaryKey:@"CFBundleVersion"];
+}
+
+static NSArray<OSSystemExtensionProperties *> *camera_properties(NSError **error) {
+    IsocastCameraProperties *delegate = [IsocastCameraProperties new];
+    OSSystemExtensionRequest *request = [OSSystemExtensionRequest propertiesRequestForExtension:@"dev.isocast.isocastd.camera" queue:dispatch_get_main_queue()];
+    request.delegate = delegate;
+    [[OSSystemExtensionManager sharedManager] submitRequest:request];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:15];
+    while (!delegate.done && deadline.timeIntervalSinceNow > 0) [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    if (!delegate.done) {
+        *error = [NSError errorWithDomain:@"dev.isocast" code:1 userInfo:@{NSLocalizedDescriptionKey: @"macOS didn't answer in 15 s"}];
+        return nil;
+    }
+    *error = delegate.error;
+    return delegate.error ? nil : (delegate.found ?: @[]);
+}
+
+// The activated build that isn't this app's, if one is enabled and none of
+// this app's build is: an update replaced the app but not the extension.
+static NSString *outdated_version(NSArray<OSSystemExtensionProperties *> *found, NSString *embedded) {
+    NSString *other = nil;
+    for (OSSystemExtensionProperties *p in found) {
+        if (!p.isEnabled || p.isUninstalling) continue;
+        if ([p.bundleVersion isEqualToString:embedded]) return nil;
+        other = p.bundleVersion;
+    }
+    return other;
+}
+
+// `isocastd --camera-extension-state`: one JSON line. state is current
+// (this build is enabled), outdated (another build is), waiting (macOS
+// waits for the user's approval) or absent.
+int32_t isocast_camera_state(void) {
+    @autoreleasepool {
+        NSString *embedded = embedded_version();
+        if (!embedded) return probe_result(@{@"error": @"this engine doesn't carry the camera extension"}, 1);
+        NSError *error = nil;
+        NSArray<OSSystemExtensionProperties *> *found = camera_properties(&error);
+        if (!found) return probe_result(@{@"error": error.localizedDescription ?: @"properties request failed"}, 1);
+        NSMutableArray *builds = [NSMutableArray array];
+        NSString *state = @"absent";
+        BOOL current = NO, waiting = NO, enabled = NO;
+        for (OSSystemExtensionProperties *p in found) {
+            [builds addObject:@{@"version": p.bundleVersion ?: @"", @"short_version": p.bundleShortVersion ?: @"",
+                @"enabled": @(p.isEnabled), @"awaiting_approval": @(p.isAwaitingUserApproval), @"uninstalling": @(p.isUninstalling)}];
+            if (p.isUninstalling) continue;
+            if (p.isEnabled) { enabled = YES; if ([p.bundleVersion isEqualToString:embedded]) current = YES; }
+            if (p.isAwaitingUserApproval) waiting = YES;
+        }
+        if (current) state = @"current";
+        else if (enabled) state = @"outdated";
+        else if (waiting) state = @"waiting";
+        return probe_result(@{@"state": state, @"embedded_version": embedded, @"builds": builds}, 0);
+    }
+}
+
 // wait: keep waiting (up to 15 minutes) after macOS asks the user to approve,
 // printing "needs-approval" on stdout first; otherwise return 2 at once.
+static int32_t camera_request(bool activate, bool wait) {
+    IsocastCameraActivation *delegate = [IsocastCameraActivation new];
+    delegate.activating = activate;
+    delegate.waitForApproval = wait;
+    OSSystemExtensionRequest *request = activate
+        ? [OSSystemExtensionRequest activationRequestForExtension:@"dev.isocast.isocastd.camera" queue:dispatch_get_main_queue()]
+        : [OSSystemExtensionRequest deactivationRequestForExtension:@"dev.isocast.isocastd.camera" queue:dispatch_get_main_queue()];
+    request.delegate = delegate;
+    [[OSSystemExtensionManager sharedManager] submitRequest:request];
+    // Deactivation asks for an administrator password first (macOS 26.7):
+    // give the person time to type it before giving up.
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:wait ? 900 : activate ? 30 : 180];
+    while (!delegate.done && deadline.timeIntervalSinceNow > 0) [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    if (!delegate.done) { fprintf(stderr, "Isocast camera request timed out; check System Settings and retry --check.\n"); return 2; }
+    return delegate.result;
+}
+
 int32_t isocast_camera_manage(bool activate, bool wait) {
     @autoreleasepool {
         if (![[NSBundle mainBundle].bundlePath hasPrefix:@"/Applications/"]) {
             fprintf(stderr, "Install the signed Isocast host app in /Applications first; see docs/virtual-camera.md.\n");
             return 1;
         }
-        IsocastCameraActivation *delegate = [IsocastCameraActivation new];
-        delegate.activating = activate;
-        delegate.waitForApproval = wait;
-        OSSystemExtensionRequest *request = activate
-            ? [OSSystemExtensionRequest activationRequestForExtension:@"dev.isocast.isocastd.camera" queue:dispatch_get_main_queue()]
-            : [OSSystemExtensionRequest deactivationRequestForExtension:@"dev.isocast.isocastd.camera" queue:dispatch_get_main_queue()];
-        request.delegate = delegate;
-        [[OSSystemExtensionManager sharedManager] submitRequest:request];
-        // Deactivation asks for an administrator password first (macOS 26.7):
-        // give the person time to type it before giving up.
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:wait ? 900 : activate ? 30 : 180];
-        while (!delegate.done && deadline.timeIntervalSinceNow > 0) [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
-        if (!delegate.done) { fprintf(stderr, "Isocast camera request timed out; check System Settings and retry --check.\n"); return 2; }
-        return delegate.result;
+        if (!activate) {
+            // macOS only deactivates the build this app carries ("not
+            // found" otherwise): after an update, replace the active older
+            // build first (no approval needed), then remove it (#69).
+            NSString *embedded = embedded_version();
+            NSError *error = nil;
+            NSArray<OSSystemExtensionProperties *> *found = embedded ? camera_properties(&error) : nil;
+            NSString *outdated = found ? outdated_version(found, embedded) : nil;
+            BOOL present = NO;
+            for (OSSystemExtensionProperties *p in found) {
+                if (!p.isUninstalling && (p.isEnabled || p.isAwaitingUserApproval)) present = YES;
+            }
+            if (found && !present) {
+                // Nothing to remove: don't ask for a password for nothing.
+                fprintf(stderr, "Isocast camera is already absent.\n");
+                return 0;
+            }
+            if (outdated) {
+                fprintf(stderr, "Isocast camera build %s is active; replacing it with this app's build %s before removing it.\n", outdated.UTF8String, embedded.UTF8String);
+                int32_t replaced = camera_request(true, false);
+                if (replaced) {
+                    fprintf(stderr, "Isocast camera deactivation failed: couldn't replace the active build %s with this app's (%d)\n", outdated.UTF8String, replaced);
+                    return 1;
+                }
+            }
+        }
+        return camera_request(activate, wait);
     }
 }
 
@@ -296,12 +421,6 @@ int32_t isocast_camera_manage(bool activate, bool wait) {
     }
 }
 @end
-
-static int32_t probe_result(NSDictionary *values, int32_t status) {
-    NSData *json = [NSJSONSerialization dataWithJSONObject:values options:NSJSONWritingSortedKeys error:nil];
-    if (json) { fwrite(json.bytes, 1, json.length, stdout); fputc('\n', stdout); }
-    return status;
-}
 
 int32_t isocast_camera_probe(bool capture) {
     @autoreleasepool {

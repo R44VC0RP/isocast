@@ -22,6 +22,7 @@ unsafe extern "C" {
     fn isocast_camera_auth_parent(fd: i32) -> bool;
     fn isocast_camera_manage(activate: bool, wait: bool) -> i32;
     fn isocast_camera_probe(capture: bool) -> i32;
+    fn isocast_camera_state() -> i32;
 }
 
 /// `wait`: after macOS asks for approval, print `needs-approval` and keep
@@ -34,6 +35,165 @@ pub fn activate(wait: bool) -> i32 {
 pub fn deactivate() -> i32 {
     // SAFETY: the maintenance entry point runs on the process's main thread.
     unsafe { isocast_camera_manage(false, false) }
+}
+
+/// `isocastd --camera-extension-state`: print what sysextd knows about the
+/// embedded extension as one JSON line (see [`extension_state`]).
+pub fn print_state() -> i32 {
+    // SAFETY: the maintenance entry point runs on the process's main thread.
+    unsafe { isocast_camera_state() }
+}
+
+/// What macOS has activated of the camera extension this engine carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtensionState {
+    /// This engine's build is enabled.
+    Current,
+    /// Another build is enabled (an update replaced the app, not the
+    /// extension): `active` is its CFBundleVersion, `embedded` this one's.
+    Outdated { active: String, embedded: String },
+    /// macOS waits for the user to allow it.
+    Waiting,
+    /// Not activated.
+    Absent,
+}
+
+/// Ask sysextd (from a child with its own run loop, as for activation)
+/// which builds of the embedded camera extension it has activated.
+pub fn extension_state() -> Result<ExtensionState, String> {
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let output = run_with_deadline(
+        std::process::Command::new(exe).arg("--camera-extension-state"),
+        std::time::Duration::from_secs(20),
+    )?;
+    let line: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("unreadable extension state ({error})"))?;
+    if let Some(error) = line["error"].as_str() {
+        return Err(error.to_owned());
+    }
+    Ok(match line["state"].as_str() {
+        Some("current") => ExtensionState::Current,
+        Some("waiting") => ExtensionState::Waiting,
+        Some("absent") => ExtensionState::Absent,
+        Some("outdated") => ExtensionState::Outdated {
+            active: line["builds"]
+                .as_array()
+                .and_then(|builds| {
+                    builds
+                        .iter()
+                        .find(|b| b["enabled"] == true && b["uninstalling"] != true)
+                })
+                .and_then(|b| b["version"].as_str())
+                .unwrap_or("?")
+                .to_owned(),
+            embedded: line["embedded_version"].as_str().unwrap_or("?").to_owned(),
+        },
+        other => return Err(format!("unknown extension state {other:?}")),
+    })
+}
+
+/// How a removal ended (see [`request_deactivation`]).
+pub enum Deactivation {
+    /// macOS removed it.
+    Removed,
+    /// Nothing was active to remove.
+    Absent,
+    /// macOS finishes removing it at the next restart.
+    RestartNeeded,
+    Failed(String),
+}
+
+/// Ask macOS to deactivate the embedded camera extension (it asks for an
+/// administrator password), from a child of this executable; waits for the
+/// answer, at most a little over the child's own 180 s for the password
+/// (plus a replacement of an older active build first, see virtual_camera.m).
+pub fn request_deactivation() -> Deactivation {
+    if embedded_extension().is_none() {
+        return Deactivation::Failed(
+            "virtual_camera: this engine doesn't carry the camera extension; remove a development install with scripts/vcam-uninstall.sh".into(),
+        );
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => return Deactivation::Failed(format!("virtual_camera: {error}")),
+    };
+    let output = match run_with_deadline(
+        std::process::Command::new(exe).arg("--uninstall-camera-extension"),
+        std::time::Duration::from_secs(260),
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            return Deactivation::Failed(format!(
+                "virtual_camera: macOS didn't remove Isocast Virtual Camera ({error}; no administrator password?)"
+            ));
+        }
+    };
+    let said = String::from_utf8_lossy(&output.stderr);
+    let said = said.lines().last().unwrap_or("").trim();
+    let said = said
+        .strip_prefix("Isocast camera deactivation failed: ")
+        .unwrap_or(said);
+    match output.status.code() {
+        Some(0) if said.contains("already absent") => Deactivation::Absent,
+        Some(0) => Deactivation::Removed,
+        Some(2) if said.starts_with("Restart macOS") => Deactivation::RestartNeeded,
+        Some(2) => Deactivation::Failed(
+            "virtual_camera: macOS didn't remove Isocast Virtual Camera (no administrator password in 3 minutes); try again".into(),
+        ),
+        _ => Deactivation::Failed(format!(
+            "virtual_camera: macOS couldn't remove Isocast Virtual Camera: {said}"
+        )),
+    }
+}
+
+/// Run a maintenance child to completion, killing it after `deadline`.
+fn run_with_deadline(
+    command: &mut std::process::Command,
+    deadline: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("couldn't ask macOS: {error}"))?;
+    let mut stdout = child.stdout.take().expect("piped");
+    let mut stderr = child.stderr.take().expect("piped");
+    let out = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let err = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes);
+        bytes
+    });
+    let end = std::time::Instant::now() + deadline;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < end => {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "macOS didn't answer in {} s; try again",
+                    deadline.as_secs()
+                ));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
 }
 
 /// Part of the error a Start returns when no Isocast camera is published

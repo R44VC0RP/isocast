@@ -39,7 +39,7 @@ pub const STATES: &[&str] = &[
     "toast-drops",
     "toast-overload[:fits|EVENT.json]",
     "transition:KIND",
-    "vcam[:missing|approval|running|failed]",
+    "vcam[:missing|approval|running|failed|removable]",
     "replay[:running|failed|saved]",
     "pause",
     "resume",
@@ -199,6 +199,12 @@ impl Area for Controls {
         area.on_save_replay(move || {
             if let Some(app) = weak.upgrade() {
                 save_replay(&app);
+            }
+        });
+        let weak = Rc::downgrade(app);
+        area.on_remove_vcam(move || {
+            if let Some(app) = weak.upgrade() {
+                remove_vcam(&app);
             }
         });
         let weak = Rc::downgrade(app);
@@ -2073,6 +2079,8 @@ fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
         .into(),
     );
     area.set_busy_vcam(s.busy_vcam);
+    area.set_vcam_removable(status.is_some_and(|x| x.removable));
+    area.set_vcam_removing(s.removing_vcam);
     let error = status
         .and_then(|x| x.last_error.clone())
         .unwrap_or_default();
@@ -2231,6 +2239,65 @@ fn toggle_vcam(app: &Rc<App>) {
     });
 }
 
+/// Remove the camera extension from macOS (#69). The engine waits for
+/// macOS's password prompt (minutes, perhaps), so the call goes on its own
+/// connection and thread: the app's other calls don't queue behind it.
+fn remove_vcam(app: &Rc<App>) {
+    {
+        let mut s = app.session.borrow_mut();
+        if s.busy_vcam {
+            return;
+        }
+        s.busy_vcam = true;
+        s.removing_vcam = true;
+    }
+    app.changed(Changed::BUSY | Changed::VCAM);
+    std::thread::spawn(|| {
+        let result = crate::daemon::connect()
+            .and_then(|mut client| {
+                client.call::<isocast_protocol::virtual_camera::VirtualCameraRemoval>(
+                    Method::VirtualCameraRemove,
+                )
+            })
+            .map_err(|error| {
+                error
+                    .downcast_ref::<isocast_client::DaemonError>()
+                    .map_or_else(|| format!("{error:#}"), |e| e.0.message.clone())
+            });
+        let _ = slint::invoke_from_event_loop(move || {
+            crate::window::with_app(|app| {
+                {
+                    let mut s = app.session.borrow_mut();
+                    s.busy_vcam = false;
+                    s.removing_vcam = false;
+                }
+                match result {
+                    Ok(removal) => {
+                        app.toast(
+                            ToastKind::Info,
+                            if removal.restart_needed {
+                                "Restart to finish removing the virtual camera"
+                            } else {
+                                "Virtual camera removed"
+                            },
+                            removal.message,
+                        );
+                    }
+                    Err(message) => {
+                        app.toast(
+                            ToastKind::Error,
+                            "Couldn’t remove the virtual camera",
+                            message,
+                        );
+                    }
+                }
+                app.refresh_status(true);
+                app.changed(Changed::BUSY | Changed::VCAM);
+            })
+        });
+    });
+}
+
 /// Change the camera's output in the live setup (`virtual_camera`): the
 /// engine takes it while the camera is off.
 fn set_vcam(app: &Rc<App>, field: &str, value: &str) {
@@ -2267,7 +2334,8 @@ fn set_vcam(app: &Rc<App>, field: &str, value: &str) {
 }
 
 /// The camera's status for snapshots: `missing` (a start found no
-/// extension), `running` (an hour of frames), `failed` (another reason).
+/// extension), `running` (an hour of frames), `failed` (another reason),
+/// `removable` (a release engine's, with Remove Virtual Camera).
 fn sample_vcam(app: &Rc<App>, which: &str) -> anyhow::Result<VirtualCameraStatus> {
     let s = app.session.borrow();
     let mut status = s.vcam.clone().unwrap_or_default();
@@ -2290,7 +2358,15 @@ fn sample_vcam(app: &Rc<App>, which: &str) -> anyhow::Result<VirtualCameraStatus
             status.state = VirtualCameraState::Failed;
             status.last_error = Some("virtual_camera.width: give an advertised size: 1920x1080, 1280x720, 2560x1440, 3840x2160, 1080x1920, 720x1280".into());
         }
-        other => anyhow::bail!("vcam takes missing, approval, running or failed, not {other:?}"),
+        // A release engine (it carries the extension): Remove is offered.
+        "removable" => {
+            status.state = VirtualCameraState::Stopped;
+            status.last_error = None;
+            status.removable = true;
+        }
+        other => anyhow::bail!(
+            "vcam takes missing, approval, running, failed or removable, not {other:?}"
+        ),
     }
     Ok(status)
 }

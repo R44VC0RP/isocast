@@ -829,6 +829,10 @@ native app; each verified against OBS's behaviour on a test Mac.
       the app explains the System Settings approval.
     - [ ] Developer ID activation on a test Mac, camera clients,
       coexistence and removal (needs Ryan's two profiles).
+    - [x] Follow-ups (#69): Start replaces an older active extension
+      build after an update; Remove Virtual Camera (API/CLI/MCP/popover)
+      deactivates it, replacing an older build first; the approval alert's
+      name and the nonce idea are documented as not possible.
   - [ ] **G.1b Installed camera qualification (needs Ryan).** Apple-team
     signing and explicit activation/approval, then actual camera clients,
     multi-client buffer lifetime, extension CPU/GPU and client latency.
@@ -3726,3 +3730,14 @@ One line per finished task, newest last.
   text_web pass with zero program/stream drops and threads/fds back to
   baseline. isos, cycles and disk fail on engine bugs (scratch
   /Volumes/IsocastBuild/stress-suite/scratch/REPORT.md).
+- G.1 follow-ups (2026-10-16, #69): after an update Start asks macOS to
+  activate the app's extension build when another is active, and
+  `virtual_camera_remove` / `isocast vcam remove` / MCP / the camera
+  popover's Remove Virtual Camera… deactivate it. Verified on isocast-m2-b
+  with two notarized Developer ID builds: build A approved and live
+  (149/149 distinct frames), app replaced by B → Start replaced the active
+  build in 1.3 s with no prompt (151/151 distinct); B active, app downgraded
+  to A → remove replaced then deactivated it (one password), camera gone
+  from AVFoundation. The approval alert names the executable and the
+  extension runs as _cmiodalassistants, so neither the rename nor a nonce
+  check is possible (docs/virtual-camera.md).

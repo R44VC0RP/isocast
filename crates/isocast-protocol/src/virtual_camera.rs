@@ -186,4 +186,17 @@ pub struct VirtualCameraStatus {
     pub last_error: Option<String>,
     /// Host-clock picture timestamp to sink enqueue, not camera-client latency.
     pub enqueue_latency_us: crate::api::Percentiles,
+    /// This engine carries the camera extension (the release app), so
+    /// `virtual_camera_remove` can take it out of macOS.
+    #[serde(default)]
+    pub removable: bool,
+}
+
+/// What `virtual_camera_remove` did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VirtualCameraRemoval {
+    /// macOS finishes removing it when the Mac restarts.
+    pub restart_needed: bool,
+    /// What happened, in words for the user.
+    pub message: String,
 }
