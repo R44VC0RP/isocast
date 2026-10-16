@@ -95,6 +95,7 @@ mod hotkeys;
 mod library;
 mod optimize;
 mod plugins;
+mod projectors;
 mod projects;
 mod recovery;
 mod replay;
@@ -162,6 +163,7 @@ fn main() -> ExitCode {
             daemon.load_setup();
             daemon.recover_recordings();
             daemon.load_data();
+            daemon.load_projectors();
             diagnostics::start(&daemon);
             daemon.load_timelines();
             start_plugins(&daemon);
@@ -835,6 +837,8 @@ struct Daemon {
     starting: parking_lot::RwLock<()>,
     /// The obs-websocket compatibility server (`websocket_*`).
     websocket: websocket::Runtime,
+    /// Open projectors and where each view was last shown (`projector_*`).
+    projectors: projectors::ProjectorState,
 }
 
 /// isocastd's processor use, as `status` reports it: the share of all the
@@ -1406,6 +1410,10 @@ impl Daemon {
             Method::ReplayStop => self.replay_stop().and_then(to_json),
             Method::ReplaySave => self.replay_save().and_then(to_json),
             Method::ReplayStatus => to_json(self.replay_status()),
+            Method::ProjectorOpen(params) => self.projector_open(*params).and_then(to_json),
+            Method::ProjectorClose(params) => self.projector_close(params).and_then(to_json),
+            Method::ProjectorList => to_json(self.projector_list()),
+            Method::ProjectorPlace(params) => self.projector_place(*params).and_then(to_json),
             Method::WebsocketStatus => to_json(self.websocket.status()),
             Method::WebsocketEnable(params) => self
                 .websocket
@@ -1520,6 +1528,25 @@ impl Daemon {
             debug::sync(self, "setup changed");
         }
         diagnostics::event(&event);
+        // A display went away: full-screen projectors on it close (after
+        // this event goes out).
+        let display_gone = match &event {
+            Event::DeviceChanged {
+                action: isocast_protocol::api::DeviceAction::Removed,
+                kind: isocast_protocol::api::DeviceKind::Display,
+                id,
+                name,
+            } => Some((id.clone(), name.clone())),
+            _ => None,
+        };
+        self.send_event(event);
+        if let Some((id, name)) = display_gone {
+            self.projectors_display_gone(&id, &name);
+        }
+    }
+
+    /// Hand `event` to the watchers that want it.
+    fn send_event(&self, event: Event) {
         let mut watchers = self.watchers.lock();
         // Nobody wants it (no one watches, or every watcher left its kind
         // out): not even serialized.

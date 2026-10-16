@@ -59,7 +59,7 @@ libc = "0.2"
 # The NSEvent key monitor's handler (src/keys.rs: focused hotkeys).
 block2 = "0.6.2"
 objc2 = "0.6.5"
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFString", "CFUUID"] }
 # CGImage and CGContext: the Create view's clip thumbnails (src/thumbs.rs).
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGColor", "CGColorSpace", "CGContext", "CGImage"] }
 objc2-io-surface = { version = "0.3.2", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "libc", "objc2-core-foundation"] }

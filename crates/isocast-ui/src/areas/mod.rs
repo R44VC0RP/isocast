@@ -77,6 +77,7 @@ pub mod hotkeys;
 pub mod library;
 pub mod mixer;
 pub mod permissions;
+pub mod projectors;
 pub mod report;
 pub mod settings;
 pub mod sources;
@@ -103,6 +104,7 @@ pub const STATES: &[&[&str]] = &[
     developer::STATES,
     permissions::STATES,
     wizard::STATES,
+    projectors::STATES,
 ];
 
 /// What `App` asks of an area. Everything but `connect` and `update` has

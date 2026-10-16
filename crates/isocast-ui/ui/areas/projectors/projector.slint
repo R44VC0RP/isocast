@@ -1,0 +1,192 @@
+// Projectors (G.4, #19): a window showing the program, the preview, a
+// scene or a source as large as fits (full screen on a display, or
+// windowed), or the multiview: a grid of the preview, the program and the
+// scenes, each with its viewer line (a tag and the scene's name, as Studio
+// Mode's monitors have) and tally (red on program, green on preview, as
+// broadcast multiviews and OBS have them). A click on a scene stages it in
+// Studio Mode (cuts to it otherwise); a double click takes it.
+// src/areas/projectors.rs fills it; every window has its own properties.
+import { Theme } from "../../theme.slint";
+
+export struct ProjectorTile {
+    // Where, as fractions of the grid.
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    picture: image,
+    // The picture has arrived (else `empty` shows).
+    shown: bool,
+    // The viewer line: a tag (PVW, PGM, or the scene's number) and a name.
+    tag: string,
+    name: string,
+    // 1: on preview (green), 2: on program (red), 0: neither.
+    tally: int,
+    // Studio Mode's guides: the action-safe (90%) and title-safe (80%)
+    // areas.
+    safe: bool,
+    empty: string,
+}
+
+export component ProjectorWindow inherits Window {
+    in property <string> heading;
+    in property <[ProjectorTile]> tiles;
+    // A multiview: tiles with viewer lines and gaps; else one picture
+    // edge to edge.
+    in property <bool> multiview;
+    in property <float> aspect: 16 / 9;
+    // It covers a display (full screen): no title bar.
+    in property <bool> covering;
+    callback tile-clicked(int);
+    callback tile-double-clicked(int);
+    // Escape, F (full screen), ⌘W, 1–9.
+    callback key(string);
+
+    title: root.heading;
+    no-frame: root.covering;
+    preferred-width: 960px;
+    preferred-height: root.multiview ? 600px : 540px;
+    min-width: 240px;
+    min-height: 135px;
+    background: root.multiview ? Theme.surface-stage : Theme.surface-monitor;
+    default-font-size: Theme.fs;
+    default-font-family: Theme.font-ui;
+    default-font-weight: Theme.weight-regular;
+    forward-focus: keys;
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if event.modifiers.control && (event.text == "w" || event.text == "W") {
+                root.key("close");
+                return accept;
+            }
+            if event.modifiers.control || event.modifiers.meta || event.modifiers.alt {
+                return reject;
+            }
+            if event.text == Key.Escape { root.key("escape"); return accept; }
+            if event.text == "f" || event.text == "F" { root.key("fullscreen"); return accept; }
+            if event.text >= "1" && event.text <= "9" && event.text.character-count == 1 {
+                root.key("scene:" + event.text);
+                return accept;
+            }
+            reject
+        }
+
+        for tile[index] in root.tiles: cell := Rectangle {
+            // A multiview's tiles sit 4px apart and 4px in; each has its
+            // viewer line above the picture.
+            property <length> gap: root.multiview ? Theme.space-1 : 0px;
+            property <length> head: root.multiview ? Theme.statusbar : 0px;
+            property <length> cell-x: tile.x * (root.width - self.gap) + self.gap;
+            property <length> cell-y: tile.y * (root.height - self.gap) + self.gap;
+            property <length> cell-w: tile.w * (root.width - self.gap) - self.gap;
+            property <length> cell-h: tile.h * (root.height - self.gap) - self.gap;
+            // The picture, as large as fits under its viewer line, centred.
+            property <length> room-h: max(0px, self.cell-h - self.head);
+            property <length> pic-w: min(self.cell-w, self.room-h * root.aspect);
+            property <length> pic-h: self.pic-w / root.aspect;
+            property <length> pic-x: (self.cell-w - self.pic-w) / 2;
+            property <length> pic-y: self.head + (self.room-h - self.pic-h) / 2;
+            property <color> tally-color: tile.tally == 2 ? Theme.danger : tile.tally == 1 ? Theme.onair : transparent;
+
+            x: self.cell-x;
+            y: self.cell-y;
+            width: self.cell-w;
+            height: self.cell-h;
+            accessible-role: button;
+            accessible-label: tile.tag + " " + tile.name;
+
+            if root.multiview: HorizontalLayout {
+                x: cell.pic-x;
+                y: cell.pic-y - cell.head;
+                width: cell.pic-w;
+                height: cell.head;
+                padding-left: 2px;
+                padding-right: 2px;
+                spacing: Theme.space-2;
+                Text {
+                    text: tile.tag;
+                    color: tile.tally == 2 ? Theme.danger-text : tile.tally == 1 ? Theme.onair-text : Theme.text-3;
+                    font-family: tile.tag == "PGM" || tile.tag == "PVW" ? Theme.font-brand : Theme.font-mono;
+                    font-size: Theme.fs-micro;
+                    font-weight: tile.tag == "PGM" || tile.tag == "PVW" ? Theme.weight-semibold : Theme.weight-light;
+                    letter-spacing: tile.tag == "PGM" || tile.tag == "PVW" ? Theme.tracking-tag : Theme.tracking-mono;
+                    vertical-alignment: center;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: tile.name;
+                    color: Theme.text;
+                    font-size: Theme.fs-sm;
+                    font-weight: Theme.weight-medium;
+                    letter-spacing: Theme.tracking-sm;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            Rectangle {
+                x: cell.pic-x;
+                y: cell.pic-y;
+                width: cell.pic-w;
+                height: cell.pic-h;
+                // A cell with no scene to show: quieter than a picture.
+                background: root.multiview && tile.tag == "" ? Theme.surface-panel : Theme.surface-monitor;
+                clip: true;
+
+                Image {
+                    width: 100%;
+                    height: 100%;
+                    source: tile.picture;
+                    image-fit: contain;
+                    visible: tile.shown;
+                }
+                if !tile.shown && tile.empty != "": Text {
+                    text: tile.empty;
+                    color: Theme.text-3;
+                    font-size: root.multiview ? Theme.fs-sm : Theme.fs;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    wrap: word-wrap;
+                    width: parent.width - 2 * Theme.space-2;
+                }
+                if tile.safe: Rectangle {
+                    x: parent.width * 0.05;
+                    y: parent.height * 0.05;
+                    width: parent.width * 0.9;
+                    height: parent.height * 0.9;
+                    border-width: 1px;
+                    border-color: #ffffff33;
+                }
+                if tile.safe: Rectangle {
+                    x: parent.width * 0.1;
+                    y: parent.height * 0.1;
+                    width: parent.width * 0.8;
+                    height: parent.height * 0.8;
+                    border-width: 1px;
+                    border-color: #ffffff1f;
+                }
+                // Tally: a 3px ring inside the picture's edge.
+                if tile.tally != 0: Rectangle {
+                    border-width: 3px;
+                    border-color: cell.tally-color;
+                }
+            }
+
+            TouchArea {
+                clicked => { root.tile-clicked(index); }
+                double-clicked => { root.tile-double-clicked(index); }
+            }
+        }
+    }
+}
+
+// The displays a projector can fill, for the menus (View › Projectors).
+export struct ProjectorDisplay {
+    id: string,
+    name: string,
+}
+
+export global ProjectorsArea {
+    in property <[ProjectorDisplay]> displays;
+}

@@ -186,6 +186,7 @@ pub fn run(options: &Options) -> Result<()> {
     let canvas = areas::canvas::Canvas::new(&gpu, clock, true);
     let hub = App::new(&app, commands, Mode { offscreen: true }, canvas);
     hub.sources.set_device(gpu.device.clone());
+    hub.projectors.set_device(gpu.device.clone());
 
     let mut offscreen = Offscreen {
         gpu,
@@ -552,6 +553,8 @@ impl Offscreen {
     fn drawn(&self) -> Rc<OffscreenWindow> {
         match self.others.borrow().last() {
             Some(editor) if self.hub.create.editor_open() => editor.clone(),
+            // A projector (G.4), the newest window made.
+            Some(projector) if self.hub.projectors.any_open() => projector.clone(),
             _ => self.window.clone(),
         }
     }

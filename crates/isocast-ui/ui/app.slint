@@ -46,6 +46,7 @@ import { PermissionsArea } from "areas/permissions/state.slint";
 import { PermissionsSheet } from "areas/permissions/sheet.slint";
 import { WizardArea } from "areas/wizard/state.slint";
 import { WizardSheet } from "areas/wizard/sheet.slint";
+import { ProjectorsArea } from "areas/projectors/projector.slint";
 
 // What Rust sees: the globals and the structs in their models.
 export { Theme, Ui, ConnectionState, Menus, Toasts, EditCommands, SettingsForms }
@@ -56,6 +57,7 @@ export { StatRow, OutputStat } from "areas/developer/state.slint";
 export { PermissionsArea, PermissionItem } from "areas/permissions/state.slint";
 export { WizardArea, ObsCollectionRow, ChangeRow } from "areas/wizard/state.slint";
 export { QuitPrompt }
+export { ProjectorsArea, ProjectorDisplay, ProjectorTile, ProjectorWindow } from "areas/projectors/projector.slint";
 export { DropdownOption, MenuEntry, MenuList, MenuEntryKind, NavTab, Segment, ToastData, ToastRow, ToastKind, FormField, FormGroup } from "kit.slint";
 export { SceneRow, ItemRow, FilterRow, PickRow } from "areas/sources/state.slint";
 export { Strip, Level, AudioRow } from "areas/mixer/state.slint";
@@ -509,6 +511,34 @@ export component AppWindow inherits Window {
             title: "View";
             MenuItem { title: "Studio Mode"; shortcut: @keys(Control + Shift + S); checkable: true; checked: Ui.studio; activated => { Ui.menu("studio_mode"); } }
             MenuItem { title: "Create"; shortcut: @keys(Control + Shift + C); checkable: true; checked: CreateArea.active; activated => { Ui.menu("create_view"); } }
+            MenuSeparator { }
+            // Projectors (G.4, src/areas/projectors.rs): each in a window,
+            // or full screen on a display.
+            Menu {
+                title: "Multiview";
+                MenuItem { title: "Windowed"; activated => { Ui.menu("projector|multiview||window"); } }
+                for display in ProjectorsArea.displays: MenuItem {
+                    title: "Full Screen on " + display.name;
+                    activated => { Ui.menu("projector|multiview||" + display.id); }
+                }
+            }
+            Menu {
+                title: "Program Projector";
+                MenuItem { title: "Windowed"; activated => { Ui.menu("projector|program||window"); } }
+                for display in ProjectorsArea.displays: MenuItem {
+                    title: "Full Screen on " + display.name;
+                    activated => { Ui.menu("projector|program||" + display.id); }
+                }
+            }
+            Menu {
+                title: "Preview Projector";
+                MenuItem { title: "Windowed"; activated => { Ui.menu("projector|preview||window"); } }
+                for display in ProjectorsArea.displays: MenuItem {
+                    title: "Full Screen on " + display.name;
+                    activated => { Ui.menu("projector|preview||" + display.id); }
+                }
+            }
+            MenuItem { title: "Close All Projectors"; activated => { Ui.menu("projector_close_all"); } }
             MenuSeparator { }
             MenuItem { title: "Source Toolbar"; checkable: true; checked: Ui.show-source-toolbar; activated => { Ui.menu("source_toolbar"); } }
             MenuItem { title: "Status Bar"; checkable: true; checked: Ui.show-status-bar; activated => { Ui.menu("status_bar"); } }

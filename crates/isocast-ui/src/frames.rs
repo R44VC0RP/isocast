@@ -26,6 +26,8 @@ struct Want {
     width: u32,
     height: u32,
     fps: u32,
+    /// The receiving thread ends (`Feed::stop`).
+    stopped: bool,
 }
 
 /// The receiving thread's handle: change the target, the size or the rate.
@@ -51,6 +53,7 @@ impl Feed {
                 width,
                 height,
                 fps,
+                stopped: false,
             })),
             control: Arc::default(),
         };
@@ -70,6 +73,13 @@ impl Feed {
         }
         // The open stream ends at its next frame (or within 250 ms).
         want.target = target.map(str::to_string);
+    }
+
+    /// End the receiving thread (and its stream) for good.
+    pub fn stop(&self) {
+        let mut want = self.want.lock().unwrap();
+        want.stopped = true;
+        want.target = None;
     }
 
     /// Fit the picture in `width`×`height` pixels (a new ring of surfaces
@@ -102,6 +112,9 @@ impl Feed {
         let mut delay = Duration::from_millis(250);
         loop {
             let want = self.want.lock().unwrap().clone();
+            if want.stopped {
+                return;
+            }
             let Some(target) = want.target.clone() else {
                 thread::sleep(Duration::from_millis(50));
                 continue;

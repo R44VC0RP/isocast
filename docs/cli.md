@@ -119,6 +119,10 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast websocket status`](#isocast-websocket-status)
   - [`isocast websocket enable`](#isocast-websocket-enable)
   - [`isocast websocket disable`](#isocast-websocket-disable)
+- [`isocast projector`](#isocast-projector)
+  - [`isocast projector open`](#isocast-projector-open)
+  - [`isocast projector close`](#isocast-projector-close)
+  - [`isocast projector list`](#isocast-projector-list)
 - [`isocast vcam`](#isocast-vcam)
   - [`isocast vcam start`](#isocast-vcam-start)
   - [`isocast vcam stop`](#isocast-vcam-stop)
@@ -185,6 +189,7 @@ Commands:
   stream       Stream the program live over RTMP or RTMPS to the live setup's [stream] service, and keep its stream key in the Keychain
   replay       The replay buffer: keep the last seconds of the program in memory, and save them to a file on demand
   websocket    The obs-websocket v5 server, so OBS tools (Stream Deck, Touch Portal, Streamer.bot, scripts) drive Isocast. Off until enabled
+  projector    Projectors: the program, the preview, a scene, a source or a multiview grid, full screen on a display or in a window (the app shows them)
   vcam         Feed a picture to Isocast Virtual Camera (extension approval required once)
   debug        Developer mode, for testing a build locally: verbose logs of every API call and component, and frame timing traces while recording
   watch        Print events from isocastd as they happen, until Ctrl-C
@@ -2001,6 +2006,73 @@ Options:
   -h, --help  Print help
 ```
 
+## isocast projector
+
+```text
+Projectors: the program, the preview, a scene, a source or a multiview grid, full screen on a display or in a window (the app shows them)
+
+Usage: isocast projector <COMMAND>
+
+Commands:
+  open   Open a projector: the program, studio mode's preview, a scene, a video source or a multiview grid, full screen on a display or in a window. The app shows it (and opens it when it next starts if it isn't running). Opening a view that is open already moves it
+  close  Close a projector by id (`isocast projector list`), or all
+  list   The open projectors, where each is, and the displays
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## isocast projector open
+
+```text
+Open a projector: the program, studio mode's preview, a scene, a video source or a multiview grid, full screen on a display or in a window. The app shows it (and opens it when it next starts if it isn't running). Opening a view that is open already moves it
+
+Usage: isocast projector open [OPTIONS] <VIEW> [ID]
+
+Arguments:
+  <VIEW>  program, preview, scene, source or multiview [possible values: program, preview, scene, source, multiview]
+  [ID]    The scene's id (view scene) or the video source's id (view source)
+
+Options:
+      --display <DISPLAY>  Full screen on this display: `main`, a display's id or name (`isocast devices`)
+      --fullscreen         Full screen on the main display (or --display)
+      --window             In a window (where this view was last, unless --frame)
+      --frame <X,Y,W,H>    The window's place: X,Y,WIDTH,HEIGHT in points from the main display's top left
+      --layout <LAYOUT>    The multiview's grid: top-8 (the default), 3x3 or 2x2 [possible values: top-8, 3x3, 2x2]
+      --canvas <CANVAS>    The canvas (main)
+      --json               
+  -h, --help               Print help
+```
+
+## isocast projector close
+
+```text
+Close a projector by id (`isocast projector list`), or all
+
+Usage: isocast projector close [OPTIONS] [ID]
+
+Arguments:
+  [ID]  
+
+Options:
+      --all   
+      --json  
+  -h, --help  Print help
+```
+
+## isocast projector list
+
+```text
+The open projectors, where each is, and the displays
+
+Usage: isocast projector list [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
 ## isocast vcam
 
 ```text
@@ -2144,7 +2216,7 @@ Save the live engine's newest frame of the program (the default), studio mode's 
 Usage: isocast frame [OPTIONS] [TARGET]
 
 Arguments:
-  [TARGET]  `program`, `preview` or a source id [default: program]
+  [TARGET]  `program`, `preview`, `scene:ID` or a source id [default: program]
 
 Options:
   -o, --output <OUTPUT>  Where to save it; `<target>.jpg` if absent
@@ -2161,7 +2233,7 @@ Record what a monitor shows: the live engine's low-latency H.264 stream of the p
 Usage: isocast frames [OPTIONS] [TARGET]
 
 Arguments:
-  [TARGET]  `program`, `preview` or a source id [default: program]
+  [TARGET]  `program`, `preview`, `scene:ID` or a source id [default: program]
 
 Options:
   -o, --output <OUTPUT>    Where to save it; `<target>.h264` if absent

@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-94 tools. Arguments marked required must be given; ids, not names,
+97 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -80,6 +80,16 @@ Remove the stored stream key for a streaming service (the live setup's by defaul
 | `destination` | string (optional) | A destination ("main", or an id from get_status's streams). |
 | `server` | string (optional) | For "custom": the server the key belongs to. |
 | `service` | StreamService | The service; the live setup's [stream] service if absent. |
+
+## close_projector
+
+Close a projector by `id` (from list_projectors), or every one with `all`. Where each was is remembered for the next time its view opens. Returns the projectors still open.
+
+| Argument | Type | Description |
+|---|---|---|
+| `all` | boolean | Close every open projector. |
+| `id` | string (optional) | The projector's id (`projector_list`); absent with `all`. |
+| `reason` | string (optional) | Why, for the `projectors` event (the app says "the display was disconnected"). |
 
 ## close_timeline
 
@@ -332,6 +342,10 @@ List recording encoders with their display labels and supported containers. Use 
 
 The installed plugins: id, version, what they provide (a process, and kinds like twitch-chat/glow), state (ok, disabled, incompatible or failed, and why), their process (running or restarting, restarts, how it last ended, its log) and the permissions they were granted.
 
+## list_projectors
+
+The open projectors (what each shows, full screen on which display or where its window is, whether the app shows it) and the displays a projector can fill.
+
 ## list_projects
 
 The recording projects, newest first: each recording session writes into its own folder (`<date> <time> Untitled` in the recordings folder) with every take's program and ISO files, manifests and exports. Each has an id (stable across renames), name, folder, takes (manifests) and files. Optional `limit` (100 if absent).
@@ -386,6 +400,21 @@ Open System Settings on the user's screen at the pane where a permission (screen
 | Argument | Type | Description |
 |---|---|---|
 | `permission` (required) | PermissionKind | screen_recording, camera, microphone or system_audio. |
+
+## open_projector
+
+Open a projector: the program, studio mode's preview, a scene (`scene` id), a video source (`source` id) or a multiview grid (`layout`: top-8, 3x3 or 2x2; preview, program and scenes with labels and tally), full screen on a display (`fullscreen`, `display`: main, an id or a name from list_projectors) or in a window (`fullscreen` false, optional `frame` in points). The Isocast app shows it, and opens it when it next starts if it isn't running (`shown` says whether a window shows it). Opening a view that is already open moves it. Absent placement: where that view was last.
+
+| Argument | Type | Description |
+|---|---|---|
+| `canvas` | string (optional) | The canvas (`main`, the default). |
+| `display` | string (optional) | `main`, a display's id or its name (`isocast devices`). |
+| `frame` | Frame | The window's place (not full screen). Absent: where the same view was last, else the app picks. |
+| `fullscreen` | boolean (optional) | `true`: full screen on `display` (the main display if absent); `false`: in a window. Absent: where the same view was last (a window the first time), or full screen if `display` is given. |
+| `layout` | MultiviewLayout | The grid, for `view = multiview`: `top-8` (the default), `3x3` or `2x2`. |
+| `scene` | string (optional) | The scene's id, for `view = scene`. |
+| `source` | string (optional) | The video source's id, for `view = source`. |
+| `view` (required) | ProjectorView |  |
 
 ## open_timeline
 

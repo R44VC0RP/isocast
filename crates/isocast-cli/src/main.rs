@@ -33,6 +33,7 @@ mod mcp;
 mod optimize;
 mod plugin;
 mod project;
+mod projector;
 mod replay;
 #[cfg(target_os = "macos")]
 mod shared_frames;
@@ -543,6 +544,13 @@ enum Command {
         #[command(subcommand)]
         command: websocket::Command,
     },
+    /// Projectors: the program, the preview, a scene, a source or a
+    /// multiview grid, full screen on a display or in a window (the app
+    /// shows them).
+    Projector {
+        #[command(subcommand)]
+        command: projector::Command,
+    },
     /// Feed a picture to Isocast Virtual Camera (extension approval required once).
     Vcam {
         #[command(subcommand)]
@@ -578,7 +586,7 @@ enum Command {
     /// studio mode's preview, or a video source as a JPEG. Starts the engine
     /// if it isn't running.
     Frame {
-        /// `program`, `preview` or a source id.
+        /// `program`, `preview`, `scene:ID` or a source id.
         #[arg(default_value = "program")]
         target: String,
         /// Where to save it; `<target>.jpg` if absent.
@@ -595,7 +603,7 @@ enum Command {
     /// video source, saved as an H.264 elementary stream (Annex B, which
     /// ffprobe and ffplay read). Starts the engine if it isn't running.
     Frames {
-        /// `program`, `preview` or a source id.
+        /// `program`, `preview`, `scene:ID` or a source id.
         #[arg(default_value = "program")]
         target: String,
         /// Where to save it; `<target>.h264` if absent.
@@ -1417,6 +1425,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         },
         Command::Engine { command, json } => engine(command, json),
         Command::Vcam { command } => virtual_camera::run(command),
+        Command::Projector { command } => projector::run(command),
         Command::Replay { command } => replay::run(command),
         Command::Websocket { command } => websocket::run(command),
         Command::Debug { command } => debug::run(command),
@@ -3710,6 +3719,16 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                 serde_json::to_value(kind)?.as_str().unwrap_or_default(),
                 serde_json::to_value(action)?.as_str().unwrap_or_default()
             ),
+            Event::Projectors { projectors, reason } => {
+                if let Some(reason) = reason {
+                    println!("projector closed: {reason}");
+                }
+                println!("projectors: {} open", projectors.len());
+                for projector in &projectors {
+                    print!("  ");
+                    projector::print_one(projector);
+                }
+            }
             Event::EncoderOverload { overload } => {
                 println!(
                     "encoder overload in take {}: {}",

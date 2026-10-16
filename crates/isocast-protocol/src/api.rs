@@ -478,6 +478,23 @@ pub enum Method {
     /// timeline's length. One revision. Returns
     /// [`TimelineInfo`](crate::timeline::TimelineInfo).
     TimelineRoll(TimelineRollParams),
+    /// Open a projector (G.4): the program, studio mode's preview, a
+    /// scene, a video source or a multiview grid, full screen on a display
+    /// or in a window. The app shows it (and opens it when it next starts
+    /// if none runs now). Opening a view that is already open moves that
+    /// projector. Returns [`Projector`](crate::projector::Projector).
+    ProjectorOpen(Box<crate::projector::OpenParams>),
+    /// Close a projector, or all of them; where each was is remembered for
+    /// the next time its view opens. Returns
+    /// [`Projectors`](crate::projector::Projectors).
+    ProjectorClose(crate::projector::CloseParams),
+    /// The open projectors and the displays they can fill. Returns
+    /// [`Projectors`](crate::projector::Projectors).
+    ProjectorList,
+    /// What the app showing a projector reports: where its window is and
+    /// whether it shows it. Returns
+    /// [`Projector`](crate::projector::Projector).
+    ProjectorPlace(Box<crate::projector::PlaceParams>),
 }
 
 /// Every method's name, as requests and plugin grants spell it
@@ -1197,6 +1214,13 @@ pub enum Event {
     /// frames (ISO files first; the program and stream are protected), and
     /// the disk isn't the cause. Comes at most once per take.
     EncoderOverload { overload: Box<Overload> },
+    /// A projector opened, closed or moved: the open projectors now, and
+    /// why one closed if it wasn't asked to (a display went away).
+    Projectors {
+        projectors: Vec<crate::projector::Projector>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 /// What began a take, in `started` events.
@@ -1259,11 +1283,12 @@ pub enum EventKind {
     Replay,
     ReplaySaved,
     EncoderOverload,
+    Projectors,
 }
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 29] = [
+    pub const NAMES: [&str; 30] = [
         "setup_changed",
         "started",
         "status",
@@ -1293,6 +1318,7 @@ impl EventKind {
         "replay",
         "replay_saved",
         "encoder_overload",
+        "projectors",
     ];
 
     /// The kind's name, as events and `watch` spell it.
@@ -1333,6 +1359,7 @@ impl Event {
             Self::Replay { .. } => EventKind::Replay,
             Self::ReplaySaved { .. } => EventKind::ReplaySaved,
             Self::EncoderOverload { .. } => EventKind::EncoderOverload,
+            Self::Projectors { .. } => EventKind::Projectors,
         }
     }
 }
@@ -1721,8 +1748,9 @@ impl RpcError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FrameParams {
-    /// `program` (the default), `preview` (studio mode's preview scene) or
-    /// a video source's id.
+    /// `program` (the default), `preview` (studio mode's preview scene),
+    /// `scene:ID` (a scene, drawn while watched, on air or not) or a video
+    /// source's id.
     #[serde(default = "program_target")]
     pub target: String,
     /// Scale down to at most this wide, keeping the aspect ratio; full size
@@ -1753,8 +1781,9 @@ fn program_target() -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FramesParams {
-    /// `program` (the default), `preview` (studio mode's preview scene) or
-    /// a video source's id.
+    /// `program` (the default), `preview` (studio mode's preview scene),
+    /// `scene:ID` (a scene, drawn while watched, on air or not) or a video
+    /// source's id.
     #[serde(default = "program_target")]
     pub target: String,
     /// Scale down to at most this wide, keeping the aspect ratio; full size
@@ -1795,8 +1824,9 @@ pub struct FrameStream {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SharedFramesParams {
-    /// `program` (the default), `preview` (studio mode's preview scene) or
-    /// a video source's id.
+    /// `program` (the default), `preview` (studio mode's preview scene),
+    /// `scene:ID` (a scene, drawn while watched, on air or not) or a video
+    /// source's id.
     #[serde(default = "program_target")]
     pub target: String,
     /// The picture fits in this many pixels across and down, keeping its

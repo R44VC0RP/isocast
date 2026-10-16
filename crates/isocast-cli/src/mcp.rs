@@ -1128,6 +1128,59 @@ impl Isocast {
     }
 
     #[tool(
+        description = "Open a projector: the program, studio mode's preview, a scene (`scene` \
+                       id), a video source (`source` id) or a multiview grid (`layout`: top-8, \
+                       3x3 or 2x2; preview, program and scenes with labels and tally), full \
+                       screen on a display (`fullscreen`, `display`: main, an id or a name from \
+                       list_projectors) or in a window (`fullscreen` false, optional `frame` in \
+                       points). The Isocast app shows it, and opens it when it next starts if \
+                       it isn't running (`shown` says whether a window shows it). Opening a \
+                       view that is already open moves it. Absent placement: where that view \
+                       was last.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn open_projector(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<isocast_protocol::projector::OpenParams>>,
+    ) -> Result<Json<isocast_protocol::projector::Projector>, String> {
+        self.call(Method::ProjectorOpen(Box::new(params))).await
+    }
+
+    #[tool(
+        description = "Close a projector by `id` (from list_projectors), or every one with \
+                       `all`. Where each was is remembered for the next time its view opens. \
+                       Returns the projectors still open.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn close_projector(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<isocast_protocol::projector::CloseParams>>,
+    ) -> Result<Json<isocast_protocol::projector::Projectors>, String> {
+        self.call(Method::ProjectorClose(params)).await
+    }
+
+    #[tool(
+        description = "The open projectors (what each shows, full screen on which display or \
+                       where its window is, whether the app shows it) and the displays a \
+                       projector can fill.",
+        annotations(read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn list_projectors(
+        &self,
+        Parameters(Strict(_)): Parameters<Strict<CameraNoArgs>>,
+    ) -> Result<Json<isocast_protocol::projector::Projectors>, String> {
+        self.call(Method::ProjectorList).await
+    }
+
+    #[tool(
         description = "The replay buffer's state, seconds held, memory used and its limit, \
                        format, whether it shares the stream's encoder, missed frames and the \
                        last save.",

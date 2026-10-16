@@ -1632,6 +1632,22 @@ each section. Delete entries that stop being true.
   (`timeline_roll`, ⌥-drag of an edge) is the non-ripple trim. Snapping
   covers clip edges, takes' markers, the marks and, for nothing but
   scrubs, not the playhead (it follows the trimmed edge).
+- 2026-10-16 (G.4 projectors, #19): the daemon keeps the projector list
+  (`<setup>.projectors.json` beside the setup, so throwaway engines keep
+  their own) and where each view was last shown; the app opens a window
+  per projector and reports its place (`projector_place`). Not the daemon
+  drawing windows: the GUI stays a client. A CLI-opened projector with no
+  app running waits (`shown: false`) and opens when the app starts.
+  Full screen is winit's simple full screen at NSMainMenuWindowLevel+1,
+  not a macOS space (instant, any display, works for accessory apps).
+  Multiview tally follows the brief and OBS (red program, green preview),
+  unlike Studio Mode's tags (yellow PREVIEW, green PROGRAM); its tags say
+  PVW/PGM in those tally colours. Default grid: top-8 (picked over 3x3
+  offscreen: bigger PVW/PGM). Scene tiles and scene projectors watch
+  `scene:ID`, drawn by an engine thread of their own (one compositor per
+  watched scene on one GPU device, only while watched); scene tiles ask
+  30 fps, PVW/PGM and single projectors the canvas rate. A `canvas`
+  field (`main`) is there for #86's second canvas.
 
 - 2026-10-16 (engine hardening, #27/#30/#31/#35): engine and daemon locks
   use parking_lot. Only selected control state uses `Critical` transactions:
@@ -5355,6 +5371,16 @@ each section. Delete entries that stop being true.
 - 2026-10-16 (#87): the motion harness can drive the editor window
   (`editor-…` targets); its takes follow the wall clock, so lockstep runs
   of it aren't pixel-identical.
+- 2026-10-16 (G.4): Slint/winit windows on macOS: Slint keeps the native
+  window's decorations in step with `no-frame` (winit set_decorations is
+  undone), AppKit keeps titled windows inside the visible frame, and
+  Slint's set_position is the content's top left before the native window
+  exists but the title bar's after; projectors.rs `put_frame` handles it.
+  Slint's rendering notifier gave no samples with the Skia/wgpu renderer.
+  A dropped `frames::Feed` used to keep streaming (now `Feed::stop`).
+  CGVirtualDisplay (scripts/screenshots/virtual-display.m) is a real
+  display plug/unplug for tests; cua-driver's list_windows doesn't list
+  windows above the normal level (use CGWindowListCopyWindowInfo).
 
 - 2026-10-16 (#74): a CLI-stored stream key can't be read by an ad-hoc
   signed isocastd from another build (702, "stored by another build"):

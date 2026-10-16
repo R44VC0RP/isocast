@@ -26,6 +26,7 @@ pub mod obs;
 pub mod optimize;
 pub mod plugin;
 pub mod project;
+pub mod projector;
 pub mod replay;
 mod source;
 pub mod stream;

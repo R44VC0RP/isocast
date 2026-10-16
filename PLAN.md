@@ -914,7 +914,7 @@ native app; each verified against OBS's behaviour on a test Mac.
       and #68 shared encoder placement; qualify kills, #60/#68 loads, CPU,
       timeline/Create/WebM, e2e and workspace gates before Tier-1 review.
       Qualified on M4/M2; coordinator Tier-1 review/re-review and merge remain.
-- [ ] **G.4 Projectors and multiview.** Fullscreen or windowed preview,
+- [x] **G.4 Projectors and multiview (#19).** Fullscreen or windowed preview,
   program, scene or source on any display; a multiview grid.
 - [x] **G.5 Custom hotkeys (engine side).** Bindable action catalogue,
   per-profile bindings, CLI/MCP, and global press/release registration where
@@ -1409,6 +1409,19 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   and 11 ownership controls, strict e2e 16/16, fmt/clippy and 212 tests pass.
   Tier-1 review remains with the coordinator; evidence in rapid-splits
   scratch REPORT.md.
+- G.4 (#19, 2026-10-16): projectors (program, preview, scene, source,
+  multiview top-8/3x3/2x2) on the method table (projector_open/close/
+  list/place, `isocast projector`, MCP), kept and placed by the daemon,
+  shown by the app full screen (simple full screen above the menu bar) or
+  windowed; scene:ID monitor targets on an engine scene-feeds thread.
+  Verified on m2-a: 0 dropped frames recording program + 2 ISOs with a
+  full-screen program projector, a scene projector and a multiview open
+  (isocastd +24/+27% of a core, A/B x2); projector frames reach the window
+  as soon as the CLI's shared stream gets them (p50 45.7 vs 46.3 ms after
+  the program tick); a virtual display unplugged closes its full-screen
+  projector in 1 s with the reason; offscreen snapshots; visual-shots base
+  vs head unchanged.
+
 - Engine hardening (#27/#30/#31/#35, 2026-10-16): explicit critical-state
   recovery replaces lock poisoning; the monitor callback is lock/heap-free;
   AVAssetWriter append exceptions are contained and both VT session types

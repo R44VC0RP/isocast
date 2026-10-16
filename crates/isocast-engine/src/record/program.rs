@@ -182,7 +182,12 @@ struct Playing {
 
 impl<P: Platform> Compositor<P> {
     pub(super) fn new(platform: &P, canvas: (u32, u32)) -> Result<Self> {
-        let gpu = Gpu::new()?;
+        Self::with_gpu(platform, canvas, Gpu::new()?)
+    }
+
+    /// A compositor drawing on `gpu`, shared with others (the scene feeds'
+    /// compositors, one per watched scene, share one device).
+    pub(super) fn with_gpu(platform: &P, canvas: (u32, u32), gpu: Gpu) -> Result<Self> {
         let renderer = Renderer::new(&gpu, wgpu::TextureFormat::Bgra8Unorm);
         let filters = Filters::new(&gpu, renderer.format(), true);
         let transitions = Transitions::new(&gpu, renderer.format());
@@ -226,6 +231,11 @@ impl<P: Platform> Compositor<P> {
             animated: 0,
             gpu_wait: std::time::Duration::ZERO,
         })
+    }
+
+    /// The canvas size it draws.
+    pub(super) fn canvas(&self) -> (u32, u32) {
+        self.canvas
     }
 
     /// The engine's clock started at `epoch`.

@@ -78,6 +78,7 @@ pub fn run(options: &Options) -> Result<()> {
     let canvas = Canvas::new(&gpu, Box::new(|| 0.0), false);
     let shell = App::new(&app, commands, Mode { offscreen: false }, canvas);
     shell.sources.set_device(gpu.device.clone());
+    shell.projectors.set_device(gpu.device.clone());
     APP.with(|s| *s.borrow_mut() = Some(shell.clone()));
 
     // macOS reports a window covered by others as occluded and Slint then

@@ -37,6 +37,7 @@ mod mix;
 mod monitor;
 mod pause;
 mod program;
+mod scene_feeds;
 mod scenes;
 mod shared_frames;
 mod tap;

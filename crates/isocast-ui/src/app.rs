@@ -68,6 +68,8 @@ pub struct App {
     pub developer: areas::developer::Developer,
     pub permissions: areas::permissions::PermissionsStep,
     pub wizard: areas::wizard::Wizard,
+    /// Projectors and the multiview (G.4): windows of their own.
+    pub projectors: areas::projectors::Projectors,
     /// `--drag-test`: how long each flush (the areas showing a change) and
     /// each update from the daemon took on the window's thread.
     pub work_log: RefCell<Option<WorkLog>>,
@@ -109,6 +111,7 @@ impl App {
             developer: areas::developer::Developer::default(),
             permissions: areas::permissions::PermissionsStep::default(),
             wizard: areas::wizard::Wizard::default(),
+            projectors: areas::projectors::Projectors::default(),
         });
         window.set_version(env!("CARGO_PKG_VERSION").into());
         if !mode.offscreen {
@@ -151,7 +154,7 @@ impl App {
 
     /// The areas, in the order they update. Create comes first so that in
     /// its view Delete takes off the selected clip, not a scene item.
-    pub fn areas(&self) -> [&dyn Area; 10] {
+    pub fn areas(&self) -> [&dyn Area; 11] {
         [
             &self.create,
             &self.canvas,
@@ -163,6 +166,7 @@ impl App {
             &self.developer,
             &self.permissions,
             &self.wizard,
+            &self.projectors,
         ]
     }
 
@@ -229,6 +233,11 @@ impl App {
             let weak = weak.clone();
             slint::Timer::single_shot(std::time::Duration::ZERO, move || {
                 if let Some(app) = weak.upgrade() {
+                    // Open Projector items come first: they're added to
+                    // other areas' menus.
+                    if app.projectors.chosen(&app, &id) {
+                        return;
+                    }
                     for area in app.areas() {
                         if area.menu_chosen(&app, &owner, &id) {
                             return;
@@ -328,6 +337,7 @@ impl App {
         }
         self.changed(Changed::ALL);
         self.refresh_status(false);
+        self.projectors.load(self);
     }
 
     pub(crate) fn event(self: &Rc<Self>, event: Event) {
@@ -410,7 +420,8 @@ impl App {
             Event::TakeFinished { .. }
             | Event::ProjectCreated { .. }
             | Event::ProjectRenamed { .. }
-            | Event::DeviceChanged { .. } => {}
+            | Event::DeviceChanged { .. }
+            | Event::Projectors { .. } => {}
             Event::RecordingPaused { .. } => self.refresh_status(true),
             Event::Status { live } => {
                 {
@@ -1261,7 +1272,9 @@ impl App {
         let menu = self
             .areas()
             .iter()
-            .find_map(|area| area.context_menu(self, owner));
+            .find_map(|area| area.context_menu(self, owner))
+            // Open Projector, on the preview's, a scene's and a source's.
+            .map(|menu| self.projectors.extend_menu(self, owner, menu));
         if let Some(menu) = menu {
             self.show_menu(owner, menu, anchor);
         }

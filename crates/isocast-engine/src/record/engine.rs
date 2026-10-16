@@ -31,6 +31,7 @@ use super::iso_frames::IsoFrames;
 use super::mix::{MIX_DELAY, Meter, Mixer, StereoMeter};
 use super::monitor::{Closing, Monitor, MonitorSlot, Tap};
 use super::program::{Compositor, Feed};
+use super::scene_feeds::{self, SceneFeeds};
 use super::scenes::{SceneInput, SceneThread};
 use super::shared_frames::{self, SharedFeed};
 use super::timings::CompositorTimings;
@@ -361,6 +362,9 @@ struct Inner<P: Platform> {
     /// Studio mode's preview scene, drawn while someone wants it.
     preview: Arc<FrameSlot<P::Frame>>,
     preview_scene: Mutex<Option<Arc<str>>>,
+    /// Scenes drawn for monitors on air or not (`scene:ID` targets:
+    /// projectors and the multiview), off the program's thread.
+    scene_feeds: Arc<SceneFeeds<P::Frame>>,
     /// A camera-only source is needed only while that output is running.
     camera_source: Mutex<Option<String>>,
     /// The highest rate the preview was asked for since the program last
@@ -587,6 +591,7 @@ impl<P: Platform> Engine<P> {
             // Only ever read newest first: no older canvases are kept.
             program: Arc::new(FrameSlot::with_capacity(timeline.clone(), 1)),
             preview: Arc::new(FrameSlot::with_capacity(timeline.clone(), 1)),
+            scene_feeds: Arc::new(SceneFeeds::new(timeline.clone())),
             timeline,
             epoch: AtomicI64::new(i64::MIN),
             on_event,
@@ -876,6 +881,7 @@ impl<P: Platform> Engine<P> {
         // an idle one has no picture until its next frame.
         Ok(match target {
             PROGRAM | "preview" => wait_for_frame(&slot),
+            scene if scene.starts_with(scene_feeds::PREFIX) => wait_for_frame(&slot),
             _ => slot.newest_timed(),
         })
     }
@@ -1836,7 +1842,7 @@ fn stop_compositor(mut run: CompositorRun) {
 /// program and the preview are drawn at least that often, on the canvas's
 /// frame grid, and say which setup revision each frame shows).
 fn stream_source<P: Platform>(
-    inner: &Inner<P>,
+    inner: &Arc<Inner<P>>,
     target: &str,
     fps: u32,
 ) -> Result<frame_stream::Source<P::Frame>, String> {
@@ -1864,10 +1870,13 @@ fn stream_source<P: Platform>(
 /// drawn at least `fps` times a second for a while after each ask) or a
 /// video source. An error lists the valid targets.
 fn slot_of<P: Platform>(
-    inner: &Inner<P>,
+    inner: &Arc<Inner<P>>,
     target: &str,
     fps: u32,
 ) -> Result<Arc<FrameSlot<P::Frame>>, String> {
+    if let Some(id) = target.strip_prefix(scene_feeds::PREFIX) {
+        return scene_slot(inner, id, fps);
+    }
     // The program and the preview are drawn while they are asked for.
     inner.want(target, fps);
     match target {
@@ -1899,7 +1908,7 @@ fn slot_of<P: Platform>(
                     };
                     Err(format!(
                         "target: {id:?} is not a running video source{why}; give \
-                         \"program\", \"preview\" or one of: {}",
+                         \"program\", \"preview\", \"scene:ID\" or one of: {}",
                         if ids.is_empty() {
                             "(none)".to_string()
                         } else {
@@ -1910,6 +1919,60 @@ fn slot_of<P: Platform>(
             }
         }
     }
+}
+
+/// Where frames of scene `id` arrive, drawn at least `fps` times a second
+/// for a while after each ask by the scene feeds' thread (started here if
+/// it isn't running). An error lists the scenes.
+fn scene_slot<P: Platform>(
+    inner: &Arc<Inner<P>>,
+    id: &str,
+    fps: u32,
+) -> Result<Arc<FrameSlot<P::Frame>>, String> {
+    {
+        let state = inner.state.lock();
+        if !state.setup.scenes.iter().any(|scene| scene.id == id) {
+            let ids: Vec<&str> = state.setup.scenes.iter().map(|s| s.id.as_str()).collect();
+            return Err(format!(
+                "target: {id:?} is not a scene; give \"scene:\" and one of: {}",
+                if ids.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    ids.join(", ")
+                }
+            ));
+        }
+    }
+    let (slot, start) = inner.scene_feeds.want(id, fps);
+    if start {
+        let weak = Arc::downgrade(inner);
+        let failed = inner.scene_feeds.clone();
+        let feeds = inner.scene_feeds.clone();
+        let platform = inner.platform.clone();
+        let epoch = inner.epoch().unwrap_or_else(|| platform.now());
+        let spawned = isocast_diagnostics::spawn(
+            "scene feeds",
+            move || {
+                let scenes = || weak.upgrade().and_then(|inner| inner.scenes.latest());
+                let stop = || {
+                    weak.upgrade()
+                        .is_none_or(|inner| inner.stopping.load(Ordering::SeqCst))
+                };
+                if let Err(error) = scene_feeds::run(&platform, &feeds, scenes, epoch, stop) {
+                    feeds.stopped();
+                    isocast_diagnostics::diagnostic!("warn";
+                        "scene feeds stopped: {error:#}"
+                    );
+                }
+            },
+            move |_| failed.stopped(),
+        );
+        if let Err(error) = spawned {
+            inner.scene_feeds.stopped();
+            return Err(format!("could not start drawing scenes: {error}"));
+        }
+    }
+    Ok(slot)
 }
 
 /// The program's frame clock: at each tick, the scene on air drawn from the
