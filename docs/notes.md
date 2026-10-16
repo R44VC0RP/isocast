@@ -5313,6 +5313,22 @@ each section. Delete entries that stop being true.
   script, far faster than a real drag; an obs-websocket session's watch
   queue (64) then overflows and resyncs.
 
+- 2026-10-16 (#62): **A soak's "first minutes" loss can be another engine,
+  not cold start.** The 2 h m2-a soak on 79bf8c7 (run by hand, outside
+  hw-batch's per-Mac lock) lost 179 program / 194 stream frames between
+  17:40:19 and 17:41:19 UTC, then nothing. The unified log shows a different
+  isocastd (pids 78352 and 78368: the vertical-canvas lane's hw-batch job
+  `20261016-133701-vertical-canvas-cmd`) creating 4 and 6 HEVC sessions at
+  17:40:24 and 17:40:41; the same lane's 3-session trials ran every ~17 s
+  from 17:38. Isocast's pressure feedback can't see another process's
+  VideoToolbox sessions. The overnight d66fbb8 soak's 27 frames
+  (06:42:27-06:42:57) coincide with a softwareupdated/mobileassetd burst
+  (2,032/343 log lines, only that minute). Check
+  `log show --start … --predicate 'eventMessage CONTAINS "new compression session"'`
+  and `ps` for foreign engines before blaming a take start; run hardware
+  soaks through hw-batch so the Mac's lock keeps other jobs off it.
+  Current main's cold starts lose nothing (see the #62 log line).
+
 - 2026-10-16 (#82): a third-party HAL driver that stops answering makes
   every Core Audio call into it wait for coreaudiod's 60-150 s timeouts:
   on Ryan's Mac, Studio Audio (com.ryanvogel.studiondi.audio, from his

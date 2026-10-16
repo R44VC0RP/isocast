@@ -1377,6 +1377,17 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 
 ## Log
 
+- A.4 / #62 (2026-10-16): cold stream start under heavy M2 load no longer
+  loses protected frames on main (79bf8c7; #68's placed-and-parked encoder,
+  #77, #79). No code change. 4K60 + 1080p60 HEVC ISOs, 1080p60 program and
+  stream: 10 cold starts each of record-first, stream-first and both at once
+  on m2-a (22f7574) and m2-b (79bf8c7), 60 fresh engines, program/stream/audio
+  0/0/0, ISOs shedding; 180 files ffprobe + full decode. 24 min hardware
+  soak (m2-a, hw-batch) and 16 min (m2-b) 0 protected loss; #60 light stream
+  restarts and 4K+HD record-only splits, #68 fit/heavy short and split runs
+  clean; strict e2e 17/17; gates 214 tests. The two soaks' early losses were
+  external load (another lane's engine; softwareupdated): see notes.
+
 - Engine hardening (#27/#30/#31/#35, 2026-10-16): explicit critical-state
   recovery replaces lock poisoning; the monitor callback is lock/heap-free;
   AVAssetWriter append exceptions are contained and both VT session types
