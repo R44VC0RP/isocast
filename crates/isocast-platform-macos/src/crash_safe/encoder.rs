@@ -91,6 +91,7 @@ impl VideoSession {
         let values = vec![CFBoolean::new(true); keys.len()];
         let specification = CFDictionary::<CFString, CFBoolean>::from_slices(&keys, &values);
         let mut session = ptr::null_mut();
+        isocast_diagnostics::fds::clear_os_error();
         let status = unsafe {
             VTCompressionSession::create(
                 None,
@@ -106,6 +107,10 @@ impl VideoSession {
             )
         };
         let Some(session) = NonNull::new(session).filter(|_| status == 0) else {
+            // Out of descriptors, VideoToolbox also says -12908 (#92).
+            if let Some(out) = isocast_diagnostics::fds::exhausted() {
+                bail!("{out} (VideoToolbox error {status})");
+            }
             if status == -12908 {
                 bail!(
                     "no hardware {:?} encoder is free: this Mac's video encoders are busy with \

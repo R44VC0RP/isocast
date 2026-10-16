@@ -1418,6 +1418,16 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   9.35 points of one core. Offscreen vertical drag/lock/removal preserve main;
   CLI/MCP and link/restart verified. Review/commits remain coordinator-owned;
   evidence in vertical-canvas/scratch/REPORT.md.
+- #92 (2026-10-16): isocastd raises its open-file soft limit at launch
+  (256 -> min(hard, 10240); status.diagnostics.open_files); encoder creation
+  that runs out of descriptors says "too many open files" (errno EMFILE
+  after VideoToolbox's -12908, or within 8 of the limit) instead of "no
+  hardware encoder is free"; plugin sandboxes cover a recordings folder
+  before it is made, so the first take into it no longer restarts every
+  plugin. m2-b (hw-batch): stress clients main 2dccb6f FAIL x2 (encoder
+  error), branch PASS x4 (0 plugin restarts; main with ulimit 4096 still
+  restarts all 16); forced hard limit 64: main misleading, branch truthful;
+  strict e2e 17/17.
 
 - A.4 / #62 (2026-10-16): cold stream start under heavy M2 load no longer
   loses protected frames on main (79bf8c7; #68's placed-and-parked encoder,

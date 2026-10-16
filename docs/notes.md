@@ -1670,6 +1670,15 @@ each section. Delete entries that stop being true.
   watched scene on one GPU device, only while watched); scene tiles ask
   30 fps, PVW/PGM and single projectors the canvas rate. A `canvas`
   field (`main`) is there for #86's second canvas.
+- 2026-10-16 (#92): a plugin's sandbox includes a recordings folder that
+  doesn't exist yet, as its nearest existing parent resolved plus the
+  rest, instead of leaving it out. The first take into a new folder (the
+  setup's folder, made on first use) restarted every sandboxed plugin
+  (#56's refresh) even without a recordings grant; the rule (deny or
+  allow) is now in place from the start. A folder later made as a link
+  elsewhere resolves differently and still restarts them; a folder first
+  used with `start --folder` is a new root and restarts them as before.
+  The stress clients check (zero restarts) was right; no scenario change.
 
 - 2026-10-16 (engine hardening, #27/#30/#31/#35): engine and daemon locks
   use parking_lot. Only selected control state uses `Critical` transactions:
@@ -5422,6 +5431,15 @@ each section. Delete entries that stop being true.
   CGVirtualDisplay (scripts/screenshots/virtual-display.m) is a real
   display plug/unplug for tests; cua-driver's list_windows doesn't list
   windows above the normal level (use CGWindowListCopyWindowInfo).
+- 2026-10-16 (#92): **"no hardware encoder is free" (-12908) can mean
+  out of file descriptors.** VideoToolbox returns -12908 when the process
+  has no descriptors left (a session needs about 4). macOS starts
+  processes at a 256 soft limit; isocastd now raises it at launch (logged,
+  and in `status` diagnostics.open_files), and the encoder errors check
+  errno/the count first. To test under a low limit, lower the soft limit
+  before the hard one (`ulimit -S -n 64; ulimit -H -n 64`): the other order
+  fails in sh and leaves the hard limit, which isocastd then raises to.
+  Each obs-websocket/watch client holds 2 daemon descriptors.
 
 - 2026-10-16 (#74): a CLI-stored stream key can't be read by an ad-hoc
   signed isocastd from another build (702, "stored by another build"):

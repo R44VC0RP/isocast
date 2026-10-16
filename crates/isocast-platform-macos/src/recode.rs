@@ -248,6 +248,7 @@ impl Encoder {
             )
         };
         let mut session = ptr::null_mut();
+        isocast_diagnostics::fds::clear_os_error();
         let status = unsafe {
             VTCompressionSession::create(
                 None,
@@ -263,6 +264,9 @@ impl Encoder {
             )
         };
         let session = NonNull::new(session).filter(|_| status == 0).ok_or_else(|| {
+            if let Some(out) = isocast_diagnostics::fds::exhausted() {
+                return anyhow!("{out} (VideoToolbox error {status})");
+            }
             anyhow!(
                 "VideoToolbox could not start an encoder for {width}×{height} {} (error {status})",
                 fourcc(codec)

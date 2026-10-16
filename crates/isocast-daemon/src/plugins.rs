@@ -384,12 +384,28 @@ struct RecordingFolders {
     not_projects: Vec<PathBuf>,
 }
 
+/// A recordings folder as Seatbelt will match it: resolved, or for one not
+/// made yet, its nearest existing parent resolved plus the rest. Its rules
+/// are then in place before it is made, so making it (the first recording
+/// into a new folder) restarts no plugin; made as a link somewhere else,
+/// it resolves differently and `refresh_sandboxes` still restarts them.
+fn resolved(root: &Path) -> Option<PathBuf> {
+    if let Ok(real) = root.canonicalize() {
+        return Some(real);
+    }
+    if !root.is_absolute() {
+        return None;
+    }
+    let existing = root.ancestors().skip(1).find(|parent| parent.exists())?;
+    let rest = root.strip_prefix(existing).ok()?;
+    rest.components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
+        .then(|| Some(existing.canonicalize().ok()?.join(rest)))?
+}
+
 impl RecordingFolders {
     fn new(roots: &[PathBuf], granted: &Permissions) -> Self {
-        let mut roots: Vec<PathBuf> = roots
-            .iter()
-            .filter_map(|root| root.canonicalize().ok())
-            .collect();
+        let mut roots: Vec<PathBuf> = roots.iter().filter_map(|root| resolved(root)).collect();
         roots.sort();
         roots.dedup();
         let not_projects = match granted.recordings {
@@ -1493,8 +1509,8 @@ impl Launch {
             (Some(parent), Some(name)) => real(parent).join(name),
             _ => socket.to_path_buf(),
         };
-        // Canonical, as Seatbelt matches resolved paths; folders not made
-        // yet are left out (no file can be in them), and so is a recordings
+        // Canonical, as Seatbelt matches resolved paths (a recordings folder
+        // not made yet as it will resolve: `resolved`); left out is a recordings
         // folder holding the home folder, the plugin's own folders or its
         // program (`/`, say): denying or granting all of that isn't what
         // the grant means, and the home folder's own rule still applies.

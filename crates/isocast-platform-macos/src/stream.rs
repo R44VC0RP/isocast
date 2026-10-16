@@ -156,6 +156,7 @@ impl H264Encoder {
         // it get the usual mode.
         let mut status = -1;
         let mut session = ptr::null_mut();
+        isocast_diagnostics::fds::clear_os_error();
         for low_latency in [true, false] {
             if low_latency && !spec.low_latency {
                 continue;
@@ -170,6 +171,10 @@ impl H264Encoder {
                 true => "a monitor",
                 false => "the stream",
             };
+            // Out of descriptors, VideoToolbox also says -12908 (#92).
+            if let Some(out) = isocast_diagnostics::fds::exhausted() {
+                bail!("{out} (VideoToolbox error {status})");
+            }
             // kVTCouldNotFindVideoEncoderErr: no hardware encoder is free.
             if status == -12908 {
                 bail!(

@@ -152,7 +152,11 @@ fn main() -> ExitCode {
             return ExitCode::from(result as u8);
         }
     }
+    // Before anything opens files or starts helpers (they inherit it): the
+    // 256 macOS starts with runs out under many clients and plugins (#92).
+    let (files_before, files_now) = isocast_diagnostics::fds::raise();
     let _logs = isocast_diagnostics::init("isocastd", false);
+    isocast_diagnostics::diagnostic!("isocastd: open-file limit {files_now} (was {files_before})");
     let socket = socket_path();
     match hold_instance_lock().and_then(|lock| Ok((lock, listen(&socket)?))) {
         // The lock is held until the process exits.
