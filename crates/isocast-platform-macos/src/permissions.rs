@@ -19,11 +19,16 @@ pub(crate) fn source_permission(
     let device = match source {
         SourceKind::Camera(_) => Some(PermissionKind::Camera),
         SourceKind::Microphone(_) => Some(PermissionKind::Microphone),
-        SourceKind::Display(_)
-        | SourceKind::Window(_)
-        | SourceKind::Application(_)
-        | SourceKind::SystemAudio(_)
-        | SourceKind::ApplicationAudio(_) => Some(PermissionKind::ScreenRecording),
+        SourceKind::Display(_) | SourceKind::Window(_) | SourceKind::Application(_) => {
+            Some(PermissionKind::ScreenRecording)
+        }
+        // The permission the capture will use (see `tap::backend`).
+        SourceKind::SystemAudio(_) | SourceKind::ApplicationAudio(_) => {
+            Some(match crate::tap::backend() {
+                crate::tap::Backend::ProcessTap => PermissionKind::SystemAudio,
+                crate::tap::Backend::ScreenCaptureKit => PermissionKind::ScreenRecording,
+            })
+        }
         _ => None,
     };
     if let Some(kind) = device {
@@ -70,6 +75,10 @@ pub(crate) fn settings_url(permission: PermissionKind) -> &'static str {
         PermissionKind::Microphone => {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
         }
+        // The same pane as screen recording ("System Audio Recording Only").
+        PermissionKind::SystemAudio => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture"
+        }
     }
 }
 
@@ -79,6 +88,9 @@ fn pane(permission: PermissionKind) -> &'static str {
         PermissionKind::ScreenRecording => "Screen & System Audio Recording",
         PermissionKind::Camera => "Camera",
         PermissionKind::Microphone => "Microphone",
+        PermissionKind::SystemAudio => {
+            "Screen & System Audio Recording (System Audio Recording Only)"
+        }
     }
 }
 
@@ -131,7 +143,10 @@ fn bundled() -> bool {
 
 /// Permissions macOS refused without showing its prompt (by
 /// `PermissionKind::ALL` index), as `request_permissions` saw.
-static UNASKED: [AtomicBool; 3] = [const { AtomicBool::new(false) }; 3];
+static UNASKED: [AtomicBool; KINDS] = [const { AtomicBool::new(false) }; KINDS];
+
+/// How many permissions there are.
+const KINDS: usize = PermissionKind::ALL.len();
 
 fn index(kind: PermissionKind) -> usize {
     PermissionKind::ALL
@@ -175,7 +190,7 @@ fn graphic_session() -> bool {
 pub const PREFLIGHT_ARG: &str = "--preflight-permissions";
 
 /// The preflight child's exit status: a bit (by `PermissionKind::ALL`
-/// index) for each permission that is *not* granted, so 0 is all three.
+/// index) for each permission that is *not* granted, so 0 is all of them.
 pub(crate) fn preflight_status(permissions: &Permissions) -> u8 {
     PermissionKind::ALL
         .into_iter()
@@ -192,7 +207,7 @@ pub(crate) fn preflight_status(permissions: &Permissions) -> u8 {
 /// isocastd's responsibility, so it is checked as the engine's bundle,
 /// afresh (as its own child it inherited the stale answer: measured on
 /// isocast-m2-a, macOS 27).
-fn granted_after_restart() -> Option<[bool; 3]> {
+fn granted_after_restart() -> Option<[bool; KINDS]> {
     let exe = std::env::current_exe().ok()?;
     if exe.file_name().is_none_or(|name| name != "isocastd") {
         return None;
@@ -200,7 +215,7 @@ fn granted_after_restart() -> Option<[bool; 3]> {
     match spawn_disclaimed(&exe, PREFLIGHT_ARG) {
         Ok(pid) => {
             let bits = wait_status(pid, Duration::from_secs(3))?;
-            (bits < 8).then(|| std::array::from_fn(|i| bits & (1 << i) == 0))
+            (bits < 1 << KINDS).then(|| std::array::from_fn(|i| bits & (1 << i) == 0))
         }
         Err(error) => {
             isocast_diagnostics::diagnostic!("warn";
@@ -312,9 +327,17 @@ fn wait_status(pid: libc::pid_t, limit: Duration) -> Option<u8> {
 /// disclaimed child is checked as itself, so their answers differ for
 /// good and a restart wouldn't help).
 pub(crate) fn live_report(permissions: Permissions) -> PermissionsReport {
-    let missing = bundled() && preflight_status(&permissions) != 0;
+    // Only a decided permission can be turned on in System Settings
+    // meanwhile; one never asked for (often system audio) can't be.
+    let missing = bundled()
+        && PermissionKind::ALL.into_iter().any(|kind| {
+            !matches!(
+                permissions.get(kind),
+                Permission::Granted | Permission::NotDetermined
+            )
+        });
     let fresh = missing.then(granted_after_restart).flatten();
-    let waiting: [bool; 3] = std::array::from_fn(|i| {
+    let waiting: [bool; KINDS] = std::array::from_fn(|i| {
         fresh.is_some_and(|fresh| fresh[i])
             && permissions.get(PermissionKind::ALL[i]) != Permission::Granted
     });
@@ -323,12 +346,12 @@ pub(crate) fn live_report(permissions: Permissions) -> PermissionsReport {
 
 /// Each permission with its next step.
 pub(crate) fn report(permissions: Permissions) -> PermissionsReport {
-    report_with(permissions, [false; 3])
+    report_with(permissions, [false; KINDS])
 }
 
 /// Each permission with its next step; `waiting` (by `PermissionKind::ALL`
 /// index): granted, but this process sees it only after a restart.
-fn report_with(permissions: Permissions, waiting: [bool; 3]) -> PermissionsReport {
+fn report_with(permissions: Permissions, waiting: [bool; KINDS]) -> PermissionsReport {
     let app = app_name();
     let details = PermissionKind::ALL
         .into_iter()
@@ -382,6 +405,14 @@ fn report_with(permissions: Permissions, waiting: [bool; 3]) -> PermissionsRepor
                         kind.label()
                     )),
                 ),
+                Permission::NotDetermined if kind == PermissionKind::SystemAudio => (
+                    PermissionAction::Request,
+                    Some(format!(
+                        "macOS hasn't asked yet: `isocast permissions --request {flag}` shows \
+                         its prompt (until then, system and app audio are recorded through \
+                         screen recording where that is allowed)"
+                    )),
+                ),
                 Permission::NotDetermined => (
                     PermissionAction::Request,
                     Some(format!(
@@ -414,6 +445,9 @@ fn report_with(permissions: Permissions, waiting: [bool; 3]) -> PermissionsRepor
                         "cameras, capture cards and iPhone or iPad screens".into()
                     }
                     PermissionKind::Microphone => "microphones and audio interfaces".into(),
+                    PermissionKind::SystemAudio => {
+                        "system and app audio without screen recording (macOS 14.2+)".into()
+                    }
                 },
                 action,
                 settings_url: settings_url(kind).into(),
@@ -455,9 +489,10 @@ mod tests {
             screen_recording: Permission::Granted,
             camera: Permission::Denied,
             microphone: Permission::NotDetermined,
+            system_audio: Permission::Granted,
         };
         assert_eq!(preflight_status(&denied), 0b110);
-        let report = report_with(denied, [false, true, false]);
+        let report = report_with(denied, [false, true, false, false]);
         assert_eq!(report.details[1].action, PermissionAction::Restart);
         assert_eq!(report.details[2].action, PermissionAction::Request);
     }
@@ -468,8 +503,9 @@ mod tests {
             screen_recording: Permission::NotGranted,
             camera: Permission::Denied,
             microphone: Permission::Restricted,
+            system_audio: Permission::NotDetermined,
         });
-        let [screen, camera, microphone] = &report.details[..] else {
+        let [screen, camera, microphone, system_audio] = &report.details[..] else {
             panic!("{report:?}");
         };
         assert_eq!(screen.action, PermissionAction::OpenSettings);
@@ -481,12 +517,22 @@ mod tests {
         assert!(camera.settings_url.ends_with("Privacy_Camera"));
         assert!(!camera.restart_after_granting);
         assert_eq!(microphone.action, PermissionAction::AskAdministrator);
+        assert_eq!(system_audio.action, PermissionAction::Request);
+        let step = system_audio.next_step.as_deref().unwrap();
+        assert!(step.contains("--request system_audio"), "{step}");
         let granted = super::report(Permissions {
             screen_recording: Permission::Granted,
             camera: Permission::NotDetermined,
             microphone: Permission::Granted,
+            system_audio: Permission::Denied,
         });
         assert_eq!(granted.details[0].next_step, None);
         assert_eq!(granted.details[1].action, PermissionAction::Request);
+        assert_eq!(granted.details[3].action, PermissionAction::OpenSettings);
+        assert!(
+            granted.details[3]
+                .settings_url
+                .ends_with("Privacy_AudioCapture")
+        );
     }
 }

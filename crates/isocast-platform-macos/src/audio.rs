@@ -1,5 +1,6 @@
 //! Audio capture: microphones through AVFoundation, and what the computer
-//! plays through ScreenCaptureKit.
+//! or an app plays through Core Audio process taps (`tap.rs`, macOS 14.2+)
+//! or, before 14.2, ScreenCaptureKit.
 
 use std::ptr::{self, NonNull};
 use std::slice;
@@ -41,6 +42,7 @@ use objc2_screen_capture_kit::{
 
 use crate::camera::{host_time, watch};
 use crate::devices::{find_display, find_microphone, shareable_content};
+use crate::tap::{self, Backend, TapCapture, Target};
 use crate::writer::catch;
 
 /// Channels recorded from a microphone at most. Multi-channel interfaces
@@ -350,17 +352,39 @@ pub(crate) fn interleaved_f32(sample: &CMSampleBuffer, channels: u32) -> Result<
     Ok(Some(out))
 }
 
-/// A running system audio capture. Dropping it stops the stream.
+/// A running system or app audio capture. Dropping it stops it.
 pub struct SystemAudioCapture {
+    _stream: Option<StreamAudio>,
+    _tap: Option<TapCapture>,
+}
+
+impl SystemAudioCapture {
+    fn stream(stream: StreamAudio) -> Self {
+        SystemAudioCapture {
+            _stream: Some(stream),
+            _tap: None,
+        }
+    }
+
+    fn tap(tap: TapCapture) -> Self {
+        SystemAudioCapture {
+            _stream: None,
+            _tap: Some(tap),
+        }
+    }
+}
+
+/// Audio from a ScreenCaptureKit stream. Dropping it stops the stream.
+struct StreamAudio {
     stream: Retained<SCStream>,
     _delegate: Retained<AudioDelegate>,
     _queue: DispatchRetained<DispatchQueue>,
 }
 
 // SAFETY: as for display capture.
-unsafe impl Send for SystemAudioCapture {}
+unsafe impl Send for StreamAudio {}
 
-impl Drop for SystemAudioCapture {
+impl Drop for StreamAudio {
     fn drop(&mut self) {
         let (tx, rx) = mpsc::channel();
         let handler = RcBlock::new(move |_error: *mut NSError| {
@@ -371,26 +395,58 @@ impl Drop for SystemAudioCapture {
     }
 }
 
-/// Start capturing what the computer plays, as stereo.
-/// `exclude_own` leaves out what this process plays (monitoring).
+/// Start capturing what the computer plays, as stereo, leaving out the
+/// apps `exclude` names. `exclude_own` leaves out what this process plays
+/// (monitoring).
 pub fn capture_system_audio(
+    exclude: &[String],
     sink: AudioSink,
     exclude_own: bool,
 ) -> Result<(SystemAudioCapture, u32)> {
-    capture_played_audio(None, sink, exclude_own)
+    let backend = tap::backend();
+    isocast_diagnostics::diagnostic!("info";
+        "system audio: capturing through {}", backend.label());
+    match backend {
+        Backend::ProcessTap => {
+            let target = Target::System {
+                exclude: exclude.to_vec(),
+                exclude_own,
+            };
+            let (tap, channels) = tap::capture(target, sink)?;
+            Ok((SystemAudioCapture::tap(tap), channels))
+        }
+        Backend::ScreenCaptureKit => {
+            let (stream, channels) = capture_played_audio(None, exclude, sink, exclude_own)?;
+            Ok((SystemAudioCapture::stream(stream), channels))
+        }
+    }
 }
 
 /// Start capturing what one app plays, as stereo.
 pub fn capture_application_audio(app: &str, sink: AudioSink) -> Result<(SystemAudioCapture, u32)> {
-    capture_played_audio(Some(app), sink, false)
+    let backend = tap::backend();
+    isocast_diagnostics::diagnostic!("info";
+        "application audio: capturing {app:?} through {}", backend.label());
+    match backend {
+        Backend::ProcessTap => {
+            let (tap, channels) = tap::capture(Target::App(app.to_string()), sink)?;
+            Ok((SystemAudioCapture::tap(tap), channels))
+        }
+        Backend::ScreenCaptureKit => {
+            let (stream, channels) = capture_played_audio(Some(app), &[], sink, false)?;
+            Ok((SystemAudioCapture::stream(stream), channels))
+        }
+    }
 }
 
-/// What the computer (or only `app`) plays.
+/// What the computer (or only `app`) plays, through ScreenCaptureKit,
+/// leaving out the running apps `exclude` names.
 fn capture_played_audio(
     app: Option<&str>,
+    exclude: &[String],
     sink: AudioSink,
     exclude_own: bool,
-) -> Result<(SystemAudioCapture, u32)> {
+) -> Result<(StreamAudio, u32)> {
     const CHANNELS: u32 = 2;
     // ScreenCaptureKit captures audio as part of a display stream; the
     // video is kept tiny and slow, and dropped.
@@ -404,13 +460,21 @@ fn capture_played_audio(
         .find(|d| unsafe { d.displayID() } == id)
         .context("ScreenCaptureKit can't see the main display")?;
     let filter = match app {
-        None => unsafe {
-            SCContentFilter::initWithDisplay_excludingWindows(
-                SCContentFilter::alloc(),
-                &display,
-                &NSArray::new(),
-            )
-        },
+        None => {
+            // Apps that aren't running have nothing to leave out.
+            let excluded: Vec<_> = unsafe { content.applications() }
+                .iter()
+                .filter(|a| exclude.iter().any(|q| crate::capture::app_matches(a, q)))
+                .collect();
+            unsafe {
+                SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
+                    SCContentFilter::alloc(),
+                    &display,
+                    &NSArray::from_retained_slice(&excluded),
+                    &NSArray::new(),
+                )
+            }
+        }
         // Only the app's sound is captured.
         Some(app) => {
             let apps = crate::capture::find_applications(&content, app)?;
@@ -477,7 +541,7 @@ fn capture_played_audio(
         Err(_) => bail!("system audio capture did not start in time"),
     }
     Ok((
-        SystemAudioCapture {
+        StreamAudio {
             stream,
             _delegate: delegate,
             _queue: queue,

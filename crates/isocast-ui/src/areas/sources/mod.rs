@@ -1469,14 +1469,18 @@ fn show_quick_setting(app: &Rc<App>, window: &AppWindow) {
             "device",
             devices::microphone_options(devices.as_ref(), &text("device")),
         ),
-        SourceKind::Window(_) | SourceKind::Application(_) | SourceKind::ApplicationAudio(_) => {
-            choice(
-                &area,
-                "Application",
-                "app",
-                devices::app_options(devices.as_ref(), &text("app")),
-            )
-        }
+        SourceKind::Window(_) | SourceKind::Application(_) => choice(
+            &area,
+            "Application",
+            "app",
+            devices::app_options(devices.as_ref(), &text("app")),
+        ),
+        SourceKind::ApplicationAudio(_) => choice(
+            &area,
+            "Application",
+            "app",
+            devices::audio_app_options(devices.as_ref(), &text("app")),
+        ),
         SourceKind::Text(_) => {
             let file = text("file");
             if file.is_empty() {

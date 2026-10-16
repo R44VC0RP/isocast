@@ -39,6 +39,7 @@ mod permissions;
 pub mod plugin;
 mod stream;
 mod system;
+mod tap;
 mod termination;
 pub mod virtual_camera;
 mod vp8;
@@ -368,10 +369,11 @@ impl Platform for MacPlatform {
 
     fn capture_system_audio(
         &self,
+        exclude: &[String],
         sink: AudioSink,
         exclude_own: bool,
     ) -> anyhow::Result<(Capture, u32)> {
-        let (capture, channels) = audio::capture_system_audio(sink, exclude_own)?;
+        let (capture, channels) = audio::capture_system_audio(exclude, sink, exclude_own)?;
         Ok((Capture::SystemAudio(capture), channels))
     }
 

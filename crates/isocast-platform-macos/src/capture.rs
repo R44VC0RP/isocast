@@ -194,7 +194,7 @@ pub fn capture_screen(
 
 /// Whether an app's name or bundle id matches `query`: exactly, or the
 /// name contains it, ignoring case.
-fn app_matches(app: &SCRunningApplication, query: &str) -> bool {
+pub(crate) fn app_matches(app: &SCRunningApplication, query: &str) -> bool {
     let query = query.to_lowercase();
     let name = unsafe { app.applicationName() }.to_string().to_lowercase();
     let bundle = unsafe { app.bundleIdentifier() }.to_string().to_lowercase();

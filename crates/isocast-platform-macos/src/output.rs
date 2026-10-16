@@ -100,7 +100,7 @@ fn output_channels(device: AudioObjectID) -> u32 {
     }
 }
 
-fn default_output() -> Option<AudioObjectID> {
+pub(crate) fn default_output() -> Option<AudioObjectID> {
     property::<AudioObjectID>(
         kAudioObjectSystemObject as AudioObjectID,
         kAudioHardwarePropertyDefaultOutputDevice,
@@ -109,7 +109,7 @@ fn default_output() -> Option<AudioObjectID> {
     .filter(|device| *device != 0)
 }
 
-fn device_name(device: AudioObjectID) -> String {
+pub(crate) fn device_name(device: AudioObjectID) -> String {
     string_property(device, kAudioObjectPropertyName).unwrap_or_else(|| format!("Device {device}"))
 }
 
@@ -153,7 +153,7 @@ fn find_output(query: &str) -> Result<(AudioObjectID, String)> {
     }
 }
 
-fn address(selector: u32, scope: u32) -> AudioObjectPropertyAddress {
+pub(crate) fn address(selector: u32, scope: u32) -> AudioObjectPropertyAddress {
     AudioObjectPropertyAddress {
         mSelector: selector,
         mScope: scope,
@@ -162,7 +162,7 @@ fn address(selector: u32, scope: u32) -> AudioObjectPropertyAddress {
 }
 
 /// A fixed-size property of a Core Audio object.
-fn property<T: Copy>(object: AudioObjectID, selector: u32, scope: u32) -> Option<T> {
+pub(crate) fn property<T: Copy>(object: AudioObjectID, selector: u32, scope: u32) -> Option<T> {
     let address = address(selector, scope);
     let mut value = MaybeUninit::<T>::uninit();
     let mut size = size_of::<T>() as u32;
@@ -180,7 +180,7 @@ fn property<T: Copy>(object: AudioObjectID, selector: u32, scope: u32) -> Option
 }
 
 /// A variable-size property, as bytes aligned for any of its structs.
-fn property_bytes(object: AudioObjectID, selector: u32, scope: u32) -> Option<Vec<u8>> {
+pub(crate) fn property_bytes(object: AudioObjectID, selector: u32, scope: u32) -> Option<Vec<u8>> {
     let address = address(selector, scope);
     let mut size = 0u32;
     let status = unsafe {
@@ -215,7 +215,7 @@ fn property_bytes(object: AudioObjectID, selector: u32, scope: u32) -> Option<Ve
 }
 
 /// A string property (Core Audio hands over a retained CFString).
-fn string_property(object: AudioObjectID, selector: u32) -> Option<String> {
+pub(crate) fn string_property(object: AudioObjectID, selector: u32) -> Option<String> {
     let string = property::<*const CFString>(object, selector, kAudioObjectPropertyScopeGlobal)?;
     let string = unsafe { CFRetained::from_raw(NonNull::new(string.cast_mut())?) };
     Some(string.to_string())

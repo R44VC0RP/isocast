@@ -516,10 +516,11 @@ fn open_native<P: Platform>(
             let (capture, channels) = platform.capture_microphone(&microphone.device, sink)?;
             Ok(captured_audio(feed, chunks, capture, channels))
         }
-        SourceKind::SystemAudio(_) => {
+        SourceKind::SystemAudio(system) => {
             let (feed, sink, chunks) = audio_feed();
             // What monitoring plays would otherwise be recorded again.
-            let (capture, channels) = platform.capture_system_audio(sink, setup.monitors())?;
+            let (capture, channels) =
+                platform.capture_system_audio(&system.exclude, sink, setup.monitors())?;
             Ok(captured_audio(feed, chunks, capture, channels))
         }
         SourceKind::ApplicationAudio(application) => {

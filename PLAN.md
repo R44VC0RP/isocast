@@ -886,6 +886,12 @@ native app; each verified against OBS's behaviour on a test Mac.
   stingers (VP8 with alpha) play without converting: libvpx's VP8 decoder,
   vendored in crates/isocast-vp8 and built statically; Vorbis sound
   through lewton.
+- [x] **G.10 System and app audio through Core Audio process taps (#33).**
+  `system_audio` and `application_audio` capture through a process tap
+  and a private aggregate device on macOS 14.2+ (ScreenCaptureKit before
+  14.2, while System Audio Recording isn't allowed, or forced with
+  `ISOCAST_AUDIO_CAPTURE=screencapturekit`); `system_audio.exclude`
+  leaves apps out; the `system_audio` permission; app pickers in the app.
 
 ### T. Themes (Ryan, 2026-10-13)
 
@@ -1330,6 +1336,14 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   557.6 → 486.1 M/s, 0 drops, all benchmark movies decode. Evidence and
   uncommitted merge handoff: g3b-crash-safe scratch REPORT.md.
 
+- G.10 / #33 (2026-10-15): system and app audio through Core Audio process
+  taps with SCK fallback, `exclude`, `system_audio` permission. Verified on
+  isocast-m2-a (macOS 27) and m2-b (26.7): tone tracks right (excluded and
+  other apps at -107 dB, also for apps that start mid-take), beep stamps
+  0.6 ms (27) / 21.9 ms (26.7) from AVAudioEngine's schedule with 0 spread
+  (SCK -0.6 / 37.7 ms), 0.1-0.2 s less CPU per 18 s than SCK, output switch
+  mid-take recorded like SCK, forced and not-allowed fallbacks; e2e hosted
+  16/16.
 - A.4 / #68 review B1 (2026-10-15): keep the pre-placed encoder's native
   clock contiguous across parking; restore host PTS/DTS before muxing so
   VT cannot spend the idle gap as a bitrate burst. 150 s park: first packet

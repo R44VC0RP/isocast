@@ -304,6 +304,69 @@ pub fn app_options(devices: Option<&Devices>, value: &str) -> Vec<Choice> {
     prompt(keep(options, value, "not open"), value, "Choose an app…")
 }
 
+/// Apps whose sound can be captured or left out: those that have opened
+/// audio (playing ones first), then other apps with windows. Each by
+/// bundle id where it has one, else its name (tools like `afplay`).
+fn audio_apps(devices: Option<&Devices>) -> Vec<(String, String, String)> {
+    let mut found: Vec<(String, String, String)> = Vec::new();
+    for a in devices.map(|d| d.audio_apps.as_slice()).unwrap_or_default() {
+        let key = a.bundle_id.clone().unwrap_or_else(|| a.name.clone());
+        if found.iter().all(|f| f.0 != key) {
+            let detail = if a.playing { "playing" } else { "audio" };
+            found.push((key, a.name.clone(), detail.into()));
+        }
+    }
+    for a in apps(devices) {
+        if found.iter().all(|f| f.0 != a.key) {
+            found.push((a.key, a.name, String::new()));
+        }
+    }
+    found
+}
+
+/// Apps for an application audio source's `app`.
+pub fn audio_app_options(devices: Option<&Devices>, value: &str) -> Vec<Choice> {
+    let lower = value.to_lowercase();
+    let options = audio_apps(devices)
+        .into_iter()
+        .map(|(key, name, detail)| {
+            // Keep a setup's own spelling of the app it names.
+            let v = if !value.is_empty()
+                && (key.to_lowercase() == lower || name.to_lowercase() == lower)
+            {
+                value.to_string()
+            } else {
+                key
+            };
+            choice(v, name, detail)
+        })
+        .collect();
+    prompt(keep(options, value, "not open"), value, "Choose an app…")
+}
+
+/// Apps a system audio source could leave out, besides those it does.
+pub fn exclude_options(devices: Option<&Devices>, excluded: &[String]) -> Vec<Choice> {
+    let left_out = |key: &str, name: &str| {
+        excluded
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(key) || e.eq_ignore_ascii_case(name))
+    };
+    let options = audio_apps(devices)
+        .into_iter()
+        .filter(|(key, name, _)| !left_out(key, name))
+        .map(|(key, name, detail)| choice(key, name, detail))
+        .collect();
+    prompt(options, "", "Leave out an app…")
+}
+
+/// The name an excluded app is shown by: its name if it's running.
+pub fn app_name(devices: Option<&Devices>, value: &str) -> String {
+    audio_apps(devices)
+        .into_iter()
+        .find(|(key, name, _)| key.eq_ignore_ascii_case(value) || name.eq_ignore_ascii_case(value))
+        .map_or_else(|| value.to_string(), |(_, name, _)| name)
+}
+
 /// The window of `app` a window source with `title` captures: the
 /// largest whose title contains it (ignoring case), as the engine picks.
 pub fn match_window<'a>(

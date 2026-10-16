@@ -370,7 +370,46 @@ fn choice_control(
             row.value = v;
             row.refresh = true;
         }
-        ("window" | "application" | "application_audio", "app") => {
+        ("application_audio", "app") => {
+            let none = devices.is_none_or(|d| d.windows.is_empty() && d.audio_apps.is_empty());
+            row.options = if none && v.is_empty() {
+                let note = if devices.is_none() {
+                    "Looking…"
+                } else {
+                    "No apps with sound found."
+                };
+                vec![(String::new(), note.into(), String::new())]
+            } else {
+                dev::audio_app_options(devices, &v)
+            };
+            row.value = v;
+            row.refresh = true;
+        }
+        ("system_audio", "exclude") => {
+            // The apps left out, each removable, and a menu to add one.
+            let excluded: Vec<String> = value
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
+            row.kind = "files";
+            row.files = excluded.iter().map(|e| dev::app_name(devices, e)).collect();
+            row.dirs = excluded
+                .iter()
+                .map(|e| {
+                    let name = dev::app_name(devices, e);
+                    if name == *e { String::new() } else { e.clone() }
+                })
+                .collect();
+            row.options = dev::exclude_options(devices, &excluded);
+            row.value = String::new();
+            row.refresh = true;
+        }
+        ("window" | "application", "app") => {
             let none = devices.is_none_or(|d| d.windows.is_empty());
             row.options = if none && v.is_empty() {
                 let note = if devices.is_none() {
@@ -1016,6 +1055,18 @@ pub fn change(app: &Rc<App>, t: &Target, key: &str, event: FormEvent) -> Outcome
                             out.insert("title".into(), Value::Null);
                         }
                         out
+                    }
+                    ("system_audio", "exclude") => {
+                        let mut list = value
+                            .get(key)
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        if chosen.is_empty() || list.iter().any(|v| v == &json!(chosen)) {
+                            return Outcome::Nothing;
+                        }
+                        list.push(json!(chosen));
+                        one(key, Value::Array(list))
                     }
                     ("filter", "sidechain_source") => one(
                         "sidechain_source",

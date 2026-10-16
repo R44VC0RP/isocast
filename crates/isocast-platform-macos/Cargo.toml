@@ -47,6 +47,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSResponder",
     "NSRunningApplication",
     "NSScreen",
+    "NSWorkspace",
+    "libc",
     "NSView",
     "NSWindow",
     "objc2-core-foundation",
@@ -100,7 +102,8 @@ objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = 
     "AudioUnitProperties",
     "objc2-core-audio-types",
 ] }
-objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware"] }
+# objc2 + objc2-foundation: CATapDescription (process taps, #33).
+objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware", "objc2", "objc2-foundation", "objc2-core-audio-types"] }
 objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
@@ -167,6 +170,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSObject",
     "NSString",
     "NSURL",
+    "NSUUID",
     "NSValue",
     "NSRunLoop",
     "NSPort",

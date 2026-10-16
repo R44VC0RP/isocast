@@ -195,10 +195,16 @@ pub fn probe(source: &SourceKind, canvas: &Canvas) -> Result<Option<Probe>> {
             })
         }
         SourceKind::ApplicationAudio(application) => {
-            let content = crate::devices::shareable_content()?;
-            crate::capture::find_applications(&content, &application.app)?;
+            let device = match crate::tap::backend() {
+                crate::tap::Backend::ProcessTap => crate::tap::check_app(&application.app)?,
+                crate::tap::Backend::ScreenCaptureKit => {
+                    let content = crate::devices::shareable_content()?;
+                    crate::capture::find_applications(&content, &application.app)?;
+                    application.app.clone()
+                }
+            };
             Some(Probe {
-                device: application.app.clone(),
+                device,
                 video: None,
                 channels: Some(2),
             })

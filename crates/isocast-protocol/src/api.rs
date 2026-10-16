@@ -628,8 +628,8 @@ pub struct GetParams {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RequestPermissionsParams {
-    /// Only this permission (screen_recording, camera or microphone); all
-    /// three that haven't been decided if left out.
+    /// Only this permission (screen_recording, camera, microphone or
+    /// system_audio); all that haven't been decided if left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<crate::devices::PermissionKind>,
 }

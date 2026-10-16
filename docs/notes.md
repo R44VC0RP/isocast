@@ -1658,6 +1658,38 @@ each section. Delete entries that stop being true.
   (baseline 7%, VP9 alpha 24%, ProRes 4444 22%), 0 dropped frames in 90 s,
   RSS flat at 243 MB (VP9 alpha 211, ProRes 393). Libvpx decodes on one
   thread unless the stream has several token partitions.
+- 2026-10-15 (#33): **System and app audio through Core Audio process
+  taps, ScreenCaptureKit as the fallback.** `tap.rs`: a private
+  `CATapDescription` (global-but-exclude for system audio, mixdown of
+  processes for an app) read through a private aggregate device that holds
+  only the tap (no sub-device: an output with inputs, like AirPods, would
+  otherwise open its microphone and add its streams; review B1), IOProc on Core Audio's thread stamping each
+  buffer from `inInputTime.mHostTime`. Which backend: taps when System
+  Audio Recording (`kTCCServiceAudioCapture`) is granted; if it isn't but
+  screen recording is, SCK, so an existing setup never stops at a new
+  prompt mid-recording (or fails once it's turned down); with neither, a
+  tap (its prompt asks for less). Before 14.2 and with
+  `ISOCAST_AUDIO_CAPTURE=screencapturekit`, SCK. `AudioHardwareCreate/
+  DestroyProcessTap` are looked up with dlsym (deployment target 14.0).
+  Apps match by bundle id, name, part of the name or a tool's executable
+  name; a helper process belongs to the app `responsibility_get_pid_
+  responsible_for_pid` names (browsers' helpers, WebKit's GPU process);
+  a tool started from a terminal belongs to itself. The tap's process
+  list follows `kAudioHardwarePropertyProcessObjectList` (set
+  `kAudioTapPropertyDescription`, same UUID); a change of default output,
+  of the tap's format or a dead aggregate rebuilds tap and device (the
+  engine fills the gap). `system_audio.exclude` lists apps to leave out
+  (OBS-style "all but"); under SCK only apps SCK lists can be left out.
+- 2026-10-15 (#33): **A fourth permission, `system_audio`.** Preflight and
+  request through TCC's SPI (`TCCAccessPreflight`/`TCCAccessRequest`,
+  dlopen'd), because opening a tap without a decision shows macOS's prompt
+  and blocks `AudioDeviceCreateIOProcID` until it's answered (the source
+  then times out after 8 s). It is reported granted before 14.2, is never
+  "needed" in the app's sheet (screen recording also records system
+  audio) and doctor flags it only when a setup plays system/app audio and
+  neither it nor screen recording is granted. `isocast permissions
+  --request` (all) asks for it too, so first-launch onboarding does.
+
 - 2026-10-15 (#68 review B1): **Exclude a parked gap from the native H.264
   timeline, not the engine timeline.** VT's bitrate controller treated the
   gap after the warm picture as unused budget (3 s: 1.96 MB first packet;
@@ -5004,6 +5036,24 @@ each section. Delete entries that stop being true.
   needs the folder's exclusive lock, so a take killed there stays
   "recording" with its fragmented (playable) files; kill-matrix can't run
   with --work on exFAT or NFS (the daemon's Unix socket can't live there).
+- 2026-10-15 (#33): Process taps need their own TCC grant (System Audio
+  Recording Only) even where screen recording is granted; an engine
+  with screen recording but no decision blocks in
+  `AudioDeviceCreateIOProcID` on the prompt. A copied /usr/bin/afplay is
+  SIGKILLed (platform binary signature); `codesign -f -s -` the copy.
+  On the M2s the tap and the aggregate's input stream report 48 kHz even
+  with the speakers set to 44.1 kHz (the HAL drift-compensates; beep
+  stamps then jitter ±3 ms instead of 0), so the resampler path (rate ≠
+  48 kHz) has only its unit test so far. afplay itself goes silent for
+  ~1 s when the default output changes (SCK records the same gap).
+  `tccutil reset AudioCapture dev.isocast.isocastd` brings back "not
+  asked" on a test Mac. A private aggregate device is visible to its own
+  process as an AVFoundation microphone (filtered by its UID prefix
+  `dev.isocast.tap.`). The test VM's "Apple Virtual Sound Device" has
+  inputs and outputs, but a daemon started over SSH there can't play
+  (afplay: AudioQueueStart 89) or write files (-12903), so audio checks
+  need the M2s.
+
 - 2026-10-15 (#59, fixes-005): `stream stop` drops `state.stream`, but a
   stream that *failed* stays in the status until the next start, and its
   own status hard-codes `key_set: true` (engine stream/mod.rs). `status`

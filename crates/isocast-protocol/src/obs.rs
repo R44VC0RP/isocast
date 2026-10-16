@@ -1677,7 +1677,7 @@ impl<'a, 'v> Importer<'a, 'v> {
                 self.notes.push(format!(
                     "{label}: OBS captured an output device; Isocast records what the Mac plays"
                 ));
-                SourceKind::SystemAudio(SystemAudioSource {})
+                SourceKind::SystemAudio(SystemAudioSource::default())
             }
             "sck_audio_capture" => match int(s, "type").unwrap_or(0) {
                 1 => match text(s, "application").filter(|a| !a.is_empty()) {
@@ -1686,7 +1686,7 @@ impl<'a, 'v> Importer<'a, 'v> {
                     }
                     None => return Err("application audio with no application chosen".into()),
                 },
-                _ => SourceKind::SystemAudio(SystemAudioSource {}),
+                _ => SourceKind::SystemAudio(SystemAudioSource::default()),
             },
             "color_source" => SourceKind::Color(ColorSource {
                 color: obs_color(int(s, "color").unwrap_or(0xFFFF_FFFF), true),

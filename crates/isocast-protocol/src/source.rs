@@ -138,12 +138,29 @@ impl Kind for MicrophoneSource {
     const AUDIO: bool = true;
 }
 
-/// Audio the computer is playing.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct SystemAudioSource {}
+/// Audio the computer is playing, optionally leaving some apps out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SystemAudioSource {
+    /// Apps whose sound is left out: names or bundle ids, or parts of
+    /// names, as for `application_audio`'s `app` (`isocast devices` lists
+    /// the apps that have opened audio).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+}
 
 impl Kind for SystemAudioSource {
     const AUDIO: bool = true;
+
+    fn check(&self, path: &str, issues: &mut Issues) {
+        for (i, app) in self.exclude.iter().enumerate() {
+            if app.trim().is_empty() {
+                issues.add(
+                    format!("{path}.exclude[{i}]"),
+                    "name an app (a name, bundle id or part of a name), or remove the entry",
+                );
+            }
+        }
+    }
 }
 
 /// A solid colour (OBS's Color Source).

@@ -229,6 +229,9 @@ app,engine,version,executable,build_version,bundle_id,feed,key,lsenv=sys.argv[1:
 usage={"NSCameraUsageDescription":"Isocast records cameras and capture cards into your scenes and recordings.",
        "NSMicrophoneUsageDescription":"Isocast records microphones and audio interfaces into your scenes and recordings.",
        "NSScreenCaptureUsageDescription":"Isocast captures the displays, windows and desktop audio you select for scenes and recordings.",
+       # System Audio Recording (process taps, macOS 14.2+; #33): asked for
+       # under the outer app, which macOS attributes the engine to.
+       "NSAudioCaptureUsageDescription":"Isocast records the system or app audio you choose for your scenes and recordings.",
        # Without it macOS keeps the engine off the local network with no
        # prompt: a LAN RTMP server fails with "No route to host" (#57).
        "NSLocalNetworkUsageDescription":"Isocast streams to servers on your local network, such as an RTMP server on another computer."}

@@ -127,7 +127,7 @@ impl Area for PermissionsStep {
         self.offered.set(true);
         app.call_as::<PermissionsReport>(Method::Permissions, move |app, result| {
             let Ok(report) = result else { return };
-            let needed = needed(app);
+            let needed = needed(app, Some(&report));
             let missing = report
                 .details
                 .iter()
@@ -444,12 +444,12 @@ impl PermissionsStep {
     fn sample(&self, app: &Rc<App>, which: &str) -> anyhow::Result<()> {
         use Permission::{Denied, Granted, NotDetermined, NotGranted, Restricted};
         let states = match which {
-            "first-launch" | "asking" => [NotGranted, NotDetermined, NotDetermined],
-            "helper" | "relaunch" => [NotGranted, Granted, Granted],
-            "denied" => [Granted, Denied, Granted],
-            "silent" => [Granted, Granted, Denied],
-            "allowed" => [Granted, Granted, Granted],
-            "blocked" => [Granted, Restricted, Granted],
+            "first-launch" | "asking" => [NotGranted, NotDetermined, NotDetermined, NotDetermined],
+            "helper" | "relaunch" => [NotGranted, Granted, Granted, NotDetermined],
+            "denied" => [Granted, Denied, Granted, Denied],
+            "silent" => [Granted, Granted, Denied, Granted],
+            "allowed" => [Granted, Granted, Granted, Granted],
+            "blocked" => [Granted, Restricted, Granted, Granted],
             other => anyhow::bail!(
                 "no sample {other:?}; one of first-launch, asking, helper, relaunch, denied, silent, allowed, blocked"
             ),
@@ -483,11 +483,12 @@ impl PermissionsStep {
         let Some(window) = app.window() else { return };
         let area = window.global::<PermissionsArea>();
         let report = self.report.borrow();
-        // The first launch's sample has no setup yet: it needs all three.
+        // The first launch's sample has no setup yet: it needs the three
+        // that aren't optional.
         let needed = if self.sample.get() && self.first_launch.get() {
-            [true; 3]
+            [true, true, true, false]
         } else {
-            needed(app)
+            needed(app, report.as_ref())
         };
         area.set_checked(report.is_some());
         area.set_first_launch(self.first_launch.get());
@@ -542,6 +543,12 @@ fn row(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem
             "Microphone",
             "Microphones and audio interfaces.",
             "Microphone",
+        ),
+        PermissionKind::SystemAudio => (
+            "speaker",
+            "System Audio",
+            "Optional: what this Mac and its apps play, recorded without Screen Recording.",
+            "Screen & System Audio Recording",
         ),
     };
     let app = shown_name(d);
@@ -604,7 +611,8 @@ fn row(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem
             ),
         }
     };
-    let purpose = if needed {
+    // System audio is never required (screen recording records it too).
+    let purpose = if needed || d.permission == PermissionKind::SystemAudio {
         purpose.to_string()
     } else {
         format!("{purpose} This setup doesn’t use it.")
@@ -660,17 +668,24 @@ fn kind(id: &str) -> PermissionKind {
         .unwrap_or(0)]
 }
 
-/// Which permissions are needed: all three before there is a setup (its
-/// first setup picks a screen, camera and microphone), else those its
-/// sources use.
-fn needed(app: &Rc<App>) -> [bool; 3] {
+/// Which permissions are needed: screen recording, camera and microphone
+/// before there is a setup (its first setup picks a screen, camera and
+/// microphone), else those its sources use. System audio recording is
+/// never needed: screen recording records system and app audio too, and
+/// where system audio recording is allowed, system and app audio don't
+/// need screen recording.
+fn needed(app: &Rc<App>, report: Option<&PermissionsReport>) -> [bool; 4] {
+    let played_by_tap = report.is_some_and(|r| r.permissions.system_audio == Permission::Granted);
     let s = app.session.borrow();
     let Some(setup) = s.setup.as_ref() else {
-        return [true; 3];
+        return [true, true, true, false];
     };
-    let mut needed = [false; 3];
+    let mut needed = [false; 4];
     for source in &setup.sources {
         let kind = match source.kind {
+            SourceKind::SystemAudio(_) | SourceKind::ApplicationAudio(_) if played_by_tap => {
+                continue;
+            }
             SourceKind::Display(_)
             | SourceKind::Window(_)
             | SourceKind::Application(_)
@@ -686,7 +701,7 @@ fn needed(app: &Rc<App>) -> [bool; 3] {
 }
 
 /// A report as the engine gives it, for snapshots: the release app's names.
-fn sample_report(states: [Permission; 3], unasked: bool, restart: bool) -> PermissionsReport {
+fn sample_report(states: [Permission; 4], unasked: bool, restart: bool) -> PermissionsReport {
     let details = PermissionKind::ALL
         .into_iter()
         .zip(states)
@@ -718,6 +733,7 @@ fn sample_report(states: [Permission; 3], unasked: bool, restart: bool) -> Permi
             screen_recording: states[0],
             camera: states[1],
             microphone: states[2],
+            system_audio: states[3],
         },
         app: "Isocast".into(),
         details,

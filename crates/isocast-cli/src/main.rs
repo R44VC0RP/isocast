@@ -217,7 +217,8 @@ enum Command {
         /// Setup file (.toml or .json).
         setup: Option<PathBuf>,
         /// Record without a setup file: screen, display[:NAME_OR_ID],
-        /// camera:NAME_OR_ID, mic[:NAME_OR_ID], system-audio,
+        /// camera:NAME_OR_ID, mic[:NAME_OR_ID],
+        /// system-audio[:except=APP[,APP]], window:APP, app-audio:APP,
         /// test-pattern[:WIDTHxHEIGHT[@FPS]] or tone[:HZ]. Repeat for more
         /// sources; every audio source goes into every file.
         #[arg(long = "source", value_name = "SPEC")]
@@ -467,13 +468,14 @@ enum Command {
     /// permission. Refused, atomically by isocastd, while it records,
     /// streams, exports or feeds the virtual camera.
     Restart,
-    /// Show the screen recording, camera and microphone permissions and
-    /// what to do about each that isn't granted; with --request, ask macOS
+    /// Show the screen recording, camera, microphone and system audio
+    /// recording permissions and what to do about each that isn't granted; with --request, ask macOS
     /// for the ones not decided yet (its prompts appear; --request camera
     /// asks for that one only) and wait up to a minute for the answers;
     /// with --open, open the System Settings pane where one is turned on.
     Permissions {
-        /// screen_recording, camera or microphone; all three if left out.
+        /// screen_recording, camera, microphone or system_audio; all if
+        /// left out.
         #[arg(
             long,
             conflicts_with = "open",
@@ -482,7 +484,7 @@ enum Command {
             value_parser = parse_permission
         )]
         request: Option<Option<isocast_protocol::devices::PermissionKind>>,
-        /// screen_recording, camera or microphone.
+        /// screen_recording, camera, microphone or system_audio.
         #[arg(long, value_name = "PERMISSION", value_parser = parse_permission)]
         open: Option<isocast_protocol::devices::PermissionKind>,
         #[arg(long)]
@@ -3834,12 +3836,21 @@ fn devices(json: bool) -> Result<ExitCode> {
             o.name, o.sample_rate, o.channels, o.id
         );
     }
+    if !devices.audio_apps.is_empty() {
+        println!("Apps with audio (for app-audio and system-audio's exclude)");
+        for a in &devices.audio_apps {
+            let playing = if a.playing { " (playing)" } else { "" };
+            let bundle = a.bundle_id.as_deref().unwrap_or("-");
+            println!("  {}{playing}  {bundle}  pid {}", a.name, a.pid);
+        }
+    }
     let p = &devices.permissions;
     println!(
-        "Permissions: screen recording {}, camera {}, microphone {}",
+        "Permissions: screen recording {}, camera {}, microphone {}, system audio recording {}",
         p.screen_recording.label(),
         p.camera.label(),
-        p.microphone.label()
+        p.microphone.label(),
+        p.system_audio.label()
     );
     for note in &devices.notes {
         println!("note: {note}");

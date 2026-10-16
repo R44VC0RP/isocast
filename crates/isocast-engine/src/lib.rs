@@ -248,11 +248,12 @@ pub trait Platform: Clone + Send + Sync + 'static {
         sink: AudioSink,
     ) -> anyhow::Result<(Self::Capture, u32)>;
 
-    /// Start capturing what the computer plays. Returns its channel count.
-    /// `exclude_own` leaves out what this process plays (monitoring), so it
-    /// isn't recorded twice.
+    /// Start capturing what the computer plays, leaving out the apps
+    /// `exclude` names. Returns its channel count. `exclude_own` leaves out
+    /// what this process plays (monitoring), so it isn't recorded twice.
     fn capture_system_audio(
         &self,
+        exclude: &[String],
         sink: AudioSink,
         exclude_own: bool,
     ) -> anyhow::Result<(Self::Capture, u32)>;

@@ -137,7 +137,7 @@ component FilesField inherits VerticalLayout {
                     VerticalLayout {
                         alignment: center;
                         Icon {
-                            path: Icons.reel;
+                            path: root.f.options.length > 0 ? Icons.app-audio : Icons.reel;
                             size: Theme.icon-xs;
                             stroke-width: 1.125px;
                             color: Theme.text-3;
@@ -191,7 +191,20 @@ component FilesField inherits VerticalLayout {
             }
         }
     }
-    HorizontalLayout {
+    // Apps to add from (a system audio source's apps to leave out).
+    if root.f.options.length > 0: HorizontalLayout {
+        alignment: start;
+        Dropdown {
+            width: root.width;
+            on-control: true;
+            show-detail: true;
+            options: root.f.options;
+            value: root.f.value;
+            label: root.f.label;
+            selected(v) => { SettingsForms.choose(root.form, root.f.key, v); }
+        }
+    }
+    if root.f.options.length == 0: HorizontalLayout {
         alignment: start;
         Button {
             text: "Add Files…";

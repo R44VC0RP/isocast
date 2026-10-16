@@ -321,15 +321,15 @@ struct ImportDocumentsParams {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 struct RequestPermissionsToolParams {
-    /// Only this one: screen_recording, camera or microphone (all three
-    /// not decided yet if left out).
+    /// Only this one: screen_recording, camera, microphone or system_audio
+    /// (all not decided yet if left out).
     #[serde(default)]
     permission: Option<isocast_protocol::devices::PermissionKind>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct OpenPermissionSettingsParams {
-    /// screen_recording, camera or microphone.
+    /// screen_recording, camera, microphone or system_audio.
     permission: isocast_protocol::devices::PermissionKind,
 }
 
@@ -1537,7 +1537,8 @@ impl Isocast {
 
     #[tool(
         description = "Open System Settings on the user's screen at the pane where a \
-                       permission (screen_recording, camera or microphone) is turned on by \
+                       permission (screen_recording, camera, microphone or system_audio) is \
+                       turned on by \
                        hand, for one that was refused.",
         annotations(
             read_only_hint = false,

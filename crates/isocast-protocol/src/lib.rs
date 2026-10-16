@@ -1396,7 +1396,19 @@ impl Setup {
                 ("mic", arg) => SourceKind::Microphone(MicrophoneSource {
                     device: arg.unwrap_or("default").to_string(),
                 }),
-                ("system-audio", None) => SourceKind::SystemAudio(SystemAudioSource {}),
+                ("system-audio", None) => SourceKind::SystemAudio(SystemAudioSource::default()),
+                ("system-audio", Some(arg)) => match arg.strip_prefix("except=") {
+                    Some(apps) if !apps.trim().is_empty() => {
+                        SourceKind::SystemAudio(SystemAudioSource {
+                            exclude: apps.split(',').map(|a| a.trim().to_string()).collect(),
+                        })
+                    }
+                    _ => {
+                        return Err(format!(
+                            "{spec:?}: expected system-audio or system-audio:except=APP[,APP]"
+                        ));
+                    }
+                },
                 ("camera", Some(device)) => SourceKind::Camera(CameraSource {
                     device: device.to_string(),
                     width: None,
@@ -2127,7 +2139,7 @@ pub const QUICK_SOURCES: &[&str] = &[
     "display[:NAME_OR_ID]",
     "camera:NAME_OR_ID",
     "mic[:NAME_OR_ID]",
-    "system-audio",
+    "system-audio[:except=APP[,APP]]",
     "window:APP",
     "app-audio:APP",
     "test-pattern[:WIDTHxHEIGHT[@FPS]]",
