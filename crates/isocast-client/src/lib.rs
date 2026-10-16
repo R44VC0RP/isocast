@@ -405,14 +405,19 @@ fn daemon_path() -> Result<PathBuf> {
 }
 
 /// The engine a distribution bundles next to `exe` (its
-/// `Contents/MacOS/…`): `Contents/Helpers/Isocast Engine.app`'s isocastd.
+/// `Contents/MacOS/…`): `Contents/Helpers/Isocast Engine.app`'s
+/// "Isocast Engine" (#83), or its `isocastd` in releases made before that.
 fn bundled_helper(exe: &Path) -> Option<PathBuf> {
+    use isocast_protocol::api::{ENGINE_EXECUTABLE, OLD_ENGINE_EXECUTABLE};
     let contents = exe.parent().and_then(Path::parent)?;
     if contents.file_name().is_none_or(|name| name != "Contents") {
         return None;
     }
-    let helper = contents.join("Helpers/Isocast Engine.app/Contents/MacOS/isocastd");
-    helper.is_file().then_some(helper)
+    let macos = contents.join("Helpers/Isocast Engine.app/Contents/MacOS");
+    [ENGINE_EXECUTABLE, OLD_ENGINE_EXECUTABLE]
+        .into_iter()
+        .map(|name| macos.join(name))
+        .find(|helper| helper.is_file())
 }
 
 /// An isocastd older than the one this client would launch: left running

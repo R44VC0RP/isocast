@@ -609,6 +609,8 @@ pub fn environment(folder: &Path) -> Value {
                 "QuickTime Player.app/",
                 "Camtasia",
                 "isocast",
+                // The release engine (#83).
+                "Isocast Engine",
             ]
             .iter()
             .any(|s| path.contains(s))

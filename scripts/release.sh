@@ -122,6 +122,9 @@ output="${output:-$target/dist/$version}"
 case "$output" in /*) ;; *) output="$root/$output" ;; esac
 app="$output/Isocast.app"
 engine="$app/Contents/Helpers/Isocast Engine.app"
+# The engine's executable (#83): macOS names it in prompts such as the camera
+# extension's approval alert. Cargo still builds it as isocastd.
+engine_executable="Isocast Engine"
 dmg="$output/Isocast-$version-arm64.dmg"
 entitlements="$root/scripts/release-entitlements.plist"
 app_entitlements="$root/scripts/release-app-entitlements.plist"
@@ -218,14 +221,14 @@ run env CARGO_TARGET_DIR="$target" MACOSX_DEPLOYMENT_TARGET=14.0 ISOCAST_BUILD_V
 binary_dir="$target/aarch64-apple-darwin/release"
 run cp "$binary_dir/$app_target" "$app/Contents/MacOS/$app_target"
 run cp "$binary_dir/isocast" "$app/Contents/MacOS/isocast"
-run cp "$binary_dir/isocastd" "$engine/Contents/MacOS/isocastd"
+run cp "$binary_dir/isocastd" "$engine/Contents/MacOS/$engine_executable"
 # The CMIO camera extension (camera-extension/), embedded in the engine helper
 # that activates it (OSSystemExtensionRequest on the first Start).
 run env MACOSX_DEPLOYMENT_TARGET=14.0 sh scripts/build-camera-extension.sh "$camera_work"
 run ditto "$camera_work/$camera_id.systemextension" "$extension"
 run python3 -c 'import plistlib,sys
 from pathlib import Path
-app,engine,version,executable,build_version,bundle_id,feed,key,lsenv=sys.argv[1:]
+app,engine,version,executable,build_version,bundle_id,feed,key,engine_executable,lsenv=sys.argv[1:]
 usage={"NSCameraUsageDescription":"Isocast records cameras and capture cards into your scenes and recordings.",
        "NSMicrophoneUsageDescription":"Isocast records microphones and audio interfaces into your scenes and recordings.",
        "NSScreenCaptureUsageDescription":"Isocast captures the displays, windows and desktop audio you select for scenes and recordings.",
@@ -237,7 +240,7 @@ usage={"NSCameraUsageDescription":"Isocast records cameras and capture cards int
        "NSLocalNetworkUsageDescription":"Isocast streams to servers on your local network, such as an RTMP server on another computer."}
 for source,dest,identifier,name,binary in [
     ("crates/isocast-ui/Info.plist" if executable=="isocast-ui" else "crates/isocast-app/bundle/Info.plist",app,bundle_id,"Isocast",executable),
-    ("crates/isocast-daemon/Info.plist",engine,"dev.isocast.isocastd","Isocast Engine","isocastd")]:
+    ("crates/isocast-daemon/Info.plist",engine,"dev.isocast.isocastd","Isocast Engine",engine_executable)]:
     p=plistlib.loads(Path(source).read_bytes())
     p.update(usage)
     p.update(CFBundleIdentifier=identifier,CFBundleName=name,CFBundleDisplayName=name,
@@ -259,7 +262,7 @@ ext=Path(engine,"Contents/Library/SystemExtensions/dev.isocast.isocastd.camera.s
 p=plistlib.loads(ext.read_bytes())
 p.update(CFBundleShortVersionString=version,CFBundleVersion=build_version)
 ext.write_bytes(plistlib.dumps(p))' "$app" "$engine" "$version" "$app_target" "$build_version" "$bundle_id" "$feed_url" "$sparkle_key" \
-    "${update_test:+${ISOCAST_UPDATE_TEST_ENV:-}}"
+    "$engine_executable" "${update_test:+${ISOCAST_UPDATE_TEST_ENV:-}}"
 run xcrun actool "$root/crates/isocast-app/bundle/Isocast.icon" --compile "$app/Contents/Resources" \
     --platform macosx --minimum-deployment-target 14.0 --app-icon Isocast \
     --output-partial-info-plist "$output/work/icon.plist"
@@ -346,7 +349,7 @@ w=Path(sys.argv[1]); app=w/"Isocast.app"; target=sys.argv[4]
 engine="Contents/Helpers/Isocast Engine.app/Contents"
 camera=f"{engine}/Library/SystemExtensions/dev.isocast.isocastd.camera.systemextension/Contents"
 paths=[f"Contents/MacOS/{target}","Contents/MacOS/isocast","Contents/Info.plist",
-       f"{engine}/MacOS/isocastd",f"{engine}/Info.plist",
+       f"{engine}/MacOS/{sys.argv[9]}",f"{engine}/Info.plist",
        f"{camera}/MacOS/IsocastCamera",f"{camera}/Info.plist"]
 if sys.argv[3]!="ad-hoc": paths+=[f"{engine}/embedded.provisionprofile",f"{camera}/embedded.provisionprofile"]
 hashes={p:hashlib.sha256((app/p).read_bytes()).hexdigest() for p in paths}
@@ -355,7 +358,8 @@ r=dict(schema=1,version=sys.argv[2],signing=sys.argv[3],app_target=target,
        app_files=hashes,dmg_sha256=hashlib.sha256(Path(sys.argv[6]).read_bytes()).hexdigest())
 if sys.argv[7]: r["sparkle"]=dict(feed=sys.argv[7],public_key=sys.argv[8])
 (w/"release.json").write_text(json.dumps(r,indent=2)+"\n")' \
-    "$output" "$version" "$mode" "$app_target" "$build_version" "$dmg" "${sparkle_key:+$feed_url}" "$sparkle_key"
+    "$output" "$version" "$mode" "$app_target" "$build_version" "$dmg" "${sparkle_key:+$feed_url}" "$sparkle_key" \
+    "$engine_executable"
 if [ "$ad_hoc" = 0 ]; then
     run python3 -c 'import subprocess,sys
 for args in [["--type","execute",sys.argv[1]],["--type","open","--context","context:primary-signature",sys.argv[2]]]:

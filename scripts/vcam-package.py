@@ -326,6 +326,11 @@ def verify_release(engine, ad_hoc):
     require(sorted(p.name for p in folder.iterdir()) == [extension.name], "unexpected items in the engine's SystemExtensions folder")
     host_info, ext_info = plist(engine / "Contents/Info.plist"), plist(extension / "Contents/Info.plist")
     require(host_info.get("CFBundleIdentifier") == HOST, f"engine bundle id is {host_info.get('CFBundleIdentifier')!r}, not {HOST}")
+    # The camera extension's producer path pin (camera-extension/Camera.swift)
+    # and the clients' engine launch expect this executable (#83).
+    require(host_info.get("CFBundleExecutable") == "Isocast Engine"
+            and (engine / "Contents/MacOS/Isocast Engine").is_file(),
+            f"engine executable is {host_info.get('CFBundleExecutable')!r}, not Contents/MacOS/Isocast Engine")
     require(ext_info.get("CFBundleIdentifier") == EXTENSION, f"extension bundle id is {ext_info.get('CFBundleIdentifier')!r}")
     require(ext_info.get("CFBundlePackageType") == "SYSX", "extension is not a system extension bundle (SYSX)")
     require((extension / "Contents/MacOS" / ext_info.get("CFBundleExecutable", "?")).is_file(), "extension executable missing")

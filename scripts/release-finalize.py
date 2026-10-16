@@ -221,7 +221,10 @@ def runtime_check(app, output, hosted):
     sock = root / "d.sock"
     require(len(os.fsencode(sock)) < 104, "runtime scratch path is too long for a Unix socket")
     cli = app / "Contents/MacOS/isocast"
-    daemon = app / "Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd"
+    # "Isocast Engine" (#83), or isocastd in builds prepared before #83.
+    engine = app / "Contents/Helpers/Isocast Engine.app/Contents"
+    name = plistlib.loads((engine / "Info.plist").read_bytes())["CFBundleExecutable"]
+    daemon = engine / "MacOS" / name
     # Signing/notary/GitHub credentials never enter the recorded application.
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("ISOCAST_", "APPLE_", "DEVELOPER_", "SPARKLE_"))

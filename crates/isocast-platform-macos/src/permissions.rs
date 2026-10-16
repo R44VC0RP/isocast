@@ -209,7 +209,10 @@ pub(crate) fn preflight_status(permissions: &Permissions) -> u8 {
 /// isocast-m2-a, macOS 27).
 fn granted_after_restart() -> Option<[bool; KINDS]> {
     let exe = std::env::current_exe().ok()?;
-    if exe.file_name().is_none_or(|name| name != "isocastd") {
+    if exe
+        .file_name()
+        .is_none_or(|name| !isocast_protocol::api::is_engine_executable(name))
+    {
         return None;
     }
     match spawn_disclaimed(&exe, PREFLIGHT_ARG) {

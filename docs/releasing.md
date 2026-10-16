@@ -17,7 +17,12 @@ workflow-wide concurrency group serializes tag pushes and manual reruns.
 The DMG's app carries the virtual camera's CMIO extension
 (`dev.isocast.isocastd.camera`) inside its engine helper, which activates it
 on the first Start Virtual Camera; that needs two Developer ID provisioning
-profiles (step 4a), and no build is made without them.
+profiles (step 4a), and no build is made without them. The engine helper is
+`Isocast.app/Contents/Helpers/Isocast Engine.app` (bundle id
+`dev.isocast.isocastd`), and its executable is `Contents/MacOS/Isocast Engine`
+(Cargo's `isocastd`, renamed when packaged; #83): macOS names that file in the
+camera extension's approval alert. Releases before #83 called it `isocastd`;
+the clients and the extension accept both.
 
 A small **preflight** job runs first, without secrets or approval: it
 checks the version, that the tag exists, that Cargo.toml at the tag matches,

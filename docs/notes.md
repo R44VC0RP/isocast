@@ -1607,6 +1607,20 @@ each section. Delete entries that stop being true.
   engine retries failed sources every 5 s, so a hung driver costs at most
   2 threads per device. Logs: "source open given up" and "given-up source
   open returned" (with seconds and outcome).
+- 2026-10-16 (#83): **The release engine's executable is "Isocast
+  Engine".** macOS's camera-extension approval alert names the requesting
+  executable, so `release.sh` copies Cargo's `isocastd` to
+  `Isocast.app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/Isocast Engine`
+  (CFBundleExecutable to match). Kept: the bundle id `dev.isocast.isocastd`
+  (signing identity, provisioning profile, app group, TCC), Cargo's binary
+  name, the development app (`Isocast Dev.app/Contents/MacOS/isocastd`) and
+  every script that runs `target/release/isocastd`, and the logs' process
+  label `isocastd` (log file names, crash/diagnostics bundles). Finders of
+  the release engine accept both names (`api::is_engine_executable`): the
+  client's bundled helper, the permissions preflight self-spawn and the
+  extension's producer path pin. Not "Isocast": the app's own window and
+  menus already are, and two "Isocast" processes would be confusing.
+
 - 2026-10-16 (#79): **Recording-native submission pressure, not just the
   writer queue.** On m2-b, five 1080p60 ISOs plus program blocked all six
   crash-safe writer threads in VTCompressionSessionEncodeFrame (~17.7 ms
@@ -5231,6 +5245,20 @@ each section. Delete entries that stop being true.
   frame, so the bar edge in one decoded row names the source frame
   (`pattern_frames`), and the label's fifth character tells BARS2 from
   BARS.
+- 2026-10-16 (#83): TCC keys a Developer ID app's grants by its designated
+  requirement (identifier + team), never the helper's file name: on
+  isocast-m2-b an update-test app granted camera, microphone, screen and
+  system audio as build 1792300000 (engine `isocastd`) kept every
+  TCC.db row unchanged (same csreq and last_modified; the screen row's
+  last_modified moved only when I toggled it by hand in between) after
+  both a bundle swap and a Sparkle update to build 1792300100 (engine
+  `Isocast Engine`), with no prompt. The camera alert then said
+  "Isocast Engine" would like to use a new camera extension. Gotchas met on
+  the way: the test Mac's screen-recording `+` and the extension toggle ask
+  for the password in System Settings' own sheet (type with cua-driver's
+  desktop scope, not into SecurityAgent); ffmpeg's avfoundation input
+  rejects `-framerate 60` for the Isocast camera (use 240, the range's top).
+
 - 2026-10-16 (S.2 stress): Python's `sock.close()` doesn't close a
   socket whose `makefile()` reader is still open, so the connection stays
   up on the daemon's side (e2e.py's `Watch.close` does this). stress.py's

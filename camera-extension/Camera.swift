@@ -63,17 +63,25 @@ func producerCodeAllowed(signingID: String?, pid: pid_t) -> Bool {
 
 // Where an Isocast engine runs when installed (#69): the release app's
 // helper, /Applications/<app>.app/Contents/Helpers/Isocast Engine.app/
-// Contents/MacOS/isocastd (any name for the app, directly in
-// /Applications), or the development host scripts/vcam-install.sh copies.
-let releaseEngineSuffix = ".app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd"
+// Contents/MacOS/Isocast Engine (#83; isocastd in older releases, still accepted
+// so an older engine works until this build replaces its extension) (any
+// name for the app, directly in /Applications), or the development host
+// scripts/vcam-install.sh copies.
+let releaseEngineSuffixes = [
+    ".app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/Isocast Engine",
+    ".app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd",
+]
 let devHostEngine = "/Applications/Isocast Camera Host.app/Contents/MacOS/isocastd"
 
 func producerPathAllowed(_ path: String) -> Bool {
     if path == devHostEngine { return true }
     let prefix = "/Applications/"
-    guard path.hasPrefix(prefix), path.hasSuffix(releaseEngineSuffix) else { return false }
-    let name = path.dropFirst(prefix.count).dropLast(releaseEngineSuffix.count)
-    return !name.isEmpty && !name.contains("/")
+    guard path.hasPrefix(prefix) else { return false }
+    return releaseEngineSuffixes.contains { suffix in
+        guard path.hasSuffix(suffix) else { return false }
+        let name = path.dropFirst(prefix.count).dropLast(suffix.count)
+        return !name.isEmpty && !name.contains("/")
+    }
 }
 
 let cameraQueue = DispatchQueue(label: "dev.isocast.camera", qos: .userInteractive,

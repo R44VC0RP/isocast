@@ -22,7 +22,7 @@ Developer ID) and the Mach service `9G68SMNHEU.dev.isocast.isocastd.camera`.
 (docs/releasing.md step 4a).
 
 When a Start finds no Isocast camera and the engine carries the extension,
-the engine asks macOS to activate it (`isocastd --install-camera-extension
+the engine asks macOS to activate it (`<engine> --install-camera-extension
 --wait-for-approval`, a child with its own run loop):
 
 - **Already allowed** (for example after a reinstall): Start retries until
@@ -33,22 +33,19 @@ the engine asks macOS to activate it (`isocastd --install-camera-extension
   Settings button. The request stays alive for 15 minutes; when the user
   allows it the engine starts the camera itself, unless Stop was pressed.
   A later Start while it waits doesn't ask again. macOS's alert says
-  **"isocastd" would like to use a new camera extension**: it names the
-  requesting process's executable, not its bundle. Checked on isocast-m2-b
-  (#69): the same words with the engine helper registered with Launch
-  Services (its CFBundleName/CFBundleDisplayName are "Isocast Engine"), and
-  with the engine's responsible process being Terminal. The password sheets
-  that follow use the bundle name ("Isocast Engine is trying to modify a
-  System Extension"). Only renaming the engine's executable would change the
-  alert, and that path is pinned by the extension's producer check, the
-  CLI's engine launch and the release scripts, so it stays.
+  **"Isocast Engine" would like to use a new camera extension**: it names
+  the requesting process's executable, not its bundle (#69), so since #83
+  the engine's executable is `Contents/MacOS/Isocast Engine` (it was
+  `isocastd`, and the alert said "isocastd"; checked on isocast-m2-b,
+  2026-10-16). The password sheets that follow use the bundle name
+  ("Isocast Engine is trying to modify a System Extension").
 - **Not in /Applications** (run from the DMG): Start says to move Isocast
   into Applications. **Refused** by macOS: Start reports macOS's reason.
 
 - **After an update** (#69): Sparkle replaces the app and the extension it
   carries, but macOS keeps running the build it activated. The first Start
   of each installed build asks macOS which build is active
-  (`isocastd --camera-extension-state`, one JSON line); when it's another
+  (`<engine> --camera-extension-state`, one JSON line); when it's another
   build, Start asks macOS to activate this one, which replaces it without
   asking the user again, then starts. Engine logs say
   `camera extension build check: Current` (or the replacement).
@@ -73,7 +70,7 @@ approval, and then deactivates it. The engine's own maintenance entry point
 does the same from a terminal:
 
 ```sh
-"/Applications/Isocast.app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd" --uninstall-camera-extension
+"/Applications/Isocast.app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/Isocast Engine" --uninstall-camera-extension
 ```
 
 To delete Isocast: Remove Virtual Camera, then move the app to the Trash
@@ -139,9 +136,11 @@ as "unknown"). It checks the live client against Apple anchor + identifier
 **dev.isocast.isocastd** + team **9G68SMNHEU** when macOS allows the lookup;
 its sandbox denies that by pid on macOS 26.7, so it then requires the
 producer's executable to be at one of the engine's exact paths: the release
-app's `/Applications/<app>.app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd`
+app's `/Applications/<app>.app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/Isocast Engine`
 or the development host's `/Applications/Isocast Camera Host.app/Contents/MacOS/isocastd`
-(weaker than the team check). Refusals are logged:
+(weaker than the team check). The release engine's name before #83,
+`…/MacOS/isocastd` in the same helper, is also accepted, so an older
+engine works until its build replaces the extension. Refusals are logged:
 `log stream --predicate 'subsystem == "dev.isocast.isocastd.camera"'`.
 Reservations are keyed by CMIO client id so a second authorization cannot
 overwrite the first.
@@ -158,7 +157,7 @@ user or invisible to the extension's user, and CMIOExtensionClient (macOS 27
 SDK) still gives only a client id, a signing id and a pid: no audit token to
 verify the caller's code. So the producer check stays the path pin. What it
 leaves open: a process running as the same user that installs its own app
-at `/Applications/<name>.app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd`
+at `/Applications/<name>.app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/Isocast Engine`
 (writable without a password for an admin user) can feed the camera. Such a
 process can already do far more with the user's account; the camera shows
 only what a producer sends and never reads anything back.

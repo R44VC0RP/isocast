@@ -1468,6 +1468,21 @@ pub enum EngineState {
     Recording,
 }
 
+/// The engine's executable inside a release app's
+/// `Contents/Helpers/Isocast Engine.app/Contents/MacOS/` (#83): macOS names
+/// it in prompts such as the camera extension's approval alert. Cargo,
+/// development builds and the development app still call it `isocastd`.
+pub const ENGINE_EXECUTABLE: &str = "Isocast Engine";
+
+/// What the engine's executable was called in release apps before #83,
+/// and is still called in development builds.
+pub const OLD_ENGINE_EXECUTABLE: &str = "isocastd";
+
+/// Whether `name` is an engine executable's file name, either one.
+pub fn is_engine_executable(name: &std::ffi::OsStr) -> bool {
+    name == ENGINE_EXECUTABLE || name == OLD_ENGINE_EXECUTABLE
+}
+
 /// Where the daemon listens: `$ISOCAST_SOCKET`, or else
 /// `~/Library/Application Support/Isocast/isocastd.sock` on macOS and
 /// `~/.isocast/isocastd.sock` elsewhere.

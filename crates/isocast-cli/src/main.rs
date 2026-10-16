@@ -2835,7 +2835,7 @@ fn permissions(
             println!("{}", serde_json::to_string_pretty(&opened)?);
         } else {
             println!(
-                "Opened System Settings at {}; turn isocastd's app on there.",
+                "Opened System Settings at {}; turn the Isocast engine's app on there.",
                 permission.label()
             );
         }

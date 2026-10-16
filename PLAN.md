@@ -3783,3 +3783,10 @@ One line per finished task, newest last.
   (under one frame); obs-websocket SetCurrentProgramScene 0.31 ms both.
   Verified by interleaved A/B against one isolated engine (80 runs each)
   and idle/recording/streaming runs; m2-b A/B queued (hw-batch).
+- #83 (2026-10-16): release engine executable renamed to "Isocast Engine",
+  so the camera-extension alert says "Isocast Engine" (screenshot on
+  isocast-m2-b). Grants made under the old `isocastd` build survived a
+  bundle swap and a Sparkle update (TCC rows unchanged, no prompts); the
+  old running isocastd was detected (#49) and replaced; recording (ffprobe
+  5 s/8 s takes, 0 drops), the virtual camera (149/149 distinct frames) and
+  `isocast permissions` (incl. the fresh-process restart check) work.

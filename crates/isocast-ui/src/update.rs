@@ -585,7 +585,7 @@ mod mac {
                                     ToastKind::Info,
                                     "Engine restarted",
                                     format!(
-                                        "isocastd {} was still running from an older Isocast; \
+                                        "Isocast Engine {} was still running from an older Isocast; \
                                          Isocast restarted it with this version’s engine.",
                                         stale.running
                                     ),
@@ -606,7 +606,7 @@ mod mac {
                             "updates: couldn't restart the older isocastd: {why}");
                         if let Some(app) = self::app() {
                             let pid = stale.pid.map_or_else(
-                                || "`pgrep isocastd`".to_string(),
+                                || "`pgrep -f 'Isocast Engine'`".to_string(),
                                 |pid| pid.to_string(),
                             );
                             app.show_toast(
@@ -614,7 +614,7 @@ mod mac {
                                     ToastKind::Warning,
                                     "Older engine running",
                                     format!(
-                                        "isocastd {} is older than this Isocast and couldn’t be \
+                                        "Isocast Engine {} is older than this Isocast and couldn’t be \
                                          restarted ({why}). Quit Isocast, end it with `kill {pid}` \
                                          (it finishes its files first), then open Isocast again.",
                                         stale.running
