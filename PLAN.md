@@ -457,6 +457,13 @@ come later (clips already carry in/out points on their take).
     I/O, Delete, ⌘Z, export.
   - [x] C.3d Real-window QA and performance on a test Mac: scrub a 30-min,
     3-ISO take; scrub latency and fps; export time against real time.
+  - [x] C.3e Editor round 2 (#87): per-clip crops (`timeline_crop`,
+    presets 16:9 9:16 1:1 4:5, handles on the viewer; export encodes
+    only cropped clips again, in the EDITED file), rolls
+    (`timeline_roll`, ⌥-drag), waveforms on every track, snapping (N),
+    zoom (⌘+ ⌘− ⇧Z, ⌘-scroll, pinch), edit-point and marker navigation
+    (↑ ↓, M ⇧M), Space; motion scenarios for trim, playhead and crop
+    drags; EDITED files checked in ffmpeg, AVFoundation, Safari, Chrome.
 
 ### S. Stress testing and performance (Ryan, 2026-10-13)
 
@@ -3860,3 +3867,10 @@ One line per finished task, newest last.
   isolated engine with obs-websocket-js (msgpack 80/80, JSON 77/77),
   obsws-python 9/9, local mediamtx; latency unchanged (3 interleaved
   rounds).
+- C.3e (2026-10-16, branch agent/editor-round2, #87): crops, rolls,
+  waveforms, snapping, zoom and editor keys; e2e edit scenario crops a
+  program clip and an angle and checks every cropped picture (bar edges
+  through the crop, band, bars) against its source frame; motion suite
+  scripts/motion/editor.toml passes realtime and lockstep; studio views
+  pixel-identical to main (visual-shots, 15 pictures); real window on
+  isocast-m2-b (keys, zoom, play, crop mode).

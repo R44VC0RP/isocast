@@ -59,6 +59,7 @@ mod thumbs;
 mod toasts;
 mod update;
 mod usage;
+mod waves;
 mod window;
 
 use std::path::PathBuf;

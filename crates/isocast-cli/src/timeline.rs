@@ -10,12 +10,13 @@ use anyhow::{Result, bail};
 use clap::Subcommand;
 use isocast_protocol::api::{Event, EventKind, Method, WatchParams};
 use isocast_protocol::timeline::{
+    Crop, CropPreset, TimelineAngleParams, TimelineCropParams, TimelineRangeParams,
+    TimelineRollParams, TimelineSplitParams, TimelineTrimParams,
+};
+use isocast_protocol::timeline::{
     ExportFile, ExportStarted, RemovedReason, RemovedTake, RetakeParams, Retaken, TimelineClosed,
     TimelineExportParams, TimelineInfo, TimelineList, TimelineMoveParams, TimelineNewParams,
     TimelineOpenParams, TimelineRemoveParams, TimelineTarget,
-};
-use isocast_protocol::timeline::{
-    TimelineAngleParams, TimelineRangeParams, TimelineSplitParams, TimelineTrimParams,
 };
 use serde::Serialize;
 
@@ -138,7 +139,43 @@ pub enum TimelineCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Take back the last edit (trim, split, delete, angle, remove, move).
+    /// Crop the edited video from START to END (seconds on the timeline):
+    /// show part of each clip's picture, scaled to the program's size.
+    /// Give --rect, --preset (or both: that shape inside the rectangle),
+    /// or --clear.
+    Crop {
+        start: f64,
+        end: f64,
+        /// The part shown, as fractions of the picture: X,Y,WIDTH,HEIGHT
+        /// from the top-left (0 to 1), like 0.25,0,0.5,1.
+        #[arg(long, value_name = "X,Y,W,H", value_parser = parse_rect)]
+        rect: Option<Crop>,
+        /// A shape: the largest one that fits, centred: 16:9, 9:16, 1:1 or
+        /// 4:5.
+        #[arg(long, value_parser = parse_preset)]
+        preset: Option<CropPreset>,
+        /// Show the whole picture again.
+        #[arg(long, conflicts_with_all = ["rect", "preset"])]
+        clear: bool,
+        #[arg(long)]
+        timeline: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Move the cut after CLIP by SECONDS (negative: earlier), trimming
+    /// CLIP's end and the next clip's start together (a roll edit): the
+    /// timeline keeps its length.
+    Roll {
+        clip: String,
+        #[arg(value_name = "SECONDS", allow_hyphen_values = true)]
+        by: f64,
+        #[arg(long)]
+        timeline: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take back the last edit (trim, split, delete, angle, crop, roll,
+    /// remove, move).
     Undo {
         #[arg(long)]
         timeline: Option<String>,
@@ -152,6 +189,32 @@ pub enum TimelineCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+fn parse_rect(text: &str) -> Result<Crop, String> {
+    let values: Vec<f64> = text
+        .split(',')
+        .map(|v| v.trim().parse::<f64>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| format!("{text:?}: give four numbers X,Y,WIDTH,HEIGHT, like 0.25,0,0.5,1"))?;
+    match values[..] {
+        [x, y, width, height] => Ok(Crop {
+            x,
+            y,
+            width,
+            height,
+        }),
+        _ => Err(format!(
+            "{text:?}: give four numbers X,Y,WIDTH,HEIGHT, like 0.25,0,0.5,1"
+        )),
+    }
+}
+
+fn parse_preset(text: &str) -> Result<CropPreset, String> {
+    CropPreset::parse(text).ok_or_else(|| {
+        let names: Vec<&str> = CropPreset::ALL.iter().map(|p| p.name()).collect();
+        format!("{text:?}: choose one of {}", names.join(", "))
+    })
 }
 
 /// Print an edit's result: the timeline, as JSON or text.
@@ -330,6 +393,38 @@ pub fn run(command: TimelineCommand) -> Result<ExitCode> {
             }))?;
             edited(&info, json)?;
         }
+        TimelineCommand::Crop {
+            start,
+            end,
+            rect,
+            preset,
+            clear,
+            timeline,
+            json,
+        } => {
+            let info: TimelineInfo = client.call(Method::TimelineCrop(TimelineCropParams {
+                start_seconds: start,
+                end_seconds: end,
+                crop: rect,
+                preset,
+                clear,
+                timeline,
+            }))?;
+            edited(&info, json)?;
+        }
+        TimelineCommand::Roll {
+            clip,
+            by,
+            timeline,
+            json,
+        } => {
+            let info: TimelineInfo = client.call(Method::TimelineRoll(TimelineRollParams {
+                clip,
+                by_seconds: by,
+                timeline,
+            }))?;
+            edited(&info, json)?;
+        }
         TimelineCommand::Undo { timeline, json } => {
             let info: TimelineInfo =
                 client.call(Method::TimelineUndo(Some(TimelineTarget { timeline })))?;
@@ -406,6 +501,13 @@ fn print_timeline(info: &TimelineInfo) {
             .as_ref()
             .map(|angle| format!(", angle {angle}"))
             .unwrap_or_default();
+        let angle = match clip.crop {
+            Some(c) => format!(
+                "{angle}, crop {:.3},{:.3} {:.3}×{:.3}",
+                c.x, c.y, c.width, c.height
+            ),
+            None => angle,
+        };
         println!(
             "  {:>2}. {:<4} at {:>8.2} s  {:>7.2} s  take \"{take}\" {:.2}–{:.2} s{angle}{status}{dropped}",
             clip.index + 1,

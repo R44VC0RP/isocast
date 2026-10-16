@@ -757,10 +757,14 @@ export component EditorWindow inherits Window {
     default-font-weight: Theme.weight-regular;
     forward-focus: keys;
 
-    // S splits, I and O mark, Delete takes the marked span out (else the
-    // selected clip off), J K L play, arrows step a frame (⇧ ten), 1–9
-    // choose the angle, Escape clears the marks, ⌘Z and ⇧⌘Z undo and redo
-    // edits (Slint's Control is ⌘ on macOS).
+    // S splits, I and O mark (⇧I ⇧O go to them), Delete takes the marked
+    // span out (else the selected clip off), J K L play (Space plays and
+    // stops), arrows step a frame (⇧ ten), ↑ ↓ go to the previous and next
+    // edit point, M and ⇧M to the next and previous marker, Home and End
+    // to the ends, 1–9 choose the angle, C crops, N turns snapping on and
+    // off, ⌘+ ⌘− (= −) zoom and ⇧Z fits, Escape leaves cropping or clears
+    // the marks, ⌘Z and ⇧⌘Z undo and redo edits (Slint's Control is ⌘ on
+    // macOS).
     keys := FocusScope {
         key-pressed(event) => {
             if event.modifiers.control && (event.text == "z" || event.text == "Z") {
@@ -771,15 +775,31 @@ export component EditorWindow inherits Window {
                 }
                 return accept;
             }
+            if event.modifiers.control && (event.text == "=" || event.text == "+") { view.zoom-by(0.1); return accept; }
+            if event.modifiers.control && (event.text == "-" || event.text == "_") { view.zoom-by(-0.1); return accept; }
             if event.modifiers.control || event.modifiers.meta || event.modifiers.alt {
                 return reject;
             }
+            if event.text == "=" || event.text == "+" { view.zoom-by(0.1); return accept; }
+            if event.text == "-" { view.zoom-by(-0.1); return accept; }
+            if event.text == "Z" { view.zoom-fit(); return accept; }
             if event.text == "s" || event.text == "S" { CreateArea.key("s"); return accept; }
-            if event.text == "i" || event.text == "I" { CreateArea.key("i"); return accept; }
-            if event.text == "o" || event.text == "O" { CreateArea.key("o"); return accept; }
+            if event.text == "I" { CreateArea.key("go-in"); return accept; }
+            if event.text == "O" { CreateArea.key("go-out"); return accept; }
+            if event.text == "i" { CreateArea.key("i"); return accept; }
+            if event.text == "o" { CreateArea.key("o"); return accept; }
             if event.text == "j" || event.text == "J" { CreateArea.key("j"); return accept; }
             if event.text == "k" || event.text == "K" { CreateArea.key("k"); return accept; }
             if event.text == "l" || event.text == "L" { CreateArea.key("l"); return accept; }
+            if event.text == " " { CreateArea.key("space"); return accept; }
+            if event.text == "m" { CreateArea.key("marker:1"); return accept; }
+            if event.text == "M" { CreateArea.key("marker:-1"); return accept; }
+            if event.text == "c" || event.text == "C" { CreateArea.key("crop"); return accept; }
+            if event.text == "n" || event.text == "N" { CreateArea.key("snap"); return accept; }
+            if event.text == Key.UpArrow { CreateArea.key("up"); return accept; }
+            if event.text == Key.DownArrow { CreateArea.key("down"); return accept; }
+            if event.text == Key.Home { CreateArea.key("home"); return accept; }
+            if event.text == Key.End { CreateArea.key("end"); return accept; }
             if event.text == Key.LeftArrow || event.text == Key.RightArrow {
                 CreateArea.key("step:" + (event.text == Key.LeftArrow ? -1 : 1) * (event.modifiers.shift ? 10 : 1));
                 return accept;
@@ -792,7 +812,7 @@ export component EditorWindow inherits Window {
             if event.text == Key.Backspace || event.text == Key.Delete { CreateArea.key("delete"); return accept; }
             reject
         }
-        EditorView {
+        view := EditorView {
             width: parent.width;
             height: parent.height;
         }

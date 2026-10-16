@@ -63,6 +63,10 @@ isocast timeline split 10                      # cut the clip at 10 s on the tim
 isocast timeline delete 12 13.5                # take 12–13.5 s out and close the gap (ripple)
 isocast timeline angle camera 3 5              # the edited video shows the camera ISO from 3 to 5 s
 isocast timeline angle program 3 5             # and back to the program
+isocast timeline crop 3 5 --preset 9:16         # show a centred 9:16 part of the picture from 3 to 5 s
+isocast timeline crop 3 5 --rect 0.25,0,0.5,1  # or any part: x,y,width,height as fractions of the picture
+isocast timeline crop 3 5 --clear              # the whole picture again
+isocast timeline roll c1 -0.5                  # move the cut after c1 half a second earlier (a roll)
 isocast timeline undo                          # take back the last edit; `redo` puts it back
 ```
 
@@ -72,6 +76,14 @@ every clip in the span recorded (the error lists them); clips across a
 span's ends are split there. Undo goes back through the edits (trim, split,
 delete, angle, remove, move) since the last take was recorded: a take added
 by recording or `retake` starts a new history.
+
+A crop is the part of a clip's picture the edited video shows: a rectangle
+in fractions of the picture (from its top-left), kept on its 2-pixel grid and
+at least 32 pixels each way. It belongs to the clip and applies to whichever
+angle the clip shows; presets (16:9, 9:16, 1:1, 4:5) give the largest
+rectangle of that shape inside the picture (or inside `--rect`), centred.
+Trim drags the clip's end and moves everything after it (ripple); a roll
+moves the cut between two clips and keeps the timeline's length.
 
 ## Export
 
@@ -86,7 +98,11 @@ that every clip has, each cut to the clips' in and out points, next to the
 first take (or in `--folder`), with an `.export.json` manifest. When a clip
 shows another angle than the program, it also writes `<name> EDITED.mov`:
 each clip's angle as its picture, the program's sound throughout, in the
-program's format.
+program's format. A crop does too: the edited file shows each cropped clip's
+crop scaled to fit the program's size (black bars where its shape differs),
+encoded again with the program's codec, while uncropped clips are copied as
+always. The program and ISO files are never cropped: they stay whole, so a
+crop never loses a picture.
 
 Cuts are frame-accurate. Video is copied as recorded, except where a clip
 starts between two keyframes (recordings have one every second): the frame
@@ -100,7 +116,8 @@ recording while an export runs.
 
 Timelines are kept across restarts. Over MCP the same steps are
 `new_timeline`, `retake`, `get_timeline`, `remove_clip`, `move_clip`,
-`trim_clip`, `split_clip`, `delete_range`, `set_angle`, `undo_edit`,
+`trim_clip`, `split_clip`, `delete_range`, `roll_cut`, `set_angle`,
+`crop_clip`, `undo_edit`,
 `redo_edit` and `export_timeline` ([mcp-tools.md](mcp-tools.md)). Note that
 `move_clip`'s `index` counts from 0, while the CLI's position counts from 1.
 

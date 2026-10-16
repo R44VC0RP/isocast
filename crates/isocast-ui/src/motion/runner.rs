@@ -2,7 +2,7 @@
 //! interaction replayed into it a frame at a time, and what each frame
 //! showed recorded (see docs/motion-testing.md).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::{Rc, Weak};
 use std::sync::mpsc::{Receiver, channel};
@@ -61,15 +61,28 @@ impl WindowAdapter for MotionWindow {
     }
 }
 
-/// A display whose clock moves only when the run says so.
+type MakeWindow = Box<dyn Fn() -> Result<Rc<MotionWindow>, slint::PlatformError>>;
+
+/// A display whose clock moves only when the run says so. The studio's
+/// window is the first it hands out; a window made later (the editor's,
+/// #87) gets one of its own, made by `make`.
 struct MotionPlatform {
-    window: Rc<MotionWindow>,
+    windows: Rc<RefCell<Vec<Rc<MotionWindow>>>>,
+    handed: Cell<usize>,
+    make: MakeWindow,
     now: Rc<Cell<Duration>>,
 }
 
 impl Platform for MotionPlatform {
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        Ok(self.window.clone())
+        let n = self.handed.get();
+        self.handed.set(n + 1);
+        if let Some(window) = self.windows.borrow().get(n) {
+            return Ok(window.clone());
+        }
+        let window = (self.make)()?;
+        self.windows.borrow_mut().push(window.clone());
+        Ok(window)
     }
 
     fn duration_since_start(&self) -> Duration {
@@ -135,7 +148,11 @@ enum Input {
 
 pub struct Runner {
     gpu: Gpu,
+    /// The window replayed into and drawn: the studio's, or the editor's
+    /// for `editor-…` targets.
     window: Rc<MotionWindow>,
+    windows: Rc<RefCell<Vec<Rc<MotionWindow>>>>,
+    editor: bool,
     app: AppWindow,
     hub: Rc<App>,
     updates: Receiver<Update>,
@@ -184,26 +201,40 @@ pub fn run(run: Run, keep_images: bool, dump: &[usize], dir: &std::path::Path) -
     let gpu_name = format!("{} ({:?})", info.name, info.backend);
     let (width, height) = run.size;
     let scale = run.scale;
-    let renderer = SkiaWGPU30Renderer::new(
-        gpu.instance.clone(),
-        gpu.adapter.clone(),
-        gpu.device.clone(),
-        gpu.queue.clone(),
-    )
-    .map_err(|e| anyhow::anyhow!("Skia could not use the GPU: {e}"))?;
-    let window = Rc::new_cyclic(|weak: &Weak<MotionWindow>| MotionWindow {
-        window: slint::Window::new(weak.clone()),
-        renderer,
-        size: Cell::new(PhysicalSize::new(
-            (width as f32 * scale).round() as u32,
-            (height as f32 * scale).round() as u32,
-        )),
-        redraws: Cell::new(0),
-    });
+    let make: MakeWindow = {
+        let (instance, adapter, device, queue) = (
+            gpu.instance.clone(),
+            gpu.adapter.clone(),
+            gpu.device.clone(),
+            gpu.queue.clone(),
+        );
+        Box::new(move || {
+            let renderer = SkiaWGPU30Renderer::new(
+                instance.clone(),
+                adapter.clone(),
+                device.clone(),
+                queue.clone(),
+            )
+            .map_err(|e| slint::PlatformError::Other(format!("Skia could not use the GPU: {e}")))?;
+            Ok(Rc::new_cyclic(|weak: &Weak<MotionWindow>| MotionWindow {
+                window: slint::Window::new(weak.clone()),
+                renderer,
+                size: Cell::new(PhysicalSize::new(
+                    (width as f32 * scale).round() as u32,
+                    (height as f32 * scale).round() as u32,
+                )),
+                redraws: Cell::new(0),
+            }))
+        })
+    };
+    let window = make().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let windows = Rc::new(RefCell::new(vec![window.clone()]));
     let now = Rc::new(Cell::new(Duration::ZERO));
     crate::clock::set_virtual(Duration::ZERO);
     slint::platform::set_platform(Box::new(MotionPlatform {
-        window: window.clone(),
+        windows: windows.clone(),
+        handed: Cell::new(0),
+        make,
         now: now.clone(),
     }))
     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -263,6 +294,8 @@ pub fn run(run: Run, keep_images: bool, dump: &[usize], dir: &std::path::Path) -
     let mut runner = Runner {
         gpu,
         window,
+        windows,
+        editor: false,
         app,
         hub,
         updates,
@@ -317,10 +350,17 @@ pub fn run(run: Run, keep_images: bool, dump: &[usize], dir: &std::path::Path) -
         // Let the encoders get going: their start is not what is measured.
         runner.settle(60)?;
     }
+    let editor = runner.run.target.starts_with("editor-");
+    if editor {
+        runner.editor_setup()?;
+    }
     for state in runner.run.before.clone() {
         runner
             .state(&state)
             .with_context(|| format!("before: {state}"))?;
+    }
+    if editor {
+        runner.use_editor()?;
     }
     runner.settle(20)?;
 
@@ -357,6 +397,87 @@ pub fn run(run: Run, keep_images: bool, dump: &[usize], dir: &std::path::Path) -
 }
 
 impl Runner {
+    /// For `editor-…` targets (#87): two takes of the setup's synthetic
+    /// sources (3 s and 2 s) on a new timeline, recorded as a person
+    /// would, then the editor window opened on them with their frames,
+    /// waveforms and the picture at 1 s.
+    fn editor_setup(&mut self) -> Result<()> {
+        self.area_state(&format!("create-new:Motion {}", self.run.id()))?;
+        self.wait_until(Duration::from_secs(10), "the new timeline", |r| {
+            r.hub
+                .create
+                .timeline_name()
+                .is_some_and(|n| n.starts_with("Motion ") && n.ends_with(&r.run.id()))
+        })?;
+        for seconds in [3.0, 2.0] {
+            let clips = self.hub.create.clip_count();
+            self.area_state("record")?;
+            self.wait_until(Duration::from_secs(15), "a take to start", |r| {
+                r.recording()
+            })?;
+            let until = Instant::now() + Duration::from_secs_f64(seconds);
+            self.wait_until(Duration::from_secs(20), "the take's length", |_| {
+                Instant::now() >= until
+            })?;
+            self.area_state("stop-record")?;
+            self.wait_until(Duration::from_secs(20), "the take on the timeline", |r| {
+                !r.recording() && r.hub.create.clip_count() > clips
+            })
+            .with_context(|| {
+                format!(
+                    "recording: {}, clips: {} (were {clips})",
+                    self.recording(),
+                    self.hub.create.clip_count()
+                )
+            })?;
+        }
+        for state in [
+            "editor",
+            "create-thumbs",
+            "create-waves",
+            "create-playhead:1",
+            "create-preview",
+        ] {
+            self.area_state(state)?;
+        }
+        Ok(())
+    }
+
+    /// Replay into and draw the editor window from now on.
+    fn use_editor(&mut self) -> Result<()> {
+        let window = self
+            .windows
+            .borrow()
+            .get(1)
+            .cloned()
+            .context("the editor window wasn't made")?;
+        let (width, height) = self.run.size;
+        window
+            .window
+            .dispatch_event(WindowEvent::ScaleFactorChanged {
+                scale_factor: self.run.scale,
+            });
+        window.window.dispatch_event(WindowEvent::Resized {
+            size: LogicalSize::new(width as f32, height as f32),
+        });
+        self.window = window;
+        self.editor = true;
+        Ok(())
+    }
+
+    /// An area's state, not held to the suite's list (the harness's own
+    /// setup).
+    fn area_state(&mut self, state: &str) -> Result<()> {
+        let (name, arg) = state.split_once(':').unwrap_or((state, ""));
+        self.hub
+            .areas()
+            .iter()
+            .find_map(|area| area.state(&self.hub, &self.app, name, arg))
+            .with_context(|| format!("no area knows the state {name:?}"))??;
+        self.hub.flush();
+        Ok(())
+    }
+
     fn recording(&self) -> bool {
         self.hub
             .session
@@ -708,7 +829,7 @@ impl Runner {
         let mut redraws = self.window.redraws.get();
         let mut previous: Option<Vec<u64>> = None;
         let mut before_previous: Option<Vec<u64>> = None;
-        let mut regions: Vec<[f32; 4]> = Vec::new();
+        let mut regions: Vec<Vec<[f32; 4]>> = Vec::new();
         let wall_start = Instant::now();
         let start = self.now.get();
         let calls_at = |r: &Self| r.calls.lock().map(|c| (c.total, c.bytes)).unwrap_or((0, 0));
@@ -837,9 +958,7 @@ impl Runner {
             let probe = tracker.probe(self, &image);
             // The dragged object's area over the last three frames (with a
             // margin for its outline and handles) isn't checked for flicker.
-            if let Some(region) = tracker.moving_region(self) {
-                regions.push(region);
-            }
+            regions.push(tracker.moving_regions(self));
             let recent = &regions[regions.len().saturating_sub(3)..];
             let tile_pt = 16.0;
             let tiles_across = image
@@ -851,7 +970,7 @@ impl Runner {
                     (i % tiles_across) as f32 * tile_pt,
                     (i / tiles_across) as f32 * tile_pt,
                 );
-                recent.iter().any(|[x0, y0, x1, y1]| {
+                recent.iter().flatten().any(|[x0, y0, x1, y1]| {
                     tx + tile_pt > x0 - 8.0
                         && tx < x1 + 8.0
                         && ty + tile_pt > y0 - 8.0
@@ -1068,15 +1187,23 @@ impl Runner {
     /// The `n`th visible element of Slint type `type_name`, left to right
     /// (then top to bottom): its position and size in window points.
     pub fn element(&self, type_name: &str, n: usize) -> Option<[f32; 4]> {
-        let mut found: Vec<[f32; 4]> =
-            ElementHandle::find_by_element_type_name(&self.app, type_name)
-                .filter(|e| e.is_valid())
-                .map(|e| {
-                    let (p, s) = (e.absolute_position(), e.size());
-                    [p.x, p.y, s.width, s.height]
-                })
-                .filter(|r| r[2] > 0.0 || r[3] > 0.0)
-                .collect();
+        let editor = self
+            .editor
+            .then(|| self.hub.create.editor_window())
+            .flatten();
+        let elements: Vec<ElementHandle> = match &editor {
+            Some(editor) => ElementHandle::find_by_element_type_name(editor, type_name).collect(),
+            None => ElementHandle::find_by_element_type_name(&self.app, type_name).collect(),
+        };
+        let mut found: Vec<[f32; 4]> = elements
+            .into_iter()
+            .filter(|e| e.is_valid())
+            .map(|e| {
+                let (p, s) = (e.absolute_position(), e.size());
+                [p.x, p.y, s.width, s.height]
+            })
+            .filter(|r| r[2] > 0.0 || r[3] > 0.0)
+            .collect();
         found.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
         found.dedup_by(|a, b| a[0] == b[0] && a[1] == b[1]);
         found.get(n).copied()
@@ -1108,6 +1235,30 @@ impl Runner {
     pub fn theme_line(&self) -> [u8; 3] {
         let c = self.app.global::<Theme>().get_line();
         [c.red(), c.green(), c.blue()]
+    }
+
+    /// Theme colours the editor's trackers look for (#87).
+    pub fn theme_colour(&self, name: &str) -> [u8; 3] {
+        let theme = self.app.global::<Theme>();
+        let c = match name {
+            "bone" => theme.get_bone(),
+            "control" => theme.get_control(),
+            "accent" => theme.get_accent(),
+            _ => theme.get_surface_stage(),
+        };
+        [c.red(), c.green(), c.blue()]
+    }
+
+    /// The editor's crop, in fractions of its picture (#87).
+    pub fn editor_crop(&self) -> Option<[f32; 4]> {
+        let editor = self.hub.create.editor_window()?;
+        let area = editor.global::<crate::CreateArea>();
+        Some([
+            area.get_crop_x(),
+            area.get_crop_y(),
+            area.get_crop_w(),
+            area.get_crop_h(),
+        ])
     }
 }
 

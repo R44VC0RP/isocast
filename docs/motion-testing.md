@@ -121,6 +121,20 @@ Targets, and how each is found in a frame:
   again each frame).
 - `none`: no tracking, for scenarios that only check flicker and blank
   frames.
+- `editor-trim`, `editor-playhead`, `editor-crop` (#87,
+  `scripts/motion/editor.toml`): the editor window's drags. Before the
+  scenario's `before` steps the harness records two takes (3 s and 2 s)
+  onto a new timeline and opens the editor on them; the run then replays
+  into and draws the editor's own window. State: the first `ClipView`'s
+  right edge, the `Playhead`'s line, the crop's right edge (`CropBox` and
+  the crop). Pixels: the selected clip's accent ring where it ends (the
+  suite selects the clip), the playhead's 1 pt bone line low in the lanes,
+  the crop outline's bone column a quarter down the crop. The dragged
+  object, the playhead and the viewer's time readout (`ShownAt`) are left
+  out of the flicker check: they move with the drag. The takes' lengths
+  follow the wall clock, so these runs are a pass/fail check, not
+  pixel-deterministic (compare.py differs), and they aren't in the CI
+  suite.
 
 The standard suite: the Scenes|Sources splitter, the Mixer|Transitions
 splitter (it resizes the dock after it), the splitter above the docks (it

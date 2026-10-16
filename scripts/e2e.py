@@ -738,12 +738,66 @@ def beep_onsets(samples):
     return onsets
 
 
+def picture_rows(path, width, height, at):
+    """Per decoded picture, its gray rows at fractions `at` of its height."""
+    graph = "[0:v]format=gray,split={n}{outs};{crops}{ins}vstack={n}[out]".format(
+        n=len(at), outs="".join(f"[s{i}]" for i in range(len(at))),
+        crops="".join(f"[s{i}]crop={width}:1:0:{int(y * height)}[r{i}];" for i, y in enumerate(at)),
+        ins="".join(f"[r{i}]" for i in range(len(at))))
+    if len(at) == 1:
+        graph = f"[0:v]format=gray,crop={width}:1:0:{int(at[0] * height)}[out]"
+    raw = ffmpeg("-i", path, "-filter_complex", graph, "-map", "[out]", "-fps_mode", "passthrough",
+                 "-pix_fmt", "gray", "-f", "rawvideo", "-", timeout=90).stdout
+    size = len(at) * width
+    require(len(raw) % size == 0, f"{path.name}: rows don't divide into pictures")
+    return [[raw[i + k * width:i + (k + 1) * width] for k in range(len(at))]
+            for i in range(0, len(raw), size)]
+
+
+def cropped_picture(rows, crop, width, height, want):
+    """Why a picture of `crop` (scaled to fill width x height) isn't the
+    source picture `want` (pattern_frames' row), if it isn't: its bar edges
+    halfway down must sit where the source's do in the crop, the band row
+    (70% down: source 77.5%, the flashing band) must be the band, and the
+    row at 60% (source 70%) the bars."""
+    mid, bars, band = rows
+    scale = crop["width"]  # source pixels per output pixel
+    rise = (width - want[1] - 1) % width
+    fall = (width // 2 - want[1] - 1) % width
+    bits = mid.translate(BAR_LEVELS)
+    edges = [(i, bits[i:i + 2]) for i in range(3, width - 4) if bits[i] != bits[i + 1]]
+    if not edges:
+        return "no bar edge halfway down"
+    for i, kind in edges:
+        source_x = crop["x"] * width + (i + 0.5) * scale - 0.5
+        target = rise if kind == b"01" else fall
+        apart = abs(source_x - target)
+        if min(apart, width - apart) > 3:
+            return (f"a bar edge at {i} shows source column {source_x:.1f}; the source's "
+                    f"{'rise' if kind == b'01' else 'fall'} is at {target}")
+    if max(band) - min(band) > 48:
+        return f"the row at 70% isn't the band (levels {min(band)}–{max(band)})"
+    if abs(sum(band) / width - want[3]) > 48:
+        return f"the band is {sum(band) / width:.0f}, the source's {want[3]:.0f}"
+    if max(bars) - min(bars) < 96:
+        return f"the row at 60% isn't bars (levels {min(bars)}–{max(bars)})"
+    return None
+
+
+def video_packets(path):
+    """The video stream's packets, each hashed (copied ones hash the same)."""
+    lines = ffmpeg("-i", path, "-map", "0:v:0", "-c", "copy", "-f", "framemd5", "-").stdout.decode()
+    return [line.rsplit(",", 1)[-1].strip() for line in lines.splitlines() if line and not line.startswith("#")]
+
+
 def scenario_edit(e, cfg, evidence):
     """C.3's edits on two program + 2 ISO takes: trim, split, ripple delete,
-    an angle, undo and redo, export. Every exported picture must be the take
-    picture on screen at its moment (by the test pattern), every pulse must
-    flash and beep together at the cuts, joins mustn't click, and the takes'
-    files must be unchanged."""
+    an angle, undo and redo, export; then crops (#87) and export again. Every
+    exported picture must be the take picture on screen at its moment (by
+    the test pattern; a cropped one the crop of it, scaled up), every pulse
+    must flash and beep together at the cuts, joins mustn't click, crops
+    must change only the edited file, and the takes' files must be
+    unchanged."""
     fps = cfg["canvas"]["fps"]
     cfg["recording"]["iso"]["enabled"] = True
     e.apply(cfg)
@@ -818,14 +872,16 @@ def scenario_edit(e, cfg, evidence):
     require(all(abs(c["start_seconds"] - s[0]) < 1e-4 for c, s in zip(clips, segments)),
             "clip starts differ from the clips' lengths added up")
 
-    export = e.rpc("timeline_export", {"folder": str(e.root / "export")})
-    def exported():
-        value = read_json(export["manifest"])
-        return value if value["status"] != "exporting" else None
-    result = until(exported, 90, "timeline export")
-    require(result["status"] == "complete" and not result.get("errors"), f"export failed: {result}")
-    require(sorted(f["source"] for f in result["files"]) == ["bars", "bars2", "edited", "program"],
-            f"exported sources: {[f['source'] for f in result['files']]}, skipped {result.get('skipped')}")
+    def export_into(folder):
+        export = e.rpc("timeline_export", {"folder": str(e.root / folder)})
+        def exported():
+            value = read_json(export["manifest"])
+            return value if value["status"] != "exporting" else None
+        result = until(exported, 90, "timeline export")
+        require(result["status"] == "complete" and not result.get("errors"), f"export failed: {result}")
+        require(sorted(f["source"] for f in result["files"]) == ["bars", "bars2", "edited", "program"],
+                f"exported sources: {[f['source'] for f in result['files']]}, skipped {result.get('skipped')}")
+        return result
 
     def in_pulse(clip, x, end=False):  # x is in a pulse (its end: the pulse ran up to it)
         return any((p < x <= p + 0.1) if end else (p <= x < p + 0.1) for p in pulses_in[clip])
@@ -837,70 +893,142 @@ def scenario_edit(e, cfg, evidence):
         pulses += [start + p - cut_in for p in pulses_in[clip] if cut_in < p < cut_out]
     joins = [s[0] for s in segments[1:]]
     sources = {}
-    evidence["exported"] = []
-    for f in result["files"]:
-        path, width = Path(f["path"]), f["width"]
-        require(all(abs(p["start_seconds"] - s[0]) < 1e-3 for p, s in zip(f["parts"], segments))
-                and len(f["parts"]) == len(segments), f"{path.name}: parts don't follow the clips")
-        dropped = 0
-        if loss_limit(evidence):
-            frames = int(probe(path)["streams"][0]["nb_read_frames"])
-            dropped = round(duration * fps) - frames
-        row = check_file(path, duration, fps, (cfg["canvas"]["width"], cfg["canvas"]["height"]),
-                         dropped=dropped)
-        # Every picture: the one on screen in its take at that moment.
-        out = pattern_frames(path, width, f["height"])
-        bad = []
-        for t, shift, cell, _ in out:
-            seg = next((s for s in segments if s[0] - 1e-6 <= t < s[0] + s[3] - s[2] - 1e-6), None)
-            require(seg is not None, f"{path.name}: a picture at {t:.4f} s, past the timeline")
-            source = (seg[4] or "program") if f["source"] == "edited" else f["source"]
-            src_path, offset = files[(seg[1], source)]
-            if src_path not in sources:
-                frames = pattern_frames(src_path, width, f["height"])
-                sources[src_path] = (frames, [x[0] - frames[0][0] for x in frames])
-            src, src_times = sources[src_path]
-            moment = seg[2] + (t - seg[0]) - offset
-            want = src[max(0, bisect.bisect_right(src_times, moment + 0.25 / fps) - 1)]
-            require((want[2] > 50) == (source == "bars2"), f"{src_path.name}: label cell can't tell the angles apart")
-            apart = abs(shift - want[1])
-            if min(apart, width - apart) > 3 or (cell > 50) != (want[2] > 50):
-                bad.append(f"{t:.4f} s: bars at {shift}, label {cell:.0f}; {source} at "
-                           f"{seg[2] + t - seg[0]:.4f} s of its take has {want[1]}, {want[2]:.0f}")
-        require(not bad, f"{path.name}: {len(bad)} of {len(out)} pictures aren't their take's "
-                         f"at that moment: {bad[:4]}")
-        # Pulses: each expected one flashes and beeps; nothing else does.
-        flashes = [t for i, (t, _, _, band) in enumerate(out) if band > 128 and (i == 0 or out[i - 1][3] <= 128)]
-        samples = pcm(path)
-        beeps = beep_onsets(samples)
-        end = out[-1][0] + 1 / fps
-        def inner(xs):
-            return [x for x in xs if 0.15 < x < end - 0.15]
-        def near(x, xs, tolerance):
-            return min((abs(x - y) for y in xs), default=1) <= tolerance
-        for x in inner(pulses):
-            require(near(x, flashes, 1.5 / fps) and near(x, beeps, 1.5 / fps),
-                    f"{path.name}: no flash or beep at {x:.4f} s (flashes {flashes}, beeps {beeps})")
-        for x in inner(flashes) + inner(beeps):
-            require(near(x, pulses, 1.5 / fps), f"{path.name}: unexpected pulse at {x:.4f} s")
-        offsets = [min(abs(x - y) for y in beeps) for x in inner(flashes)]
-        require(max(offsets) <= 1 / fps + 1 / RATE,
-                f"{path.name}: flash/beep apart by {max(offsets) * 1000:.2f} ms")
-        # Clicks: no sample step near a join larger than the tone's own.
-        window = RATE // 200
-        steps = [abs(y - x) for x, y in zip(samples, samples[1:])]
-        spans = [(max(0, round(t * RATE) - window), min(len(steps), round(t * RATE) + window)) for t in joins]
-        at_joins = max(max(steps[lo:hi]) for lo, hi in spans)
-        for lo, hi in spans:
-            steps[lo:hi] = [0.0] * (hi - lo)
-        tone = max(steps)
-        require(tone > 0.01, f"{path.name}: no tone")
-        require(at_joins <= tone * 1.05 + 1e-4,
-                f"{path.name}: a join clicks (step {at_joins:.4f}, the tone's largest {tone:.4f})")
-        row.update(pictures_checked=len(out), pulses=len(inner(flashes)),
-                   max_sync_ms=round(max(offsets) * 1000, 3), join_step=round(at_joins, 4),
-                   tone_step=round(tone, 4), reencoded=[p.get("reencoded_frames") for p in f["parts"]])
-        evidence["exported"].append(row)
+
+    def check_export(result, cropped=None):
+        """Every file of an export, picture by picture; `cropped` (the crop
+        and the indexes of the segments it covers) applies to the edited
+        file's pictures there."""
+        rows = []
+        for f in result["files"]:
+            path, width, height = Path(f["path"]), f["width"], f["height"]
+            require(all(abs(p["start_seconds"] - s[0]) < 1e-3 for p, s in zip(f["parts"], segments))
+                    and len(f["parts"]) == len(segments), f"{path.name}: parts don't follow the clips")
+            dropped = 0
+            if loss_limit(evidence):
+                frames = int(probe(path)["streams"][0]["nb_read_frames"])
+                dropped = round(duration * fps) - frames
+            row = check_file(path, duration, fps, (cfg["canvas"]["width"], cfg["canvas"]["height"]),
+                             dropped=dropped)
+            # Every picture: the one on screen in its take at that moment.
+            out = pattern_frames(path, width, height)
+            crop_rows = crop_check = None
+            if cropped and f["source"] == "edited":
+                crop_check, crop_segments = cropped
+                crop_rows = picture_rows(path, width, height, (0.5, 0.6, 0.7))
+                require(len(crop_rows) == len(out), f"{path.name}: rows and pictures disagree")
+            bad, checked_cropped = [], 0
+            for n, (t, shift, cell, _) in enumerate(out):
+                index = next((i for i, s in enumerate(segments)
+                              if s[0] - 1e-6 <= t < s[0] + s[3] - s[2] - 1e-6), None)
+                require(index is not None, f"{path.name}: a picture at {t:.4f} s, past the timeline")
+                seg = segments[index]
+                source = (seg[4] or "program") if f["source"] == "edited" else f["source"]
+                src_path, offset = files[(seg[1], source)]
+                if src_path not in sources:
+                    frames = pattern_frames(src_path, width, height)
+                    sources[src_path] = (frames, [x[0] - frames[0][0] for x in frames])
+                src, src_times = sources[src_path]
+                moment = seg[2] + (t - seg[0]) - offset
+                want = src[max(0, bisect.bisect_right(src_times, moment + 0.25 / fps) - 1)]
+                require((want[2] > 50) == (source == "bars2"), f"{src_path.name}: label cell can't tell the angles apart")
+                if crop_rows is not None and index in crop_segments:
+                    checked_cropped += 1
+                    problem = cropped_picture(crop_rows[n], crop_check, width, height, want)
+                    if problem:
+                        bad.append(f"{t:.4f} s (cropped {source} at {seg[2] + t - seg[0]:.4f} s of its "
+                                   f"take): {problem}")
+                    continue
+                apart = abs(shift - want[1])
+                if min(apart, width - apart) > 3 or (cell > 50) != (want[2] > 50):
+                    bad.append(f"{t:.4f} s: bars at {shift}, label {cell:.0f}; {source} at "
+                               f"{seg[2] + t - seg[0]:.4f} s of its take has {want[1]}, {want[2]:.0f}")
+            require(not bad, f"{path.name}: {len(bad)} of {len(out)} pictures aren't their take's "
+                             f"at that moment: {bad[:4]}")
+            if crop_rows is not None:
+                want_cropped = sum(round((segments[i][3] - segments[i][2]) * fps) for i in crop_segments)
+                require(abs(checked_cropped - want_cropped) <= len(crop_segments),
+                        f"{path.name}: {checked_cropped} cropped pictures, expected {want_cropped}")
+                row["cropped_pictures_checked"] = checked_cropped
+            # Pulses: each expected one flashes and beeps; nothing else does
+            # (a crop keeps the band's bottom, so it flashes too).
+            flashes = [t for i, (t, _, _, band) in enumerate(out) if band > 128 and (i == 0 or out[i - 1][3] <= 128)]
+            samples = pcm(path)
+            beeps = beep_onsets(samples)
+            end = out[-1][0] + 1 / fps
+            def inner(xs):
+                return [x for x in xs if 0.15 < x < end - 0.15]
+            def near(x, xs, tolerance):
+                return min((abs(x - y) for y in xs), default=1) <= tolerance
+            for x in inner(pulses):
+                require(near(x, flashes, 1.5 / fps) and near(x, beeps, 1.5 / fps),
+                        f"{path.name}: no flash or beep at {x:.4f} s (flashes {flashes}, beeps {beeps})")
+            for x in inner(flashes) + inner(beeps):
+                require(near(x, pulses, 1.5 / fps), f"{path.name}: unexpected pulse at {x:.4f} s")
+            offsets = [min(abs(x - y) for y in beeps) for x in inner(flashes)]
+            require(max(offsets) <= 1 / fps + 1 / RATE,
+                    f"{path.name}: flash/beep apart by {max(offsets) * 1000:.2f} ms")
+            # Clicks: no sample step near a join larger than the tone's own.
+            window = RATE // 200
+            steps = [abs(y - x) for x, y in zip(samples, samples[1:])]
+            spans = [(max(0, round(t * RATE) - window), min(len(steps), round(t * RATE) + window)) for t in joins]
+            at_joins = max(max(steps[lo:hi]) for lo, hi in spans)
+            for lo, hi in spans:
+                steps[lo:hi] = [0.0] * (hi - lo)
+            tone = max(steps)
+            require(tone > 0.01, f"{path.name}: no tone")
+            require(at_joins <= tone * 1.05 + 1e-4,
+                    f"{path.name}: a join clicks (step {at_joins:.4f}, the tone's largest {tone:.4f})")
+            row.update(pictures_checked=len(out), pulses=len(inner(flashes)),
+                       max_sync_ms=round(max(offsets) * 1000, 3), join_step=round(at_joins, 4),
+                       tone_step=round(tone, 4), reencoded=[p.get("reencoded_frames") for p in f["parts"]])
+            rows.append(row)
+        return rows
+
+    result = export_into("export")
+    evidence["exported"] = check_export(result)
+
+    # Crop (#87): the edited file shows the lower-right three quarters of a
+    # program clip and of the bars2 angle, scaled up to the program's size
+    # (encoded again); every other picture, and the program and ISO files,
+    # are as before (copied the same).
+    crop = {"x": 0.25, "y": 0.25, "width": 0.75, "height": 0.75}
+    crop_segments = (1, 4)
+    for i in crop_segments:
+        start, _, cut_in, cut_out, _ = segments[i]
+        e.rpc("timeline_crop", {"start_seconds": start, "end_seconds": start + cut_out - cut_in, "crop": crop})
+    clips = e.rpc("timeline_get")["clips"]
+    require([c.get("crop") for c in clips] == [crop if i in crop_segments else None for i in range(len(segments))],
+            f"crops: {[c.get('crop') for c in clips]}")
+    try:
+        e.rpc("timeline_crop", {"start_seconds": 0, "end_seconds": 1,
+                                "crop": {"x": 0.5, "y": 0, "width": 0.75, "height": 1}})
+        raise Failure("a crop past the picture's edge was accepted")
+    except RpcError as err:
+        require("crop.x, crop.width" in str(err), f"crop error doesn't name the fields: {err}")
+    cropped = export_into("export-crop")
+    require([c.get("crop") for c in cropped["clips"]] == [c.get("crop") for c in clips],
+            "the export's manifest doesn't list the crops")
+    evidence["exported_cropped"] = check_export(cropped, (crop, crop_segments))
+    by_source = {f["source"]: f for f in result["files"]}
+    for f in cropped["files"]:
+        before = by_source[f["source"]]
+        for i, (part, was) in enumerate(zip(f["parts"], before["parts"])):
+            if f["source"] == "edited" and i in crop_segments:
+                require(part["reencoded_frames"] == part["frames"],
+                        f"edited: cropped clip {part['clip']} was not encoded again whole: {part}")
+            else:
+                require(part.get("reencoded_frames") == was.get("reencoded_frames"),
+                        f"{f['source']}: clip {part['clip']} encoded {part.get('reencoded_frames')} frames "
+                        f"again, {was.get('reencoded_frames')} before the crop")
+        if f["source"] != "edited":
+            # Copied packets are the same bytes; only the frames encoded
+            # again at cuts (as before) may differ.
+            now, was = video_packets(Path(f["path"])), video_packets(Path(before["path"]))
+            again = sum(p.get("reencoded_frames") or 0 for p in f["parts"])
+            differ = sum(a != b for a, b in zip(now, was))
+            require(len(now) == len(was) and differ <= again,
+                    f"{f['source']}: the crop changed {differ} packets of a file that isn't the edited "
+                    f"one ({again} were encoded again at cuts)")
     changed = [p.name for p, digest in hashes.items() if hashlib.sha256(p.read_bytes()).hexdigest() != digest]
     require(not changed, f"edits or export changed take files: {changed}")
     evidence.update(timeline=e.rpc("timeline_get"), take_files_unchanged=len(hashes))

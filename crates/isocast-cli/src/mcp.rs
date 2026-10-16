@@ -31,10 +31,10 @@ use isocast_protocol::project::{
 };
 use isocast_protocol::stream::StreamService;
 use isocast_protocol::timeline::{
-    ExportStarted, RetakeParams, Retaken, TimelineAngleParams, TimelineClosed,
+    ExportStarted, RetakeParams, Retaken, TimelineAngleParams, TimelineClosed, TimelineCropParams,
     TimelineExportParams, TimelineInfo, TimelineList, TimelineMoveParams, TimelineNewParams,
-    TimelineOpenParams, TimelineRangeParams, TimelineRemoveParams, TimelineSplitParams,
-    TimelineTarget, TimelineTrimParams,
+    TimelineOpenParams, TimelineRangeParams, TimelineRemoveParams, TimelineRollParams,
+    TimelineSplitParams, TimelineTarget, TimelineTrimParams,
 };
 use isocast_protocol::{Setup, Transition};
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -876,6 +876,47 @@ impl Isocast {
     }
 
     #[tool(
+        description = "Crop the edited video from `start_seconds` to `end_seconds` on the \
+                       timeline: `crop` is the part of each clip's picture to show ({x, y, \
+                       width, height} as fractions of the picture, from the top-left), \
+                       `preset` a shape (16:9, 9:16, 1:1, 4:5: the largest that fits inside \
+                       `crop` or the picture, centred), or `clear` the whole picture again. \
+                       Clips are split at the span's ends; the crop applies to the angle each \
+                       clip shows. export_timeline encodes cropped clips again, scaled to the \
+                       program's size, in the edited file (program and ISO files stay whole). \
+                       One undoable edit. Returns the timeline.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn crop_clip(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<TimelineCropParams>>,
+    ) -> Result<Json<TimelineInfo>, String> {
+        self.call(Method::TimelineCrop(params)).await
+    }
+
+    #[tool(
+        description = "Move the cut between `clip` and the clip after it by `by_seconds` \
+                       (negative: earlier), a roll edit: the clip's out point and the next \
+                       clip's in point move together, so the timeline keeps its length. One \
+                       undoable edit. Returns the timeline.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn roll_cut(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<TimelineRollParams>>,
+    ) -> Result<Json<TimelineInfo>, String> {
+        self.call(Method::TimelineRoll(params)).await
+    }
+
+    #[tool(
         description = "Take back the last edit of a timeline (trim, split, delete, angle, \
                        remove, move; not a recorded take). Returns the timeline, with how many \
                        edits can still be undone and redone.",
@@ -936,7 +977,8 @@ impl Isocast {
                        each cut frame-accurately to the clips' in and out points (video copied \
                        as recorded except from a cut to the next keyframe; audio re-encoded once \
                        and cross-faded so it stays in sync at every join), an EDITED file when \
-                       clips show other angles (set_angle), plus an .export.json manifest, next \
+                       clips show other angles (set_angle) or crops (crop_clip), plus an \
+                       .export.json manifest, next \
                        to the first take (or in \
                        `folder`). Sources some clips lack are skipped, saying why. It runs in \
                        the background: returns at once with the files it will write; \
@@ -2075,8 +2117,8 @@ Text in scenes can show a data key (`data = \"score.home\"`); set_data changes i
 (get_data reads it), with no setup change. \
 Timelines line takes up like a clip bar: new_timeline makes one current, and every take that \
 finishes is added to it; retake records the last one again, remove_clip and move_clip edit \
-it, trim_clip, split_clip, delete_range and set_angle cut it (undo_edit, redo_edit; takes' \
-files are never touched), export_timeline joins it into one file. \
+it, trim_clip, split_clip, delete_range, roll_cut, set_angle and crop_clip cut it (undo_edit, \
+redo_edit; takes' files are never touched), export_timeline joins it into one file. \
 Each recording session writes into its own project folder; list_projects finds them and \
 rename_project names one once it has stopped. \
 Sources and scenes are addressed by id. Errors name the field and list valid options."

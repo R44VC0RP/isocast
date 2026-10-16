@@ -29,7 +29,8 @@ use crate::timeline::{
     TimelineSummary, TimelineTarget,
 };
 use crate::timeline::{
-    TimelineAngleParams, TimelineRangeParams, TimelineSplitParams, TimelineTrimParams,
+    TimelineAngleParams, TimelineCropParams, TimelineRangeParams, TimelineRollParams,
+    TimelineSplitParams, TimelineTrimParams,
 };
 use crate::{Canvas, Issue, Setup};
 
@@ -466,6 +467,17 @@ pub enum Method {
     /// Put back the last edit undone. Returns
     /// [`TimelineInfo`](crate::timeline::TimelineInfo).
     TimelineRedo(Option<TimelineTarget>),
+    /// Choose the part of the picture the edited video shows over a span
+    /// (a rectangle in fractions of each clip's angle, a shape preset, or
+    /// the whole picture again): clips across its ends are split there.
+    /// Export encodes those clips again, scaled to the program's size. One
+    /// revision. Returns [`TimelineInfo`](crate::timeline::TimelineInfo).
+    TimelineCrop(TimelineCropParams),
+    /// Move the cut between a clip and the next one (a roll: the first's
+    /// out point and the second's in point together), keeping the
+    /// timeline's length. One revision. Returns
+    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
+    TimelineRoll(TimelineRollParams),
 }
 
 /// Every method's name, as requests and plugin grants spell it

@@ -500,6 +500,10 @@ pub struct JoinPart {
     /// with dropped frames can't tell; 0 if unknown (then the file's own
     /// average, rounded).
     pub fps: u32,
+    /// Show only this part of the file's picture (fractions of its width
+    /// and height), scaled to fit the joined file's size: the part is
+    /// decoded and encoded again whole (#87). The whole picture if absent.
+    pub crop: Option<isocast_protocol::timeline::Crop>,
 }
 
 /// What a join wrote.

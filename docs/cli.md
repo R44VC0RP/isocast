@@ -65,6 +65,8 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast timeline split`](#isocast-timeline-split)
   - [`isocast timeline delete`](#isocast-timeline-delete)
   - [`isocast timeline angle`](#isocast-timeline-angle)
+  - [`isocast timeline crop`](#isocast-timeline-crop)
+  - [`isocast timeline roll`](#isocast-timeline-roll)
   - [`isocast timeline undo`](#isocast-timeline-undo)
   - [`isocast timeline redo`](#isocast-timeline-redo)
 - [`isocast project`](#isocast-project)
@@ -955,7 +957,9 @@ Commands:
   split   Cut the clip at SECONDS on the timeline in two
   delete  Take START to END (seconds on the timeline) out, closing the gap
   angle   Show SOURCE (`program` or an ISO source's id) in the edited video from START to END (seconds on the timeline)
-  undo    Take back the last edit (trim, split, delete, angle, remove, move)
+  crop    Crop the edited video from START to END (seconds on the timeline): show part of each clip's picture, scaled to the program's size. Give --rect, --preset (or both: that shape inside the rectangle), or --clear
+  roll    Move the cut after CLIP by SECONDS (negative: earlier), trimming CLIP's end and the next clip's start together (a roll edit): the timeline keeps its length
+  undo    Take back the last edit (trim, split, delete, angle, crop, roll, remove, move)
   redo    Put back the last edit undone
   help    Print this message or the help of the given subcommand(s)
 
@@ -1149,10 +1153,47 @@ Options:
   -h, --help                 Print help
 ```
 
+## isocast timeline crop
+
+```text
+Crop the edited video from START to END (seconds on the timeline): show part of each clip's picture, scaled to the program's size. Give --rect, --preset (or both: that shape inside the rectangle), or --clear
+
+Usage: isocast timeline crop [OPTIONS] <START> <END>
+
+Arguments:
+  <START>  
+  <END>    
+
+Options:
+      --rect <X,Y,W,H>       The part shown, as fractions of the picture: X,Y,WIDTH,HEIGHT from the top-left (0 to 1), like 0.25,0,0.5,1
+      --preset <PRESET>      A shape: the largest one that fits, centred: 16:9, 9:16, 1:1 or 4:5
+      --clear                Show the whole picture again
+      --timeline <TIMELINE>  
+      --json                 
+  -h, --help                 Print help
+```
+
+## isocast timeline roll
+
+```text
+Move the cut after CLIP by SECONDS (negative: earlier), trimming CLIP's end and the next clip's start together (a roll edit): the timeline keeps its length
+
+Usage: isocast timeline roll [OPTIONS] <CLIP> <SECONDS>
+
+Arguments:
+  <CLIP>     
+  <SECONDS>  
+
+Options:
+      --timeline <TIMELINE>  
+      --json                 
+  -h, --help                 Print help
+```
+
 ## isocast timeline undo
 
 ```text
-Take back the last edit (trim, split, delete, angle, remove, move)
+Take back the last edit (trim, split, delete, angle, crop, roll, remove, move)
 
 Usage: isocast timeline undo [OPTIONS]
 

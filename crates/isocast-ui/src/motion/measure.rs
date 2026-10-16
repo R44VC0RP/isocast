@@ -234,7 +234,24 @@ pub enum Tracker {
         engine: bool,
         scan_y: Option<f32>,
     },
+    /// The editor window's drags (#87): a clip's out point (`editor-trim`,
+    /// the first clip's right edge, where its colour meets the lane's),
+    /// the playhead dragged on the ruler (`editor-playhead`, its 1 pt line)
+    /// and the crop box's bottom-right corner (`editor-crop`, its right
+    /// outline), each along a row found on the first frame.
+    Editor {
+        kind: EditorKind,
+        scan_y: Option<f32>,
+        last: Option<f32>,
+    },
     None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorKind {
+    Trim,
+    Playhead,
+    Crop,
 }
 
 const TEMPLATE: i64 = 8;
@@ -263,9 +280,19 @@ impl Tracker {
                 engine,
                 scan_y: None,
             },
+            "editor-trim" | "editor-playhead" | "editor-crop" => Tracker::Editor {
+                kind: match kind {
+                    "editor-trim" => EditorKind::Trim,
+                    "editor-playhead" => EditorKind::Playhead,
+                    _ => EditorKind::Crop,
+                },
+                scan_y: None,
+                last: None,
+            },
             "none" => Tracker::None,
             other => bail!(
-                "target {other:?} isn't one of splitter:N, row-splitter, canvas-corner, canvas-move, none"
+                "target {other:?} isn't one of splitter:N, row-splitter, canvas-corner, canvas-move, \
+                 editor-trim, editor-playhead, editor-crop, none"
             ),
         })
     }
@@ -277,6 +304,7 @@ impl Tracker {
             Tracker::Column { scan_y, .. } => *scan_y,
             Tracker::Row { scan_x, .. } => *scan_x,
             Tracker::Canvas { scan_y, .. } => *scan_y,
+            Tracker::Editor { scan_y, .. } => *scan_y,
             Tracker::None => None,
         }
     }
@@ -308,6 +336,23 @@ impl Tracker {
                     r.canvas_to_window(x + w / 2.0, y + h / 2.0)
                 })
             }
+            Tracker::Editor { kind, .. } => match kind {
+                EditorKind::Trim => {
+                    let [x, y, w, h] = r.element("ClipView", 0)?;
+                    // The out point's handle: the clip's last 6 points.
+                    Some((x + w - 3.0, y + h / 2.0))
+                }
+                EditorKind::Playhead => {
+                    let [x, y, _, _] = r.element("Playhead", 0)?;
+                    // On the ruler, at the line.
+                    Some((x + 20.0, y + 10.0))
+                }
+                EditorKind::Crop => {
+                    let [x, y, w, h] = r.element("CropBox", 0)?;
+                    let [cx, cy, cw, ch] = r.editor_crop()?;
+                    Some((x + (cx + cw) * w, y + (cy + ch) * h))
+                }
+            },
             Tracker::None => {
                 let app = r.app();
                 Some((
@@ -318,29 +363,47 @@ impl Tracker {
         }
     }
 
-    /// The window area (points) the dragged thing covers, when it is a
+    /// The window areas (points) the dragged thing covers, when it is a
     /// drawn object: the item's box as set and as shown. Its own texture
     /// moving (a checker) can repeat a tile two frames apart, which isn't
     /// flicker; whether the object itself keeps up is the gap's business.
-    pub fn moving_region(&self, r: &Runner) -> Option<[f32; 4]> {
-        let Tracker::Canvas { .. } = self else {
-            return None;
-        };
-        let to_window = |[x, y, w, h]: [f32; 4]| {
-            let (x0, y0) = r.canvas_to_window(x, y);
-            let (x1, y1) = r.canvas_to_window(x + w, y + h);
-            [x0, y0, x1, y1]
-        };
-        let (a, b) = (
-            to_window(r.canvas_box(false)),
-            to_window(r.canvas_box(true)),
-        );
-        Some([
-            a[0].min(b[0]),
-            a[1].min(b[1]),
-            a[2].max(b[2]),
-            a[3].max(b[3]),
-        ])
+    /// In the editor (#87): the dragged clip, the crop box or the
+    /// playhead, and the playhead's time over the viewer, which counts
+    /// with it (its last digit's pixels can repeat a frame apart).
+    pub fn moving_regions(&self, r: &Runner) -> Vec<[f32; 4]> {
+        let corners = |[x, y, w, h]: [f32; 4]| [x, y, x + w, y + h];
+        match self {
+            Tracker::Canvas { .. } => {
+                let to_window = |[x, y, w, h]: [f32; 4]| {
+                    let (x0, y0) = r.canvas_to_window(x, y);
+                    let (x1, y1) = r.canvas_to_window(x + w, y + h);
+                    [x0, y0, x1, y1]
+                };
+                let (a, b) = (
+                    to_window(r.canvas_box(false)),
+                    to_window(r.canvas_box(true)),
+                );
+                vec![[
+                    a[0].min(b[0]),
+                    a[1].min(b[1]),
+                    a[2].max(b[2]),
+                    a[3].max(b[3]),
+                ]]
+            }
+            Tracker::Editor { kind, .. } => {
+                let dragged = match kind {
+                    EditorKind::Trim => "ClipView",
+                    EditorKind::Playhead => "Playhead",
+                    EditorKind::Crop => "CropBox",
+                };
+                [dragged, "Playhead", "ShownAt"]
+                    .into_iter()
+                    .filter_map(|t| r.element(t, 0))
+                    .map(corners)
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
     }
 
     pub fn probe(&mut self, r: &Runner, image: &Image) -> Probe {
@@ -471,10 +534,104 @@ impl Tracker {
                     .find(|p| image.at_px(*p, y).is_some_and(green))
                     .map(|p| p as f32 / image.scale);
             }
+            Tracker::Editor { kind, scan_y, last } => {
+                let found = match kind {
+                    EditorKind::Trim => {
+                        let Some([x, y, w, _]) = r.element("ClipView", 0) else {
+                            return probe;
+                        };
+                        probe.model = Some(x + w);
+                        // The 2 pt between the clip's header and frames:
+                        // its colour alone.
+                        let scan = *scan_y.get_or_insert(y + 21.0);
+                        // The clip's last pixel (its colour, or its
+                        // selection ring's) before the lane's.
+                        // The selected clip's ring (2 pt, inside it): its
+                        // last pixel before the next clip, the lane or the
+                        // playhead (the suite selects the clip first).
+                        let accent = r.theme_colour("accent");
+                        let row = (scan * image.scale) as i64;
+                        let ring =
+                            |px: i64| image.at_px(px, row).is_some_and(|c| near(c, accent, 24));
+                        let is_edge = |px: i64| ring(px) && !ring(px + 1);
+                        nearest(last.unwrap_or(x + w), image, is_edge)
+                            .map(|px| (px + 1) as f32 / image.scale)
+                    }
+                    EditorKind::Playhead | EditorKind::Crop => {
+                        let line = match kind {
+                            EditorKind::Playhead => {
+                                let Some([x, y, _, h]) = r.element("Playhead", 0) else {
+                                    return probe;
+                                };
+                                probe.model = Some(x + 20.0);
+                                // Low in the lanes, under the tracks.
+                                scan_y.get_or_insert(y + h - 30.0);
+                                x + 20.0
+                            }
+                            _ => {
+                                let (Some([x, y, w, h]), Some([cx, cy, cw, ch])) =
+                                    (r.element("CropBox", 0), r.editor_crop())
+                                else {
+                                    return probe;
+                                };
+                                let right = x + (cx + cw) * w;
+                                probe.model = Some(right);
+                                // A quarter down the crop: clear of the
+                                // handles and the thirds.
+                                scan_y.get_or_insert(y + (cy + ch * 0.25) * h);
+                                right
+                            }
+                        };
+                        let scan = scan_y.expect("set above");
+                        let bone = r.theme_colour("bone");
+                        let y0 = (scan * image.scale) as i64;
+                        // A column of the line's colour 9 points tall.
+                        let is_line = |px: i64| {
+                            (-4..=4).all(|dy| {
+                                image
+                                    .at_px(px, y0 + (dy as f32 * image.scale) as i64)
+                                    .is_some_and(|c| near(c, bone, 3))
+                            })
+                        };
+                        nearest(last.unwrap_or(line), image, is_line).map(|mut px| {
+                            match kind {
+                                // The playhead's line starts at its x.
+                                EditorKind::Playhead => {
+                                    while is_line(px - 1) {
+                                        px -= 1;
+                                    }
+                                    px as f32 / image.scale
+                                }
+                                // The crop's outline ends at its right.
+                                _ => {
+                                    while is_line(px + 1) {
+                                        px += 1;
+                                    }
+                                    (px + 1) as f32 / image.scale
+                                }
+                            }
+                        })
+                    }
+                };
+                if let Some(found) = found {
+                    probe.pixel = Some(found);
+                    *last = Some(found);
+                }
+            }
             Tracker::None => {}
         }
         probe
     }
+}
+
+/// The device pixel nearest `from` (window points) along a row where
+/// `found` holds, within 240 points.
+fn nearest(from: f32, image: &Image, found: impl Fn(i64) -> bool) -> Option<i64> {
+    let start = (from * image.scale).round() as i64;
+    let reach = (240.0 * image.scale) as i64;
+    (0..reach)
+        .flat_map(|d| [start - d, start + d])
+        .find(|px| found(*px))
 }
 
 fn percentile(values: &[f64], p: f64) -> f64 {

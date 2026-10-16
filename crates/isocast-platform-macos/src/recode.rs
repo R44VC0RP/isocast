@@ -12,16 +12,20 @@ use std::ptr::{self, NonNull};
 use std::sync::Mutex;
 
 use anyhow::{Result, anyhow, bail};
+use isocast_protocol::timeline::Crop;
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_media::{
     CMFormatDescription, CMSampleBuffer, CMTime, CMVideoCodecType, kCMSampleAttachmentKey_NotSync,
     kCMTimeInvalid, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
 };
 use objc2_core_video::{
-    CVImageBuffer, CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType,
-    CVPixelBufferGetWidth, kCVImageBufferColorPrimaries_ITU_R_709_2,
-    kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-    kCVPixelBufferIOSurfacePropertiesKey, kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
+    CVAttachmentMode, CVImageBuffer, CVPixelBuffer, CVPixelBufferGetHeight,
+    CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, kCVImageBufferCleanApertureHeightKey,
+    kCVImageBufferCleanApertureHorizontalOffsetKey, kCVImageBufferCleanApertureKey,
+    kCVImageBufferCleanApertureVerticalOffsetKey, kCVImageBufferCleanApertureWidthKey,
+    kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferTransferFunction_ITU_R_709_2,
+    kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVPixelBufferIOSurfacePropertiesKey,
+    kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
     kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
 };
 use objc2_video_toolbox::{
@@ -330,23 +334,28 @@ impl Encoder {
         })
     }
 
-    /// Encode `picture` (scaled to the encoder's size if it isn't) shown
-    /// from `pts` for `duration`; a keyframe if `keyframe`.
+    /// Encode `picture` (scaled to the encoder's size if it isn't, and
+    /// only its `crop` if given, fitted to that size) shown from `pts` for
+    /// `duration`; a keyframe if `keyframe`.
     pub fn encode(
         &mut self,
         picture: &CVPixelBuffer,
         pts: CMTime,
         duration: CMTime,
         keyframe: bool,
+        crop: Option<Crop>,
     ) -> Result<()> {
         let scaled;
-        let picture = if (
+        let size = (
             CVPixelBufferGetWidth(picture),
             CVPixelBufferGetHeight(picture),
-        ) == self.size
-        {
+        );
+        let picture = if crop.is_none() && size == self.size {
             picture
         } else {
+            if let Some(crop) = crop {
+                set_clean_aperture(picture, crop, size);
+            }
             scaled = self.scale(picture)?;
             &*scaled.0
         };
@@ -404,6 +413,10 @@ impl Encoder {
         if status != 0 {
             bail!("could not scale a frame (VideoToolbox error {status})");
         }
+        // The scaled frame is shown whole: no crop may reach the file.
+        frame
+            .0
+            .remove_attachment(unsafe { kCVImageBufferCleanApertureKey });
         Ok(frame)
     }
 
@@ -442,6 +455,38 @@ impl Drop for Encoder {
             self.session.invalidate();
         }
     }
+}
+
+/// Mark the part of `picture` (`size` pixels) that `crop` covers as its
+/// clean aperture, the part the pixel transfer (letterbox mode) scales to
+/// fit the frame it fills.
+fn set_clean_aperture(picture: &CVPixelBuffer, crop: Crop, (width, height): (usize, usize)) {
+    let (w, h) = (width as f64, height as f64);
+    let numbers = [
+        CFNumber::new_f64(crop.width * w),
+        CFNumber::new_f64(crop.height * h),
+        // From the picture's centre to the crop's.
+        CFNumber::new_f64((crop.x + crop.width / 2.0 - 0.5) * w),
+        CFNumber::new_f64((crop.y + crop.height / 2.0 - 0.5) * h),
+    ];
+    let aperture = unsafe {
+        CFDictionary::<CFString, CFNumber>::from_slices(
+            &[
+                kCVImageBufferCleanApertureWidthKey,
+                kCVImageBufferCleanApertureHeightKey,
+                kCVImageBufferCleanApertureHorizontalOffsetKey,
+                kCVImageBufferCleanApertureVerticalOffsetKey,
+            ],
+            &[&*numbers[0], &*numbers[1], &*numbers[2], &*numbers[3]],
+        )
+    };
+    unsafe {
+        picture.set_attachment(
+            kCVImageBufferCleanApertureKey,
+            aperture.as_opaque(),
+            CVAttachmentMode::ShouldPropagate,
+        )
+    };
 }
 
 /// Whether `picture` holds 10-bit samples.

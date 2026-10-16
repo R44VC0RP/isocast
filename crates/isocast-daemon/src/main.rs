@@ -1483,6 +1483,8 @@ impl Daemon {
             Method::TimelineRedo(target) => self
                 .timeline_step(target.unwrap_or_default(), true)
                 .and_then(to_json),
+            Method::TimelineCrop(params) => self.timeline_crop(params).and_then(to_json),
+            Method::TimelineRoll(params) => self.timeline_roll(params).and_then(to_json),
             Method::HotkeysGet => to_json(self.hotkeys_get()),
             Method::HotkeysSet(params) => self.hotkeys_set(*params).and_then(to_json),
             Method::HotkeysActions => to_json(isocast_protocol::hotkeys::catalogue()),

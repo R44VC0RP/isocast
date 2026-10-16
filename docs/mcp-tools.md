@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-92 tools. Arguments marked required must be given; ids, not names,
+94 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -97,6 +97,19 @@ Make a scene collection (one empty scene on the canvas in use) or a profile (60 
 | `name` (required) | string | Its name. |
 | `switch` | boolean | Switch to it once made (refused while recording or streaming). |
 
+## crop_clip
+
+Crop the edited video from `start_seconds` to `end_seconds` on the timeline: `crop` is the part of each clip's picture to show ({x, y, width, height} as fractions of the picture, from the top-left), `preset` a shape (16:9, 9:16, 1:1, 4:5: the largest that fits inside `crop` or the picture, centred), or `clear` the whole picture again. Clips are split at the span's ends; the crop applies to the angle each clip shows. export_timeline encodes cropped clips again, scaled to the program's size, in the edited file (program and ISO files stay whole). One undoable edit. Returns the timeline.
+
+| Argument | Type | Description |
+|---|---|---|
+| `clear` | boolean | Show the whole picture again over the span (no `crop` or `preset`). |
+| `crop` | Crop | The part of each clip's picture to show (fractions of its width and height, from the top-left); the whole picture if absent and a `preset` is given. |
+| `end_seconds` (required) | number |  |
+| `preset` | CropPreset | Make it this shape: the largest rectangle of it inside `crop` (or the picture), centred: `16:9`, `9:16`, `1:1` or `4:5`. |
+| `start_seconds` (required) | number | Where the span starts and ends, in seconds on the timeline, each rounded to the frame grid of the clip there. |
+| `timeline` | string (optional) | The timeline's id; the current one if absent. |
+
 ## delete_collection_or_profile
 
 Delete a scene collection or profile that isn't in use (switch away first); its file is kept in the library's deleted folder.
@@ -145,7 +158,7 @@ Predict instantly, without benchmarking, whether a setup's files (the live setup
 
 ## export_timeline
 
-Join a timeline's clips (the current one unless `timeline` is given), in order, into one program file and one file per ISO source every clip has, each cut frame-accurately to the clips' in and out points (video copied as recorded except from a cut to the next keyframe; audio re-encoded once and cross-faded so it stays in sync at every join), an EDITED file when clips show other angles (set_angle), plus an .export.json manifest, next to the first take (or in `folder`). Sources some clips lack are skipped, saying why. It runs in the background: returns at once with the files it will write; get_events shows export_progress and export_finished.
+Join a timeline's clips (the current one unless `timeline` is given), in order, into one program file and one file per ISO source every clip has, each cut frame-accurately to the clips' in and out points (video copied as recorded except from a cut to the next keyframe; audio re-encoded once and cross-faded so it stays in sync at every join), an EDITED file when clips show other angles (set_angle) or crops (crop_clip), plus an .export.json manifest, next to the first take (or in `folder`). Sources some clips lack are skipped, saying why. It runs in the background: returns at once with the files it will write; get_events shows export_progress and export_finished.
 
 | Argument | Type | Description |
 |---|---|---|
@@ -519,6 +532,16 @@ Record the last take again, on the current timeline. Not recording: take the las
 |---|---|---|
 | `folder` | string (optional) | Write the new take here; else the folder of the take it replaces (else the setup's `recording.folder`). Not while recording, where the new take goes where the recording writes. |
 | `seconds` | number (optional) | Stop on its own after this many seconds (not while recording). |
+
+## roll_cut
+
+Move the cut between `clip` and the clip after it by `by_seconds` (negative: earlier), a roll edit: the clip's out point and the next clip's in point move together, so the timeline keeps its length. One undoable edit. Returns the timeline.
+
+| Argument | Type | Description |
+|---|---|---|
+| `by_seconds` (required) | number | How far to move the cut, in seconds (negative: earlier), rounded to the clips' frame grid. Both clips must keep a frame and stay within their takes. |
+| `clip` (required) | string | The clip before the cut, like `c2`. |
+| `timeline` | string (optional) | The timeline's id; the current one if absent. |
 
 ## save_replay
 

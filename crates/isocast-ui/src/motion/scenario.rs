@@ -348,6 +348,14 @@ pub fn safe_name(name: &str) -> bool {
 /// exports), go online (streaming) or change settings (a setting could
 /// move the recordings folder).
 pub const ALLOWED_STATES: &[&str] = &[
+    // The editor window's view (#87; `editor-…` targets record their
+    // takes and open it first).
+    "create-crop-mode",
+    "create-crop",
+    "create-key",
+    "create-playhead",
+    "create-select",
+    "create-zoom",
     "select-first-item",
     "snap",
     "hide",

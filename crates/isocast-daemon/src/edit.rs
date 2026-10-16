@@ -1,5 +1,5 @@
 //! The Edit view's edits (C.3): trim, split, ripple delete and angle
-//! selection on a timeline's clips, and undo/redo. Each edit changes only
+//! selection on a timeline's clips, crops and rolls (#87), and undo/redo. Each edit changes only
 //! the timeline (its clips' in and out points, order and angles) and is one
 //! revision; the takes' files are never touched.
 //!
@@ -14,9 +14,9 @@ use std::path::PathBuf;
 use isocast_protocol::PROGRAM;
 use isocast_protocol::api::RpcError;
 use isocast_protocol::timeline::{
-    Clip, RemovedReason, RemovedTake, Revision, Timeline, TimelineAction, TimelineAngleParams,
-    TimelineInfo, TimelineRangeParams, TimelineSplitParams, TimelineTarget, TimelineTrimParams,
-    UNDO_LIMIT, take_length,
+    Clip, Crop, RemovedReason, RemovedTake, Revision, Timeline, TimelineAction,
+    TimelineAngleParams, TimelineCropParams, TimelineInfo, TimelineRangeParams, TimelineRollParams,
+    TimelineSplitParams, TimelineTarget, TimelineTrimParams, UNDO_LIMIT, fit_aspect, take_length,
 };
 
 use crate::Daemon;
@@ -29,6 +29,20 @@ pub struct TakeGrid {
     pub fps: u32,
     pub frames: i64,
     pub sources: Vec<String>,
+    /// Each source's picture size, in the order of `sources`.
+    pub sizes: Vec<(u32, u32)>,
+}
+
+impl TakeGrid {
+    /// The picture size of `source` (the program's, else the first's).
+    fn size(&self, source: &str) -> (u32, u32) {
+        self.sources
+            .iter()
+            .position(|s| s == source)
+            .or_else(|| self.sources.iter().position(|s| s == PROGRAM))
+            .and_then(|i| self.sizes.get(i).copied())
+            .unwrap_or((1920, 1080))
+    }
 }
 
 /// Each clip's take's grid, by manifest path.
@@ -57,6 +71,7 @@ pub fn grids(timeline: &Timeline) -> Result<Grids, String> {
                 fps,
                 frames: frames as i64,
                 sources: manifest.files.iter().map(|f| f.source.clone()).collect(),
+                sizes: manifest.files.iter().map(|f| (f.width, f.height)).collect(),
             },
         );
     }
@@ -316,6 +331,160 @@ pub fn angle(
     Ok(changed)
 }
 
+/// The smallest crop, in pixels each way.
+const MIN_CROP_PIXELS: f64 = 32.0;
+
+/// `crop` on a `width`×`height` picture, checked (fields named) and moved
+/// to the picture's 2-pixel grid; `None` for the whole picture.
+fn snap_crop(crop: Crop, (width, height): (u32, u32)) -> Result<Option<Crop>, String> {
+    for (field, value) in [
+        ("crop.x", crop.x),
+        ("crop.y", crop.y),
+        ("crop.width", crop.width),
+        ("crop.height", crop.height),
+    ] {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(format!(
+                "{field}: {value} is outside the picture; crops are fractions of its width and \
+                 height, from 0 to 1"
+            ));
+        }
+    }
+    if crop.x + crop.width > 1.0 + 1e-6 {
+        return Err(format!(
+            "crop.x, crop.width: {} + {} runs past the picture's right edge (at most 1)",
+            crop.x, crop.width
+        ));
+    }
+    if crop.y + crop.height > 1.0 + 1e-6 {
+        return Err(format!(
+            "crop.y, crop.height: {} + {} runs past the picture's bottom edge (at most 1)",
+            crop.y, crop.height
+        ));
+    }
+    let (w, h) = (f64::from(width.max(2)), f64::from(height.max(2)));
+    // Even pixels (4:2:0 pictures), inside the picture.
+    let even = |v: f64, size: f64| ((v * size / 2.0).round() * 2.0).clamp(0.0, size);
+    let (x0, y0) = (even(crop.x, w), even(crop.y, h));
+    let (x1, y1) = (even(crop.x + crop.width, w), even(crop.y + crop.height, h));
+    if x1 - x0 < MIN_CROP_PIXELS || y1 - y0 < MIN_CROP_PIXELS {
+        return Err(format!(
+            "crop.width, crop.height: {:.0}×{:.0} pixels of a {width}×{height} picture is too \
+             small; a crop is at least {MIN_CROP_PIXELS:.0} pixels each way",
+            x1 - x0,
+            y1 - y0
+        ));
+    }
+    let snapped = Crop {
+        x: x0 / w,
+        y: y0 / h,
+        width: (x1 - x0) / w,
+        height: (y1 - y0) / h,
+    };
+    Ok((!snapped.is_full()).then_some(snapped))
+}
+
+/// `timeline_crop`: returns the clips whose crop was set (or cleared).
+pub fn crop(
+    timeline: &mut Timeline,
+    grids: &Grids,
+    params: &TimelineCropParams,
+) -> Result<Vec<String>, String> {
+    if params.clear && (params.crop.is_some() || params.preset.is_some()) {
+        return Err("clear: give clear alone, or a crop and/or preset".into());
+    }
+    if !params.clear && params.crop.is_none() && params.preset.is_none() {
+        return Err(
+            "crop, preset, clear: give a crop (x, y, width, height), a preset (16:9, 9:16, 1:1, \
+             4:5), or clear"
+                .into(),
+        );
+    }
+    // Check the rectangle before cutting anything.
+    if let Some(rect) = params.crop {
+        snap_crop(rect, (1 << 16, 1 << 16))?;
+    }
+    let (first, last) = range(timeline, grids, params.start_seconds, params.end_seconds)?;
+    let mut changed = Vec::new();
+    for index in first..last {
+        let clip = &timeline.clips[index];
+        let source = clip.angle.clone().unwrap_or_else(|| PROGRAM.to_string());
+        let size = grid(grids, clip).size(&source);
+        let value = match params.clear {
+            true => None,
+            false => {
+                let mut rect = params.crop.unwrap_or(Crop::FULL);
+                if let Some(preset) = params.preset {
+                    rect = fit_aspect(rect, preset.aspect(), size);
+                }
+                snap_crop(rect, size).map_err(|err| format!("clip {}: {err}", clip.id))?
+            }
+        };
+        let clip = &mut timeline.clips[index];
+        clip.crop = value;
+        changed.push(clip.id.clone());
+    }
+    Ok(changed)
+}
+
+/// `timeline_roll`: moves the cut after `params.clip`; returns the clip
+/// after it.
+pub fn roll(
+    timeline: &mut Timeline,
+    grids: &Grids,
+    params: &TimelineRollParams,
+) -> Result<String, String> {
+    let index = crate::timeline::find(timeline, &params.clip).map_err(|err| err.message)?;
+    if index + 1 >= timeline.clips.len() {
+        return Err(format!(
+            "clip: {} is the last clip, so there is no cut after it to move; choose one of: {}",
+            params.clip,
+            timeline.clips[..timeline.clips.len() - 1]
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !params.by_seconds.is_finite() {
+        return Err(format!("by_seconds: {} isn't a number", params.by_seconds));
+    }
+    let (a, b) = (&timeline.clips[index], &timeline.clips[index + 1]);
+    let (grid_a, grid_b) = (grid(grids, a).clone(), grid(grids, b).clone());
+    let (a_in, a_out) = span(a, &grid_a);
+    let (b_in, b_out) = span(b, &grid_b);
+    // Both clips move by the same time, on the first's frame grid; the
+    // second's must land on its own grid too.
+    let frames_a = frame(params.by_seconds, grid_a.fps);
+    let moved = seconds(frames_a, grid_a.fps);
+    let frames_b = frame(moved, grid_b.fps);
+    if (seconds(frames_b, grid_b.fps) - moved).abs() > 1e-6 {
+        return Err(format!(
+            "by_seconds: clips {} and {} have frame rates ({} and {} fps) whose frames don't line \
+             up {moved:.4} s from the cut; trim them one by one",
+            a.id, b.id, grid_a.fps, grid_b.fps
+        ));
+    }
+    let (new_a_out, new_b_in) = (a_out + frames_a, b_in + frames_b);
+    let low = (a_in + 1 - a_out).max(-b_in);
+    let high = (grid_a.frames - a_out).min(b_out - 1 - b_in);
+    if new_a_out <= a_in || new_a_out > grid_a.frames || new_b_in < 0 || new_b_in >= b_out {
+        return Err(format!(
+            "by_seconds: {:.4} s moves the cut between {} and {} out of reach; it can move from \
+             {:.4} to {:.4} s (each clip keeps a frame and stays within its take)",
+            params.by_seconds,
+            a.id,
+            b.id,
+            seconds(low, grid_a.fps),
+            seconds(high, grid_a.fps)
+        ));
+    }
+    let next = b.id.clone();
+    timeline.clips[index].out_seconds = seconds(new_a_out, grid_a.fps);
+    timeline.clips[index + 1].in_seconds = seconds(new_b_in, grid_b.fps);
+    Ok(next)
+}
+
 /// The timeline's clips and removed takes now, for its history.
 fn snapshot(timeline: &Timeline, action: TimelineAction) -> Revision {
     Revision {
@@ -501,6 +670,50 @@ impl Daemon {
         )
     }
 
+    pub(crate) fn timeline_crop(
+        &self,
+        params: TimelineCropParams,
+    ) -> Result<TimelineInfo, RpcError> {
+        self.edit_timeline(
+            params.timeline.as_deref(),
+            TimelineAction::Cropped,
+            |timeline, grids| {
+                let changed = crop(timeline, grids, &params)?;
+                let what = match (params.clear, params.preset) {
+                    (true, _) => "the whole picture".to_string(),
+                    (false, Some(preset)) => format!("a {} crop", preset.name()),
+                    (false, None) => "a crop".to_string(),
+                };
+                let notes = vec![format!(
+                    "the edited video shows {what} over {} (clip{} {})",
+                    describe_span(params.start_seconds, params.end_seconds),
+                    if changed.len() == 1 { "" } else { "s" },
+                    changed.join(", ")
+                )];
+                Ok((changed.first().cloned(), notes))
+            },
+        )
+    }
+
+    pub(crate) fn timeline_roll(
+        &self,
+        params: TimelineRollParams,
+    ) -> Result<TimelineInfo, RpcError> {
+        self.edit_timeline(
+            params.timeline.as_deref(),
+            TimelineAction::Rolled,
+            |timeline, grids| {
+                let next = roll(timeline, grids, &params)?;
+                let notes = vec![format!(
+                    "moved the cut between {} and {next} by {:+.3} s; the timeline's length is \
+                     unchanged",
+                    params.clip, params.by_seconds
+                )];
+                Ok((Some(params.clip.clone()), notes))
+            },
+        )
+    }
+
     pub(crate) fn timeline_step(
         &self,
         target: TimelineTarget,
@@ -550,6 +763,7 @@ mod tests {
                     fps: 60,
                     frames: *frames,
                     sources: vec!["camera".into(), PROGRAM.into()],
+                    sizes: vec![(1280, 720), (1920, 1080)],
                 },
             );
             clips.push(Clip {
@@ -559,6 +773,7 @@ mod tests {
                 out_seconds: seconds(*frames, 60),
                 project: None,
                 angle: None,
+                crop: None,
             });
         }
         let timeline = Timeline {
@@ -786,5 +1001,106 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("less than a frame"), "{err}");
+    }
+
+    #[test]
+    fn crops_snap_to_pixels_follow_angles_and_undo() {
+        let (mut t, grids) = timeline(&[("a", 120), ("b", 120)]);
+        let params = |crop, preset, clear| TimelineCropParams {
+            start_seconds: 1.0,
+            end_seconds: 3.0,
+            crop,
+            preset,
+            clear,
+            timeline: None,
+        };
+        // A 9:16 preset on the 1920x1080 program: 608x1080, centred.
+        revise(&mut t, TimelineAction::Cropped, |t| {
+            crop(
+                t,
+                &grids,
+                &params(
+                    None,
+                    Some(isocast_protocol::timeline::CropPreset::Vertical),
+                    false,
+                ),
+            )
+        })
+        .unwrap();
+        assert_eq!(t.clips.len(), 4);
+        let c = t.clips[1].crop.unwrap();
+        assert!((c.width * 1920.0 - 608.0).abs() < 1e-6, "{c:?}");
+        assert!((c.height - 1.0).abs() < 1e-9 && (c.x * 1920.0 - 656.0).abs() < 1e-6);
+        assert_eq!(t.clips[0].crop, None);
+        assert_eq!(t.clips[3].crop, None);
+        // A rectangle off the 2-pixel grid lands on it.
+        let r = Crop {
+            x: 0.1001,
+            y: 0.2,
+            width: 0.5,
+            height: 0.5,
+        };
+        crop(&mut t, &grids, &params(Some(r), None, false)).unwrap();
+        let c = t.clips[1].crop.unwrap();
+        assert_eq!((c.x * 1920.0).round() % 2.0, 0.0);
+        // Errors name the field.
+        let bad = Crop { x: 0.8, ..r };
+        let err = crop(&mut t.clone(), &grids, &params(Some(bad), None, false)).unwrap_err();
+        assert!(err.starts_with("crop.x, crop.width:"), "{err}");
+        let tiny = Crop { width: 0.01, ..r };
+        let err = crop(&mut t.clone(), &grids, &params(Some(tiny), None, false)).unwrap_err();
+        assert!(err.contains("too small"), "{err}");
+        let err = crop(&mut t.clone(), &grids, &params(None, None, false)).unwrap_err();
+        assert!(err.starts_with("crop, preset, clear:"), "{err}");
+        // The whole picture is no crop; clear takes it off.
+        crop(&mut t, &grids, &params(Some(Crop::FULL), None, false)).unwrap();
+        assert_eq!(t.clips[1].crop, None);
+        crop(&mut t, &grids, &params(Some(r), None, false)).unwrap();
+        crop(&mut t, &grids, &params(None, None, true)).unwrap();
+        assert!(t.clips.iter().all(|c| c.crop.is_none()));
+        // Undo goes back to before the first crop (the cuts too).
+        step(&mut t, false).unwrap();
+        assert_eq!(t.clips.len(), 2);
+    }
+
+    #[test]
+    fn rolls_move_a_cut_and_keep_the_length() {
+        let (mut t, grids) = timeline(&[("a", 120), ("b", 120)]);
+        // Trim both so the cut can move either way.
+        t.clips[0].out_seconds = 1.5;
+        t.clips[1].in_seconds = 0.5;
+        let before = total(&t);
+        let roll_by = |t: &mut Timeline, by| {
+            roll(
+                t,
+                &grids,
+                &TimelineRollParams {
+                    clip: "c1".into(),
+                    by_seconds: by,
+                    timeline: None,
+                },
+            )
+        };
+        assert_eq!(roll_by(&mut t, -0.25).unwrap(), "c2");
+        assert_eq!(layout(&t)[0], ("c1".into(), 0, 75, None));
+        assert_eq!(layout(&t)[1], ("c2".into(), 15, 120, None));
+        assert!((total(&t) - before).abs() < 1e-9);
+        // Past the next clip's take start: refused, naming the reach.
+        let err = roll_by(&mut t.clone(), -0.5).unwrap_err();
+        assert!(
+            err.starts_with("by_seconds:") && err.contains("can move from"),
+            "{err}"
+        );
+        let err = roll(
+            &mut t.clone(),
+            &grids,
+            &TimelineRollParams {
+                clip: "c2".into(),
+                by_seconds: 0.1,
+                timeline: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("last clip") && err.contains("c1"), "{err}");
     }
 }

@@ -1612,6 +1612,27 @@ each section. Delete entries that stop being true.
   M2-b final verification: 0 phantom files / 0 VT errors in 200 split
   attempts, all second-run starts 504–1496 ms ahead; 0 stale-busy refusals.
   `/Volumes/IsocastBuild/rapid-splits/scratch/REPORT.md` (Tier-1 review pending).
+- 2026-10-16 (#87): a crop is a normalized rectangle per clip
+  (`Clip.crop`, fractions of the shown angle's picture, on its 2-pixel
+  grid, ≥ 32 px), set over a span like an angle, so the vertical canvas
+  (#86) can reuse it (a 9:16 preset is the bridge). Export applies it only
+  in the EDITED file: the program and ISO files stay whole, so a crop can
+  never lose picture. A cropped clip is decoded and encoded again whole,
+  its crop marked as the decoded picture's clean aperture so
+  VideoToolbox's letterbox transfer scales just that part to the
+  program's size (black bars when the shapes differ); the scaled frame's
+  clean aperture is removed so no `clap` reaches the file (checked: none).
+- 2026-10-16 (#87): waveforms are made in the app (src/waves.rs, like
+  thumbnails), not on the method table: one call per connection at a time
+  means a seconds-long decode on the app's link would stall its edits.
+  Peaks (100/s) cache in `$TMPDIR/isocast-waveforms`. Drawn as a strip
+  under the frames: an overlay over the frames' lower half was tried and
+  hid them (scratch/snaps/waves-compare.png on the branch's lane).
+- 2026-10-16 (#87): trims stay ripple (the clips have no gaps); a roll
+  (`timeline_roll`, ⌥-drag of an edge) is the non-ripple trim. Snapping
+  covers clip edges, takes' markers, the marks and, for nothing but
+  scrubs, not the playhead (it follows the trimmed edge).
+
 - 2026-10-16 (engine hardening, #27/#30/#31/#35): engine and daemon locks
   use parking_lot. Only selected control state uses `Critical` transactions:
   an unwound mutation marks it broken for emergency finalization; a reader
@@ -5318,6 +5339,22 @@ each section. Delete entries that stop being true.
   couldn't-restart warning stays until dismissed (OK).
 
 ## Gotchas
+
+- 2026-10-16 (#87): headless Chrome (154) refused (MEDIA_ERR_DECODE, a
+  third of a second in) both HEVC files of the check export, program and
+  EDITED, whose cuts were encoded again (C.3's smart render gives them a
+  second sample description, the likely cause). The takes themselves play, and H.264/.mp4
+  exports play to the end; Safari, ffmpeg and AVFoundation play both.
+  Repro: scratch/tools/export_check.py on the editor-round2 lane, in the VM.
+- 2026-10-16 (#87): the first `Icon` of a kind that appears (an SVG
+  path) can cost ~30 ms of one frame (the crop mark on the first cropped
+  clip: 41.9 ms frame in the motion run, 9.9 ms with the mark drawn from
+  rectangles). Draw small marks that appear mid-interaction.
+- 2026-10-16 (#87): Slint callbacks can't declare properties; compute in
+  a function. `rotation-angle` is `transform-rotation` in Slint 1.18.
+- 2026-10-16 (#87): the motion harness can drive the editor window
+  (`editor-…` targets); its takes follow the wall clock, so lockstep runs
+  of it aren't pixel-identical.
 
 - 2026-10-16 (#74): a CLI-stored stream key can't be read by an ad-hoc
   signed isocastd from another build (702, "stored by another build"):

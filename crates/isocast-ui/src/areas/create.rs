@@ -22,6 +22,12 @@
 //! trim handles, S splits at the playhead, I and O mark a span that Delete
 //! takes out, 1–9 or a track's header choose the angle, J K L play the
 //! preview, ⌘Z undoes the last edit.
+//!
+//! Round 2 (#87): crops of the picture (C, handles on the viewer, shape
+//! presets; `timeline_crop`), rolls (⌥-drag of an edge; `timeline_roll`),
+//! waveforms on the tracks (src/waves.rs), snapping (N) to clip edges,
+//! markers, the marks and the playhead, edit-point and marker navigation
+//! (↑ ↓, M ⇧M), Space to play, and zoom (⌘+ ⌘−, ⇧Z, ⌘-scroll, pinch).
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -31,9 +37,10 @@ use std::time::{Duration, Instant};
 use isocast_protocol::PROGRAM;
 use isocast_protocol::api::{EngineState, Event, Method};
 use isocast_protocol::timeline::{
-    ClipFile, ClipInfo, ExportStarted, Retaken, TimelineAngleParams, TimelineInfo, TimelineList,
-    TimelineMoveParams, TimelineNewParams, TimelineOpenParams, TimelineRangeParams,
-    TimelineRemoveParams, TimelineSplitParams, TimelineTarget, TimelineTrimParams,
+    ClipFile, ClipInfo, Crop, CropPreset, ExportStarted, Retaken, TimelineAngleParams,
+    TimelineCropParams, TimelineInfo, TimelineList, TimelineMoveParams, TimelineNewParams,
+    TimelineOpenParams, TimelineRangeParams, TimelineRemoveParams, TimelineRollParams,
+    TimelineSplitParams, TimelineTarget, TimelineTrimParams,
 };
 use slint::{ComponentHandle, ModelRc, VecModel};
 
@@ -43,6 +50,7 @@ use crate::daemon::Link;
 use crate::kit::{self, MenuBuilder};
 use crate::thumbs::{Preview, Thumbs};
 use crate::toasts::Toast;
+use crate::waves::Waves;
 use crate::{AppWindow, ClipRow, CreateArea, EditorWindow, SegmentRow, ToastKind, TrackRow};
 
 /// Where edits are shown: the editor window (C.3), or before it opens the
@@ -85,6 +93,11 @@ pub const STATES: &[&str] = &[
     "create-redo",
     "create-layout:0|1",
     "create-preview (wait for the picture)",
+    "create-crop:X,Y,W,H|PRESET|clear (crop the clip at the playhead)",
+    "create-crop-mode:on|off",
+    "create-roll:INDEX,SECONDS",
+    "create-waves (wait for the waveforms)",
+    "create-key:KEY (an editor key: space, up, down, marker:1, …)",
     "editor (open the editor window; the snapshot draws it)",
 ];
 
@@ -128,6 +141,11 @@ pub struct Create {
     asked_at: Cell<Option<Instant>>,
     /// The editor window (C.3), once opened (Window › Editor).
     editor: RefCell<Option<EditorWindow>>,
+    /// The tracks' waveforms (#87).
+    waves: Waves,
+    /// A crop handle being dragged: what it holds, the crop when it was
+    /// pressed, and the clip.
+    crop_drag: RefCell<Option<(String, Crop, String)>>,
 }
 
 /// Each clip's take's number, in the order the takes were recorded (a
@@ -233,6 +251,120 @@ fn mm_ss_cc(seconds: f64) -> String {
     format!("{:02}:{:02}.{:02}", cs / 6000, cs / 100 % 60, cs % 100)
 }
 
+/// The takes' markers inside their clips, in seconds on the timeline, in
+/// order.
+fn marker_times(clips: &[ClipInfo]) -> Vec<f64> {
+    let mut times: Vec<f64> = clips
+        .iter()
+        .flat_map(|clip| {
+            clip.markers
+                .iter()
+                .filter(|m| m.time_seconds >= clip.in_seconds && m.time_seconds < clip.out_seconds)
+                .map(|m| clip.start_seconds + m.time_seconds - clip.in_seconds)
+        })
+        .collect();
+    times.sort_by(f64::total_cmp);
+    times
+}
+
+/// Where a crop handle dragged by `dx`, `dy` (fractions of the picture)
+/// puts the crop that was `start` when pressed: `handle` is "move" or the
+/// edges it holds ("l", "r", "t", "b", "tl", …). With `aspect` (the shape
+/// to keep, width over height in pixels, on a picture `picture` wide over
+/// high) the crop keeps its shape, from the opposite corner or edge.
+fn dragged_crop(
+    handle: &str,
+    start: Crop,
+    dx: f64,
+    dy: f64,
+    aspect: Option<f64>,
+    picture: f64,
+) -> Crop {
+    // The smallest crop while dragging: 5% of the picture each way.
+    const MIN: f64 = 0.05;
+    let mut c = start;
+    if handle == "move" {
+        c.x = (start.x + dx).clamp(0.0, 1.0 - start.width);
+        c.y = (start.y + dy).clamp(0.0, 1.0 - start.height);
+        return c;
+    }
+    let (left, right) = (handle.contains('l'), handle.contains('r'));
+    let (top, bottom) = (handle.contains('t'), handle.contains('b'));
+    let (x0, y0) = (start.x, start.y);
+    let (x1, y1) = (start.x + start.width, start.y + start.height);
+    let (mut nx0, mut ny0, mut nx1, mut ny1) = (x0, y0, x1, y1);
+    if left {
+        nx0 = (x0 + dx).clamp(0.0, x1 - MIN);
+    }
+    if right {
+        nx1 = (x1 + dx).clamp(x0 + MIN, 1.0);
+    }
+    if top {
+        ny0 = (y0 + dy).clamp(0.0, y1 - MIN);
+    }
+    if bottom {
+        ny1 = (y1 + dy).clamp(y0 + MIN, 1.0);
+    }
+    let Some(aspect) = aspect else {
+        return Crop {
+            x: nx0,
+            y: ny0,
+            width: nx1 - nx0,
+            height: ny1 - ny0,
+        };
+    };
+    // In fractions: height = width * picture / aspect.
+    let ratio = picture / aspect;
+    let horizontal = left || right;
+    let vertical = top || bottom;
+    let (mut w, mut h) = (nx1 - nx0, ny1 - ny0);
+    if horizontal && (!vertical || w * ratio >= h) {
+        h = w * ratio;
+    } else {
+        w = h / ratio;
+    }
+    // Anchor: the opposite edge (or the centre, for an edge alone).
+    let ax = match (left, right) {
+        (true, false) => x1 - w,
+        (false, true) => x0,
+        _ => (x0 + x1 - w) / 2.0,
+    };
+    let ay = match (top, bottom) {
+        (true, false) => y1 - h,
+        (false, true) => y0,
+        _ => (y0 + y1 - h) / 2.0,
+    };
+    // Shrink to fit inside the picture, keeping the shape and the anchor.
+    let fit_w = match (left, right) {
+        (true, false) => x1,
+        (false, true) => 1.0 - x0,
+        _ => 2.0 * ((x0 + x1) / 2.0).min(1.0 - (x0 + x1) / 2.0),
+    };
+    let fit_h = match (top, bottom) {
+        (true, false) => y1,
+        (false, true) => 1.0 - y0,
+        _ => 2.0 * ((y0 + y1) / 2.0).min(1.0 - (y0 + y1) / 2.0),
+    };
+    let scale = (fit_w / w).min(fit_h / h).min(1.0);
+    let (w2, h2) = (w * scale, h * scale);
+    let x = match (left, right) {
+        (true, false) => x1 - w2,
+        (false, true) => x0,
+        _ => ax + (w - w2) / 2.0,
+    };
+    let y = match (top, bottom) {
+        (true, false) => y1 - h2,
+        (false, true) => y0,
+        _ => ay + (h - h2) / 2.0,
+    };
+    Crop {
+        x: x.clamp(0.0, 1.0 - w2),
+        y: y.clamp(0.0, 1.0 - h2),
+        width: w2,
+        height: h2,
+    }
+}
+
 /// Clips' places and starts again after a local move or remove.
 fn renumber(clips: &mut [ClipInfo]) {
     let mut start = 0.0;
@@ -301,6 +433,7 @@ impl Create {
         }
         *self.timeline.borrow_mut() = info;
         self.loading.set(false);
+        self.bump_version(app);
         self.show(app);
         if self.again.replace(false) {
             self.load(app);
@@ -337,6 +470,7 @@ impl Create {
                     None => empty.clone(),
                 };
                 let (in_frac, out_frac) = fractions(clip, file_of(clip, PROGRAM));
+                let (waves, wave_frac) = self.wave_of(clip, file_of(clip, PROGRAM), &mut asked);
                 ClipRow {
                     id: clip.id.as_str().into(),
                     number: place(index).into(),
@@ -356,6 +490,9 @@ impl Create {
                         .map(|a| source_name(app, a))
                         .unwrap_or_default()
                         .into(),
+                    cropped: clip.crop.is_some(),
+                    waves,
+                    wave_frac,
                 }
             })
             .collect();
@@ -392,6 +529,7 @@ impl Create {
                             None => empty.clone(),
                         };
                         let (in_frac, out_frac) = fractions(clip, file);
+                        let (waves, wave_frac) = self.wave_of(clip, file, &mut asked);
                         SegmentRow {
                             clip: clip.id.as_str().into(),
                             start: clip.start_seconds as f32,
@@ -401,6 +539,8 @@ impl Create {
                             out_frac,
                             active: clip.angle.as_deref() == Some(source.as_str()),
                             missing: file.is_none(),
+                            waves,
+                            wave_frac,
                         }
                     })
                     .collect();
@@ -425,8 +565,38 @@ impl Create {
         }
     }
 
-    /// Take in thumbnails as they are made, every 50 ms until none are
-    /// left (no timer runs otherwise).
+    /// `file`'s waveform pictures and the share of the file each covers,
+    /// asked for if not made yet (only while the editor is open: the
+    /// studio's clip bar shows none).
+    fn wave_of(
+        &self,
+        clip: &ClipInfo,
+        file: Option<&ClipFile>,
+        asked: &mut bool,
+    ) -> (ModelRc<slint::Image>, f32) {
+        let Some(file) = file else {
+            return (ModelRc::default(), 1.0);
+        };
+        if self.editor.borrow().is_none() {
+            return (ModelRc::default(), 1.0);
+        }
+        match self.waves.get(&file.path) {
+            Some(wave) => {
+                let length = file
+                    .duration_seconds
+                    .unwrap_or_else(|| take_length(clip))
+                    .max(1e-3);
+                (wave.images, (wave.chunk_seconds / length) as f32)
+            }
+            None => {
+                *asked |= self.waves.request(&file.path);
+                (ModelRc::default(), 1.0)
+            }
+        }
+    }
+
+    /// Take in thumbnails (and waveforms) as they are made, every 50 ms
+    /// until none are left (no timer runs otherwise).
     fn collect_thumbs(&self, app: &Rc<App>) {
         if self.thumbs_timer.running() {
             return;
@@ -437,10 +607,11 @@ impl Create {
             Duration::from_millis(50),
             move || {
                 let Some(app) = weak.upgrade() else { return };
-                if app.create.thumbs.collect() {
+                let thumbs = app.create.thumbs.collect();
+                if app.create.waves.collect() | thumbs {
                     app.create.show_rows(&app);
                 }
-                if app.create.thumbs.idle() {
+                if app.create.thumbs.idle() && app.create.waves.idle() {
                     app.create.thumbs_timer.stop();
                 }
             },
@@ -535,6 +706,14 @@ impl Create {
         );
         area.set_can_remove(self.selected.borrow().is_some());
         area.set_can_export(n > 0);
+        let markers: Vec<f32> = timeline
+            .as_ref()
+            .map(|t| marker_times(&t.clips))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t as f32)
+            .collect();
+        area.set_markers(ModelRc::new(VecModel::from(markers)));
         area.set_can_undo(timeline.as_ref().is_some_and(|t| t.undo > 0));
         area.set_can_redo(timeline.as_ref().is_some_and(|t| t.redo > 0));
         area.set_shuttle(self.shuttle.get() as f32);
@@ -955,6 +1134,50 @@ impl Create {
             }
         });
         let weak = Rc::downgrade(app);
+        area.on_snap(move |seconds, pps, to_playhead| {
+            weak.upgrade().map_or(seconds, |app| {
+                app.create
+                    .snap(&app, f64::from(seconds), f64::from(pps), to_playhead)
+                    as f32
+            })
+        });
+        let weak = Rc::downgrade(app);
+        area.on_roll(move |id, seconds| {
+            if let Some(app) = weak.upgrade() {
+                app.create.roll(&app, &id, f64::from(seconds));
+            }
+        });
+        let weak = Rc::downgrade(app);
+        area.on_crop_press(move |handle| {
+            if let Some(app) = weak.upgrade() {
+                app.create.crop_press(&app, &handle);
+            }
+        });
+        let weak = Rc::downgrade(app);
+        area.on_crop_drag(move |dx, dy| {
+            if let Some(app) = weak.upgrade() {
+                app.create.crop_move(&app, f64::from(dx), f64::from(dy));
+            }
+        });
+        let weak = Rc::downgrade(app);
+        area.on_crop_release(move || {
+            if let Some(app) = weak.upgrade() {
+                app.create.crop_release(&app);
+            }
+        });
+        let weak = Rc::downgrade(app);
+        area.on_crop_preset_chosen(move |preset| {
+            if let Some(app) = weak.upgrade() {
+                app.create.crop_preset(&app, &preset);
+            }
+        });
+        let weak = Rc::downgrade(app);
+        area.on_crop_clear(move || {
+            if let Some(app) = weak.upgrade() {
+                app.create.crop_with(&app, None, None, true);
+            }
+        });
+        let weak = Rc::downgrade(app);
         area.on_open_editor(move || {
             if let Some(app) = weak.upgrade()
                 && let Err(error) = app.create.open_editor(&app)
@@ -1012,6 +1235,7 @@ impl Create {
             return;
         };
         let source = clip.angle.clone().unwrap_or_else(|| PROGRAM.to_string());
+        self.show_crop(&area, &clip, &source);
         let into = (at - clip.start_seconds).clamp(0.0, clip.duration_seconds);
         // The frame on screen then: just inside the clip at its end.
         let take = clip.in_seconds + into.min(clip.duration_seconds - 1e-3).max(0.0);
@@ -1019,7 +1243,11 @@ impl Create {
             PROGRAM => "Program".to_string(),
             other => source_name(app, other),
         };
-        area.set_preview_label(format!("{name} · {}", mm_ss_cc(at)).into());
+        let cropped = match clip.crop {
+            Some(_) => " · cropped",
+            None => "",
+        };
+        area.set_preview_label(format!("{name} · {}{cropped}", mm_ss_cc(at)).into());
         let Some(file) = file_of(&clip, &source) else {
             area.set_has_preview(false);
             return;
@@ -1101,8 +1329,25 @@ impl Create {
                 }
                 app.create.loaded(app, Some(info));
             }
-            Err(error) => app.failed(failed, &error),
+            Err(error) => {
+                // A dropped trim springs back.
+                app.create.bump_version(app);
+                app.failed(failed, &error)
+            }
         });
+    }
+
+    /// The timeline was read again (or an edit failed): see
+    /// CreateArea.timeline-version.
+    fn bump_version(&self, app: &Rc<App>) {
+        if let Some(window) = app.window() {
+            let area = window.global::<CreateArea>();
+            area.set_timeline_version(area.get_timeline_version().wrapping_add(1));
+        }
+        if let Some(editor) = self.editor.borrow().as_ref() {
+            let area = editor.global::<CreateArea>();
+            area.set_timeline_version(area.get_timeline_version().wrapping_add(1));
+        }
     }
 
     fn split(&self, app: &Rc<App>) {
@@ -1248,6 +1493,21 @@ impl Create {
         Ok(())
     }
 
+    /// The editor window, if it was opened (the motion harness drives it).
+    pub fn editor_window(&self) -> Option<EditorWindow> {
+        self.editor.borrow().as_ref().map(|e| e.clone_strong())
+    }
+
+    /// The current timeline's name.
+    pub fn timeline_name(&self) -> Option<String> {
+        self.timeline.borrow().as_ref().map(|t| t.name.clone())
+    }
+
+    /// Clips on the current timeline.
+    pub fn clip_count(&self) -> usize {
+        self.timeline.borrow().as_ref().map_or(0, |t| t.clips.len())
+    }
+
     /// Whether the editor window is open (offscreen snapshots draw it).
     pub fn editor_open(&self) -> bool {
         self.editor
@@ -1348,7 +1608,56 @@ impl Create {
             "i" => self.mark(app, false),
             "o" => self.mark(app, true),
             "j" | "k" | "l" => self.shuttle(app, key),
-            "clear" => self.clear_marks(app),
+            "space" => {
+                let key = if self.shuttle.get() != 0.0 { "k" } else { "l" };
+                self.shuttle(app, key);
+            }
+            "up" | "down" => self.go_to(app, key == "down", false),
+            "marker:1" | "marker:-1" => self.go_to(app, key == "marker:1", true),
+            "home" => self.set_playhead(app, 0.0),
+            "end" => {
+                let total = self
+                    .timeline
+                    .borrow()
+                    .as_ref()
+                    .map_or(0.0, |t| t.duration_seconds);
+                self.set_playhead(app, total);
+            }
+            "go-in" | "go-out" => {
+                if let Some(surface) = self.surface(app) {
+                    let area = surface.area();
+                    let mark = match key {
+                        "go-in" => area.get_mark_in(),
+                        _ => area.get_mark_out(),
+                    };
+                    if mark >= 0.0 {
+                        self.set_playhead(app, f64::from(mark));
+                    }
+                }
+            }
+            "snap" => {
+                if let Some(surface) = self.surface(app) {
+                    let area = surface.area();
+                    area.set_snapping(!area.get_snapping());
+                }
+            }
+            "crop" => {
+                if let Some(surface) = self.surface(app) {
+                    let area = surface.area();
+                    area.set_crop_mode(!area.get_crop_mode());
+                }
+            }
+            "clear" => {
+                let crop_mode = self.surface(app).is_some_and(|s| s.area().get_crop_mode());
+                match crop_mode {
+                    true => {
+                        if let Some(surface) = self.surface(app) {
+                            surface.area().set_crop_mode(false);
+                        }
+                    }
+                    false => self.clear_marks(app),
+                }
+            }
             "delete" => {
                 if self.marks(app).is_some() {
                     self.delete_range(app);
@@ -1367,6 +1676,259 @@ impl Create {
             }
         }
         true
+    }
+
+    // ---- Round 2 (#87)
+
+    /// The crop of `clip` (showing `source`) on the viewer, unless a
+    /// handle is being dragged.
+    fn show_crop(&self, area: &CreateArea, clip: &ClipInfo, source: &str) {
+        if self.crop_drag.borrow().is_some() {
+            return;
+        }
+        let crop = clip.crop.unwrap_or(Crop::FULL);
+        let same = (
+            area.get_crop_x(),
+            area.get_crop_y(),
+            area.get_crop_w(),
+            area.get_crop_h(),
+        ) == (
+            crop.x as f32,
+            crop.y as f32,
+            crop.width as f32,
+            crop.height as f32,
+        );
+        area.set_has_crop(clip.crop.is_some());
+        area.set_crop_x(crop.x as f32);
+        area.set_crop_y(crop.y as f32);
+        area.set_crop_w(crop.width as f32);
+        area.set_crop_h(crop.height as f32);
+        if let Some(file) = file_of(clip, source).filter(|f| f.width > 0 && f.height > 0) {
+            let picture = f64::from(file.width) / f64::from(file.height);
+            area.set_crop_aspect(picture as f32);
+            // The shape it has, if it is a preset's (a crop made by the
+            // CLI or MCP too), so drags keep it; else free.
+            let shape = crop.width * picture / crop.height.max(1e-6);
+            let preset = clip.crop.and_then(|_| {
+                CropPreset::ALL
+                    .into_iter()
+                    .find(|p| (p.aspect() / shape - 1.0).abs() < 0.01)
+            });
+            // (A shape chosen for the crop shown stays chosen.)
+            if !same {
+                area.set_crop_preset(preset.map_or("free", CropPreset::name).into());
+            }
+        }
+    }
+
+    /// `seconds` snapped to the nearest clip edge, marker, mark (or the
+    /// playhead, if `to_playhead`) within 8 points at `pps` points a
+    /// second, when snapping is on.
+    fn snap(&self, app: &Rc<App>, seconds: f64, pps: f64, to_playhead: bool) -> f64 {
+        let Some(surface) = self.surface(app) else {
+            return seconds;
+        };
+        let area = surface.area();
+        if !area.get_snapping() || pps <= 0.0 {
+            return seconds;
+        }
+        let mut points = self.edit_points();
+        if let Some(t) = self.timeline.borrow().as_ref() {
+            points.extend(marker_times(&t.clips));
+        }
+        for mark in [area.get_mark_in(), area.get_mark_out()] {
+            if mark >= 0.0 {
+                points.push(f64::from(mark));
+            }
+        }
+        if to_playhead {
+            points.push(self.playhead(app));
+        }
+        let reach = 8.0 / pps;
+        points
+            .into_iter()
+            .map(|p| (p, (p - seconds).abs()))
+            .filter(|(_, d)| *d <= reach)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map_or(seconds, |(p, _)| p)
+    }
+
+    /// Where clips meet, the timeline's start and its end.
+    fn edit_points(&self) -> Vec<f64> {
+        let timeline = self.timeline.borrow();
+        let Some(t) = timeline.as_ref() else {
+            return Vec::new();
+        };
+        let mut points: Vec<f64> = t.clips.iter().map(|c| c.start_seconds).collect();
+        points.push(t.duration_seconds);
+        points
+    }
+
+    /// Move the playhead to the next (`forward`) or previous edit point,
+    /// or (`markers`) marker.
+    fn go_to(&self, app: &Rc<App>, forward: bool, markers: bool) {
+        let at = self.playhead(app);
+        let points = match markers {
+            true => self
+                .timeline
+                .borrow()
+                .as_ref()
+                .map(|t| marker_times(&t.clips))
+                .unwrap_or_default(),
+            false => self.edit_points(),
+        };
+        // Half a frame either way is "here".
+        let near = 0.5 / f64::from(self.clip_at(at).map_or(30, |c| c.fps.max(1)));
+        let next = match forward {
+            true => points
+                .into_iter()
+                .filter(|p| *p > at + near)
+                .reduce(f64::min),
+            false => points
+                .into_iter()
+                .filter(|p| *p < at - near)
+                .reduce(f64::max),
+        };
+        if let Some(next) = next {
+            self.set_playhead(app, next);
+        }
+    }
+
+    /// Roll the cut after clip `id` by `seconds` (an ⌥-drag of an edge).
+    fn roll(&self, app: &Rc<App>, id: &str, seconds: f64) {
+        self.edit(
+            app,
+            Method::TimelineRoll(TimelineRollParams {
+                clip: id.to_string(),
+                by_seconds: seconds,
+                timeline: None,
+            }),
+            "Couldn’t move the cut",
+        );
+    }
+
+    /// The clip a crop applies to: the one at the playhead.
+    fn crop_target(&self, app: &Rc<App>) -> Option<ClipInfo> {
+        self.clip_at(self.playhead(app))
+    }
+
+    /// Crop the clip at the playhead: to `crop`, shaped by `preset`, or
+    /// (`clear`) not at all.
+    fn crop_with(
+        &self,
+        app: &Rc<App>,
+        crop: Option<Crop>,
+        preset: Option<CropPreset>,
+        clear: bool,
+    ) {
+        let Some(clip) = self.crop_target(app) else {
+            return;
+        };
+        self.edit(
+            app,
+            Method::TimelineCrop(TimelineCropParams {
+                start_seconds: clip.start_seconds,
+                end_seconds: clip.start_seconds + clip.duration_seconds,
+                crop,
+                preset,
+                clear,
+                timeline: None,
+            }),
+            "Couldn’t crop the clip",
+        );
+    }
+
+    fn crop_press(&self, app: &Rc<App>, handle: &str) {
+        let Some(surface) = self.surface(app) else {
+            return;
+        };
+        let Some(clip) = self.crop_target(app) else {
+            return;
+        };
+        let area = surface.area();
+        let start = Crop {
+            x: f64::from(area.get_crop_x()),
+            y: f64::from(area.get_crop_y()),
+            width: f64::from(area.get_crop_w()),
+            height: f64::from(area.get_crop_h()),
+        };
+        *self.crop_drag.borrow_mut() = Some((handle.to_string(), start, clip.id));
+    }
+
+    fn crop_move(&self, app: &Rc<App>, dx: f64, dy: f64) {
+        let Some(surface) = self.surface(app) else {
+            return;
+        };
+        let Some((handle, start, _)) = self.crop_drag.borrow().clone() else {
+            return;
+        };
+        let area = surface.area();
+        let aspect = CropPreset::parse(&area.get_crop_preset()).map(CropPreset::aspect);
+        let crop = dragged_crop(
+            &handle,
+            start,
+            dx,
+            dy,
+            aspect,
+            f64::from(area.get_crop_aspect()),
+        );
+        area.set_crop_x(crop.x as f32);
+        area.set_crop_y(crop.y as f32);
+        area.set_crop_w(crop.width as f32);
+        area.set_crop_h(crop.height as f32);
+    }
+
+    /// A handle let go: crop the clip it was pressed on to where it is.
+    fn crop_release(&self, app: &Rc<App>) {
+        let Some((_, start, id)) = self.crop_drag.borrow_mut().take() else {
+            return;
+        };
+        let Some(surface) = self.surface(app) else {
+            return;
+        };
+        let area = surface.area();
+        let crop = Crop {
+            x: f64::from(area.get_crop_x()),
+            y: f64::from(area.get_crop_y()),
+            width: f64::from(area.get_crop_w()),
+            height: f64::from(area.get_crop_h()),
+        };
+        if crop == start {
+            return;
+        }
+        let span = {
+            let timeline = self.timeline.borrow();
+            timeline
+                .as_ref()
+                .and_then(|t| t.clips.iter().find(|c| c.id == id))
+                .map(|c| (c.start_seconds, c.start_seconds + c.duration_seconds))
+        };
+        let Some((start_seconds, end_seconds)) = span else {
+            return;
+        };
+        self.edit(
+            app,
+            Method::TimelineCrop(TimelineCropParams {
+                start_seconds,
+                end_seconds,
+                crop: (!crop.is_full()).then_some(crop),
+                preset: None,
+                clear: crop.is_full(),
+                timeline: None,
+            }),
+            "Couldn’t crop the clip",
+        );
+    }
+
+    /// A shape chosen: crop the clip at the playhead to the largest of it
+    /// inside the picture, centred ("free" only lets drags change shape).
+    fn crop_preset(&self, app: &Rc<App>, name: &str) {
+        if let Some(surface) = self.surface(app) {
+            surface.area().set_crop_preset(name.into());
+        }
+        if let Some(preset) = CropPreset::parse(name) {
+            self.crop_with(app, None, Some(preset), false);
+        }
     }
 
     fn exported(&self, app: &Rc<App>, event: &Event) {
@@ -1705,6 +2267,67 @@ impl Area for Create {
                     self.preview_timer.stop();
                     self.shown(app, frame);
                 }
+                Ok(())
+            }
+            "create-crop" => {
+                match arg {
+                    "clear" => self.crop_with(app, None, None, true),
+                    preset if CropPreset::parse(preset).is_some() => self.crop_preset(app, preset),
+                    rect => {
+                        let v: Vec<f64> = rect.split(',').filter_map(|v| v.parse().ok()).collect();
+                        let [x, y, width, height] = v[..] else {
+                            return Some(Err(anyhow::anyhow!(
+                                "create-crop:X,Y,W,H, a preset (16:9, 9:16, 1:1, 4:5) or clear"
+                            )));
+                        };
+                        self.crop_with(
+                            app,
+                            Some(Crop {
+                                x,
+                                y,
+                                width,
+                                height,
+                            }),
+                            None,
+                            false,
+                        );
+                    }
+                }
+                Ok(())
+            }
+            "create-crop-mode" => {
+                if let Some(surface) = self.surface(app) {
+                    surface.area().set_crop_mode(arg != "off");
+                }
+                Ok(())
+            }
+            "create-roll" => {
+                let Some((i, by)) = arg.split_once(',') else {
+                    return Some(Err(anyhow::anyhow!("create-roll:INDEX,SECONDS")));
+                };
+                index(i).and_then(|id| {
+                    let by: f64 = by
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("SECONDS is a number"))?;
+                    self.roll(app, &id, by);
+                    Ok(())
+                })
+            }
+            "create-key" => {
+                self.edit_key(app, arg);
+                Ok(())
+            }
+            "create-waves" => {
+                self.show_rows(app);
+                let until = Instant::now() + Duration::from_secs(20);
+                loop {
+                    self.waves.collect();
+                    if self.waves.idle() || Instant::now() > until {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                self.show_rows(app);
                 Ok(())
             }
             "create-thumbs" => {

@@ -1,11 +1,13 @@
 //! `timeline_export`: join a timeline's clips into one program file and
 //! one file per ISO source every clip has, each cut to the clips' in and
-//! out points, plus (when clips show other angles, C.3) an edited file with
-//! each clip's angle as its picture and the program's sound, in the
+//! out points, plus (when clips show other angles, C.3, or are cropped,
+//! #87) an edited file with each clip's angle as its picture (cropped and
+//! scaled to the program's size where the clip has a crop) and the
+//! program's sound, in the
 //! background, reporting `export_progress` and `export_finished` events.
 //! The video is copied as recorded, except the frames from a cut that
-//! isn't on a keyframe to the next keyframe, and angles in another format
-//! than the program, which are encoded again; the audio is decoded and
+//! isn't on a keyframe to the next keyframe, angles in another format
+//! than the program, and cropped clips, which are encoded again; the audio is decoded and
 //! encoded once more as one continuous track per file, cross-faded at
 //! each join (see `isocast-platform-macos`'s `join`), so it lines up with
 //! the video at every join in any player or editor.
@@ -31,7 +33,7 @@ use isocast_engine::{JoinPart, JoinSpec, Joined, OnJoinProgress};
 use isocast_protocol::api::{Event, RpcError};
 use isocast_protocol::manifest::{ManifestFile, SessionManifest};
 use isocast_protocol::timeline::{
-    EDITED, ExportClip, ExportFile, ExportManifest, ExportPart, ExportRunning, ExportSkipped,
+    Crop, EDITED, ExportClip, ExportFile, ExportManifest, ExportPart, ExportRunning, ExportSkipped,
     ExportStarted, ExportStatus, TimelineExportParams, take_length,
 };
 use isocast_protocol::{Container, PROGRAM};
@@ -102,6 +104,8 @@ struct TakeFiles {
     fps: u32,
     /// The source the edited file shows for it.
     angle: String,
+    /// The part of the angle's picture the edited file shows.
+    crop: Option<Crop>,
 }
 
 impl TakeFiles {
@@ -130,6 +134,7 @@ impl TakeFiles {
             in_seconds: self.in_seconds(),
             audio: None,
             fps: file.fps,
+            crop: None,
         }
     }
 
@@ -137,6 +142,7 @@ impl TakeFiles {
     /// program's sound.
     fn edited_part(&self) -> JoinPart {
         let mut part = self.part(&self.angle);
+        part.crop = self.crop;
         if self.angle != PROGRAM {
             let program = self.file(PROGRAM).expect("planned");
             part.audio = Some((
@@ -584,6 +590,7 @@ impl Daemon {
                 frames: out_frame - in_frame,
                 fps,
                 angle: clip.angle.clone().unwrap_or_else(|| PROGRAM.to_string()),
+                crop: clip.crop.filter(|crop| !crop.is_full()),
             });
         }
         let (sources, skipped) = plan(&takes);
@@ -604,15 +611,18 @@ impl Daemon {
                  (`isocast timeline remove CLIP`, MCP remove_clip), then export again"
             )));
         }
-        // The edited file, when a clip shows another angle than the program.
+        // The edited file, when a clip shows another angle than the program
+        // or is cropped.
         let mut skipped = skipped;
-        let angled = takes.iter().any(|take| take.angle != PROGRAM);
+        let angled = takes
+            .iter()
+            .any(|take| take.angle != PROGRAM || take.crop.is_some());
         let edited = angled && sources.iter().any(|source| source == PROGRAM);
         if angled && !edited {
             skipped.push(ExportSkipped {
                 source: EDITED.into(),
-                reason: "clips show other angles, but the program can't be joined, and the \
-                         edited file has the program's sound and format"
+                reason: "clips show other angles or crops, but the program can't be joined, \
+                         and the edited file has the program's sound and format"
                     .into(),
             });
         }
@@ -665,7 +675,7 @@ impl Daemon {
             // out up to 4.2 times the program's stretch: allow 5.
             needed += takes
                 .iter()
-                .map(|take| match take.angle == PROGRAM {
+                .map(|take| match take.angle == PROGRAM && take.crop.is_none() {
                     true => share(take, PROGRAM),
                     false => share(take, &take.angle).max(share(take, PROGRAM)) * 5,
                 })
@@ -773,6 +783,7 @@ impl Daemon {
                     in_seconds: clip.in_seconds,
                     out_seconds: clip.out_seconds,
                     angle: clip.angle.clone(),
+                    crop: clip.crop,
                 })
                 .collect(),
             files: files.clone(),
@@ -1044,6 +1055,7 @@ mod tests {
             frames: 30,
             fps: 30,
             angle: PROGRAM.into(),
+            crop: None,
         }
     }
 
@@ -1110,6 +1122,7 @@ mod tests {
                 frames: self.frames,
                 fps: self.fps,
                 angle: self.angle.clone(),
+                crop: self.crop,
             }
         }
     }

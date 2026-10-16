@@ -31,6 +31,13 @@ export struct ClipRow {
     // The ISO source the edited video shows for it ("" for the program),
     // as its track's name ("Camera").
     angle: string,
+    // It has a crop (#87): the edited video shows part of its picture.
+    cropped: bool,
+    // Its program file's sound as waveform pictures (#87), each covering
+    // `wave-frac` of the file (empty until made), white on transparent
+    // for `colorize`.
+    waves: [image],
+    wave-frac: float,
 }
 
 // One clip's stretch of an ISO track.
@@ -45,6 +52,9 @@ export struct SegmentRow {
     active: bool,
     // The clip's take didn't record this source.
     missing: bool,
+    // The file's sound (see ClipRow).
+    waves: [image],
+    wave-frac: float,
 }
 
 // One ISO source's track.
@@ -132,6 +142,39 @@ export global CreateArea {
     callback key(string);
     // Open the editor window (C.3) on the current timeline.
     callback open-editor();
+
+    // ---- Editor round 2 (#87)
+    // Counts the timeline's reads and failed edits, so a dropped trim is
+    // shown until the timeline after it is.
+    in property <int> timeline-version;
+    // Snap the playhead and dragged edges to clip edges, markers, the
+    // marks and the playhead (N).
+    in-out property <bool> snapping: true;
+    // `seconds` snapped to the nearest of those within 8 points at
+    // `pps` points a second (the playhead too if `to-playhead`).
+    pure callback snap(float, float, bool) -> float;
+    // The takes' markers inside the clips, in seconds on the timeline.
+    in property <[float]> markers;
+    // Roll the cut after clip `id` by `seconds` (⌥-drag of an edge).
+    callback roll(string, float);
+    // Cropping (C): the crop of the clip at the playhead (fractions of its
+    // picture; the whole picture when it has none), its picture's shape
+    // (width over height), the shape a drag keeps ("free", "16:9", …).
+    in-out property <bool> crop-mode;
+    in property <bool> has-crop;
+    in property <float> crop-x: 0;
+    in property <float> crop-y: 0;
+    in property <float> crop-w: 1;
+    in property <float> crop-h: 1;
+    in property <float> crop-aspect: 16 / 9;
+    in-out property <string> crop-preset: "free";
+    // A crop handle pressed, moved (by fractions of the picture) and let
+    // go: "move", or the edges it holds ("l", "tr", …).
+    callback crop-press(string);
+    callback crop-drag(float, float);
+    callback crop-release();
+    callback crop-preset-chosen(string);
+    callback crop-clear();
 
     callback toggle-view();
     callback select(string);

@@ -11,7 +11,8 @@
 //! cut is frame-accurate and every other frame is the recorded one; and a
 //! part whose file has another codec, size or frame rate than the joined
 //! file (an ISO angle in the edited file) is decoded, scaled and encoded
-//! again whole, on the joined file's frame grid. A part ends with its last
+//! again whole, on the joined file's frame grid; so is a cropped part
+//! (#87), its crop scaled to fit the joined file's size. A part ends with its last
 //! frame that starts before its end (recordings have no reordered frames,
 //! so cutting there needs nothing encoded again).
 //!
@@ -39,6 +40,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use block2::RcBlock;
 use isocast_engine::{JoinPart, JoinSpec, Joined, JoinedPart, OnJoinProgress, SAMPLE_RATE};
 use isocast_protocol::Container;
+use isocast_protocol::timeline::Crop;
 use objc2::AllocAnyThread;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_av_foundation::{
@@ -110,8 +112,11 @@ struct Part {
     offset: CMTime,
     in_point: CMTime,
     audio: AudioSource,
-    /// Its video is in the joined file's format, so it can be copied.
+    /// Its video is in the joined file's format and shown whole, so it can
+    /// be copied.
     copy: bool,
+    /// The part of its picture shown (#87); encoded again whole if set.
+    crop: Option<Crop>,
 }
 
 pub fn join(spec: &JoinSpec, progress: OnJoinProgress) -> Result<Joined> {
@@ -241,10 +246,11 @@ fn open_part(spec: &JoinPart, format: Option<&Format>) -> Result<Part> {
             }
         }
     };
-    let copy = match format {
-        Some(format) => matches(&video, spec.fps, format),
-        None => true,
-    };
+    let copy = spec.crop.is_none()
+        && match format {
+            Some(format) => matches(&video, spec.fps, format),
+            None => true,
+        };
     Ok(Part {
         path: path.to_path_buf(),
         asset,
@@ -255,6 +261,7 @@ fn open_part(spec: &JoinPart, format: Option<&Format>) -> Result<Part> {
         in_point: at(spec.in_seconds.max(0.0)),
         audio,
         copy,
+        crop: spec.crop,
         video,
     })
 }
@@ -712,6 +719,7 @@ impl VideoStream<'_> {
         duration: CMTime,
         keyframe: bool,
     ) -> Result<()> {
+        let crop = self.parts[self.index.expect("open")].crop;
         let ten = ten_bit(picture);
         if self
             .encoder
@@ -732,7 +740,7 @@ impl VideoStream<'_> {
             )?);
         }
         let encoder = self.encoder.as_mut().expect("made");
-        encoder.encode(picture, pts, duration, keyframe)?;
+        encoder.encode(picture, pts, duration, keyframe, crop)?;
         self.queue.extend(encoder.take());
         Ok(())
     }
@@ -1098,8 +1106,15 @@ fn write(spec: &JoinSpec, path: &Path, progress: OnJoinProgress) -> Result<Joine
     }
     for part in parts.iter().filter(|part| !part.copy) {
         isocast_diagnostics::debug!(
-            "join: {} is encoded again ({} at {}x{}, {} fps, like the joined file)",
+            "join: {} is encoded again{} ({} at {}x{}, {} fps, like the joined file)",
             part.path.display(),
+            match part.crop {
+                Some(crop) => format!(
+                    ", cropped to {:.4},{:.4} {:.4}x{:.4}",
+                    crop.x, crop.y, crop.width, crop.height
+                ),
+                None => String::new(),
+            },
             fourcc(format.codec),
             format.size.0,
             format.size.1,

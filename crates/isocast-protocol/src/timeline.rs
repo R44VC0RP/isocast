@@ -18,7 +18,10 @@
 //! of the timeline out (ripple), and `timeline_angle` sets which source the
 //! edited video shows over a span (a clip's `angle`). Each edit is one
 //! revision, which `timeline_undo` and `timeline_redo` step through. They
-//! never touch a take's files.
+//! never touch a take's files. `timeline_crop` (#87) sets the part of the
+//! picture the edited video shows over a span (a clip's `crop`, a
+//! rectangle in fractions of its angle's picture), and `timeline_roll`
+//! moves the cut between two clips without changing the timeline's length.
 
 use std::path::PathBuf;
 
@@ -104,6 +107,100 @@ pub struct Clip {
     /// id); the program if absent. Set with `timeline_angle`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub angle: Option<String>,
+    /// The part of its angle's picture the edited video shows, scaled to
+    /// fit the program's size; the whole picture if absent. Set with
+    /// `timeline_crop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<Crop>,
+}
+
+/// A crop: the part of a picture shown, as fractions of the picture's
+/// width and height from its top-left corner (0 to 1). Kept on the
+/// picture's 2-pixel grid, at least 32 pixels each way.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Crop {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Crop {
+    /// The whole picture.
+    pub const FULL: Crop = Crop {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+    };
+
+    /// It covers the whole picture (no crop).
+    pub fn is_full(&self) -> bool {
+        self.x <= 1e-6 && self.y <= 1e-6 && self.width >= 1.0 - 1e-6 && self.height >= 1.0 - 1e-6
+    }
+}
+
+/// A crop's shape: the largest rectangle of that shape (in pixels) that
+/// fits, centred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum CropPreset {
+    /// Landscape, as most programs are.
+    #[serde(rename = "16:9")]
+    Wide,
+    /// Vertical video (Shorts, Reels, TikTok).
+    #[serde(rename = "9:16")]
+    Vertical,
+    /// Square.
+    #[serde(rename = "1:1")]
+    Square,
+    /// Portrait feed posts.
+    #[serde(rename = "4:5")]
+    Portrait,
+}
+
+impl CropPreset {
+    pub const ALL: [CropPreset; 4] = [Self::Wide, Self::Vertical, Self::Square, Self::Portrait];
+
+    /// Width over height.
+    pub fn aspect(self) -> f64 {
+        match self {
+            Self::Wide => 16.0 / 9.0,
+            Self::Vertical => 9.0 / 16.0,
+            Self::Square => 1.0,
+            Self::Portrait => 4.0 / 5.0,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Wide => "16:9",
+            Self::Vertical => "9:16",
+            Self::Square => "1:1",
+            Self::Portrait => "4:5",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == text.trim())
+    }
+}
+
+/// The largest rectangle of `aspect` (width over height, in pixels) that
+/// fits inside `within` on a `width`×`height` picture, centred in it.
+pub fn fit_aspect(within: Crop, aspect: f64, (width, height): (u32, u32)) -> Crop {
+    let (w, h) = (f64::from(width.max(1)), f64::from(height.max(1)));
+    let (room_w, room_h) = (within.width * w, within.height * h);
+    let (out_w, out_h) = match room_w / room_h > aspect {
+        true => (room_h * aspect, room_h),
+        false => (room_w, room_w / aspect),
+    };
+    Crop {
+        x: within.x + (within.width - out_w / w) / 2.0,
+        y: within.y + (within.height - out_h / h) / 2.0,
+        width: out_w / w,
+        height: out_h / h,
+    }
 }
 
 /// A take that was on a timeline (or recorded for it) and was taken off.
@@ -246,6 +343,49 @@ pub struct TimelineAngleParams {
     pub timeline: Option<String>,
 }
 
+/// Parameters of `timeline_crop`: what part of the picture the edited
+/// video shows over a span.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineCropParams {
+    /// Where the span starts and ends, in seconds on the timeline, each
+    /// rounded to the frame grid of the clip there.
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    /// The part of each clip's picture to show (fractions of its width and
+    /// height, from the top-left); the whole picture if absent and a
+    /// `preset` is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<Crop>,
+    /// Make it this shape: the largest rectangle of it inside `crop` (or
+    /// the picture), centred: `16:9`, `9:16`, `1:1` or `4:5`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<CropPreset>,
+    /// Show the whole picture again over the span (no `crop` or `preset`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear: bool,
+    /// The timeline's id; the current one if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<String>,
+}
+
+/// Parameters of `timeline_roll`: move the cut between a clip and the next
+/// (the clip's out point and the next one's in point together), so the
+/// timeline keeps its length.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineRollParams {
+    /// The clip before the cut, like `c2`.
+    pub clip: String,
+    /// How far to move the cut, in seconds (negative: earlier), rounded to
+    /// the clips' frame grid. Both clips must keep a frame and stay within
+    /// their takes.
+    pub by_seconds: f64,
+    /// The timeline's id; the current one if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<String>,
+}
+
 /// Parameters of `retake`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -338,6 +478,13 @@ pub struct ClipInfo {
     /// The take's frame rate, whose grid the clip's points sit on.
     #[serde(default)]
     pub fps: u32,
+    /// See [`Clip::crop`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<Crop>,
+    /// Markers added while the take was recorded, on its own clock (those
+    /// inside the clip show at `start_seconds + time - in_seconds`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<crate::manifest::Marker>,
 }
 
 /// One of a take's files.
@@ -538,6 +685,9 @@ pub struct ExportClip {
     /// The source the edited file shows for it, if not the program.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub angle: Option<String>,
+    /// The part of its picture the edited file shows, if not the whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<Crop>,
 }
 
 /// The source label of an export's edited file: the program's sound with
@@ -581,6 +731,10 @@ pub enum TimelineAction {
     /// An edit was taken back (`timeline_undo`) or put back (`timeline_redo`).
     Undone,
     Redone,
+    /// The edited video's crop changed over a span (`timeline_crop`).
+    Cropped,
+    /// The cut between two clips moved (`timeline_roll`).
+    Rolled,
 }
 
 /// A take's length on the timeline, as whole frames at a frame rate: its

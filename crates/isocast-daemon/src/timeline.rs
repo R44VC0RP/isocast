@@ -512,6 +512,7 @@ pub fn append(timeline: &mut Timeline, take: &Path, manifest: &SessionManifest) 
             .and_then(isocast_protocol::project::read)
             .map(|file| file.id),
         angle: None,
+        crop: None,
     });
     crate::edit::recorded(timeline);
     id
@@ -599,6 +600,8 @@ fn clip_info(clip: &Clip, index: usize, start: f64) -> ClipInfo {
         problem: None,
         angle: clip.angle.clone(),
         fps: 0,
+        crop: clip.crop,
+        markers: Vec::new(),
     };
     match read_manifest(&clip.take) {
         Ok(manifest) => {
@@ -607,6 +610,7 @@ fn clip_info(clip: &Clip, index: usize, start: f64) -> ClipInfo {
             info.status = Some(manifest.status);
             info.problem = unfinished(&clip.id, &clip.take, &manifest);
             info.fps = timeline::take_length(&manifest).map_or(0, |(_, fps)| fps);
+            info.markers = manifest.markers.clone();
             info.files = manifest
                 .files
                 .iter()
