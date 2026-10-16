@@ -22,6 +22,11 @@ dispatch2 = "0.3.1"
 isocast-engine = { path = "../isocast-engine" }
 isocast-protocol = { path = "../isocast-protocol" }
 isocast-surfaces = { path = "../isocast-surfaces", features = ["wgpu"] }
+# VP8 (and VP8 alpha) WebM video: libvpx's decoder, vendored (#64).
+isocast-vp8 = { path = "../isocast-vp8" }
+# Vorbis audio in WebM/MKV, which macOS can't decode (#64); without its Ogg
+# reader (Matroska is ours).
+lewton = { version = "0.10.2", default-features = false }
 base64 = "0.22.1"
 libc = "0.2"
 mach2 = "0.6.0"

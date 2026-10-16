@@ -1,0 +1,14 @@
+[package]
+name = "isocast-vp8"
+version.workspace = true
+edition.workspace = true
+# Our wrapper is MIT OR Apache-2.0; the vendored libvpx sources in libvpx/
+# are BSD-3-Clause (libvpx/LICENSE, with the patent grant in libvpx/PATENTS).
+license = "(MIT OR Apache-2.0) AND BSD-3-Clause"
+repository.workspace = true
+description = "VP8 video decoding for Isocast: libvpx's VP8 decoder, vendored and built statically."
+links = "isocast_vpx"
+
+[build-dependencies]
+# Already in the build (through other crates' build scripts).
+cc = "1.2"

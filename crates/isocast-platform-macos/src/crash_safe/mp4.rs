@@ -18,6 +18,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use isocast_protocol::Container;
@@ -81,10 +82,15 @@ pub struct Writer {
     len: u64,
     sequence: u32,
     moov_written: bool,
+    /// Creation and modification time of the movie and its tracks
+    /// ([`movie_time`]).
+    created: u64,
 }
 
 impl Writer {
-    pub fn create(path: &Path, container: Container) -> Result<Self> {
+    /// A new file at `path`, dated `created` (the take's start; it goes in
+    /// the movie's and tracks' creation time, and recovery keeps it).
+    pub fn create(path: &Path, container: Container, created: SystemTime) -> Result<Self> {
         let mut file = OpenOptions::new()
             .create_new(true)
             .custom_flags(libc::O_NOFOLLOW)
@@ -95,11 +101,22 @@ impl Writer {
         // Advisory lock for as long as this writer holds the file: repair
         // (`open_for_repair`) refuses a file whose recorder is still alive,
         // wherever the file was moved meanwhile. It dies with the process.
-        if let Err(err) = file.try_lock() {
-            bail!(
-                "{} is already being written by another recorder ({err})",
+        // Only a lock someone else holds stops the take: a file system that
+        // refuses locks altogether (some SMB and NFS shares) records without
+        // one: repair can't take the folder's lock there either, so it never
+        // touches these files while they're written.
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => bail!(
+                "{} is already being written by another recorder",
                 path.display()
-            );
+            ),
+            Err(std::fs::TryLockError::Error(err)) => {
+                isocast_diagnostics::diagnostic!("warn";
+                    "isocastd: {} can't be locked ({err}); recording it without the lock",
+                    path.display()
+                );
+            }
         }
         let mut head = ftyp(container, true);
         head.extend_from_slice(&placeholder());
@@ -112,6 +129,7 @@ impl Writer {
             len: head.len() as u64,
             sequence: 0,
             moov_written: false,
+            created: movie_time(created),
         })
     }
 
@@ -131,7 +149,7 @@ impl Writer {
     /// index only.
     pub fn write_fragment(&mut self, tracks: &[FragmentTrack<'_>], video_shift: u64) -> Result<()> {
         if !self.moov_written {
-            let moov = moov(self.container, &self.tracks, None, 0);
+            let moov = moov(self.container, &self.tracks, None, 0, self.created);
             self.file.write_all(&moov)?;
             self.len += moov.len() as u64;
             self.moov_written = true;
@@ -194,22 +212,21 @@ impl Writer {
     /// timescale) and make the file an ordinary movie.
     pub fn finish(mut self, duration: u64) -> Result<()> {
         if !self.moov_written {
-            let moov = moov(self.container, &self.tracks, None, 0);
+            let moov = moov(self.container, &self.tracks, None, 0, self.created);
             self.file.write_all(&moov)?;
             self.len += moov.len() as u64;
             self.moov_written = true;
         }
         fix_durations(&mut self.samples);
         let start = ftyp(self.container, true).len() as u64;
-        finalize(
-            &mut self.file,
-            self.len,
-            start,
+        let moov = moov(
             self.container,
             &self.tracks,
-            &self.samples,
+            Some(&self.samples),
             duration,
-        )?;
+            self.created,
+        );
+        finalize(&mut self.file, self.len, start, &moov)?;
         self.sync()
     }
 
@@ -241,18 +258,9 @@ fn fix_durations(samples: &mut [Vec<Sample>]) {
 
 /// Append the final `moov` at `len` (the end of the fragments) and patch
 /// the placeholder into an `mdat` spanning everything in between.
-fn finalize(
-    file: &mut File,
-    len: u64,
-    start: u64,
-    container: Container,
-    tracks: &[Track],
-    samples: &[Vec<Sample>],
-    duration: u64,
-) -> Result<()> {
-    let moov = moov(container, tracks, Some(samples), duration);
+fn finalize(file: &mut File, len: u64, start: u64, moov: &[u8]) -> Result<()> {
     file.seek(SeekFrom::Start(len))?;
-    file.write_all(&moov)?;
+    file.write_all(moov)?;
     // The data region must be whole on disk before the header says it is
     // one box. The patch is one 16-byte write; should it tear (a crash in
     // the middle of it), `recover` recognises any state of those bytes.
@@ -418,12 +426,21 @@ pub fn open_for_repair(folder: &Path, name: &OsStr) -> Result<File> {
     }
     // A recorder holds its movie locked while it writes (`Writer::create`):
     // a file still being written, even one renamed into this folder, is
-    // left alone. The lock stays with this handle for the repair.
-    if let Err(err) = file.try_lock() {
-        bail!(
-            "{} is still being written by a running recorder ({err}); it is left alone",
+    // left alone. The lock stays with this handle for the repair. A file
+    // system that refuses locks (the caller already holds the folder's
+    // lock, exclusively) is repaired without one, as it was recorded.
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => bail!(
+            "{} is still being written by a running recorder; it is left alone",
             name.to_string_lossy()
-        );
+        ),
+        Err(std::fs::TryLockError::Error(err)) => {
+            isocast_diagnostics::diagnostic!("warn";
+                "isocastd: {} can't be locked ({err}); repairing it without the lock",
+                name.to_string_lossy()
+            );
+        }
     }
     Ok(file)
 }
@@ -555,6 +572,7 @@ pub fn recover(file: &mut File) -> Result<Option<Recovered>> {
         );
     };
     let tracks = parse_tracks(&moov_body)?;
+    let created = parse_created(&moov_body);
     if tracks.is_empty() {
         bail!("the fragment index describes no tracks");
     }
@@ -630,15 +648,8 @@ pub fn recover(file: &mut File) -> Result<Option<Recovered>> {
         .map(|t| t.seconds)
         .fold(0.0f64, f64::max);
     let duration = (longest * f64::from(MOVIE_TIMESCALE)).round() as u64;
-    finalize(
-        file,
-        len.max(end),
-        ftyp_size,
-        container,
-        &tracks,
-        &samples,
-        duration,
-    )?;
+    let moov = moov(container, &tracks, Some(&samples), duration, created);
+    finalize(file, len.max(end), ftyp_size, &moov)?;
     file.sync_data()?;
     Ok(Some(Recovered {
         fragments,
@@ -730,6 +741,18 @@ fn be64(data: &[u8], at: usize) -> Option<u64> {
 fn be16(data: &[u8], at: usize) -> Option<u16> {
     data.get(at..at + 2)
         .map(|b| u16::from_be_bytes(b.try_into().unwrap()))
+}
+
+/// The creation time a `moov`'s `mvhd` carries ([`movie_time`]), 0 if none.
+fn parse_created(moov: &[u8]) -> u64 {
+    let Some(mvhd) = find_box(moov, b"mvhd") else {
+        return 0;
+    };
+    if mvhd.first().copied().unwrap_or(0) == 1 {
+        be64(mvhd, 4).unwrap_or(0)
+    } else {
+        be32(mvhd, 4).map_or(0, u64::from)
+    }
 }
 
 /// The tracks of a fragmented `moov`, in track id order (ids are 1-based
@@ -980,14 +1003,22 @@ fn moov(
     tracks: &[Track],
     samples: Option<&[Vec<Sample>]>,
     duration: u64,
+    created: u64,
 ) -> Vec<u8> {
-    let mut body = mvhd(duration, tracks.len() as u32 + 1);
+    let mut body = mvhd(duration, tracks.len() as u32 + 1, created);
     for (index, track) in tracks.iter().enumerate() {
         let samples = samples.map(|s| s[index].as_slice());
         if samples.is_some_and(<[Sample]>::is_empty) {
             continue;
         }
-        body.extend(trak(container, index as u32 + 1, track, samples, duration));
+        body.extend(trak(
+            container,
+            index as u32 + 1,
+            track,
+            samples,
+            duration,
+            created,
+        ));
     }
     if samples.is_none() {
         let mut mvex = Vec::new();
@@ -1005,15 +1036,38 @@ fn moov(
 
 const MATRIX: [u32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x4000_0000];
 
-fn mvhd(duration: u64, next_track: u32) -> Vec<u8> {
+/// Seconds from 1904-01-01 00:00 UTC (the QuickTime and ISO epoch) to
+/// `time`, as `mvhd`, `tkhd` and `mdhd` date a movie.
+pub fn movie_time(time: SystemTime) -> u64 {
+    const UNIX_FROM_1904: u64 = 2_082_844_800;
+    time.duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() + UNIX_FROM_1904)
+}
+
+/// Whether a header needs version 1 (64-bit times and duration).
+fn wide(duration: u64, created: u64) -> bool {
+    duration > u64::from(u32::MAX) || created > u64::from(u32::MAX)
+}
+
+/// The creation and modification times of a header (both `created`).
+fn times(body: &mut Vec<u8>, v1: bool, created: u64) {
+    for _ in 0..2 {
+        if v1 {
+            body.extend_from_slice(&created.to_be_bytes());
+        } else {
+            body.extend_from_slice(&(created as u32).to_be_bytes());
+        }
+    }
+}
+
+fn mvhd(duration: u64, next_track: u32, created: u64) -> Vec<u8> {
     let mut body = Vec::new();
-    let v1 = duration > u64::from(u32::MAX);
+    let v1 = wide(duration, created);
+    times(&mut body, v1, created);
     if v1 {
-        body.extend_from_slice(&[0u8; 16]);
         body.extend_from_slice(&MOVIE_TIMESCALE.to_be_bytes());
         body.extend_from_slice(&duration.to_be_bytes());
     } else {
-        body.extend_from_slice(&[0u8; 8]);
         body.extend_from_slice(&MOVIE_TIMESCALE.to_be_bytes());
         body.extend_from_slice(&(duration as u32).to_be_bytes());
     }
@@ -1034,6 +1088,7 @@ fn trak(
     track: &Track,
     samples: Option<&[Sample]>,
     duration: u64,
+    created: u64,
 ) -> Vec<u8> {
     let media_duration = samples.map_or(0, |s| {
         s.last()
@@ -1049,7 +1104,7 @@ fn trak(
     } else {
         0
     };
-    let mut body = tkhd(id, track, presented);
+    let mut body = tkhd(id, track, presented, created);
     if samples.is_some() {
         let mut elst = Vec::new();
         let v1 = presented > u64::from(u32::MAX) || track.skip > u64::from(u32::MAX);
@@ -1064,7 +1119,7 @@ fn trak(
         elst.extend_from_slice(&0x1_0000u32.to_be_bytes());
         body.extend(boxed(b"edts", &full(b"elst", u8::from(v1), 0, &elst)));
     }
-    let mut mdia = mdhd(track.timescale, media_duration);
+    let mut mdia = mdhd(track.timescale, media_duration, created);
     let (handler, name): (&[u8; 4], &str) = match track.kind {
         TrackKind::Video { .. } => (b"vide", "VideoHandler"),
         TrackKind::Audio { .. } => (b"soun", "SoundHandler"),
@@ -1090,16 +1145,15 @@ fn trak(
     boxed(b"trak", &body)
 }
 
-fn tkhd(id: u32, track: &Track, duration: u64) -> Vec<u8> {
+fn tkhd(id: u32, track: &Track, duration: u64, created: u64) -> Vec<u8> {
     let mut body = Vec::new();
-    let v1 = duration > u64::from(u32::MAX);
+    let v1 = wide(duration, created);
+    times(&mut body, v1, created);
     if v1 {
-        body.extend_from_slice(&[0u8; 16]);
         body.extend_from_slice(&id.to_be_bytes());
         body.extend_from_slice(&[0u8; 4]);
         body.extend_from_slice(&duration.to_be_bytes());
     } else {
-        body.extend_from_slice(&[0u8; 8]);
         body.extend_from_slice(&id.to_be_bytes());
         body.extend_from_slice(&[0u8; 4]);
         body.extend_from_slice(&(duration as u32).to_be_bytes());
@@ -1125,15 +1179,14 @@ fn tkhd(id: u32, track: &Track, duration: u64) -> Vec<u8> {
     full(b"tkhd", u8::from(v1), 0xf, &body)
 }
 
-fn mdhd(timescale: u32, duration: u64) -> Vec<u8> {
+fn mdhd(timescale: u32, duration: u64, created: u64) -> Vec<u8> {
     let mut body = Vec::new();
-    let v1 = duration > u64::from(u32::MAX);
+    let v1 = wide(duration, created);
+    times(&mut body, v1, created);
     if v1 {
-        body.extend_from_slice(&[0u8; 16]);
         body.extend_from_slice(&timescale.to_be_bytes());
         body.extend_from_slice(&duration.to_be_bytes());
     } else {
-        body.extend_from_slice(&[0u8; 8]);
         body.extend_from_slice(&timescale.to_be_bytes());
         body.extend_from_slice(&(duration as u32).to_be_bytes());
     }
@@ -1478,7 +1531,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("isocast-mp4-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("take.mov");
-        let mut writer = Writer::create(&path, Container::Mov).unwrap();
+        let started = SystemTime::now();
+        let mut writer = Writer::create(&path, Container::Mov, started).unwrap();
         writer.set_tracks(tracks());
         let shift = video_shift(60_000);
         for fragment in 0..3u64 {
@@ -1571,6 +1625,9 @@ mod tests {
             find_box(mdia, b"mdhd").unwrap().to_vec()
         };
         assert_eq!(be32(&mdhd, 16).unwrap(), 100_000);
+        // The take's start survives as the movie's creation time.
+        assert_eq!(parse_created(moov), movie_time(started));
+        assert_eq!(be32(&mdhd, 4).map(u64::from), Some(movie_time(started)));
         // The audio edit presents only the sound that exists (69 packets
         // minus priming = 1.428 s), not the movie's 1.667 s.
         let audio_elst = {
@@ -1593,7 +1650,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("isocast-mp4-torn-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("take.mp4");
-        let mut writer = Writer::create(&path, Container::Mp4).unwrap();
+        let mut writer = Writer::create(&path, Container::Mp4, SystemTime::now()).unwrap();
         writer.set_tracks(tracks());
         let video = [(4u32, 0u64, 1000u32, true)];
         writer
@@ -1613,7 +1670,13 @@ mod tests {
             .unwrap();
         // The final moov lands, the patch doesn't.
         let len = writer.len;
-        let moov = moov(Container::Mp4, &writer.tracks, Some(&writer.samples), 800);
+        let moov = moov(
+            Container::Mp4,
+            &writer.tracks,
+            Some(&writer.samples),
+            800,
+            writer.created,
+        );
         writer.file.seek(SeekFrom::Start(len)).unwrap();
         writer.file.write_all(&moov).unwrap();
         drop(writer);
@@ -1656,7 +1719,7 @@ mod tests {
         let mut other = ftyp(Container::Mp4, false);
         other.extend(boxed(b"wide", &[]));
         other.extend(boxed(b"mdat", &[7u8; 64]));
-        other.extend(boxed(b"moov", &mvhd(0, 1)));
+        other.extend(boxed(b"moov", &mvhd(0, 1, 0)));
         std::fs::write(&foreign, &other).unwrap();
         assert!(recover(&foreign).unwrap().is_none());
         assert_eq!(std::fs::read(&foreign).unwrap(), other);
@@ -1685,7 +1748,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("isocast-mp4-audio-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("take.mov");
-        let mut writer = Writer::create(&path, Container::Mov).unwrap();
+        let mut writer = Writer::create(&path, Container::Mov, SystemTime::now()).unwrap();
         writer.set_tracks(tracks());
         for fragment in 0..2u64 {
             let audio: Vec<(u32, u64, u32, bool)> = (0..23)
@@ -1745,9 +1808,9 @@ mod tests {
         std::fs::create_dir_all(dir.join("a")).unwrap();
         std::fs::create_dir_all(dir.join("b")).unwrap();
         let path = dir.join("a/take.mov");
-        let writer = Writer::create(&path, Container::Mov).unwrap();
+        let writer = Writer::create(&path, Container::Mov, SystemTime::now()).unwrap();
         let original = std::fs::read(&path).unwrap();
-        assert!(Writer::create(&path, Container::Mov).is_err());
+        assert!(Writer::create(&path, Container::Mov, SystemTime::now()).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), original);
         std::fs::rename(&path, dir.join("b/take.mov")).unwrap();
         let err = open_for_repair(&dir.join("b"), OsStr::new("take.mov")).unwrap_err();
@@ -1779,17 +1842,31 @@ mod tests {
         std::fs::create_dir_all(dir.join("owner")).unwrap();
         std::fs::create_dir_all(dir.join("other")).unwrap();
         let movie = dir.join("owner/take.mov");
-        let mut writer = Writer::create(&movie, Container::Mov).unwrap();
+        let mut writer = Writer::create(&movie, Container::Mov, SystemTime::now()).unwrap();
         writer.set_tracks(tracks());
         drop(writer);
         std::os::unix::fs::symlink(&movie, dir.join("other/link.mov")).unwrap();
         let original = std::fs::read(&movie).unwrap();
-        assert!(Writer::create(&dir.join("other/link.mov"), Container::Mov).is_err());
+        assert!(
+            Writer::create(
+                &dir.join("other/link.mov"),
+                Container::Mov,
+                SystemTime::now()
+            )
+            .is_err()
+        );
         assert_eq!(std::fs::read(&movie).unwrap(), original);
         let err = open_for_repair(&dir.join("other"), OsStr::new("link.mov")).unwrap_err();
         assert!(err.to_string().contains("symbolic link"), "{err:#}");
         std::fs::hard_link(&movie, dir.join("other/hard.mov")).unwrap();
-        assert!(Writer::create(&dir.join("other/hard.mov"), Container::Mov).is_err());
+        assert!(
+            Writer::create(
+                &dir.join("other/hard.mov"),
+                Container::Mov,
+                SystemTime::now()
+            )
+            .is_err()
+        );
         assert_eq!(std::fs::read(&movie).unwrap(), original);
         let err = open_for_repair(&dir.join("other"), OsStr::new("hard.mov")).unwrap_err();
         assert!(err.to_string().contains("hard links"), "{err:#}");

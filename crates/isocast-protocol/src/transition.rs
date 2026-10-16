@@ -678,8 +678,8 @@ impl Default for LumaWipe {
 
 /// A video played over the switch (OBS's Stinger). It lasts as long as the
 /// video. Transparent parts need a video with alpha (ProRes 4444 or HEVC
-/// with alpha in a .mov, or VP9 with alpha in a .webm, as OBS uses), or a
-/// matte.
+/// with alpha in a .mov, or VP9 or VP8 with alpha in a .webm, as OBS uses),
+/// or a matte.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Stinger {
     /// The video: absolute, `~/...`, or relative to the setup file. It

@@ -779,6 +779,9 @@ pub struct WriterSpec {
     pub container: Container,
     pub video: VideoTrackSpec,
     pub audio: Vec<AudioTrackSpec>,
+    /// When the take began (wall clock): the file's creation time, the same
+    /// for every file of a take.
+    pub created: std::time::SystemTime,
 }
 
 #[derive(Debug, Clone)]

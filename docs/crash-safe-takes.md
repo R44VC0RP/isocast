@@ -142,7 +142,10 @@ still writing elsewhere. The recorder also holds an advisory lock
 (`flock`) on its movie for as long as it writes it, and repair try-locks
 the file it opened: a file still being written, even one renamed into
 another folder, is left alone; the lock dies with a crashed process, so
-its take stays repairable. If a complete final `moov` follows the
+its take stays repairable. Only a lock held elsewhere (`EWOULDBLOCK`)
+refuses: on a share that refuses `flock` altogether (some SMB and NFS
+mounts) the take records without the lock, with a warning in the log, and
+repair, which needs the folder's lock, doesn't run there. If a complete final `moov` follows the
 fragments the crash was between the `moov` append and the patch: patch
 only. Else the tracks come from the fragmented `moov` (its `stsd` entries
 are copied verbatim, so recovery never needs an encoder), the samples from

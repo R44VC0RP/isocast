@@ -41,6 +41,7 @@ mod stream;
 mod system;
 mod termination;
 pub mod virtual_camera;
+mod vp8;
 mod webm;
 mod writer;
 

@@ -111,6 +111,18 @@ sais-lite (MIT, Yuta Mori) and orlp/ed25519 (zlib, Orson Peters). The full
 texts ship in the app as Contents/Resources/LICENSE-Sparkle and are at
 https://github.com/sparkle-project/Sparkle/blob/2.10.0/LICENSE.""")
 
+section("VP8 decoder")
+vpx = root / "crates/isocast-vp8/libvpx"
+print("""VP8 video in WebM and Matroska files is decoded with libvpx's VP8 decoder
+(libvpx 1.17.0, https://chromium.googlesource.com/webm/libvpx), whose sources
+are vendored in crates/isocast-vp8/libvpx and built into the engine. libvpx
+is under the BSD 3-clause licence below, with the WebM Project's patent
+grant after it.
+""")
+print((vpx / "LICENSE").read_text().rstrip())
+print()
+print((vpx / "PATENTS").read_text().rstrip())
+
 section(f"Rust crates ({len(rows)})")
 print("Crate, version, licence, link.")
 print()

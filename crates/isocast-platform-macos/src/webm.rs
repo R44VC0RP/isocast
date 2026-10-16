@@ -1,7 +1,8 @@
 //! Matroska and WebM media, which AVFoundation can't open: our demuxer
 //! (`matroska.rs`), video decoded by VideoToolbox (VP9, with its alpha
 //! channel from BlockAdditional; AV1 where the Mac decodes it; H.264 and
-//! HEVC), and Opus or AAC audio decoded by AudioToolbox. Frames come out
+//! HEVC) or by libvpx (VP8 and its alpha, `vp8.rs`), and Opus or AAC audio
+//! decoded by AudioToolbox, Vorbis by lewton. Frames come out
 //! like the AVFoundation path's: IOSurface pixel buffers, 4:2:0 or (with
 //! alpha) BGRA with straight alpha, and stereo float audio at 48 kHz.
 
@@ -60,7 +61,7 @@ use objc2_video_toolbox::{
 
 use crate::frames::{FramePool, PixelBuffer};
 use crate::matroska::{Colour, Demuxer, MAX_DURATION_NS, Packet, Track, TrackKind};
-use isocast_engine::FramePool as _;
+use crate::vp8::{Vp8Video, take_waiting};
 
 /// Decoded frames held back to put H.264 and HEVC (whose frames are
 /// stored in decoding order) into presentation order.
@@ -668,12 +669,20 @@ impl Drop for Decoder {
     }
 }
 
+/// A video track's decoder.
+enum Codec {
+    Toolbox(Decoder),
+    Vp8(Box<Vp8Video>),
+}
+
 /// A file's video, decoded.
 pub struct VideoReader {
     demuxer: Option<Demuxer>,
     track: u64,
     codec: String,
-    color: Decoder,
+    /// VideoToolbox's decoder, or VP8's (libvpx).
+    color: Option<Decoder>,
+    vp8: Option<Box<Vp8Video>>,
     /// Set from the first VP9 alpha frame when the video has alpha.
     alpha: Option<Decoder>,
     has_alpha: bool,
@@ -726,6 +735,12 @@ impl VideoReader {
         };
         let failed = |status: i32| unsupported(&format!(" here (VideoToolbox error {status})"));
         let (color, tags, reorder) = match track.codec.as_str() {
+            "V_VP8" => {
+                // Untagged VP8 is Rec. 709, like untagged video everywhere.
+                let tags = tags(colour.matrix, colour.primaries, colour.transfer);
+                let vp8 = Vp8Video::new(track.alpha, colour, shown)?;
+                (Codec::Vp8(Box::new(vp8)), Some(tags), 0)
+            }
             "V_VP9" => {
                 static REGISTER: Once = Once::new();
                 REGISTER.call_once(|| unsafe {
@@ -760,7 +775,7 @@ impl VideoReader {
                         header.profile, header.bit_depth
                     ))
                 })?;
-                (decoder, Some(tags), 0)
+                (Codec::Toolbox(decoder), Some(tags), 0)
             }
             "V_AV1" => {
                 if !unsafe { VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) } {
@@ -781,7 +796,7 @@ impl VideoReader {
                     output,
                 )
                 .map_err(failed)?;
-                (decoder, tags, 0)
+                (Codec::Toolbox(decoder), tags, 0)
             }
             "V_MPEG4/ISO/AVC" | "V_MPEGH/ISO/HEVC" => {
                 let (codec, atom) = if track.codec == "V_MPEG4/ISO/AVC" {
@@ -802,19 +817,21 @@ impl VideoReader {
                     output,
                 )
                 .map_err(failed)?;
-                (decoder, tags, REORDER_DEPTH)
-            }
-            "V_VP8" => {
-                return Err(unsupported(" (macOS has no VP8 decoder)"));
+                (Codec::Toolbox(decoder), tags, REORDER_DEPTH)
             }
             _ => return Err(unsupported("")),
         };
         let has_alpha = track.alpha && track.codec == "V_VP9";
+        let (color, vp8) = match color {
+            Codec::Toolbox(decoder) => (Some(decoder), None),
+            Codec::Vp8(vp8) => (None, Some(vp8)),
+        };
         let mut reader = Self {
             demuxer: None,
             track: track.number,
             codec: track.codec.clone(),
             color,
+            vp8,
             alpha: None,
             has_alpha,
             tags,
@@ -853,9 +870,17 @@ impl VideoReader {
 
     /// Decode `packet` (and its alpha) into `pending`.
     fn decode(&mut self, packet: Packet) -> Result<()> {
+        if let Some(vp8) = self.vp8.as_mut() {
+            if let Some(frame) = vp8.decode(&packet.data, packet.alpha.as_deref())? {
+                self.push(packet.time, frame);
+            }
+            return Ok(());
+        }
         let name = video_codec_name(&self.codec);
         let frames = self
             .color
+            .as_mut()
+            .expect("VideoToolbox decodes all but VP8")
             .decode(&packet.data, packet.time)
             .map_err(|status| {
                 anyhow!(
@@ -873,17 +898,22 @@ impl VideoReader {
             } else {
                 image
             };
-            if let Some(tags) = &self.tags {
-                let mode = CVAttachmentMode::ShouldPropagate;
-                unsafe {
-                    frame.set_attachment(kCVImageBufferYCbCrMatrixKey, tags.matrix, mode);
-                    frame.set_attachment(kCVImageBufferColorPrimariesKey, tags.primaries, mode);
-                    frame.set_attachment(kCVImageBufferTransferFunctionKey, tags.transfer, mode);
-                }
-            }
-            self.pending.push((packet.time, PixelBuffer(frame)));
+            self.push(packet.time, frame);
         }
         Ok(())
+    }
+
+    /// Tag a decoded frame with its colour and queue it.
+    fn push(&mut self, time: i64, frame: CFRetained<CVImageBuffer>) {
+        if let Some(tags) = &self.tags {
+            let mode = CVAttachmentMode::ShouldPropagate;
+            unsafe {
+                frame.set_attachment(kCVImageBufferYCbCrMatrixKey, tags.matrix, mode);
+                frame.set_attachment(kCVImageBufferColorPrimariesKey, tags.primaries, mode);
+                frame.set_attachment(kCVImageBufferTransferFunctionKey, tags.transfer, mode);
+            }
+        }
+        self.pending.push((time, PixelBuffer(frame)));
     }
 
     /// Decode a frame of the VP9 alpha stream, its luma being the alpha.
@@ -933,8 +963,12 @@ impl VideoReader {
     }
 
     fn size(&self) -> (u32, u32) {
-        let dimensions =
-            unsafe { objc2_core_media::CMVideoFormatDescriptionGetDimensions(&self.color.format) };
+        let format = &self
+            .color
+            .as_ref()
+            .expect("VP9 has a VideoToolbox decoder")
+            .format;
+        let dimensions = unsafe { objc2_core_media::CMVideoFormatDescriptionGetDimensions(format) };
         (dimensions.width as u32, dimensions.height as u32)
     }
 
@@ -958,16 +992,9 @@ impl VideoReader {
                 self.pool = Some(FramePool::new(width, height)?);
             }
             let pool = self.pool.as_mut().expect("set above");
-            let mut taken = None;
             // The pool caps frames in flight; wait briefly for one back.
-            for _ in 0..200 {
-                taken = pool.take()?;
-                if taken.is_some() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            let PixelBuffer(target) = taken.context("no free frame to combine alpha into")?;
+            let PixelBuffer(target) =
+                take_waiting(pool).context("no free frame to combine alpha into")?;
             copy_bgra(&color, &target)?;
             target
         };
@@ -1190,6 +1217,93 @@ pub struct AudioReader {
     end: Option<i64>,
     /// Decoding only the first packet, to measure the decoder.
     probing: bool,
+    /// Vorbis, decoded here (macOS can't): the converter then gets float
+    /// samples, which it only resamples.
+    vorbis: Option<Box<Vorbis>>,
+}
+
+/// A Vorbis stream's decoder (lewton).
+struct Vorbis {
+    ident: lewton::header::IdentHeader,
+    setup: lewton::header::SetupHeader,
+    window: lewton::audio::PreviousWindowRight,
+    /// The time of the first packet, which gives no sound itself (Vorbis
+    /// starts overlapping from the second): the first sound plays then.
+    start: Option<i64>,
+    /// Whether sound has come out yet.
+    started: bool,
+}
+
+impl Vorbis {
+    /// The decoder for a track whose CodecPrivate holds the three Vorbis
+    /// headers, Xiph-laced.
+    fn new(private: &[u8]) -> std::result::Result<Self, String> {
+        let [identification, comment, setup] = xiph_headers(private)
+            .ok_or_else(|| "its track has no valid Vorbis headers".to_string())?;
+        let ident = lewton::header::read_header_ident(identification)
+            .map_err(|err| format!("its Vorbis headers are damaged ({err:?})"))?;
+        lewton::header::read_header_comment(comment)
+            .map_err(|err| format!("its Vorbis headers are damaged ({err:?})"))?;
+        let setup = lewton::header::read_header_setup(
+            setup,
+            ident.audio_channels,
+            (ident.blocksize_0, ident.blocksize_1),
+        )
+        .map_err(|err| format!("its Vorbis headers are damaged ({err:?})"))?;
+        Ok(Self {
+            ident,
+            setup,
+            window: lewton::audio::PreviousWindowRight::new(),
+            start: None,
+            started: false,
+        })
+    }
+
+    /// One packet's samples, interleaved.
+    fn decode(&mut self, packet: &[u8]) -> Result<Vec<f32>> {
+        let Self {
+            ident,
+            setup,
+            window,
+            ..
+        } = self;
+        // A damaged packet must not take the engine down with it.
+        let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lewton::audio::read_audio_packet_generic::<lewton::samples::InterleavedSamples<f32>>(
+                ident, setup, packet, window,
+            )
+        }))
+        .map_err(|_| anyhow!("the Vorbis decoder failed on a damaged packet"))?
+        .map_err(|err| anyhow!("could not decode the Vorbis audio ({err:?})"))?;
+        // A damaged packet can decode far out of range; keep it to full scale.
+        let mut samples = decoded.samples;
+        for sample in &mut samples {
+            *sample = sample.clamp(-1.0, 1.0);
+        }
+        Ok(samples)
+    }
+}
+
+/// The three packets of a Xiph-laced CodecPrivate (Vorbis's headers).
+fn xiph_headers(private: &[u8]) -> Option<[&[u8]; 3]> {
+    let (&count, mut rest) = private.split_first()?;
+    if count != 2 {
+        return None;
+    }
+    let mut sizes = [0usize; 2];
+    for size in &mut sizes {
+        loop {
+            let (&byte, tail) = rest.split_first()?;
+            rest = tail;
+            *size += usize::from(byte);
+            if byte < 255 {
+                break;
+            }
+        }
+    }
+    let (first, rest) = rest.split_at_checked(sizes[0])?;
+    let (second, third) = rest.split_at_checked(sizes[1])?;
+    Some([first, second, third])
 }
 
 // SAFETY: an AudioConverter may be used from any thread, one at a time.
@@ -1220,6 +1334,7 @@ impl AudioReader {
             .next_packet(track.number)?
             .with_context(|| format!("{shown} has an audio track with no sound"))?;
         let channels = track.channels;
+        let mut vorbis = None;
         let (input, cookie, skip, offset) = match track.codec.as_str() {
             "A_OPUS" => {
                 // OpusHead: the pre-skip is a little-endian u16 at byte 10.
@@ -1264,7 +1379,27 @@ impl AudioReader {
                 let priming = track.codec_delay * u64::from(SAMPLE_RATE) / 1_000_000_000;
                 (input, Some(esds(&track.private)), priming, 0)
             }
-            "A_VORBIS" => return Err(unsupported(" (macOS has no Vorbis decoder)")),
+            "A_VORBIS" => {
+                let decoder =
+                    Vorbis::new(&track.private).map_err(|why| unsupported(&format!(" ({why})")))?;
+                if u32::from(decoder.ident.audio_channels) != channels {
+                    return Err(unsupported(" (its track and stream disagree on channels)"));
+                }
+                // Decoded to floats here; the converter only resamples.
+                let input = AudioStreamBasicDescription {
+                    mSampleRate: f64::from(decoder.ident.audio_sample_rate),
+                    mFormatID: kAudioFormatLinearPCM,
+                    mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+                    mBytesPerPacket: 4 * channels,
+                    mFramesPerPacket: 1,
+                    mBytesPerFrame: 4 * channels,
+                    mChannelsPerFrame: channels,
+                    mBitsPerChannel: 32,
+                    mReserved: 0,
+                };
+                vorbis = Some(Box::new(decoder));
+                (input, None, 0, 0)
+            }
             _ => return Err(unsupported("")),
         };
         let output = AudioStreamBasicDescription {
@@ -1313,6 +1448,7 @@ impl AudioReader {
             returned: 0,
             end: None,
             probing: false,
+            vorbis,
         };
         if let Some(cookie) = cookie {
             let status = unsafe {
@@ -1385,13 +1521,40 @@ impl AudioReader {
         Ok(samples)
     }
 
-    /// The next packet for the converter, `None` at the end.
+    /// The next packet for the converter, `None` at the end: the file's,
+    /// or for Vorbis, its decoded samples (floats).
     fn packet(&mut self) -> Result<Option<Packet>> {
-        if let Some(first) = self.first.take() {
-            return Ok(Some(first));
+        loop {
+            let packet = match self.first.take() {
+                Some(first) => Some(first),
+                None => {
+                    let demuxer = self.demuxer.as_mut().expect("opened with its demuxer");
+                    demuxer.next_packet(self.track)?
+                }
+            };
+            let Some(mut packet) = packet else {
+                return Ok(None);
+            };
+            let Some(vorbis) = self.vorbis.as_mut() else {
+                return Ok(Some(packet));
+            };
+            let samples = vorbis.decode(&packet.data)?;
+            if samples.is_empty() {
+                if !vorbis.started {
+                    vorbis.start.get_or_insert(packet.time);
+                }
+                continue;
+            }
+            if !vorbis.started {
+                vorbis.started = true;
+                packet.time = vorbis.start.unwrap_or(packet.time);
+            }
+            packet.data = samples
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect();
+            return Ok(Some(packet));
         }
-        let demuxer = self.demuxer.as_mut().expect("opened with its demuxer");
-        demuxer.next_packet(self.track)
     }
 
     fn next(&mut self) -> Result<Option<(Vec<f32>, Duration)>> {
@@ -1477,10 +1640,15 @@ unsafe extern "C-unwind" fn supply(
     list.mBuffers[0].mNumberChannels = reader.channels;
     list.mBuffers[0].mDataByteSize = packet.data.len() as u32;
     list.mBuffers[0].mData = packet.data.as_ptr() as *mut c_void;
-    if !descriptions.is_null() {
+    // Decoded Vorbis is linear PCM, whose packets are its frames.
+    let packets = match reader.vorbis {
+        Some(_) => packet.data.len() as u32 / (4 * reader.channels),
+        None => 1,
+    };
+    if !descriptions.is_null() && reader.vorbis.is_none() {
         unsafe { *descriptions = &mut reader.description };
     }
-    unsafe { *count.as_ptr() = 1 };
+    unsafe { *count.as_ptr() = packets };
     // Kept until the next call, while the converter reads it.
     reader.lent = Some(packet);
     0

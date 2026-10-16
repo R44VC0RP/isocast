@@ -279,6 +279,7 @@ pub fn doctor<P: Platform>(platform: &P, setup: Option<&Setup>, folder: Option<&
                 encoder: encoder.clone(),
             },
             audio,
+            created: std::time::SystemTime::now(),
         })
     };
     let mut rate = 0.0;

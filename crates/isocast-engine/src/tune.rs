@@ -176,6 +176,7 @@ impl Load {
                 encoder: self.encoder.clone(),
             },
             audio: Vec::new(),
+            created: std::time::SystemTime::now(),
         }
     }
 

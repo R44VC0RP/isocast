@@ -882,6 +882,10 @@ native app; each verified against OBS's behaviour on a test Mac.
   Portal OBS actions, Streamer.bot, bots and scripts drive Isocast: auth,
   requests, batches, events, JSON and MessagePack; 77 requests mapped, the
   rest answer 204. Off by default; `isocast websocket status|enable|disable`.
+- [x] **G.10 VP8, VP8 alpha and Vorbis in WebM/MKV (#64).** Older OBS
+  stingers (VP8 with alpha) play without converting: libvpx's VP8 decoder,
+  vendored in crates/isocast-vp8 and built statically; Vorbis sound
+  through lewton.
 
 ### T. Themes (Ryan, 2026-10-13)
 
@@ -1301,6 +1305,17 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 
 ## Log
 
+- #76 flock (2026-10-16): crash-safe takes refuse a file only when its
+  lock is held elsewhere (WouldBlock); a share that refuses flock records
+  with a logged warning. Verified on an NFS `nolocks` mount (ENOTSUP):
+  main refused the take, head records it complete (program 120 frames, ISO
+  108: it starts 0.4 s late on this share, NFS file creation); exFAT and
+  APFS lock as before (kill-matrix ownership 11/11 incl. live-renamed).
+- #76 creation time (2026-10-16): crash-safe movies and their tracks carry
+  the take's start (mvhd/tkhd/mdhd), after Stop and after kill -9 + repair;
+  ffprobe creation_time and AVFoundation creationDate match the file name
+  on program and ISO files (APFS, exFAT, NFS; kill-matrix 6/6, ownership
+  11/11); main's files had none.
 - G.3b / #3 (2026-10-15, default-on integration, awaiting coordinator review):
   preserved the reviewed fragment/repair implementation while integrating
   main 505145d; new writers take the shared first-picture gate after the

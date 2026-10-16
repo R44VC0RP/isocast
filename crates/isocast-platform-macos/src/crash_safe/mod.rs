@@ -208,7 +208,7 @@ impl CrashSafeWriter {
                 pending: Vec::new(),
             });
         }
-        let file = mp4::Writer::create(&spec.path, spec.container)?;
+        let file = mp4::Writer::create(&spec.path, spec.container, spec.created)?;
         Ok(Self {
             file: Some(file),
             video,

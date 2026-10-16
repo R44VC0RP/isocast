@@ -1070,6 +1070,7 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
                             encoder: encoder.clone(),
                         },
                         audio: audio_tracks(&audio),
+                        created: now.into(),
                     },
                 })
             },

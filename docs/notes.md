@@ -1582,6 +1582,13 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-16 (#76): crash-safe files carry the take's start as creation
+  and modification time in `mvhd`, `tkhd` and `mdhd` (QuickTime epoch,
+  whole seconds; version 1 headers only when a time or duration passes
+  32 bits, i.e. after 2040). The time is `plan_take`'s clock, the one the
+  file names use, so every file of a take shares it; it is written into the
+  fragmented `moov` at creation and read back from there by `recover`, so a
+  repaired file keeps it. AVFoundation reads it as `creationDate`.
 - 2026-10-15 (#3, G.3b 0.0.5): **default on, 500 ms, keep every frame.**
   Ryan chose a temporary `ISOCAST_CRASH_SAFE=0` legacy fallback for one
   release, not a new setup field; automatic next-launch repair suffices,
@@ -1627,6 +1634,30 @@ each section. Delete entries that stop being true.
   error failed are finished from their fragments at Stop and again at
   every launch until that works. Originally `ISOCAST_CRASH_SAFE=1` only;
   the 2026-10-15 decision above supersedes that default and shipping form.
+- 2026-10-15 (#64): **VP8 is decoded by a vendored libvpx, Vorbis by
+  lewton.** macOS decodes neither. Pure-Rust VP8 crates were scaffolds or
+  keyframe-only (WebP); the libvpx crates clone or download libvpx while
+  building. crates/isocast-vp8 holds libvpx 1.17.0's VP8 decoder sources
+  only (BSD-3, unchanged; provenance and the configure line in its
+  build.rs; LICENSE and PATENTS go into THIRD_PARTY_NOTICES) built with
+  cc, NEON chosen at compile time, ~310 KB. VP8 without alpha is copied
+  into 420v frames; with alpha (a second VP8 stream in BlockAdditional,
+  decoded every packet so its references stay in step) or full range,
+  vImage converts to BGRA and the alpha luma becomes the alpha channel.
+  Untagged VP8 is Rec. 709 like all untagged video (the VP8 spec says
+  601; OBS 28+ and our VP9 path use 709). Vorbis packets are decoded to
+  floats and fed to the same AudioConverter (it only resamples), so
+  trimming and looping are shared; the first packet gives no sound, so the
+  first sound gets its time. lewton (2021, mature, rodio's decoder) adds
+  only byteorder.
+  Cost on a base M2 (isocast-m2-b, hw job 20261015-220535-vp8-cmd, a
+  12 Mb/s 1080p60 testsrc2 stinger, harder than real ones): decode plus
+  conversion 4.4 ms a frame with alpha (3.8x real time; ffmpeg's libvpx
+  1 thread 4.6 ms), 2.3 ms without; looping as a media source while
+  recording, isocastd used 67% of a core with alpha and 54% without
+  (baseline 7%, VP9 alpha 24%, ProRes 4444 22%), 0 dropped frames in 90 s,
+  RSS flat at 243 MB (VP9 alpha 211, ProRes 393). Libvpx decodes on one
+  thread unless the stream has several token partitions.
 - 2026-10-15 (#68 review B1): **Exclude a parked gap from the native H.264
   timeline, not the engine timeline.** VT's bitrate controller treated the
   gap after the warm picture as unused budget (3 s: 1.96 MB first packet;
@@ -4956,6 +4987,23 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-15 (#64): a media source doesn't advance while nothing records
+  or streams: `snapshot` on an idle engine shows the clip's first frame
+  every time. Start a recording before snapshotting media. Snapshots of a
+  playing alpha clip compared with ffmpeg's composite sometimes match no
+  single reference frame (31-46 dB on both VP8 and VP9, while others are
+  exact or 48-52 dB); take several.
+- 2026-10-16 (#76): `flock` on an NFS mount with `-o nolocks` fails with
+  ENOTSUP (45); Rust's `try_lock` reports it as `TryLockError::Error`
+  ("lock acquisition failed due to I/O error"), not `WouldBlock`. Before
+  #76 that refused every crash-safe take there as "already being written
+  by another recorder". A lockless share to test on: on an M2 test Mac,
+  `/etc/exports` with `/Users/Shared/csf-nfs -mapall=501:20 -network
+  127.0.0.0 -mask 255.0.0.0`, `sudo nfsd start`, `sudo mount -t nfs -o
+  nolocks,vers=3 localhost:/Users/Shared/csf-nfs DIR`. Repair at launch
+  needs the folder's exclusive lock, so a take killed there stays
+  "recording" with its fragmented (playable) files; kill-matrix can't run
+  with --work on exFAT or NFS (the daemon's Unix socket can't live there).
 - 2026-10-15 (#59, fixes-005): `stream stop` drops `state.stream`, but a
   stream that *failed* stays in the status until the next start, and its
   own status hard-codes `key_set: true` (engine stream/mod.rs). `status`

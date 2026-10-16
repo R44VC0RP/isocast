@@ -692,6 +692,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "byteorder-lite"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3192,6 +3198,8 @@ dependencies = [
  "isocast-engine",
  "isocast-protocol",
  "isocast-surfaces",
+ "isocast-vp8",
+ "lewton",
  "libc",
  "mach2",
  "objc2 0.6.5",
@@ -3264,6 +3272,13 @@ dependencies = [
  "slint-build",
  "toml",
  "wgpu",
+]
+
+[[package]]
+name = "isocast-vp8"
+version = "0.0.4"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -3449,6 +3464,16 @@ name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
+
+[[package]]
+name = "lewton"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "777b48df9aaab155475a83a7df3070395ea1ac6902f5cd062b8f2b028075c030"
+dependencies = [
+ "byteorder",
+ "tinyvec",
+]
 
 [[package]]
 name = "libc"
