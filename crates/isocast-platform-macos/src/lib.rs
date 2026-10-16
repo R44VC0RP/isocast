@@ -465,6 +465,30 @@ pub fn volume(path: &Path) -> anyhow::Result<Volume> {
     })
 }
 
+/// Whether the file system holding `path` can give a file a second name
+/// (`_PC_LINK_MAX` above 1). One that can't (exFAT and FAT say 1) may
+/// report any link count, and there a count above one isn't a hard link.
+/// An unanswered call counts as able, so a link check stays strict.
+pub(crate) fn hard_links_possible(path: &Path) -> bool {
+    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+        return true;
+    };
+    // -1 is "no limit" (or an error): able, either way.
+    !matches!(
+        unsafe { libc::pathconf(path.as_ptr(), libc::_PC_LINK_MAX) },
+        0 | 1
+    )
+}
+
+/// [`hard_links_possible`] for the file system of an open file.
+pub(crate) fn hard_links_possible_fd(file: &std::fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+    !matches!(
+        unsafe { libc::fpathconf(file.as_raw_fd(), libc::_PC_LINK_MAX) },
+        0 | 1
+    )
+}
+
 /// Write 4 KB at the start of `probe` and fsync it, timed. Plain fsync,
 /// not F_FULLFSYNC (what Rust's `sync_data` does here), which would flush
 /// the drive's whole cache and slow the recording it measures.

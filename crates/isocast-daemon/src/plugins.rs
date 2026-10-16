@@ -355,6 +355,9 @@ struct Process {
     state: Mutex<Run>,
     changed: Condvar,
     stop: AtomicBool,
+    /// Its process was stopped to start again with new sandbox rules
+    /// (`Registry::refresh_sandboxes`): not a crash.
+    refresh: AtomicBool,
 }
 
 struct Run {
@@ -364,8 +367,51 @@ struct Run {
     crashes: VecDeque<Instant>,
     last_exit: Option<(String, Instant)>,
     sandboxed: bool,
+    /// The recordings folders its sandbox was made with, while it runs
+    /// sandboxed.
+    recordings: Option<RecordingFolders>,
     /// The supervisor has finished.
     done: bool,
+}
+
+/// The recordings folders a sandbox is made with: the recordings folders
+/// (resolved), and, for a `write` grant, the folders in them named like
+/// projects that aren't (`isocast_protocol::project::named_like_but_not`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RecordingFolders {
+    roots: Vec<PathBuf>,
+    not_projects: Vec<PathBuf>,
+}
+
+impl RecordingFolders {
+    fn new(roots: &[PathBuf], granted: &Permissions) -> Self {
+        let mut roots: Vec<PathBuf> = roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .collect();
+        roots.sort();
+        roots.dedup();
+        let not_projects = match granted.recordings {
+            Some(RecordingsAccess::Write) => roots
+                .iter()
+                .flat_map(|root| isocast_protocol::project::named_like_but_not(root))
+                .collect(),
+            _ => Vec::new(),
+        };
+        Self {
+            roots,
+            not_projects,
+        }
+    }
+
+    /// A folder here that `self`'s sandbox has no rule for.
+    fn adds_to(&self, earlier: &Self) -> bool {
+        self.roots.iter().any(|r| !earlier.roots.contains(r))
+            || self
+                .not_projects
+                .iter()
+                .any(|p| !earlier.not_projects.contains(p))
+    }
 }
 
 impl Process {
@@ -521,6 +567,17 @@ impl Registry {
         for process in processes {
             process.stop();
         }
+    }
+
+    /// Restart, in the background, each sandboxed plugin process whose
+    /// sandbox has no rule for a recordings folder (or, with a `write`
+    /// grant, a folder named like a project that isn't one) that exists
+    /// now: Seatbelt rules can't change in a running process (#56).
+    pub fn refresh_sandboxes(&self) {
+        let shared = self.0.clone();
+        let _ = thread::Builder::new()
+            .name("plugin sandboxes".into())
+            .spawn(move || shared.refresh_sandboxes());
     }
 
     /// The plugin a connection on the main socket belongs to, if its peer
@@ -1033,10 +1090,12 @@ impl Shared {
                 crashes: VecDeque::new(),
                 last_exit: None,
                 sandboxed: false,
+                recordings: None,
                 done: false,
             }),
             changed: Condvar::new(),
             stop: AtomicBool::new(false),
+            refresh: AtomicBool::new(false),
         });
         entry.listener = Some(listener);
         entry.process = Some(process.clone());
@@ -1075,14 +1134,16 @@ impl Shared {
                 break;
             }
             let started = Instant::now();
-            // The recordings folders as they are now (a folder recorded to
-            // later is in its sandbox from its next start).
+            // The recordings folders as they are now (one used later, or a
+            // folder named like a project made later, restarts it:
+            // `refresh_sandboxes`).
             let roots = self
                 .hooks
                 .get()
                 .map(|hooks| (hooks.recording_roots)())
                 .unwrap_or_default();
-            let outcome = launch.start(&process.command, &roots);
+            let recordings = RecordingFolders::new(&roots, &launch.granted);
+            let outcome = launch.start(&process.command, &recordings);
             let exit = match outcome {
                 Ok((pid, sandboxed)) => {
                     self.pids.lock().unwrap().insert(pid, launch.scope.clone());
@@ -1091,6 +1152,7 @@ impl Shared {
                         run.pid = Some(pid);
                         run.phase = ProcessState::Running;
                         run.sandboxed = sandboxed;
+                        run.recordings = sandboxed.then_some(recordings);
                         process.changed.notify_all();
                     }
                     if !first {
@@ -1099,7 +1161,9 @@ impl Shared {
                     let exit = wait(pid);
                     self.pids.lock().unwrap().remove(&pid);
                     let _ = std::fs::remove_file(launch.dir.join("pid"));
-                    process.state.lock().unwrap().pid = None;
+                    let mut run = process.state.lock().unwrap();
+                    run.pid = None;
+                    run.recordings = None;
                     exit
                 }
                 Err(err) => format!("couldn't start: {err}"),
@@ -1107,6 +1171,11 @@ impl Shared {
             first = false;
             if process.stop.load(Ordering::SeqCst) {
                 break;
+            }
+            // Stopped for new sandbox rules: start it again at once.
+            if process.refresh.swap(false, Ordering::SeqCst) {
+                process.state.lock().unwrap().restarts += 1;
+                continue;
             }
             // It ended on its own: a crash.
             let now = Instant::now();
@@ -1159,6 +1228,48 @@ impl Shared {
         run.phase = ProcessState::Stopped;
         run.done = true;
         process.changed.notify_all();
+    }
+
+    fn refresh_sandboxes(&self) {
+        let running: Vec<(Arc<Process>, Permissions)> = {
+            let entries = self.entries.lock().unwrap();
+            entries
+                .values()
+                .filter_map(|e| Some((e.process.clone()?, e.record.granted.clone())))
+                .collect()
+        };
+        if running.is_empty() {
+            return;
+        }
+        let roots = self
+            .hooks
+            .get()
+            .map(|hooks| (hooks.recording_roots)())
+            .unwrap_or_default();
+        for (process, granted) in running {
+            let now = RecordingFolders::new(&roots, &granted);
+            let pid = {
+                let run = process.state.lock().unwrap();
+                match (&run.recordings, run.pid) {
+                    (Some(earlier), Some(pid)) if now.adds_to(earlier) => pid,
+                    _ => continue,
+                }
+            };
+            isocast_diagnostics::diagnostic!(
+                "isocastd: plugin {}: restarting it so its sandbox has the recordings folders \
+                 as they are now",
+                process.id
+            );
+            process.refresh.store(true, Ordering::SeqCst);
+            signal_group(pid, libc::SIGTERM);
+            let process = process.clone();
+            thread::spawn(move || {
+                thread::sleep(STOP_GRACE);
+                if process.state.lock().unwrap().pid == Some(pid) {
+                    signal_group(pid, libc::SIGKILL);
+                }
+            });
+        }
     }
 
     /// Turn a plugin off after it crashed too often (kept across restarts
@@ -1305,7 +1416,11 @@ struct Launch {
 
 impl Launch {
     /// Start the process; its id and whether it is sandboxed.
-    fn start(&self, command: &[String], recordings: &[PathBuf]) -> Result<(u32, bool), String> {
+    fn start(
+        &self,
+        command: &[String],
+        recordings: &RecordingFolders,
+    ) -> Result<(u32, bool), String> {
         let program = find_program(&command[0], &self.folder)?;
         let data = self.dir.join("data");
         let tmp = data.join("tmp");
@@ -1363,7 +1478,7 @@ impl Launch {
         program: &Path,
         socket: &Path,
         data: &Path,
-        recordings: &[PathBuf],
+        recordings: &RecordingFolders,
     ) -> String {
         let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let home = real(Path::new(&std::env::var_os("HOME").unwrap_or_default()));
@@ -1394,14 +1509,21 @@ impl Launch {
             program_real.clone(),
         ];
         own.extend(program_folders.iter().cloned());
-        let recordings: Vec<PathBuf> = recordings
-            .iter()
-            .filter_map(|root| root.canonicalize().ok())
-            .filter(|root| !own.iter().any(|path| path.starts_with(root)))
-            .collect();
         let not_projects = recordings
+            .not_projects
             .iter()
-            .flat_map(|root| isocast_protocol::project::named_like_but_not(root))
+            .filter(|folder| {
+                folder
+                    .parent()
+                    .is_some_and(|root| !own.iter().any(|path| path.starts_with(root)))
+            })
+            .cloned()
+            .collect();
+        let recordings: Vec<PathBuf> = recordings
+            .roots
+            .iter()
+            .filter(|root| !own.iter().any(|path| path.starts_with(root)))
+            .cloned()
             .collect();
         isocast_platform_macos::plugin::Sandbox {
             home,
@@ -1428,7 +1550,7 @@ impl Launch {
         _program: &Path,
         _socket: &Path,
         _data: &Path,
-        _recordings: &[PathBuf],
+        _recordings: &RecordingFolders,
     ) -> String {
         String::new()
     }

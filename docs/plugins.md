@@ -76,9 +76,15 @@ it). It can only create inside a project folder (one named `<date> <time>
 manifests (`*.session.json`), `*.partial` files or Isocast's own `.isocast*`
 files. No plugin can hard-link a recording, whatever its grant. The
 recordings folders are the live setup's `recording.folder` and those
-recorded into lately, as they are when the plugin's process starts; a
-folder recorded into for the first time is in its sandbox from its next
-start.
+recorded into lately (by the engine or `isocast record`). A sandbox can't
+change while its process runs, so when a recording starts in a folder its
+sandbox doesn't have yet (or, for `write`, a folder named like a project
+but without Isocast's project file has appeared since), Isocast restarts
+the plugin's process with the folders as they are then
+(`plugin_changed`, `restarted`); it may miss that recording's `started`
+and `project_created` events, so read `list_projects` when it starts. A
+folder made in between, or one only a standalone `isocast record` used,
+gets its rules at the next such start.
 
 ### Projects
 
@@ -91,7 +97,8 @@ is the folder's name after the date and time. `list_projects` lists them;
 `rename_project` (refused while a recording or an export writes into it)
 renames the folder to `<date> <time> <name>` in one step (atomic on APFS
 and HFS+; on exFAT a check and a rename) and moves timelines' references
-(timelines also find a project renamed in the Finder by its id), so a plugin can name a take once `take_finished`
+(timelines also find a project renamed in the Finder by its id, and
+`list_projects` points its export manifests at the new folder), so a plugin can name a take once `take_finished`
 or `stopped` says it is done. Recordings from before project folders stay
 where they are.
 

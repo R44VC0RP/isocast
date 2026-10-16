@@ -937,7 +937,20 @@ fn not_plain(path: &std::path::Path) -> Option<String> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => Some(format!("it can't be checked ({err})")),
         Ok(meta) if !meta.file_type().is_file() => Some("it isn't a plain file".into()),
-        Ok(meta) if meta.nlink() != 1 => Some(format!("it has {} names", meta.nlink())),
+        // A second name is a hard link only where the volume can make one;
+        // elsewhere (or a count of 0) it's how the volume reports links,
+        // and refusing would refuse every take on it (#56).
+        Ok(meta) if meta.nlink() > 1 && crate::hard_links_possible(path) => {
+            Some(format!("it has {} names", meta.nlink()))
+        }
+        Ok(meta) if meta.nlink() != 1 => {
+            isocast_diagnostics::diagnostic!("warn";
+                "isocastd: {} reports {} names, which can't be a hard link there; recording into it",
+                path.display(),
+                meta.nlink()
+            );
+            None
+        }
         Ok(_) => None,
     }
 }

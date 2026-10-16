@@ -373,7 +373,8 @@ impl Recovered {
 /// Open `name` inside `folder` for repair, and nothing else: the entry
 /// must be a regular file reached through the directory itself (no
 /// symbolic link is followed, `openat` with `O_NOFOLLOW`), with no other
-/// name for its inode (`st_nlink == 1`), so a staged alias can never make
+/// name for its inode (`st_nlink == 1` where the volume has hard links),
+/// so a staged alias can never make
 /// recovery write into a movie another engine is still writing through
 /// another folder. The folder itself may be a link (a recording folder on
 /// an external disk); its lock lives in the real folder either way.
@@ -417,7 +418,9 @@ pub fn open_for_repair(folder: &Path, name: &OsStr) -> Result<File> {
     if !meta.is_file() {
         bail!("{} is not a regular file", name.to_string_lossy());
     }
-    if meta.nlink() > 1 {
+    // Only where the volume can make hard links: elsewhere the count is
+    // how the volume reports links, not a second name (#56).
+    if meta.nlink() > 1 && crate::hard_links_possible_fd(&file) {
         bail!(
             "{} has {} names (hard links); recovery only repairs files no other folder can reach",
             name.to_string_lossy(),

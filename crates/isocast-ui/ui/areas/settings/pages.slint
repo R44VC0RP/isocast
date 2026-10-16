@@ -1240,7 +1240,7 @@ export component AdvancedPage inherits SetPage {
             toggled(on) => { SettingsArea.set-flag("developer", on); }
         }
         SwitchRow {
-            label: "Turn Off After 24 Hours";
+            label: SettingsArea.developer-auto-off-label;
             place: RowPlace.last;
             enabled: SettingsArea.developer-on;
             on <=> SettingsArea.developer-auto-off;

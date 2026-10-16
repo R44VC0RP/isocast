@@ -1667,6 +1667,17 @@ each section. Delete entries that stop being true.
   the files were finished and are playable" (the engine's own wording
   for the keep-free stop). Scene switches acknowledged within the same
   frame as the next one may be missing from the manifest (never on air).
+- 2026-10-16 (#45): **`tune` stays outside the `starting` gate.** A
+  benchmark takes minutes, and holding the gate made `shutdown_if_idle`
+  (restart, the updater) wait instead of refuse. Tune checks
+  `shutting_down` under the state lock before setting `tuning`, and
+  shutdown_if_idle sets `shutting_down` before taking that lock, so one
+  always sees the other. Optimize still holds the gate (no busy flag). The
+  app's own busy check can't see a tune, so after an engine Busy refusal it
+  waits 15 s before asking again.
+- 2026-10-16 (#55): **The Pacing row is "N late · p99 X ms"**, count
+  first, so the value column never elides the part that matters. The
+  auto-off switch keeps a profile's custom hours and names them.
 
 - 2026-10-16 (#77): **Detach the warm program tap, not the native session.**
   After the warm picture completes, remove both routes before publishing
@@ -1699,6 +1710,34 @@ each section. Delete entries that stop being true.
   daemon's part is 0.02-0.05 ms; the A.6 diagnostics added 5-6 ms of disk
   syncing and scanning to every CLI run. Left: the CLI starts ~0.9 ms slower
   than at QA-2 without any logging (a larger binary and command tree).
+- 2026-10-16 (#56, plugin follow-ups): (1) the writer's and repair's
+  hard-link check (AssetWriter `not_plain`, `open_for_repair`) refuses a
+  file with more than one name only where the volume can make hard links
+  (`pathconf(_PC_LINK_MAX)` > 1; APFS 32767, exFAT and FAT say 1); any
+  other count is logged and recorded/repaired. Symlinks, non-files and the
+  pre-existing-entry refusal are unchanged; an APFS hard link still stops
+  repair. (2) Healing a clip by manifest name gives it its project's id
+  (`move_folder` takes the id; rename_project passes it too). (3) Export
+  manifests are healed by `list_projects` (and with a timeline heal): one
+  whose own files' folder is gone while the files are beside it is
+  rewritten from that folder to its own, skipping `exporting` ones. Exports
+  written outside the renamed project aren't rewritten (as rename_project).
+  (4) Seatbelt rules can't change in a running process, so
+  `Registry::refresh_sandboxes` (after `start` picks its project, and on
+  `setup_changed`) restarts a sandboxed plugin process whose sandbox lacks
+  a recordings folder that exists now or, for `write`, a not-a-project
+  folder named like one; not counted as a crash. Such a plugin can miss
+  that recording's `started`/`project_created`. (5) The recordings-folders
+  list moved to `isocast_protocol::project::{remembered_roots,
+  remember_root}`, and standalone `isocast record` adds its folder, so
+  `list_projects` shows its projects. Fix round 1 (review B1): two
+  processes write it, so the read/merge/write holds an flock on
+  `….json.lock`, writes a `create_new` file of its own and renames it in,
+  and keeps `….json.bak`; an unparseable registry is read from the `.bak`
+  and moved aside as `….json.unreadable` on the next write, never
+  silently replaced by `[]`. Repair asks the link limit via `fpathconf` on
+  the opened file (F1).
+
 - 2026-10-16 (#76): crash-safe files carry the take's start as creation
   and modification time in `mvhd`, `tkhd` and `mdhd` (QuickTime epoch,
   whole seconds; version 1 headers only when a time or duration passes
@@ -5286,6 +5325,18 @@ each section. Delete entries that stop being true.
   up to 104 ms late with *no* load (CPU load with 8× `yes` made it better,
   14-26 ms), so loading the CPU doesn't reproduce it; repeated idle runs do
   (2/15 on m2-b).
+- 2026-10-16: **A new remote-build lane can inherit another lane's crates.**
+  Its target is an APFS clone of the last-used lane's and sync keeps
+  mtimes, so a crate this branch doesn't touch but the other lane changed
+  (here isocast-protocol, from a vcam branch) counted as fresh and the
+  build failed on a variant main doesn't have. Touching every crate source
+  once fixed it: `git ls-files 'crates/*.rs' 'crates/*.slint' | grep -v
+  libvpx | xargs touch` (a full rebuild, ~8 min on an M2).
+- 2026-10-16: **Offscreen `press:LABEL` fails in a run's first snapshot**
+  ("no element named …") for elements of a dialog opened by a state in the
+  same snapshot; put a plain snapshot of that state first (the later
+  snapshots in the run find it).
+
 - 2026-10-15 (#64): a media source doesn't advance while nothing records
   or streams: `snapshot` on an idle engine shows the clip's first frame
   every time. Start a recording before snapshotting media. Snapshots of a

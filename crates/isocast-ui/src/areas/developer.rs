@@ -309,10 +309,12 @@ fn overlay(
                 .flatten()
                 .map(|c| c["wake_lateness_us"]["p99"].as_f64().unwrap_or(0.0))
                 .fold(0.0, f64::max);
+            // Late wakes first and short enough not to elide (#55): the
+            // clocks' p99 wake lateness after.
             rows.push(row(
                 "Pacing",
-                format!("p99 wake {:.2} ms · {late} late", worst / 1000.0),
-                format!("wake {:.2} ms · {late} late", worst / 1000.0),
+                format!("{late} late · p99 {:.2} ms", worst / 1000.0),
+                format!("{late} late · {:.2} ms", worst / 1000.0),
                 late > 0,
             ));
             let queues: Vec<String> = trace["stream_encoders"]

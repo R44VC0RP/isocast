@@ -991,14 +991,28 @@ impl Settings {
             "iso_filtered" => json!({"recording": {"iso": {"filtered": on}}}),
             "reconnect" => json!({"stream": {"reconnect": {"enabled": on}}}),
             "developer" => json!({"developer": {"enabled": on}}),
+            // Back on: the hours it had (a custom `auto_off_hours` too).
             "developer_auto_off" => json!({"developer": {"auto_off_hours": if on {
-                isocast_protocol::developer::DEFAULT_AUTO_OFF_HOURS
+                self.auto_off_hours()
             } else {
                 0
             }}}),
             _ => return,
         };
         self.change(app, patch);
+    }
+
+    /// Developer mode's hours until it turns itself off when the switch is
+    /// on: the draft's, else the applied setting's, else the default (#55).
+    fn auto_off_hours(&self) -> u64 {
+        let guard = self.draft.borrow();
+        let d = guard.as_ref();
+        [d.map(|d| &d.draft), d.map(|d| &d.base)]
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v["developer"]["auto_off_hours"].as_u64())
+            .find(|&hours| hours > 0)
+            .unwrap_or(isocast_protocol::developer::DEFAULT_AUTO_OFF_HOURS.into())
     }
 
     /// The live setup with the draft's ISO settings, for the ISO audio
@@ -1240,7 +1254,11 @@ impl Settings {
     }
 
     fn set_key_busy(&self, app: &Rc<App>, busy: bool) {
+        // Parked meanwhile (Review…): the parked draft's, so its buttons
+        // aren't left disabled on return (#58).
         if let Some(d) = self.draft.borrow_mut().as_mut() {
+            d.key_busy = busy;
+        } else if let Some(d) = self.parked.borrow_mut().as_mut() {
             d.key_busy = busy;
         }
         self.show(app);
@@ -1314,7 +1332,12 @@ impl Settings {
         app.edit_then(patch, EditOptions::default(), move |app, ok| {
             let settings = &app.settings;
             let refusal = app.session.borrow_mut().last_refusal.take();
-            if let Some(d) = settings.draft.borrow_mut().as_mut() {
+            // Parked meanwhile (Review… opened the permissions step): the
+            // parked draft takes the answer, and that step stays open.
+            let parked = settings.draft.borrow().is_none() && settings.parked.borrow().is_some();
+            let mut draft = settings.draft.borrow_mut();
+            let mut parked_draft = settings.parked.borrow_mut();
+            if let Some(d) = draft.as_mut().or(parked_draft.as_mut()) {
                 d.applying = false;
                 if ok {
                     d.base = d.draft.clone();
@@ -1326,12 +1349,16 @@ impl Settings {
                     });
                 }
             }
+            drop((draft, parked_draft));
             if ok {
                 app.refresh_status(true);
-                if close {
-                    settings.close(app);
-                    return;
-                }
+            }
+            if parked {
+                return;
+            }
+            if ok && close {
+                settings.close(app);
+                return;
             }
             settings.show(app);
         });
@@ -1718,6 +1745,14 @@ impl Settings {
         let developer = &draft["developer"];
         area.set_developer_on(developer["enabled"] == json!(true));
         area.set_developer_auto_off(developer["auto_off_hours"] != json!(0));
+        let hours = self.auto_off_hours();
+        area.set_developer_auto_off_label(
+            format!(
+                "Turn Off After {hours} Hour{}",
+                if hours == 1 { "" } else { "s" }
+            )
+            .into(),
+        );
 
         // The summary: what the draft makes, how fast its program file
         // fills the disk (the estimate the engine's free-space check uses,

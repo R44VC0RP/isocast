@@ -373,6 +373,87 @@ pub fn moved(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
     path.strip_prefix(from).ok().map(|rest| to.join(rest))
 }
 
+/// The recordings folders recordings were made in lately (newest last):
+/// the engine's, and standalone `isocast record`'s (#56), kept beside the
+/// setup file. A registry that can't be read falls back to the last good
+/// one (`….bak`), never to an empty list while one is there.
+pub fn remembered_roots() -> Vec<PathBuf> {
+    let path = remembered_path();
+    read_roots(&path)
+        .or_else(|| read_roots(&path.with_extension("json.bak")))
+        .unwrap_or_default()
+}
+
+fn read_roots(path: &Path) -> Option<Vec<PathBuf>> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// Remember `root` as the newest recordings folder (20 are kept). Whether
+/// it is new to the list.
+///
+/// The engine and standalone `isocast record` both do this, so the whole
+/// read, merge and write holds an exclusive lock on `….json.lock` beside
+/// it, and the new list is written to a file of this call's own
+/// (`create_new`) and renamed into place: no torn file, no lost root. A
+/// copy is kept as `….json.bak`; an unreadable registry is moved aside
+/// (`….json.unreadable`) and the list continues from that copy.
+pub fn remember_root(root: &Path) -> std::io::Result<bool> {
+    use std::io::Write;
+    let path = remembered_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("json.lock"))?;
+    lock.lock()?;
+    let current = read_roots(&path);
+    let mut roots = current
+        .clone()
+        .or_else(|| read_roots(&path.with_extension("json.bak")))
+        .unwrap_or_default();
+    let new = !roots.iter().any(|p| p == root);
+    roots.retain(|p| p != root);
+    roots.push(root.to_owned());
+    if roots.len() > 20 {
+        roots.drain(..roots.len() - 20);
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let partial = path.with_extension(format!("json.{}-{nanos}.partial", std::process::id()));
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&partial)?;
+        file.write_all(&serde_json::to_vec(&roots).map_err(std::io::Error::other)?)?;
+        file.sync_all()?;
+        if current.is_none() && path.exists() {
+            // Unreadable (not ours to judge): kept aside, not overwritten.
+            std::fs::rename(&path, path.with_extension("json.unreadable"))?;
+        }
+        std::fs::rename(&partial, &path)?;
+        // The last good list, for a registry later found unreadable.
+        let bak_partial = partial.with_extension("bak.partial");
+        std::fs::copy(&path, &bak_partial)
+            .and_then(|_| std::fs::rename(&bak_partial, path.with_extension("json.bak")))
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&bak_partial);
+            })
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written.map(|()| new)
+}
+
+fn remembered_path() -> PathBuf {
+    crate::api::setup_path().with_extension("recording-folders.json")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

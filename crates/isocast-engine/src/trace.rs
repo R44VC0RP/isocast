@@ -7,9 +7,9 @@
 //! ([`drain`]) into one JSONL record per output, so the trace's volume is
 //! per output per second, not per frame.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 
@@ -34,9 +34,33 @@ fn now() -> Option<Time> {
 }
 
 static OUTPUTS: Mutex<Vec<Weak<OutputTrace>>> = Mutex::new(Vec::new());
-/// Outputs' first frames, in the order the writers started them (the
-/// encoder start order), until the next drain.
-static STARTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+/// First frames of outputs that ended before a drain listed them (their
+/// trace's drop moves them here), until the next drain.
+static STARTS: Mutex<Vec<(u64, Value)>> = Mutex::new(Vec::new());
+/// The order writers started their files in (the encoder start order).
+static NEXT_START: AtomicU64 = AtomicU64::new(0);
+/// The most first frames one drain lists.
+const MAX_STARTS: usize = 64;
+
+/// A file's first frame, as its writer started it.
+struct Start {
+    order: u64,
+    pts_ns: i64,
+    wall: SystemTime,
+    age: Option<Duration>,
+}
+
+impl Start {
+    fn record(&self, trace: &OutputTrace) -> (u64, Value) {
+        let wall = chrono::DateTime::<chrono::Utc>::from(self.wall)
+            .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        (
+            self.order,
+            json!({"source":trace.source,"take":trace.take,"first_pts_ns":self.pts_ns,
+                "wall":wall,"age_us":self.age.map(|a| a.as_micros() as u64)}),
+        )
+    }
+}
 
 /// One recording output's (file's) counters since the last drain.
 pub struct OutputTrace {
@@ -59,6 +83,10 @@ pub struct OutputTrace {
     submit_max: AtomicU64,
     /// Frames waiting inside the writer for the encoder, most seen.
     queue_max: AtomicU64,
+    /// The first frame, set once by the writer (no lock, no allocation),
+    /// and whether a drain has listed it.
+    start: OnceLock<Start>,
+    start_listed: AtomicBool,
 }
 
 impl OutputTrace {
@@ -76,6 +104,8 @@ impl OutputTrace {
             submit_sum: AtomicU64::new(0),
             submit_max: AtomicU64::new(0),
             queue_max: AtomicU64::new(0),
+            start: OnceLock::new(),
+            start_listed: AtomicBool::new(false),
         });
         let mut outputs = OUTPUTS.lock().unwrap_or_else(|p| p.into_inner());
         outputs.retain(|o| o.strong_count() > 0);
@@ -121,15 +151,21 @@ impl OutputTrace {
     }
 
     /// The writer started the file with its first frame, stamped `pts`.
+    /// Lock-free and allocation-free on the writer's thread (#55): the
+    /// record is built when [`drain`] lists it.
     pub(crate) fn started(&self, pts: Time) {
-        let mut starts = STARTS.lock().unwrap_or_else(|p| p.into_inner());
-        if starts.len() < 64 {
-            starts.push(
-                json!({"source":self.source,"take":self.take,"first_pts_ns":pts.as_nanos(),
-                "wall":chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
-                "age_us":Self::age(pts).map(|a| a.as_micros() as u64)}),
-            );
-        }
+        let _ = self.start.set(Start {
+            order: NEXT_START.fetch_add(1, Ordering::Relaxed),
+            pts_ns: pts.as_nanos(),
+            wall: SystemTime::now(),
+            age: Self::age(pts),
+        });
+    }
+
+    /// The first frame's record, once, if the writer has started.
+    fn take_start(&self) -> Option<(u64, Value)> {
+        let start = self.start.get()?;
+        (!self.start_listed.swap(true, Ordering::Relaxed)).then(|| start.record(self))
     }
 
     fn take(&self) -> Value {
@@ -155,6 +191,25 @@ pub fn drain() -> (Vec<Value>, Vec<Value>) {
         outputs.iter().filter_map(Weak::upgrade).collect()
     };
     let records = outputs.iter().map(|o| o.take()).collect();
-    let starts = std::mem::take(&mut *STARTS.lock().unwrap_or_else(|p| p.into_inner()));
-    (records, starts)
+    let mut starts = std::mem::take(&mut *STARTS.lock().unwrap_or_else(|p| p.into_inner()));
+    starts.extend(outputs.iter().filter_map(|o| o.take_start()));
+    starts.sort_by_key(|(order, _)| *order);
+    starts.truncate(MAX_STARTS);
+    (
+        records,
+        starts.into_iter().map(|(_, start)| start).collect(),
+    )
+}
+
+impl Drop for OutputTrace {
+    /// A file that ended before a drain listed its start: keep the start
+    /// for the next drain (at the file's end, off its frame path).
+    fn drop(&mut self) {
+        if let Some(start) = self.take_start() {
+            let mut starts = STARTS.lock().unwrap_or_else(|p| p.into_inner());
+            if starts.len() < MAX_STARTS {
+                starts.push(start);
+            }
+        }
+    }
 }

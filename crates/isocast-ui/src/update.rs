@@ -595,10 +595,12 @@ mod mac {
                             app.refresh_status(true);
                         }
                     }
-                    // Busy again: try once it is idle.
+                    // Busy again (or with what the status doesn't show,
+                    // as a `tune` benchmark): try again in a while.
                     Stopped::Busy(_) => {
                         QUIET_UNTIL.set(None);
                         RESTARTED.set(None);
+                        RESTART_PAUSE.set(Some(Instant::now() + Duration::from_secs(15)));
                     }
                     Stopped::Failed(why) => {
                         QUIET_UNTIL.set(None);
@@ -692,6 +694,9 @@ mod mac {
             Stopped::Busy(what) => {
                 QUIET_UNTIL.set(None);
                 daemon::NO_LAUNCH.store(false, Ordering::SeqCst);
+                // The status may not show what refused (a `tune`
+                // benchmark): ask again in a while, not every second.
+                RETRY_AT.set(Some(Instant::now() + Duration::from_secs(15)));
                 isocast_diagnostics::diagnostic!("info"; "updates: not installing yet: {what}");
             }
             Stopped::Failed(why) => {

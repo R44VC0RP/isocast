@@ -581,6 +581,20 @@ fn connect(server: &ServerUrl, until: Until) -> Result<TcpStream> {
         if until.stop.load(Ordering::SeqCst) {
             bail!("the stream was stopped while connecting");
         }
+        // The connect itself can outlast its deadline (macOS holds it while
+        // its Local Network prompt waits for an answer, #65; a lookup has
+        // no deadline of its own): give up on it here, as for a stop.
+        if Instant::now() >= deadline + CONNECT_GRACE {
+            let hint = if maybe_local(&server.host) {
+                LOCAL_NETWORK_HINT
+            } else {
+                ""
+            };
+            bail!(
+                "could not connect to {} port {port} in time{hint}",
+                server.host
+            );
+        }
         match rx.recv_timeout(READ_SLICE) {
             Ok(result) => return result,
             Err(RecvTimeoutError::Timeout) => {}
@@ -606,7 +620,7 @@ fn connect_now(host: &str, port: u16, deadline: Instant) -> Result<TcpStream> {
         })?
         .collect();
     let addresses = alternate_families(found);
-    let mut last: Option<(SocketAddr, io::Error)> = None;
+    let mut failures: Vec<(SocketAddr, io::Error)> = Vec::new();
     for (i, address) in addresses.iter().enumerate() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -621,7 +635,7 @@ fn connect_now(host: &str, port: u16, deadline: Instant) -> Result<TcpStream> {
         };
         match TcpStream::connect_timeout(address, wait) {
             Ok(stream) => return Ok(stream),
-            Err(err) => last = Some((*address, err)),
+            Err(err) => failures.push((*address, err)),
         }
     }
     let tried = addresses
@@ -629,20 +643,37 @@ fn connect_now(host: &str, port: u16, deadline: Instant) -> Result<TcpStream> {
         .map(|a| a.ip().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    Err(match last {
-        Some((address, err)) => {
-            // macOS's Local Network privacy refuses a private address with
-            // EHOSTUNREACH, without a prompt if the app can't ask.
-            let hint = if blocked_locally(&address, &err) {
-                LOCAL_NETWORK_HINT
-            } else {
-                ""
-            };
-            anyhow!("could not connect to {host} port {port} (tried {tried}): {err}{hint}")
+    // macOS's Local Network privacy refuses a local address with
+    // EHOSTUNREACH, without a prompt if the app can't ask: whichever
+    // address it was, not just the last one tried (#65).
+    let hint = if failures.iter().any(|(a, err)| blocked_locally(a, err)) {
+        LOCAL_NETWORK_HINT
+    } else {
+        ""
+    };
+    Err(match failures.as_slice() {
+        [] => anyhow!("could not connect to {host} port {port} in time{hint}"),
+        [.., (_, last)]
+            if failures
+                .iter()
+                .all(|(_, err)| err.to_string() == last.to_string()) =>
+        {
+            anyhow!("could not connect to {host} port {port} (tried {tried}): {last}{hint}")
         }
-        None => anyhow!("could not connect to {host} port {port} in time"),
+        // Different failures: each address's.
+        _ => {
+            let each = failures
+                .iter()
+                .map(|(a, err)| format!("{}: {err}", a.ip()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow!("could not connect to {host} port {port} ({each}){hint}")
+        }
     })
 }
+
+/// How long past its deadline a connect's answer is still waited for.
+const CONNECT_GRACE: Duration = Duration::from_secs(1);
 
 /// The longest one address may take to connect while others remain.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -688,11 +719,72 @@ fn blocked_locally(address: &SocketAddr, err: &io::Error) -> bool {
         err.kind(),
         io::ErrorKind::HostUnreachable | io::ErrorKind::NetworkUnreachable
     );
-    let local = match address.ip() {
+    unreachable && is_local(address.ip())
+}
+
+/// A private, link-local or unique-local address, or (IPv6) one on the
+/// same link as this Mac by its interfaces' prefixes: global IPv6 LAN
+/// addresses are local networks too (#65).
+fn is_local(ip: IpAddr) -> bool {
+    match ip {
         IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
-        IpAddr::V6(ip) => ip.is_unicast_link_local() || ip.is_unique_local(),
-    };
-    unreachable && local
+        IpAddr::V6(ip) => ip.is_unicast_link_local() || ip.is_unique_local() || on_link(ip),
+    }
+}
+
+/// `host` (as given) may be on the local network: a `.local` name or a
+/// local address.
+fn maybe_local(host: &str) -> bool {
+    host.ends_with(".local")
+        || host.ends_with(".local.")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse()
+            .is_ok_and(is_local)
+}
+
+/// Whether `ip` is inside the prefix of one of this Mac's IPv6 interface
+/// addresses (its own subnet).
+#[cfg(unix)]
+fn on_link(ip: std::net::Ipv6Addr) -> bool {
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills `list`, freed below; each entry's addr and
+    // netmask, when set, point at sockaddrs of the entry's family.
+    unsafe {
+        if libc::getifaddrs(&mut list) != 0 {
+            return false;
+        }
+        let mut found = false;
+        let mut entry = list;
+        while !entry.is_null() && !found {
+            let e = &*entry;
+            if !e.ifa_addr.is_null()
+                && !e.ifa_netmask.is_null()
+                && i32::from((*e.ifa_addr).sa_family) == libc::AF_INET6
+            {
+                let addr = (*e.ifa_addr.cast::<libc::sockaddr_in6>()).sin6_addr.s6_addr;
+                let mask = (*e.ifa_netmask.cast::<libc::sockaddr_in6>())
+                    .sin6_addr
+                    .s6_addr;
+                found = same_prefix(&ip.octets(), &addr, &mask);
+            }
+            entry = e.ifa_next;
+        }
+        libc::freeifaddrs(list);
+        found
+    }
+}
+
+#[cfg(not(unix))]
+fn on_link(_ip: std::net::Ipv6Addr) -> bool {
+    false
+}
+
+/// `a` and `b` agree on the bits `mask` sets (a mask of all zeros, as a
+/// default route's, matches nothing).
+fn same_prefix(a: &[u8; 16], b: &[u8; 16], mask: &[u8; 16]) -> bool {
+    mask.iter().any(|&m| m != 0) && (0..16).all(|i| a[i] & mask[i] == b[i] & mask[i])
 }
 
 /// The info object of a `_result`, `_error` or `onStatus`: the first
@@ -940,6 +1032,25 @@ mod tests {
         assert!(!blocked_locally(&a("8.8.8.8:1935"), &unreachable));
         let refused = io::Error::from(io::ErrorKind::ConnectionRefused);
         assert!(!blocked_locally(&a("10.0.10.165:1935"), &refused));
+        let v6 = |s: &str| s.parse::<std::net::Ipv6Addr>().unwrap().octets();
+        let slash64 = v6("ffff:ffff:ffff:ffff::");
+        assert!(same_prefix(
+            &v6("2001:db8:1:2::5"),
+            &v6("2001:db8:1:2::9"),
+            &slash64
+        ));
+        assert!(!same_prefix(
+            &v6("2001:db8:1:3::5"),
+            &v6("2001:db8:1:2::9"),
+            &slash64
+        ));
+        assert!(!same_prefix(
+            &v6("2001:db8:1:3::5"),
+            &v6("2001:db8:1:2::9"),
+            &[0; 16]
+        ));
+        assert!(maybe_local("studio.local") && maybe_local("[fd00::2]") && maybe_local("10.0.0.5"));
+        assert!(!maybe_local("live.twitch.tv") && !maybe_local("8.8.8.8"));
     }
 
     #[test]

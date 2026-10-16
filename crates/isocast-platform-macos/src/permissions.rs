@@ -325,10 +325,12 @@ fn wait_status(pid: libc::pid_t, limit: Duration) -> Option<u8> {
 
 /// Each permission with its next step, as this process sees them now,
 /// and which grants wait for a restart (a fresh process is asked only
-/// when something isn't granted here, and only from an app bundle: a bare
-/// isocastd's grants are the terminal's that started it, while the
-/// disclaimed child is checked as itself, so their answers differ for
-/// good and a restart wouldn't help).
+/// when something isn't granted here, and only from an app bundle). A
+/// bare isocastd started from a terminal has the terminal's grants while
+/// the disclaimed child is checked as itself, so their answers can differ
+/// for good and a restart wouldn't help; one the CLI launched is disclaimed
+/// itself, so the check would work there, but a process can't tell which
+/// it is, so bare engines skip it.
 pub(crate) fn live_report(permissions: Permissions) -> PermissionsReport {
     // Only a decided permission can be turned on in System Settings
     // meanwhile; one never asked for (often system audio) can't be.

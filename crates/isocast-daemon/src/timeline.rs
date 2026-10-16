@@ -403,8 +403,14 @@ impl Timelines {
     /// A recording project's folder moved from `from` to `to`: every
     /// timeline naming takes inside it names them there. All or nothing:
     /// if one can't be written, those already written are put back.
-    /// Returns the timelines changed.
-    pub fn move_folder(&mut self, from: &Path, to: &Path) -> Result<Vec<String>, RpcError> {
+    /// Clips moved without a project id get `project` (#56). Returns the
+    /// timelines changed.
+    pub fn move_folder(
+        &mut self,
+        from: &Path,
+        to: &Path,
+        project: Option<&str>,
+    ) -> Result<Vec<String>, RpcError> {
         let fix = |path: &mut PathBuf| match isocast_protocol::project::moved(path, from, to) {
             Some(new) => {
                 *path = new;
@@ -417,7 +423,12 @@ impl Timelines {
             let mut moved = timeline.clone();
             let mut any = false;
             for clip in &mut moved.clips {
-                any |= fix(&mut clip.take);
+                if fix(&mut clip.take) {
+                    any = true;
+                    if clip.project.is_none() {
+                        clip.project = project.map(str::to_string);
+                    }
+                }
             }
             for removed in &mut moved.removed {
                 any |= fix(&mut removed.take);
@@ -803,34 +814,42 @@ impl Daemon {
             .iter()
             .flat_map(|root| isocast_protocol::project::scan(root))
             .collect();
-        let mut moves: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut moves: Vec<(PathBuf, PathBuf, String)> = Vec::new();
         for (take, project) in missing {
             let (Some(old), Some(name)) = (take.parent(), take.file_name()) else {
                 continue;
             };
-            if moves.iter().any(|(from, _)| from == old) {
+            if moves.iter().any(|(from, _, _)| from == old) {
                 continue;
             }
             let by_id = project.and_then(|id| projects.iter().find(|(_, file)| file.id == id));
             let found = match by_id {
-                Some((folder, _)) => Some(folder.clone()),
+                Some((folder, file)) => Some((folder.clone(), file.id.clone())),
                 None => {
                     let holding: Vec<_> = projects
                         .iter()
                         .filter(|(folder, _)| folder.join(name).is_file())
                         .collect();
                     match holding.as_slice() {
-                        [(folder, _)] => Some(folder.clone()),
+                        [(folder, file)] => Some((folder.clone(), file.id.clone())),
                         _ => None,
                     }
                 }
             };
-            if let Some(new) = found.filter(|new| new.join(name).is_file()) {
-                moves.push((old.to_path_buf(), new));
+            if let Some((new, id)) = found.filter(|(new, _)| new.join(name).is_file()) {
+                moves.push((old.to_path_buf(), new, id));
             }
         }
-        for (from, to) in moves {
-            if let Err(err) = self.timelines.lock().unwrap().move_folder(&from, &to) {
+        for (from, to, id) in moves {
+            let moved = self
+                .timelines
+                .lock()
+                .unwrap()
+                .move_folder(&from, &to, Some(&id));
+            for message in crate::projects::heal_exports(&to) {
+                self.publish(Event::Warning { message });
+            }
+            if let Err(err) = moved {
                 self.publish(Event::Warning {
                     message: format!(
                         "timelines name takes in {}, which moved to {}, but couldn't be \

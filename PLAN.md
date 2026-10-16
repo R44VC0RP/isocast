@@ -1351,6 +1351,12 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
     restart for a bare isocastd; dead first-run plumbing gone; a disabled
     primary footer button looks disabled; Review… keeps Settings' edits;
     dev builds say "Isocast".
+  - [x] **8.2k Follow-up sweep for 0.0.7 (GitHub #45, #55, #58, #65).**
+    Restart and the updater refuse during `tune`; developer traces record
+    a file's start without a lock; bug reports bring more than a tiny
+    newest developer segment; the Pacing row and the auto-off switch;
+    Settings isn't left disabled by an Apply behind Review…; the stream
+    connect's Local Network hint and deadline.
 - [x] **8.3** Docs: getting started, setup reference, MCP tools, plugins.
   (With the user-facing README and its screenshots, licences and
   THIRD_PARTY_NOTICES, and the .github templates.)
@@ -3790,3 +3796,19 @@ One line per finished task, newest last.
   old running isocastd was detected (#49) and replaced; recording (ffprobe
   5 s/8 s takes, 0 drops), the virtual camera (149/149 distinct frames) and
   `isocast permissions` (incl. the fresh-process restart check) work.
+- #56 (2026-10-16): plugin follow-ups: the hard-link check warns instead of
+  refusing on volumes without hard links; clips healed by name get their
+  project id; export manifests heal after a Finder rename; plugin sandboxes
+  restart with new recordings folders and not-a-project folders; standalone
+  `isocast record` projects are listed. Verified: e2e projects and
+  plugin_files pass on head and fail on main (export heal, id backfill,
+  write probe restart); standalone record listed (head 1, main 0); exFAT
+  and FAT (LINK_MAX 1) takes record in both writers; an APFS hard link
+  still stops repair.
+- 8.2k / #45 #55 #58 #65 (2026-10-16): restart refused in 0.06 s during
+  `tune` (was: waited for it), tune unharmed; encoder_start_order intact
+  across a split with the lock-free start; a report holds both developer
+  segments after a toggle (23.9 kB + 392 B); offscreen snapshots for the
+  Pacing row, the 6-hour auto-off and Settings after Review… (before: OK
+  and Apply disabled); rtmp unit test extended; gates clean on
+  isocast-m2-b.

@@ -2006,6 +2006,17 @@ fn record(
     };
     let (project, _, created) = isocast_engine::project::begin(&root)
         .with_context(|| format!("could not make a project folder in {}", root.display()))?;
+    // The engine lists, recovers and opens to plugins the recordings
+    // folders it remembers: this one too (#56).
+    let absolute = std::path::absolute(&project).unwrap_or_else(|_| project.clone());
+    let remembered = absolute.parent().unwrap_or(&absolute);
+    if let Err(err) = isocast_protocol::project::remember_root(remembered) {
+        isocast_diagnostics::diagnostic!("warn";
+            "warning: could not add {} to the recordings folders isocastd lists ({err}); \
+             its projects show in list_projects while it is the setup's recording.folder",
+            remembered.display()
+        );
+    }
     let options = RecordOptions {
         folder: Some(project.clone()),
         duration,

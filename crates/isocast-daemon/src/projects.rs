@@ -114,6 +114,11 @@ impl Daemon {
         found.sort_by(|a, b| (&b.1.created_at, &b.0).cmp(&(&a.1.created_at, &a.0)));
         found.dedup_by(|a, b| a.0 == b.0);
         found.truncate(params.limit.unwrap_or(DEFAULT_LIMIT) as usize);
+        for (folder, _) in &found {
+            for message in heal_exports(folder) {
+                self.publish(Event::Warning { message });
+            }
+        }
         Projects {
             projects: found
                 .iter()
@@ -224,7 +229,11 @@ impl Daemon {
             )));
         };
         // Timelines name their takes' manifests: move them too, or undo.
-        let moved = self.timelines.lock().unwrap().move_folder(&folder, &target);
+        let moved = self
+            .timelines
+            .lock()
+            .unwrap()
+            .move_folder(&folder, &target, Some(&file.id));
         if let Err(err) = moved {
             let undone = rename_exclusive(&target, &folder);
             return Err(failed(format!(
@@ -286,39 +295,86 @@ fn same_folder(a: &Path, b: &Path) -> bool {
 /// path: point those inside it at the new folder. Returns notes for any
 /// that couldn't be updated.
 fn rewrite_exports(folder: &Path, old: &Path) -> Vec<String> {
+    export_manifests(folder)
+        .filter_map(|(path, json)| rewrite_export(&path, json, old, folder))
+        .collect()
+}
+
+/// Export manifests in `folder` that name the folder they were written in
+/// by a path that's gone (the folder was renamed in the Finder, so
+/// `rename_project` never rewrote them): point them at `folder` (#56).
+/// Returns notes for any that couldn't be updated.
+pub(crate) fn heal_exports(folder: &Path) -> Vec<String> {
     let mut notes = Vec::new();
-    for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
-        let path = entry.path();
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .ends_with(".export.json")
-        {
+    for (path, json) in export_manifests(folder) {
+        // Still being written by the export that made it: leave it.
+        if json.get("status").and_then(|s| s.as_str()) == Some("exporting") {
             continue;
         }
-        let Ok(mut json) = std::fs::read(&path)
-            .map_err(|_| ())
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).map_err(|_| ()))
+        // Its own files are written beside it: their folder is where it was.
+        let Some(file) = json
+            .pointer("/files/0/path")
+            .and_then(|p| p.as_str())
+            .map(PathBuf::from)
         else {
             continue;
         };
-        if !move_paths(&mut json, old, folder) {
+        let (Some(old), Some(name)) = (file.parent(), file.file_name()) else {
+            continue;
+        };
+        if same_folder(old, folder)
+            || old.symlink_metadata().is_ok()
+            || folder.join(name).symlink_metadata().is_err()
+        {
             continue;
         }
-        let partial = path.with_extension("json.partial");
-        let written = serde_json::to_vec_pretty(&json)
-            .map_err(std::io::Error::other)
-            .and_then(|bytes| std::fs::write(&partial, bytes))
-            .and_then(|()| std::fs::rename(&partial, &path));
-        if let Err(err) = written {
-            let _ = std::fs::remove_file(&partial);
-            notes.push(format!(
-                "the export manifest {} still names files in the old folder: {err}",
-                path.display()
-            ));
-        }
+        let old = old.to_path_buf();
+        notes.extend(rewrite_export(&path, json, &old, folder));
     }
     notes
+}
+
+/// The export manifests (`*.export.json`) in `folder` that can be read.
+fn export_manifests(folder: &Path) -> impl Iterator<Item = (PathBuf, serde_json::Value)> {
+    std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".export.json")
+        })
+        .filter_map(|entry| {
+            let path = entry.path();
+            let json = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+            Some((path, json))
+        })
+}
+
+/// Rewrite the export manifest at `path` (`json`) with its paths inside
+/// `old` moved to `new`, if any are; a note if it couldn't be written.
+fn rewrite_export(
+    path: &Path,
+    mut json: serde_json::Value,
+    old: &Path,
+    new: &Path,
+) -> Option<String> {
+    if !move_paths(&mut json, old, new) {
+        return None;
+    }
+    let partial = path.with_extension("json.partial");
+    let written = serde_json::to_vec_pretty(&json)
+        .map_err(std::io::Error::other)
+        .and_then(|bytes| std::fs::write(&partial, bytes))
+        .and_then(|()| std::fs::rename(&partial, path));
+    let err = written.err()?;
+    let _ = std::fs::remove_file(&partial);
+    Some(format!(
+        "the export manifest {} still names files in the old folder: {err}",
+        path.display()
+    ))
 }
 
 /// Rewrite every string in `json` that is a path inside `from` to the

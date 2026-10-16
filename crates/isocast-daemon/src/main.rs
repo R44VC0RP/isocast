@@ -1234,7 +1234,7 @@ impl Daemon {
             self.shutting_down.store(false, Ordering::SeqCst);
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
-                message: format!("isocastd is {busy}, so it keeps running"),
+                message: format!("isocastd keeps running while {busy}"),
             });
         }
         Ok(())
@@ -1289,7 +1289,6 @@ impl Daemon {
                 | Method::VirtualCameraStart
                 | Method::ReplayStart
                 | Method::Resume
-                | Method::Tune(_)
                 | Method::Optimize(_)
         )
         .then(|| self.starting.read().unwrap_or_else(|e| e.into_inner()));
@@ -1516,6 +1515,8 @@ impl Daemon {
     fn publish(&self, event: Event) {
         if matches!(event, Event::SetupChanged { .. }) {
             self.refresh_hotkeys();
+            // `recording.folder` may name a new recordings folder.
+            self.plugins.refresh_sandboxes();
             debug::sync(self, "setup changed");
         }
         diagnostics::event(&event);
@@ -1908,6 +1909,16 @@ impl Daemon {
         };
         // Kept beside the setup file, for `start` to check against.
         let memory = capacity::memory_path(state.file.legacy());
+        // Not under the `starting` gate (a benchmark takes minutes, and a
+        // restart would wait for it rather than be refused, #45): checked
+        // under the state lock instead, which `shutdown_if_idle` takes
+        // after setting `shutting_down`, so one of the two sees the other.
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: "the daemon is shutting down; tune once it has restarted".into(),
+            });
+        }
         state.tuning = true;
         drop(state);
         // Recording stays blocked until `tuning` clears, so clear it even if
@@ -2780,6 +2791,11 @@ impl Daemon {
                 return Err(err);
             }
         };
+        // A plugin's sandbox lists the recordings folders as they were when
+        // it started: one used for the first time (made just now, maybe),
+        // or a folder named like a project made since, restarts it with
+        // them (#56).
+        self.plugins.refresh_sandboxes();
         // A folder made for a recording that wrote nothing goes again.
         let discard = |project: &projects::ProjectRef| {
             if project.created {

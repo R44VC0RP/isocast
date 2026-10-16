@@ -1216,12 +1216,29 @@ def scenario_projects(e, cfg, evidence):
                    and all(f["exists"] for f in c["files"]) for c in clips)
     finder = new.with_name(new.name.replace("My Talk", "Finder Name"))
     new.rename(finder)
+    # Export manifests are healed too, by list_projects alone (#56).
+    e.rpc("list_projects")
+    export = read_json(finder / Path(exported["manifest"]).name)
+    require(all(Path(f["path"]).parent == finder and all(Path(p["path"]).is_file() for p in f["parts"])
+                for f in export["files"]) and all(Path(c["take"]).is_file() for c in export["clips"]),
+            f"export manifest not healed after a Finder rename: {export['files']}")
     require(resolves(finder), "timeline broke after a Finder rename")
     e.stop()
     killed = finder.with_name(finder.name.replace("Finder Name", "Killed Rename"))
     finder.rename(killed)
+    # Clips from before project ids: healed by file name, and given the
+    # id (#56).
+    timelines = [t for t in (e.root / "timelines").glob("*.json") if "clips" in read_json(t)]
+    for path in timelines:
+        saved = read_json(path)
+        for clip in saved["clips"]:
+            clip.pop("project", None)
+        write_json(path, saved)
     e.start()
     require(resolves(killed), "timeline broke after a rename with no timeline update")
+    for path in timelines:
+        require(all(c.get("project") == project for c in read_json(path)["clips"]),
+                f"a clip healed by file name has no project id: {path}")
     e.stop()
     e.start()
     require(resolves(killed), "timeline did not stay healed across a restart")
@@ -1252,7 +1269,11 @@ def attempt(fn):
         fn(); return "ok"
     except OSError as err:
         return f"denied: {err.strerror}"
-project = call("list_projects")["result"]["projects"][0]
+for _ in range(200):
+    project = call("list_projects")["result"]["projects"][0]
+    if project["files"]:
+        break
+    time.sleep(0.05)
 media = project["files"][0]
 mine = os.path.join(project["folder"], os.environ["ISOCAST_PLUGIN_ID"] + "-note.txt")
 results = {
@@ -1272,6 +1293,9 @@ results = {
     "create_manifest": attempt(lambda: open(os.path.join(project["folder"], "fake.session.json"), "x").write("{}")),
     "create_in_root": attempt(lambda: open(os.path.join(os.path.dirname(project["folder"]), "x.txt"), "x").write("x")),
     "rewrite_own_file": attempt(lambda: open(mine, "a").write("more\n")),
+    "create_in_fake_project": attempt(lambda: open(os.path.join(os.path.dirname(project["folder"]),
+                                                               "2026-01-01 00-00-00 Fake", "x.txt"), "x").write("x")),
+    "folder": project["folder"],
 }
 with open(os.path.join(data, "results.json"), "w") as out:
     json.dump(results, out)
@@ -1361,6 +1385,44 @@ def scenario_plugin_files(e, cfg, evidence):
     for link in project.iterdir():
         if link.is_symlink():
             link.unlink()
+    # Sandboxes follow the recordings folders live (#56): a folder named
+    # like a project made since the plugins started restarts the write
+    # grant's process (only), and its new sandbox keeps it out.
+    out = {g: e.root / "plugins" / f"probe-{g}" / "data" / "results.json"
+           for g in ("none", "read", "write")}
+    fake = e.root / "recordings" / "2026-01-01 00-00-00 Fake"
+    fake.mkdir()
+    for f in out.values():
+        f.unlink()
+    started = e.rpc("start", {"seconds": 2})
+    until(lambda: out["write"].exists() and out["write"].read_text(), 30, "write probe restarted")
+    time.sleep(0.2)
+    rerun = read_json(out["write"])
+    require(rerun["create_in_fake_project"] == "denied: Operation not permitted",
+            f"a folder named like a project made after the plugin started is writable: {rerun}")
+    require(rerun["create_file"] == "ok", f"write grant lost its project after a restart: {rerun}")
+    until(lambda: finished(Path(started["manifest"])), 40, "take after fake folder")
+    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
+    require(not out["none"].exists() and not out["read"].exists(),
+            "plugins without a write grant were restarted for a folder named like a project")
+    # A recordings folder used for the first time: every sandboxed plugin
+    # starts again with it in its rules.
+    second_root = e.root / "recordings2"
+    started = e.rpc("start", {"seconds": 2, "folder": str(second_root)})
+    for g in out:
+        until(lambda: out[g].exists() and out[g].read_text(), 30, f"{g} probe restarted")
+    time.sleep(0.2)
+    reruns = {g: read_json(f) for g, f in out.items()}
+    evidence["live_rules"] = reruns
+    require(all(Path(r["folder"]).parent == second_root for r in reruns.values()),
+            f"probes did not see the new recordings folder's project: {reruns}")
+    require(reruns["read"]["read_media"] == "ok" and reruns["write"]["read_media"] == "ok"
+            and reruns["write"]["create_file"] == "ok",
+            f"a grant can't use a recordings folder first used after it started: {reruns}")
+    require(reruns["none"]["read_media"].startswith("denied"),
+            f"no grant could read a new recordings folder: {reruns['none']}")
+    until(lambda: finished(Path(started["manifest"])), 40, "take in the new recordings folder")
+    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
 
 
 def scenario_pause(e, cfg, evidence):

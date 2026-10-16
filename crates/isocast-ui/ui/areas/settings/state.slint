@@ -318,6 +318,8 @@ export global SettingsArea {
     // Developer mode (the profile's `developer`).
     in-out property <bool> developer-on;
     in-out property <bool> developer-auto-off;
+    // "Turn Off After 24 Hours", or the profile's own hours.
+    in-out property <string> developer-auto-off-label: "Turn Off After 24 Hours";
 
     // ---- Welcome (no setup yet) and the failed state
     // Which choice is working ("obs", "file"; "" for none).

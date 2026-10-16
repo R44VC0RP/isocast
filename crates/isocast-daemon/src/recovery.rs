@@ -113,25 +113,18 @@ impl Daemon {
     /// The recordings folders recordings were made in lately (newest
     /// last), as `remember_recording_folder` keeps them.
     pub(crate) fn remembered_recording_folders(&self) -> Vec<PathBuf> {
-        let path = isocast_protocol::api::setup_path().with_extension("recording-folders.json");
-        std::fs::read(path)
-            .ok()
-            .and_then(|s| serde_json::from_slice::<Vec<PathBuf>>(&s).ok())
-            .unwrap_or_default()
+        isocast_protocol::project::remembered_roots()
     }
 
+    /// Remember a recordings folder (a failure is logged: the folder's
+    /// projects are then listed only while it is the setup's).
     pub(crate) fn remember_recording_folder(&self, folder: &std::path::Path) {
-        let path = isocast_protocol::api::setup_path().with_extension("recording-folders.json");
-        let mut folders = std::fs::read(&path)
-            .ok()
-            .and_then(|s| serde_json::from_slice::<Vec<PathBuf>>(&s).ok())
-            .unwrap_or_default();
-        folders.retain(|p| p != folder);
-        folders.push(folder.to_owned());
-        if folders.len() > 20 {
-            folders.drain(..folders.len() - 20);
+        if let Err(err) = isocast_protocol::project::remember_root(folder) {
+            isocast_diagnostics::diagnostic!("warn";
+                "isocastd: could not remember the recordings folder {}: {err}",
+                folder.display()
+            );
         }
-        let _ = std::fs::write(path, serde_json::to_vec(&folders).unwrap_or_default());
     }
 
     pub(crate) fn recover_recordings(&self) {
