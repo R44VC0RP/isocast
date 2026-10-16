@@ -173,6 +173,7 @@ impl Client {
         if line.is_empty() {
             bail!("isocastd closed the connection");
         }
+        isocast_diagnostics::daemon_answered();
         let response: Response = serde_json::from_str(&line)
             .with_context(|| format!("isocastd sent an unreadable response: {line}"))?;
         if let Some(error) = response.error {

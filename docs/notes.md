@@ -1674,6 +1674,17 @@ each section. Delete entries that stop being true.
   targeted stream/replay pass); do not claim an established baseline cause.
   Evidence: `/Volumes/IsocastBuild/parked-tap/scratch/REPORT.md`.
 
+- 2026-10-16 (#4): console processes (CLI, app, UI) write their clean-exit
+  mark with a plain `fsync`, not `sync_all` (F_FULLFSYNC), and prune their
+  logs folder on the maintenance thread instead of before the command;
+  `clean_exit` waits for that prune (5 s cap) unless isocastd answered the
+  process (`isocast_diagnostics::daemon_answered`, called by the client),
+  since the daemon prunes the same folder every 30 s. The daemon keeps
+  F_FULLFSYNC and its synchronous start-up prune. Why: the scene-switch
+  "API round trip" QA timed is `isocast scene X --cut` wall time, and the
+  daemon's part is 0.02-0.05 ms; the A.6 diagnostics added 5-6 ms of disk
+  syncing and scanning to every CLI run. Left: the CLI starts ~0.9 ms slower
+  than at QA-2 without any logging (a larger binary and command tree).
 - 2026-10-16 (#76): crash-safe files carry the take's start as creation
   and modification time in `mvhd`, `tkhd` and `mdhd` (QuickTime epoch,
   whole seconds; version 1 headers only when a time or duration passes
@@ -5230,6 +5241,12 @@ each section. Delete entries that stop being true.
   hw-batch job's work folder is ~90 bytes deep, so stress.py runs each
   engine through a short `/tmp/isocast-stress-<pid>` link when needed.
 
+- 2026-10-16 (#4): Rust's `File::sync_all`/`sync_data` on macOS is
+  F_FULLFSYNC: 3.6 ms on Ryan's internal disk, ~14 ms on
+  /Volumes/IsocastBuild, per call. Keep it off anything a person or a
+  script waits on (a CLI command, a reply); `libc::fsync` is ~0.1 ms.
+  To time a CLI command, run several builds interleaved against one
+  isolated daemon: single runs vary by ~0.5 ms.
 - 2026-10-15 (#64): a media source doesn't advance while nothing records
   or streams: `snapshot` on an idle engine shows the clip's first frame
   every time. Start a recording before snapshotting media. Snapshots of a

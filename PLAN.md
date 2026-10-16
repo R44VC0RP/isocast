@@ -3762,3 +3762,10 @@ One line per finished task, newest last.
   from AVFoundation. The approval alert names the executable and the
   extension runs as _cmiodalassistants, so neither the rename nor a nonce
   check is possible (docs/virtual-camera.md).
+- #4 (2026-10-16): `isocast scene X --cut` back to ~8.8 ms from 13.4 ms
+  (QA-2 build 7.7 ms) on Ryan's Mac: the CLI's diagnostics no longer
+  F_FULLFSYNC their run marker or prune before the command. isocastd's own
+  switch is 0.02-0.05 ms and unchanged; program latency of a cut unchanged
+  (under one frame); obs-websocket SetCurrentProgramScene 0.31 ms both.
+  Verified by interleaved A/B against one isolated engine (80 runs each)
+  and idle/recording/streaming runs; m2-b A/B queued (hw-batch).
