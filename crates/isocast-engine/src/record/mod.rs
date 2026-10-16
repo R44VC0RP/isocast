@@ -283,6 +283,9 @@ pub struct SplitTake {
     /// answered: frames and audio before then go to the take before.
     pub begins_at: DateTime<Local>,
     pub begins_in: Duration,
+    /// Things to know about its files, like one whose source has
+    /// delivered no frames (it is written only once one arrives).
+    pub notes: Vec<String>,
 }
 
 /// Why a split didn't happen.
@@ -346,9 +349,7 @@ impl SessionControl {
         if state.finished || state.end.is_some_and(|end| now >= end) {
             return Err("recording: stopping or idle; valid action: start".into());
         }
-        if state.splitting
-            || (state.takes.len() > 1 && state.takes.last().is_some_and(|at| *at > now))
-        {
+        if Self::busy(&state, now) {
             return Err(
                 "recording: a take is starting or the previous take is finishing; retry \
                  pause/resume after the handover"
@@ -379,6 +380,15 @@ impl SessionControl {
             ));
         }
         Ok(state.saved_pause_generation >= generation)
+    }
+
+    /// A split's handover is under way (see `LiveStatus::handover`).
+    pub fn handover(&self, now: Time) -> bool {
+        Self::busy(&self.state.lock(), now)
+    }
+
+    fn busy(state: &ControlState, now: Time) -> bool {
+        state.splitting || (state.takes.len() > 1 && state.takes.last().is_some_and(|at| *at > now))
     }
 
     pub fn pause_status(&self, now: Time) -> Option<isocast_protocol::api::RecordingPause> {
@@ -1167,6 +1177,7 @@ fn live_status(
         elapsed_seconds: status.elapsed_seconds,
         paused: status.paused,
         paused_seconds: status.paused_seconds,
+        handover: false,
         disk: None,
         files: plans
             .iter()

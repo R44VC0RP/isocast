@@ -4,11 +4,12 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, SendError, Sender};
 use std::thread;
 
 use anyhow::{Context, Result, anyhow};
 use isocast_protocol::{Source, SourceKind};
+use parking_lot::Mutex;
 
 use super::pause::RecordingClock;
 use super::{
@@ -40,12 +41,66 @@ impl AudioTiming {
     }
 }
 
+/// How long a file whose capture stopped waits, beyond three frames, for
+/// the frames the capture delivered before it stopped.
+const DRAIN_AFTER_STOP: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Switch a writer thread to a new take's file at `at`.
 pub(super) struct Split<W> {
     pub at: Time,
     pub take: usize,
     pub writer: W,
     pub plan: Arc<FilePlan>,
+}
+
+/// A writer thread's splits. Sending and closing take the same lock, so a
+/// split is either received (and answered with a `Done`) or refused at
+/// once, never lost with the channel.
+pub(super) fn split_channel<W>() -> (SplitSender<W>, SplitReceiver<W>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let closed = Arc::new(Mutex::new(false));
+    (
+        SplitSender {
+            tx,
+            closed: closed.clone(),
+        },
+        SplitReceiver { rx, closed },
+    )
+}
+
+pub(super) struct SplitSender<W> {
+    tx: Sender<Split<W>>,
+    closed: Arc<Mutex<bool>>,
+}
+
+impl<W> SplitSender<W> {
+    /// Hands `split` to the writer thread, or gives it back once that
+    /// thread no longer takes splits.
+    pub(super) fn send(&self, split: Split<W>) -> Result<(), SendError<Split<W>>> {
+        let closed = self.closed.lock();
+        if *closed {
+            return Err(SendError(split));
+        }
+        self.tx.send(split)
+    }
+}
+
+pub(super) struct SplitReceiver<W> {
+    rx: Receiver<Split<W>>,
+    closed: Arc<Mutex<bool>>,
+}
+
+impl<W> SplitReceiver<W> {
+    fn try_recv(&self) -> Option<Split<W>> {
+        self.rx.try_recv().ok()
+    }
+
+    /// Refuses further splits and returns those not yet received.
+    fn close(self) -> Vec<Split<W>> {
+        let mut closed = self.closed.lock();
+        *closed = true;
+        self.rx.try_iter().collect()
+    }
 }
 
 /// A finished (or failed) file of take `take`, file `index`.
@@ -64,7 +119,7 @@ pub(super) fn write_files<W: FileWriter>(
     plan: Arc<FilePlan>,
     index: usize,
     packets: Receiver<Packet<W::Frame>>,
-    splits: Receiver<Split<W>>,
+    splits: SplitReceiver<W>,
     done: Sender<Done>,
     shared: &Shared,
     clock: Arc<RecordingClock>,
@@ -99,17 +154,38 @@ pub(super) fn write_files<W: FileWriter>(
         let mut closing: Option<Closing<W>> = None;
         let mut failure = Ok(());
         let written = isocast_diagnostics::contain("file writer", || {
-            for packet in packets {
+            // Once the capture has stopped: until when its last frames may
+            // still arrive (queued here, or on their way from its frame
+            // clock, which delivers each frame a frame after it is due).
+            let mut draining: Option<std::time::Instant> = None;
+            loop {
+                let packet = match draining {
+                    None => packets.recv().ok(),
+                    Some(until) => packets
+                        .recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+                        .ok(),
+                };
+                let Some(packet) = packet else {
+                    break;
+                };
                 // Audio can keep this receiver alive after its video capture
                 // has stopped. Close that file instead of accepting splits
-                // whose first video frame can never arrive.
-                if let Some(reason) = source.as_ref().and_then(|slot| slot.stopped()) {
-                    failure = Err(anyhow!("the capture stopped: {reason}"));
-                    break;
+                // whose first video frame can never arrive, once it holds
+                // the frames the capture delivered: it ends on the last one
+                // (the failure is set after the loop).
+                if draining.is_none()
+                    && source.as_ref().is_some_and(|slot| slot.stopped().is_some())
+                {
+                    draining = Some(
+                        std::time::Instant::now()
+                            + DRAIN_AFTER_STOP
+                            + std::time::Duration::from_secs(3) / file.fps(),
+                    );
                 }
                 file.lost_packets += missed_audio.swap(0, Ordering::Relaxed);
                 if next.is_none()
-                    && let Ok(split) = splits.try_recv()
+                    && draining.is_none()
+                    && let Some(split) = splits.try_recv()
                 {
                     next = Some((
                         split.at,
@@ -274,14 +350,18 @@ pub(super) fn write_files<W: FileWriter>(
             finish(c.file, c.at.min(shared.end()), c.take, c.failure);
         }
         // Splits that never began, whether or not a packet came after them.
+        // Closing refuses further handoffs while the native finalizers are
+        // still closing, so none can enter a receiver never read again.
         let never: Vec<_> = next
             .map(|(_, take, file)| (take, file.writer))
             .into_iter()
-            .chain(splits.try_iter().map(|split| (split.take, split.writer)))
+            .chain(
+                splits
+                    .close()
+                    .into_iter()
+                    .map(|split| (split.take, split.writer)),
+            )
             .collect();
-        // Refuse further handoffs while the native finalizers are still
-        // closing. Otherwise a split could enter a receiver never read again.
-        drop(splits);
         for (take, writer) in never {
             writer.cancel();
             let _ = done.send(Done {

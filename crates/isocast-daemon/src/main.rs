@@ -1449,7 +1449,7 @@ impl Daemon {
                 .map(|split| Started {
                     begins_at: Some(timeline::split_text(&split)),
                     files: split.files,
-                    notes: Vec::new(),
+                    notes: split.notes,
                 })
                 .map_err(|failed| failed.error)
                 .and_then(to_json),
@@ -2752,6 +2752,7 @@ impl Daemon {
             live.paused = recording.paused;
             live.elapsed_seconds = recording.elapsed_seconds;
             live.paused_seconds = recording.paused_seconds;
+            live.handover = control.handover(now());
         }
         let info = engine_info(&state);
         let (collection, profile) = state.file.current_names(state.setup.as_ref());

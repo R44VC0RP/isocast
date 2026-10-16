@@ -1211,13 +1211,15 @@ impl Daemon {
                 Ok(Retaken {
                     timeline: id.clone(),
                     begins_in_seconds: Some(split.begins_in.as_secs_f64()),
-                    notes: vec![format!(
+                    notes: std::iter::once(format!(
                         "the take being recorded is dropped from timeline {id:?} when the new take \
                          begins at {begins_at} (in {:.2} s); its files ({}) stay in {}",
                         split.begins_in.as_secs_f64(),
                         names.join(", "),
                         folder_of(&now.files)
-                    )],
+                    ))
+                    .chain(split.notes)
+                    .collect(),
                     begins_at: Some(begins_at),
                     files: split.files,
                     replaced: None,

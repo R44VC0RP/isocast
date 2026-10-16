@@ -2434,6 +2434,11 @@ pub struct LiveStatus {
     /// Total time cut out so far, including the current pause.
     #[serde(default)]
     pub paused_seconds: f64,
+    /// A split's handover is under way: the new take's files are starting
+    /// or the previous take's are finishing. Split, pause and resume are
+    /// refused (busy) until it ends, about a second or two later.
+    #[serde(default)]
+    pub handover: bool,
     pub files: Vec<LiveFile>,
     /// Each audio source's level since the last status, as captured
     /// (before gain), and the program mix's ("program").

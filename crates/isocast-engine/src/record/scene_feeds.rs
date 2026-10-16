@@ -23,6 +23,13 @@ use crate::{Platform, Time};
 const HOLD: Duration = Duration::from_secs(3);
 /// The most frames a second a scene is drawn at.
 const MAX_FPS: u32 = 60;
+/// How long a scene keeps the highest rate asked for after its last such
+/// ask: then a slower viewer's rate takes over.
+const RATE_HOLD: Duration = Duration::from_secs(2);
+/// After the drawing thread fails, how long viewers wait before it is
+/// tried again: doubling from the first, up to the last.
+const RETRY_FIRST: Duration = Duration::from_secs(1);
+const RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// The prefix of a scene target.
 pub(crate) const PREFIX: &str = "scene:";
@@ -38,6 +45,9 @@ struct State<F> {
     /// The drawing thread runs (it ends, under this lock, once nothing is
     /// watched).
     running: bool,
+    /// Why the drawing thread last failed, how many times in a row, and
+    /// when it may be started again; cleared once it draws a frame.
+    failure: Option<(String, u32, Instant)>,
 }
 
 /// A watched scene: its id, where its frames go, and the rate asked for.
@@ -45,9 +55,10 @@ type Watching<F> = (Arc<str>, Arc<FrameSlot<F>>, u32);
 
 struct Watched<F> {
     slot: Arc<FrameSlot<F>>,
-    /// The highest rate asked for since it was last drawn, and when last
-    /// asked.
+    /// The highest rate asked for within [`RATE_HOLD`], when it was last
+    /// asked for, and when the scene was last asked for at all.
     fps: u32,
+    fps_asked: Instant,
     asked: Instant,
 }
 
@@ -57,6 +68,7 @@ impl<F: Clone> SceneFeeds<F> {
             state: Mutex::new(State {
                 feeds: HashMap::new(),
                 running: false,
+                failure: None,
             }),
             timeline,
         }
@@ -64,19 +76,35 @@ impl<F: Clone> SceneFeeds<F> {
 
     /// Someone shows scene `id` at `fps`: where its frames arrive, and
     /// whether the drawing thread must be started (the caller starts it).
-    pub(super) fn want(&self, id: &str, fps: u32) -> (Arc<FrameSlot<F>>, bool) {
+    /// While the thread is waiting to be retried after failing, the error.
+    pub(super) fn want(&self, id: &str, fps: u32) -> Result<(Arc<FrameSlot<F>>, bool), String> {
         let mut state = self.state.lock();
         let now = Instant::now();
+        if !state.running
+            && let Some((error, _, retry)) = &state.failure
+            && now < *retry
+        {
+            return Err(format!(
+                "scenes can't be drawn: {error}; trying again in {} s",
+                (*retry - now).as_secs_f64().ceil()
+            ));
+        }
         let watched = state.feeds.entry(id.into()).or_insert_with(|| Watched {
             slot: Arc::new(FrameSlot::with_capacity(self.timeline.clone(), 1)),
             fps: 0,
+            fps_asked: now,
             asked: now,
         });
-        watched.fps = watched.fps.max(fps.clamp(1, MAX_FPS));
+        // The fastest viewer's rate, until it stops asking (it closed).
+        let fps = fps.clamp(1, MAX_FPS);
+        if fps >= watched.fps || now.duration_since(watched.fps_asked) >= RATE_HOLD {
+            watched.fps = fps;
+            watched.fps_asked = now;
+        }
         watched.asked = now;
         let slot = watched.slot.clone();
         let start = !std::mem::replace(&mut state.running, true);
-        (slot, start)
+        Ok((slot, start))
     }
 
     /// The scenes still watched and their rates (those nobody asked for
@@ -101,10 +129,28 @@ impl<F: Clone> SceneFeeds<F> {
         )
     }
 
-    /// The thread is gone (it failed or the engine stops): start a new one
-    /// at the next ask.
+    /// The thread is gone (the engine stops): start a new one at the
+    /// next ask.
     pub(super) fn stopped(&self) {
         self.state.lock().running = false;
+    }
+
+    /// The thread failed with `error`: start a new one only after a wait
+    /// that doubles with each failure in a row, which it returns.
+    pub(super) fn failed(&self, error: String) -> Duration {
+        let mut state = self.state.lock();
+        state.running = false;
+        let failures = state.failure.as_ref().map_or(0, |(_, n, _)| *n) + 1;
+        let wait = RETRY_FIRST
+            .saturating_mul(1 << (failures - 1).min(16))
+            .min(RETRY_MAX);
+        state.failure = Some((error, failures, Instant::now() + wait));
+        wait
+    }
+
+    /// The thread draws again: a later failure waits the shortest time.
+    fn recovered(&self) {
+        self.state.lock().failure = None;
     }
 }
 
@@ -124,6 +170,7 @@ pub(super) fn run<P: Platform>(
     // Each watched scene's compositor, the scenes version it adopted, and
     // when the scene is next due.
     let mut drawing: HashMap<Arc<str>, (Compositor<P>, u64, Instant)> = HashMap::new();
+    let mut drew = false;
     loop {
         if stop() {
             feeds.stopped();
@@ -176,6 +223,9 @@ pub(super) fn run<P: Platform>(
             };
             if let Some((frame, _)) = compositor.draw(Feed::Preview, Some(&scene), tick, tick)? {
                 slot.push(frame, tick);
+                if !std::mem::replace(&mut drew, true) {
+                    feeds.recovered();
+                }
             }
         }
     }

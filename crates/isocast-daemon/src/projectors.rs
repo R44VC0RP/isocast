@@ -66,6 +66,17 @@ fn displays() -> Vec<Display> {
     super::devices().map(|d| d.displays).unwrap_or_default()
 }
 
+/// A full-screen placement on a display that isn't connected (when the
+/// displays could be listed): it must not cover another one instead.
+fn display_missing(placement: &Placement, displays: &[Display]) -> bool {
+    placement.fullscreen
+        && !displays.is_empty()
+        && placement
+            .display
+            .as_ref()
+            .is_some_and(|id| !displays.iter().any(|d| &d.id == id))
+}
+
 /// The display `query` names: `main`, an id or a name (exact, then
 /// ignoring case). An error lists them.
 fn find_display<'a>(displays: &'a [Display], query: &str) -> Result<&'a Display, RpcError> {
@@ -94,6 +105,9 @@ fn find_display<'a>(displays: &'a [Display], query: &str) -> Result<&'a Display,
 
 impl ProjectorState {
     /// Read the projectors kept on disk (none shown until an app says so).
+    /// A full-screen one whose display isn't connected now stays closed
+    /// (its placement is remembered), as it would have closed when its
+    /// display went.
     fn load(&self) {
         let path = path();
         let saved = match fs::read(&path) {
@@ -108,6 +122,24 @@ impl ProjectorState {
             },
             Err(_) => Saved::default(),
         };
+        let mut saved = saved;
+        if saved.open.iter().any(|p| p.placement.fullscreen) {
+            let displays = displays();
+            let (gone, open): (Vec<Projector>, Vec<Projector>) = std::mem::take(&mut saved.open)
+                .into_iter()
+                .partition(|p| display_missing(&p.placement, &displays));
+            saved.open = open;
+            for projector in gone {
+                isocast_diagnostics::diagnostic!("info";
+                    "isocastd: projector {} stays closed: its display {} isn't connected",
+                    projector.id,
+                    projector.placement.display.as_deref().unwrap_or_default()
+                );
+                saved
+                    .placements
+                    .insert(key(&projector), projector.placement.clone());
+            }
+        }
         let mut kept = self.saved.lock();
         *kept = saved;
         for projector in &mut kept.open {
@@ -239,6 +271,8 @@ impl Daemon {
             }
             None => None,
         };
+        // To check a remembered full-screen display.
+        let attached = (params.fullscreen.is_none() && display.is_none()).then(displays);
         let mut projector = Projector {
             id: String::new(),
             view: params.view,
@@ -277,6 +311,12 @@ impl Daemon {
                     if params.frame.is_some() {
                         placement.fullscreen = false;
                         placement.frame = params.frame;
+                    }
+                    // Its display isn't connected: a window, rather than
+                    // covering another display.
+                    if display_missing(&placement, attached.as_deref().unwrap_or_default()) {
+                        placement.fullscreen = false;
+                        placement.display = None;
                     }
                     placement
                 }

@@ -2503,6 +2503,9 @@ fn status(json: bool) -> Result<ExitCode> {
                 live.elapsed_seconds,
                 live.paused_seconds
             );
+            if live.handover {
+                println!("  Starting a new take: split, pause and resume wait until it has");
+            }
             for file in &live.files {
                 println!(
                     "  {}  {} frames, {} dropped, {} audio dropouts",
@@ -2585,6 +2588,9 @@ fn split(json: bool) -> Result<ExitCode> {
         }
         for file in &started.files {
             println!("  {}", file.display());
+        }
+        for note in &started.notes {
+            println!("note: {note}");
         }
     }
     Ok(ExitCode::SUCCESS)

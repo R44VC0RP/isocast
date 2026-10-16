@@ -1621,6 +1621,21 @@ each section. Delete entries that stop being true.
   HEVC ISOs shed. Three fitting recording-only trials lose nothing. The
   compact side preview was chosen over a full-height 30%-width variant;
   actual app pictures and media evidence are in vertical-canvas/scratch.
+- 2026-10-16 (#93): a writer whose capture stopped keeps writing for
+  three frames + 50 ms after it sees the stop (the ISO frame clock also
+  delivers a frame newer than its last pick before giving up), so the
+  file ends on the capture's last frame. Split channels close under a
+  lock shared with the sender: a split is received and answered, or
+  refused at once. A file whose source gave the current take no frame a
+  second in is still announced by `split`, with a note, since it may yet
+  start. MIN_TAKE stays 1 s (not clearly safe to shorten).
+- 2026-10-16 (#95): a remembered full-screen placement on a missing
+  display: the daemon keeps it closed at load and opens a window on
+  `projector open VIEW`; the app never falls back to another monitor for
+  a named one. Scene feeds keep the fastest rate 2 s after its last ask;
+  a failing scene-feeds thread is retried after 1 s, doubling to 30 s,
+  and viewers' streams end with its error meanwhile.
+
 - 2026-10-16 (#80, #81): **One recording split handover at a time.**
   It owns the busy flag until the new writers start and the previous take's
   writers finalize; early requests get WRONG_STATE with a retry explanation.
@@ -5405,6 +5420,14 @@ each section. Delete entries that stop being true.
   couldn't-restart warning stays until dismissed (OK).
 
 ## Gotchas
+
+- 2026-10-16: `scripts/remote-build.sh` syncs the checkout it lives in
+  (`dirname $0`), not the current directory: to build another worktree
+  (a base for A/B), run that worktree's own copy of the script.
+- 2026-10-16: on isocast-m2-a, `screencapture` from a hw-batch `--gui`
+  job fails ("could not create image from display"); cua-driver's
+  `get_desktop_state` works (~3 pictures a second). `isocast shutdown`
+  there left the isolated daemon running in 3 of 3 tries; kill it by pid.
 
 - 2026-10-16 (#87): headless Chrome (154) refused (MEDIA_ERR_DECODE, a
   third of a second in) both HEVC files of the check export, program and

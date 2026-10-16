@@ -513,6 +513,10 @@ come later (clips already carry in/out points on their take).
     answering it. M2-b: two full cycles/disk runs, 0 phantom files, split
     starts 504–1496 ms ahead, 0 stale-busy starts; concurrent controls,
     kill/ownership matrix, full strict e2e and workspace gates pass.
+  - [x] S.2 #93 rapid-splits follow-ups: a stopped capture's file keeps
+    its last frames, every split sent to a closing writer is answered,
+    the split reply marks a file whose source delivers no frames, and
+    `status` live.handover says when split/pause are busy. MIN_TAKE kept.
   - [x] S.2 #79 Capacity-limit isolation: recording-native submission
     pressure sheds ISO work before mixed A/V channels fill, including queued
     startup pictures; M2 capacity accounts for per-picture session overhead
@@ -916,6 +920,11 @@ native app; each verified against OBS's behaviour on a test Mac.
       Qualified on M4/M2; coordinator Tier-1 review/re-review and merge remain.
 - [x] **G.4 Projectors and multiview (#19).** Fullscreen or windowed preview,
   program, scene or source on any display; a multiview grid.
+  - [x] G.4 follow-ups (#95): a remembered full-screen projector whose
+    display is gone never covers another one; F/double-click full screen
+    names its display; scene feeds follow the fastest current viewer and
+    back off a failing draw thread. Tally colours (Ryan) and multiview CPU
+    remain.
 - [x] **G.5 Custom hotkeys (engine side).** Bindable action catalogue,
   per-profile bindings, CLI/MCP, and global press/release registration where
   macOS allows. Timeline and pause actions are wired; timeline-clear remains
@@ -1461,6 +1470,17 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   the program tick); a virtual display unplugged closes its full-screen
   projector in 1 s with the reason; offscreen snapshots; visual-shots base
   vs head unchanged.
+- #93 (2026-10-16): with the developer fault hook (bars2 capture stops
+  before frame 90) BARS2 ends on source frame 89 on head in every run, 88
+  on base 3470602 in 2 of 3; live.handover true after a split, false
+  1.6 s after its start; e2e split/pause/record, kill matrix 18/18 and
+  stress cycles+disk pass on m2-a (38 splits accepted, 62 busy, 0 files
+  acknowledged without a file).
+- #95 (2026-10-16): virtual display removed before launch, app windows
+  polled every 100 ms on m2-a: base covers the main display for 0.9 s on
+  app start and on `projector open program`, head never (0/75, 0/56); F
+  on the second display records it and unplugging closes the projector
+  in 1 s.
 
 - Engine hardening (#27/#30/#31/#35, 2026-10-16): explicit critical-state
   recovery replaces lock poisoning; the monitor callback is lock/heap-free;

@@ -28,7 +28,7 @@ use isocast_protocol::{
 };
 
 use super::disk::{DiskMeter, DiskProbe};
-use super::file::{Done, Split, file_end, write_files};
+use super::file::{Done, Split, file_end, split_channel, write_files};
 use super::frame_stream::{self, FrameFeed};
 use super::iso_frames::IsoFrames;
 use super::mix::{MIX_DELAY, Meter, Mixer, StereoMeter};
@@ -42,8 +42,8 @@ use super::{
     AUDIO_TAIL, COMMIT_TIMEOUT, CaptureReport, DiskReport, FIRST_FRAME_TIMEOUT, FilePlan,
     FolderLock, Formats, MIN_FREE_BYTES, MIN_FREE_SECONDS, MIN_TAKE, MIX_QUEUE_DEPTH, MONITOR_FPS,
     OnAir, Output, Packet, QUEUE_DEPTH, RecordOptions, Report, SPACE_CHECK_INTERVAL, SPEED_MARGIN,
-    SPLIT_LEAD, SPLIT_SOON_LEAD, START_DELAY, STATUS_INTERVAL, SessionControl, Shared, Slots,
-    SourceFilters, SplitRefused, SplitTake, SplitTiming, Take, create_writers, expand_home,
+    SPLIT_LEAD, SPLIT_SOON_LEAD, STALL_AFTER, START_DELAY, STATUS_INTERVAL, SessionControl, Shared,
+    Slots, SourceFilters, SplitRefused, SplitTake, SplitTiming, Take, create_writers, expand_home,
     interrupted_note, interrupted_sessions, is_program, live_status, plan_take, sidechain_sources,
     take_manifest, wait_for_frame, write_manifest, write_manifest_durable,
 };
@@ -2351,7 +2351,7 @@ fn scene_slot<P: Platform>(
             ));
         }
     }
-    let (slot, start) = inner.scene_feeds.want(id, fps);
+    let (slot, start) = inner.scene_feeds.want(id, fps)?;
     if start {
         let weak = Arc::downgrade(inner);
         let failed = inner.scene_feeds.clone();
@@ -2367,16 +2367,18 @@ fn scene_slot<P: Platform>(
                         .is_none_or(|inner| inner.stopping.load(Ordering::SeqCst))
                 };
                 if let Err(error) = scene_feeds::run(&platform, &feeds, scenes, epoch, stop) {
-                    feeds.stopped();
+                    let wait = feeds.failed(format!("{error:#}"));
                     isocast_diagnostics::diagnostic!("warn";
-                        "scene feeds stopped: {error:#}"
+                        "scene feeds stopped: {error:#}; trying again in {} s", wait.as_secs()
                     );
                 }
             },
-            move |_| failed.stopped(),
+            move |panic| {
+                failed.failed(panic);
+            },
         );
         if let Err(error) = spawned {
-            inner.scene_feeds.stopped();
+            inner.scene_feeds.failed(format!("{error}"));
             return Err(format!("could not start drawing scenes: {error}"));
         }
     }
@@ -2828,8 +2830,15 @@ fn run_iso<P: Platform>(
         if tick >= shared.end() {
             break;
         }
-        // Its file ends here; the rest of the recording goes on.
-        if let Some(reason) = runner.slot.stopped() {
+        // Its file ends here, after the frames it captured before it
+        // stopped (one newer than the last tick's pick is still due); the
+        // rest of the recording goes on.
+        if let Some(reason) = runner.slot.stopped()
+            && runner
+                .slot
+                .peek_until_timed(Time::MAX)
+                .is_none_or(|(_, at)| at + frame / 2 <= tick)
+        {
             bail!(
                 "{}: the capture stopped, so its file ends early: {reason}",
                 runner.id
@@ -3382,7 +3391,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             .zip(takes[0].plans.clone())
             .enumerate()
             .map(|(index, ((writer, (packets, missed_audio)), plan))| {
-                let (split_tx, split_rx) = mpsc::channel();
+                let (split_tx, split_rx) = split_channel();
                 split_senders.push(split_tx);
                 let done = done_tx.clone();
                 let clock = clock.clone();
@@ -3471,6 +3480,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                         .collect();
                     let mut status = live_status(&current.plans, levels, shared, now, &clock);
                     status.monitor = inner.monitor.lock().status();
+                    status.handover = control.handover(now);
                     // While frames or audio are being lost, see whether the
                     // disk is why.
                     let lost = status
@@ -3644,6 +3654,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                             let manifest = plan.manifest_path.clone();
                             let index = takes.len();
                             let mut gone = Vec::new();
+                            let mut notes = Vec::new();
+                            let current = takes.last().expect("a take");
                             for (i, ((split, writer), file)) in split_senders
                                 .iter()
                                 .zip(writers)
@@ -3663,6 +3675,22 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                                     split.writer.cancel();
                                     gone.push(i);
                                 } else {
+                                    // Its source has given this take no frame
+                                    // a second in: its file is only written if
+                                    // one arrives (otherwise the manifest lists
+                                    // it as delivering none).
+                                    if current.plans[i].start.load(Ordering::SeqCst) == i64::MIN
+                                        && current.results[i].is_none()
+                                        && now >= current.epoch + STALL_AFTER
+                                    {
+                                        notes.push(format!(
+                                            "{}: source {:?} has delivered no frames since the \
+                                             current take began; this file is written only if \
+                                             it delivers one",
+                                            path.display(),
+                                            current.plans[i].source
+                                        ));
+                                    }
                                     files.push(path);
                                 }
                             }
@@ -3699,6 +3727,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                                 manifest,
                                 begins_at: started_at,
                                 begins_in: at.saturating_since(now),
+                                notes,
                             }));
                         }
                         Err(refused) => {

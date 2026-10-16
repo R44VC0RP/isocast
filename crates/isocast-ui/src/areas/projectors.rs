@@ -201,6 +201,11 @@ fn apply_native(shown: &Shown) -> bool {
                     .find(|m| monitor_id(m).as_deref() == Some(id.as_str()))
             });
             if placement.fullscreen {
+                // Its display isn't connected: never cover another one
+                // (housekeeping closes it).
+                if placement.display.is_some() && monitor.is_none() {
+                    return true;
+                }
                 if let Some(monitor) = monitor
                     .or_else(|| window.current_monitor())
                     .or_else(|| window.primary_monitor())
@@ -492,6 +497,31 @@ impl Projectors {
                     }
                 }
                 None => {
+                    // Full screen on a display that isn't connected (it
+                    // went just now): closed, never shown on another.
+                    if let Some(display) = projector
+                        .placement
+                        .display
+                        .as_deref()
+                        .filter(|_| projector.placement.fullscreen)
+                    {
+                        use slint::winit_030::WinitWindowAccessor;
+                        let present = app.window().and_then(|window| {
+                            window.window().with_winit_window(|window| {
+                                window
+                                    .available_monitors()
+                                    .any(|m| monitor_id(&m).as_deref() == Some(display))
+                            })
+                        });
+                        if present == Some(false) {
+                            self.close(
+                                app,
+                                &projector.id,
+                                Some("its display isn't connected".to_string()),
+                            );
+                            continue;
+                        }
+                    }
                     if let Err(error) = self.show(app, projector) {
                         isocast_diagnostics::diagnostic!("warn";
                             "projector: couldn't open its window: {error:#}"
@@ -721,8 +751,19 @@ impl Projectors {
                     frame: Some(frame),
                 }
             }
+            // Full screen entered from the window (F, double click) covers
+            // the display it is on: named, so unplugging it closes it.
             None => Placement {
                 frame: shown.windowed.get().or(asked.frame),
+                display: asked.display.clone().or_else(|| {
+                    shown
+                        .window
+                        .window()
+                        .with_winit_window(|window| {
+                            window.current_monitor().as_ref().and_then(monitor_id)
+                        })
+                        .flatten()
+                }),
                 ..asked
             },
         };
@@ -1156,9 +1197,19 @@ impl Projectors {
     }
 
     fn toggle_fullscreen(&self, app: &Rc<App>, shown: &Rc<Shown>) {
+        use slint::winit_030::WinitWindowAccessor;
+        // Into full screen on the display the window is on now.
+        let on = shown
+            .window
+            .window()
+            .with_winit_window(|window| window.current_monitor().as_ref().and_then(monitor_id))
+            .flatten();
         {
             let mut placed = shown.placed.borrow_mut();
             placed.fullscreen = !placed.fullscreen;
+            if placed.fullscreen && on.is_some() {
+                placed.display = on;
+            }
         }
         self.place(app, shown);
         self.report(app, shown);
