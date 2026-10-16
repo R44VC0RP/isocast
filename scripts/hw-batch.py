@@ -13,8 +13,24 @@ m2-a soaks; --mac any holds .bench.lock while it builds and picks.
     scripts/hw-batch.py now KIND [options]       queue it and run it now
                                                  (the delegator; waits for
                                                  the lock)
+    scripts/hw-batch.py now --detach KIND [...]  the same in a runner of its
+                                                 own that outlives this
+                                                 shell: long soaks (never
+                                                 start one by hand, outside
+                                                 the per-Mac lock)
     scripts/hw-batch.py list                     queued, running, recent
     scripts/hw-batch.py cancel ID                drop a queued job
+    scripts/hw-batch.py reclaim [--dry-run]      move running/ jobs whose
+                                                 runner died (and whose test
+                                                 Mac job is gone) to done/
+                                                 as LOST; run-queue and now
+                                                 do it first by themselves
+    scripts/hw-batch.py reap [--hours N] [--kill]
+                                                 list (or stop, with --kill)
+                                                 lane engines on the test
+                                                 Macs older than N hours
+                                                 (default 12) that no
+                                                 running job owns
     scripts/hw-batch.py run-queue [--max-hours H]
                                                  run every queued job (the
                                                  nightly runner)
@@ -74,6 +90,8 @@ import os
 import random
 import re
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import time
@@ -92,6 +110,13 @@ REMOTE_NAME = "hw-batch"
 TIMEOUT_MIN = {"e2e": 45, "bench": 30, "smoke": 30, "motion": 45, "drag-lag": 30, "stress": 120, "cmd": 60}
 MEASURES = ("bench", "smoke", "motion", "drag-lag")
 ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[A-Za-z0-9._-]+$")
+# A running/ entry younger than this is never reclaimed: its runner may be
+# between moving it there and recording its pid.
+RECLAIM_GRACE_S = 120
+
+
+def interrupted(signum, _frame):
+    raise KeyboardInterrupt(f"signal {signum}")
 
 
 def log(msg):
@@ -115,7 +140,7 @@ def git(repo, *args):
 
 
 def dirs():
-    for d in ("queue", "running", "done", "jobs", "results", "nightly", "src"):
+    for d in ("queue", "running", "done", "jobs", "results", "nightly", "src", "runners"):
         (ROOT / d).mkdir(parents=True, exist_ok=True)
 
 
@@ -147,7 +172,8 @@ def submit(args):
         "branch": git(repo, "rev-parse", "--abbrev-ref", "HEAD"), "commit": commit,
         "mac": args.mac, "note": args.note or "", "submitted": time.strftime("%Y-%m-%d %H:%M"),
         "timeout_min": args.timeout or TIMEOUT_MIN.get(args.kind) or 60,
-        "out": str(Path(args.out).expanduser().resolve()) if args.out else None,
+        "out": str(Path(args.out).expanduser().resolve()) if args.out else
+        (str(ROOT / "results" / time.strftime("%Y-%m-%d") / job_id) if getattr(args, "detach", False) else None),
         "only": args.only or [], "scenario": args.scenario, "variant": args.variant,
         "runs": args.runs, "seconds": args.seconds, "hours": args.hours, "scale": args.scale,
         "args": args.args or "", "command": args.command or "", "gui": args.gui,
@@ -465,7 +491,14 @@ def run_job(path):
     job_id = job["id"]
     assert ID_RE.match(job_id), job_id
     running = ROOT / "running" / path.name
-    path.rename(running)
+    try:
+        path.rename(running)
+    except FileNotFoundError:
+        log(f"{job_id}: no longer queued (another runner took it, or it was cancelled)")
+        return None
+    # Who runs it, so `reclaim` can tell a live runner from a dead one.
+    job["runner"] = {"pid": os.getpid(), "host": socket.gethostname(), "started": time.time()}
+    running.write_text(json.dumps(job, indent=2) + "\n")
     out = Path(job["out"]) if job.get("out") else ROOT / "results" / time.strftime("%Y-%m-%d") / job_id
     out.mkdir(parents=True, exist_ok=True)
     job["out"] = str(out)
@@ -597,7 +630,10 @@ def run_queue(args):
         queued = sorted((ROOT / "queue").glob("*.json"), key=lambda p: (p.stat().st_mtime_ns, p.name))
         if not queued:
             break
-        ran.append(run_job(queued[0]))
+        reclaim()
+        job = run_job(queued[0])
+        if job:
+            ran.append(job)
     left = sorted(p.stem for p in (ROOT / "queue").glob("*.json"))
     date = time.strftime("%Y-%m-%d")
     lines = [f"# Hardware batch {date}", "",
@@ -626,8 +662,14 @@ def list_jobs(_args):
     dirs()
     for state in ("running", "queue"):
         for p in sorted((ROOT / state).glob("*.json")):
-            j = json.loads(p.read_text())
-            print(f"{state:8} {j['id']}  {j.get('note', '')}")
+            try:
+                j = json.loads(p.read_text())
+            except ValueError:
+                continue  # being rewritten
+            gone = state == "running" and time.time() - p.stat().st_mtime >= RECLAIM_GRACE_S \
+                and runner_alive(j, p) is False
+            print(f"{state:8} {j['id']}  {j.get('note', '')}"
+                  + ("  (runner gone: `hw-batch.py reclaim`)" if gone else ""))
     for p in sorted((ROOT / "done").glob("*.json"))[-10:]:
         j = json.loads(p.read_text())
         print(f"done     {j['id']}  {j.get('status')}  {j.get('out')}/summary.md")
@@ -646,6 +688,206 @@ def cancel(args):
         shutil.rmtree(jobdir)
     print(f"cancelled {args.id}")
     return 0
+
+
+# ---------- reclaiming and reaping ----------
+
+def runner_alive(job, entry):
+    """True if the job's runner still runs, False if it's gone, None if this
+    Mac can't tell (another host's runner)."""
+    runner = job.get("runner")
+    if runner:
+        if runner.get("host") != socket.gethostname():
+            return None
+        r = subprocess.run(["ps", "-o", "command=", "-p", str(runner["pid"])], capture_output=True, text=True)
+        return r.returncode == 0 and "hw-batch" in r.stdout
+    # Runners from before runner pids were recorded: the runner keeps the
+    # job's log.txt open from the moment it takes the job to the end.
+    logs = [Path(job["out"]) / "log.txt"] if job.get("out") else []
+    logs += list((ROOT / "results").glob(f"*/{job['id']}/log.txt"))
+    logs = [str(l) for l in logs if l.exists()]
+    if not logs:
+        return False
+    r = subprocess.run(["lsof", "-t", *logs], capture_output=True, text=True)
+    if r.stdout.strip():
+        return True
+    if r.returncode not in (0, 1) or r.stderr.strip():
+        return None  # lsof couldn't tell: never call it dead
+    # A false "dead" would delete a live job's binaries, so an old runner
+    # also has to be past its job's timeout before it counts as gone.
+    age = time.time() - entry.stat().st_mtime
+    limit = 60 * float(job.get("timeout_min") or 360) + 1800
+    return False if age > limit else None
+
+
+def remote_job_alive(host, job_id):
+    """True if the job's command still runs on its test Mac, False if not,
+    None if the Mac can't be reached."""
+    try:
+        r = ssh(host, f'p="$(cat "$HOME/isocast-scratch/{REMOTE_NAME}/{job_id}/pid" 2>/dev/null)"; '
+                      '[ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo live || echo gone', timeout=40)
+    except subprocess.TimeoutExpired:
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() == "live"
+
+
+def reclaim(dry_run=False):
+    """Move running/ entries whose runner died to done/ as LOST, with a
+    summary saying so. Not while the job's command still runs on its test
+    Mac (that is reported: stop it, then reclaim)."""
+    dirs()
+    reclaimed = []
+    for entry in sorted((ROOT / "running").glob("*.json")):
+        try:
+            job = json.loads(entry.read_text())
+            age = time.time() - entry.stat().st_mtime
+        except (OSError, ValueError):
+            continue  # gone, or being rewritten by its runner
+        job_id = job.get("id", entry.stem)
+        if not ID_RE.match(job_id) or age < RECLAIM_GRACE_S:
+            continue
+        alive = runner_alive(job, entry)
+        if alive is not False:
+            continue
+        host = job.get("host")
+        remote = remote_job_alive(host, job_id) if host else False
+        if remote is None:
+            log(f"{job_id}: its runner is gone, but {host} can't be reached to check the job there; left in running/")
+            continue
+        if remote:
+            log(f"{job_id}: its runner is gone but the job still runs on {host}; left in running/ "
+                f"(it holds no lock now: stop it there, then run `hw-batch.py reclaim`)")
+            continue
+        runner = job.get("runner") or {}
+        why = (f"runner pid {runner['pid']} on {runner.get('host')} is gone" if runner.get("pid")
+               else "no process holds its log.txt (a runner from before runner pids were recorded)")
+        why += f"; no job on {host}" if host else "; it had no test Mac yet"
+        if dry_run:
+            print(f"would reclaim {job_id}: {why}")
+            reclaimed.append(job_id)
+            continue
+        done = ROOT / "done" / entry.name
+        try:
+            entry.rename(done)  # atomic: only one reclaimer (or runner) wins
+        except FileNotFoundError:
+            continue
+        out = Path(job["out"]) if job.get("out") else ROOT / "results" / time.strftime("%Y-%m-%d") / job_id
+        out.mkdir(parents=True, exist_ok=True)
+        job["out"] = str(out)
+        job["status"] = "LOST"
+        job["warning"] = f"reclaimed {time.strftime('%Y-%m-%d %H:%M')}: {why}"
+        if host:
+            # Whatever the job wrote before its runner died, then its scratch.
+            subprocess.run(["rsync", "-a", "-e", "ssh", f"{host}:isocast-scratch/{REMOTE_NAME}/{job_id}/out/",
+                            f"{out}/"], capture_output=True, timeout=1800)
+            ssh(host, f"rm -rf \"$HOME/isocast-scratch/{REMOTE_NAME}/{job_id}\"")
+            release_builds([host], job_id)
+        with open(out / "log.txt", "a") as f:
+            print(f"hw-batch {time.strftime('%H:%M:%S')}: {job_id}: reclaimed as LOST: {why}", file=f)
+        started = (job.get("runner") or {}).get("started")
+        job["seconds"] = round(time.time() - started) if started else 0
+        done.write_text(json.dumps(job, indent=2) + "\n")
+        summarize(job, out, "LOST", job["seconds"], host)
+        shutil.rmtree(ROOT / "jobs" / job_id, ignore_errors=True)
+        shutil.rmtree(ROOT / "src" / job_id, ignore_errors=True)
+        log(f"reclaimed {job_id} as LOST: {why} -> {out}/summary.md")
+        reclaimed.append(job_id)
+    return reclaimed
+
+
+def reclaim_cmd(args):
+    found = reclaim(args.dry_run)
+    if not found:
+        print("hw-batch: nothing to reclaim")
+    return 0
+
+
+def etime_seconds(text):
+    days, _, rest = text.rpartition("-")
+    parts = [int(x) for x in rest.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    return int(days or 0) * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def reap(args):
+    """Lane engines left on the test Macs: isocastd processes older than
+    --hours that no running job owns (a job owns what started on its Mac
+    after it did). Never the Mac's own engine (~/Library/Application
+    Support/Isocast/Isocast Dev.app), an installed app's, or exonbook's
+    (only the M2s are looked at). Lists them; --kill stops them (TERM)."""
+    dirs()
+    now = time.time()
+    jobs = []
+    for entry in (ROOT / "running").glob("*.json"):
+        try:
+            job = json.loads(entry.read_text())
+            started = (job.get("runner") or {}).get("started") or entry.stat().st_ctime
+        except (OSError, ValueError):
+            # Unreadable mid-rewrite: assume it owns everything on both Macs.
+            job, started = {"id": entry.stem, "host": "*"}, 0
+        jobs.append((job.get("host"), started, job.get("id", entry.stem)))
+    status = 0
+    macs = list(MACS) if args.mac == "all" else [args.mac]
+    for mac in macs:
+        host = MACS[mac]
+        r = ssh(host, 'echo "HOME=$HOME"; ps -axo pid=,ppid=,user=,etime=,command= -U "$(id -un)"', timeout=60)
+        if r.returncode != 0:
+            log(f"{host}: unreachable ({r.stderr.strip()[-200:]})")
+            status = 1
+            continue
+        lines = r.stdout.splitlines()
+        home = lines[0].split("=", 1)[1]
+        procs = []
+        for line in lines[1:]:
+            fields = line.split(None, 4)
+            if len(fields) < 5:
+                continue
+            pid, ppid, _user, etime, command = fields
+            if Path(command.split(" --")[0]).name != "isocastd":
+                continue
+            procs.append((int(pid), int(ppid), etime_seconds(etime), command))
+        engines = {p[0] for p in procs if "--native-log-relay" not in p[3]}
+        doomed, kept = [], []
+        for pid, _ppid, age, command in procs:
+            if pid not in engines:
+                continue
+            own = command.startswith(f"{home}/Library/Application Support/Isocast/Isocast Dev.app/") \
+                or command.startswith("/Applications/") or command.startswith(f"{home}/Applications/")
+            owner = next((j for h, started, j in jobs if h in (host, "*") and now - age >= started - 60), None)
+            if own or age < args.hours * 3600 or owner:
+                why = "the Mac's own engine" if own else f"owned by {owner}" if owner else "young"
+                kept.append((pid, age, command, why))
+                continue
+            doomed.append((pid, age, command))
+        print(f"== {host}: {len(doomed)} lane engine(s) older than {args.hours:g} h no running job owns"
+              f"{'; stopping them' if args.kill else ' (dry run; --kill stops them)'}")
+        for pid, age, command in doomed:
+            print(f"  {pid:>6}  {age / 3600:6.1f} h  {command[:160]}")
+        for pid, age, command, why in kept:
+            if why != "young":
+                print(f"  kept {pid} ({age / 3600:.1f} h, {why}): {command[:120]}")
+        if args.kill and doomed:
+            pids = " ".join(str(p[0]) for p in doomed)
+            # Each engine and its log relay; TERM lets it shut down cleanly.
+            k = ssh(host, f'for p in {pids}; do kill -TERM $(pgrep -P "$p") "$p" 2>/dev/null; done; sleep 10; '
+                          f'for p in {pids}; do kill -0 "$p" 2>/dev/null && echo "$p"; done; true', timeout=120)
+            left = k.stdout.split()
+            log(f"{host}: stopped {len(doomed) - len(left)} engine(s)" + (f"; still running: {' '.join(left)}"
+                                                                         if left else ""))
+            if left:
+                status = 1
+    return status
+
+
+def run_one(args):
+    """`now --detach`'s runner: run one queued job, in a session of its own."""
+    if not ID_RE.match(args.id):
+        sys.exit("hw-batch: bad job id")
+    job = run_job(ROOT / "queue" / f"{args.id}.json")
+    return 0 if job and job["status"] == "PASS" else 1
 
 
 def schedule(args):
@@ -687,10 +929,22 @@ def main():
         s.add_argument("--args", help="extra arguments for drag-lag.py or soak.py")
         s.add_argument("--command", help="cmd: a shell command")
         s.add_argument("--gui", action="store_true", help="cmd: run in the desktop session")
+        if name == "now":
+            s.add_argument("--detach", action="store_true",
+                           help="run it in a runner of its own that outlives this shell (long soaks); "
+                                "prints the job id and where its summary will be")
     q = sub.add_parser("run-queue")
     q.add_argument("--max-hours", type=float, default=11,
                    help="start no job after this many hours (a 10 h soak takes about 10.75 h)")
     sub.add_parser("list")
+    rc = sub.add_parser("reclaim")
+    rc.add_argument("--dry-run", action="store_true")
+    rp = sub.add_parser("reap")
+    rp.add_argument("--hours", type=float, default=12, help="only engines older than this (default 12)")
+    rp.add_argument("--mac", choices=("all", *MACS), default="all")
+    rp.add_argument("--kill", action="store_true", help="stop them (default: list only)")
+    r1 = sub.add_parser("run-job", help=argparse.SUPPRESS)
+    r1.add_argument("id")
     c = sub.add_parser("cancel")
     c.add_argument("id")
     sc = sub.add_parser("schedule")
@@ -699,17 +953,42 @@ def main():
     sc.add_argument("--script", default=str(Path(__file__).resolve()),
                     help="the runner to schedule (default this file; use the main checkout's)")
     args = p.parse_args()
+    # A runner stopped with TERM (`timeout`, a lane's cleanup) still stops
+    # its test Mac job and writes its summary, instead of leaving it running
+    # there with no lock and a dead entry in running/.
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
     if args.op == "submit":
         submit(args)
         return 0
     if args.op == "now":
         dirs()
+        reclaim()
         job_id = submit(args)
+        if args.detach:
+            runner_log = ROOT / "runners" / f"{job_id}.log"
+            out = json.loads((ROOT / "queue" / f"{job_id}.json").read_text())["out"]
+            with open(runner_log, "a") as f:
+                # Its own session: closing this shell or ending the lane's
+                # turn doesn't stop it.
+                subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "run-job", job_id],
+                                 cwd=Path.cwd(), stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
+            print(f"detached: runner log {runner_log}; summary {out}/summary.md "
+                  f"when it ends; `hw-batch.py list` shows it")
+            return 0
         job = run_job(ROOT / "queue" / f"{job_id}.json")
+        if not job:
+            return 1
         print((Path(job["out"]) / "summary.md").read_text())
         return 0 if job["status"] == "PASS" else 1
-    return {"run-queue": run_queue, "list": list_jobs, "cancel": cancel, "schedule": schedule}[args.op](args)
+    return {"run-queue": run_queue, "list": list_jobs, "cancel": cancel, "schedule": schedule,
+            "reclaim": reclaim_cmd, "reap": reap, "run-job": run_one}[args.op](args)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt as e:
+        log(f"stopped ({e or 'interrupted'})")
+        sys.exit(130)

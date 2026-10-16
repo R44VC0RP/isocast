@@ -58,6 +58,8 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "timeline", 
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
+# The longest run folder whose scenarios' sockets all fit in sun_path.
+SHORT_ROOT = 44
 
 
 class Failure(Exception):
@@ -1955,6 +1957,15 @@ def main():
             require(args.daemon.is_file(), f"daemon not found: {args.daemon}; build release first")
             args.work.mkdir(parents=True, exist_ok=True)
             root = Path(tempfile.mkdtemp(prefix="run-", dir=args.work)).resolve()
+            if len(os.fsencode(root)) > SHORT_ROOT:
+                # macOS caps Unix socket paths at 104 bytes, and the deepest
+                # socket (a plugin's, ROOT/plugin_files/plugins/<id>/socket)
+                # needs ~60 of them: a deep --work (hw-batch's, a lane with
+                # a long name) runs under a short folder in /tmp instead.
+                root.rmdir()
+                root = Path(tempfile.mkdtemp(prefix="isocast-e2e-", dir="/tmp")).resolve()
+                report["work_note"] = f"--work is too deep for Unix sockets; ran in {root}"
+                print(f"e2e: {report['work_note']}", file=sys.stderr)
             write_json(root / "capabilities.json", report["capabilities"])
             report["work"] = str(root)
             if args.hosted and not args.capabilities_from:

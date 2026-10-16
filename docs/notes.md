@@ -5,6 +5,28 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-16 (#91, #97, #98): **hw-batch keeps itself tidy.** A runner now
+  records its pid and host in its running/ entry, and stops its test Mac
+  job and writes its summary on TERM/HUP (a `timeout` around `now` used to
+  kill it outright, leaving the job running there with no lock and a dead
+  entry). `run-queue` and `now` first reclaim dead entries (runner gone, by
+  pid, or for entries from older runners by no process holding the job's
+  log.txt; and no live `pid` in the job's scratch on its Mac) to done/ as
+  LOST with a summary; `hw-batch.py reclaim [--dry-run]` does it by hand.
+  **Long soaks: `hw-batch.py now --detach soak --hours H …`**, never by
+  hand outside the per-Mac lock (#62's losses). `hw-batch.py reap [--hours
+  N] [--kill]` lists (dry run by default) isocastd processes on the M2s
+  older than N h (default 12) that no running job owns (one that started
+  on that Mac after the engine did); never `~/Library/Application
+  Support/Isocast/Isocast Dev.app`, /Applications, or exonbook. GUI cmd
+  jobs leak an engine each (11 older than 1 h on m2-a at 19:30). e2e.py
+  runs in `/tmp/isocast-e2e-XXXX` when the run folder is longer than 44
+  bytes (hw-batch's is ~90: sockets past the 104-byte limit).
+  **There is no `isocast shutdown` command** (#98): it's a usage error
+  (exit 2), so scripts that ran it with `>/dev/null 2>&1` left the daemon
+  up. Stop an isolated daemon with the `shutdown` method:
+  `printf '{"jsonrpc":"2.0","id":1,"method":"shutdown"}\n' | nc -U "$ISOCAST_SOCKET"`.
+
 - 2026-10-16 (S.2 stress): **hw-batch runs one job per test Mac, not one
   job at a time.** A job with `--mac m2-a|m2-b` (and a soak's receiver)
   holds `/Volumes/IsocastBuild/.bench.lock.<mac>`; `--mac any` holds
