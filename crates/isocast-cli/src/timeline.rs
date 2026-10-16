@@ -14,6 +14,9 @@ use isocast_protocol::timeline::{
     TimelineExportParams, TimelineInfo, TimelineList, TimelineMoveParams, TimelineNewParams,
     TimelineOpenParams, TimelineRemoveParams, TimelineTarget,
 };
+use isocast_protocol::timeline::{
+    TimelineAngleParams, TimelineRangeParams, TimelineSplitParams, TimelineTrimParams,
+};
 use serde::Serialize;
 
 use crate::client::Client;
@@ -72,8 +75,10 @@ pub enum TimelineCommand {
         json: bool,
     },
     /// Join the clips, in order, into one program file and one file per ISO
-    /// source every clip has (the video as recorded, no re-encoding), plus
-    /// an .export.json manifest; waits for it unless --background.
+    /// source every clip has, each cut to the clips' in and out points (the
+    /// video as recorded except the frames from a cut to the next
+    /// keyframe), an EDITED file when clips show other angles, and an
+    /// .export.json manifest; waits for it unless --background.
     Export {
         /// The timeline's id; the current one if absent.
         #[arg(long)]
@@ -89,6 +94,74 @@ pub enum TimelineCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Move a clip's in and/or out point, in seconds on its take's own
+    /// clock (rounded to its frames). The take's files are untouched.
+    Trim {
+        clip: String,
+        /// The new in point (0 is the take's start).
+        #[arg(long = "in", value_name = "SECONDS")]
+        in_seconds: Option<f64>,
+        /// The new out point (up to the take's length).
+        #[arg(long = "out", value_name = "SECONDS")]
+        out_seconds: Option<f64>,
+        #[arg(long)]
+        timeline: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cut the clip at SECONDS on the timeline in two.
+    Split {
+        #[arg(value_name = "SECONDS")]
+        at: f64,
+        #[arg(long)]
+        timeline: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take START to END (seconds on the timeline) out, closing the gap.
+    Delete {
+        start: f64,
+        end: f64,
+        #[arg(long)]
+        timeline: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show SOURCE (`program` or an ISO source's id) in the edited video
+    /// from START to END (seconds on the timeline).
+    Angle {
+        source: String,
+        start: f64,
+        end: f64,
+        #[arg(long)]
+        timeline: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take back the last edit (trim, split, delete, angle, remove, move).
+    Undo {
+        #[arg(long)]
+        timeline: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Put back the last edit undone.
+    Redo {
+        #[arg(long)]
+        timeline: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Print an edit's result: the timeline, as JSON or text.
+fn edited(info: &TimelineInfo, json: bool) -> Result<()> {
+    if json {
+        return print(info);
+    }
+    print_notes(&info.notes);
+    print_timeline(info);
+    Ok(())
 }
 
 fn print<T: Serialize>(value: &T) -> Result<()> {
@@ -206,6 +279,67 @@ pub fn run(command: TimelineCommand) -> Result<ExitCode> {
             background,
             json,
         } => return export(client, timeline, folder, background, json),
+        TimelineCommand::Trim {
+            clip,
+            in_seconds,
+            out_seconds,
+            timeline,
+            json,
+        } => {
+            let info: TimelineInfo = client.call(Method::TimelineTrim(TimelineTrimParams {
+                clip,
+                in_seconds,
+                out_seconds,
+                timeline,
+            }))?;
+            edited(&info, json)?;
+        }
+        TimelineCommand::Split { at, timeline, json } => {
+            let info: TimelineInfo = client.call(Method::TimelineSplit(TimelineSplitParams {
+                at_seconds: at,
+                timeline,
+            }))?;
+            edited(&info, json)?;
+        }
+        TimelineCommand::Delete {
+            start,
+            end,
+            timeline,
+            json,
+        } => {
+            let info: TimelineInfo =
+                client.call(Method::TimelineDeleteRange(TimelineRangeParams {
+                    start_seconds: start,
+                    end_seconds: end,
+                    timeline,
+                }))?;
+            edited(&info, json)?;
+        }
+        TimelineCommand::Angle {
+            source,
+            start,
+            end,
+            timeline,
+            json,
+        } => {
+            let info: TimelineInfo = client.call(Method::TimelineAngle(TimelineAngleParams {
+                start_seconds: start,
+                end_seconds: end,
+                source,
+                timeline,
+            }))?;
+            edited(&info, json)?;
+        }
+        TimelineCommand::Undo { timeline, json } => {
+            let info: TimelineInfo =
+                client.call(Method::TimelineUndo(Some(TimelineTarget { timeline })))?;
+            edited(&info, json)?;
+        }
+        TimelineCommand::Redo { timeline, json } => {
+            let info: TimelineInfo =
+                client.call(Method::TimelineRedo(Some(TimelineTarget { timeline })))?;
+            edited(&info, json)?;
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -267,12 +401,19 @@ fn print_timeline(info: &TimelineInfo) {
             1 => ", 1 dropped frame".into(),
             n => format!(", {n} dropped frames"),
         };
+        let angle = clip
+            .angle
+            .as_ref()
+            .map(|angle| format!(", angle {angle}"))
+            .unwrap_or_default();
         println!(
-            "  {:>2}. {:<4} at {:>8.2} s  {:>7.2} s  take \"{take}\"{status}{dropped}",
+            "  {:>2}. {:<4} at {:>8.2} s  {:>7.2} s  take \"{take}\" {:.2}–{:.2} s{angle}{status}{dropped}",
             clip.index + 1,
             clip.id,
             clip.start_seconds,
-            clip.duration_seconds
+            clip.duration_seconds,
+            clip.in_seconds,
+            clip.out_seconds
         );
         if let Some(problem) = &clip.problem {
             println!("        problem: {problem}");

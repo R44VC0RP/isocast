@@ -437,6 +437,26 @@ come later (clips already carry in/out points on their take).
   (thumbnails, lengths), record and retake, remove, drag to reorder,
   export with progress; on the same methods and events. After the console
   redesign of crates/isocast-ui lands.
+- [ ] **C.3 Edit view (#70).** Ryan, 2026-10-15: "Edit directly inside of
+  Isocast, so all of your ISO sources are shown, and you can just do simple
+  clipping with them." Simple and fast, not a full NLE.
+  - [x] C.3a Edits on the method table: `timeline_trim`, `timeline_split`,
+    `timeline_delete_range` (ripple), `timeline_angle` (per-range source of
+    the edited video), `timeline_undo`/`redo` (each edit one revision);
+    CLI `isocast timeline trim|split|delete|angle|undo|redo --json`, MCP
+    tools. Never touches take files.
+  - [x] C.3b Export cut to the edits: every file trimmed frame-accurately
+    (smart render: copy whole keyframe intervals, encode again only from a
+    cut to the next keyframe), an EDITED file with angle switches (angles
+    in another format encoded again whole), audio cut to the sample with
+    10 ms cross-fades at joins.
+  - [x] C.3c The editor in its own window (Ryan: never change or crowd
+    the studio): stacked tracks (program + each ISO) with thumbnails
+    (waveforms: follow-up), playhead and scrubbing with a preview of the
+    angle, trim handles, split (S), delete range, angle switching, J/K/L,
+    I/O, Delete, ⌘Z, export.
+  - [x] C.3d Real-window QA and performance on a test Mac: scrub a 30-min,
+    3-ISO take; scrub latency and fps; export time against real time.
 
 ### S. Stress testing and performance (Ryan, 2026-10-13)
 
@@ -3602,6 +3622,34 @@ One line per finished task, newest last.
   the activation request reaching sysextd (ad-hoc: "Missing entitlement")
   and the DMG-path refusal; offscreen vcam:approval. Real activation waits
   on the profiles.
+- C.3a (2026-10-15, branch ui/edit-view, #70): timeline edits on the one
+  method table (trim, split, ripple delete, angle, undo/redo; CLI
+  `isocast timeline trim|split|delete|angle|undo|redo`, 6 MCP tools), one
+  revision each, never touching take files. Verified: unit tests of the
+  edit maths; isolated engine, three synthetic takes edited from the CLI,
+  undo/redo, the timeline byte for byte the same after `isocast restart`,
+  the 15 take files' sha256 unchanged.
+- C.3b (2026-10-15, branch ui/edit-view, #70): exports cut to the edits.
+  Verified on an isolated engine, synthetic program + 60 fps desktop +
+  30 fps camera ISOs: HEVC/.mov (trims at 1.25 s etc., split, ripple
+  delete, camera and desktop angles) and H.264/.mp4; every frame of every
+  file (4 files, 3,734 + 1,722 frames) matched by the test pattern's bars
+  to the source frame on screen at that moment of the take, 0 mismatches,
+  MSE ≤ 0.8 for re-encoded frames; re-encoded frames = exactly the partial
+  keyframe intervals (45/15 at 1 s keyframes) plus the camera angle (120),
+  all other packets bit for bit the takes'; no decode errors; audio
+  samples = duration × 48000; flash-to-beep 0 ms (30 fps files ≤ 16.6 ms,
+  as in their takes); a join from mid-beep to silence and from silence to
+  mid-beep stepped at most 0.092 (the tone's own largest step 0.098; a
+  hard cut 0.7); take files' sha256 unchanged.
+- C.3c (2026-10-15, branch ui/edit-view, #70): the Edit view in the Create
+  view: an ISO track per source under Program (each clip's stretch of the
+  file, the angle shown lit), an exact-frame preview of the angle at the
+  playhead (right of the tracks, chosen over left), trim handles, Split,
+  Delete span, Undo/Redo, S, I/O, Delete, J/K/L, arrows, 1–9 angles, ⌘Z.
+  Verified offscreen (scripts/snapshot.sh, 3 recorded takes): both layouts,
+  1440x900 and 900x600; S, I/O + Delete, 3 and ⌘Z through real key and
+  menu events, each a method call the engine confirmed.
 - 0.0.5 fixes (2026-10-15, #49 #59 #25): the app restarts an engine older
   than its bundled one (notice; after the take while recording or
   streaming), the CLI warns; ended streams report the live setup's key;
@@ -3631,3 +3679,17 @@ One line per finished task, newest last.
   WebSocket client, base vs head); the camera extension pins the engine's
   exact paths (10 path cases); `isocast mcp` warns about an older engine and
   the app's couldn't-restart notice stays (fake distribution run).
+- C.3c rework (2026-10-15, #70): the editor moved into its own window,
+  "Isocast Editor — <timeline>" (Window › Editor, ⌘E), per Ryan; the
+  studio's Create view is C.2's clip bar again. Verified offscreen: the
+  editor window and a full-window-mode trial drawn side by side
+  (snaps2/), keys S, I/O+Delete, 2, 3 in the editor through real key
+  events; studio pictures unchanged (visual-shots, below).
+- C.3d (2026-10-16, #70): on isocast-m2-b (base M2), a 30-min take with
+  program + 3 HEVC ISOs (0 drops in 108,000/54,000/54,000/108,000 frames),
+  six CLI edits (13-21 ms each), export of the 28:55 timeline (5 files,
+  400 s of angles encoded again) in 157.9 s, 11x real time, every file
+  1734.75 s. Editor window opened from Window › Editor in a real window:
+  ruler drag scrub on the 30-min take 16.7 ms median preview latency (p95
+  31.5); on a 2-min take J/L playback 27-30 pictures/s at 18-25 ms median,
+  frame steps 38-41 ms; the studio's clip bar unchanged beside it.

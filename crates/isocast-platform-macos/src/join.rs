@@ -1,11 +1,26 @@
 //! Joining files end to end (a timeline's export) with AVAssetReader and
-//! AVAssetWriter: the video samples are copied as they are (no decoding or
-//! encoding), retimed to follow each other; each audio track is decoded and
-//! encoded again (AAC, as recordings are) as one continuous track, cut or
-//! padded with silence to each part's length, so it lines up with the
-//! video at every join. Each part fills exactly its clip's length (see
-//! [`JoinPart::length`]), so files at different frame rates joined from the
-//! same clips switch clips at the same moments.
+//! AVAssetWriter. Each part is the stretch of a take's file from its clip's
+//! in point for its clip's length (see [`JoinPart`]), so files at
+//! different frame rates joined from the same clips switch clips at the
+//! same moments.
+//!
+//! Video is copied as recorded (no decoding or encoding), retimed to follow
+//! on, except where it can't be (C.3, `recode`): when a part starts between
+//! two keyframes, the frame on screen at its in point and the frames up to
+//! the next keyframe are decoded and encoded again (a smart render), so the
+//! cut is frame-accurate and every other frame is the recorded one; and a
+//! part whose file has another codec, size or frame rate than the joined
+//! file (an ISO angle in the edited file) is decoded, scaled and encoded
+//! again whole, on the joined file's frame grid. A part ends with its last
+//! frame that starts before its end (recordings have no reordered frames,
+//! so cutting there needs nothing encoded again).
+//!
+//! Each audio track is decoded and encoded again (AAC, as recordings are)
+//! as one continuous track, each part's from its in point, cut or padded
+//! with silence to the part's length so it lines up with the video at
+//! every join, and cross-faded over 10 ms into the next part (the outgoing
+//! part's audio just past its end under the incoming part's first samples)
+//! so a join never clicks.
 //!
 //! Why not AVMutableComposition with a passthrough export: every take's AAC
 //! starts with its own encoder priming, so a passthrough join needs an edit
@@ -13,6 +28,7 @@
 //! (and the editors built on it) placed the second take's audio ~20 ms
 //! early (measured 2026-10-13), more than a frame at 60 fps.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 use std::sync::mpsc;
@@ -33,11 +49,14 @@ use objc2_av_foundation::{
 use objc2_core_foundation::{CFRetained, Type};
 use objc2_core_media::{
     CMAudioFormatDescriptionGetStreamBasicDescription, CMFormatDescription, CMSampleBuffer,
-    CMSampleTimingInfo, CMTime, CMTimeFlags, CMTimeRoundingMethod,
+    CMSampleTimingInfo, CMTime, CMTimeFlags, CMTimeRange, CMTimeRoundingMethod,
+    CMVideoFormatDescriptionGetDimensions, kCMTimePositiveInfinity,
 };
+use objc2_core_video::CVPixelBuffer;
 use objc2_foundation::{NSArray, NSString, NSURL};
 
 use crate::audio::{interleaved_f32, pcm_settings};
+use crate::recode::{Decoder, Encoder, fourcc, is_sync, ten_bit};
 use crate::writer::{
     aac_settings, add_input, audio_sample_buffer, catch, float_format, ns_error, writer_error,
 };
@@ -46,19 +65,53 @@ use crate::writer::{
 const PAD_CHUNK: i64 = 4800;
 /// How often progress is reported.
 const PROGRESS_EVERY: Duration = Duration::from_millis(200);
+/// The audio cross-fade at each join, in samples (10 ms).
+const CROSSFADE: usize = 480;
+/// How far before a part's in point its video is read from, to find the
+/// keyframe before it (recordings have one at least every second).
+const SEEK_BACK_SECONDS: f64 = 3.0;
+/// How far before a part's in point its audio is read from.
+const AUDIO_SEEK_BACK_SECONDS: f64 = 0.5;
+
+/// The joined file's video format.
+struct Format {
+    codec: u32,
+    size: (i32, i32),
+    /// Its frame rate, rounded to whole frames per second (0: unknown).
+    fps: i32,
+    timescale: i32,
+    hint: CFRetained<CMFormatDescription>,
+}
+
+/// Where a part's audio comes from: its own file, or (an edited file's
+/// angle) the program file of the same take.
+struct AudioSource {
+    path: PathBuf,
+    asset: Retained<AVURLAsset>,
+    tracks: Vec<Retained<AVAssetTrack>>,
+    /// That file's video start (its audio is timed against it) and where
+    /// that start sits within the clip.
+    start: CMTime,
+    offset: CMTime,
+}
 
 /// One file to join.
 struct Part {
     path: PathBuf,
     asset: Retained<AVURLAsset>,
     video: Retained<AVAssetTrack>,
-    audio: Vec<Retained<AVAssetTrack>>,
-    /// The video track's start in the file.
+    /// The video track's start and length in the file.
     start: CMTime,
+    duration: CMTime,
     /// How long it lasts in the joined file.
     length: CMTime,
-    /// Where the file starts within that.
+    /// Where the file starts within its clip, and where the part starts on
+    /// the take's clock.
     offset: CMTime,
+    in_point: CMTime,
+    audio: AudioSource,
+    /// Its video is in the joined file's format, so it can be copied.
+    copy: bool,
 }
 
 pub fn join(spec: &JoinSpec, progress: OnJoinProgress) -> Result<Joined> {
@@ -128,21 +181,31 @@ fn partial_path(output: &Path) -> PathBuf {
     output.with_file_name(name)
 }
 
-#[allow(deprecated)] // The synchronous track list is fine off the main thread.
-fn open_part(spec: &JoinPart) -> Result<Part> {
-    let path = &spec.path;
+fn open_asset(path: &Path) -> Result<Retained<AVURLAsset>> {
     if !path.exists() {
         bail!("{} does not exist", path.display());
     }
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-    let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) };
-    let video_type = unsafe { AVMediaTypeVideo }.context("missing AVMediaTypeVideo")?;
-    let audio_type = unsafe { AVMediaTypeAudio }.context("missing AVMediaTypeAudio")?;
-    let video: Retained<NSArray<AVAssetTrack>> = unsafe { asset.tracksWithMediaType(video_type) };
-    let video = video
-        .firstObject()
+    Ok(unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) })
+}
+
+#[allow(deprecated)] // The synchronous track lists are fine off the main thread.
+fn tracks(asset: &AVURLAsset, audio: bool) -> Result<Vec<Retained<AVAssetTrack>>> {
+    let kind = match audio {
+        true => unsafe { AVMediaTypeAudio }.context("missing AVMediaTypeAudio")?,
+        false => unsafe { AVMediaTypeVideo }.context("missing AVMediaTypeVideo")?,
+    };
+    let list: Retained<NSArray<AVAssetTrack>> = unsafe { asset.tracksWithMediaType(kind) };
+    Ok(list.to_vec())
+}
+
+fn open_part(spec: &JoinPart, format: Option<&Format>) -> Result<Part> {
+    let path = &spec.path;
+    let asset = open_asset(path)?;
+    let video = tracks(&asset, false)?
+        .into_iter()
+        .next()
         .with_context(|| format!("{} has no video macOS can read", path.display()))?;
-    let audio: Retained<NSArray<AVAssetTrack>> = unsafe { asset.tracksWithMediaType(audio_type) };
     let range = unsafe { video.timeRange() };
     if !valid(range.duration) || range.duration.value <= 0 {
         bail!("{} has no video frames", path.display());
@@ -152,15 +215,84 @@ fn open_part(spec: &JoinPart) -> Result<Part> {
         Some((frames, fps)) if fps > 0 => unsafe { CMTime::new(frames as i64, fps as i32) },
         _ => range.duration,
     };
+    let at = |seconds: f64| unsafe { CMTime::with_seconds(seconds, timescale) };
+    let offset = at(spec.offset_seconds.max(0.0));
+    let audio = match &spec.audio {
+        None => AudioSource {
+            path: path.clone(),
+            asset: asset.clone(),
+            tracks: tracks(&asset, true)?,
+            start: range.start,
+            offset,
+        },
+        Some((audio_path, audio_offset)) => {
+            let audio_asset = open_asset(audio_path)?;
+            let start = tracks(&audio_asset, false)?
+                .first()
+                .map_or(unsafe { CMTime::new(0, 1) }, |track| unsafe {
+                    track.timeRange().start
+                });
+            AudioSource {
+                path: audio_path.clone(),
+                tracks: tracks(&audio_asset, true)?,
+                asset: audio_asset,
+                start,
+                offset: at(audio_offset.max(0.0)),
+            }
+        }
+    };
+    let copy = match format {
+        Some(format) => matches(&video, spec.fps, format),
+        None => true,
+    };
     Ok(Part {
         path: path.to_path_buf(),
         asset,
         start: range.start,
+        duration: range.duration,
         length,
-        offset: unsafe { CMTime::with_seconds(spec.offset_seconds.max(0.0), timescale) },
+        offset,
+        in_point: at(spec.in_seconds.max(0.0)),
+        audio,
+        copy,
         video,
-        audio: audio.to_vec(),
     })
+}
+
+/// A track's frame rate: `recorded` (the manifest's) if known, else its
+/// average, rounded (which dropped frames pull down).
+fn rate(track: &AVAssetTrack, recorded: u32) -> i32 {
+    match recorded {
+        0 => unsafe { track.nominalFrameRate() }.round() as i32,
+        fps => fps as i32,
+    }
+}
+
+/// The format of `track`'s video, at `fps` frames a second.
+fn format_of(track: &AVAssetTrack, path: &Path, fps: u32) -> Result<Format> {
+    let hint =
+        format(track).with_context(|| format!("{}'s video has no format", path.display()))?;
+    let size = unsafe { CMVideoFormatDescriptionGetDimensions(&hint) };
+    Ok(Format {
+        codec: unsafe { hint.media_sub_type() },
+        size: (size.width, size.height),
+        fps: rate(track, fps),
+        timescale: unsafe { track.naturalTimeScale() }.max(1),
+        hint,
+    })
+}
+
+/// Whether `track`'s video can be copied into a file of `format`.
+fn matches(track: &AVAssetTrack, recorded: u32, format: &Format) -> bool {
+    let Some(own) = self::format(track) else {
+        return false;
+    };
+    let size = unsafe { CMVideoFormatDescriptionGetDimensions(&own) };
+    let fps = rate(track, recorded);
+    let codec = unsafe { own.media_sub_type() };
+    codec == format.codec
+        && (size.width, size.height) == format.size
+        && (fps == format.fps || fps == 0 || format.fps == 0)
 }
 
 fn valid(time: CMTime) -> bool {
@@ -169,6 +301,22 @@ fn valid(time: CMTime) -> bool {
 
 fn seconds(time: CMTime) -> f64 {
     unsafe { time.seconds() }
+}
+
+fn add(a: CMTime, b: CMTime) -> CMTime {
+    unsafe { a.add(b) }
+}
+
+fn sub(a: CMTime, b: CMTime) -> CMTime {
+    unsafe { a.subtract(b) }
+}
+
+fn cmp(a: CMTime, b: CMTime) -> i32 {
+    unsafe { a.compare(b) }
+}
+
+fn max(a: CMTime, b: CMTime) -> CMTime {
+    if cmp(a, b) >= 0 { a } else { b }
 }
 
 /// A track's first format description.
@@ -187,7 +335,15 @@ fn channels(track: &AVAssetTrack) -> Option<u32> {
     Some(asbd.mChannelsPerFrame)
 }
 
-fn reader(part: &Part, track: &AVAssetTrack, pcm: Option<u32>) -> Result<Reader> {
+/// A reader of `track` (in `asset`, at `path`), as PCM if `pcm` gives the
+/// channels, over `range` of the track's time if given.
+fn reader(
+    asset: &AVURLAsset,
+    path: &Path,
+    track: &AVAssetTrack,
+    pcm: Option<u32>,
+    range: Option<CMTimeRange>,
+) -> Result<Reader> {
     let settings = pcm.map(pcm_settings);
     let output = unsafe {
         AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
@@ -196,16 +352,17 @@ fn reader(part: &Part, track: &AVAssetTrack, pcm: Option<u32>) -> Result<Reader>
         )
     };
     unsafe { output.setAlwaysCopiesSampleData(false) };
-    let reader = unsafe { AVAssetReader::initWithAsset_error(AVAssetReader::alloc(), &part.asset) }
-        .map_err(|err| ns_error(&err).context(format!("could not read {}", part.path.display())))?;
+    let reader = unsafe { AVAssetReader::initWithAsset_error(AVAssetReader::alloc(), asset) }
+        .map_err(|err| ns_error(&err).context(format!("could not read {}", path.display())))?;
     let started = catch(|| unsafe {
+        if let Some(range) = range {
+            reader.setTimeRange(range);
+        }
         reader.addOutput(&output);
         reader.startReading()
     })?;
     if !started {
-        return Err(
-            reader_error(&reader).context(format!("could not read {}", part.path.display()))
-        );
+        return Err(reader_error(&reader).context(format!("could not read {}", path.display())));
     }
     Ok(Reader { reader, output })
 }
@@ -241,56 +398,424 @@ fn reader_error(reader: &AVAssetReader) -> anyhow::Error {
     }
 }
 
+/// A video sample of the current part, and when it shows in the joined
+/// file.
+#[derive(Clone)]
+struct Sample {
+    sample: Retained<CMSampleBuffer>,
+    pts: CMTime,
+    sync: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Copying samples until the part's end.
+    Copy,
+    /// Decoding and encoding the whole part again.
+    Render,
+    Done,
+}
+
 /// The parts' video, one after another, retimed to the joined file.
 struct VideoStream<'a> {
     parts: &'a [Part],
     starts: &'a [CMTime],
+    format: &'a Format,
     index: Option<usize>,
     reader: Option<Reader>,
-    /// What to add to the current part's times, and where it ends.
+    /// What to add to the current part's times, and where it starts and
+    /// ends in the joined file.
     shift: CMTime,
+    start: CMTime,
     end: CMTime,
-    /// Frames passed on from each part, and left out of it.
+    mode: Mode,
+    /// Samples ready for the writer.
+    queue: VecDeque<CFRetained<CMSampleBuffer>>,
+    decoder: Option<Decoder>,
+    encoder: Option<Encoder>,
+    /// Frames past the part's end are counted (the part runs to its
+    /// file's end, so they are frames the file holds beyond its clip).
+    count_tail: bool,
+    /// Rendering a whole part: the next output frame, how many it has,
+    /// and the picture on screen.
+    render_frame: i64,
+    render_frames: i64,
+    picture: Option<CFRetained<CVPixelBuffer>>,
+    /// A keyframe of the part has been read (decoding starts there).
+    synced: bool,
+    /// Frames passed on from each part, left out of it, and encoded again.
     frames: Vec<u64>,
     left_out: Vec<u64>,
+    reencoded: Vec<u64>,
 }
 
 impl VideoStream<'_> {
     fn next(&mut self) -> Result<Option<CFRetained<CMSampleBuffer>>> {
         loop {
-            if let (Some(reader), Some(index)) = (&self.reader, self.index) {
-                let part = &self.parts[index];
-                match reader.next(&part.path)? {
-                    Some(sample) => {
-                        let count = unsafe { sample.num_samples() };
-                        if count <= 0 {
-                            continue;
-                        }
-                        let copy = retimed(&sample, self.shift).with_context(|| {
-                            format!("could not retime a frame of {}", part.path.display())
-                        })?;
-                        // A frame starting past the clip's end isn't in it.
-                        let pts = unsafe { copy.presentation_time_stamp() };
-                        if valid(pts) && unsafe { pts.compare(self.end) } >= 0 {
-                            self.left_out[index] += count as u64;
-                            continue;
-                        }
-                        self.frames[index] += count as u64;
-                        return Ok(Some(copy));
+            if let Some(sample) = self.queue.pop_front() {
+                return Ok(Some(sample));
+            }
+            match self.mode {
+                Mode::Copy => match self.read()? {
+                    Some(sample) => self.copy(sample)?,
+                    None => self.mode = Mode::Done,
+                },
+                Mode::Render => self.render_step()?,
+                Mode::Done => {
+                    let next = self.index.map_or(0, |i| i + 1);
+                    if next == self.parts.len() {
+                        return Ok(None);
                     }
-                    None => self.reader = None,
+                    self.begin(next)?;
                 }
             }
-            let next = self.index.map_or(0, |i| i + 1);
-            if next == self.parts.len() {
-                return Ok(None);
-            }
-            let part = &self.parts[next];
-            self.index = Some(next);
-            self.reader = Some(reader(part, &part.video, None)?);
-            self.shift = unsafe { self.starts[next].add(part.offset).subtract(part.start) };
-            self.end = unsafe { self.starts[next].add(part.length) };
         }
+    }
+
+    fn part(&self) -> &Part {
+        &self.parts[self.index.expect("a part is open")]
+    }
+
+    /// Open part `index`: copy (from the cut) or render it.
+    fn begin(&mut self, index: usize) -> Result<()> {
+        self.index = Some(index);
+        let part = &self.parts[index];
+        self.start = self.starts[index];
+        self.end = add(self.start, part.length);
+        self.shift = sub(add(self.start, part.offset), add(part.in_point, part.start));
+        // The part's in point on the file's video clock (it may be before
+        // the file's start: the file began late).
+        let file_in = seconds(sub(part.in_point, part.offset));
+        let file_end = seconds(add(part.offset, part.duration));
+        self.count_tail = seconds(add(part.in_point, part.length)) >= file_end - 0.5e-3;
+        self.render_frame = 0;
+        self.render_frames = match self.format.fps {
+            0 => 0,
+            fps => (seconds(part.length) * f64::from(fps)).round() as i64,
+        };
+        self.picture = None;
+        self.synced = false;
+        self.open_reader(file_in - SEEK_BACK_SECONDS)?;
+        if part.copy {
+            self.mode = Mode::Copy;
+            self.head(file_in > SEEK_BACK_SECONDS)
+        } else {
+            if self.format.fps == 0 {
+                bail!(
+                    "{} is in another format than the joined file, whose frame rate isn't known",
+                    part.path.display()
+                );
+            }
+            self.mode = Mode::Render;
+            Ok(())
+        }
+    }
+
+    /// Read the current part's video from `from` seconds into its file.
+    fn open_reader(&mut self, from: f64) -> Result<()> {
+        let part = self.part();
+        let range = (from > 0.0).then(|| CMTimeRange {
+            start: add(part.start, unsafe {
+                CMTime::with_seconds(from, self.format.timescale)
+            }),
+            duration: unsafe { kCMTimePositiveInfinity },
+        });
+        let reader = reader(&part.asset, &part.path, &part.video, None, range)?;
+        self.reader = Some(reader);
+        Ok(())
+    }
+
+    /// The current part's next sample, with its time in the joined file.
+    fn read(&mut self) -> Result<Option<Sample>> {
+        loop {
+            let Some(reader) = &self.reader else {
+                return Ok(None);
+            };
+            let path = &self.parts[self.index.expect("open")].path;
+            let Some(sample) = reader.next(path)? else {
+                self.reader = None;
+                return Ok(None);
+            };
+            if unsafe { sample.num_samples() } <= 0 {
+                continue;
+            }
+            let pts = unsafe { sample.presentation_time_stamp() };
+            let dts = unsafe { sample.decode_time_stamp() };
+            if valid(dts) && valid(pts) && cmp(dts, pts) != 0 {
+                bail!(
+                    "{} has reordered frames (B-frames), which exports can't cut yet; Isocast \
+                     records without them",
+                    path.display()
+                );
+            }
+            return Ok(Some(Sample {
+                sync: is_sync(&sample),
+                pts: add(pts, self.shift),
+                sample,
+            }));
+        }
+    }
+
+    /// Pass `sample` on as it is, if it starts before the part's end.
+    fn copy(&mut self, sample: Sample) -> Result<()> {
+        let index = self.index.expect("open");
+        if cmp(sample.pts, self.end) >= 0 {
+            self.left_out[index] += u64::from(self.count_tail);
+            if !self.count_tail {
+                self.reader = None;
+                self.mode = Mode::Done;
+            }
+            return Ok(());
+        }
+        let copy = retimed(&sample.sample, self.shift).with_context(|| {
+            format!(
+                "could not retime a frame of {}",
+                self.parts[index].path.display()
+            )
+        })?;
+        self.queue.push_back(copy);
+        self.frames[index] += 1;
+        Ok(())
+    }
+
+    /// The start of a copied part: the frame on screen at its in point,
+    /// copied if it is a keyframe, else encoded again with the frames up
+    /// to the next keyframe; then copying carries on from there.
+    fn head(&mut self, may_reread: bool) -> Result<()> {
+        let index = self.index.expect("open");
+        // The keyframe interval on screen at the start: its keyframe first.
+        let mut interval: Vec<Sample> = Vec::new();
+        let mut skipped = false;
+        let after = loop {
+            match self.read()? {
+                None => break None,
+                Some(sample) if cmp(sample.pts, self.start) <= 0 => {
+                    if sample.sync {
+                        interval.clear();
+                    } else if interval.is_empty() {
+                        // Before the first keyframe read: can't be decoded.
+                        skipped = true;
+                        continue;
+                    }
+                    interval.push(sample);
+                }
+                Some(sample) => break Some(sample),
+            }
+        };
+        if interval.is_empty() && skipped {
+            // The reader began after the keyframe before the in point.
+            if may_reread {
+                self.open_reader(0.0)?;
+                return self.head(false);
+            }
+            bail!(
+                "{} has no keyframe before {:.3} s",
+                self.part().path.display(),
+                seconds(sub(self.part().in_point, self.part().offset))
+            );
+        }
+        let Some(on_screen) = interval.last().cloned() else {
+            // The file starts after the part does (it began late): its
+            // first frame is a keyframe, copied where it falls.
+            if let Some(sample) = after {
+                if !sample.sync {
+                    bail!(
+                        "{} doesn't start with a keyframe",
+                        self.part().path.display()
+                    );
+                }
+                self.copy(sample)?;
+            }
+            return Ok(());
+        };
+        if on_screen.sync {
+            // A keyframe: copied, shown from the part's start.
+            let copy = retimed(&on_screen.sample, sub(self.start, on_screen.sample_pts()))?;
+            self.queue.push_back(copy);
+            self.frames[index] += 1;
+            if let Some(sample) = after {
+                self.copy(sample)?;
+            }
+            return Ok(());
+        }
+        // Encode again from the frame on screen to the next keyframe.
+        let mut again = vec![on_screen];
+        let mut next = after;
+        let keyframe = loop {
+            match next.take() {
+                None => break None,
+                Some(sample) if sample.sync || cmp(sample.pts, self.end) >= 0 => {
+                    break Some(sample);
+                }
+                Some(sample) => {
+                    again.push(sample);
+                    next = self.read()?;
+                }
+            }
+        };
+        let decode_only = interval.len() - 1;
+        let frame = self.frame_duration();
+        let mut first = true;
+        for (i, sample) in interval[..decode_only].iter().chain(&again).enumerate() {
+            let pictures = self.decode(&sample.sample)?;
+            if i < decode_only {
+                continue;
+            }
+            let Some((picture, _)) = pictures.into_iter().last() else {
+                bail!(
+                    "{}: a frame decoded to no picture",
+                    self.part().path.display()
+                );
+            };
+            let pts = max(sample.pts, self.start);
+            self.encode(&picture, pts, frame, first)?;
+            first = false;
+            self.frames[index] += 1;
+            self.reencoded[index] += 1;
+        }
+        self.finish_encoding()?;
+        if let Some(sample) = keyframe {
+            self.copy(sample)?;
+        }
+        Ok(())
+    }
+
+    /// One frame's duration in the joined file.
+    fn frame_duration(&self) -> CMTime {
+        unsafe { CMTime::new(1, self.format.fps.max(1)) }
+    }
+
+    fn decode(
+        &mut self,
+        sample: &CMSampleBuffer,
+    ) -> Result<Vec<(CFRetained<CVPixelBuffer>, CMTime)>> {
+        let format = unsafe { sample.format_description() }.context("a frame without a format")?;
+        if !self
+            .decoder
+            .as_ref()
+            .is_some_and(|decoder| decoder.accepts(&format))
+        {
+            self.decoder = Some(Decoder::new(&format)?);
+        }
+        let path = &self.parts[self.index.expect("open")].path;
+        self.decoder
+            .as_mut()
+            .expect("made")
+            .decode(sample)
+            .with_context(|| format!("could not decode {}", path.display()))
+    }
+
+    fn encode(
+        &mut self,
+        picture: &CVPixelBuffer,
+        pts: CMTime,
+        duration: CMTime,
+        keyframe: bool,
+    ) -> Result<()> {
+        let ten = ten_bit(picture);
+        if self
+            .encoder
+            .as_ref()
+            .is_some_and(|encoder| encoder.ten_bit != ten)
+        {
+            // Another bit depth: its frames so far go first.
+            self.finish_encoding()?;
+            self.encoder = None;
+        }
+        if self.encoder.is_none() {
+            let size = (self.format.size.0 as u32, self.format.size.1 as u32);
+            self.encoder = Some(Encoder::new(
+                self.format.codec,
+                size,
+                f64::from(self.format.fps.max(1)),
+                ten,
+            )?);
+        }
+        let encoder = self.encoder.as_mut().expect("made");
+        encoder.encode(picture, pts, duration, keyframe)?;
+        self.queue.extend(encoder.take());
+        Ok(())
+    }
+
+    /// Wait for every frame given to the encoder, and queue them.
+    fn finish_encoding(&mut self) -> Result<()> {
+        if let Some(encoder) = &mut self.encoder {
+            encoder.flush()?;
+            self.queue.extend(encoder.take());
+        }
+        Ok(())
+    }
+
+    /// Render the whole part on the joined file's frame grid: each output
+    /// frame is the picture on screen at its time (the first picture
+    /// before the file starts, the last after it ends).
+    fn render_step(&mut self) -> Result<()> {
+        if self.render_frame >= self.render_frames {
+            self.reader = None;
+            self.mode = Mode::Done;
+            return self.finish_encoding();
+        }
+        let Some(sample) = self.read()? else {
+            // The file ended: its last picture holds to the part's end.
+            match self.picture.clone() {
+                Some(picture) => {
+                    while self.render_frame < self.render_frames {
+                        self.render_picture(&picture)?;
+                    }
+                }
+                None => bail!("{} has no frames in its clip", self.part().path.display()),
+            }
+            return Ok(());
+        };
+        if !self.synced && !sample.sync {
+            // Before the first keyframe read: can't be decoded.
+            return Ok(());
+        }
+        self.synced = true;
+        let pictures = self.decode(&sample.sample)?;
+        let quarter = unsafe { CMTime::new(1, 4 * self.format.fps.max(1)) };
+        for (picture, _) in pictures {
+            // Frames before this picture show the one before it.
+            loop {
+                let at = self.render_time();
+                if self.render_frame >= self.render_frames || cmp(add(at, quarter), sample.pts) >= 0
+                {
+                    break;
+                }
+                let shown = self.picture.clone().unwrap_or_else(|| picture.clone());
+                self.render_picture(&shown)?;
+            }
+            self.picture = Some(picture);
+        }
+        Ok(())
+    }
+
+    /// The joined-file time of the next rendered frame.
+    fn render_time(&self) -> CMTime {
+        add(self.start, unsafe {
+            CMTime::new(self.render_frame, self.format.fps.max(1))
+        })
+    }
+
+    fn render_picture(&mut self, picture: &CVPixelBuffer) -> Result<()> {
+        let index = self.index.expect("open");
+        let (at, frame, first) = (
+            self.render_time(),
+            self.frame_duration(),
+            self.render_frame == 0,
+        );
+        self.encode(picture, at, frame, first)?;
+        self.render_frame += 1;
+        self.frames[index] += 1;
+        self.reencoded[index] += 1;
+        Ok(())
+    }
+}
+
+impl Sample {
+    /// Its time in its file.
+    fn sample_pts(&self) -> CMTime {
+        unsafe { self.sample.presentation_time_stamp() }
     }
 }
 
@@ -316,10 +841,10 @@ fn retimed(sample: &CMSampleBuffer, shift: CMTime) -> Result<CFRetained<CMSample
     timing.truncate(needed.max(0) as usize);
     for entry in &mut timing {
         if valid(entry.presentationTimeStamp) {
-            entry.presentationTimeStamp = unsafe { entry.presentationTimeStamp.add(shift) };
+            entry.presentationTimeStamp = add(entry.presentationTimeStamp, shift);
         }
         if valid(entry.decodeTimeStamp) {
-            entry.decodeTimeStamp = unsafe { entry.decodeTimeStamp.add(shift) };
+            entry.decodeTimeStamp = add(entry.decodeTimeStamp, shift);
         }
     }
     let mut out = ptr::null_mut();
@@ -339,7 +864,8 @@ fn retimed(sample: &CMSampleBuffer, shift: CMTime) -> Result<CFRetained<CMSample
 }
 
 /// One audio track of every part, one after another, as continuous audio:
-/// each part's cut or padded with silence to the part's length.
+/// each part's from its in point, cut or padded with silence to the part's
+/// length, and cross-faded into the next.
 struct AudioStream<'a> {
     parts: &'a [Part],
     /// Where each part starts and the joined file ends, in samples.
@@ -351,77 +877,161 @@ struct AudioStream<'a> {
     reader: Option<Reader>,
     /// Samples written so far, in all.
     written: i64,
+    /// Where the current part's in point is on its track's clock, in
+    /// samples, until its first samples are read (then `pad` and `skip`
+    /// say how they line up).
+    target: Option<i64>,
     /// Silence still to add before the current part's audio, and samples
-    /// of it still to skip (its audio starts before or after its video).
+    /// of it still to skip (its audio starts after or before its in point).
     pad: i64,
     skip: i64,
+    /// Samples read and not yet written (interleaved).
+    pending: Vec<f32>,
+    /// The previous part's audio just past its end, faded out under the
+    /// current part's first [`CROSSFADE`] samples, and how many of those
+    /// have been written.
+    tail: Vec<f32>,
+    faded: usize,
 }
 
 impl AudioStream<'_> {
     fn next(&mut self) -> Result<Option<CFRetained<CMSampleBuffer>>> {
+        let channels = self.channels as usize;
         loop {
             if let Some(index) = self.index {
                 let end = self.bounds[index + 1];
                 if self.written < end {
-                    if self.pad > 0 || self.reader.is_none() {
-                        // Before the part's audio, or after it ran out.
-                        let mut count = (end - self.written).min(PAD_CHUNK);
-                        if self.reader.is_some() {
-                            count = count.min(self.pad);
-                            self.pad -= count;
+                    let room = end - self.written;
+                    if self.pad > 0 {
+                        // Before the part's audio.
+                        let count = room.min(PAD_CHUNK).min(self.pad);
+                        self.pad -= count;
+                        let silence = vec![0.0; count as usize * channels];
+                        return self.emit(silence).map(Some);
+                    }
+                    if self.pending.is_empty() {
+                        if !self.fill()? {
+                            // After the part's audio ran out.
+                            let count = room.min(PAD_CHUNK);
+                            let silence = vec![0.0; count as usize * channels];
+                            return self.emit(silence).map(Some);
                         }
-                        let silence = vec![0.0; count as usize * self.channels as usize];
-                        return self.emit(&silence).map(Some);
-                    }
-                    let reader = self.reader.as_ref().expect("checked");
-                    let part = &self.parts[index];
-                    let Some(sample) = reader.next(&part.path)? else {
-                        self.reader = None;
-                        continue;
-                    };
-                    let Some(mut samples) = interleaved_f32(&sample, self.channels)? else {
-                        continue;
-                    };
-                    let channels = self.channels as usize;
-                    if self.skip > 0 {
-                        let skipped = (self.skip as usize).min(samples.len() / channels);
-                        samples.drain(..skipped * channels);
-                        self.skip -= skipped as i64;
-                    }
-                    let frames = (samples.len() / channels) as i64;
-                    let take = frames.min(end - self.written);
-                    if take <= 0 {
                         continue;
                     }
-                    samples.truncate(take as usize * channels);
-                    return self.emit(&samples).map(Some);
+                    let take = ((self.pending.len() / channels) as i64).min(room) as usize;
+                    let rest = self.pending.split_off(take * channels);
+                    let samples = std::mem::replace(&mut self.pending, rest);
+                    return self.emit(samples).map(Some);
                 }
+                // The part is done: keep what follows its end, to fade out
+                // under the next part's start.
+                self.tail.clear();
+                if index + 1 < self.parts.len() && self.pad == 0 {
+                    while self.pending.len() < CROSSFADE * channels && self.fill()? {}
+                    self.pending.truncate(CROSSFADE * channels);
+                    self.tail = std::mem::take(&mut self.pending);
+                }
+                self.pending.clear();
                 self.reader = None;
             }
             let next = self.index.map_or(0, |i| i + 1);
             if next == self.parts.len() {
                 return Ok(None);
             }
-            self.index = Some(next);
-            let part = &self.parts[next];
-            let track = &part.audio[self.track];
-            self.reader = Some(reader(part, track, Some(self.channels))?);
-            // Where the part's audio starts: after the file's offset in its
-            // clip, and its own start against the file's video.
-            let range = unsafe { track.timeRange() };
-            let mut lead = in_samples(part.offset);
-            if valid(range.start) {
-                lead += in_samples(unsafe { range.start.subtract(part.start) });
-            }
-            self.pad = lead.max(0);
-            self.skip = (-lead).max(0);
+            self.begin(next)?;
         }
     }
 
-    fn emit(&mut self, samples: &[f32]) -> Result<CFRetained<CMSampleBuffer>> {
+    fn begin(&mut self, index: usize) -> Result<()> {
+        self.index = Some(index);
+        self.faded = 0;
+        self.pad = 0;
+        self.skip = 0;
+        let part = &self.parts[index];
+        let source = &part.audio;
+        let track = &source.tracks[self.track];
+        // The in point on the track's clock: the file's video start is at
+        // its offset in the clip.
+        let in_point = add(source.start, sub(part.in_point, source.offset));
+        self.target = Some(in_samples(in_point));
+        let from = sub(in_point, unsafe {
+            CMTime::with_seconds(AUDIO_SEEK_BACK_SECONDS, SAMPLE_RATE as i32)
+        });
+        let track_start = unsafe { track.timeRange() }.start;
+        let range = (valid(track_start) && cmp(from, track_start) > 0).then_some(CMTimeRange {
+            start: from,
+            duration: unsafe { kCMTimePositiveInfinity },
+        });
+        self.reader = Some(reader(
+            &source.asset,
+            &source.path,
+            track,
+            Some(self.channels),
+            range,
+        )?);
+        Ok(())
+    }
+
+    /// Read the next samples into `pending`, skipping what comes before
+    /// the in point; false at the end of the part's audio.
+    fn fill(&mut self) -> Result<bool> {
+        let channels = self.channels as usize;
+        loop {
+            let Some(reader) = &self.reader else {
+                return Ok(false);
+            };
+            let path = &self.parts[self.index.expect("open")].audio.path;
+            let Some(sample) = reader.next(path)? else {
+                self.reader = None;
+                return Ok(false);
+            };
+            let pts = unsafe { sample.presentation_time_stamp() };
+            let Some(mut samples) = interleaved_f32(&sample, self.channels)? else {
+                continue;
+            };
+            if let Some(target) = self.target.take() {
+                // The first samples read: line them up with the in point.
+                let first = if valid(pts) { in_samples(pts) } else { target };
+                self.pad = (first - target).max(0);
+                self.skip = (target - first).max(0);
+            }
+            if self.skip > 0 {
+                let skipped = (self.skip as usize).min(samples.len() / channels);
+                samples.drain(..skipped * channels);
+                self.skip -= skipped as i64;
+            }
+            if samples.is_empty() {
+                continue;
+            }
+            self.pending.extend_from_slice(&samples);
+            return Ok(true);
+        }
+    }
+
+    fn emit(&mut self, mut samples: Vec<f32>) -> Result<CFRetained<CMSampleBuffer>> {
+        let channels = self.channels as usize;
+        // Over the outgoing audio there is (10 ms, or less where its file
+        // ends sooner), so the incoming part never fades in over nothing.
+        let fade = self.tail.len() / channels;
+        if fade > 0 && self.faded < fade {
+            let frames = samples.len() / channels;
+            for frame in 0..frames {
+                let n = self.faded + frame;
+                if n >= fade {
+                    break;
+                }
+                let gain = (n as f32 + 0.5) / fade as f32;
+                for c in 0..channels {
+                    let before = self.tail.get(n * channels + c).copied().unwrap_or(0.0);
+                    let sample = &mut samples[frame * channels + c];
+                    *sample = *sample * gain + before * (1.0 - gain);
+                }
+            }
+            self.faded += frames;
+        }
         let pts = unsafe { CMTime::new(self.written, SAMPLE_RATE as i32) };
-        let buffer = audio_sample_buffer(&self.format, self.channels as usize, samples, pts)?;
-        self.written += (samples.len() / self.channels as usize) as i64;
+        let buffer = audio_sample_buffer(&self.format, channels, &samples, pts)?;
+        self.written += (samples.len() / channels) as i64;
         Ok(buffer)
     }
 }
@@ -438,37 +1048,72 @@ fn in_samples(time: CMTime) -> i64 {
 }
 
 fn write(spec: &JoinSpec, path: &Path, progress: OnJoinProgress) -> Result<Joined> {
+    // The joined file's video format: the format file's, else the first
+    // part's.
+    let format = match &spec.format {
+        Some(file) => {
+            let asset = open_asset(file)?;
+            let video = tracks(&asset, false)?
+                .into_iter()
+                .next()
+                .with_context(|| format!("{} has no video macOS can read", file.display()))?;
+            // The program's: the take's frame grid.
+            format_of(&video, file, spec.parts[0].length.map_or(0, |(_, fps)| fps))?
+        }
+        None => {
+            let first = &spec.parts[0].path;
+            let asset = open_asset(first)?;
+            let video = tracks(&asset, false)?
+                .into_iter()
+                .next()
+                .with_context(|| format!("{} has no video macOS can read", first.display()))?;
+            format_of(&video, first, spec.parts[0].fps)?
+        }
+    };
     let parts = spec
         .parts
         .iter()
-        .map(open_part)
+        .map(|part| open_part(part, Some(&format)))
         .collect::<Result<Vec<_>>>()?;
     let first = &parts[0];
-    let tracks = first.audio.len();
+    let tracks = first.audio.tracks.len();
     let mut track_channels = Vec::new();
-    for track in &first.audio {
+    for track in &first.audio.tracks {
         track_channels.push(channels(track).filter(|c| *c > 0).with_context(|| {
-            format!("{}: an audio track without channels", first.path.display())
+            format!(
+                "{}: an audio track without channels",
+                first.audio.path.display()
+            )
         })?);
     }
     for part in &parts[1..] {
-        if part.audio.len() != tracks {
+        if part.audio.tracks.len() != tracks {
             bail!(
                 "{} has {} audio tracks, {} has {tracks}; files joined need the same tracks",
-                part.path.display(),
-                part.audio.len(),
-                first.path.display()
+                part.audio.path.display(),
+                part.audio.tracks.len(),
+                first.audio.path.display()
             );
         }
     }
+    for part in parts.iter().filter(|part| !part.copy) {
+        isocast_diagnostics::debug!(
+            "join: {} is encoded again ({} at {}x{}, {} fps, like the joined file)",
+            part.path.display(),
+            fourcc(format.codec),
+            format.size.0,
+            format.size.1,
+            format.fps
+        );
+    }
     // Where each part starts in the joined file: the parts' lengths added
     // up, exactly.
-    let timescale = unsafe { first.video.naturalTimeScale() };
+    let timescale = format.timescale;
     let mut starts = Vec::new();
-    let mut cursor = unsafe { CMTime::new(0, timescale.max(1)) };
+    let mut cursor = unsafe { CMTime::new(0, timescale) };
     for part in &parts {
         starts.push(cursor);
-        cursor = unsafe { cursor.add(part.length) };
+        cursor = add(cursor, part.length);
     }
     let total = cursor;
     let mut bounds: Vec<i64> = starts.iter().map(|t| in_samples(*t)).collect();
@@ -485,13 +1130,12 @@ fn write(spec: &JoinSpec, path: &Path, progress: OnJoinProgress) -> Result<Joine
     let writer = unsafe { AVAssetWriter::assetWriterWithURL_fileType_error(&url, file_type) }
         .map_err(|err| ns_error(&err))?;
     let video_type = unsafe { AVMediaTypeVideo }.context("missing AVMediaTypeVideo")?;
-    let hint = format(&first.video).context("the first file's video has no format")?;
     let video_input = catch(|| unsafe {
         let input =
             AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings_sourceFormatHint(
                 video_type,
                 None,
-                Some(&hint),
+                Some(&format.hint),
             );
         input.setExpectsMediaDataInRealTime(false);
         input.setMediaTimeScale(timescale);
@@ -516,17 +1160,30 @@ fn write(spec: &JoinSpec, path: &Path, progress: OnJoinProgress) -> Result<Joine
     if !unsafe { writer.startWriting() } {
         return Err(writer_error(&writer).context("could not start writing"));
     }
-    catch(|| unsafe { writer.startSessionAtSourceTime(CMTime::new(0, timescale.max(1))) })?;
+    catch(|| unsafe { writer.startSessionAtSourceTime(CMTime::new(0, timescale)) })?;
 
+    let zero = unsafe { CMTime::new(0, 1) };
     let mut video = VideoStream {
         parts: &parts,
         starts: &starts,
+        format: &format,
         index: None,
         reader: None,
-        shift: unsafe { CMTime::new(0, 1) },
-        end: unsafe { CMTime::new(0, 1) },
+        shift: zero,
+        start: zero,
+        end: zero,
+        mode: Mode::Done,
+        queue: VecDeque::new(),
+        decoder: None,
+        encoder: None,
+        count_tail: false,
+        render_frame: 0,
+        render_frames: 0,
+        picture: None,
+        synced: false,
         frames: vec![0; parts.len()],
         left_out: vec![0; parts.len()],
+        reencoded: vec![0; parts.len()],
     };
     let mut audio = track_channels
         .iter()
@@ -541,8 +1198,12 @@ fn write(spec: &JoinSpec, path: &Path, progress: OnJoinProgress) -> Result<Joine
                 index: None,
                 reader: None,
                 written: 0,
+                target: None,
                 pad: 0,
                 skip: 0,
+                pending: Vec::new(),
+                tail: Vec::new(),
+                faded: 0,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -550,7 +1211,7 @@ fn write(spec: &JoinSpec, path: &Path, progress: OnJoinProgress) -> Result<Joine
     let result = (|| -> Result<()> {
         let mut video_done = false;
         let mut audio_done = vec![false; audio.len()];
-        let mut appended = unsafe { CMTime::new(0, 1) };
+        let mut appended = zero;
         let mut reported = Instant::now();
         let total_seconds = seconds(total).max(1e-9);
         if !progress(0.0) {
@@ -633,19 +1294,19 @@ fn write(spec: &JoinSpec, path: &Path, progress: OnJoinProgress) -> Result<Joine
         }
         return Err(err);
     }
-    let (frames, left_out) = (video.frames.clone(), video.left_out.clone());
     Ok(Joined {
         duration_seconds: seconds(total),
-        frames: frames.iter().sum(),
+        frames: video.frames.iter().sum(),
         parts: parts
             .iter()
-            .zip(&starts)
-            .zip(frames.into_iter().zip(left_out))
-            .map(|((part, start), (frames, frames_left_out))| JoinedPart {
-                start_seconds: seconds(*start),
+            .enumerate()
+            .map(|(i, part)| JoinedPart {
+                start_seconds: seconds(starts[i]),
                 duration_seconds: seconds(part.length),
-                frames,
-                frames_left_out,
+                frames: video.frames[i],
+                frames_left_out: video.left_out[i],
+                reencoded: video.reencoded[i],
+                converted: !part.copy,
             })
             .collect(),
     })

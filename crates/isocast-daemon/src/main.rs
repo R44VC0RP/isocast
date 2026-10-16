@@ -87,6 +87,7 @@ use isocast_platform_macos::MacPlatform;
 mod data;
 mod debug;
 mod diagnostics;
+mod edit;
 mod export;
 mod hotkeys;
 mod library;
@@ -1470,6 +1471,18 @@ impl Daemon {
             Method::Retake(params) => self.retake(params.unwrap_or_default()).and_then(to_json),
             Method::TimelineExport(params) => self
                 .timeline_export(params.unwrap_or_default())
+                .and_then(to_json),
+            Method::TimelineTrim(params) => self.timeline_trim(params).and_then(to_json),
+            Method::TimelineSplit(params) => self.timeline_split(params).and_then(to_json),
+            Method::TimelineDeleteRange(params) => {
+                self.timeline_delete_range(params).and_then(to_json)
+            }
+            Method::TimelineAngle(params) => self.timeline_angle(params).and_then(to_json),
+            Method::TimelineUndo(target) => self
+                .timeline_step(target.unwrap_or_default(), false)
+                .and_then(to_json),
+            Method::TimelineRedo(target) => self
+                .timeline_step(target.unwrap_or_default(), true)
                 .and_then(to_json),
             Method::HotkeysGet => to_json(self.hotkeys_get()),
             Method::HotkeysSet(params) => self.hotkeys_set(*params).and_then(to_json),

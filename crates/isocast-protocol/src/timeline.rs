@@ -11,8 +11,14 @@
 //! where they were recorded, and the timeline lists them under `removed`.
 //! So does a take isocastd was recording when it was killed or crashed: it
 //! never finished, so it is never a clip.
-//! A clip covers its whole take for now; `in_seconds` and `out_seconds`
-//! (on the take's own timeline) are there so it can later cover part of it.
+//! A clip covers part of its take, `in_seconds` to `out_seconds` on the
+//! take's own clock (the whole take when it is added). The Edit view's edits
+//! (C.3) only change clips: `timeline_trim` sets a clip's in and out points,
+//! `timeline_split` cuts a clip in two, `timeline_delete_range` takes a span
+//! of the timeline out (ripple), and `timeline_angle` sets which source the
+//! edited video shows over a span (a clip's `angle`). Each edit is one
+//! revision, which `timeline_undo` and `timeline_redo` step through. They
+//! never touch a take's files.
 
 use std::path::PathBuf;
 
@@ -50,6 +56,31 @@ pub struct Timeline {
     /// The number the next clip's id gets (`c1`, `c2`, …), so ids are
     /// never reused.
     pub next_clip: u32,
+    /// Counts every change to the clips (an edit, an undo, a take added),
+    /// so a client can tell its copy is out of date.
+    #[serde(default)]
+    pub revision: u64,
+    /// The clips (and removed takes) before each edit, oldest first, for
+    /// `timeline_undo`; at most [`UNDO_LIMIT`]. A take added by recording
+    /// clears it: undo goes back through the edits since the last take.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undo: Vec<Revision>,
+    /// What `timeline_undo` took back, newest last, for `timeline_redo`;
+    /// any new edit clears it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redo: Vec<Revision>,
+}
+
+/// How many edits `timeline_undo` can take back.
+pub const UNDO_LIMIT: usize = 100;
+
+/// A timeline's clips as they were before (or after) an edit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Revision {
+    /// The edit this undoes or redoes.
+    pub action: TimelineAction,
+    pub clips: Vec<Clip>,
+    pub removed: Vec<RemovedTake>,
 }
 
 /// One take on a timeline.
@@ -69,6 +100,10 @@ pub struct Clip {
     /// again if the project's folder is renamed behind Isocast's back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// The source the edited video shows for this clip (an ISO source's
+    /// id); the program if absent. Set with `timeline_angle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<String>,
 }
 
 /// A take that was on a timeline (or recorded for it) and was taken off.
@@ -151,6 +186,66 @@ pub struct TimelineMoveParams {
     pub timeline: Option<String>,
 }
 
+/// Parameters of `timeline_trim`: a clip's new in and/or out point.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineTrimParams {
+    /// The clip's id, like `c2`.
+    pub clip: String,
+    /// Where the clip starts, in seconds on its take's own clock (0 is the
+    /// take's start); unchanged if absent. Rounded to the take's frame grid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_seconds: Option<f64>,
+    /// Where the clip ends, on its take's clock, up to the take's length;
+    /// unchanged if absent. Rounded to the take's frame grid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out_seconds: Option<f64>,
+    /// The timeline's id; the current one if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<String>,
+}
+
+/// Parameters of `timeline_split`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineSplitParams {
+    /// Where to cut, in seconds on the timeline (0 is its start), rounded
+    /// to the frame grid of the clip there.
+    pub at_seconds: f64,
+    /// The timeline's id; the current one if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<String>,
+}
+
+/// Parameters of `timeline_delete_range`: a span of the timeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineRangeParams {
+    /// Where the span starts and ends, in seconds on the timeline, each
+    /// rounded to the frame grid of the clip there.
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    /// The timeline's id; the current one if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<String>,
+}
+
+/// Parameters of `timeline_angle`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineAngleParams {
+    /// Where the span starts and ends, in seconds on the timeline, each
+    /// rounded to the frame grid of the clip there.
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+    /// What the edited video shows over the span: `program`, or an ISO
+    /// source's id that every clip in the span recorded.
+    pub source: String,
+    /// The timeline's id; the current one if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<String>,
+}
+
 /// Parameters of `retake`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -199,6 +294,14 @@ pub struct TimelineInfo {
     /// files are).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// See [`Timeline::revision`].
+    #[serde(default)]
+    pub revision: u64,
+    /// Edits `timeline_undo` can take back, and `timeline_redo` put back.
+    #[serde(default)]
+    pub undo: usize,
+    #[serde(default)]
+    pub redo: usize,
 }
 
 /// A clip and its take.
@@ -228,6 +331,13 @@ pub struct ClipInfo {
     /// Why the take can't be read (its manifest is missing or broken).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// The source the edited video shows (see [`Clip::angle`]); the
+    /// program if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<String>,
+    /// The take's frame rate, whose grid the clip's points sit on.
+    #[serde(default)]
+    pub fps: u32,
 }
 
 /// One of a take's files.
@@ -252,6 +362,9 @@ pub struct ClipFile {
     pub audio_dropouts: u64,
     /// The file is where the manifest says.
     pub exists: bool,
+    /// Where the file's first frame sits on its take's clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_offset_seconds: Option<f64>,
 }
 
 /// What `timeline_list` returns.
@@ -320,7 +433,9 @@ pub struct ExportStarted {
     /// The export's manifest (`<name>.export.json`), written now and again
     /// when it finishes.
     pub manifest: PathBuf,
-    /// The files it writes: the program and each ISO source every clip has.
+    /// The files it writes: the program and each ISO source every clip has,
+    /// each cut to the clips' in and out points, and (when a clip shows
+    /// another angle than the program) the edited file, source `edited`.
     pub files: Vec<ExportFile>,
     /// Sources it doesn't join, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -351,7 +466,8 @@ pub struct ExportSkipped {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ExportFile {
     pub path: PathBuf,
-    /// The video source joined (`program` for the program).
+    /// The video source joined (`program` for the program, `edited` for
+    /// the edited file).
     pub source: String,
     pub width: u32,
     pub height: u32,
@@ -371,7 +487,7 @@ pub struct ExportFile {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ExportPart {
     pub clip: String,
-    /// The take's file joined.
+    /// The take's file joined (in the edited file, the clip's angle's).
     pub path: PathBuf,
     /// Where it starts in the joined file and how long it is there, once
     /// written.
@@ -385,6 +501,11 @@ pub struct ExportPart {
     /// (a file running longer than the program; normally none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frames_left_out: Option<u64>,
+    /// Frames decoded and encoded again (the partial keyframe intervals at
+    /// a cut, or the whole part when its file's format differs from the
+    /// joined file's); the rest were copied as recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reencoded_frames: Option<u64>,
 }
 
 /// An export's manifest, `<name>.export.json` next to its files.
@@ -414,7 +535,14 @@ pub struct ExportClip {
     pub take: PathBuf,
     pub in_seconds: f64,
     pub out_seconds: f64,
+    /// The source the edited file shows for it, if not the program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<String>,
 }
+
+/// The source label of an export's edited file: the program's sound with
+/// each clip's angle (see [`Clip::angle`]) as its picture.
+pub const EDITED: &str = "edited";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -442,6 +570,17 @@ pub enum TimelineAction {
     Dropped,
     /// A take being recorded for it never finished (the recording failed).
     Interrupted,
+    /// A clip's in or out point moved (`timeline_trim`).
+    Trimmed,
+    /// A clip was cut in two (`timeline_split`).
+    Split,
+    /// A span was taken out (`timeline_delete_range`).
+    Deleted,
+    /// The edited video's source changed over a span (`timeline_angle`).
+    Angle,
+    /// An edit was taken back (`timeline_undo`) or put back (`timeline_redo`).
+    Undone,
+    Redone,
 }
 
 /// A take's length on the timeline, as whole frames at a frame rate: its

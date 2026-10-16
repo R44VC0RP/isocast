@@ -1,9 +1,14 @@
 //! `timeline_export`: join a timeline's clips into one program file and
-//! one file per ISO source every clip has, in the background, reporting
-//! `export_progress` and `export_finished` events. The video is copied as
-//! recorded; the audio is decoded and encoded once more as one continuous
-//! track per file (see `isocast-platform-macos`'s `join`), so it lines up
-//! with the video at every join in any player or editor.
+//! one file per ISO source every clip has, each cut to the clips' in and
+//! out points, plus (when clips show other angles, C.3) an edited file with
+//! each clip's angle as its picture and the program's sound, in the
+//! background, reporting `export_progress` and `export_finished` events.
+//! The video is copied as recorded, except the frames from a cut that
+//! isn't on a keyframe to the next keyframe, and angles in another format
+//! than the program, which are encoded again; the audio is decoded and
+//! encoded once more as one continuous track per file, cross-faded at
+//! each join (see `isocast-platform-macos`'s `join`), so it lines up with
+//! the video at every join in any player or editor.
 //!
 //! Exports write next to the first clip's take (or to `folder`), named
 //! after the timeline: `<name> PROGRAM.mov`, `<name> <SOURCE>.mov` and
@@ -25,8 +30,8 @@ use isocast_engine::{JoinPart, JoinSpec, Joined, OnJoinProgress};
 use isocast_protocol::api::{Event, RpcError};
 use isocast_protocol::manifest::{ManifestFile, SessionManifest};
 use isocast_protocol::timeline::{
-    ExportClip, ExportFile, ExportManifest, ExportPart, ExportRunning, ExportSkipped,
-    ExportStarted, ExportStatus, TimelineExportParams, take_length, take_seconds,
+    EDITED, ExportClip, ExportFile, ExportManifest, ExportPart, ExportRunning, ExportSkipped,
+    ExportStarted, ExportStatus, TimelineExportParams, take_length,
 };
 use isocast_protocol::{Container, PROGRAM};
 
@@ -89,29 +94,86 @@ struct TakeFiles {
     clip: String,
     folder: PathBuf,
     manifest: SessionManifest,
-}
-
-/// What each clip's file of `source` adds to its joined file: the clip's
-/// length (so every joined file switches clips at the same moments) and
-/// where the file starts within it.
-fn join_parts(takes: &[TakeFiles], source: &str) -> Vec<JoinPart> {
-    takes
-        .iter()
-        .map(|take| {
-            let file = take.file(source).expect("planned");
-            JoinPart {
-                path: take.folder.join(&file.path),
-                length: take_length(&take.manifest),
-                offset_seconds: file.start_offset_seconds.unwrap_or(0.0),
-            }
-        })
-        .collect()
+    /// The clip's in point and length, in frames of its take's frame rate
+    /// (the program's).
+    in_frame: u64,
+    frames: u64,
+    fps: u32,
+    /// The source the edited file shows for it.
+    angle: String,
 }
 
 impl TakeFiles {
     fn file(&self, source: &str) -> Option<&ManifestFile> {
         self.manifest.files.iter().find(|f| f.source == source)
     }
+
+    fn in_seconds(&self) -> f64 {
+        self.in_frame as f64 / f64::from(self.fps)
+    }
+
+    fn seconds(&self) -> f64 {
+        self.frames as f64 / f64::from(self.fps)
+    }
+
+    /// What its file of `source` adds to that source's joined file: the
+    /// clip's stretch of it, from its in point for its length (so every
+    /// joined file switches clips at the same moments), and where the file
+    /// starts within the take.
+    fn part(&self, source: &str) -> JoinPart {
+        let file = self.file(source).expect("planned");
+        JoinPart {
+            path: self.folder.join(&file.path),
+            length: Some((self.frames, self.fps)),
+            offset_seconds: file.start_offset_seconds.unwrap_or(0.0),
+            in_seconds: self.in_seconds(),
+            audio: None,
+            fps: file.fps,
+        }
+    }
+
+    /// What it adds to the edited file: its angle's picture with the
+    /// program's sound.
+    fn edited_part(&self) -> JoinPart {
+        let mut part = self.part(&self.angle);
+        if self.angle != PROGRAM {
+            let program = self.file(PROGRAM).expect("planned");
+            part.audio = Some((
+                self.folder.join(&program.path),
+                program.start_offset_seconds.unwrap_or(0.0),
+            ));
+        }
+        part
+    }
+}
+
+/// Why the edited file can't be written, if it can't: every clip's angle
+/// file must be there and finished.
+fn edited_problem(takes: &[TakeFiles]) -> Option<String> {
+    for take in takes {
+        let Some(file) = take.file(&take.angle) else {
+            return Some(format!(
+                "clip {}'s angle {:?} isn't in its take",
+                take.clip, take.angle
+            ));
+        };
+        let path = take.folder.join(&file.path);
+        if !path.exists() {
+            return Some(format!(
+                "clip {}'s angle file {} is missing",
+                take.clip,
+                path.display()
+            ));
+        }
+        if file.duration_seconds.is_none() {
+            return Some(format!(
+                "clip {}'s angle file {} never finished",
+                take.clip,
+                path.display()
+            ));
+        }
+    }
+    None
 }
 
 /// The audio a file holds, as "audio tone (2 ch)", for messages.
@@ -498,11 +560,19 @@ impl Daemon {
             if let Some(problem) = unfinished(&clip.id, &clip.take, &manifest) {
                 return Err(failed(problem));
             }
-            let duration = take_seconds(&manifest);
-            if clip.in_seconds > 1e-6 || (clip.out_seconds - duration).abs() > 1e-6 {
+            // The clip's stretch on its take's frame grid (edits keep its
+            // points there; this only rounds what a hand edit left).
+            let (take_frames, fps) = take_length(&manifest).unwrap_or((
+                (manifest.duration_seconds.unwrap_or(0.0) * 60.0).round() as u64,
+                60,
+            ));
+            let frame = |seconds: f64| (seconds * f64::from(fps)).round().max(0.0) as u64;
+            let in_frame = frame(clip.in_seconds).min(take_frames);
+            let out_frame = frame(clip.out_seconds).min(take_frames);
+            if out_frame <= in_frame {
                 return Err(failed(format!(
-                    "clip {} covers {:.3}–{:.3} s of its {duration:.3} s take; exports join whole \
-                     takes for now",
+                    "clip {} covers no frames of its take ({:.3}–{:.3} s); trim it (`isocast \
+                     timeline trim`, MCP trim_clip) or take it off",
                     clip.id, clip.in_seconds, clip.out_seconds
                 )));
             }
@@ -510,6 +580,10 @@ impl Daemon {
                 clip: clip.id.clone(),
                 folder: clip.take.parent().unwrap_or(Path::new("/")).to_path_buf(),
                 manifest,
+                in_frame,
+                frames: out_frame - in_frame,
+                fps,
+                angle: clip.angle.clone().unwrap_or_else(|| PROGRAM.to_string()),
             });
         }
         let (sources, skipped) = plan(&takes);
@@ -530,6 +604,29 @@ impl Daemon {
                  (`isocast timeline remove CLIP`, MCP remove_clip), then export again"
             )));
         }
+        // The edited file, when a clip shows another angle than the program.
+        let mut skipped = skipped;
+        let angled = takes.iter().any(|take| take.angle != PROGRAM);
+        let edited = angled && sources.iter().any(|source| source == PROGRAM);
+        if angled && !edited {
+            skipped.push(ExportSkipped {
+                source: EDITED.into(),
+                reason: "clips show other angles, but the program can't be joined, and the \
+                         edited file has the program's sound and format"
+                    .into(),
+            });
+        }
+        let edited = edited
+            && match edited_problem(&takes) {
+                None => true,
+                Some(reason) => {
+                    skipped.push(ExportSkipped {
+                        source: EDITED.into(),
+                        reason,
+                    });
+                    false
+                }
+            };
         if sources.is_empty() {
             let reasons: Vec<String> = skipped
                 .iter()
@@ -551,16 +648,29 @@ impl Daemon {
             ))
         })?;
         // Room for every file joined (their audio comes out about as big),
-        // and for a recording on the same disk to carry on.
-        let needed: u64 = sources
+        // each clip's share of its file, and for a recording on the same
+        // disk to carry on.
+        let share = |take: &TakeFiles, source: &str| {
+            let file = take.file(source).expect("planned");
+            let size = std::fs::metadata(take.folder.join(&file.path)).map_or(0, |m| m.len());
+            let length = file.duration_seconds.unwrap_or(0.0).max(1e-3);
+            (size as f64 * (take.seconds() / length).min(1.0)) as u64
+        };
+        let mut needed: u64 = sources
             .iter()
-            .flat_map(|source| {
-                takes.iter().map(move |take| {
-                    let file = take.file(source).expect("planned");
-                    std::fs::metadata(take.folder.join(&file.path)).map_or(0, |m| m.len())
-                })
-            })
+            .flat_map(|source| takes.iter().map(move |take| share(take, source)))
             .sum();
+        if edited {
+            // Angles encoded again (scaled up, at a higher quality) came
+            // out up to 4.2 times the program's stretch: allow 5.
+            needed += takes
+                .iter()
+                .map(|take| match take.angle == PROGRAM {
+                    true => share(take, PROGRAM),
+                    false => share(take, &take.angle).max(share(take, PROGRAM)) * 5,
+                })
+                .sum::<u64>();
+        }
         let recording = self.recording_floor(&folder);
         if let Some(free) = free_bytes(&folder) {
             let human = |bytes: u64| isocast_engine::space::human(bytes as f64);
@@ -586,24 +696,40 @@ impl Daemon {
                 )));
             }
         }
-        let labels: Vec<(String, &str)> = sources
+        let extension_of = |source: &str| {
+            let file = takes[0].file(source).expect("planned");
+            match file.path.rsplit_once('.') {
+                Some((_, "mp4")) => "mp4",
+                _ => "mov",
+            }
+        };
+        let mut labels: Vec<(String, &str)> = sources
             .iter()
-            .map(|source| {
-                let file = takes[0].file(source).expect("planned");
-                let extension = match file.path.rsplit_once('.') {
-                    Some((_, "mp4")) => "mp4",
-                    _ => "mov",
-                };
-                (source.to_uppercase(), extension)
-            })
+            .map(|source| (source.to_uppercase(), extension_of(source)))
             .collect();
+        if edited {
+            labels.push((EDITED.to_uppercase(), extension_of(PROGRAM)));
+        }
         let stem = fit_stem(&file_stem(&timeline.name), &labels);
         let (paths, manifest_path) = unique_paths(&folder, &stem, &labels);
-        let files: Vec<ExportFile> = sources
+        let mut outputs: Vec<String> = sources.clone();
+        if edited {
+            outputs.push(EDITED.into());
+        }
+        let files: Vec<ExportFile> = outputs
             .iter()
             .zip(&paths)
             .map(|(source, path)| {
-                let first = takes[0].file(source).expect("planned");
+                // The edited file is in the program's format, with its sound.
+                let shown = |take: &TakeFiles| match source.as_str() {
+                    EDITED => take.angle.clone(),
+                    source => source.to_string(),
+                };
+                let format = match source.as_str() {
+                    EDITED => PROGRAM,
+                    source => source,
+                };
+                let first = takes[0].file(format).expect("planned");
                 ExportFile {
                     path: path.clone(),
                     source: source.clone(),
@@ -615,11 +741,14 @@ impl Daemon {
                         .iter()
                         .map(|take| ExportPart {
                             clip: take.clip.clone(),
-                            path: take.folder.join(&take.file(source).expect("planned").path),
+                            path: take
+                                .folder
+                                .join(&take.file(&shown(take)).expect("planned").path),
                             start_seconds: None,
                             duration_seconds: None,
                             frames: None,
                             frames_left_out: None,
+                            reencoded_frames: None,
                         })
                         .collect(),
                     duration_seconds: None,
@@ -643,6 +772,7 @@ impl Daemon {
                     take: clip.take.clone(),
                     in_seconds: clip.in_seconds,
                     out_seconds: clip.out_seconds,
+                    angle: clip.angle.clone(),
                 })
                 .collect(),
             files: files.clone(),
@@ -663,12 +793,21 @@ impl Daemon {
             running.timeline = id.clone();
         }
         slot.started = true;
-        let duration_seconds = isocast_protocol::timeline::duration(&timeline.clips);
+        let duration_seconds: f64 = takes.iter().map(TakeFiles::seconds).sum();
         let manifest_notes = manifest.notes.clone();
-        let parts: Vec<Vec<JoinPart>> = sources
+        let mut parts: Vec<(Vec<JoinPart>, Option<PathBuf>)> = sources
             .iter()
-            .map(|source| join_parts(&takes, source))
+            .map(|source| (takes.iter().map(|take| take.part(source)).collect(), None))
             .collect();
+        if edited {
+            let program = takes[0]
+                .folder
+                .join(&takes[0].file(PROGRAM).expect("planned").path);
+            parts.push((
+                takes.iter().map(TakeFiles::edited_part).collect(),
+                Some(program),
+            ));
+        }
         let daemon = self.clone();
         let path = manifest_path.clone();
         let watched = folder.clone();
@@ -708,7 +847,7 @@ impl Daemon {
     fn run_export(
         &self,
         manifest: &mut ExportManifest,
-        parts: &[Vec<JoinPart>],
+        parts: &[(Vec<JoinPart>, Option<PathBuf>)],
         path: &Path,
         folder: &Path,
     ) {
@@ -717,7 +856,7 @@ impl Daemon {
         let mut checked = Instant::now();
         let mut stopped: Option<String> = None;
         let mut error = None;
-        for (index, parts) in parts.iter().enumerate() {
+        for (index, (parts, format)) in parts.iter().enumerate() {
             let file = &manifest.files[index];
             let spec = JoinSpec {
                 parts: parts.clone(),
@@ -726,6 +865,7 @@ impl Daemon {
                     Some("mp4") => Container::Mp4,
                     _ => Container::Mov,
                 },
+                format: format.clone(),
             };
             let output = file.path.clone();
             let mut progress = |fraction: f64| {
@@ -764,7 +904,28 @@ impl Daemon {
                 true
             };
             match join_files(&spec, &mut progress) {
-                Ok(joined) => record(&mut manifest.files[index], &joined),
+                Ok(joined) => {
+                    record(&mut manifest.files[index], &joined);
+                    let file = &manifest.files[index];
+                    let mut notes = Vec::new();
+                    for (part, written) in file.parts.iter().zip(&joined.parts) {
+                        // An angle in the edited file is meant to be
+                        // encoded again; say so only for a joined source.
+                        if written.converted && file.source != EDITED {
+                            notes.push(format!(
+                                "{}: clip {}'s file {} isn't in the joined file's format ({}x{} \
+                                 at {} fps, the codec of the first), so it was encoded again whole",
+                                file.source,
+                                part.clip,
+                                part.path.display(),
+                                file.width,
+                                file.height,
+                                file.fps
+                            ));
+                        }
+                    }
+                    manifest.notes.extend(notes);
+                }
                 Err(err) => {
                     error = Some(match stopped.take() {
                         Some(reason) => format!("{}: {reason}", file.path.display()),
@@ -795,6 +956,7 @@ fn record(file: &mut ExportFile, joined: &Joined) {
         part.duration_seconds = Some(written.duration_seconds);
         part.frames = Some(written.frames);
         part.frames_left_out = (written.frames_left_out > 0).then_some(written.frames_left_out);
+        part.reencoded_frames = (written.reencoded > 0).then_some(written.reencoded);
     }
 }
 
@@ -817,21 +979,22 @@ fn left_out_notes(manifest: &ExportManifest) -> Vec<String> {
     notes
 }
 
-/// Files shorter than their clip (one started late or stopped early):
-/// their picture holds and their audio is silent for the rest.
+/// Files that don't cover their whole clip (one started late or stopped
+/// early): their picture holds and their audio is silent for the rest.
 fn short_file_notes(takes: &[TakeFiles], sources: &[String]) -> Vec<String> {
     let mut notes = Vec::new();
     for source in sources {
         for take in takes {
             let file = take.file(source).expect("planned");
-            let clip = take_seconds(&take.manifest);
-            let covered =
-                file.start_offset_seconds.unwrap_or(0.0) + file.duration_seconds.unwrap_or(0.0);
+            let (clip_in, clip) = (take.in_seconds(), take.seconds());
+            let file_in = file.start_offset_seconds.unwrap_or(0.0);
+            let file_out = file_in + file.duration_seconds.unwrap_or(0.0);
+            let covered = (file_out.min(clip_in + clip) - file_in.max(clip_in)).clamp(0.0, clip);
             let short = clip - covered;
             if short > 1.0 / f64::from(file.fps.max(1)) {
                 notes.push(format!(
                     "{source}: clip {}'s file covers {covered:.3} s of the clip's {clip:.3} s; its \
-                     last picture holds and its audio is silent for the other {short:.3} s",
+                     picture holds and its audio is silent for the other {short:.3} s",
                     take.clip
                 ));
             }
@@ -877,6 +1040,10 @@ mod tests {
                 "duration_seconds": 1.0, "files": files, "errors": []
             }))
             .unwrap(),
+            in_frame: 0,
+            frames: 30,
+            fps: 30,
+            angle: PROGRAM.into(),
         }
     }
 
@@ -939,6 +1106,10 @@ mod tests {
                 clip: self.clip.clone(),
                 folder: self.folder.clone(),
                 manifest: self.manifest.clone(),
+                in_frame: self.in_frame,
+                frames: self.frames,
+                fps: self.fps,
+                angle: self.angle.clone(),
             }
         }
     }

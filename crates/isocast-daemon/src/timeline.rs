@@ -310,6 +310,9 @@ impl Timelines {
             clips,
             removed: timeline.removed.clone(),
             notes,
+            revision: timeline.revision,
+            undo: timeline.undo.len(),
+            redo: timeline.redo.len(),
         })
     }
 
@@ -347,6 +350,9 @@ impl Timelines {
             removed: Vec::new(),
             recording: Vec::new(),
             next_clip: 1,
+            revision: 0,
+            undo: Vec::new(),
+            redo: Vec::new(),
         };
         self.write(&timeline)?;
         self.timelines.insert(id.clone(), timeline);
@@ -493,7 +499,9 @@ pub fn append(timeline: &mut Timeline, take: &Path, manifest: &SessionManifest) 
             .parent()
             .and_then(isocast_protocol::project::read)
             .map(|file| file.id),
+        angle: None,
     });
+    crate::edit::recorded(timeline);
     id
 }
 
@@ -577,6 +585,8 @@ fn clip_info(clip: &Clip, index: usize, start: f64) -> ClipInfo {
         dropped_frames: 0,
         files: Vec::new(),
         problem: None,
+        angle: clip.angle.clone(),
+        fps: 0,
     };
     match read_manifest(&clip.take) {
         Ok(manifest) => {
@@ -584,6 +594,7 @@ fn clip_info(clip: &Clip, index: usize, start: f64) -> ClipInfo {
             info.started_at = Some(manifest.started_at.clone());
             info.status = Some(manifest.status);
             info.problem = unfinished(&clip.id, &clip.take, &manifest);
+            info.fps = timeline::take_length(&manifest).map_or(0, |(_, fps)| fps);
             info.files = manifest
                 .files
                 .iter()
@@ -601,6 +612,7 @@ fn clip_info(clip: &Clip, index: usize, start: f64) -> ClipInfo {
                         frames: file.frames,
                         dropped_frames: file.dropped_frames.unwrap_or(0),
                         audio_dropouts: file.audio_dropouts.unwrap_or(0),
+                        start_offset_seconds: file.start_offset_seconds,
                     }
                 })
                 .collect();
@@ -748,7 +760,7 @@ impl Daemon {
         *self.timelines.lock().unwrap() = loaded;
     }
 
-    fn timeline_changed(&self, id: &str, action: TimelineAction, clip: Option<String>) {
+    pub(crate) fn timeline_changed(&self, id: &str, action: TimelineAction, clip: Option<String>) {
         let timelines = self.timelines.lock().unwrap();
         let clips = timelines.get(id).map_or(0, |t| t.clips.len());
         let current = timelines.current().map(str::to_string);
@@ -832,7 +844,11 @@ impl Daemon {
         }
     }
 
-    fn timeline_info(&self, id: &str, notes: Vec<String>) -> Result<TimelineInfo, RpcError> {
+    pub(crate) fn timeline_info(
+        &self,
+        id: &str,
+        notes: Vec<String>,
+    ) -> Result<TimelineInfo, RpcError> {
         self.heal_timelines();
         self.timelines
             .lock()
@@ -905,7 +921,10 @@ impl Daemon {
             let id = timelines.resolve(params.timeline.as_deref())?;
             let removed = timelines.change(&id, |timeline| {
                 let at = find(timeline, &params.clip)?;
-                Ok(remove(timeline, at, RemovedReason::Removed))
+                crate::edit::revise(timeline, TimelineAction::Removed, |timeline| {
+                    Ok(remove(timeline, at, RemovedReason::Removed))
+                })
+                .map_err(invalid)
             })?;
             (id, removed)
         };
@@ -927,7 +946,10 @@ impl Daemon {
             let id = timelines.resolve(params.timeline.as_deref())?;
             timelines.change(&id, |timeline| {
                 let at = find(timeline, &params.clip)?;
-                move_clip(timeline, at, params.index)
+                crate::edit::revise(timeline, TimelineAction::Moved, |timeline| {
+                    move_clip(timeline, at, params.index).map_err(|err| err.message)
+                })
+                .map_err(invalid)
             })?;
             id
         };
@@ -1218,6 +1240,7 @@ impl Daemon {
                 return Ok(None);
             }
             let clip = timeline.clips.pop().expect("checked");
+            crate::edit::recorded(timeline);
             let removed = RemovedTake {
                 take: clip.take.clone(),
                 clip: Some(clip.id.clone()),

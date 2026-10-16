@@ -559,6 +559,14 @@ each section. Delete entries that stop being true.
 
 ## Questions for Ryan
 
+- 2026-10-15 (#70): may e2e.py get an `edit` scenario (record three takes
+  of the synthetic setup, trim mid-keyframe-interval, split, ripple delete,
+  two angles, export, then check every frame against the takes by the test
+  pattern's bars, flash-to-beep at every join, no click at joins, and the
+  take files' hashes)? It was verified by hand with
+  `/Volumes/IsocastBuild/edit-view/scratch/tools/verify_edit.py`. Nothing
+  waits on it.
+
 - 2026-10-15 (#18): with a `[stream]` in the profile the replay buffer
   always encodes as the stream does (its size, bitrate, 2 s keyframes),
   even while not streaming, so it can share the stream's encoder: a profile
@@ -1632,6 +1640,55 @@ each section. Delete entries that stop being true.
   is still the main destination's spec only: an own-format destination
   isn't pre-placed (follow-up).
 
+- 2026-10-15 (#70, C.3c, Ryan's requirement): **The editor is its own
+  window, "Isocast Editor — <timeline>"** (Window › Editor, ⌘E, or a
+  clip's "Open in Editor"), never a change to the studio. Tried offscreen
+  against a full-window mode over the studio
+  (edit-view/scratch/snaps2/editor-window.png, editor-mode.png) and chose
+  the window: the studio keeps running beside it (scenes, monitors,
+  recording), it can sit on another display, and which one you are in is
+  the window you are looking at. Its layout: a viewer of the angle at the
+  playhead over the timeline with every ISO track. The studio's Create
+  view keeps C.2's clip bar exactly (record into a timeline, retake,
+  reorder, export; its thumbnails pick C.2's 8 frames of the 24 now
+  made). The editor has its own keys (S, I, O, Delete, J K L, arrows,
+  1–9 angles, Esc, ⌘Z/⇧⌘Z), so the studio's keys are unchanged. Clip
+  names are the take's number in recording order, so a split take keeps
+  one. Offscreen, `--state editor` opens it and snapshots draw it.
+
+- 2026-10-15 (#70, C.3): **Edits are clips.** Trim, split, ripple delete
+  and angle selection only change a timeline's clips (in/out points on the
+  take's clock, order, and a new `angle` per clip); an angle over a span
+  splits the clips at its ends, so the edited video is still a list of
+  clips. Points snap to the take's program frame grid. Each edit pushes the
+  clips and removed takes before it onto `undo` (at most 100, kept in the
+  timeline file so undo survives a restart); a recorded take (append,
+  retake) clears the history instead of being undoable, because undoing an
+  edit made before a take must not drop the take. A take whose last clip is
+  deleted is listed under `removed`, as `timeline_remove` does.
+- 2026-10-15 (#70, C.3): **Edited export.** The edited file shows each
+  clip's angle with the program's sound (the program mix; ISO files carry
+  their own sources' audio, whose tracks differ between angles), in the
+  program's codec, size and frame rate. Video is copied except (a) from a
+  cut that isn't on a keyframe to the next keyframe (the frame on screen at
+  the in point, then the rest of that interval), decoded and encoded again
+  with VideoToolbox in the same codec at quality 0.85 (the take's own
+  quality isn't in its manifest; 0.85 is above recordings' default, so the
+  re-encoded second matches the copied ones: MSE ≤ 0.8 on the test
+  pattern's bars against the source frame), and (b) angles in another
+  format, encoded again whole on the program's frame grid, letterboxed. A
+  part ends at its last frame starting before its end, which needs nothing
+  encoded again because recordings have no reordered frames (an export
+  refuses a file that has them). Audio: each part's track is read from
+  its in point (a ranged reader, aligned by the first buffer's time), cut
+  to the sample, and the outgoing part's next 480 samples are faded out
+  under the incoming part's first 480 (linear, 10 ms, or over less where
+  the outgoing file's audio ends sooner), at every join including C.1's
+  take joins. The joined file's frame rate is the take's grid (the
+  manifest's fps), not the file's average, which dropped frames pull
+  down. Undo restores clips and the takes edits took off; takes recording
+  took off meanwhile (dropped, interrupted) stay listed. An edit that
+  changes nothing is no revision.
 - 2026-10-15 (#3, G.3b 0.0.5): **default on, 500 ms, keep every frame.**
   Ryan chose a temporary `ISOCAST_CRASH_SAFE=0` legacy fallback for one
   release, not a new setup field; automatic next-launch repair suffices,
@@ -5104,6 +5161,34 @@ each section. Delete entries that stop being true.
   pts gives <= 0.4 ms on every destination, before and after a reconnect.
   (The lane's scratch ms.py does this; e2e's stream scenario doesn't run
   `sync_check` on the FLV, so e2e isn't affected.)
+- 2026-10-15 (#70): **A new remote-build lane can build stale sources.**
+  Its target is an APFS clone of another lane's, whose artifacts can be
+  newer than files this branch changed long ago (sync keeps mtimes), so
+  cargo skipped isocast-protocol and reported "no `TimelineTrimParams` in
+  `timeline`" for files that were right there. Touching the branch's own
+  files before the first build on a new lane or host fixed it:
+  `git diff --name-only --diff-filter=d "$(git merge-base main HEAD)" |
+  xargs touch` (against `main` itself, once main has moved on, touch
+  creates empty files for main's new paths).
+
+- 2026-10-15 (#70): **`hw-batch.py … cmd --gui` jobs must finish within
+  10 minutes**: `testmac.sh gui` gives up on the desktop bridge after 10
+  minutes, and the runner then deletes the job's folder and frees the lock
+  while the job still runs there (a 30-minute recording kept going into a
+  deleted folder until killed). Do long work in an SSH `cmd` job, keep its
+  output outside the job folder, then a short `--gui` job for the window.
+
+- 2026-10-15 (#70): **A passthrough AVAssetWriterInput takes samples with
+  another format description** (VideoToolbox's re-encoded keyframe
+  interval between copied ones): it writes a new sample description, in
+  .mov and .mp4, H.264 and HEVC, and FFmpeg decodes across them with no
+  errors. FFmpeg then attaches new-extradata side data to the first packet
+  after each switch, which adds a column to `-f framemd5` lines: compare
+  the hash column by name, not "the last column" (7 copied keyframes
+  looked new that way). Also decode with `-fps_mode passthrough` when
+  matching frames by index: an export of a 30 fps ISO whose parts start on
+  the 60 fps grid probes as r=60, and FFmpeg's default duplicates frames to
+  that.
 
 - 2026-10-15 (#59, fixes-005): `stream stop` drops `state.stream`, but a
   stream that *failed* stays in the status until the next start, and its

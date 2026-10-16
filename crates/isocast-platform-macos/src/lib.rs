@@ -37,6 +37,7 @@ mod output;
 mod pacing;
 mod permissions;
 pub mod plugin;
+mod recode;
 mod stream;
 mod system;
 mod tap;

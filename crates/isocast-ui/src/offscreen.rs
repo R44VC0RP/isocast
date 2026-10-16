@@ -53,16 +53,47 @@ impl WindowAdapter for OffscreenWindow {
     }
 }
 
-/// The snapshot's platform: one offscreen window, and a clock that only
-/// moves when the snapshot says so.
+/// The snapshot's platform: the offscreen main window (and the editor
+/// window, C.3, once opened), and a clock that only moves when the
+/// snapshot says so.
 struct OffscreenPlatform {
     window: Rc<OffscreenWindow>,
+    /// Windows after the first (the editor's), made as asked for.
+    others: Rc<std::cell::RefCell<Vec<Rc<OffscreenWindow>>>>,
+    gpu: Gpu,
+    made: Cell<bool>,
     now: Rc<Cell<Duration>>,
 }
 
 impl Platform for OffscreenPlatform {
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-        Ok(self.window.clone())
+        if !self.made.replace(true) {
+            return Ok(self.window.clone());
+        }
+        let renderer = SkiaWGPU30Renderer::new(
+            self.gpu.instance.clone(),
+            self.gpu.adapter.clone(),
+            self.gpu.device.clone(),
+            self.gpu.queue.clone(),
+        )
+        .map_err(|e| slint::PlatformError::Other(format!("Skia could not use the GPU: {e}")))?;
+        let size = self.window.size.get();
+        let scale = self.window.window.scale_factor();
+        let window = Rc::new_cyclic(|weak: &Weak<OffscreenWindow>| OffscreenWindow {
+            window: slint::Window::new(weak.clone()),
+            renderer,
+            size: Cell::new(size),
+        });
+        window
+            .window
+            .dispatch_event(WindowEvent::ScaleFactorChanged {
+                scale_factor: scale,
+            });
+        window.window.dispatch_event(WindowEvent::Resized {
+            size: size.to_logical(scale),
+        });
+        self.others.borrow_mut().push(window.clone());
+        Ok(window)
     }
 
     fn duration_since_start(&self) -> Duration {
@@ -83,6 +114,8 @@ impl Platform for OffscreenPlatform {
 struct Offscreen {
     gpu: Gpu,
     window: Rc<OffscreenWindow>,
+    /// The editor window's (C.3), once opened: snapshots draw it then.
+    others: Rc<std::cell::RefCell<Vec<Rc<OffscreenWindow>>>>,
     app: AppWindow,
     hub: Rc<App>,
     updates: Receiver<Update>,
@@ -120,8 +153,12 @@ pub fn run(options: &Options) -> Result<()> {
         )),
     });
     let now = Rc::new(Cell::new(Duration::ZERO));
+    let others = Rc::new(std::cell::RefCell::new(Vec::new()));
     slint::platform::set_platform(Box::new(OffscreenPlatform {
         window: window.clone(),
+        others: others.clone(),
+        gpu: gpu.clone(),
+        made: Cell::new(false),
         now: now.clone(),
     }))
     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -153,6 +190,7 @@ pub fn run(options: &Options) -> Result<()> {
     let mut offscreen = Offscreen {
         gpu,
         window,
+        others,
         app,
         hub,
         updates,
@@ -472,15 +510,18 @@ impl Offscreen {
         Ok(())
     }
 
+    /// Keys and the pointer go to the window drawn (the editor's while it
+    /// is open).
     fn key(&mut self, text: slint::SharedString) {
-        let window = &self.window.window;
+        let drawn = self.drawn();
+        let window = &drawn.window;
         window.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
         window.dispatch_event(WindowEvent::KeyReleased { text });
         self.advance(Duration::from_millis(16));
     }
 
     fn pointer(&self, event: WindowEvent) {
-        self.window.window.dispatch_event(event);
+        self.drawn().window.dispatch_event(event);
     }
 
     /// Press, move in `steps`, release.
@@ -506,9 +547,19 @@ impl Offscreen {
         self.advance(Duration::from_millis(16));
     }
 
+    /// The window snapshots draw: the editor's while it is open, else the
+    /// main window.
+    fn drawn(&self) -> Rc<OffscreenWindow> {
+        match self.others.borrow().last() {
+            Some(editor) if self.hub.create.editor_open() => editor.clone(),
+            _ => self.window.clone(),
+        }
+    }
+
     /// Draw the window into the target texture.
     fn render(&mut self) -> Result<wgpu::Texture> {
-        let size = self.window.size.get();
+        let drawn = self.drawn();
+        let size = drawn.size.get();
         let stale = self
             .target
             .as_ref()
@@ -551,7 +602,7 @@ impl Offscreen {
             ..Default::default()
         });
         self.gpu.queue.submit([encoder.finish()]);
-        self.window
+        drawn
             .renderer
             .render_to_texture(&target)
             .map_err(|e| anyhow::anyhow!("could not draw the window: {e}"))?;

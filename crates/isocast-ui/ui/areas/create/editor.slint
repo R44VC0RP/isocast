@@ -1,0 +1,113 @@
+// The editor (C.3, #70): a viewer showing the angle the edited video has
+// at the playhead, over the timeline with every ISO track (ClipBar in its
+// editor form). It fills the editor window, never the studio, so it is
+// always plain which one you are in.
+
+import { Theme } from "../../theme.slint";
+import { CreateArea } from "state.slint";
+import { ClipBar } from "clip-bar.slint";
+
+export component EditorView inherits Rectangle {
+    background: Theme.surface-stage;
+
+    // ---- The viewer
+    viewer := Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height - bar.height - 1px;
+        background: Theme.surface-chrome;
+
+        // The line over the picture: EDITOR, the timeline, what is shown.
+        Rectangle {
+            y: 0;
+            height: 32px;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        height: 18px;
+                        width: badge.preferred-width + 14px;
+                        border-radius: 4px;
+                        background: Theme.accent-soft;
+                        badge := Text {
+                            text: "EDITOR";
+                            color: Theme.accent;
+                            font-size: Theme.fs-micro;
+                            font-weight: Theme.weight-semibold;
+                            letter-spacing: 0.6px;
+                        }
+                    }
+                }
+                Text {
+                    text: CreateArea.has-timeline ? CreateArea.timeline-name : "No timeline";
+                    color: Theme.text;
+                    font-size: Theme.fs-sm;
+                    font-weight: Theme.weight-semibold;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+                Text {
+                    text: CreateArea.has-timeline ? CreateArea.summary : "";
+                    color: Theme.text-3;
+                    font-size: Theme.fs-xs;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Text {
+                    text: CreateArea.preview-label;
+                    color: Theme.text-2;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-micro;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+                if CreateArea.shuttle != 0: Text {
+                    text: (CreateArea.shuttle < 0 ? "◀ " : "▶ ") + abs(CreateArea.shuttle) + "×";
+                    color: Theme.accent;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-micro;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+            }
+        }
+
+        // The picture, 16:9, as large as fits.
+        property <length> room-w: self.width - 32px;
+        property <length> room-h: self.height - 32px - 12px;
+        property <length> pic-w: min(self.room-w, self.room-h * 16 / 9);
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: 32px + (parent.room-h - self.height) / 2;
+            width: parent.pic-w;
+            height: self.width * 9 / 16;
+            background: #000000;
+            if CreateArea.has-preview: Image {
+                width: parent.width;
+                height: parent.height;
+                source: CreateArea.preview;
+                image-fit: contain;
+            }
+        }
+    }
+    Rectangle {
+        y: viewer.height;
+        height: 1px;
+        background: Theme.line;
+    }
+
+    // ---- The timeline
+    bar := ClipBar {
+        editor: true;
+        side-preview: false;
+        x: 0;
+        y: root.height - self.height;
+        width: root.width;
+        height: min(max(160px, self.wanted-height), root.height * 0.6);
+    }
+}

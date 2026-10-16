@@ -456,8 +456,11 @@ pub enum MediaPart {
 }
 
 /// Files to join end to end into one (a timeline's export): the video
-/// copied as it is, each audio track decoded and encoded again as one
-/// continuous track, so it lines up with the video at every join.
+/// copied as it is, except the frames from a cut that isn't on a keyframe
+/// to the next keyframe, and parts whose video is in another format than
+/// the joined file's, which are decoded and encoded again; each audio
+/// track decoded and encoded again as one continuous track, cross-faded
+/// at each join, so it lines up with the video at every join.
 #[derive(Debug, Clone)]
 pub struct JoinSpec {
     /// The files, in order. Each has one video track and the same number
@@ -466,6 +469,9 @@ pub struct JoinSpec {
     /// Where the joined file goes; it must not exist.
     pub output: PathBuf,
     pub container: Container,
+    /// The joined video takes this file's codec, size and frame rate (the
+    /// program's, for an edited file); the first part's if absent.
+    pub format: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -481,6 +487,18 @@ pub struct JoinPart {
     /// Where the file starts within its clip, in seconds (a file that
     /// started after the others): held before it, as at the end.
     pub offset_seconds: f64,
+    /// Where the part starts on its take's clock (its clip's in point), in
+    /// seconds: what the file holds from there on fills the part. The
+    /// picture at the start is the frame on screen at that moment.
+    pub in_seconds: f64,
+    /// Take the part's audio from this file of the same take instead (and
+    /// where it starts within the clip): an edited file shows an ISO
+    /// file's picture with the program's sound.
+    pub audio: Option<(PathBuf, f64)>,
+    /// The file's frame rate as recorded (its manifest's), which a file
+    /// with dropped frames can't tell; 0 if unknown (then the file's own
+    /// average, rounded).
+    pub fps: u32,
 }
 
 /// What a join wrote.
@@ -500,6 +518,11 @@ pub struct JoinedPart {
     pub frames: u64,
     /// Frames starting past the part's length, left out.
     pub frames_left_out: u64,
+    /// Frames decoded and encoded again; the others were copied.
+    pub reencoded: u64,
+    /// Its file is in another format than the joined file's (codec, size
+    /// or frame rate), so it was encoded again whole.
+    pub converted: bool,
 }
 
 /// Called with how far a join has got, 0 to 1, a few times a second;

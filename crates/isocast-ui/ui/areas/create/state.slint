@@ -1,7 +1,10 @@
 // Area G: the Create view (C.2), the clip bar from Paper's "Workspace ·
 // Create" and "Create · Retake" boards under the viewer and the control
-// bar, in place of the docks. src/areas/create.rs fills this from the
-// engine's timeline methods and events.
+// bar, in place of the docks, and the Edit view's tracks (C.3): every ISO
+// source of the take under the Program track, a preview of the angle at
+// the playhead, trims, splits, ripple deletes and angles.
+// src/areas/create.rs fills this from the engine's timeline methods and
+// events.
 
 // One clip on the Program track.
 export struct ClipRow {
@@ -20,8 +23,37 @@ export struct ClipRow {
     problem: bool,
     // Frames dropped while it was recorded.
     dropped: bool,
-    // Frames from its program file, evenly spaced (empty until made).
+    // Frames from its program file, evenly spaced over the take (empty
+    // until made), and the part of the take the clip covers (0 to 1).
     thumbs: [image],
+    in-frac: float,
+    out-frac: float,
+    // The ISO source the edited video shows for it ("" for the program),
+    // as its track's name ("Camera").
+    angle: string,
+}
+
+// One clip's stretch of an ISO track.
+export struct SegmentRow {
+    clip: string,
+    start: float,
+    duration: float,
+    thumbs: [image],
+    in-frac: float,
+    out-frac: float,
+    // The edited video shows this track for the clip.
+    active: bool,
+    // The clip's take didn't record this source.
+    missing: bool,
+}
+
+// One ISO source's track.
+export struct TrackRow {
+    source: string,
+    name: string,
+    // Its angle key ("2" for the first ISO; "1" is the program).
+    key: string,
+    segments: [SegmentRow],
 }
 
 export global CreateArea {
@@ -64,6 +96,42 @@ export global CreateArea {
     in-out property <float> zoom: 0;
     // The horizontal scroll, in points.
     in-out property <length> scroll-x;
+
+    // ---- The Edit view (C.3)
+    // The ISO tracks under the Program track.
+    in property <[TrackRow]> tracks;
+    // The picture at the playhead (the angle the edited video shows there)
+    // and what it is ("Camera · 00:03.25").
+    in property <image> preview;
+    in property <bool> has-preview;
+    in property <string> preview-label;
+    // The In and Out marks on the timeline, in seconds (-1: not set).
+    in-out property <float> mark-in: -1;
+    in-out property <float> mark-out: -1;
+    in property <bool> can-undo;
+    in property <bool> can-redo;
+    // Playing: -4 to 4 times real time (J, K, L), 0 stopped.
+    in property <float> shuttle;
+    // Where the editor's preview sits: 1 at the right of the tracks
+    // (chosen, 2026-10-15); 0 at the left.
+    in-out property <int> layout: 1;
+    // The playhead was moved (a click, a drag, a key).
+    callback scrubbed();
+    // Split at the playhead; take the marked span out; show a source over
+    // the marked span (else the selected clip, else the clip under the
+    // playhead).
+    callback split();
+    callback delete-range();
+    callback set-angle(string);
+    // Clip `id`'s in (false) or out (true) point moved by `seconds`.
+    callback trim(string, bool, float);
+    callback undo();
+    callback redo();
+    // A key in the editor window (s, i, o, j, k, l, step:N, angle:N,
+    // clear, delete).
+    callback key(string);
+    // Open the editor window (C.3) on the current timeline.
+    callback open-editor();
 
     callback toggle-view();
     callback select(string);

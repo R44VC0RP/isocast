@@ -28,6 +28,9 @@ use crate::timeline::{
     TimelineMoveParams, TimelineNewParams, TimelineOpenParams, TimelineRemoveParams,
     TimelineSummary, TimelineTarget,
 };
+use crate::timeline::{
+    TimelineAngleParams, TimelineRangeParams, TimelineSplitParams, TimelineTrimParams,
+};
 use crate::{Canvas, Issue, Setup};
 
 /// Every method the engine offers. Serialized as JSON-RPC `method` and
@@ -310,7 +313,11 @@ pub enum Method {
     Retake(Option<RetakeParams>),
     /// Join a timeline's clips (the current one's unless `timeline` names
     /// one), in order, into one program file and one file per ISO source
-    /// every clip has, without re-encoding the video, plus a manifest. It
+    /// every clip has, each cut to the clips' in and out points, plus the
+    /// edited file when clips show other angles, and a manifest. The video
+    /// is copied as recorded except the frames around a cut that doesn't
+    /// fall on a keyframe (and parts of the edited file in another format),
+    /// which are encoded again; audio is cross-faded at every join. It
     /// runs in the background: `export_progress` and `export_finished`
     /// events report it. Its params are optional. Returns
     /// [`ExportStarted`](crate::timeline::ExportStarted).
@@ -429,6 +436,29 @@ pub enum Method {
     /// Turn off the obs-websocket server, disconnecting its clients.
     /// Returns [`WebsocketStatus`](crate::websocket::WebsocketStatus).
     WebsocketDisable,
+    /// Move a clip's in and/or out point, on its take's clock (rounded to
+    /// its frame grid); the take's files are never touched. One revision.
+    /// Returns [`TimelineInfo`](crate::timeline::TimelineInfo).
+    TimelineTrim(TimelineTrimParams),
+    /// Cut the clip at a moment on the timeline in two (the second gets a
+    /// new id, and the first's angle). One revision. Returns
+    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
+    TimelineSplit(TimelineSplitParams),
+    /// Take a span of the timeline out, closing the gap (ripple): clips in
+    /// it are taken off, clips across its ends trimmed or split. One
+    /// revision. Returns [`TimelineInfo`](crate::timeline::TimelineInfo).
+    TimelineDeleteRange(TimelineRangeParams),
+    /// Choose the source the edited video shows over a span of the
+    /// timeline (`program` or an ISO source): clips across its ends are
+    /// split there and every clip in it shows `source`. One revision.
+    /// Returns [`TimelineInfo`](crate::timeline::TimelineInfo).
+    TimelineAngle(TimelineAngleParams),
+    /// Take back the last edit (trim, split, delete, angle, remove, move).
+    /// Returns [`TimelineInfo`](crate::timeline::TimelineInfo).
+    TimelineUndo(Option<TimelineTarget>),
+    /// Put back the last edit undone. Returns
+    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
+    TimelineRedo(Option<TimelineTarget>),
 }
 
 /// Every method's name, as requests and plugin grants spell it

@@ -191,6 +191,7 @@ objc2-video-toolbox = { version = "0.3.2", default-features = false, features = 
     "VTErrors",
     "VTPixelTransferProperties",
     "VTPixelTransferSession",
+    "VTPixelTransferProperties",
     "VTSession",
     "VTUtilities",
     "VTDecompressionSession",
