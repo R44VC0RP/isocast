@@ -5,6 +5,23 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-16 (S.2 stress): **hw-batch runs one job per test Mac, not one
+  job at a time.** A job with `--mac m2-a|m2-b` (and a soak's receiver)
+  holds `/Volumes/IsocastBuild/.bench.lock.<mac>`; `--mac any` holds
+  `.bench.lock` while it builds and picks, then the Mac's lock. So `now
+  … --mac m2-b` runs while a soak holds m2-a. Each job exports its source
+  to `hw-queue/src/<job>/hw-batch`. Runners started before this (an old
+  `run-queue` process) still take only `.bench.lock`, so they don't see a
+  pinned job's Mac lock: don't pin new jobs to a Mac an old runner may
+  pick until it exits. That includes a soak's `--receiver`: the stress
+  lane's m2-b runs (02:40-03:35 New York) overlapped the main soak's
+  receiver ffmpeg on m2-b; the soak's stream kept 0 drops, 0 reconnects.
+- 2026-10-16 (S.2 stress): the shared test VM's VideoToolbox was wedged
+  (every hevc/h264/ProRes session failed with -12903 / -12900 after 3.6
+  days up, with another lane's engine running): e2e's encoder probe hangs
+  30 s and recordings fail. `scripts/vm.sh` can't fix it; a VM restart
+  would (not done: another lane was using it).
+
 - 2026-10-15: Lane speed (audit /Volumes/IsocastBuild/agent-audit/REPORT.md).
   exonbook builds: `scripts/remote-build.sh` keeps one source + target per
   lane in `~/isocast-builds/<lane>` there (nice 15, lane lock, refuses
@@ -1589,6 +1606,19 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-16 (S.2): **The stress suite checks correctness, not speed**
+  (`scripts/stress.py`, hw-batch kind `stress`). Each scenario gets its
+  own engine; the bar is no lost or damaged file (every file a start or
+  split returned must exist in a complete manifest and decode with its
+  frames accounted), no program/stream drop or audio dropout, no crash,
+  panic or slow shutdown, only documented refusals from the API, and
+  footprint/threads/fds back near their pre-load values (300 MB / 24 /
+  32). ISO drops are reported, never failed: shedding them is the design.
+  The `disk` scenario accepts a manifest `failed` with "stopped early …
+  the files were finished and are playable" (the engine's own wording
+  for the keep-free stop). Scene switches acknowledged within the same
+  frame as the next one may be missing from the manifest (never on air).
 
 - 2026-10-16 (#77): **Detach the warm program tap, not the native session.**
   After the warm picture completes, remove both routes before publishing
@@ -5118,6 +5148,16 @@ each section. Delete entries that stop being true.
   couldn't-restart warning stays until dismissed (OK).
 
 ## Gotchas
+
+- 2026-10-16 (S.2 stress): Python's `sock.close()` doesn't close a
+  socket whose `makefile()` reader is still open, so the connection stays
+  up on the daemon's side (e2e.py's `Watch.close` does this). stress.py's
+  first clients run "leaked" 31 threads and 64 fds that were really its
+  own 32 open watch connections; close the reader too (stress.py
+  `hang_up`).
+- 2026-10-16 (S.2 stress): macOS caps Unix socket paths at 104 bytes; a
+  hw-batch job's work folder is ~90 bytes deep, so stress.py runs each
+  engine through a short `/tmp/isocast-stress-<pid>` link when needed.
 
 - 2026-10-15 (#64): a media source doesn't advance while nothing records
   or streams: `snapshot` on an idle engine shows the clip's first frame

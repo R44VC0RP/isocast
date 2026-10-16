@@ -493,6 +493,14 @@ come later (clips already carry in/out points on their take).
     reopens the source (10); f32 setup values come back with float noise
     through `serde_json::to_value` (12); a disk-bound take keeps writing
     its backlog ~7-15 s past its end (5).
+  - [x] S.2d Stress suite: `scripts/stress.py` (hw-batch kind `stress`):
+    many sources and scenes, ISOs at and past the capacity estimate, 100
+    switches/s, hundreds of start/stop/split/pause cycles, plugins,
+    obs-websocket and watch clients, replay saves, 4-destination
+    multistream, long text and browser sources, a filling disk; every
+    file decoded and accounted, latency and memory/thread/fd growth.
+    Findings (at-limit ISO losses, rapid splits, refused-start state) in
+    docs/benchmarks.md "Stress suite".
   - [x] S.2c Overloaded ISO tails. Repeat the last accepted picture at the
     final slot when needed, retaining all audio. `repeated_frames` is
     explicit in reports/manifests; drops remain expected minus stored plus
@@ -3693,3 +3701,13 @@ One line per finished task, newest last.
   ruler drag scrub on the 30-min take 16.7 ms median preview latency (p95
   31.5); on a 2-min take J/L playback 27-30 pictures/s at 18-25 ms median,
   frame steps 38-41 ms; the studio's clip bar unchanged beside it.
+- S.2d (2026-10-16): `scripts/stress.py`, nine scenarios on isolated
+  engines, and hw-batch's `stress` kind; hw-batch now runs one job per
+  test Mac (pinned jobs hold `.bench.lock.<mac>`). Full run on
+  isocast-m2-b with main d66fbb8 (job 20261016-032046-stress-suite-stress,
+  13 min): 224 takes, 244 files and 40 replay saves all decode with frames
+  accounted; sources, switching (100.0/s, p99 1.9 ms), clients (16
+  plugins, 32+1 obs-websocket, 32 watchers), replay, multistream and
+  text_web pass with zero program/stream drops and threads/fds back to
+  baseline. isos, cycles and disk fail on engine bugs (scratch
+  /Volumes/IsocastBuild/stress-suite/scratch/REPORT.md).

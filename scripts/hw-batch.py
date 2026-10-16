@@ -4,8 +4,10 @@
 Lanes don't wait for benchmarks, soaks or strict e2e on the M2s any more:
 they queue a job and finish their turn. The runner (cronctl, nightly on
 Ryan's Mac) runs queued jobs one at a time, in order, on isocast-m2-a or
-isocast-m2-b over SSH, holding /Volumes/IsocastBuild/.bench.lock, and
-writes a summary per job plus one morning summary.
+isocast-m2-b over SSH, and writes a summary per job plus one morning
+summary. One job runs on a test Mac at a time: a job for one Mac (--mac)
+holds /Volumes/IsocastBuild/.bench.lock.<mac>, so `now` on m2-b runs while
+m2-a soaks; --mac any holds .bench.lock while it builds and picks.
 
     scripts/hw-batch.py submit KIND [options]    queue a job (lanes)
     scripts/hw-batch.py now KIND [options]       queue it and run it now
@@ -34,6 +36,9 @@ Kinds (all strict: the test Macs' zero-drop bar):
             [--receiver local|m2-a|m2-b]: the stream goes to an ffmpeg
             receiver on the other test Mac (the runner relays it over ssh:
             the test Macs can't reach each other directly)
+  stress    scripts/stress.py, the extreme stress suite (about 30 min):
+            every scenario, or --scenario NAME[,NAME…]; --args '…' adds
+            stress.py options (--profile quick, --keep-failures…)
   cmd       --command '<shell>' [--gui]: anything else; $HW_OUT is the
             folder whose contents come back
 
@@ -49,7 +54,8 @@ bench.py...) come from --commit (or HEAD); testmac.sh and remote-build.sh
 from this runner.
 
 Other options: --mac m2-a|m2-b|any (default any: the first reachable one
-whose benchmark lock is free), --out DIR (results; default
+whose benchmark lock is free; the runner then holds /Volumes/IsocastBuild/
+.bench.lock while it builds and picks), --out DIR (results; default
 /Volumes/IsocastBuild/hw-queue/results/DATE/ID), --timeout MIN, --note TEXT,
 --lane NAME (default this checkout's folder name).
 
@@ -61,6 +67,7 @@ status: 0 if every job run passed, 1 otherwise.
 """
 
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -78,17 +85,28 @@ BUILD = Path(os.environ.get("ISOCAST_HW_ROOT", "/Volumes/IsocastBuild"))
 ROOT = BUILD / "hw-queue"
 LOCK = BUILD / ".bench.lock"
 MACS = {"m2-a": "isocast-m2-a", "m2-b": "isocast-m2-b"}
-KINDS = ("e2e", "bench", "smoke", "motion", "drag-lag", "soak", "cmd")
+KINDS = ("e2e", "bench", "smoke", "motion", "drag-lag", "soak", "stress", "cmd")
 SMOKE_E2E = ("record", "iso", "split", "pause", "shutdown")
 # Remote checkout name: testmac.sh puts it in ~/dev/isocast-worktrees/hw-batch.
 REMOTE_NAME = "hw-batch"
-TIMEOUT_MIN = {"e2e": 45, "bench": 30, "smoke": 30, "motion": 45, "drag-lag": 30, "cmd": 60}
+TIMEOUT_MIN = {"e2e": 45, "bench": 30, "smoke": 30, "motion": 45, "drag-lag": 30, "stress": 120, "cmd": 60}
 MEASURES = ("bench", "smoke", "motion", "drag-lag")
 ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[A-Za-z0-9._-]+$")
 
 
 def log(msg):
     print(f"hw-batch {time.strftime('%H:%M:%S')}: {msg}", file=sys.stderr, flush=True)
+
+
+def mac_lock(mac):
+    """One job per test Mac: a job for one Mac waits only for that Mac."""
+    return BUILD / f".bench.lock.{mac}"
+
+
+def hold(locks, path, job_id):
+    f = locks.enter_context(open(path, "a"))
+    log(f"{job_id}: waiting for {path}")
+    fcntl.flock(f, fcntl.LOCK_EX)
 
 
 def git(repo, *args):
@@ -296,6 +314,11 @@ def job_command(job, r, relay=None):
         extra = f" --scenario {job['scenario']}" if job.get("scenario") else ""
         extra += f" --variant {job['variant']}" if job.get("variant") else ""
         return f"scripts/motion.sh --window --bin target/release --out {out}/motion{extra}"
+    if kind == "stress":
+        names = [n for n in (job.get("scenario") or "").split(",") if n] + job["only"]
+        return (f"python3 scripts/stress.py --daemon target/release/isocastd --work {r}/w "
+                f"--out {out}/stress" + "".join(f" --scenario {n}" for n in names)
+                + (f" {job['args']}" if job.get("args") else ""))
     if kind == "drag-lag":
         return f"python3 scripts/drag-lag.py --bin-dir target/release --work {out}/lag {job['args']}"
     return job["command"]
@@ -419,6 +442,11 @@ def summarize(job, out, status, seconds, host):
                 lines.append(f"| {s.get('name')} | {s.get('status')} | {s.get('seconds', 0):.0f} | {reason} |")
         except (ValueError, KeyError) as e:
             lines.append(f"\n(e2e report unreadable: {e})")
+    stress = out / "stress" / "summary.md"
+    if stress.exists():
+        text = stress.read_text(errors="replace").splitlines()
+        lines += ["", *[l for l in text if l.startswith("|")],
+                  "", *[l for l in text if l.startswith("- PROBLEM")][:20]]
     bench = out / "bench.txt"
     if bench.exists():
         table = [l for l in bench.read_text().splitlines() if l.startswith("|")]
@@ -450,11 +478,17 @@ def run_job(path):
     relay = None
     reserved = []
     try:
-        with open(LOCK, "a") as lock:
-            log(f"{job_id}: waiting for {LOCK}")
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with contextlib.ExitStack() as locks:
+            # A job for one Mac (and its soak receiver) holds those Macs'
+            # locks, so a job on m2-b runs while m2-a soaks. --mac any holds
+            # the batch lock while it builds and picks, then the Mac's lock.
+            pinned = sorted({m for m in (job.get("mac"), job.get("receiver")) if m in MACS})
+            for mac in pinned or [None]:
+                hold(locks, mac_lock(mac) if mac else LOCK, job_id)
             log(f"{job_id}: running")
-            src = ROOT / "src" / REMOTE_NAME
+            # Per job (two Macs can run at once), named as before: testmac.sh
+            # names the test Mac's checkout and scratch after this folder.
+            src = ROOT / "src" / job_id / REMOTE_NAME
             export_src(job["commit"], src)
             bin_dir = Path(job["bin_dir"]) if job.get("bin_dir") else jobdir / "bin"
             if not job.get("bin_dir"):
@@ -463,13 +497,15 @@ def run_job(path):
             if job["kind"] in ("bench", "smoke"):
                 base_dir = Path(job["base_bin_dir"]) if job.get("base_bin_dir") else jobdir / "base-bin"
                 if not job.get("base_bin_dir"):
-                    base_src = ROOT / "src" / "hw-batch-base"
+                    base_src = ROOT / "src" / job_id / "hw-batch-base"
                     export_src(job["base_commit"], base_src)
                     build_remote(base_src, "hw-batch-base", ["isocastd"], base_dir, out)
             host = pick_mac(job.get("mac") or "any")
             if not host:
                 raise RuntimeError("no test Mac reachable")
             job["host"] = host
+            if not pinned:
+                hold(locks, mac_lock(next(m for m, h in MACS.items() if h == host)), job_id)
             running.write_text(json.dumps(job, indent=2) + "\n")
             reserved = [host] + ([MACS[job["receiver"]]] if job.get("receiver") else [])
             reserve_builds(reserved, job_id, job["timeout_min"], logf)
@@ -545,6 +581,7 @@ def run_job(path):
         running.unlink(missing_ok=True)
         if jobdir.exists():
             shutil.rmtree(jobdir)
+        shutil.rmtree(ROOT / "src" / job_id, ignore_errors=True)
         log(f"{headline} -> {out}/summary.md")
     return job
 

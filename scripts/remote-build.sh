@@ -278,6 +278,13 @@ remote() { # op args… (each arg one word; no shell metacharacters)
 hw_busy() {
     [ -d "$hw_root/hw-queue" ] || return 0
     jobs=
+    # A job for one test Mac holds that Mac's lock (.bench.lock.m2-b),
+    # not the batch lock: its running/*.json still says which Mac.
+    for l in "$hw_root"/.bench.lock.m2-*; do
+        if [ -f "$l" ] && ! lockf -s -k -t 0 "$l" true 2>/dev/null; then
+            jobs="$(ls "$hw_root"/hw-queue/running/*.json 2>/dev/null || true)"
+        fi
+    done
     if ! lockf -s -k -t 0 "$hw_root/.bench.lock" true 2>/dev/null; then
         jobs="$(ls "$hw_root"/hw-queue/running/*.json 2>/dev/null || true)"
         # Held without a running job (a bench or `now` starting): both,
