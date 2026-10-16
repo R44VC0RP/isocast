@@ -923,7 +923,7 @@ impl Isocast {
         description = "Turn on the obs-websocket v5 server (off by default; kept across \
                        restarts), optionally setting port (4455), bind (127.0.0.1, this Mac \
                        only; 0.0.0.0 for every network), password (kept in the Keychain) or \
-                       no_password. Without a stored password one is generated and returned \
+                       no_password (loopback bind only; web pages are then refused). Without a stored password one is generated and returned \
                        once as generated_password, for the user to enter in the OBS tool. \
                        Returns its status.",
         annotations(
@@ -1954,7 +1954,12 @@ impl Isocast {
         let events = self.events.clone();
         tokio::task::spawn_blocking(move || {
             events.ensure_watching();
-            Client::connect_or_launch()?.call(method)
+            let mut client = Client::connect_or_launch()?;
+            // Like the CLI's status/start: warn (stderr, the MCP host's
+            // log) once if the engine is older than this isocast (#49).
+            static STALE_CHECK: std::sync::Once = std::sync::Once::new();
+            STALE_CHECK.call_once(|| crate::client::check_engine(&mut client));
+            client.call(method)
         })
         .await
         .map_err(|err| format!("{err}"))?

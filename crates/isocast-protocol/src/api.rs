@@ -2162,6 +2162,18 @@ pub struct RecordingPause {
     pub paused: bool,
     pub elapsed_seconds: f64,
     pub paused_seconds: f64,
+    /// A pause reply of crash-safe files: seconds of the take's saved
+    /// timeline up to which every file was written and flushed to the
+    /// disk before this reply (the same number the manifest's pause entry
+    /// records). Absent when the files can't say (AVAssetWriter), when a
+    /// file's commit failed or timed out (see `errors`), and on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recoverable_seconds: Option<f64>,
+    /// What went wrong committing the files at this pause: the pause
+    /// itself took effect, but nothing durable is promised for the files
+    /// named here, and they are reported failed when the recording ends.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
 }
 
 /// How the disk holding a running session's files keeps up.
@@ -2254,6 +2266,11 @@ pub struct LiveFile {
     /// recording; the final report has the exact count.
     pub dropped_frames: u64,
     pub audio_dropouts: u64,
+    /// Seconds of the file, from its start, that a crash can no longer
+    /// lose: every track's samples up to there are in completed fragments
+    /// on disk. Only crash-safe writers report it (absent otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

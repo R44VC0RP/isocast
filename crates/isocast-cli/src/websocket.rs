@@ -23,8 +23,8 @@ pub enum Command {
         /// Set a new password: read from stdin, or asked for without echo.
         #[arg(long, conflicts_with = "no_password")]
         password: bool,
-        /// Let clients connect without a password (any program that can
-        /// reach the port, including web pages in a browser here).
+        /// Let clients connect without a password (any program on this
+        /// Mac, but not web pages); only with a loopback --bind.
         #[arg(long)]
         no_password: bool,
         #[arg(long)]

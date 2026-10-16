@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use block2::RcBlock;
 use isocast_engine::{
-    FileWriter, MOVIE_FRAGMENT_SECONDS, SAMPLE_RATE, Time, VideoTrackSpec, WriterSpec,
+    FileWriter, Finished, MOVIE_FRAGMENT_SECONDS, SAMPLE_RATE, Time, VideoTrackSpec, WriterSpec,
 };
 use isocast_protocol::{Codec, Container};
 use objc2::Message;
@@ -51,9 +51,9 @@ use crate::PixelBuffer;
 
 /// Bound encoder back-pressure without blocking the other inputs of the
 /// same file. Video buffers are retained, never copied.
-const PENDING_VIDEO: usize = 32;
+pub(crate) const PENDING_VIDEO: usize = 32;
 /// ISOs must not build a long hardware backlog ahead of a protected output.
-const PENDING_ISO: usize = 4;
+pub(crate) const PENDING_ISO: usize = 4;
 const PENDING_AUDIO: usize = 64;
 /// Bound how long queued inputs may remain stalled during Stop.
 const FINISH_WAIT: Duration = Duration::from_secs(10);
@@ -63,11 +63,11 @@ const KEYFRAME_INTERVAL_SECONDS: f64 = 1.0;
 /// boundary has reached disk. Queued encoding and AAC timing can lag inputs.
 const FRAGMENT_SECONDS: i64 = MOVIE_FRAGMENT_SECONDS;
 
-static PRIORITY_OUTPUTS: AtomicUsize = AtomicUsize::new(0);
-static PRIORITY_PRESSURE: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PRIORITY_OUTPUTS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PRIORITY_PRESSURE: AtomicUsize = AtomicUsize::new(0);
 /// Fraction of ISO pictures admitted, in thousandths. Reduce promptly under
 /// pressure, then probe for spare capacity slowly instead of sending bursts.
-static ISO_SHARE: AtomicU32 = AtomicU32::new(1000);
+pub(crate) static ISO_SHARE: AtomicU32 = AtomicU32::new(1000);
 
 /// How far apart hardware sessions get their first pictures, and in what
 /// order. VideoToolbox places a session on one of the chip's video encode
@@ -451,8 +451,11 @@ impl FileWriter for AssetWriter {
         autoreleasepool(|_| self.append_samples(track, samples, pts))
     }
 
-    fn finish(self, end: Time) -> Result<u64> {
-        autoreleasepool(|_| self.finish_at(end))
+    fn finish(self, end: Time) -> Result<Finished> {
+        autoreleasepool(|_| self.finish_at(end)).map(|repeated| Finished {
+            repeated,
+            ..Finished::default()
+        })
     }
 
     fn cancel(self) {
@@ -666,7 +669,7 @@ impl AssetWriter {
 }
 
 /// A media timescale in which every frame time is a whole number of ticks.
-fn video_timescale(fps: u32) -> i32 {
+pub(crate) fn video_timescale(fps: u32) -> i32 {
     if 60_000 % fps == 0 {
         60_000
     } else {

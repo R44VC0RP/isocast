@@ -116,6 +116,7 @@ pub mod code {
     pub const SUCCESS: u16 = 100;
     pub const MISSING_REQUEST_TYPE: u16 = 203;
     pub const UNKNOWN_REQUEST_TYPE: u16 = 204;
+    pub const UNSUPPORTED_REQUEST_BATCH_EXECUTION_TYPE: u16 = 206;
     pub const MISSING_REQUEST_FIELD: u16 = 300;
     pub const INVALID_REQUEST_FIELD: u16 = 400;
     pub const INVALID_REQUEST_FIELD_TYPE: u16 = 401;

@@ -105,6 +105,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
     "CFData",
     "CFDictionary",
     "CFNumber",
+    "CFPropertyList",
     "CFString",
     "CFUUID",
 ] }
@@ -179,6 +180,7 @@ objc2-video-toolbox = { version = "0.3.2", default-features = false, features = 
     "VTCompressionProperties",
     "VTCompressionSession",
     "VTErrors",
+    "VTPixelTransferProperties",
     "VTPixelTransferSession",
     "VTSession",
     "VTUtilities",

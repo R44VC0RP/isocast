@@ -139,7 +139,12 @@ impl Runtime {
         if let Some(bind) = params.bind {
             settings.bind = bind;
         }
-        if let Some(problem) = settings.problem() {
+        // Every outcome below but no_password ends with a password.
+        let after = WebsocketSettings {
+            authentication: !params.no_password,
+            ..settings.clone()
+        };
+        if let Some(problem) = after.problem() {
             return Err(invalid(problem));
         }
         if params.no_password && params.password.is_some() {
@@ -211,6 +216,13 @@ fn restart(inner: &mut Inner, daemon: &Arc<Daemon>) {
     if !inner.settings.enabled {
         return;
     }
+    // Settings saved by an older build may go without a password on
+    // every network (#74): stay off until enabled again.
+    if let Some(problem) = inner.settings.problem() {
+        isocast_diagnostics::diagnostic!("warn"; "isocastd: obs-websocket stays off: {problem}");
+        inner.last_error = Some(problem);
+        return;
+    }
     let password = match password(&inner.settings) {
         Ok(password) => password,
         Err(problem) => {
@@ -220,8 +232,7 @@ fn restart(inner: &mut Inner, daemon: &Arc<Daemon>) {
         }
     };
     let Ok(ip) = inner.settings.bind.parse::<IpAddr>() else {
-        inner.last_error = inner.settings.problem();
-        return;
+        return; // problem() above refused it.
     };
     let config = Config {
         addr: SocketAddr::new(ip, inner.settings.port),

@@ -2246,8 +2246,18 @@ fn pause(paused: bool, json: bool) -> Result<ExitCode> {
             recording.elapsed_seconds,
             recording.paused_seconds
         );
+        if let Some(seconds) = recording.recoverable_seconds {
+            println!("  on disk up to {seconds:.3} s of every file");
+        }
+        for error in &recording.errors {
+            eprintln!("  error: {error}");
+        }
     }
-    Ok(ExitCode::SUCCESS)
+    if recording.errors.is_empty() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::FAILURE)
+    }
 }
 
 fn split(json: bool) -> Result<ExitCode> {

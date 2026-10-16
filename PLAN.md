@@ -829,11 +829,25 @@ native app; each verified against OBS's behaviour on a test Mac.
       output needs compressed inputs and excludes MOV/ProRes; rolling takes
       add measured work. Repeat the 55 pause kills and 20 plain kills as
       negative controls. Evidence: g3b-segments scratch REPORT.md.
-    - [ ] **G.3b implementation and qualification.** Persistent recording
-      encoders plus a MOV/MP4-capable commit path, including AAC priming and
-      multiple tracks; acknowledged/fsynced progress and a writer barrier
-      before Pause replies. Numeric recovery fields stay unknown until this
-      passes the full crash, compatibility and unchanged-cost gates.
+    - [x] **G.3b design and prototype (branch `agent/g3b-crash-safe`,
+      not merged during the alpha week).** `docs/crash-safe-takes.md`:
+      options with evidence and the recommendation (our own VideoToolbox
+      and AAC encoders feeding a fragmented MOV/MP4 we write ourselves,
+      finished in place into the plain movie AVAssetWriter produces, with
+      recovery from the fragments at the next launch). Prototype behind
+      `ISOCAST_CRASH_SAFE=1` for every file: first frame on disk once the second arrives,
+      a fragment per 500 ms, commit barrier before the pause reply with a
+      numeric `recoverable_seconds_at_pause`, `committed_seconds` in live
+      status, recovery in `recover_interrupted`. Kill matrix and A/B in
+      the lane report.
+    - [x] **G.3b implementation and qualification (#3, 0.0.5).** Ryan's
+      2026-10-15 decisions: default on, temporary `ISOCAST_CRASH_SAFE=0`
+      fallback for one release, 500 ms commits, keep every frame of each
+      track rather than trimming A/V, automatic next-launch repair, and
+      retain `scripts/kill-matrix.py`. Integrate the #41 first-picture gate
+      and #68 shared encoder placement; qualify kills, #60/#68 loads, CPU,
+      timeline/Create/WebM, e2e and workspace gates before Tier-1 review.
+      Qualified on M4/M2; coordinator Tier-1 review/re-review and merge remain.
 - [ ] **G.4 Projectors and multiview.** Fullscreen or windowed preview,
   program, scene or source on any display; a multiview grid.
 - [x] **G.5 Custom hotkeys (engine side).** Bindable action catalogue,
@@ -1286,6 +1300,20 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- G.3b / #3 (2026-10-15, default-on integration, awaiting coordinator review):
+  preserved the reviewed fragment/repair implementation while integrating
+  main 505145d; new writers take the shared first-picture gate after the
+  parked stream encoder, and keep startup backlog until two native pictures
+  return (fixed measured 3/3/2 ISO startup losses to 0/0/0). 500 ms default,
+  one-release legacy fallback, keep every track's samples, automatic repair,
+  retained kill-matrix. Final M4 #68 matrix 35/35 movies, 0/0/0 drops; M2
+  fitting/overload split checks 39/39, protected outputs 0. Final 7 kill +
+  11 ownership cases pass; prior 21 kills pass on retained evidence after
+  correcting the empty-track checker. Full e2e 16/16 once, final scoped 5/5;
+  full workspace fmt/clippy/201 tests pass. M2 CPU 31.1 → 25.7%, instructions
+  557.6 → 486.1 M/s, 0 drops, all benchmark movies decode. Evidence and
+  uncommitted merge handoff: g3b-crash-safe scratch REPORT.md.
 
 - A.4 / #68 review B1 (2026-10-15): keep the pre-placed encoder's native
   clock contiguous across parking; restore host PTS/DTS before muxing so
@@ -3152,6 +3180,47 @@ One line per finished task, newest last.
   into AVMutableComposition. E2E 12 pass/1 unavailable; fmt/clippy and 180
   tests pass. G.3b remains unchecked; full evidence and remaining work in
   /Volumes/IsocastBuild/g3b-segments/scratch/REPORT.md.
+- G.3b design and prototype (2026-10-14, branch `agent/g3b-crash-safe`,
+  unmerged): `docs/crash-safe-takes.md` and a working `ISOCAST_CRASH_SAFE=1`
+  writer (own VideoToolbox/AAC encoders, fragmented MOV/MP4 finished in
+  place, commit barrier before the pause reply with a numeric
+  `recoverable_seconds_at_pause`, `committed_seconds` in status, recovery
+  from fragments at the next launch). Test Mac kill matrix: 36/36 files
+  decode after recovery, video loss ≤ 0.5 s, pause kills exact; flag off
+  identical to main (562.3 M instructions/s both); flag on −11 %
+  instructions, +23 MB RSS. Report: g3b-crash-safe scratch REPORT.md.
+- G.3b fix round 1 (2026-10-14, after the adversarial review): pictures
+  are held until the next one fixes their duration (gaps at fragment
+  boundaries stayed out of the finished table: up to 1 s of A/V drift),
+  failed files are finished from their fragments at Stop and at every
+  launch, commit errors fail the file and reach the Pause reply
+  (`recoverable_seconds`/`errors`), CLI and manifest, a pause drains the
+  writer's queue first, a torn header patch is recovered, per-track edits,
+  empty tracks left out, encoder drops counted. Reviewer's repros re-run:
+  stall cases `mdhd` = `stts` = decoded ends, 48/48 matrix files decode
+  with all AVFoundation tracks, EIO write/fsync cases loud and repaired,
+  torn patch recovered; own matrix incl. kills during Stop and recovery
+  48/48; flag off still equals main (562.3 vs 562.9 M instructions/s).
+- G.3b fix round 2 (2026-10-14, after the re-review): `MacWriter` forwards
+  `lost_frames` and `finish` returns the drops it found (the VT drop
+  interposer's 6 and 1 injected drops now show as 84/6 and 89/1 in the
+  manifest), recovery decides nothing from the 16 header bytes (all 17
+  torn states recover on real media), repair opens only regular files in
+  its own folder through `openat(O_NOFOLLOW)` and refuses links (the
+  live-alias probe no longer touches the owner's file), the first fragment
+  waits for the second picture (no raw `tfdt` gap after a stall at the
+  start), repaired files report the movie's own picture count. Flag off
+  equals main on `bench.py camera-1080` (449.2 vs 448.2 M instructions/s;
+  no 4K ISO because of #41).
+- G.3b fix round 3 (2026-10-14, after re-review 2, "merge behind the
+  flag"): a repaired take with audio but no picture presents its audio
+  (movie length = longest kept track; the reviewer's encoder-stall repro:
+  0.959 s playable in AVFoundation, was 0 s), the `ftyp` carries an
+  `isoc` brand and repair requires it byte for byte (an Isocast-shaped
+  ffmpeg file is left unchanged), the recorder `flock`s its movie and
+  repair skips a locked file (a live file renamed into another folder is
+  left alone). Reviewer's suite: 68/68 torn-header cases, all main and
+  ffmpeg files unchanged, drops 84/6 and 89/1.
 - G.5 app (2026-10-14): Settings › Hotkeys lists the profile's bindings by
   group (record, stream, scenes, Studio Mode, sources, timeline, other)
   with click-to-record chords from AppKit key codes, ✕ to clear, the
@@ -3493,3 +3562,12 @@ One line per finished task, newest last.
   desktop audio, program the mix, every track in sync (0.021 ms), across a
   split, pause/resume and a timeline export; setups without the field give
   the same documents, manifests and tracks as main.
+- small fixes (2026-10-15, #75 #74 #69 #49): an ISO audio source with no
+  sound is skipped with a warning instead of panicking the start (isolated
+  engine, video-only media clip: before "recording panicked", after both
+  fields complete with 180 frames and the tone track per file);
+  obs-websocket refuses browsers and non-loopback binds without a password,
+  caps clients at 32 and answers Sleep outside a batch with 206 (raw
+  WebSocket client, base vs head); the camera extension pins the engine's
+  exact paths (10 path cases); `isocast mcp` warns about an older engine and
+  the app's couldn't-restart notice stays (fake distribution run).

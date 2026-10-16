@@ -110,6 +110,17 @@ pub fn run(stream: TcpStream, peer: SocketAddr, shared: &Arc<Shared>) {
     #[allow(clippy::result_large_err)] // tungstenite's callback type.
     let negotiate =
         |request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
+            // Browsers always send Origin and OBS tools don't: without a
+            // password, a web page must not drive the recorder (#74).
+            if shared.password.is_none() && request.headers().contains_key("Origin") {
+                let mut refusal = ErrorResponse::new(Some(
+                    "Isocast's obs-websocket has no password, so it refuses connections from \
+                     web pages; set a password to connect from a browser"
+                        .into(),
+                ));
+                *refusal.status_mut() = tungstenite::http::StatusCode::FORBIDDEN;
+                return Err(refusal);
+            }
             let offered: Vec<String> = request
                 .headers()
                 .get_all("Sec-WebSocket-Protocol")
@@ -476,7 +487,20 @@ impl Session<'_> {
                         "Your `requestType` is not a string.",
                     ));
                 };
-                let mut result = self.request(kind, data.get("requestData"));
+                // Sleep only works in a batch; OBS answers 206 elsewhere
+                // (and a sleep here would stall the session's events).
+                let mut result = if kind == "Sleep" {
+                    json!({
+                        "requestType": kind,
+                        "requestStatus": {
+                            "result": false,
+                            "code": code::UNSUPPORTED_REQUEST_BATCH_EXECUTION_TYPE,
+                            "comment": "Sleep only works in a request batch.",
+                        },
+                    })
+                } else {
+                    self.request(kind, data.get("requestData"))
+                };
                 result["requestId"] = id.clone();
                 Ok(vec![(op::REQUEST_RESPONSE, result)])
             }

@@ -37,6 +37,8 @@ pub const OBS_WEBSOCKET_VERSION: &str = "5.5.0";
 pub const OBS_VERSION: &str = "30.2.0";
 /// The protocol's rpcVersion.
 pub const RPC_VERSION: u32 = 1;
+/// Clients connected at once; more are refused with 503 (#74).
+pub const MAX_CLIENTS: u32 = 32;
 
 /// isocastd, as the server sees it.
 pub trait Engine: Send + Sync + 'static {
@@ -142,7 +144,16 @@ impl Drop for Server {
 fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
     while !shared.stop.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok((stream, peer)) => {
+            Ok((mut stream, peer)) => {
+                if shared.clients.load(Ordering::SeqCst) >= MAX_CLIENTS {
+                    // Each client is a thread; a flood mustn't exhaust them.
+                    use std::io::Write;
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\
+                          Content-Length: 0\r\n\r\n",
+                    );
+                    continue;
+                }
                 let shared = shared.clone();
                 shared.clients.fetch_add(1, Ordering::SeqCst);
                 let spawned = thread::Builder::new()

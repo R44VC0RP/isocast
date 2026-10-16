@@ -551,7 +551,7 @@ unsafe fn encoded_frame(sample: &CMSampleBuffer) -> Result<EncodedVideo> {
 }
 
 /// A sample is a keyframe unless its attachments say "not sync".
-unsafe fn is_sync(sample: &CMSampleBuffer) -> bool {
+pub(crate) unsafe fn is_sync(sample: &CMSampleBuffer) -> bool {
     let Some(attachments) = (unsafe { sample.sample_attachments_array(false) }) else {
         return true;
     };

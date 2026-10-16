@@ -153,11 +153,24 @@ impl Daemon {
         recovered.sort_by(|a, b| b.recording.started_at.cmp(&a.recording.started_at));
         recovered.truncate(20);
         for take in recovered.iter().filter(|r| r.newly_detected) {
+            // Files a crash-safe writer left were finished from their
+            // fragments just now; the manifest's errors say what each holds.
+            let finished = take.recording.errors.iter().any(|e| {
+                e.contains("crash-safe fragments that reached the disk")
+                    || e.contains("completed at launch")
+            });
             self.publish(Event::Warning {
-                message: format!(
-                    "recording interrupted: {}; recoverable duration unknown; inspect status.interrupted or bug_report",
-                    take.manifest.display(),
-                ),
+                message: if finished {
+                    format!(
+                        "recording interrupted: {}; its files were finished from what reached the disk (see the manifest's errors and status.interrupted)",
+                        take.manifest.display(),
+                    )
+                } else {
+                    format!(
+                        "recording interrupted: {}; recoverable duration unknown; inspect status.interrupted or bug_report",
+                        take.manifest.display(),
+                    )
+                },
             });
         }
         *self.interrupted_unnoted.lock().unwrap() = recovered

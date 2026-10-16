@@ -39,15 +39,15 @@ func producerCodeAllowed(signingID: String?, pid: pid_t) -> Bool {
         log.notice("producer pid \(pid, privacy: .public) live signature check \(valid, privacy: .public)")
         return valid == errSecSuccess
     }
-    // Fallback (the sandbox allows proc_pidpath): an engine installed in
-    // /Applications, and its signature on disk when that can be read.
+    // Fallback (the sandbox allows proc_pidpath): an engine installed at
+    // one of its exact paths, and its signature on disk when that can be read.
     var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
     guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else {
         log.error("refused producer pid \(pid, privacy: .public): code lookup denied (\(copied, privacy: .public)) and no path")
         return false
     }
     let path = String(cString: buffer)
-    guard path.hasPrefix("/Applications/"), path.hasSuffix(".app/Contents/MacOS/isocastd") else {
+    guard producerPathAllowed(path) else {
         log.error("refused producer pid \(pid, privacy: .public): \(path, privacy: .public) is not an installed Isocast engine")
         return false
     }
@@ -59,6 +59,21 @@ func producerCodeAllowed(signingID: String?, pid: pid_t) -> Bool {
     }
     log.notice("producer pid \(pid, privacy: .public) at \(path, privacy: .public): accepted by path (code lookup denied: \(copied, privacy: .public))")
     return true
+}
+
+// Where an Isocast engine runs when installed (#69): the release app's
+// helper, /Applications/<app>.app/Contents/Helpers/Isocast Engine.app/
+// Contents/MacOS/isocastd (any name for the app, directly in
+// /Applications), or the development host scripts/vcam-install.sh copies.
+let releaseEngineSuffix = ".app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd"
+let devHostEngine = "/Applications/Isocast Camera Host.app/Contents/MacOS/isocastd"
+
+func producerPathAllowed(_ path: String) -> Bool {
+    if path == devHostEngine { return true }
+    let prefix = "/Applications/"
+    guard path.hasPrefix(prefix), path.hasSuffix(releaseEngineSuffix) else { return false }
+    let name = path.dropFirst(prefix.count).dropLast(releaseEngineSuffix.count)
+    return !name.isEmpty && !name.contains("/")
 }
 
 let cameraQueue = DispatchQueue(label: "dev.isocast.camera", qos: .userInteractive,

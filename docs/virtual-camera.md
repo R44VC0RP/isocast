@@ -106,8 +106,10 @@ a producer whose CMIO signing id is another app's (CMIO reports the engine's
 as "unknown"). It checks the live client against Apple anchor + identifier
 **dev.isocast.isocastd** + team **9G68SMNHEU** when macOS allows the lookup;
 its sandbox denies that by pid on macOS 26.7, so it then requires the
-producer's executable to be an app's `Contents/MacOS/isocastd` under
-/Applications (weaker than the team check; a follow-up). Refusals are logged:
+producer's executable to be at one of the engine's exact paths: the release
+app's `/Applications/<app>.app/Contents/Helpers/Isocast Engine.app/Contents/MacOS/isocastd`
+or the development host's `/Applications/Isocast Camera Host.app/Contents/MacOS/isocastd`
+(weaker than the team check; a nonce is a follow-up). Refusals are logged:
 `log stream --predicate 'subsystem == "dev.isocast.isocastd.camera"'`.
 Reservations are keyed by CMIO client id so a second authorization cannot
 overwrite the first.

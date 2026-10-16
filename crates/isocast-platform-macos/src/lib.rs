@@ -22,6 +22,7 @@ mod audio;
 mod browser;
 mod camera;
 mod capture;
+mod crash_safe;
 mod devices;
 pub mod diagnostics;
 mod frames;
@@ -67,6 +68,97 @@ pub use keychain::app_identifier;
 pub use stream::{AacEncoder, H264Encoder};
 pub use writer::AssetWriter;
 
+/// A recording file: AVAssetWriter's, or the crash-safe prototype's
+/// (`ISOCAST_CRASH_SAFE=1`; see `crash_safe`).
+// One writer per file, made once per take: its size doesn't matter, and
+// the AVAssetWriter path must stay exactly as it is (no box to go through).
+#[allow(clippy::large_enum_variant)]
+pub enum MacWriter {
+    Asset(AssetWriter),
+    CrashSafe(crash_safe::CrashSafeWriter),
+}
+
+impl isocast_engine::FileWriter for MacWriter {
+    type Frame = PixelBuffer;
+
+    fn prioritize_video(&mut self) {
+        match self {
+            Self::Asset(w) => w.prioritize_video(),
+            Self::CrashSafe(w) => w.prioritize_video(),
+        }
+    }
+
+    fn start(&mut self, at: Time) -> anyhow::Result<()> {
+        match self {
+            Self::Asset(w) => w.start(at),
+            Self::CrashSafe(w) => w.start(at),
+        }
+    }
+
+    fn append_video(&mut self, frame: &PixelBuffer, pts: Time) -> anyhow::Result<bool> {
+        match self {
+            Self::Asset(w) => w.append_video(frame, pts),
+            Self::CrashSafe(w) => w.append_video(frame, pts),
+        }
+    }
+
+    fn append_audio(&mut self, track: usize, samples: &[f32], pts: Time) -> anyhow::Result<bool> {
+        match self {
+            Self::Asset(w) => w.append_audio(track, samples, pts),
+            Self::CrashSafe(w) => w.append_audio(track, samples, pts),
+        }
+    }
+
+    fn queue_depth(&self) -> usize {
+        match self {
+            Self::Asset(w) => w.queue_depth(),
+            Self::CrashSafe(w) => w.queue_depth(),
+        }
+    }
+
+    fn finish(self, end: Time) -> anyhow::Result<isocast_engine::Finished> {
+        match self {
+            Self::Asset(w) => w.finish(end),
+            Self::CrashSafe(w) => w.finish(end),
+        }
+    }
+
+    fn cancel(self) {
+        match self {
+            Self::Asset(w) => w.cancel(),
+            Self::CrashSafe(w) => w.cancel(),
+        }
+    }
+
+    fn crash_safe(&self) -> bool {
+        match self {
+            Self::Asset(w) => w.crash_safe(),
+            Self::CrashSafe(w) => w.crash_safe(),
+        }
+    }
+
+    fn commit(&mut self) -> anyhow::Result<Option<std::time::Duration>> {
+        match self {
+            Self::Asset(w) => w.commit(),
+            Self::CrashSafe(w) => w.commit(),
+        }
+    }
+
+    fn committed(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Asset(w) => w.committed(),
+            Self::CrashSafe(w) => w.committed(),
+        }
+    }
+
+    fn lost_frames(&mut self) -> u64 {
+        match self {
+            Self::Asset(w) => w.lost_frames(),
+            Self::CrashSafe(w) => w.lost_frames(),
+        }
+    }
+}
+
 const NANOS_PER_SEC: i128 = 1_000_000_000;
 
 #[derive(Clone, Copy)]
@@ -84,7 +176,7 @@ pub enum Capture {
 impl Platform for MacPlatform {
     type Frame = PixelBuffer;
     type FramePool = FramePool;
-    type Writer = AssetWriter;
+    type Writer = MacWriter;
     type Capture = Capture;
     type Importer = MetalImporter;
     type Media = media::MediaReader;
@@ -230,8 +322,19 @@ impl Platform for MacPlatform {
         jpeg::encode(frame, max_width, quality)
     }
 
-    fn create_writer(&self, spec: &WriterSpec) -> anyhow::Result<AssetWriter> {
-        AssetWriter::create(spec)
+    fn create_writer(&self, spec: &WriterSpec) -> anyhow::Result<MacWriter> {
+        if crash_safe::enabled() {
+            return crash_safe::CrashSafeWriter::create(spec).map(MacWriter::CrashSafe);
+        }
+        AssetWriter::create(spec).map(MacWriter::Asset)
+    }
+
+    fn recover_file(
+        &self,
+        folder: &Path,
+        name: &std::ffi::OsStr,
+    ) -> anyhow::Result<Option<isocast_engine::RecoveredFile>> {
+        crash_safe::recover_file(folder, name)
     }
 
     fn capture_screen(

@@ -2076,12 +2076,16 @@ impl Daemon {
         {
             return Err(wrong(reason));
         }
-        let recording = control.pause_status(now()).expect("recording clock");
+        let mut recording = control.pause_status(now()).expect("recording clock");
         let project = state
             .session
             .as_ref()
             .and_then(|s| s.project.as_ref().map(|p| p.id.clone()));
         drop(state);
+        if paused && let Some((recoverable, errors)) = control.pause_outcome(generation) {
+            recording.recoverable_seconds = recoverable;
+            recording.errors = errors;
+        }
         self.publish(Event::RecordingPaused {
             recording: recording.clone(),
             project,

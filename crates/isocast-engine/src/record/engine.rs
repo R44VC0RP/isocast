@@ -34,13 +34,13 @@ use super::scenes::{SceneInput, SceneThread};
 use super::shared_frames::{self, SharedFeed};
 use super::timings::CompositorTimings;
 use super::{
-    AUDIO_TAIL, CaptureReport, DiskReport, FIRST_FRAME_TIMEOUT, FolderLock, Formats,
-    MIN_FREE_BYTES, MIN_FREE_SECONDS, MIN_TAKE, MIX_QUEUE_DEPTH, MONITOR_FPS, OnAir, Output,
-    Packet, QUEUE_DEPTH, RecordOptions, Report, SPACE_CHECK_INTERVAL, SPEED_MARGIN, SPLIT_LEAD,
-    SPLIT_SOON_LEAD, START_DELAY, STATUS_INTERVAL, SessionControl, Shared, Slots, SourceFilters,
-    SplitRefused, SplitTake, SplitTiming, Take, create_writers, expand_home, interrupted_note,
-    interrupted_sessions, live_status, plan_take, sidechain_sources, take_manifest, wait_for_frame,
-    write_manifest,
+    AUDIO_TAIL, COMMIT_TIMEOUT, CaptureReport, DiskReport, FIRST_FRAME_TIMEOUT, FilePlan,
+    FolderLock, Formats, MIN_FREE_BYTES, MIN_FREE_SECONDS, MIN_TAKE, MIX_QUEUE_DEPTH, MONITOR_FPS,
+    OnAir, Output, Packet, QUEUE_DEPTH, RecordOptions, Report, SPACE_CHECK_INTERVAL, SPEED_MARGIN,
+    SPLIT_LEAD, SPLIT_SOON_LEAD, START_DELAY, STATUS_INTERVAL, SessionControl, Shared, Slots,
+    SourceFilters, SplitRefused, SplitTake, SplitTiming, Take, create_writers, expand_home,
+    interrupted_note, interrupted_sessions, live_status, plan_take, sidechain_sources,
+    take_manifest, wait_for_frame, write_manifest, write_manifest_durable,
 };
 use crate::audio_filter::AudioStage;
 use crate::gpu::Gpu;
@@ -2523,6 +2523,23 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 ));
             }
         }
+        // A listed audio source that turned out to have no sound (a media
+        // file without an audio track) is left out of the files, never
+        // failing the take (#75).
+        if iso_enabled {
+            let mut warned = HashSet::new();
+            for id in iso.listed_audio() {
+                if !formats.audio.contains_key(id) && warned.insert(id) {
+                    let field = iso
+                        .audio_field(id)
+                        .unwrap_or_else(|| "recording.iso.audio".into());
+                    warnings.push(format!(
+                        "{id} has no sound (its file has no audio track), so the ISO files \
+                         record without it; take it out of {field}"
+                    ));
+                }
+            }
+        }
         // Keep the recorded sources as they are until the recording ends.
         if iso_enabled {
             state
@@ -2827,6 +2844,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             .collect();
 
         let mut all_started = false;
+        // A pause's commit barrier under way: its generation, cut and deadline.
+        let mut pending_commit: Option<(u64, Time, Time)> = None;
         let disk_probe = DiskProbe::start(platform, &folder);
         let mut disk_meter = DiskMeter::default();
         let mut losses = 0;
@@ -2887,12 +2906,99 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                     on_status(&status);
                 }
                 // Markers and scene switches go into the manifest right away.
-                if let Some(generation) = control.take_changed() {
-                    let result = write(current, SessionStatus::Recording, &[]);
+                // A pause of crash-safe files first has every file commit what
+                // it holds up to the cut, so its checkpoint states a fact:
+                // the saved timeline up to which every file is on disk.
+                let checkpoint = |generation: u64, errors: &[String], durable: bool| {
+                    let result = if durable {
+                        write_manifest_durable(
+                            &current.manifest_path,
+                            &take_manifest(
+                                platform,
+                                setup,
+                                current,
+                                SessionStatus::Recording,
+                                errors,
+                                Some(control),
+                            ),
+                        )
+                    } else {
+                        write(current, SessionStatus::Recording, errors)
+                    };
                     let mut state = control.state.lock().unwrap();
                     state.manifest_error = result.err().map(|e| format!("{e:#}"));
                     if state.manifest_error.is_none() {
                         state.saved_pause_generation = generation;
+                    }
+                };
+                if let Some(generation) = control.take_changed() {
+                    let barrier = clock.open_pause().filter(|_| {
+                        pending_commit.is_none()
+                            && current
+                                .plans
+                                .iter()
+                                .any(|p| p.crash_safe.load(Ordering::Acquire))
+                    });
+                    match barrier {
+                        Some(at) => {
+                            for plan in &current.plans {
+                                if plan.crash_safe.load(Ordering::Acquire) {
+                                    plan.commit_at.store(at.as_nanos(), Ordering::Relaxed);
+                                    plan.commit_requested.store(generation, Ordering::Release);
+                                }
+                            }
+                            pending_commit = Some((generation, at, now + COMMIT_TIMEOUT));
+                        }
+                        None => checkpoint(generation, &[], false),
+                    }
+                }
+                if let Some((generation, at, deadline)) = pending_commit {
+                    let committed: Vec<&Arc<FilePlan>> = current
+                        .plans
+                        .iter()
+                        .filter(|p| p.crash_safe.load(Ordering::Acquire))
+                        .collect();
+                    let all = committed
+                        .iter()
+                        .all(|p| p.commit_done.load(Ordering::Acquire) >= generation);
+                    // A file whose commit failed answers at once, with its
+                    // error; one that never answers is reported at the
+                    // deadline. Neither leaves this pause with a number.
+                    let mut errors: Vec<String> = committed
+                        .iter()
+                        .filter(|p| p.commit_failed.load(Ordering::Acquire) >= generation)
+                        .filter_map(|p| p.commit_error.lock().unwrap().clone())
+                        .collect();
+                    let failed = !errors.is_empty();
+                    if all || failed || now >= deadline || shared.end() != Time::MAX {
+                        if !all && !failed {
+                            for plan in committed
+                                .iter()
+                                .filter(|p| p.commit_done.load(Ordering::Acquire) < generation)
+                            {
+                                errors.push(format!(
+                                    "{}: did not confirm its commit within {} s of the pause; \
+                                     nothing durable is promised for it at this pause",
+                                    plan.spec.path.display(),
+                                    COMMIT_TIMEOUT.as_secs()
+                                ));
+                            }
+                        }
+                        let recoverable = if all && !failed {
+                            let cuts = clock.state.read().unwrap();
+                            committed
+                                .iter()
+                                .map(|p| p.recoverable(current.epoch, &cuts))
+                                .try_fold(f64::INFINITY, |min, r| r.map(|r| min.min(r)))
+                                .filter(|r| r.is_finite())
+                        } else {
+                            None
+                        };
+                        clock.set_recoverable(at, recoverable);
+                        control.state.lock().unwrap().pause_outcome =
+                            Some((generation, recoverable, errors.clone()));
+                        checkpoint(generation, &errors, true);
+                        pending_commit = None;
                     }
                 }
                 if !all_started

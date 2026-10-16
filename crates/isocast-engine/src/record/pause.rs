@@ -31,6 +31,9 @@ struct Span {
     start: Time,
     end: Option<Time>,
     removed_before: Duration,
+    /// What the commit barrier at this pause established (see
+    /// `RecordingClock::set_recoverable`).
+    recoverable: Option<f64>,
 }
 
 impl RecordingClock {
@@ -50,6 +53,24 @@ impl RecordingClock {
 
     pub fn inspected(&self, until: Time) {
         self.horizon.fetch_max(until.as_nanos(), Ordering::Relaxed);
+    }
+
+    /// Record what every file had committed to the disk when the pause cut
+    /// at `start` was answered: seconds of the take's saved timeline.
+    pub fn set_recoverable(&self, start: Time, seconds: Option<f64>) {
+        let mut cuts = self.state.write().unwrap();
+        if let Some(span) = cuts.spans.iter_mut().find(|s| s.start == start) {
+            span.recoverable = seconds;
+        }
+    }
+
+    /// The uncut time of the latest pause, if the clock is paused.
+    pub fn open_pause(&self) -> Option<Time> {
+        let cuts = self.state.read().unwrap();
+        cuts.spans
+            .last()
+            .filter(|s| s.end.is_none())
+            .map(|s| s.start)
     }
 
     pub fn change(&self, paused: bool, now: Time, end: Option<Time>) -> Result<Time, String> {
@@ -88,6 +109,7 @@ impl RecordingClock {
                 start: at,
                 end: None,
                 removed_before,
+                recoverable: None,
             });
         } else {
             cuts.spans.last_mut().expect("paused").end = Some(at);
@@ -130,6 +152,8 @@ impl Cuts {
             paused: self.paused(now),
             elapsed_seconds: mapped.saturating_since(self.epoch).as_secs_f64(),
             paused_seconds: now.saturating_since(mapped).as_secs_f64(),
+            recoverable_seconds: None,
+            errors: Vec::new(),
         }
     }
 
@@ -148,10 +172,10 @@ impl Cuts {
                     .map(|end| end.min(until).saturating_since(from).as_secs_f64());
                 Pause {
                     start_seconds: s.start.saturating_since(from).as_secs_f64(),
-                    // FileWriter accepts queued samples, not committed
-                    // fragments. Even draining those queues cannot establish
-                    // an on-disk lower bound across all outputs and tracks.
-                    recoverable_seconds_at_pause: None,
+                    // AVAssetWriter accepts queued samples, not committed
+                    // fragments, so this stays unknown for its files. A
+                    // crash-safe writer's commit barrier fills it in.
+                    recoverable_seconds_at_pause: s.recoverable,
                     end_seconds,
                     time_seconds,
                 }

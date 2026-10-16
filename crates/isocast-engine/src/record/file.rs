@@ -12,11 +12,11 @@ use isocast_protocol::{Source, SourceKind};
 
 use super::pause::RecordingClock;
 use super::{
-    AUDIO_CHUNK, AUDIO_JITTER, FilePlan, MAX_PENDING_AUDIO, Packet, SPLIT_AUDIO_WAIT,
+    AUDIO_CHUNK, AUDIO_JITTER, COMMIT_WAIT, FilePlan, MAX_PENDING_AUDIO, Packet, SPLIT_AUDIO_WAIT,
     SPLIT_FINISH_DELAY, Shared,
 };
 use crate::record::FileReport;
-use crate::{FileWriter, SAMPLE_RATE, Time};
+use crate::{FileWriter, RepairedFile, SAMPLE_RATE, Time};
 
 #[derive(Clone, Copy)]
 pub(super) struct AudioTiming {
@@ -116,12 +116,29 @@ pub(super) fn write_files<W: FileWriter>(
                             && at < end
                         {
                             let (at, next_take, new) = next.take().expect("checked");
-                            let old = std::mem::replace(&mut file, new);
+                            let mut old = std::mem::replace(&mut file, new);
+                            // The ending take's pictures are all in: put them
+                            // on disk now rather than when its last audio
+                            // arrives, so a crash right after a split keeps
+                            // the take up to the split. A commit that fails
+                            // fails the file, like any other write error.
+                            let failure = if old.crash_safe {
+                                let committed = old.writer.commit().map(|_| ());
+                                old.publish_committed();
+                                committed.with_context(|| {
+                                    format!(
+                                        "{}: could not commit the take's files at the split",
+                                        old.plan.spec.path.display()
+                                    )
+                                })
+                            } else {
+                                Ok(())
+                            };
                             let ended = Closing {
                                 at,
                                 take,
                                 file: old,
-                                failure: Ok(()),
+                                failure,
                             };
                             // A split within the previous one's closing window
                             // finishes that file now (its sessions then end as
@@ -161,6 +178,48 @@ pub(super) fn write_files<W: FileWriter>(
                     file.lost_packets + file.tracks.iter().map(|t| t.dropouts).sum::<u64>(),
                     Ordering::Relaxed,
                 );
+                // A crash-safe writer says how much of the file is on disk,
+                // and commits the rest when a pause asks it to, once the
+                // samples up to the cut are in (or soon after, if a track
+                // stalls): the pause reply then reports a fact.
+                let result = if file.crash_safe {
+                    file.publish_committed();
+                    let requested = file.plan.commit_requested.load(Ordering::Acquire);
+                    if requested > file.plan.commit_done.load(Ordering::Relaxed)
+                        && requested > file.plan.commit_failed.load(Ordering::Relaxed)
+                    {
+                        let at = Time::from_nanos(file.plan.commit_at.load(Ordering::Relaxed));
+                        let covered =
+                            file.newest_input.is_some_and(|n| n >= at) && file.audio_complete(at);
+                        if covered || newest >= at + COMMIT_WAIT {
+                            match file.writer.commit() {
+                                Ok(_) => {
+                                    // Only a commit that returned is a
+                                    // durable watermark.
+                                    file.publish_committed();
+                                    file.plan.commit_done.store(requested, Ordering::Release);
+                                    result
+                                }
+                                Err(err) => {
+                                    let err = err.context(format!(
+                                        "{}: could not commit the file at the pause",
+                                        file.plan.spec.path.display()
+                                    ));
+                                    *file.plan.commit_error.lock().unwrap() =
+                                        Some(format!("{err:#}"));
+                                    file.plan.commit_failed.store(requested, Ordering::Release);
+                                    result.and(Err(err))
+                                }
+                            }
+                        } else {
+                            result
+                        }
+                    } else {
+                        result
+                    }
+                } else {
+                    result
+                };
                 if let Some(c) = &closing
                     && (c.failure.is_err()
                         || (newest >= c.at + SPLIT_FINISH_DELAY
@@ -246,6 +305,10 @@ struct OpenFile<W: FileWriter> {
     clock: Arc<RecordingClock>,
     /// Sparse-source packets actually refused by this file's input queue.
     lost_packets: u64,
+    /// The writer commits on demand (see `FileWriter::crash_safe`).
+    crash_safe: bool,
+    /// Latest video delivery on the uncut clock, paused or not.
+    newest_input: Option<Time>,
     /// Developer mode's timing trace (see trace.rs), and the age of the
     /// frame being appended.
     trace: Arc<crate::trace::OutputTrace>,
@@ -254,6 +317,8 @@ struct OpenFile<W: FileWriter> {
 
 impl<W: FileWriter> OpenFile<W> {
     fn new(writer: W, plan: Arc<FilePlan>, clock: Arc<RecordingClock>) -> Self {
+        let crash_safe = writer.crash_safe();
+        plan.crash_safe.store(crash_safe, Ordering::Release);
         let tracks = plan
             .spec
             .audio
@@ -282,6 +347,8 @@ impl<W: FileWriter> OpenFile<W> {
             last_video: None,
             clock,
             lost_packets: 0,
+            crash_safe,
+            newest_input: None,
         }
     }
 
@@ -289,9 +356,19 @@ impl<W: FileWriter> OpenFile<W> {
         self.plan.spec.video.fps
     }
 
+    fn publish_committed(&self) {
+        if let Some(committed) = self.writer.committed() {
+            self.plan.committed.store(
+                committed.as_nanos().min(i64::MAX as u128) as i64,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
     /// Append a frame; frames at or after `end`, or before the file's start,
     /// are left out.
     fn video(&mut self, frame: &W::Frame, pts: Time, end: Time) -> Result<()> {
+        self.newest_input = Some(pts);
         if crate::trace::on() {
             self.trace_age = crate::trace::OutputTrace::age(pts);
         }
@@ -335,11 +412,21 @@ impl<W: FileWriter> OpenFile<W> {
         }
         if let Ok(true) = appended {
             self.frames += 1;
-            self.plan.frames.store(self.frames, Ordering::SeqCst);
             if self.recent.len() == 8 {
                 self.recent.pop_front();
             }
             self.recent.push_back(pts);
+        }
+        // Pictures the encoder took and then discarded on its own are not
+        // in the file: they count as dropped, not written.
+        let lost = self.writer.lost_frames();
+        if lost > 0 {
+            self.frames = self.frames.saturating_sub(lost);
+        }
+        if let Ok(true) = appended {
+            self.plan.frames.store(self.frames, Ordering::SeqCst);
+        } else if lost > 0 {
+            self.plan.frames.store(self.frames, Ordering::SeqCst);
         }
         // Published after the count, so live status never sees a frame
         // that is still being appended as dropped.
@@ -436,20 +523,41 @@ impl<W: FileWriter> OpenFile<W> {
             }
             Ok(())
         });
-        let dropouts = self.lost_packets + self.tracks.iter().map(|t| t.dropouts).sum::<u64>();
+        let mut dropouts = self.lost_packets + self.tracks.iter().map(|t| t.dropouts).sum::<u64>();
         // A failed file isn't in the report, so its error says what it holds
-        // and what it lost: every frame due up to the end that it lacks.
+        // and what it lost: every frame due up to the end that it lacks. A
+        // writer that repaired its file after failing says what the movie
+        // holds; the counters then describe that movie, not what was accepted.
         let expected = end.ticks_since(start, fps).max(0) as u64;
-        let frames = self.frames;
         let seconds = end.saturating_since(start).as_secs_f64();
-        let dropped = expected.saturating_sub(frames);
-        let repeated = self.writer.finish(end).with_context(|| {
-            format!(
-                "could not finish {} ({frames} of {expected} frames due over {seconds:.1} s, \
-                 {dropped} dropped); what was written up to its last fragment should still play",
-                path.display()
-            )
-        })?;
+        let finished = match self.writer.finish(end) {
+            Ok(finished) => finished,
+            Err(err) => {
+                let repaired = err.downcast_ref::<RepairedFile>().cloned();
+                if let Some(frames) = repaired.as_ref().and_then(|r| r.frames) {
+                    self.frames = frames;
+                    self.plan.frames.store(frames, Ordering::SeqCst);
+                }
+                let frames = self.frames;
+                let dropped = expected.saturating_sub(frames);
+                let holds = match &repaired {
+                    Some(RepairedFile {
+                        frames: Some(_), ..
+                    }) => {
+                        format!("the repaired movie holds {frames} of {expected} frames due")
+                    }
+                    _ => format!("{frames} of {expected} frames were accepted"),
+                };
+                return Err(err.context(format!(
+                    "could not finish {} ({holds} over {seconds:.1} s, {dropped} dropped)",
+                    path.display()
+                )));
+            }
+        };
+        self.frames = self.frames.saturating_sub(finished.lost_frames);
+        self.plan.frames.store(self.frames, Ordering::SeqCst);
+        dropouts += finished.lost_audio_tracks;
+        let repeated = finished.repeated;
         padded.with_context(|| format!("recording {} stopped early", path.display()))?;
 
         let epoch = self
@@ -632,8 +740,8 @@ mod tests {
             Ok(true)
         }
 
-        fn finish(self, _: Time) -> Result<u64> {
-            Ok(0)
+        fn finish(self, _: Time) -> Result<crate::Finished> {
+            Ok(crate::Finished::default())
         }
 
         fn cancel(self) {}

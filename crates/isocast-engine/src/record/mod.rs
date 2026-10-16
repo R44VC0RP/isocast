@@ -115,6 +115,12 @@ const AUDIO_JITTER: i64 = SAMPLE_RATE as i64 / 500;
 const AUDIO_TAIL: Duration = Duration::from_millis(150);
 /// Audio held for a file that has not received its first frame yet.
 const MAX_PENDING_AUDIO: usize = 500;
+/// How long after a pause cut a crash-safe file waits for the last inputs
+/// before the cut before committing anyway (a stalled track must not hold
+/// the pause reply).
+const COMMIT_WAIT: Duration = Duration::from_millis(500);
+/// How long the pause reply waits for every file's commit, at most.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct RecordOptions<'a> {
     /// Write files here instead of `recording.folder`.
@@ -242,6 +248,10 @@ struct ControlState {
     pause_generation: u64,
     saved_pause_generation: u64,
     manifest_error: Option<String>,
+    /// What the commit barrier of the latest pause established, for its
+    /// reply: the generation, the recoverable seconds (if every file
+    /// confirmed) and the files' commit errors.
+    pause_outcome: Option<(u64, Option<f64>, Vec<String>)>,
 }
 
 /// When a split's new take begins.
@@ -371,6 +381,17 @@ impl SessionControl {
                 .unwrap()
                 .status(now.min(state.end.unwrap_or(Time::MAX))),
         )
+    }
+
+    /// The commit barrier's outcome for pause `generation`: the seconds
+    /// every file is on disk up to, and the files' commit errors.
+    pub fn pause_outcome(&self, generation: u64) -> Option<(Option<f64>, Vec<String>)> {
+        let state = self.state.lock().unwrap();
+        state
+            .pause_outcome
+            .as_ref()
+            .filter(|(g, ..)| *g == generation)
+            .map(|(_, recoverable, errors)| (*recoverable, errors.clone()))
     }
 
     fn recording_time(&self, at: Time) -> Time {
@@ -657,6 +678,7 @@ impl SessionControl {
         state.pause_generation = 0;
         state.saved_pause_generation = 0;
         state.manifest_error = None;
+        state.pause_outcome = None;
     }
 
     /// What the program shows at `at`: the scene of the last switch at or
@@ -787,6 +809,35 @@ struct FilePlan {
     /// Source timing policy for each audio track (the program is continuous).
     audio_timing: Vec<file::AudioTiming>,
     spec: WriterSpec,
+    /// Crash-safe writers only (see `FileWriter::crash_safe`): how much of
+    /// the file, from its start, is on disk (nanoseconds; -1 unknown), and
+    /// the commit barrier a pause asks for: the generation requested and
+    /// the cut it must cover, then the generation the writer answered.
+    crash_safe: AtomicBool,
+    committed: AtomicI64,
+    commit_requested: AtomicU64,
+    commit_at: AtomicI64,
+    commit_done: AtomicU64,
+    /// The generation whose commit failed, and why: the file is failed
+    /// from then on, and that pause promises nothing for it.
+    commit_failed: AtomicU64,
+    commit_error: Mutex<Option<String>>,
+}
+
+impl FilePlan {
+    /// Seconds of the take's saved timeline up to which this file is on
+    /// disk, if its writer says so.
+    fn recoverable(&self, epoch: Time, cuts: &pause::Cuts) -> Option<f64> {
+        let committed = self.committed.load(Ordering::Relaxed);
+        let start = self.start.load(Ordering::SeqCst);
+        if committed < 0 || start == i64::MIN {
+            return None;
+        }
+        let offset = cuts
+            .map(Time::from_nanos(start))
+            .saturating_since(cuts.map(epoch));
+        Some(offset.as_secs_f64() + committed as f64 / 1e9)
+    }
 }
 
 /// Where a source sends packets for one file or output.
@@ -952,10 +1003,16 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
                 setup.source(id).expect("validated").kind.label(),
                 (width, height, fps),
                 &iso.encoder,
-                iso.audio_for(
-                    setup.source(id).expect("validated"),
-                    formats.audio.contains_key(id),
-                ),
+                {
+                    let mut audio = iso.audio_for(
+                        setup.source(id).expect("validated"),
+                        formats.audio.contains_key(id),
+                    );
+                    // A listed source with no audio track (a media file
+                    // without sound) gets no track; the start warns (#75).
+                    audio.retain(|id| formats.audio.contains_key(id));
+                    audio
+                },
             ));
         }
     }
@@ -991,6 +1048,13 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
                     frames: AtomicU64::new(0),
                     newest: AtomicI64::new(i64::MIN),
                     audio_dropouts: AtomicU64::new(0),
+                    crash_safe: AtomicBool::new(false),
+                    committed: AtomicI64::new(-1),
+                    commit_requested: AtomicU64::new(0),
+                    commit_at: AtomicI64::new(i64::MIN),
+                    commit_done: AtomicU64::new(0),
+                    commit_failed: AtomicU64::new(0),
+                    commit_error: Mutex::new(None),
                     audio: audio.clone(),
                     audio_timing: audio
                         .iter()
@@ -1088,11 +1152,13 @@ fn live_status(
                     let seen = newest.ticks_since(start, fps) + 1;
                     seen.max(overdue.ticks_since(start, fps)).max(0) as u64
                 };
+                let committed = plan.committed.load(Ordering::Relaxed);
                 LiveFile {
                     source: plan.source.clone(),
                     frames,
                     dropped_frames: due.saturating_sub(frames),
                     audio_dropouts: plan.audio_dropouts.load(Ordering::Relaxed),
+                    committed_seconds: (committed >= 0).then(|| committed as f64 / 1e9),
                 }
             })
             .collect(),
@@ -1243,21 +1309,42 @@ fn take_manifest<P: Platform>(
 /// The `.partial` is made new (`O_EXCL | O_NOFOLLOW`), never written
 /// through whatever was at its name (a link a plugin put there, say).
 fn write_manifest(path: &Path, manifest: &SessionManifest) -> Result<()> {
+    write_manifest_with(path, manifest, false)
+}
+
+/// Write the manifest and flush it (and its folder entry) through to the
+/// disk: for the checkpoint a pause reply vouches for.
+fn write_manifest_durable(path: &Path, manifest: &SessionManifest) -> Result<()> {
+    write_manifest_with(path, manifest, true)
+}
+
+fn write_manifest_with(path: &Path, manifest: &SessionManifest, durable: bool) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let partial = path.with_extension("json.partial");
     let json = serde_json::to_string_pretty(manifest)?;
-    // A leftover (an earlier write that failed): remove the entry itself.
+    // Remove a leftover entry, never follow it into a plugin's target.
     if partial.symlink_metadata().is_ok() {
         let _ = std::fs::remove_file(&partial);
     }
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&partial)
-        .and_then(|mut file| file.write_all((json + "\n").as_bytes()))
-        .and_then(|()| std::fs::rename(&partial, path))
+    let write = || -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&partial)?;
+        file.write_all((json + "\n").as_bytes())?;
+        if durable {
+            file.sync_all()?;
+        }
+        drop(file);
+        std::fs::rename(&partial, path)?;
+        if durable && let Some(folder) = path.parent() {
+            std::fs::File::open(folder)?.sync_all()?;
+        }
+        Ok(())
+    };
+    write()
         .inspect_err(|_| {
             let _ = std::fs::remove_file(&partial);
         })
@@ -1275,6 +1362,10 @@ const INTERRUPTED: &str = "the recording ended without finishing: the process re
                            fragments may be playable, and a file with no completed fragment may \
                            not open. Recoverable durations and frame counts are unknown; inspect \
                            every file's video and audio tracks";
+/// The same, for files a crash-safe writer left and recovery finished.
+const INTERRUPTED_RECOVERED: &str = "the recording ended without finishing: the process recording it (isocastd or `isocast \
+     record`) was stopped or crashed. Its files were finished from the fragments that had \
+     reached the disk; the durations here are what was recovered, frame counts are unknown";
 
 /// A recording's hold on its folder's lock, released when dropped.
 pub(crate) struct FolderLock {
@@ -1387,14 +1478,26 @@ fn annotate_interrupted_pauses(manifest: &mut SessionManifest) {
     if manifest.pauses.is_empty() {
         return;
     }
-    if manifest
-        .pauses
-        .last()
-        .is_some_and(|p| p.end_seconds.is_none())
-    {
+    if let Some(open) = manifest.pauses.last().filter(|p| p.end_seconds.is_none()) {
         manifest
             .errors
-            .push("this take was interrupted while paused; recoverable duration unknown".into());
+            .push(match open.recoverable_seconds_at_pause {
+                Some(seconds) => format!(
+                    "this take was interrupted while paused; every file was on disk up to \
+                 {seconds:.3} s of its timeline when the pause was answered"
+                ),
+                None => {
+                    "this take was interrupted while paused; recoverable duration unknown".into()
+                }
+            });
+    }
+    // Crash-safe files' pause replies do state committed media.
+    if manifest
+        .pauses
+        .iter()
+        .all(|p| p.recoverable_seconds_at_pause.is_some())
+    {
+        return;
     }
     manifest.errors.push(
         "this take contains pauses: pause/resume replies checkpoint the cut \
@@ -1443,20 +1546,81 @@ pub fn recover_interrupted<P: Platform>(
         else {
             continue;
         };
+        // A manifest still saying "recording" is a crash; one saying
+        // "failed" or "interrupted" may still hold a file a crash-safe
+        // writer could not finish (a write error, or a repair that failed
+        // last time): every such file is finished from its fragments now.
+        // Files that are movies already are left alone.
         let newly_detected = manifest.status == SessionStatus::Recording;
+        if !matches!(
+            manifest.status,
+            SessionStatus::Recording | SessionStatus::Interrupted | SessionStatus::Failed
+        ) {
+            continue;
+        }
+        let mut changed = newly_detected;
+        let mut repaired = false;
         if newly_detected {
             manifest.status = SessionStatus::Interrupted;
             manifest.errors.push(INTERRUPTED.into());
             annotate_interrupted_pauses(&mut manifest);
-            for file in &mut manifest.files {
-                let relative = Path::new(&file.path);
-                if relative
-                    .components()
-                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
-                {
-                    continue;
+        }
+        for file in &mut manifest.files {
+            // A file name in this folder, nothing else: recovery repairs
+            // only regular files here (the platform refuses links), under
+            // this folder's lock, which is held for the whole pass.
+            let relative = Path::new(&file.path);
+            let mut components = relative.components();
+            let Some(std::path::Component::Normal(name)) = components.next() else {
+                continue;
+            };
+            if components.next().is_some() {
+                continue;
+            }
+            let full = folder.join(name);
+            let recovered = platform.recover_file(folder, name);
+            let probe = match recovered {
+                Ok(Some(recovered)) => {
+                    repaired = true;
+                    if let Some(note) = manifest.errors.iter_mut().find(|e| *e == INTERRUPTED) {
+                        *note = INTERRUPTED_RECOVERED.into();
+                    }
+                    // The movie's own contents replace counters that only
+                    // described what the writer had accepted.
+                    if let Some(frames) = recovered.frames {
+                        file.frames = Some(frames);
+                        file.repeated_frames = None;
+                        file.dropped_frames = None;
+                    }
+                    manifest.errors.push(match recovered.frames {
+                        Some(_) => format!(
+                            "{}: finished at launch from the {} crash-safe fragments that \
+                             reached the disk before the interruption: {}",
+                            file.path, recovered.fragments, recovered.summary
+                        ),
+                        None => format!(
+                            "{}: its final header was completed at launch (the recording was \
+                             interrupted while finishing it)",
+                            file.path
+                        ),
+                    });
+                    true
                 }
-                match platform.media_info(&folder.join(relative)) {
+                Ok(None) => newly_detected,
+                Err(err) => {
+                    let note = format!(
+                        "{}: could not be finished from its fragments: {err:#}",
+                        file.path
+                    );
+                    if !manifest.errors.contains(&note) {
+                        manifest.errors.push(note);
+                        changed = true;
+                    }
+                    newly_detected
+                }
+            };
+            if probe {
+                match platform.media_info(&full) {
                     Ok(info) => file.duration_seconds = Some(info.duration.as_secs_f64()),
                     Err(err) => manifest.errors.push(format!(
                         "{}: durable media could not be probed: {err:#}",
@@ -1464,6 +1628,8 @@ pub fn recover_interrupted<P: Platform>(
                     )),
                 }
             }
+        }
+        if newly_detected || repaired {
             manifest.duration_seconds = manifest
                 .files
                 .iter()
@@ -1472,15 +1638,17 @@ pub fn recover_interrupted<P: Platform>(
                         .map(|d| d + f.start_offset_seconds.unwrap_or(0.0))
                 })
                 .reduce(f64::max);
-            if let Err(err) = write_manifest(&path, &manifest) {
-                manifest
-                    .errors
-                    .push(format!("could not persist interrupted marker: {err:#}"));
-            }
         }
-        if manifest.status == SessionStatus::Interrupted {
+        if (changed || repaired)
+            && let Err(err) = write_manifest(&path, &manifest)
+        {
+            manifest
+                .errors
+                .push(format!("could not persist interrupted marker: {err:#}"));
+        }
+        if manifest.status == SessionStatus::Interrupted || repaired {
             recovered.push(isocast_protocol::manifest::InterruptedRecording {
-                newly_detected,
+                newly_detected: newly_detected || repaired,
                 manifest: path,
                 recording: manifest,
             });

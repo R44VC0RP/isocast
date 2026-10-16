@@ -75,8 +75,9 @@ pub struct WebsocketEnableParams {
     /// returned once as `generated_password`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
-    /// Remove the password: any program that reaches the port may connect,
-    /// including web pages in a browser on this Mac.
+    /// Remove the password: any program on this Mac that reaches the port
+    /// may connect, except web pages (connections with an Origin header
+    /// are refused). Only with a loopback bind (127.0.0.1 or ::1).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_password: bool,
 }
@@ -117,10 +118,17 @@ impl WebsocketSettings {
         if self.port == 0 {
             return Some("port: 0 is not a port; give 1-65535 (4455 is OBS's)".into());
         }
-        if self.bind.parse::<std::net::IpAddr>().is_err() {
+        let Ok(ip) = self.bind.parse::<std::net::IpAddr>() else {
             return Some(format!(
                 "bind: {:?} is not an IP address; give 127.0.0.1 (this Mac only), an address \
                  of this Mac, or 0.0.0.0 (every network)",
+                self.bind
+            ));
+        };
+        if !self.authentication && !ip.is_loopback() {
+            return Some(format!(
+                "no_password: {} reaches other computers, so it needs a password; give \
+                 bind 127.0.0.1 (this Mac only) to go without one, or a password",
                 self.bind
             ));
         }
@@ -153,8 +161,29 @@ mod tests {
         assert!(bad.problem().unwrap().starts_with("bind:"));
         let zero = WebsocketSettings {
             port: 0,
-            ..settings
+            ..settings.clone()
         };
         assert!(zero.problem().unwrap().starts_with("port:"));
+        // No password only on this Mac (#74).
+        let open = WebsocketSettings {
+            authentication: false,
+            ..settings.clone()
+        };
+        assert!(open.problem().is_none());
+        for bind in ["0.0.0.0", "192.168.1.5", "::"] {
+            let wide = WebsocketSettings {
+                bind: bind.into(),
+                ..open.clone()
+            };
+            assert!(
+                wide.problem().unwrap().starts_with("no_password:"),
+                "{bind}"
+            );
+        }
+        let local6 = WebsocketSettings {
+            bind: "::1".into(),
+            ..open
+        };
+        assert!(local6.problem().is_none());
     }
 }

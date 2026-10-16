@@ -620,7 +620,9 @@ mod mac {
                                         stale.running
                                     ),
                                 )
-                                .key(STALE_KEY),
+                                .key(STALE_KEY)
+                                // Stays until dismissed: it says what to do.
+                                .action2("OK", |_| {}),
                             );
                         }
                     }

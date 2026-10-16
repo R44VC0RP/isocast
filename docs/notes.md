@@ -585,6 +585,63 @@ each section. Delete entries that stop being true.
 
 ## Benchmarks
 
+- 2026-10-15 (#3 default-on, final runtime b240e043, main 505145d baseline):
+  M2-b, `bench.py flagship-1080`, three interleaved 20 s pairs: daemon CPU
+  31.1% (31.0–31.1) → 25.7% (25.7–25.8), instructions 557.6 → 486.1 M/s,
+  VT CPU 13.7% both, RSS 121 → 138 MB, disk 251.1 → 246.4 MB, billed energy
+  0.20 → 0.19 J (tiny rusage counter, not machine power). Zero losses, 18/18
+  complete; both benchmark batches' 36 movies decode. Final M4 record-first
+  #68 matrix 35/35 files, ISO/program/stream 0/0/0; M2 fitting/heavy split
+  matrix 39/39, all protected outputs and audio loss-free, overloaded ISOs
+  still shed. Final kill matrix 7/7 + ownership 11/11: max video loss .454 s,
+  audio .635 s, next-launch repair 104–132 ms; earlier 21-case matrix .512 s
+  video/.682 s audio, 101–167 ms repair. Empty tracks omitted by recovery are
+  not lost packets: the initial checker falsely failed "None of 0"; corrected
+  checks pass on the exact retained files. Raw failing reports remain.
+  HEVC 10-bit, all ProRes variants, WebM playback and Create thumbnails pass;
+  full strict e2e 16/16 once, final affected scenarios 5/5, workspace 201 tests.
+  Evidence: `/Volumes/IsocastBuild/g3b-crash-safe/scratch/REPORT.md`, jobs
+  20261015-202302-g3b-005-cmd and 20261015-205333-g3b-start-fix-cmd. No m2-a use.
+
+- 2026-10-14: **G.3b crash-safe prototype (branch `agent/g3b-crash-safe`)**,
+  isocast-m2-a (base M2, macOS 27.0), synthetic sources, common lock, no
+  screensharingd. Kill matrix (`kill -9` at random media times, during a
+  pause, right after start, 160 ms into a split's new take, after resume;
+  HEVC/H.264/ProRes 422, MOV/MP4; 640×360/30 ISO + program; isolated
+  engines; recovery by `isocast restart` on the folder): flag on, 15 runs /
+  36 files: **36/36 decode fully (`ffmpeg -xerror`) after recovery, 36/36
+  unfinished files read by AVAssetReader before it**; video loss vs the
+  last status ≤ **0.499 s** (median 0.146), program audio ≤ 0.681 s
+  (median 0.209); a kill during a pause recovers the video exactly to the
+  cut and the audio exactly to the stated `recoverable_seconds_at_pause`
+  (cut − 47 ms); recovery 135–157 ms including the restart; pause replies
+  260–269 ms (25–86 ms with AVAssetWriter). Same 25 cases with the flag
+  off: 30/60 files unreadable (every take under ~2 s), loss up to 2.161 s,
+  a pause kill loses 1.9 s. Fix round 1 (review repros re-run on the
+  fixed build, `/Volumes/IsocastBuild/g3b-crash-safe/scratch/REPORT.md`
+  "Fix round 1"): the reviewer's four SIGSTOP stall cases now finish with
+  `mdhd` = `stts` = edit = ffprobe video end = AVFoundation decoded end
+  (3.983/4.333/5.683/5.100 s, gaps of 39000–59000 ticks kept in the
+  table); their 28-run matrix: 48/48 picture-bearing files decode in
+  ffmpeg with every AVFoundation track complete (15 files were killed
+  before any frame); the EIO write, fsync-at-pause and fsync-at-split
+  injections fail the file loudly (pause reply `errors`, manifest) and
+  the file is finished from its fragments; the torn 8-byte header patch
+  is recovered. Fix round 2 (re-review repros): the VT drop interposer's
+  injected drops reach the manifest (84/6, 89/1), all 17 torn header
+  states (0–16 bytes) recover on real media, the live-alias probe leaves
+  the owner's file untouched (refused as a symbolic link), a stall right
+  after the first picture leaves no raw `tfdt` gap, the EIO'd file's
+  manifest says 1 frame / 77 dropped (the movie's content); flag off vs
+  main on `camera-1080` (no 4K ISO, #41): 449.2 vs 448.2 M
+  instructions/s, 41.7 vs 41.5 % CPU, 6/6 complete, 0 drops; flag on
+  404.8 M/s, +7 MB RSS. A/B `scripts/bench.py` flagship-1080, 3
+  interleaved 20 s runs: main e9753d4 vs branch flag off **562.3 vs 562.3
+  M instructions/s**, 49.8 vs 50.0 % CPU, 124 vs 126 MB, 0 drops; flag off
+  vs on (final build) 563.5 vs **499.9 M instructions/s** (−11 %), 51.7 vs
+  44.0 % CPU, VT 29.2 vs 29.9 %, RSS 124 vs **147 MB**, disk 248 vs 221 MB
+  per 20 s, sizes 466/215/75 vs 468/209/76 MB/min, 0 drops, 9/9 complete.
+  Evidence: /Volumes/IsocastBuild/g3b-crash-safe/scratch/REPORT.md.
 - 2026-10-14 (iso-drops, #42-only qualification): baseline 63be94c versus
   10fc1a8 on isocast-m2-a, SSH, synthetic benchmark clips, 3 interleaved
   pairs/scenario, both common locks, no screen sharing. Healthy flagship-1080:
@@ -1525,6 +1582,51 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-15 (#3, G.3b 0.0.5): **default on, 500 ms, keep every frame.**
+  Ryan chose a temporary `ISOCAST_CRASH_SAFE=0` legacy fallback for one
+  release, not a new setup field; automatic next-launch repair suffices,
+  including remembered project folders. Recovery presents every kept
+  track to its own end, not the shortest A/V end. The approved retained
+  crash harness is `scripts/kill-matrix.py`. Integrate by merging main
+  505145d into the reviewed 96dc52d branch, preserving the three repair
+  fix rounds. New recording encoders must take #41's first-picture turns
+  (and drain startup backlog before enforcing the small ISO queue), while
+  #68's shared stream/replay session stays placed before recording and
+  retained across splits. Default-on qualification is in the new section
+  of `/Volumes/IsocastBuild/g3b-crash-safe/scratch/REPORT.md`; it is not
+  implied by the earlier default-off approval.
+
+- 2026-10-14 (G.3b lane, branch `agent/g3b-crash-safe`, not merged in the
+  alpha week): **crash-safe takes are our own encoders plus a fragmented
+  movie we write and finish ourselves** (`docs/crash-safe-takes.md`).
+  A `VTCompressionSession` per file with writer.rs's settings and the
+  existing AudioToolbox AAC encoder feed `crash_safe/mp4.rs`: `ftyp`, a
+  16-byte `free` placeholder, a fragmented `moov`, then `moof`+`mdat` per
+  500 ms of media (`ISOCAST_CRASH_SAFE_INTERVAL_MS`), the first picture
+  at once. Stop appends the real `moov` and turns the placeholder into one
+  `mdat` header, the layout AVAssetWriter's finished movies have (their
+  old fragment indexes sit inside the `mdat` the same way; checked on an
+  8 s HEVC take). An unfinished file is recognised by the placeholder and
+  finished from its fragments by `Platform::recover_file` at the next
+  launch. Rejected: rolling sealed segments (+29–62 % instructions, a
+  second AAC encode in the join, measured 2026-10-13) and a write-ahead
+  sample log (a copy of every byte at Stop, or nothing but Isocast can
+  open the take). The AAC priming (2112 samples) is an audio edit list
+  plus `roll` sample groups in the finished file (AVAssetReader needs the
+  groups to start at 0) and a video `tfdt` delay while fragmented, as in
+  AVAssetWriter's fMP4 output. A pause asks every crash-safe file to
+  drain its own queue and its encoder, write and flush up to the cut
+  before the manifest checkpoint, so `recoverable_seconds_at_pause` (and
+  the Pause reply's `recoverable_seconds`) is read back from the writers
+  (video exact to the cut, audio 44–65 ms short: the priming and the
+  partial packet, when the inputs arrived within 500 ms of the cut). A
+  commit that fails or does not answer in 3 s leaves the pause with no
+  number and its error in the reply, the manifest and the file's failure.
+  Each picture is held until the next one fixes its duration, so fragment
+  and final timing agree and gaps stay where they fell. Files a write
+  error failed are finished from their fragments at Stop and again at
+  every launch until that works. Originally `ISOCAST_CRASH_SAFE=1` only;
+  the 2026-10-15 decision above supersedes that default and shipping form.
 - 2026-10-15 (#68 review B1): **Exclude a parked gap from the native H.264
   timeline, not the engine timeline.** VT's bitrate controller treated the
   gap after the warm picture as unused budget (3 s: 1.96 MB first packet;
@@ -4833,6 +4935,25 @@ each section. Delete entries that stop being true.
   are intent-level (plan, apply, start, stop, switch scene, preview frame),
   not one tool per API call.
 
+- 2026-10-15 (#75, small-fixes): an ISO audio source with no sound (a media
+  file without an audio track) is skipped with a take-report warning naming
+  the field, not refused by validation: a media source may or may not have
+  audio, which is only known once its file is open. The skip is in
+  plan_take (record/mod.rs), the warning beside the other start warnings
+  (engine.rs); the writer is untouched.
+- 2026-10-15 (#74, small-fixes): obs-websocket without a password allows
+  only loopback binds (`WebsocketSettings::problem`, field `no_password`;
+  stored settings that break it keep the server off) and refuses upgrades
+  with an Origin header (403); at most 32 clients (503 beyond); Sleep
+  outside a batch answers 206 like OBS.
+- 2026-10-15 (#69, small-fixes): the camera extension's path fallback
+  accepts only `/Applications/<one name>.app/Contents/Helpers/Isocast
+  Engine.app/Contents/MacOS/isocastd` and `/Applications/Isocast Camera
+  Host.app/Contents/MacOS/isocastd` (`producerPathAllowed`).
+- 2026-10-15 (#49, small-fixes): `isocast mcp` checks for an older engine
+  once, on its first tool call, and warns on stderr; the app's
+  couldn't-restart warning stays until dismissed (OK).
+
 ## Gotchas
 
 - 2026-10-15 (#59, fixes-005): `stream stop` drops `state.stream`, but a
@@ -4855,6 +4976,78 @@ each section. Delete entries that stop being true.
   password the previous build stored (as with stream keys): the server
   stays off and says to set it again; tests use ISOCAST_WEBSOCKET_PASSWORD.
 
+- 2026-10-15 (#3 integration): **A direct VT encoder's first keyframe is
+  not the end of startup.** With a 4K program and 4K/1080p/1080p ISOs,
+  three M4 starts kept every frame on main but the crash-safe writer
+  refused 3/3/2 ISO frames at 0.217–0.250 s. Refusal-only traces showed
+  queue 4, native in-flight 8, newest encoded PTS 0: its startup backlog
+  flag had cleared too early. Keep the bounded 32-picture startup queue
+  until two encoded pictures return and pending is below 4. Afterward
+  all three starts are loss-free; the shared 25 ms first-picture gate and
+  the steady ISO admission policy are unchanged. Never use a heavy VT
+  property-query interposer to qualify losses: it perturbed both builds
+  substantially. Also, create movie files exclusively before locking;
+  truncate-then-lock destroys an existing file even when the lock fails.
+
+- 2026-10-14 (G.3b fix round 1, from the adversarial review): a muxer that
+  writes a picture's duration before it knows the next picture's time
+  silently removes every gap that falls on a fragment boundary; the
+  reviewer's SIGSTOP stalls produced 0.6–1.0 s of A/V drift in finished
+  files that decoded cleanly. Hold the newest picture until its successor
+  arrives, and rebuild the final table from the sample times. "Decodes
+  without errors" never certifies timing: compare `mdhd`, `stts`, the
+  edit, ffprobe's packet end and AVFoundation's decoded end.
+- 2026-10-14 (G.3b fix round 1): `File::sync_data()` is `fcntl(F_FULLFSYNC)`
+  on Apple platforms (Rust std), so there is no "plain fsync" to choose
+  from Rust and a `fsync` interposer does not see it; trace `fcntl` op 51.
+- 2026-10-14 (G.3b fix round 1): a 16-byte `pwrite` can tear under a
+  kill (a test interposer wrote 8 bytes and stopped); a recovery that
+  trusts a header's own bytes then strands intact data. Validate against
+  what follows (the header must end exactly on a complete `moov`).
+- 2026-10-14 (G.3b fix round 1): AVAssetReader fails a track whose edit
+  presents media it does not have (an audio track with zero packets and a
+  33 ms edit): leave such a track out, and present only available media.
+- 2026-10-14 (G.3b fix round 2): adding a method with a default body to a
+  trait silently leaves every delegating wrapper (`MacWriter`'s enum
+  dispatch) on the default: the re-review's VideoToolbox drop interposer
+  showed `lost_frames` never reaching the engine. Delegate every method,
+  and check new accounting end to end with an injected event, not by
+  reading the code.
+- 2026-10-14 (G.3b fix round 2): a header patch can tear after *any*
+  byte; a recognizer that accepts two exact prefixes (the review's 8
+  bytes) still strands 4–7. Decide from the structures behind the
+  reserved area, never from the area's own bytes, and test every length.
+- 2026-10-14 (G.3b fix round 2): a folder lock does not protect an inode
+  reachable through another folder (a symlink or hard link staged in a
+  failed manifest's folder). Repair must open through its own directory
+  with `openat(O_NOFOLLOW)`, refuse `st_nlink > 1`, and keep that
+  descriptor; `OpenOptions::open` by path follows links.
+- 2026-10-14 (G.3b fix round 3): `rename` keeps `st_nlink == 1`, so a
+  live movie moved into another folder passed every alias check; the
+  recorder now `flock`s its movie while writing and repair try-locks.
+  A movie "as long as its last picture" hides audio saved after it, and
+  with no picture at all presents nothing although ffmpeg read a second
+  of sound from the raw file: size the movie by its longest kept track.
+  Identify own files by an exact `ftyp` (with a private brand), never by
+  layout: a foreign fragmented MP4 with a 16-byte box after its 28-byte
+  `ftyp` got the header patch at the wrong offset and stopped opening.
+- 2026-10-14 (G.3b lane): a shared `CARGO_TARGET_DIR` between two source
+  trees (main's archive and the worktree) lets `cargo build -p …` link a
+  crate against the *other* tree's rlib of the same name when feature
+  unification differs between invocations ("struct `LiveFile` has no
+  field named `committed_seconds`" although the source has it). `cargo
+  clean --release -p` the workspace crates and rebuild; copy each build's
+  daemon away immediately, since the next tree's build overwrites
+  `target/release/isocastd`.
+- 2026-10-14 (G.3b lane): a QuickTime `mp4a` track with an edit list that
+  skips the AAC priming needs the `roll` sample group (`sgpd`/`sbgp`, roll
+  distance -1) AVAssetWriter writes: without it AVAssetReader (what
+  join.rs and editors use) starts the audio at the first whole packet
+  after the edit, 64 ms late; ffmpeg decodes from packet 0 either way.
+- 2026-10-14 (G.3b lane): AVAssetReader without output settings reports
+  a few more video "samples" than the track's frame count (244 for 240
+  frames of AVAssetWriter's own file, 249 for 245 of ours); compare frame
+  counts with ffprobe `-count_frames`, not AVAssetReader sample counts.
 - 2026-10-15 (#68, iso-overshed, BLOCKED): **Estimated spare capacity is
   not proof that stream pressure is false.** On exonbook/M4 Max, synthetic
   4K60 + 1080p60 HEVC ISOs, 1080p60 program and 6 Mb/s 1080p60 stream:
