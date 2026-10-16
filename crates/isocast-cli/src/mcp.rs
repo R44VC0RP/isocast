@@ -36,7 +36,7 @@ use isocast_protocol::timeline::{
     TimelineOpenParams, TimelineRangeParams, TimelineRemoveParams, TimelineRollParams,
     TimelineSplitParams, TimelineTarget, TimelineTrimParams,
 };
-use isocast_protocol::{Setup, Transition};
+use isocast_protocol::{CanvasId, Setup, Transition};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -97,6 +97,10 @@ struct GetSetupParams {
     /// Also return where every item is drawn, as laid out (`resolved`).
     #[serde(default)]
     resolved: bool,
+    /// With resolved: whose layout, "main" (the default) or "vertical"
+    /// (the vertical canvas's). The setup is the whole live setup.
+    #[serde(default)]
+    canvas: CanvasId,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -171,9 +175,13 @@ struct PreviewFrameParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct LiveFrameParams {
-    /// "program" (the default), "preview" (studio mode's preview scene) or
-    /// a video source id of the live setup.
+    /// "program" (the default), "preview" (studio mode's preview scene),
+    /// "vertical-program" or a video source id of the live setup.
     target: Option<String>,
+    /// "main" (the default) or "vertical": the vertical canvas's program
+    /// (with target "program" or none).
+    #[serde(default)]
+    canvas: CanvasId,
     /// Scale the picture down to at most this many pixels wide (default
     /// 1280).
     width: Option<u32>,
@@ -237,12 +245,27 @@ struct SwitchSceneParams {
     /// {"kind":"swipe","direction":"up"} or {"kind":"cut"}; the scene's
     /// transition (else the setup's) if absent.
     transition: Option<Transition>,
+    /// "main" (the default) or "vertical": the setup's [vertical] canvas,
+    /// which must not follow the main one (vertical.follow_main false).
+    #[serde(default)]
+    canvas: CanvasId,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct PreviewSceneParams {
     /// The id of a scene in the setup.
     scene: String,
+    /// "main" (the default) or "vertical" (which must not follow the main
+    /// canvas).
+    #[serde(default)]
+    canvas: CanvasId,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct ClearPreviewParams {
+    /// "main" (the default) or "vertical".
+    #[serde(default)]
+    canvas: CanvasId,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -250,6 +273,10 @@ struct TakeParams {
     /// How the preview scene comes on air; its transition (else the
     /// setup's) if absent.
     transition: Option<Transition>,
+    /// "main" (the default) or "vertical" (which must not follow the main
+    /// canvas).
+    #[serde(default)]
+    canvas: CanvasId,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -354,13 +381,21 @@ struct StreamKeyToolParams {
     service: Option<StreamService>,
     /// For "custom": the server it belongs to (rtmp://host/app).
     server: Option<String>,
+    /// "main" (the default, [stream]) or "vertical" ([vertical.stream]):
+    /// each canvas keeps its own keys.
+    #[serde(default)]
+    canvas: CanvasId,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DestinationIdParams {
-    /// The destination's id, from get_status's streams.
+    /// The destination's id, from get_status's streams (or
+    /// vertical_streams, with canvas "vertical").
     id: String,
+    /// "main" (the default, [stream]) or "vertical" ([vertical.stream]).
+    #[serde(default)]
+    canvas: CanvasId,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -371,6 +406,9 @@ struct StreamKeyTargetParams {
     service: Option<StreamService>,
     /// For "custom": the server the key belongs to.
     server: Option<String>,
+    /// "main" (the default, [stream]) or "vertical" ([vertical.stream]).
+    #[serde(default)]
+    canvas: CanvasId,
 }
 
 #[tool_router]
@@ -1005,7 +1043,9 @@ impl Isocast {
                        with the same bitrate and size share one encoder. Each needs its stream \
                        key set. Returns the first destination's status plus every \
                        destination's (`destinations`) once each is live or failed, or an error \
-                       saying what to do. get_status shows each one's health (`streams`).",
+                       saying what to do. get_status shows each one's health (`streams`). With \
+                       canvas \"vertical\", the vertical canvas's program to its own \
+                       [vertical.stream] destinations and keys (`vertical_streams`).",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1077,8 +1117,11 @@ impl Isocast {
         &self,
         Parameters(Strict(params)): Parameters<Strict<DestinationIdParams>>,
     ) -> Result<Json<StreamDestinations>, String> {
-        self.call(Method::StreamDestinationRemove { id: params.id })
-            .await
+        self.call(Method::StreamDestinationRemove {
+            id: params.id,
+            canvas: params.canvas,
+        })
+        .await
     }
 
     #[tool(
@@ -1240,7 +1283,9 @@ impl Isocast {
     #[tool(
         description = "Stop streaming (to every destination, or `only` those ids; the others \
                        keep going). Returns the final status of the first stopped, plus every \
-                       destination's: frames sent and dropped, reconnects and the last error.",
+                       destination's: frames sent and dropped, reconnects and the last error. \
+                       Stops one canvas's streams: canvas \"main\" (the default) or \
+                       \"vertical\".",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1357,6 +1402,7 @@ impl Isocast {
                 destination: params.destination,
                 service: params.service,
                 server: params.server,
+                canvas: params.canvas,
             },
         })))
         .await
@@ -1379,6 +1425,7 @@ impl Isocast {
             destination: params.destination,
             service: params.service,
             server: params.server,
+            canvas: params.canvas,
         })))
         .await
     }
@@ -1501,9 +1548,10 @@ impl Isocast {
         &self,
         Parameters(Strict(params)): Parameters<Strict<GetSetupParams>>,
     ) -> Result<Json<Live>, String> {
-        let params = params
-            .resolved
-            .then_some(isocast_protocol::api::GetParams { resolved: true });
+        let params = params.resolved.then_some(isocast_protocol::api::GetParams {
+            resolved: true,
+            canvas: params.canvas,
+        });
         self.call(Method::Get(params)).await
     }
 
@@ -1629,9 +1677,14 @@ impl Isocast {
         &self,
         Parameters(Strict(params)): Parameters<Strict<LiveFrameParams>>,
     ) -> Result<CallToolResult, String> {
+        let target = crate::canvas_target(
+            params.canvas,
+            params.target.unwrap_or_else(|| "program".into()),
+        )
+        .map_err(|err| err.to_string())?;
         let Json(frame): Json<Frame> = self
             .call(Method::Frame(FrameParams {
-                target: params.target.unwrap_or_else(|| "program".into()),
+                target,
                 max_width: Some(params.width.unwrap_or(1280)),
                 after: None,
                 timeout_ms: Some(5000),
@@ -2044,7 +2097,8 @@ impl Isocast {
         description = "Put a scene on air, by id, with a transition: cut, fade, swipe, slide, \
                        fade_to_color, luma_wipe, stinger or move (the scene's transition, else \
                        the setup's, by default). While recording, the switch is written to the \
-                       manifest's scene timeline.",
+                       manifest's scene timeline. canvas \"vertical\" switches the vertical \
+                       canvas, once vertical.follow_main is false.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2058,6 +2112,7 @@ impl Isocast {
         self.call(Method::SwitchScene {
             scene: params.scene,
             transition: params.transition,
+            canvas: params.canvas,
         })
         .await
     }
@@ -2077,6 +2132,7 @@ impl Isocast {
     ) -> Result<Json<Switched>, String> {
         self.call(Method::Preview {
             scene: params.scene,
+            canvas: params.canvas,
         })
         .await
     }
@@ -2089,8 +2145,18 @@ impl Isocast {
             idempotent_hint = true
         )
     )]
-    async fn clear_preview(&self) -> Result<Json<Switched>, String> {
-        self.call(Method::ClearPreview).await
+    async fn clear_preview(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ClearPreviewParams>>,
+    ) -> Result<Json<Switched>, String> {
+        if params.canvas.is_main() {
+            self.call(Method::ClearPreview).await
+        } else {
+            self.call(Method::ClearCanvasPreview {
+                canvas: params.canvas,
+            })
+            .await
+        }
     }
 
     #[tool(
@@ -2108,6 +2174,7 @@ impl Isocast {
     ) -> Result<Json<Switched>, String> {
         self.call(Method::Take {
             transition: params.transition,
+            canvas: params.canvas,
         })
         .await
     }

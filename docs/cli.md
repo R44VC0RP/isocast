@@ -1433,6 +1433,7 @@ Options:
       --fade <MS>               Fade to the scene over this many milliseconds
       --transition <KIND|JSON>  Another transition: a kind (cut, fade, swipe, slide, fade_to_color, luma_wipe, stinger, move) with its default settings, or a JSON object like '{"kind":"swipe","direction":"up"}'
       --duration <MS>           How long --transition takes, in milliseconds (300 by default)
+      --canvas <CANVAS>         Which canvas: main, or vertical (the setup's [vertical] canvas, once it stops following the main one) [default: main]
       --json                    
   -h, --help                    Print help
 ```
@@ -1448,9 +1449,10 @@ Arguments:
   [SCENE]  
 
 Options:
-      --clear  Leave Studio Mode (clear its staged preview)
-      --json   
-  -h, --help   Print help
+      --clear            Leave Studio Mode (clear its staged preview)
+      --canvas <CANVAS>  Which canvas: main, or vertical (once it stops following the main one) [default: main]
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast take
@@ -1465,6 +1467,7 @@ Options:
       --fade <MS>               Fade to the scene over this many milliseconds
       --transition <KIND|JSON>  Another transition: a kind (cut, fade, swipe, slide, fade_to_color, luma_wipe, stinger, move) with its default settings, or a JSON object like '{"kind":"swipe","direction":"up"}'
       --duration <MS>           How long --transition takes, in milliseconds (300 by default)
+      --canvas <CANVAS>         Which canvas: main, or vertical (once it stops following the main one) [default: main]
       --json                    
   -h, --help                    Print help
 ```
@@ -1632,9 +1635,10 @@ Print the live setup (TOML, or JSON with --json) and its revision; with --resolv
 Usage: isocast get [OPTIONS]
 
 Options:
-      --resolved  
-      --json      
-  -h, --help      Print help
+      --resolved         
+      --canvas <CANVAS>  With --resolved: whose layout, main or vertical (the setup is the whole live setup either way) [default: main]
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast plan
@@ -1680,7 +1684,7 @@ Usage: isocast stream <COMMAND>
 
 Commands:
   start        Go live: stream the program (the canvas and the program mix) to the live setup's [stream] destinations (every enabled one), starting the live engine if needed. Recordings start and stop without touching it. Returns once each is live or failed, or says why not
-  stop         Stop streaming (to every destination, or --only those)
+  stop         Stop streaming (to every destination of the canvas, or --only those); the other canvas's streams keep going
   status       Show each destination's state, bitrates, dropped frames, congestion and reconnects, and whether its stream key is set
   destination  Add, remove or change the places the program streams to
   key          Keep or remove the stream key (in the Keychain, never in a setup)
@@ -1699,22 +1703,24 @@ Go live: stream the program (the canvas and the program mix) to the live setup's
 Usage: isocast stream start [OPTIONS]
 
 Options:
-      --only <ID>  Only this destination (main, or an id from `stream status`); repeat for several. A turned-off destination starts too
-      --json       
-  -h, --help       Print help
+      --only <ID>        Only this destination (main, or an id from `stream status`); repeat for several. A turned-off destination starts too
+      --canvas <CANVAS>  Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast stream stop
 
 ```text
-Stop streaming (to every destination, or --only those)
+Stop streaming (to every destination of the canvas, or --only those); the other canvas's streams keep going
 
 Usage: isocast stream stop [OPTIONS]
 
 Options:
-      --only <ID>  Only this destination; repeat for several. The others keep going
-      --json       
-  -h, --help       Print help
+      --only <ID>        Only this destination; repeat for several. The others keep going
+      --canvas <CANVAS>  Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast stream status
@@ -1725,8 +1731,9 @@ Show each destination's state, bitrates, dropped frames, congestion and reconnec
 Usage: isocast stream status [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --canvas <CANVAS>  Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast stream destination
@@ -1769,6 +1776,8 @@ Options:
           Its own height sent (with --width)
       --disabled
           Add it turned off (`stream start` skips it unless --only names it)
+      --canvas <CANVAS>
+          Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
       --json
           
   -h, --help
@@ -1786,8 +1795,9 @@ Arguments:
   <ID>  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --canvas <CANVAS>  Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast stream destination set
@@ -1815,6 +1825,8 @@ Options:
           Turn it on or off for `stream start` [possible values: true, false]
       --clear <FIELD>
           Reset a field: server, video_bitrate_kbps or size (a destination then uses main's; main the defaults). Repeat for several
+      --canvas <CANVAS>
+          Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
       --json
           
   -h, --help
@@ -1848,6 +1860,7 @@ Options:
       --destination <DESTINATION>  A destination of the live setup (main, or an id from `stream status`): its own key
       --service <SERVICE>          custom, twitch, youtube, kick or facebook
       --server <SERVER>            For custom: the server the key belongs to (rtmp://host/app)
+      --canvas <CANVAS>            Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
       --json                       
   -h, --help                       Print help
 ```
@@ -1863,6 +1876,7 @@ Options:
       --destination <DESTINATION>  A destination of the live setup (main, or an id from `stream status`): its own key
       --service <SERVICE>          custom, twitch, youtube, kick or facebook
       --server <SERVER>            For custom: the server the key belongs to (rtmp://host/app)
+      --canvas <CANVAS>            Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
       --json                       
   -h, --help                       Print help
 ```
@@ -2221,6 +2235,7 @@ Arguments:
 Options:
   -o, --output <OUTPUT>  Where to save it; `<target>.jpg` if absent
       --width <WIDTH>    Scale it down to at most this many pixels wide
+      --canvas <CANVAS>  Which canvas: main, or vertical (its program; vertical takes `program` only) [default: main]
       --json             
   -h, --help             Print help
 ```
@@ -2247,6 +2262,7 @@ Options:
       --check              With --shared: read every frame back through this process's GPU and fail on black frames or pixels the daemon never drew
       --expect <EXPECT>    With --check: a pixel some frame must have, as X,Y=#RRGGBB (X and Y fractions of the width and height). Repeatable
       --touch              With --check: halfway through, apply an empty live change (the setup stays the same, its revision goes up) and check frames show the new revision
+      --canvas <CANVAS>    Which canvas: main, or vertical (its program; vertical takes `program` only) [default: main]
       --json               
   -h, --help               Print help
 ```

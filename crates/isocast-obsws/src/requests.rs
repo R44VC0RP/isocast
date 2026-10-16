@@ -668,6 +668,7 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
             ctx.act(Method::SwitchScene {
                 scene: scene.id.clone(),
                 transition: None,
+                canvas: isocast_protocol::CanvasId::Main,
             })?;
             Ok(Value::Null)
         }
@@ -696,6 +697,7 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
             let scene = scene(&world, &d)?;
             ctx.act(Method::Preview {
                 scene: scene.id.clone(),
+                canvas: isocast_protocol::CanvasId::Main,
             })?;
             Ok(Value::Null)
         }
@@ -1070,7 +1072,10 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
                     "Studio mode is not enabled.",
                 ));
             }
-            ctx.act(Method::Take { transition: None })?;
+            ctx.act(Method::Take {
+                transition: None,
+                canvas: isocast_protocol::CanvasId::Main,
+            })?;
             Ok(Value::Null)
         }
 
@@ -1487,7 +1492,10 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
                         .ok_or_else(|| {
                             Fail::new(code::INVALID_RESOURCE_STATE, "There are no scenes yet.")
                         })?;
-                    ctx.act(Method::Preview { scene })?;
+                    ctx.act(Method::Preview {
+                        scene,
+                        canvas: isocast_protocol::CanvasId::Main,
+                    })?;
                 }
                 (false, true) => {
                     ctx.act(Method::ClearPreview)?;
@@ -1522,8 +1530,16 @@ pub fn monitor_type(monitor: isocast_protocol::Monitoring) -> &'static str {
 }
 
 /// The program file of the running recording: the file at the program's
-/// place in `live.files` (the same order as `files`), else the last.
+/// place in `live.files` (the same order as `files`). The legacy last-file
+/// fallback is safe only with one canvas: an ambiguous two-canvas list
+/// must not report the vertical program as the main recording.
 pub fn program_file(status: &Status) -> Option<String> {
+    let vertical = status.engine.as_ref().is_some_and(|e| e.vertical.is_some())
+        || status.live.as_ref().is_some_and(|live| {
+            live.files
+                .iter()
+                .any(|f| f.source == isocast_protocol::VERTICAL_PROGRAM)
+        });
     let index = status.live.as_ref().and_then(|live| {
         (live.files.len() == status.files.len())
             .then(|| {
@@ -1535,7 +1551,7 @@ pub fn program_file(status: &Status) -> Option<String> {
     });
     index
         .and_then(|i| status.files.get(i))
-        .or(status.files.last())
+        .or_else(|| (!vertical).then(|| status.files.last()).flatten())
         .map(|f| f.to_string_lossy().into_owned())
 }
 
@@ -1690,5 +1706,22 @@ mod tests {
         assert!((db_to_mul(-6.0) - 0.501).abs() < 0.001);
         assert!((mul_to_db(0.5) + 6.02).abs() < 0.01);
         assert_eq!(mul_to_db(0.0), -100.0);
+    }
+
+    #[test]
+    fn ambiguous_record_paths_do_not_report_the_vertical_file_as_main() {
+        let mut status: Status = serde_json::from_value(json!({
+            "state": "recording", "files": ["iso.mov", "main.mov", "vertical.mov"],
+            "live": {"elapsed_seconds": 1.0, "files": [
+                {"source": "camera", "frames": 60, "dropped_frames": 0, "audio_dropouts": 0},
+                {"source": "program", "frames": 60, "dropped_frames": 0, "audio_dropouts": 0},
+                {"source": "vertical-program", "frames": 60, "dropped_frames": 0, "audio_dropouts": 0}
+            ]}
+        })).unwrap();
+        assert_eq!(program_file(&status).as_deref(), Some("main.mov"));
+        // A failed handoff omitted the ISO, while live counters still have
+        // the full set of file plans. The last file is not the main program.
+        status.files.remove(0);
+        assert_eq!(program_file(&status), None);
     }
 }

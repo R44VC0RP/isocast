@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use isocast_protocol::api::{Candidate, Capacity, TunedStream, Tuning, Variant};
 use isocast_protocol::change::merge_patch;
-use isocast_protocol::{Codec, Encoder, EncoderQuality, PROGRAM, QualityPreset, Setup, SourceKind};
+use isocast_protocol::{
+    CanvasId, Codec, Encoder, EncoderQuality, PROGRAM, QualityPreset, Setup, SourceKind,
+    VERTICAL_PROGRAM,
+};
 use serde_json::{Value, json};
 
 use crate::capacity::{self, Fix, Measurement, Memory, VideoLoad, Workload};
@@ -222,7 +225,8 @@ fn estimate(loads: &[Load]) -> f64 {
 type Formats = HashMap<(String, u32), (u32, u32, u32)>;
 
 /// The files' video: each ISO source at its device's format, then the
-/// program at its file's size.
+/// program at its file's size, then the vertical program (if a vertical
+/// canvas records) at its own.
 fn setup_loads<P: Platform>(
     platform: &P,
     setup: &Setup,
@@ -266,6 +270,24 @@ fn setup_loads<P: Platform>(
             input: (setup.canvas.width, setup.canvas.height),
             encoder: program.encoder.clone(),
         });
+    }
+    // The vertical program too, drawn at the vertical canvas's size and
+    // rate.
+    if let Some(vertical) = setup.for_canvas(CanvasId::Vertical) {
+        let program = &vertical.recording.program;
+        if program.enabled {
+            let (width, height) = program.size(&vertical.canvas);
+            loads.push(Load {
+                stream: TunedStream {
+                    source: VERTICAL_PROGRAM.to_string(),
+                    width,
+                    height,
+                    fps: vertical.canvas.fps,
+                },
+                input: (vertical.canvas.width, vertical.canvas.height),
+                encoder: program.encoder.clone(),
+            });
+        }
     }
     Ok(loads)
 }
@@ -557,7 +579,8 @@ impl<P: Platform> Tuner<'_, P> {
         let disk_before = space::write_speed(folder)?;
         self.free = self.platform.volume(folder)?.free_bytes;
         let current = setup.recording.iso.encoder.clone();
-        let has_iso = loads.iter().any(|l| l.stream.source != PROGRAM);
+        let program = |source: &str| source == PROGRAM || source == VERTICAL_PROGRAM;
+        let has_iso = loads.iter().any(|l| !program(&l.stream.source));
         let encoders = if has_iso {
             iso_encoders(&current)
         } else {
@@ -568,7 +591,7 @@ impl<P: Platform> Tuner<'_, P> {
             loads
                 .iter()
                 .map(|load| match load.stream.source.as_str() {
-                    PROGRAM => load.clone(),
+                    PROGRAM | VERTICAL_PROGRAM => load.clone(),
                     _ => Load {
                         encoder: encoder.clone(),
                         ..load.clone()

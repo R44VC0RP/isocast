@@ -939,6 +939,22 @@ native app; each verified against OBS's behaviour on a test Mac.
 - [ ] **G.7 Later items from section 9, when Ryan asks:** a second
   (vertical) canvas, SRT/WHIP streaming, NDI, Syphon, Audio Unit
   plugins.
+  - [ ] **#86 vertical canvas.** A second, upright canvas with its own
+    scene arrangements, recording and stream.
+    - [x] **#86 model.** `Setup.vertical`, `Scene.vertical`, `CanvasId`,
+      `VERTICAL_PROGRAM`, `Setup::for_canvas`, validation and the
+      collection/profile split (protocol only; engine, daemon and UI
+      separate).
+    - [x] **#86 engine qualification.** Shared capture, two compositors,
+      protected program files, independent stream groups and capacity/tune;
+      real files/sync qualified after main's hardening; base-M2 full live
+      workload needs ProRes programs to protect both streams (HEVC overload
+      is reported, not promised loss-free).
+    - [x] **#86 clients and app qualification.** Canvas-aware API/CLI/MCP,
+      hotkeys, Studio/editing, two real layout alternatives and regression
+      snapshots; full gates and strict e2e. Main-only decoded pixels and
+      normalized manifests match; native byte streams vary even on main.
+    - [ ] **#86 Tier-1 review/re-review and coordinator commits.**
 - [x] **G.8 WebM and MKV media (#61).** Media sources and stingers play
   Matroska/WebM (sniffed by content): VP9 with alpha (OBS's stinger
   format), AV1 where the Mac decodes it, H.264/HEVC in MKV, Opus and AAC
@@ -1388,6 +1404,20 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- G.7 / #86 model (2026-10-16): optional vertical canvas and per-scene
+  arrangements, shared sources/mix, validation and collection/profile
+  round-trip. Remote 77 protocol tests passed; main-integrated engine/protocol
+  clippy passed; live offscreen apply and vertical-only editing verified.
+  The full feature remains unqualified, not resolved.
+- G.7 / #86 qualification (2026-10-16): main 79bf8c7 integrated; 214 workspace
+  tests/doctests and strict AWS e2e 17/17 pass. Three 14 s dual-program + two
+  ISO runs: zero loss, 12 files decode, sync ≤0.021 ms. Full HD60 + portrait60
+  ProRes programs and two H.264 streams: both protected programs/streams
+  loss-free; shared HEVC ISOs shed at the no-margin M2 load. CPU increment
+  9.35 points of one core. Offscreen vertical drag/lock/removal preserve main;
+  CLI/MCP and link/restart verified. Review/commits remain coordinator-owned;
+  evidence in vertical-canvas/scratch/REPORT.md.
 
 - A.4 / #62 (2026-10-16): cold stream start under heavy M2 load no longer
   loses protected frames on main (79bf8c7; #68's placed-and-parked encoder,

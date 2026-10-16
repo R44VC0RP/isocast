@@ -19,14 +19,20 @@
 //!   so the handle stays under the pointer;
 //! - Studio Mode: the edited monitor shows `preview`, a second picture the
 //!   program; the preview's rate follows Settings → General (30 fps saves
-//!   power except while working on the canvas).
+//!   power except while working on the canvas);
+//! - a vertical canvas (#86): its program in a monitor of its own beside
+//!   the others (View → Vertical Preview), and Edit Vertical Canvas puts
+//!   it in the edited monitor (and Studio Mode's pair), where gestures
+//!   change the scene's vertical items, never the main ones.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use isocast_protocol::{SceneItem, Setup};
+use isocast_protocol::api::{EngineState, Method, StreamStartParams, Streaming};
+use isocast_protocol::stream::{StreamState, StreamStatus};
+use isocast_protocol::{CanvasId, SceneItem, Setup};
 use serde_json::{Value, json};
 use slint::{ComponentHandle, Model, VecModel};
 
@@ -39,7 +45,7 @@ use crate::model;
 use crate::picture::{Scene as TestScene, TestPicture};
 use crate::preview::{BoxShape, BoxStyle, LiveBox, Output, Preview, Role};
 use crate::session::EditOptions;
-use crate::{AppWindow, CanvasArea, CanvasBox, CanvasGuide, Menus, Ui};
+use crate::{AppWindow, CanvasArea, CanvasBox, CanvasGuide, Menus, ToastKind, Ui};
 
 /// Snapshot states (`--state NAME[:ARG]`).
 pub const STATES: &[&str] = &[
@@ -48,6 +54,10 @@ pub const STATES: &[&str] = &[
     "canvas-drag:X1,Y1,X2,Y2[,shift|alt|meta]",
     "canvas-hold:X1,Y1,X2,Y2[,shift|alt|meta]",
     "preview-scale:window|canvas",
+    "vertical-canvas[:on|off]",
+    "vertical-preview:on|off",
+    "edit-canvas:main|vertical",
+    "vertical-layout:wide|compact",
 ];
 
 /// Drag steps go to the daemon at most once per display frame.
@@ -242,8 +252,12 @@ pub struct Canvas {
     pub preview: RefCell<Option<Preview>>,
     /// Studio Mode's program picture (the window).
     pub program: RefCell<Option<Preview>>,
-    /// The test picture (offscreen runs), drawn before each frame.
+    /// The vertical canvas's program picture (the window, #86).
+    pub vertical: RefCell<Option<Preview>>,
+    /// The test picture (offscreen runs), drawn before each frame, and the
+    /// vertical monitor's.
     picture: Option<RefCell<TestPicture>>,
+    vertical_picture: Option<RefCell<TestPicture>>,
     /// The test picture's clock, in seconds.
     clock: Box<dyn Fn() -> f32>,
     /// Frames the window has drawn.
@@ -253,8 +267,9 @@ pub struct Canvas {
     /// `--drag-test`: when each window frame started and finished drawing.
     pub render_log: RefCell<Option<Vec<(Instant, Instant)>>>,
     render_started: Cell<Option<Instant>>,
-    /// The newest confirmed layout handed to the preview (revision, scene).
-    shown_layout: RefCell<(u64, String)>,
+    /// The newest confirmed layout handed to the preview (revision, scene,
+    /// the vertical canvas's).
+    shown_layout: RefCell<(u64, String, bool)>,
     gesture: RefCell<Option<Gesture>>,
     /// Until when the monitors keep the canvas's rate after a gesture.
     gesture_tail: Cell<Option<Instant>>,
@@ -272,7 +287,10 @@ impl Canvas {
         Self {
             preview: RefCell::new(None),
             program: RefCell::new(None),
+            vertical: RefCell::new(None),
             picture: test_picture.then(|| RefCell::new(TestPicture::new(&gpu.device, &gpu.queue))),
+            vertical_picture: test_picture
+                .then(|| RefCell::new(TestPicture::new(&gpu.device, &gpu.queue))),
             clock,
             frames: Cell::new(0),
             moves: Cell::new(0),
@@ -302,15 +320,15 @@ impl Canvas {
     }
 
     /// Start the monitors' pictures (the window, once it is shown): the
-    /// edited one and Studio Mode's program, each from a feed of its own.
-    /// `deliver` hands each feed's frames to the window's thread (true:
-    /// the program's).
+    /// edited one, Studio Mode's program and the vertical canvas's, each
+    /// from a feed of its own. `deliver` hands each feed's frames to the
+    /// window's thread, with the monitor they are for.
     pub fn start_pictures(
         &self,
         app: &Rc<App>,
         output: Output,
         check: bool,
-        deliver: impl Fn(bool, Incoming) + Send + Clone + 'static,
+        deliver: impl Fn(Role, Incoming) + Send + Clone + 'static,
     ) {
         let Some(window) = app.window() else { return };
         let fps = self.wanted_fps(app);
@@ -323,7 +341,7 @@ impl Canvas {
                 window.get_picture_pixel_height(),
             ),
             fps,
-            move |incoming| to_editor(false, incoming),
+            move |incoming| to_editor(Role::Editor, incoming),
         );
         *self.preview.borrow_mut() = Some(Preview::new(
             &window,
@@ -340,30 +358,45 @@ impl Canvas {
                 window.get_program_pixel_height(),
             ),
             fps,
-            move |incoming| deliver(true, incoming),
+            {
+                let deliver = deliver.clone();
+                move |incoming| deliver(Role::Program, incoming)
+            },
         );
         *self.program.borrow_mut() = Some(Preview::new(
             &window,
             Role::Program,
+            output.clone(),
+            feed,
+            fps,
+            false,
+        ));
+        let feed = Feed::start(
+            None,
+            size(
+                window.get_vertical_pixel_width(),
+                window.get_vertical_pixel_height(),
+            ),
+            fps,
+            move |incoming| deliver(Role::Vertical, incoming),
+        );
+        *self.vertical.borrow_mut() = Some(Preview::new(
+            &window,
+            Role::Vertical,
             output,
             feed,
             fps,
             false,
         ));
-        *self.shown_layout.borrow_mut() = (0, String::new());
+        *self.shown_layout.borrow_mut() = (0, String::new(), false);
         self.follow_scenes(app);
         self.push_layout(app);
         self.place_box(app, &window);
     }
 
-    /// A frame (or the loss of the stream) for the edited monitor or
-    /// (`program`) Studio Mode's program.
-    pub fn incoming(&self, program: bool, incoming: Incoming) {
-        let cell = if program {
-            &self.program
-        } else {
-            &self.preview
-        };
+    /// A frame (or the loss of the stream) for monitor `role`.
+    pub fn incoming(&self, role: Role, incoming: Incoming) {
+        let cell = self.cell(role);
         if let Some(preview) = cell.borrow_mut().as_mut() {
             match incoming {
                 Incoming::Frame(frame) => preview.frame(frame),
@@ -372,9 +405,17 @@ impl Canvas {
         }
     }
 
+    fn cell(&self, role: Role) -> &RefCell<Option<Preview>> {
+        match role {
+            Role::Editor => &self.preview,
+            Role::Program => &self.program,
+            Role::Vertical => &self.vertical,
+        }
+    }
+
     /// The window was hidden or shown again.
     pub fn set_hidden(&self, hidden: bool) {
-        for cell in [&self.preview, &self.program] {
+        for cell in [&self.preview, &self.program, &self.vertical] {
             if let Some(preview) = cell.borrow_mut().as_mut() {
                 preview.set_hidden(hidden);
             }
@@ -383,28 +424,45 @@ impl Canvas {
 
     /// What each monitor shows: the edited one `program`, or in Studio
     /// Mode `preview` (and the second one `program`); nothing while there
-    /// is nothing to show.
+    /// is nothing to show. Editing the vertical canvas, the same of it
+    /// (`vertical-program`, `vertical-preview`); else its monitor beside
+    /// them, while shown, `vertical-program`.
     fn follow_scenes(&self, app: &Rc<App>) {
+        let shown = app
+            .window()
+            .is_some_and(|w| w.global::<Ui>().get_show_vertical());
+        let (vertical, editing_vertical) = {
+            let s = app.session.borrow();
+            (s.vertical.is_some(), s.editing_vertical())
+        };
         let (studio, has_preview, has_program) = {
             let s = app.session.borrow();
-            let exists = |id: &Option<String>| {
-                id.as_deref().is_some_and(|id| {
+            let exists = |id: Option<&String>| {
+                id.is_some_and(|id| {
                     s.setup
                         .as_ref()
                         .and_then(|x| model::find_scene(x, id))
                         .is_some()
                 })
             };
-            (s.studio, exists(&s.preview), exists(&s.scene))
+            // The canvas whose scenes are switched (#86).
+            (s.studio, exists(s.staged()), exists(s.on_air()))
+        };
+        let (preview_target, program_target) = if editing_vertical {
+            ("vertical-preview", "vertical-program")
+        } else {
+            ("preview", "program")
         };
         let (editor, program) = if studio {
             (
-                has_preview.then_some("preview"),
-                has_program.then_some("program"),
+                has_preview.then_some(preview_target),
+                has_program.then_some(program_target),
             )
         } else {
-            (has_program.then_some("program"), None)
+            (has_program.then_some(program_target), None)
         };
+        let side =
+            (vertical && shown && !editing_vertical && has_program).then_some("vertical-program");
         if let Ok(mut preview) = self.preview.try_borrow_mut()
             && let Some(preview) = preview.as_mut()
         {
@@ -415,6 +473,11 @@ impl Canvas {
         {
             preview.set_target(program);
         }
+        if let Ok(mut preview) = self.vertical.try_borrow_mut()
+            && let Some(preview) = preview.as_mut()
+        {
+            preview.set_target(side);
+        }
     }
 
     /// The monitors' rate: the canvas's (at most 60), or when saving power
@@ -423,8 +486,7 @@ impl Canvas {
         let canvas = app
             .session
             .borrow()
-            .setup
-            .as_ref()
+            .edited_setup()
             .map_or(MAX_FPS, |s| s.canvas.fps.max(1));
         let saving = app
             .window()
@@ -444,7 +506,7 @@ impl Canvas {
 
     fn update_fps(&self, app: &Rc<App>) {
         let fps = self.wanted_fps(app);
-        for cell in [&self.preview, &self.program] {
+        for cell in [&self.preview, &self.program, &self.vertical] {
             if let Ok(mut preview) = cell.try_borrow_mut()
                 && let Some(preview) = preview.as_mut()
             {
@@ -475,10 +537,10 @@ impl Canvas {
     /// frames drawn from it.
     fn push_layout(&self, app: &Rc<App>) {
         let s = app.session.borrow();
-        let (Some(setup), Some(scene)) = (s.confirmed_setup(), s.editing_scene()) else {
+        let (Some(setup), Some(scene)) = (s.confirmed_edited(), s.editing_scene()) else {
             return;
         };
-        let key = (s.revision, scene.clone());
+        let key = (s.revision, scene.clone(), s.editing_vertical());
         if *self.shown_layout.borrow() == key {
             return;
         }
@@ -497,7 +559,7 @@ impl Canvas {
         let path = {
             let s = app.session.borrow();
             s.editing_scene()
-                .and_then(|id| s.setup.as_ref().and_then(|x| model::find_scene(x, &id)))
+                .and_then(|id| s.edited_setup().and_then(|x| model::find_scene(x, &id)))
                 .and_then(|scene| scene.items.first())
                 .map(|item| model::key(item).to_string())
         };
@@ -511,7 +573,9 @@ impl Canvas {
     pub fn select_first_item(&self, app: &Rc<App>) {
         let path = {
             let s = app.session.borrow();
-            let Some(setup) = s.setup.clone() else { return };
+            let Some(setup) = s.edited_setup().cloned() else {
+                return;
+            };
             let Some(scene) = s
                 .editing_scene()
                 .and_then(|id| model::find_scene(&setup, &id).cloned())
@@ -565,6 +629,21 @@ impl Canvas {
             }
             canvas.set_picture(image);
         }
+        // The vertical monitor's, without a box.
+        if let Some(vertical) = &self.vertical_picture
+            && window.get_vertical_width() > 0.0
+        {
+            let width = window.get_vertical_pixel_width().max(1) as u32;
+            let height = window.get_vertical_pixel_height().max(1) as u32;
+            let scene = TestScene {
+                time: (self.clock)(),
+                rect: [0.0; 4],
+            };
+            if let Some(image) = vertical.borrow_mut().draw(width, height, scene) {
+                canvas.set_vertical_picture(image);
+            }
+            canvas.set_vertical_waiting(false);
+        }
         // The test picture is drawn from the box itself.
         canvas.set_waiting(false);
         canvas.set_shown_box_visible(true);
@@ -609,7 +688,7 @@ impl Canvas {
         let mut boxes = Vec::new();
         let scene = s
             .editing_scene()
-            .and_then(|id| s.setup.as_ref().and_then(|x| model::find_scene(x, &id)));
+            .and_then(|id| s.edited_setup().and_then(|x| model::find_scene(x, &id)));
         let mut empty = false;
         if let Some(scene) = scene {
             empty = scene.items.is_empty();
@@ -642,6 +721,237 @@ impl Canvas {
         }
     }
 
+    // ---------- The vertical canvas (#86) ----------
+
+    /// Edit the vertical canvas (`on`) or the main one: the edited monitor
+    /// (and Studio Mode's pair) show it, its size is the editor's, and
+    /// gestures change its items.
+    fn set_edit_vertical(&self, app: &Rc<App>, on: bool) {
+        {
+            let mut s = app.session.borrow_mut();
+            if s.vertical_edit == on {
+                return;
+            }
+            s.vertical_edit = on;
+            // Its items (and maybe its scenes) are another canvas's.
+            s.selection = None;
+        }
+        // The other canvas's boxes are at other places at the same
+        // revisions.
+        *self.shown_layout.borrow_mut() = (0, String::new(), false);
+        if let Ok(mut preview) = self.preview.try_borrow_mut()
+            && let Some(preview) = preview.as_mut()
+        {
+            preview.forget_layouts();
+        }
+        app.changed(Changed::SETUP | Changed::CONFIRMED | Changed::SCENES | Changed::SELECTION);
+        // Studio Mode on a vertical canvas with scenes of its own: its own
+        // preview.
+        app.stage_vertical_preview();
+    }
+
+    /// The vertical monitor beside the others, shown or not (View →
+    /// Vertical Preview; kept with the window's layout).
+    fn set_show_vertical(&self, app: &Rc<App>, on: bool) {
+        let Some(window) = app.window() else { return };
+        window.global::<Ui>().set_show_vertical(on);
+        if !app.mode.offscreen {
+            crate::prefs::save(&window);
+        }
+        self.follow_scenes(app);
+    }
+
+    /// Record the vertical program with the next recording (or not): the
+    /// setup's `vertical.recording`, changed while not recording.
+    fn toggle_vertical_record(&self, app: &Rc<App>) {
+        let (on, recording) = {
+            let s = app.session.borrow();
+            (vertical_records(&s), recording(&s))
+        };
+        if recording {
+            app.toast(
+                ToastKind::Info,
+                "Recording now",
+                "Whether the vertical canvas is recorded changes once this recording stops.",
+            );
+            return;
+        }
+        // Kept when off (`enabled: false`), so its file name and encoder
+        // come back with it.
+        app.edit(
+            json!({ "vertical": { "recording": { "enabled": !on } } }),
+            EditOptions::default(),
+        );
+    }
+
+    /// Start or stop streaming the vertical canvas (`stream_start` and
+    /// `stream_stop` with `canvas: vertical`).
+    fn toggle_vertical_stream(&self, app: &Rc<App>) {
+        let (on, configured) = {
+            let s = app.session.borrow();
+            (
+                vertical_stream(&s).is_some_and(StreamStatus::is_active),
+                s.setup
+                    .as_ref()
+                    .and_then(|x| x.vertical.as_ref())
+                    .is_some_and(|v| v.stream.is_some()),
+            )
+        };
+        if !on && !configured {
+            app.toast(
+                ToastKind::Info,
+                "The vertical canvas has nowhere to stream yet",
+                "Settings can’t set up its destinations and keys yet. Add one with \
+                 `isocast stream destination add --canvas vertical`, then its key with \
+                 `isocast stream key`.",
+            );
+            return;
+        }
+        let params = StreamStartParams {
+            canvas: CanvasId::Vertical,
+            ..StreamStartParams::default()
+        };
+        app.session.borrow_mut().busy_vertical_stream = true;
+        app.changed(Changed::BUSY);
+        let method = if on {
+            Method::StreamStop(Some(params))
+        } else {
+            Method::StreamStart(Some(params))
+        };
+        app.call_as::<Streaming>(method, move |app, result| {
+            match result {
+                Ok(status) => {
+                    app.session.borrow_mut().vertical_streams = if status.destinations.is_empty() {
+                        vec![status.stream]
+                    } else {
+                        status.destinations
+                    };
+                }
+                Err(error) => {
+                    app.failed(
+                        if on {
+                            "Couldn’t stop the vertical stream"
+                        } else {
+                            "Couldn’t stream the vertical canvas"
+                        },
+                        &error,
+                    );
+                    app.refresh_status(true);
+                }
+            }
+            app.session.borrow_mut().busy_vertical_stream = false;
+            app.changed(Changed::BUSY | Changed::STREAM);
+        });
+    }
+
+    /// The vertical monitor's head and picture: its scene, whether it is
+    /// recorded and live.
+    fn show_vertical(&self, app: &Rc<App>, window: &AppWindow) {
+        let canvas = window.global::<CanvasArea>();
+        let s = app.session.borrow();
+        let name = s
+            .vertical_scene
+            .as_deref()
+            .or(s.scene.as_deref())
+            .and_then(|id| model::find_scene(s.setup.as_ref()?, id))
+            .map(|scene| model::scene_name(scene).to_string())
+            .unwrap_or_default();
+        canvas.set_vertical_name(name.as_str().into());
+        canvas.set_vertical_empty_text(
+            if name.is_empty() {
+                "Nothing on air."
+            } else {
+                ""
+            }
+            .into(),
+        );
+        canvas.set_vertical_record(vertical_records(&s));
+        canvas.set_vertical_live(
+            vertical_stream(&s)
+                .is_some_and(|x| matches!(x.state, StreamState::Live | StreamState::Reconnecting)),
+        );
+    }
+
+    /// The vertical monitor's menu (its head's ⌄, View → Vertical).
+    fn vertical_menu(&self, app: &Rc<App>) -> MenuBuilder {
+        let s = app.session.borrow();
+        let has = s.vertical.is_some();
+        let editing = s.editing_vertical();
+        let records = vertical_records(&s);
+        let busy = recording(&s);
+        let live = vertical_stream(&s).is_some_and(StreamStatus::is_active);
+        let configured = s
+            .setup
+            .as_ref()
+            .and_then(|x| x.vertical.as_ref())
+            .is_some_and(|v| v.stream.is_some());
+        let own_layout = own_vertical_layout(&s).is_some();
+        let shown = app
+            .window()
+            .is_some_and(|w| w.global::<Ui>().get_show_vertical());
+        drop(s);
+        MenuBuilder::new()
+            .item("vertical_preview", "Show Vertical Preview")
+            .checked(shown && has)
+            .disabled(!has)
+            .item("edit_canvas_main", "Edit Main Canvas")
+            .checked(!editing)
+            .disabled(!has)
+            .item("edit_canvas_vertical", "Edit Vertical Canvas")
+            .checked(editing)
+            .disabled(!has)
+            .item("vertical_main_layout", "Use Main Layout for This Scene")
+            .disabled(!has || !own_layout)
+            .separator()
+            .item("vertical_record", "Record Vertical Canvas")
+            .checked(records)
+            .disabled(!has || busy)
+            .item(
+                "vertical_stream",
+                if live {
+                    "Stop Vertical Stream"
+                } else if configured {
+                    "Start Vertical Stream"
+                } else {
+                    "Vertical Stream: Set Up with the CLI…"
+                },
+            )
+            .disabled(!has)
+            .separator()
+            .item("vertical_settings", "Vertical Canvas Settings…")
+    }
+
+    /// Use Main Layout for This Scene: the scene being edited drops its
+    /// own vertical items and layout, and the vertical canvas shows the
+    /// main ones again. Asked for by name; Undo (here, or Edit › Undo)
+    /// brings them back.
+    fn use_main_layout(&self, app: &Rc<App>) {
+        let (scene, before) = {
+            let s = app.session.borrow();
+            let Some(scene) = own_vertical_layout(&s) else {
+                return;
+            };
+            (scene, s.setup_json().cloned())
+        };
+        app.select("");
+        app.edit(
+            json!({ "scenes": [{ "id": scene.0, "vertical": null }] }),
+            EditOptions::default(),
+        );
+        let toast = crate::toasts::Toast::new(
+            ToastKind::Info,
+            format!("“{}” uses the main layout on the vertical canvas", scene.1),
+            "",
+        );
+        let toast = match before {
+            Some(before) => toast.action("Undo", move |app| {
+                app.replace_setup(before.clone(), true);
+            }),
+            None => toast,
+        };
+        app.show_toast(toast);
+    }
+
     // ---------- The pointer ----------
 
     /// Points per canvas pixel.
@@ -656,7 +966,7 @@ impl Canvas {
         let s = app.session.borrow();
         let Some(scene) = s
             .editing_scene()
-            .and_then(|id| s.setup.as_ref().and_then(|x| model::find_scene(x, &id)))
+            .and_then(|id| s.edited_setup().and_then(|x| model::find_scene(x, &id)))
         else {
             return;
         };
@@ -688,7 +998,9 @@ impl Canvas {
         // A locked item, or a locked preview (Edit → Lock Preview), stays
         // put.
         let s = app.session.borrow();
-        let Some(setup) = s.setup.clone() else { return };
+        let Some(setup) = s.edited_setup().cloned() else {
+            return;
+        };
         let Some(scene) = model::find_scene(&setup, &scene_id) else {
             return;
         };
@@ -846,7 +1158,7 @@ impl Canvas {
         };
         let patch = {
             let s = app.session.borrow();
-            let Some(setup) = s.setup.as_ref() else {
+            let Some(setup) = s.edited_setup() else {
                 return;
             };
             let Some(chain) =
@@ -854,7 +1166,7 @@ impl Canvas {
             else {
                 return;
             };
-            model::item_patch(&scene, &chain, step.fields)
+            s.canvas_item_patch(&scene, &chain, step.fields)
         };
         self.moves.set(self.moves.get() + 1);
         app.edit(
@@ -906,7 +1218,7 @@ impl Canvas {
         let s = app.session.borrow();
         let Some(scene) = s
             .editing_scene()
-            .and_then(|id| s.setup.as_ref().and_then(|x| model::find_scene(x, &id)))
+            .and_then(|id| s.edited_setup().and_then(|x| model::find_scene(x, &id)))
         else {
             return;
         };
@@ -947,7 +1259,7 @@ impl Canvas {
         let hit = {
             let s = app.session.borrow();
             s.editing_scene()
-                .and_then(|id| s.setup.as_ref().and_then(|x| model::find_scene(x, &id)))
+                .and_then(|id| s.edited_setup().and_then(|x| model::find_scene(x, &id)))
                 .and_then(|scene| {
                     topmost(scene, s.selection.as_ref().map(|x| x.path.as_str()), x, y)
                 })
@@ -1314,7 +1626,11 @@ impl Area for Canvas {
                             app.canvas.draw_picture(&window);
                         }
                         // The window's layout may have moved the monitors.
-                        for cell in [&app.canvas.preview, &app.canvas.program] {
+                        for cell in [
+                            &app.canvas.preview,
+                            &app.canvas.program,
+                            &app.canvas.vertical,
+                        ] {
                             if let Ok(mut preview) = cell.try_borrow_mut()
                                 && let Some(preview) = preview.as_mut()
                             {
@@ -1341,7 +1657,7 @@ impl Area for Canvas {
         if changed.any(Changed::LINK)
             && app.session.borrow().link != Some(crate::daemon::Link::Connected)
         {
-            *self.shown_layout.borrow_mut() = (0, String::new());
+            *self.shown_layout.borrow_mut() = (0, String::new(), false);
             if let Ok(mut preview) = self.preview.try_borrow_mut()
                 && let Some(preview) = preview.as_mut()
             {
@@ -1360,29 +1676,35 @@ impl Area for Canvas {
         if changed.any(Changed::SETUP) {
             self.update_fps(app);
         }
+        if changed.any(
+            Changed::SETUP | Changed::SCENES | Changed::STATUS | Changed::STREAM | Changed::BUSY,
+        ) {
+            self.show_vertical(app, window);
+        }
         if changed.any(Changed::SETUP | Changed::SCENES) {
             let canvas = window.global::<CanvasArea>();
             let s = app.session.borrow();
-            let name = |id: &Option<String>| {
-                id.as_deref()
-                    .and_then(|id| model::find_scene(s.setup.as_ref()?, id))
+            // The canvas whose scenes are switched (the vertical one's own
+            // while editing it, #86).
+            let name = |id: Option<&String>| {
+                id.and_then(|id| model::find_scene(s.setup.as_ref()?, id))
                     .map(|scene| model::scene_name(scene).to_string())
                     .unwrap_or_default()
             };
             let no_scenes = s.setup.as_ref().is_none_or(|x| x.scenes.is_empty());
             let program_empty = if no_scenes {
                 "Add a scene with + under Scenes."
-            } else if name(&s.scene).is_empty() {
+            } else if name(s.on_air()).is_empty() {
                 "Nothing on air."
             } else {
                 ""
             };
-            canvas.set_program_name(name(&s.scene).into());
-            canvas.set_preview_name(name(&s.preview).into());
+            canvas.set_program_name(name(s.on_air()).into());
+            canvas.set_preview_name(name(s.staged()).into());
             canvas.set_program_empty_text(program_empty.into());
             canvas.set_empty_text(
                 if s.studio {
-                    if name(&s.preview).is_empty() {
+                    if name(s.staged()).is_empty() {
                         "Click a scene to put it in preview."
                     } else {
                         ""
@@ -1419,11 +1741,13 @@ impl Area for Canvas {
                         .checked(canvas),
                 )
             }
+            "viewer:vertical" => Some(self.vertical_menu(app)),
             "viewer:view" => Some(
                 MenuBuilder::new()
                     .item("studio_mode", "Studio Mode")
                     .hint("⇧⌘S")
                     .checked(ui.get_studio())
+                    .submenu("Vertical Canvas", self.vertical_menu(app))
                     .separator()
                     .item("source_toolbar", "Source Toolbar")
                     .checked(ui.get_show_source_toolbar())
@@ -1455,7 +1779,22 @@ impl Area for Canvas {
         if id.starts_with("nudge:") {
             self.worked(app);
         }
-        false
+        match id {
+            "vertical_preview" => {
+                let shown = app
+                    .window()
+                    .is_some_and(|w| w.global::<Ui>().get_show_vertical());
+                self.set_show_vertical(app, !shown);
+            }
+            "edit_canvas_main" => self.set_edit_vertical(app, false),
+            "edit_canvas_vertical" => self.set_edit_vertical(app, true),
+            "vertical_record" => self.toggle_vertical_record(app),
+            "vertical_main_layout" => self.use_main_layout(app),
+            "vertical_stream" => self.toggle_vertical_stream(app),
+            "vertical_settings" => app.open_dialog("settings", "video"),
+            _ => return false,
+        }
+        true
     }
 
     fn state(
@@ -1533,6 +1872,51 @@ impl Area for Canvas {
                     )),
                 }
             }),
+            // Give the live (throwaway) engine's setup a vertical canvas
+            // (on, the default) or take it away.
+            "vertical-canvas" => Some(match arg {
+                "" | "on" => {
+                    app.edit(
+                        json!({ "vertical": { "width": 1080, "height": 1920, "follow_main": true } }),
+                        EditOptions::default(),
+                    );
+                    Ok(())
+                }
+                "off" => {
+                    app.edit(json!({ "vertical": null }), EditOptions::default());
+                    Ok(())
+                }
+                _ => Err(anyhow::anyhow!(
+                    "vertical-canvas takes on or off, not {arg:?}"
+                )),
+            }),
+            "vertical-preview" => Some(match arg {
+                "on" | "off" => {
+                    self.set_show_vertical(app, arg == "on");
+                    Ok(())
+                }
+                _ => Err(anyhow::anyhow!(
+                    "vertical-preview takes on or off, not {arg:?}"
+                )),
+            }),
+            "vertical-layout" => Some(match arg {
+                "wide" | "compact" => {
+                    window.global::<Ui>().set_vertical_layout(arg.into());
+                    Ok(())
+                }
+                _ => Err(anyhow::anyhow!(
+                    "vertical-layout takes wide or compact, not {arg:?}"
+                )),
+            }),
+            "edit-canvas" => Some(match arg {
+                "main" | "vertical" => {
+                    self.set_edit_vertical(app, arg == "vertical");
+                    Ok(())
+                }
+                _ => Err(anyhow::anyhow!(
+                    "edit-canvas takes main or vertical, not {arg:?}"
+                )),
+            }),
             "preview-scale" => Some(match arg {
                 "window" | "canvas" => {
                     window.global::<Ui>().set_preview_scale(arg.into());
@@ -1545,6 +1929,43 @@ impl Area for Canvas {
             _ => None,
         }
     }
+}
+
+/// The scene being edited, if it has vertical items of its own: its id
+/// and name.
+fn own_vertical_layout(s: &crate::session::Session) -> Option<(String, String)> {
+    let id = s.editing_scene()?;
+    let scene = model::find_scene(s.setup.as_ref()?, &id)?;
+    scene
+        .vertical
+        .is_some()
+        .then(|| (id.clone(), model::scene_name(scene).to_string()))
+}
+
+/// Whether the next recording writes the vertical program too.
+fn vertical_records(s: &crate::session::Session) -> bool {
+    s.setup
+        .as_ref()
+        .and_then(|x| x.vertical.as_ref())
+        .and_then(|v| v.recording.as_ref())
+        .is_some_and(|r| r.enabled)
+}
+
+/// Recording, or starting or stopping it.
+fn recording(s: &crate::session::Session) -> bool {
+    s.busy_record
+        || s.status
+            .as_ref()
+            .is_some_and(|x| x.state == EngineState::Recording)
+}
+
+/// The vertical canvas's stream: its destination streaming (or trying
+/// to), else its first.
+fn vertical_stream(s: &crate::session::Session) -> Option<&StreamStatus> {
+    s.vertical_streams
+        .iter()
+        .find(|x| x.is_active())
+        .or(s.vertical_streams.first())
 }
 
 /// Every item's box in scene `scene`, by path.

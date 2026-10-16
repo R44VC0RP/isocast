@@ -576,6 +576,11 @@ each section. Delete entries that stop being true.
 
 ## Questions for Ryan
 
+- 2026-10-16 (#86): may the existing e2e suite gain a `vertical` scenario
+  covering two programs, two stream receivers, one shared ISO set, independent
+  scene switching and per-canvas capacity warnings? This lane uses direct
+  runtime checks with the existing e2e helpers; no new test file or harness.
+
 - 2026-10-15 (#18): with a `[stream]` in the profile the replay buffer
   always encodes as the stream does (its size, bitrate, 2 s keyframes),
   even while not streaming, so it can share the stream's encoder: a profile
@@ -1599,6 +1604,23 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-16 (#86): **Two program outputs, one capture/mix/ISO set.** Each
+  canvas has its own compositor, size-specific bounded output pool and
+  stream encoder group; source frame slots, clock and mix are shared. Both
+  program writers use protected priority. One synchronized recording/take
+  intentionally starts/stops its configured program files together.
+  Main replay stays main-only. Linking uses the main program/preview;
+  unlinking seeds their current values (not stale independent choices),
+  and collection switches reset to that collection's restored main view.
+  Vertical key accounts use `canvas:vertical:<id>:<account>`: a suffix can
+  collide with a valid custom RTMP application's path (reproduced and fixed).
+  Main key accounts are untouched. Full HEVC recording + two HD60 streams
+  exceeds the base M2; priority cannot promise clean programs when protected
+  workload itself is too high. Capacity wording now says so. ProRes program
+  files offload that workload: both streams/programs had zero loss while
+  HEVC ISOs shed. Three fitting recording-only trials lose nothing. The
+  compact side preview was chosen over a full-height 30%-width variant;
+  actual app pictures and media evidence are in vertical-canvas/scratch.
 - 2026-10-16 (#80, #81): **One recording split handover at a time.**
   It owns the busy flag until the new writers start and the previous take's
   writers finalize; early requests get WRONG_STATE with a retry explanation.
@@ -1679,6 +1701,25 @@ each section. Delete entries that stop being true.
   churn played 172,753,920 sample frames and counted 50 underruns; its file
   kept all 108,056 frames with equal 3601.866667 s video/audio. This is a
   measured nonzero underrun count, not a claim of glitch-free monitoring.
+- 2026-10-16 (#86): **Vertical canvas model.** `Setup.vertical:
+  Option<VerticalCanvas>` (width 1080, height 1920, `fps` inherits the
+  main canvas, `follow_main` true, `recording: Option<VerticalRecording>`,
+  `stream`) and `Scene.vertical: Option<SceneLayout>` (`layout`, `items`);
+  all omitted when unset, so existing files keep their bytes. A scene
+  without an arrangement re-lays out its own items on the vertical size
+  (not scaled). `VerticalRecording` is its own type so an explicit
+  `recording = {}` gets the file name "{date} {time} vertical" and a
+  default encoder; its `audio` must be empty (one shared mix,
+  `recording.program.audio`), and its file name may not equal the main
+  program's. `Setup::for_canvas(CanvasId)` materializes the vertical
+  canvas as a plain setup (ISO off, replay/virtual camera defaults, no
+  `vertical`); validation runs it once and reports only what it adds,
+  under `vertical.*` and `scenes[i].vertical.*`. Source id
+  `vertical-program` is reserved (`VERTICAL_PROGRAM`). Library split:
+  the collection keeps size/`follow_main` (and the scenes' arrangements),
+  the profile keeps `vertical.fps/recording/stream`; only the collection
+  turns the canvas on. The store and profile export retain parked vertical
+  output settings while the live collection has no vertical canvas.
 
 - 2026-10-16 (#74): **obs-websocket's stream is every destination.** OBS
   has one stream output and Start Streaming starts every enabled

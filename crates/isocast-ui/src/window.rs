@@ -291,10 +291,10 @@ fn setup_when_ready(weak: slint::Weak<AppWindow>, shell: Rc<App>, setup: Setup) 
                 shell.canvas.set_max_fps(setup.fps);
                 shell
                     .canvas
-                    .start_pictures(&shell, output, setup.check, |program, incoming| {
+                    .start_pictures(&shell, output, setup.check, |role, incoming| {
                         let _ = slint::invoke_from_event_loop(move || {
-                            with_app(|app| app.canvas.incoming(program, incoming));
-                            if !program {
+                            with_app(|app| app.canvas.incoming(role, incoming));
+                            if role == crate::preview::Role::Editor {
                                 DRAG_STEP.with(|step| {
                                     if let Some(step) = step.borrow_mut().as_mut() {
                                         step();

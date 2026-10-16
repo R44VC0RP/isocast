@@ -16,6 +16,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use isocast_protocol::CanvasId;
 
 use super::queue::{Kind, Media};
 use super::{AudioTrack, Ended, Interleaver, TAP_DEPTH, flv};
@@ -102,6 +103,16 @@ impl Encoders {
         spec: &EncoderSpec,
         stop: &AtomicBool,
     ) -> Result<Subscription> {
+        self.warm_canvas(engine, CanvasId::Main, spec, stop)
+    }
+
+    pub(crate) fn warm_canvas<P: Platform>(
+        &self,
+        engine: &Engine<P>,
+        canvas: CanvasId,
+        spec: &EncoderSpec,
+        stop: &AtomicBool,
+    ) -> Result<Subscription> {
         struct Warm;
         impl Sink for Warm {
             fn keeps_encoding(&self) -> bool {
@@ -117,8 +128,13 @@ impl Encoders {
                 }
             }
         }
-        let subscription =
-            self.subscribe(engine, spec, "the recording's warm encoder", Arc::new(Warm))?;
+        let subscription = self.subscribe_canvas(
+            engine,
+            canvas,
+            spec,
+            "the recording's warm encoder",
+            Arc::new(Warm),
+        )?;
         let deadline = Instant::now() + Duration::from_secs(3);
         while !subscription.hub.ready.load(Ordering::SeqCst) {
             if stop.load(Ordering::SeqCst) {
@@ -137,6 +153,17 @@ impl Encoders {
     pub(crate) fn subscribe<P: Platform>(
         &self,
         engine: &Engine<P>,
+        spec: &EncoderSpec,
+        what: &str,
+        sink: Arc<dyn Sink>,
+    ) -> Result<Subscription> {
+        self.subscribe_canvas(engine, CanvasId::Main, spec, what, sink)
+    }
+
+    pub(crate) fn subscribe_canvas<P: Platform>(
+        &self,
+        engine: &Engine<P>,
+        canvas: CanvasId,
         spec: &EncoderSpec,
         what: &str,
         sink: Arc<dyn Sink>,
@@ -190,8 +217,8 @@ impl Encoders {
         let audio = platform
             .create_audio_encoder(&spec.audio)
             .with_context(|| format!("could not start {what}'s AAC encoder"))?;
-        let tap = engine.tap_program(TAP_DEPTH);
-        let program = engine.program_tap_source();
+        let program = engine.canvas_tap_source(canvas)?;
+        let tap = program.tap(TAP_DEPTH, Arc::new(AtomicU64::new(0)))?;
         let retap_program = program.clone();
         let retap_audio = tap.missed_audio_chunks.clone();
         let (tap_tx, retapped) = sync_channel(1);
@@ -206,7 +233,7 @@ impl Encoders {
             tapped: AtomicBool::new(true),
             retap: Box::new(move || {
                 if tap_tx
-                    .send(retap_program.tap(TAP_DEPTH, retap_audio.clone()))
+                    .send(retap_program.tap(TAP_DEPTH, retap_audio.clone())?)
                     .is_err()
                 {
                     bail!("the program's encoder stopped before joining");

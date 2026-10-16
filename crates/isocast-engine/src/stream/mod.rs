@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{Local, SecondsFormat};
+use isocast_protocol::CanvasId;
 use isocast_protocol::stream::ServerUrl;
 use parking_lot::{Condvar, Mutex};
 
@@ -128,6 +129,29 @@ impl StreamSpec {
             fps: canvas.fps,
         }
     }
+
+    pub fn of_canvas<P: Platform>(
+        engine: &Engine<P>,
+        canvas: CanvasId,
+        settings: StreamSettings,
+    ) -> Result<Self> {
+        if canvas == CanvasId::Main {
+            return Ok(Self::of(engine, settings));
+        }
+        let setup = engine.setup();
+        let vertical = setup
+            .vertical
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("vertical: canvas is not enabled"))?;
+        let canvas = vertical.canvas(&setup.canvas);
+        let (width, height) = settings.output_size((canvas.width, canvas.height));
+        Ok(Self {
+            settings,
+            width,
+            height,
+            fps: canvas.fps,
+        })
+    }
 }
 
 /// Place the encoders of `setup`'s enabled stream destinations that don't
@@ -158,6 +182,45 @@ pub(crate) fn warm_destinations<P: Platform>(
             Ok(subscription) => out.push(subscription),
             Err(error) => warnings.push(format!(
                 "could not prepare stream destination {}'s encoder before recording: {error:#}",
+                destination.id
+            )),
+        }
+    }
+    out
+}
+
+/// Vertical destinations cannot share a main-canvas encode even at equal
+/// dimensions: they contain different pictures. Place their own format groups
+/// before either program writer, with the same parking policy as main.
+pub(crate) fn warm_vertical<P: Platform>(
+    engine: &Engine<P>,
+    setup: &isocast_protocol::Setup,
+    stop: &AtomicBool,
+    warnings: &mut Vec<String>,
+) -> Vec<Subscription> {
+    let Some(stream) = setup.vertical.as_ref().and_then(|v| v.stream.as_ref()) else {
+        return Vec::new();
+    };
+    let mut placed = Vec::new();
+    let mut out = Vec::new();
+    for destination in stream.resolve().into_iter().filter(|d| d.enabled) {
+        let result = (|| {
+            let spec =
+                StreamSpec::of_canvas(engine, CanvasId::Vertical, destination.settings)?.encoder();
+            if placed.contains(&spec) {
+                return Ok(None);
+            }
+            placed.push(spec);
+            engine
+                .canvas_encoders(CanvasId::Vertical)?
+                .warm_canvas(engine, CanvasId::Vertical, &spec, stop)
+                .map(Some)
+        })();
+        match result {
+            Ok(Some(subscription)) => out.push(subscription),
+            Ok(None) => {}
+            Err(error) => warnings.push(format!(
+                "could not prepare vertical stream destination {} before recording: {error:#}",
                 destination.id
             )),
         }
@@ -376,13 +439,25 @@ pub fn start<P: Platform>(
     key: String,
     on_change: OnChange,
 ) -> Result<Stream> {
-    let spec = StreamSpec::of(engine, settings);
+    start_canvas(engine, CanvasId::Main, id, settings, key, on_change)
+}
+
+pub fn start_canvas<P: Platform>(
+    engine: &Engine<P>,
+    canvas: CanvasId,
+    id: &str,
+    settings: StreamSettings,
+    key: String,
+    on_change: OnChange,
+) -> Result<Stream> {
+    let spec = StreamSpec::of_canvas(engine, canvas, settings)?;
     let server = spec
         .settings
         .server()
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     let settings = &spec.settings;
     let mut status = StreamStatus::offline(settings, true);
+    status.canvas = canvas;
     status.id = id.to_string();
     status.state = StreamState::Connecting;
     (status.width, status.height, status.fps) = (spec.width, spec.height, spec.fps);
@@ -402,10 +477,13 @@ pub fn start<P: Platform>(
         started: Instant::now(),
         on_change,
     });
-    let subscription =
-        engine
-            .encoders()
-            .subscribe(engine, &spec.encoder(), "the stream", shared.clone())?;
+    let subscription = engine.canvas_encoders(canvas)?.subscribe_canvas(
+        engine,
+        canvas,
+        &spec.encoder(),
+        "the stream",
+        shared.clone(),
+    )?;
     *shared.subscription.lock() = Some(subscription);
     (shared.on_change)(&status);
     // The sender keeps pace with the program, ahead of background work.

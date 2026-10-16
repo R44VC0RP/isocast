@@ -26,6 +26,7 @@ A complete session description.
 | `stream` | [StreamSettings](#streamsettings) (optional) | Live streaming of the program, if set up. The stream key is never part of a setup: `isocast stream key set` keeps it in the Keychain. |
 | `transition` | [Transition](#transition) | How the program changes scenes unless a switch says otherwise. |
 | `version` (required) | integer | Setup format version. Must be 1. |
+| `vertical` | [VerticalCanvas](#verticalcanvas) (optional) | A second, vertical canvas (for Shorts, Reels, TikTok) showing the same scenes, with its own recording and stream. Absent: none. |
 | `virtual_camera` | [VirtualCameraSettings](#virtualcamerasettings) | |
 
 ## AudioSetup
@@ -273,6 +274,7 @@ One of: `"low"`, `"medium"`, `"high"`, `"very_high"`, `"incredible"`.
 | `layout` | [Layout](#layout) (optional) | How its items with a `layout` are laid out: the scene is their root container, the size of the canvas (CSS block layout if absent). Only the fields for children apply. |
 | `name` | string (optional) | |
 | `transition` | [Transition](#transition) (optional) | How the program changes to this scene, in place of the setup's transition, unless a switch names its own (OBS's transition override). |
+| `vertical` | [SceneLayout](#scenelayout) (optional) | Its arrangement on the setup's vertical canvas, in place of `layout` and `items`. Absent: the same items and layout, placed again on the vertical canvas's size. |
 
 ## SceneItem
 
@@ -742,6 +744,15 @@ One of:
 | Field | Type | Description |
 |---|---|---|
 | `easing` | [Easing](#easing) |  Default `"ease_in_out"`. |
+
+## SceneLayout
+
+How a scene is arranged on the vertical canvas, in place of its own `layout` and `items`.
+
+| Field | Type | Description |
+|---|---|---|
+| `items` | list of [SceneItem](#sceneitem) | Items drawn back to front, in vertical canvas pixels. Default `[]`. |
+| `layout` | [Layout](#layout) (optional) | How its items with a `layout` are laid out, as the scene's `layout`. |
 
 ## Source
 
@@ -1295,6 +1306,32 @@ Reconnecting after the connection to the server drops.
 | `delay_seconds` | integer | Seconds to wait before each attempt. Default `2`. |
 | `enabled` | boolean |  Default `true`. |
 | `max_retries` | integer | Attempts before giving up (the stream then shows `failed`). Default `25`. |
+
+## VerticalCanvas
+
+A second canvas, upright by default, that shows the setup's scenes. A scene is laid out on it by its `vertical` arrangement if it has one, else by its own items and layout, placed again on this canvas's size (not scaled from the main canvas). Its program has the same audio mix as the main one (`recording.program.audio`).
+
+| Field | Type | Description |
+|---|---|---|
+| `follow_main` | boolean | Show the scene the main canvas has on air, switching with it. False lets the vertical canvas put its own scene on air. |
+| `fps` | integer (optional) | Frames per second, from 1 to 240; the main canvas's if absent. |
+| `height` | integer | An even number of pixels from 16 to 8192. Default `1920`. |
+| `recording` | [VerticalRecording](#verticalrecording) (optional) | The vertical program recording. Absent: not recorded. |
+| `stream` | [StreamSettings](#streamsettings) (optional) | Live streaming of the vertical program, if set up (its own service; the key stays in the Keychain). |
+| `width` | integer | An even number of pixels from 16 to 8192. Default `1080`. |
+
+## VerticalRecording
+
+How the vertical program is recorded, in `recording.folder` alongside the main program. Its sound is the main program's mix (`recording.program.audio`): both canvases share one audio mix.
+
+| Field | Type | Description |
+|---|---|---|
+| `audio` | list of string | Must be empty: the vertical program has the main program's audio mix (`recording.program.audio`). |
+| `enabled` | boolean |  Default `true`. |
+| `encoder` | [Encoder](#encoder) |  Default `{"bit_depth": 8, "codec": "hevc", "container": "mov", "quality": "high"}`. |
+| `filename` | string | File name without extension. Tokens: {date}, {time}. Must differ from `recording.program.filename`. Default `"{date} {time} vertical"`. |
+| `height` | integer (optional) | |
+| `width` | integer (optional) | The file's size, if not the vertical canvas's (each side even, from 16 up to the vertical canvas's). |
 
 ## VirtualCameraSettings
 

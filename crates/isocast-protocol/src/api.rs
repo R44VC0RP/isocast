@@ -32,7 +32,7 @@ use crate::timeline::{
     TimelineAngleParams, TimelineCropParams, TimelineRangeParams, TimelineRollParams,
     TimelineSplitParams, TimelineTrimParams,
 };
-use crate::{Canvas, Issue, Setup};
+use crate::{Canvas, CanvasId, Issue, Setup};
 
 /// Every method the engine offers. Serialized as JSON-RPC `method` and
 /// `params`. Params a method doesn't have are refused, naming the ones it
@@ -96,16 +96,30 @@ pub enum Method {
         /// How it comes on air; the setup's transition if absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transition: Option<crate::Transition>,
+        /// Which canvas: `main` (the default) or `vertical` (the setup's
+        /// `[vertical]` canvas, which must not follow the main one).
+        #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+        canvas: CanvasId,
     },
     /// Stage a scene in preview (by id), to go on air with `take`. Returns
     /// [`Switched`] (with no time).
-    Preview { scene: String },
+    Preview {
+        scene: String,
+        /// Which canvas: `main` (the default) or `vertical` (which must not
+        /// follow the main one).
+        #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+        canvas: CanvasId,
+    },
     /// Put the preview scene on air, with a transition (the setup's if
     /// absent); the scene that was on air moves to preview. Returns
     /// [`Switched`].
     Take {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transition: Option<crate::Transition>,
+        /// Which canvas: `main` (the default) or `vertical` (which must not
+        /// follow the main one).
+        #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+        canvas: CanvasId,
     },
     /// Check this machine and a setup (the live setup if none is given):
     /// permissions, hardware encoders, devices and the recording disk.
@@ -207,7 +221,13 @@ pub enum Method {
     /// Remove a stream destination from the live setup (not `main`: turn it
     /// off instead, or remove the whole `[stream]`). Returns
     /// [`StreamDestinations`].
-    StreamDestinationRemove { id: String },
+    StreamDestinationRemove {
+        id: String,
+        /// Which canvas's destinations: `main` (the default, `[stream]`) or
+        /// `vertical` (`[vertical.stream]`).
+        #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+        canvas: CanvasId,
+    },
     /// Change a stream destination (`id` required; `main` changes the
     /// `[stream]` section itself). Returns [`StreamDestinations`].
     StreamDestinationSet(Box<StreamDestinationParams>),
@@ -467,6 +487,12 @@ pub enum Method {
     /// Put back the last edit undone. Returns
     /// [`TimelineInfo`](crate::timeline::TimelineInfo).
     TimelineRedo(Option<TimelineTarget>),
+    /// Clear a canvas's staged preview: `clear_preview` for `main`, or the
+    /// vertical canvas's own preview. Returns [`Switched`].
+    ClearCanvasPreview {
+        #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+        canvas: CanvasId,
+    },
     /// Choose the part of the picture the edited video shows over a span
     /// (a rectangle in fractions of each clip's angle, a shape preset, or
     /// the whole picture again): clips across its ends are split there.
@@ -558,6 +584,11 @@ pub struct StreamKeyTarget {
     /// For `custom`, the server the key belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
+    /// Which canvas's stream: `main` (the default, `[stream]`) or
+    /// `vertical` (`[vertical.stream]`). Each canvas keeps its own keys,
+    /// so the vertical canvas's Twitch key is not the main one's.
+    #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+    pub canvas: CanvasId,
 }
 
 /// Which stream destinations `stream_start` and `stream_stop` mean.
@@ -569,6 +600,12 @@ pub struct StreamStartParams {
     /// destination named here starts even if it is turned off.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub only: Vec<String>,
+    /// Which canvas streams: `main` (the default: the program to
+    /// `[stream]`) or `vertical` (the vertical program to
+    /// `[vertical.stream]`). A stop leaves the other canvas's streams
+    /// alone.
+    #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+    pub canvas: CanvasId,
 }
 
 /// What `stream_start` and `stream_stop` did: the first destination they
@@ -609,6 +646,11 @@ pub struct StreamDestinationParams {
     /// and `size` (to the main destination's; for `main`, the defaults).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clear: Vec<String>,
+    /// Which canvas's destinations: `main` (the default, `[stream]`) or
+    /// `vertical` (`[vertical.stream]`, in a `[vertical]` canvas the live
+    /// setup must have).
+    #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+    pub canvas: CanvasId,
 }
 
 /// The fields `StreamDestinationParams::clear` takes.
@@ -734,6 +776,9 @@ pub struct Switched {
     /// How the scene came on air, unless it was a cut.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<crate::Transition>,
+    /// The canvas it went on air on, unless the main one.
+    #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+    pub canvas: CanvasId,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -775,6 +820,11 @@ pub struct GetParams {
     /// Also return where every item is drawn, as laid out (`resolved`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resolved: bool,
+    /// Whose layout `resolved` is: `main` (the default) or `vertical` (the
+    /// vertical canvas's, which the live setup must have). The setup is
+    /// the whole live setup either way.
+    #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+    pub canvas: CanvasId,
 }
 
 /// What `request_permissions` asks for.
@@ -846,22 +896,22 @@ impl WatchParams {
 
 /// A set of event kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EventKinds(u32);
+pub struct EventKinds(u64);
 
 impl EventKinds {
     pub const NONE: Self = Self(0);
-    pub const ALL: Self = Self((1 << EventKind::NAMES.len()) - 1);
+    pub const ALL: Self = Self((1u64 << EventKind::NAMES.len()) - 1);
 
     pub fn with(self, kind: EventKind) -> Self {
-        Self(self.0 | 1 << kind as u32)
+        Self(self.0 | 1 << kind as u64)
     }
 
     pub fn without(self, kind: EventKind) -> Self {
-        Self(self.0 & !(1 << kind as u32))
+        Self(self.0 & !(1 << kind as u64))
     }
 
     pub fn contains(self, kind: EventKind) -> bool {
-        self.0 & 1 << kind as u32 != 0
+        self.0 & 1 << kind as u64 != 0
     }
 }
 
@@ -877,6 +927,9 @@ pub struct Live {
     /// `resolved`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<Resolved>,
+    /// The canvas `resolved` lays out, unless the main one.
+    #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+    pub canvas: CanvasId,
     /// Where the live setup is kept between runs, and whether it loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup_file: Option<SetupFile>,
@@ -1221,6 +1274,23 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// A scene went on air on a canvas other than the main one (the main
+    /// canvas's switches are `scene_changed`).
+    CanvasSceneChanged {
+        canvas: CanvasId,
+        scene: String,
+        take: Option<u32>,
+        time_seconds: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transition: Option<crate::Transition>,
+    },
+    /// A scene was staged in (or, `scene` null, cleared from) the preview
+    /// of a canvas other than the main one (the main canvas's are
+    /// `preview_changed` and `preview_cleared`).
+    CanvasPreviewChanged {
+        canvas: CanvasId,
+        scene: Option<String>,
+    },
 }
 
 /// What began a take, in `started` events.
@@ -1284,11 +1354,13 @@ pub enum EventKind {
     ReplaySaved,
     EncoderOverload,
     Projectors,
+    CanvasSceneChanged,
+    CanvasPreviewChanged,
 }
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 30] = [
+    pub const NAMES: [&str; 32] = [
         "setup_changed",
         "started",
         "status",
@@ -1319,6 +1391,8 @@ impl EventKind {
         "replay_saved",
         "encoder_overload",
         "projectors",
+        "canvas_scene_changed",
+        "canvas_preview_changed",
     ];
 
     /// The kind's name, as events and `watch` spell it.
@@ -1360,6 +1434,8 @@ impl Event {
             Self::ReplaySaved { .. } => EventKind::ReplaySaved,
             Self::EncoderOverload { .. } => EventKind::EncoderOverload,
             Self::Projectors { .. } => EventKind::Projectors,
+            Self::CanvasSceneChanged { .. } => EventKind::CanvasSceneChanged,
+            Self::CanvasPreviewChanged { .. } => EventKind::CanvasPreviewChanged,
         }
     }
 }
@@ -1439,6 +1515,19 @@ pub struct Status {
     /// `[stream]` section or a running stream).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub streams: Vec<StreamStatus>,
+    /// The scene on air on the vertical canvas (an id), if the live setup
+    /// has one: the main scene while it follows the main canvas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical_scene: Option<String>,
+    /// The scene staged in the vertical canvas's own preview, if any
+    /// (while it follows the main canvas, the main preview's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical_preview: Option<String>,
+    /// Every vertical stream destination (`[vertical.stream]`), the main
+    /// one first, each with `canvas: vertical`; kept apart from `streams`
+    /// so clients of the main canvas see only its streams.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vertical_streams: Vec<StreamStatus>,
     /// How much of this Mac's processor isocastd used lately, in percent
     /// of all its cores (as OBS's status bar shows it): measured between
     /// readings at least a second apart.
@@ -1749,8 +1838,9 @@ impl RpcError {
 #[serde(deny_unknown_fields)]
 pub struct FrameParams {
     /// `program` (the default), `preview` (studio mode's preview scene),
-    /// `scene:ID` (a scene, drawn while watched, on air or not) or a video
-    /// source's id.
+    /// `vertical-program` (the vertical canvas's program, with a
+    /// `[vertical]` canvas), `scene:ID` (a scene, drawn while watched, on
+    /// air or not) or a video source's id.
     #[serde(default = "program_target")]
     pub target: String,
     /// Scale down to at most this wide, keeping the aspect ratio; full size
@@ -1782,8 +1872,9 @@ fn program_target() -> String {
 #[serde(deny_unknown_fields)]
 pub struct FramesParams {
     /// `program` (the default), `preview` (studio mode's preview scene),
-    /// `scene:ID` (a scene, drawn while watched, on air or not) or a video
-    /// source's id.
+    /// `vertical-program` (the vertical canvas's program, with a
+    /// `[vertical]` canvas), `scene:ID` (a scene, drawn while watched, on
+    /// air or not) or a video source's id.
     #[serde(default = "program_target")]
     pub target: String,
     /// Scale down to at most this wide, keeping the aspect ratio; full size
@@ -1825,8 +1916,9 @@ pub struct FrameStream {
 #[serde(deny_unknown_fields)]
 pub struct SharedFramesParams {
     /// `program` (the default), `preview` (studio mode's preview scene),
-    /// `scene:ID` (a scene, drawn while watched, on air or not) or a video
-    /// source's id.
+    /// `vertical-program` (the vertical canvas's program, with a
+    /// `[vertical]` canvas), `scene:ID` (a scene, drawn while watched, on
+    /// air or not) or a video source's id.
     #[serde(default = "program_target")]
     pub target: String,
     /// The picture fits in this many pixels across and down, keeping its
@@ -2117,6 +2209,9 @@ pub struct Frame {
 /// The live engine: what it runs and how it keeps up.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EngineInfo {
+    /// The second canvas, only while it is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<CanvasEngineInfo>,
     /// Active media clocks, including per-source generators and ISO outputs.
     #[serde(default)]
     pub clocks: Vec<ClockPacingInfo>,
@@ -2147,6 +2242,16 @@ pub struct EngineInfo {
     /// Plugins' audio filters (WebAssembly) it runs, and what they cost.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audio_filters: Vec<PluginFilterInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CanvasEngineInfo {
+    pub canvas: Canvas,
+    pub program_frames: u64,
+    pub missed_frames: u64,
+    pub fps: f64,
+    pub compositor: CompositorInfo,
+    pub scenes: ScenesInfo,
 }
 
 /// A plugin's audio filter in a running chain.
@@ -2931,7 +3036,10 @@ mod tests {
         );
         assert_eq!(
             parse(r#"{"jsonrpc":"2.0","id":1,"method":"get","params":{"resolved":true}}"#).unwrap(),
-            Method::Get(Some(GetParams { resolved: true }))
+            Method::Get(Some(GetParams {
+                resolved: true,
+                ..Default::default()
+            }))
         );
         let wrong = r#"{"jsonrpc":"2.0","id":1,"method":"get","params":{"resolve":true}}"#;
         assert!(parse(wrong).is_err());

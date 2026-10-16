@@ -41,13 +41,24 @@ fn running(app: &App) -> Running {
             .status
             .as_ref()
             .is_some_and(|x| matches!(x.state, EngineState::Recording | EngineState::Starting)),
-        streaming: s.stream.as_ref().is_some_and(|x| {
-            matches!(
-                x.state,
-                StreamState::Live | StreamState::Connecting | StreamState::Reconnecting
-            )
-        }),
+        // Either canvas's (#86).
+        streaming: main_streaming(&s) || vertical_streaming(&s),
     }
+}
+
+fn active(x: &isocast_protocol::stream::StreamStatus) -> bool {
+    matches!(
+        x.state,
+        StreamState::Live | StreamState::Connecting | StreamState::Reconnecting
+    )
+}
+
+fn main_streaming(s: &crate::session::Session) -> bool {
+    s.stream.as_ref().is_some_and(active)
+}
+
+fn vertical_streaming(s: &crate::session::Session) -> bool {
+    s.vertical_streams.iter().any(active)
 }
 
 pub fn connect(app: &Rc<App>, window: &AppWindow) {
@@ -200,13 +211,43 @@ fn stop_and_quit(app: &Rc<App>) {
         });
     }
     if now.streaming {
-        app.call(Method::StreamStop(None), move |app, result| {
-            if let Err(error) = result {
-                app.failed("Couldn’t stop the stream, so Isocast stays open", &error);
-                failed.set(true);
+        // The main canvas's streams, then the vertical canvas's (a stop
+        // leaves the other canvas's going).
+        let (main, vertical) = {
+            let s = app.session.borrow();
+            (main_streaming(&s), vertical_streaming(&s))
+        };
+        let stop_vertical = move |app: &Rc<App>, failed: Rc<Cell<bool>>, left: Rc<Cell<usize>>| {
+            if !vertical {
+                done(app, &failed, &left);
+                return;
             }
-            done(app, &failed, &left);
-        });
+            let params = isocast_protocol::api::StreamStartParams {
+                canvas: isocast_protocol::CanvasId::Vertical,
+                ..Default::default()
+            };
+            app.call(Method::StreamStop(Some(params)), move |app, result| {
+                if let Err(error) = result {
+                    app.failed(
+                        "Couldn’t stop the vertical stream, so Isocast stays open",
+                        &error,
+                    );
+                    failed.set(true);
+                }
+                done(app, &failed, &left);
+            });
+        };
+        if main {
+            app.call(Method::StreamStop(None), move |app, result| {
+                if let Err(error) = result {
+                    app.failed("Couldn’t stop the stream, so Isocast stays open", &error);
+                    failed.set(true);
+                }
+                stop_vertical(app, failed, left);
+            });
+        } else {
+            stop_vertical(app, failed, left);
+        }
     }
 }
 

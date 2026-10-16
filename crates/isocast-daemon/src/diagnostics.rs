@@ -352,7 +352,7 @@ pub fn bug_report(daemon: &Daemon, params: &BugReportParams) -> Result<BugReport
         return isocast_diagnostics::bundle::from_preview(params).map_err(error);
     }
     let status = daemon.status();
-    let live = daemon.get(Default::default());
+    let live = daemon.get(Default::default()).ok();
     let library = daemon.library();
     let mut credentials = std::env::var("ISOCAST_STREAM_KEY")
         .ok()
@@ -365,15 +365,33 @@ pub fn bug_report(daemon: &Daemon, params: &BugReportParams) -> Result<BugReport
         if let Ok(document) = daemon.library_get(isocast_protocol::library::LibraryTarget {
             kind: isocast_protocol::library::LibraryKind::Profile,
             id: entry.id.clone(),
-        }) && let Some(stream) = document.profile.and_then(|p| p.stream)
+        }) && let Some(profile) = document.profile
         {
+            let accounts = profile
+                .stream
+                .as_ref()
+                .map(|stream| stream.key_account())
+                .into_iter()
+                .chain(
+                    profile
+                        .vertical
+                        .as_ref()
+                        .and_then(|vertical| vertical.stream.as_ref())
+                        .into_iter()
+                        .flat_map(|stream| {
+                            stream.resolve_canvas(isocast_protocol::CanvasId::Vertical)
+                        })
+                        .map(|destination| destination.key_account),
+                );
             // This build's key and an old one it may still read (#63).
-            for service in [
-                crate::key_service(),
-                isocast_engine::stream::LEGACY_KEY_SERVICE,
-            ] {
-                if let Ok(Some(key)) = crate::secret(service, &stream.key_account()) {
-                    credentials.push(key);
+            for account in accounts {
+                for service in [
+                    crate::key_service(),
+                    isocast_engine::stream::LEGACY_KEY_SERVICE,
+                ] {
+                    if let Ok(Some(key)) = crate::secret(service, &account) {
+                        credentials.push(key);
+                    }
                 }
             }
         }
@@ -387,7 +405,7 @@ pub fn bug_report(daemon: &Daemon, params: &BugReportParams) -> Result<BugReport
             .ok()
     });
     let mut folders = Vec::new();
-    if let Some(setup) = &live.setup {
+    if let Some(setup) = live.as_ref().and_then(|live| live.setup.as_ref()) {
         // The recordings folder and its newest project folders.
         folders.extend(isocast_protocol::project::recording_folders(
             &crate::expand_home(&setup.recording.folder),

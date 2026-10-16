@@ -176,6 +176,113 @@ pub fn item_patch(scene: &str, chain: &[&SceneItem], fields: Value) -> Value {
     json!({ "scenes": [{ "id": scene, "items": [node] }] })
 }
 
+/// The setup `shown` (JSON) as the vertical canvas edits it (#86): each
+/// scene's own vertical items and layout in place of the main ones (a
+/// scene without them shows the main ones, as `Setup::for_canvas` does),
+/// and the vertical canvas's size and rate as `canvas`.
+pub fn vertical_view(shown: &Value) -> Value {
+    let mut out = shown.clone();
+    let vertical = &shown["vertical"];
+    out["canvas"]["width"] = vertical.get("width").cloned().unwrap_or(json!(1080));
+    out["canvas"]["height"] = vertical.get("height").cloned().unwrap_or(json!(1920));
+    if let Some(fps) = vertical.get("fps").filter(|f| !f.is_null()) {
+        out["canvas"]["fps"] = fps.clone();
+    }
+    if let Some(object) = out.as_object_mut() {
+        object.remove("vertical");
+    }
+    if let Some(scenes) = out["scenes"].as_array_mut() {
+        for scene in scenes {
+            let Some(object) = scene.as_object_mut() else {
+                continue;
+            };
+            if let Some(own) = object.remove("vertical").filter(Value::is_object) {
+                object.insert(
+                    "items".into(),
+                    own.get("items").cloned().unwrap_or(json!([])),
+                );
+                match own.get("layout").filter(|l| !l.is_null()) {
+                    Some(layout) => object.insert("layout".into(), layout.clone()),
+                    None => object.remove("layout"),
+                };
+            }
+        }
+    }
+    out
+}
+
+/// The items of scene `scene` on one canvas of `shown`: the main ones, or
+/// (`vertical`) its vertical ones (the main ones where it has none).
+pub fn canvas_items(shown: &Value, scene: &str, vertical: bool) -> Vec<Value> {
+    let Some(scene) = shown["scenes"]
+        .as_array()
+        .and_then(|scenes| scenes.iter().find(|s| s["id"] == scene))
+    else {
+        return Vec::new();
+    };
+    let items = if vertical && scene["vertical"].is_object() {
+        &scene["vertical"]["items"]
+    } else {
+        &scene["items"]
+    };
+    items.as_array().cloned().unwrap_or_default()
+}
+
+/// `patch` sent while editing the vertical canvas (#86): what it changes in
+/// existing scenes' `items` goes to their vertical items instead, so no
+/// edit of the vertical layout can change the main one. A scene without
+/// vertical items of its own yet gets them made from the main ones (what
+/// the vertical canvas shows) with the change in. Everything else (scene
+/// names, transitions, new scenes, sources) is left as it is.
+pub fn route_vertical(shown: &Value, patch: Value) -> Value {
+    let Some(entries) = patch["scenes"].as_array() else {
+        return patch;
+    };
+    let routed: Vec<Value> = entries
+        .iter()
+        .map(|entry| {
+            let (Some(id), Some(items)) = (entry["id"].as_str(), entry.get("items")) else {
+                return entry.clone();
+            };
+            let existing = shown["scenes"]
+                .as_array()
+                .and_then(|scenes| scenes.iter().find(|s| s["id"] == id));
+            let Some(scene) = existing.filter(|_| entry["remove"] != json!(true)) else {
+                return entry.clone();
+            };
+            let mut entry = entry.clone();
+            if let Some(object) = entry.as_object_mut() {
+                object.remove("items");
+            }
+            let vertical = if scene["vertical"].is_object() {
+                json!({ "items": items })
+            } else {
+                let base = scene.get("items").cloned().unwrap_or(json!([]));
+                let made = isocast_protocol::change::merge_patch(
+                    &json!({ "items": base }),
+                    &json!({ "items": items }),
+                );
+                let mut vertical = json!({ "items": made["items"] });
+                if !scene["layout"].is_null() {
+                    vertical["layout"] = scene["layout"].clone();
+                }
+                vertical
+            };
+            let vertical = match entry.get("vertical") {
+                Some(other) if other.is_object() => {
+                    isocast_protocol::change::merge_patch(other, &vertical)
+                }
+                _ => vertical,
+            };
+            entry["vertical"] = vertical;
+            entry
+        })
+        .collect();
+    let mut out = patch;
+    out["scenes"] = Value::Array(routed);
+    out
+}
+
 /// An id made from `name`: lowercase letters, digits and dashes, not one
 /// of `taken` (or "program", which is reserved).
 pub fn new_id<'a>(name: &str, taken: impl IntoIterator<Item = &'a str>) -> String {

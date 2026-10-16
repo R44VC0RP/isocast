@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use isocast_protocol::api::{Capacity, Machine};
-use isocast_protocol::{Codec, Encoder, Setup};
+use isocast_protocol::{CanvasId, Codec, Encoder, Setup};
 use serde::{Deserialize, Serialize};
 
 /// Measurements kept; the oldest go first.
@@ -59,7 +59,9 @@ impl VideoLoad {
 pub type Workload = Vec<VideoLoad>;
 
 /// The workload of recording `setup`, given each ISO source's size and
-/// rate (`None` if one isn't known).
+/// rate (`None` if one isn't known): its ISO files, its program and, with
+/// a vertical canvas that records, the vertical program at that canvas's
+/// size and rate.
 pub fn workload(
     setup: &Setup,
     iso_format: impl Fn(&str) -> Option<(u32, u32, u32)>,
@@ -81,6 +83,18 @@ pub fn workload(
             setup.canvas.fps,
             &program.encoder,
         ));
+    }
+    if let Some(vertical) = setup.for_canvas(CanvasId::Vertical) {
+        let program = &vertical.recording.program;
+        if program.enabled {
+            let (width, height) = program.size(&vertical.canvas);
+            loads.push(VideoLoad::new(
+                width,
+                height,
+                vertical.canvas.fps,
+                &program.encoder,
+            ));
+        }
     }
     loads.sort();
     Some(loads)

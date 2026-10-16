@@ -45,7 +45,7 @@ pub(crate) struct Timeline {
     /// Source ids on air in the program and when each came on air; `None`
     /// when there is no program, so every source counts as on air from the
     /// start.
-    on_air: Mutex<Option<HashMap<String, Time>>>,
+    on_air: Mutex<Option<HashMap<String, (Time, u8)>>>,
     /// The program has said what it shows at least once.
     published: AtomicBool,
 }
@@ -77,16 +77,31 @@ impl Timeline {
         self.on_air.lock().get_or_insert_with(HashMap::new);
     }
 
-    /// The program shows `sources` from `at`: those new on air since then.
-    pub(crate) fn set_on_air<'a>(&self, sources: impl IntoIterator<Item = &'a str>, at: Time) {
+    /// A canvas shows `sources` from `at`. A source stays on air while
+    /// either canvas shows it, so switching one cannot stop the other's media.
+    pub(crate) fn set_on_air<'a>(
+        &self,
+        canvas: isocast_protocol::CanvasId,
+        sources: impl IntoIterator<Item = &'a str>,
+        at: Time,
+    ) {
         let mut on_air = self.on_air.lock();
         let Some(on_air) = on_air.as_mut() else {
             return;
         };
         let now: HashSet<&str> = sources.into_iter().collect();
-        on_air.retain(|id, _| now.contains(id.as_str()));
+        let bit = match canvas {
+            isocast_protocol::CanvasId::Main => 1,
+            isocast_protocol::CanvasId::Vertical => 2,
+        };
+        on_air.retain(|id, (_, shown)| {
+            if !now.contains(id.as_str()) {
+                *shown &= !bit;
+            }
+            *shown != 0
+        });
         for id in now {
-            on_air.entry(id.to_string()).or_insert(at);
+            on_air.entry(id.to_string()).or_insert((at, 0)).1 |= bit;
         }
         self.published.store(true, Ordering::SeqCst);
     }
@@ -101,7 +116,7 @@ impl Timeline {
     /// since the start.
     fn on_air_since(&self, id: &str) -> Option<Time> {
         match self.on_air.lock().as_ref() {
-            Some(on_air) => on_air.get(id).copied(),
+            Some(on_air) => on_air.get(id).map(|(since, _)| *since),
             None => self.start(),
         }
     }

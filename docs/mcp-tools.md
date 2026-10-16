@@ -71,12 +71,17 @@ Check this Mac against a setup (the live setup if none is given): permissions, h
 
 Leave Studio Mode by clearing its staged preview. Program stays on air.
 
+| Argument | Type | Description |
+|---|---|---|
+| `canvas` | CanvasId | "main" (the default) or "vertical". |
+
 ## clear_stream_key
 
 Remove the stored stream key for a streaming service (the live setup's by default).
 
 | Argument | Type | Description |
 |---|---|---|
+| `canvas` | CanvasId | "main" (the default, [stream]) or "vertical" ([vertical.stream]). |
 | `destination` | string (optional) | A destination ("main", or an id from get_status's streams). |
 | `server` | string (optional) | For "custom": the server the key belongs to. |
 | `service` | StreamService | The service; the live setup's [stream] service if absent. |
@@ -225,6 +230,7 @@ The live setup document (sources, scenes, recording settings) and its revision, 
 
 | Argument | Type | Description |
 |---|---|---|
+| `canvas` | CanvasId | With resolved: whose layout, "main" (the default) or "vertical" (the vertical canvas's). The setup is the whole live setup. |
 | `resolved` | boolean | Also return where every item is drawn, as laid out (`resolved`). |
 
 ## get_setup_schema
@@ -372,7 +378,8 @@ See the live engine's newest frame as a JPEG: the program (exactly what records 
 
 | Argument | Type | Description |
 |---|---|---|
-| `target` | string (optional) | "program" (the default), "preview" (studio mode's preview scene) or a video source id of the live setup. |
+| `canvas` | CanvasId | "main" (the default) or "vertical": the vertical canvas's program (with target "program" or none). |
+| `target` | string (optional) | "program" (the default), "preview" (studio mode's preview scene), "vertical-program" or a video source id of the live setup. |
 | `width` | integer (optional) | Scale the picture down to at most this many pixels wide (default 1280). |
 
 ## move_clip
@@ -467,6 +474,7 @@ Stage a scene in preview, by id, without changing what is on air; take_preview t
 
 | Argument | Type | Description |
 |---|---|---|
+| `canvas` | CanvasId | "main" (the default) or "vertical" (which must not follow the main canvas). |
 | `scene` (required) | string | The id of a scene in the setup. |
 
 ## read_bug_report_file
@@ -625,6 +633,7 @@ Keep a stream key in the macOS Keychain for a streaming service (the live setup'
 
 | Argument | Type | Description |
 |---|---|---|
+| `canvas` | CanvasId | "main" (the default, [stream]) or "vertical" ([vertical.stream]): each canvas keeps its own keys. |
 | `destination` | string (optional) | A destination ("main", or an id from get_status's streams): its own key (with service and server only for one not applied yet). |
 | `key` (required) | string | The stream key from the service's dashboard. It goes into the Keychain and is never shown again; prefer `isocast stream key set` in a terminal, which keeps it out of this conversation. |
 | `server` | string (optional) | For "custom": the server it belongs to (rtmp://host/app). |
@@ -659,10 +668,11 @@ Start the replay buffer: keep the last recording.replay.seconds (30 by default) 
 
 ## start_stream
 
-Go live: stream the program (canvas and program mix) as H.264/AAC over RTMP or RTMPS to the live setup's [stream] destinations (twitch, youtube, kick, facebook or custom servers; every enabled one, or `only` those ids), starting the live engine if needed; destinations already live are left alone, and recordings start and stop independently. Destinations with the same bitrate and size share one encoder. Each needs its stream key set. Returns the first destination's status plus every destination's (`destinations`) once each is live or failed, or an error saying what to do. get_status shows each one's health (`streams`).
+Go live: stream the program (canvas and program mix) as H.264/AAC over RTMP or RTMPS to the live setup's [stream] destinations (twitch, youtube, kick, facebook or custom servers; every enabled one, or `only` those ids), starting the live engine if needed; destinations already live are left alone, and recordings start and stop independently. Destinations with the same bitrate and size share one encoder. Each needs its stream key set. Returns the first destination's status plus every destination's (`destinations`) once each is live or failed, or an error saying what to do. get_status shows each one's health (`streams`). With canvas "vertical", the vertical canvas's program to its own [vertical.stream] destinations and keys (`vertical_streams`).
 
 | Argument | Type | Description |
 |---|---|---|
+| `canvas` | CanvasId | Which canvas streams: `main` (the default: the program to `[stream]`) or `vertical` (the vertical program to `[vertical.stream]`). A stop leaves the other canvas's streams alone. |
 | `only` | list of string | Destination ids (`main` and the ids in `stream.destinations`); every enabled one (or for a stop, every one streaming) if empty. A destination named here starts even if it is turned off. |
 
 ## stop_recording
@@ -675,10 +685,11 @@ Stop the replay buffer, discarding what it holds (save_replay first to keep it).
 
 ## stop_stream
 
-Stop streaming (to every destination, or `only` those ids; the others keep going). Returns the final status of the first stopped, plus every destination's: frames sent and dropped, reconnects and the last error.
+Stop streaming (to every destination, or `only` those ids; the others keep going). Returns the final status of the first stopped, plus every destination's: frames sent and dropped, reconnects and the last error. Stops one canvas's streams: canvas "main" (the default) or "vertical".
 
 | Argument | Type | Description |
 |---|---|---|
+| `canvas` | CanvasId | Which canvas streams: `main` (the default: the program to `[stream]`) or `vertical` (the vertical program to `[vertical.stream]`). A stop leaves the other canvas's streams alone. |
 | `only` | list of string | Destination ids (`main` and the ids in `stream.destinations`); every enabled one (or for a stop, every one streaming) if empty. A destination named here starts even if it is turned off. |
 
 ## stream_destination_add
@@ -687,6 +698,7 @@ Add a stream destination to the live setup: a service (twitch, youtube, kick, fa
 
 | Argument | Type | Description |
 |---|---|---|
+| `canvas` | CanvasId | Which canvas's destinations: `main` (the default, `[stream]`) or `vertical` (`[vertical.stream]`, in a `[vertical]` canvas the live setup must have). |
 | `clear` | list of string | Fields to reset: `server` (to the service's), `video_bitrate_kbps` and `size` (to the main destination's; for `main`, the defaults). |
 | `enabled` | boolean (optional) |  |
 | `height` | integer (optional) |  |
@@ -702,7 +714,8 @@ Remove a stream destination by id (not main: turn it off with stream_destination
 
 | Argument | Type | Description |
 |---|---|---|
-| `id` (required) | string | The destination's id, from get_status's streams. |
+| `canvas` | CanvasId | "main" (the default, [stream]) or "vertical" ([vertical.stream]). |
+| `id` (required) | string | The destination's id, from get_status's streams (or vertical_streams, with canvas "vertical"). |
 
 ## stream_destination_set
 
@@ -710,6 +723,7 @@ Change a stream destination by id (main is the [stream] section): service, serve
 
 | Argument | Type | Description |
 |---|---|---|
+| `canvas` | CanvasId | Which canvas's destinations: `main` (the default, `[stream]`) or `vertical` (`[vertical.stream]`, in a `[vertical]` canvas the live setup must have). |
 | `clear` | list of string | Fields to reset: `server` (to the service's), `video_bitrate_kbps` and `size` (to the main destination's; for `main`, the defaults). |
 | `enabled` | boolean (optional) |  |
 | `height` | integer (optional) |  |
@@ -730,10 +744,11 @@ Start using another scene collection, profile or both (by id): the live setup be
 
 ## switch_scene
 
-Put a scene on air, by id, with a transition: cut, fade, swipe, slide, fade_to_color, luma_wipe, stinger or move (the scene's transition, else the setup's, by default). While recording, the switch is written to the manifest's scene timeline.
+Put a scene on air, by id, with a transition: cut, fade, swipe, slide, fade_to_color, luma_wipe, stinger or move (the scene's transition, else the setup's, by default). While recording, the switch is written to the manifest's scene timeline. canvas "vertical" switches the vertical canvas, once vertical.follow_main is false.
 
 | Argument | Type | Description |
 |---|---|---|
+| `canvas` | CanvasId | "main" (the default) or "vertical": the setup's [vertical] canvas, which must not follow the main one (vertical.follow_main false). |
 | `scene` (required) | string | The id of a scene in the setup. |
 | `transition` | Transition | How it comes on air, like {"kind":"fade","duration_ms":500}, {"kind":"swipe","direction":"up"} or {"kind":"cut"}; the scene's transition (else the setup's) if absent. |
 
@@ -743,6 +758,7 @@ Put the preview scene on air with a transition (the scene's, else the setup's, b
 
 | Argument | Type | Description |
 |---|---|---|
+| `canvas` | CanvasId | "main" (the default) or "vertical" (which must not follow the main canvas). |
 | `transition` | Transition | How the preview scene comes on air; its transition (else the setup's) if absent. |
 
 ## test_upload_speed

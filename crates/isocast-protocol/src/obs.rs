@@ -615,6 +615,7 @@ fn profile_from(
             replay: Default::default(),
         },
         stream,
+        vertical: None,
     };
     (profile, findings)
 }
@@ -1469,6 +1470,7 @@ impl<'a, 'v> Importer<'a, 'v> {
                 layout: None,
                 items: Vec::new(),
                 transition: None,
+                vertical: None,
             });
         }
     }
@@ -3295,6 +3297,7 @@ impl<'a, 'v> Importer<'a, 'v> {
             audio,
             recording,
             stream,
+            vertical: None,
             hotkeys: Default::default(),
         };
         self.counts.scenes = setup.scenes.len();

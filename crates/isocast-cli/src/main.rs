@@ -20,7 +20,7 @@ use isocast_protocol::change::{Change, Difference, DifferenceOp};
 use isocast_protocol::devices::Devices;
 use isocast_protocol::obs::Imported;
 use isocast_protocol::stream::{MAIN_DESTINATION, StreamService, StreamState, StreamStatus};
-use isocast_protocol::{QUICK_SOURCES, Setup, Transition};
+use isocast_protocol::{CanvasId, QUICK_SOURCES, Setup, Transition};
 
 use crate::client::Client;
 
@@ -300,6 +300,10 @@ enum Command {
         scene: String,
         #[command(flatten)]
         transition: TransitionArgs,
+        /// Which canvas: main, or vertical (the setup's [vertical] canvas,
+        /// once it stops following the main one).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
@@ -310,6 +314,10 @@ enum Command {
         /// Leave Studio Mode (clear its staged preview).
         #[arg(long)]
         clear: bool,
+        /// Which canvas: main, or vertical (once it stops following the
+        /// main one).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
@@ -319,6 +327,10 @@ enum Command {
     Take {
         #[command(flatten)]
         transition: TransitionArgs,
+        /// Which canvas: main, or vertical (once it stops following the
+        /// main one).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
@@ -498,6 +510,10 @@ enum Command {
     Get {
         #[arg(long)]
         resolved: bool,
+        /// With --resolved: whose layout, main or vertical (the setup is
+        /// the whole live setup either way).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
@@ -595,6 +611,10 @@ enum Command {
         /// Scale it down to at most this many pixels wide.
         #[arg(long)]
         width: Option<u32>,
+        /// Which canvas: main, or vertical (its program; vertical takes
+        /// `program` only).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
@@ -646,6 +666,10 @@ enum Command {
         /// show the new revision.
         #[arg(long, requires = "check")]
         touch: bool,
+        /// Which canvas: main, or vertical (its program; vertical takes
+        /// `program` only).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
@@ -674,20 +698,33 @@ enum StreamCommand {
         /// repeat for several. A turned-off destination starts too.
         #[arg(long = "only", value_name = "ID")]
         only: Vec<String>,
+        /// Which canvas: main ([stream]), or vertical ([vertical.stream],
+        /// with its own destinations and keys).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
-    /// Stop streaming (to every destination, or --only those).
+    /// Stop streaming (to every destination of the canvas, or --only
+    /// those); the other canvas's streams keep going.
     Stop {
         /// Only this destination; repeat for several. The others keep going.
         #[arg(long = "only", value_name = "ID")]
         only: Vec<String>,
+        /// Which canvas: main ([stream]), or vertical ([vertical.stream],
+        /// with its own destinations and keys).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
     /// Show each destination's state, bitrates, dropped frames, congestion
     /// and reconnects, and whether its stream key is set.
     Status {
+        /// Which canvas: main ([stream]), or vertical ([vertical.stream],
+        /// with its own destinations and keys).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
@@ -733,12 +770,20 @@ enum DestinationCommand {
         /// Add it turned off (`stream start` skips it unless --only names it).
         #[arg(long)]
         disabled: bool,
+        /// Which canvas: main ([stream]), or vertical ([vertical.stream],
+        /// with its own destinations and keys).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
     /// Remove a destination (not main; not while it streams).
     Remove {
         id: String,
+        /// Which canvas: main ([stream]), or vertical ([vertical.stream],
+        /// with its own destinations and keys).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
@@ -756,6 +801,10 @@ enum DestinationCommand {
         /// then uses main's; main the defaults). Repeat for several.
         #[arg(long, value_name = "FIELD")]
         clear: Vec<String>,
+        /// Which canvas: main ([stream]), or vertical ([vertical.stream],
+        /// with its own destinations and keys).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
@@ -787,6 +836,10 @@ enum StreamKeyCommand {
     Set {
         #[command(flatten)]
         target: KeyTargetArgs,
+        /// Which canvas: main ([stream]), or vertical ([vertical.stream],
+        /// with its own destinations and keys).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
@@ -795,6 +848,10 @@ enum StreamKeyCommand {
     Clear {
         #[command(flatten)]
         target: KeyTargetArgs,
+        /// Which canvas: main ([stream]), or vertical ([vertical.stream],
+        /// with its own destinations and keys).
+        #[arg(long, value_parser = parse_canvas, default_value = "main")]
+        canvas: CanvasId,
         #[arg(long)]
         json: bool,
     },
@@ -816,17 +873,46 @@ struct KeyTargetArgs {
 }
 
 impl KeyTargetArgs {
-    fn target(self) -> StreamKeyTarget {
+    fn target(self, canvas: CanvasId) -> StreamKeyTarget {
         StreamKeyTarget {
             destination: self.destination,
             service: self.service,
             server: self.server,
+            canvas,
         }
     }
 }
 
 fn parse_service(text: &str) -> Result<StreamService, String> {
     StreamService::from_id(text)
+}
+
+/// A canvas, as `--canvas` names it: main or vertical.
+fn parse_canvas(text: &str) -> Result<CanvasId, String> {
+    serde_json::from_value(serde_json::Value::String(text.to_string()))
+        .map_err(|_| format!("{text:?} is not a canvas; canvases: main, vertical"))
+}
+
+/// The monitor target `--canvas` means: the target itself on the main
+/// canvas; on the vertical one, its program or preview. Sources are shared.
+fn canvas_target(canvas: CanvasId, target: String) -> Result<String> {
+    if canvas.is_main()
+        || matches!(
+            target.as_str(),
+            isocast_protocol::VERTICAL_PROGRAM | "vertical-preview"
+        )
+    {
+        return Ok(target);
+    }
+    if target == isocast_protocol::PROGRAM {
+        return Ok(isocast_protocol::VERTICAL_PROGRAM.to_string());
+    }
+    if target == "preview" {
+        return Ok("vertical-preview".to_string());
+    }
+    bail!(
+        "--canvas vertical: give `program` (the default) or `preview`, or watch source {target:?} without --canvas"
+    )
 }
 
 #[derive(Subcommand)]
@@ -1117,7 +1203,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 name,
                 json,
             } => {
-                let (width, height, fps) = parse_canvas(canvas.as_deref())?;
+                let (width, height, fps) = parse_canvas_size(canvas.as_deref())?;
                 // The daemon may run in another folder: make a relative
                 // folder absolute here.
                 let folder = match folder {
@@ -1200,7 +1286,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Pause { json } => pause(true, json),
         Command::Resume { json } => pause(false, json),
         Command::Status { json } => status(json),
-        Command::Get { resolved, json } => get(resolved, json),
+        Command::Get {
+            resolved,
+            canvas,
+            json,
+        } => get(resolved, canvas, json),
         Command::Permissions {
             request,
             open,
@@ -1354,24 +1444,42 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Scene {
             scene,
             transition,
+            canvas,
             json,
         } => {
             let transition = transition.get()?;
-            switched(Method::SwitchScene { scene, transition }, json)
+            switched(
+                Method::SwitchScene {
+                    scene,
+                    transition,
+                    canvas,
+                },
+                json,
+            )
         }
-        Command::Preview { scene, clear, json } => switched(
-            if clear {
-                Method::ClearPreview
-            } else {
-                Method::Preview {
+        Command::Preview {
+            scene,
+            clear,
+            canvas,
+            json,
+        } => switched(
+            match (clear, canvas.is_main()) {
+                (true, true) => Method::ClearPreview,
+                (true, false) => Method::ClearCanvasPreview { canvas },
+                (false, _) => Method::Preview {
                     scene: scene.expect("required by clap"),
-                }
+                    canvas,
+                },
             },
             json,
         ),
-        Command::Take { transition, json } => {
+        Command::Take {
+            transition,
+            canvas,
+            json,
+        } => {
             let transition = transition.get()?;
-            switched(Method::Take { transition }, json)
+            switched(Method::Take { transition, canvas }, json)
         }
         Command::Plan { file, patch, json } => plan(file.as_deref(), patch.as_deref(), json),
         Command::Apply {
@@ -1391,8 +1499,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             target,
             output,
             width,
+            canvas,
             json,
-        } => frame(target, output, width, json),
+        } => frame(canvas_target(canvas, target)?, output, width, json),
         Command::Frames {
             target,
             output,
@@ -1406,9 +1515,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             check,
             expect,
             touch,
+            canvas,
             json,
-        } => match shared {
-            true => shared_frames(shared_frames::Options {
+        } => match (shared, canvas_target(canvas, target)?) {
+            (true, target) => shared_frames(shared_frames::Options {
                 target,
                 max_width: width,
                 max_height: height,
@@ -1421,7 +1531,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 touch,
                 json,
             }),
-            false => frames(target, output, width, fps, seconds, json),
+            (false, target) => frames(target, output, width, fps, seconds, json),
         },
         Command::Engine { command, json } => engine(command, json),
         Command::Vcam { command } => virtual_camera::run(command),
@@ -1435,22 +1545,25 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 seconds,
                 json,
             } => optimize::speed_test(target.service, target.server, seconds, json),
-            StreamCommand::Start { only, json } => {
+            StreamCommand::Start { only, canvas, json } => {
                 let mut client = Client::connect_or_launch()?;
                 client::check_engine(&mut client);
                 let started: Streaming =
-                    client.call(Method::StreamStart(Some(StreamStartParams { only })))?;
+                    client.call(Method::StreamStart(Some(StreamStartParams {
+                        only,
+                        canvas,
+                    })))?;
                 print_streaming(&started, json)
             }
-            StreamCommand::Stop { only, json } => {
+            StreamCommand::Stop { only, canvas, json } => {
                 let Some(mut client) = Client::connect()? else {
                     bail!("not streaming: isocastd isn't running");
                 };
                 let stopped: Streaming =
-                    client.call(Method::StreamStop(Some(StreamStartParams { only })))?;
+                    client.call(Method::StreamStop(Some(StreamStartParams { only, canvas })))?;
                 print_streaming(&stopped, json)
             }
-            StreamCommand::Status { json } => {
+            StreamCommand::Status { canvas, json } => {
                 let Some(mut client) = Client::connect()? else {
                     if json {
                         println!("null");
@@ -1460,11 +1573,24 @@ fn run(cli: Cli) -> Result<ExitCode> {
                     return Ok(ExitCode::SUCCESS);
                 };
                 let status = client.call::<Status>(Method::Status)?;
-                match status.stream {
+                // The vertical canvas's: its main destination's (else its
+                // first) as the stream.
+                let (stream, destinations) = if canvas.is_main() {
+                    (status.stream, status.streams)
+                } else {
+                    let first = status
+                        .vertical_streams
+                        .iter()
+                        .find(|s| s.id == MAIN_DESTINATION)
+                        .or(status.vertical_streams.first())
+                        .cloned();
+                    (first, status.vertical_streams)
+                };
+                match stream {
                     Some(stream) => print_streaming(
                         &Streaming {
                             stream,
-                            destinations: status.streams,
+                            destinations,
                         },
                         json,
                     ),
@@ -1472,10 +1598,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         println!("null");
                         Ok(ExitCode::SUCCESS)
                     }
-                    None => {
+                    None if canvas.is_main() => {
                         println!(
                             "Not set up for streaming: the live setup has no [stream] section \
                              (add one: `isocast stream destination add SERVICE`)"
+                        );
+                        Ok(ExitCode::SUCCESS)
+                    }
+                    None => {
+                        println!(
+                            "The vertical canvas isn't set up for streaming: the live setup has \
+                             no [vertical.stream] section (add one: `isocast stream destination \
+                             add SERVICE --canvas vertical`)"
                         );
                         Ok(ExitCode::SUCCESS)
                     }
@@ -1488,18 +1622,20 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         id,
                         fields,
                         disabled,
+                        canvas,
                         json,
                     } => (
                         Method::StreamDestinationAdd(Box::new(StreamDestinationParams {
                             id,
                             service: Some(service),
                             enabled: disabled.then_some(false),
+                            canvas,
                             ..fields.params()
                         })),
                         json,
                     ),
-                    DestinationCommand::Remove { id, json } => {
-                        (Method::StreamDestinationRemove { id }, json)
+                    DestinationCommand::Remove { id, canvas, json } => {
+                        (Method::StreamDestinationRemove { id, canvas }, json)
                     }
                     DestinationCommand::Set {
                         id,
@@ -1507,6 +1643,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         fields,
                         enabled,
                         clear,
+                        canvas,
                         json,
                     } => (
                         Method::StreamDestinationSet(Box::new(StreamDestinationParams {
@@ -1514,6 +1651,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                             service,
                             enabled,
                             clear,
+                            canvas,
                             ..fields.params()
                         })),
                         json,
@@ -1528,19 +1666,27 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 Ok(ExitCode::SUCCESS)
             }
             StreamCommand::Key { command } => match command {
-                StreamKeyCommand::Set { target, json } => {
+                StreamKeyCommand::Set {
+                    target,
+                    canvas,
+                    json,
+                } => {
                     let mut client = Client::connect_or_launch()?;
                     let key = read_stream_key()?;
                     let stored: StreamKey =
                         client.call(Method::StreamKeySet(Box::new(StreamKeyParams {
                             key,
-                            target: target.target(),
+                            target: target.target(canvas),
                         })))?;
                     print_stream_key(&stored, json)
                 }
-                StreamKeyCommand::Clear { target, json } => {
+                StreamKeyCommand::Clear {
+                    target,
+                    canvas,
+                    json,
+                } => {
                     let stored: StreamKey = Client::connect_or_launch()?
-                        .call(Method::StreamKeyClear(Box::new(target.target())))?;
+                        .call(Method::StreamKeyClear(Box::new(target.target(canvas))))?;
                     print_stream_key(&stored, json)
                 }
             },
@@ -1683,7 +1829,7 @@ fn import_obs(
     profile: Option<String>,
     json: bool,
 ) -> Result<ExitCode> {
-    let (width, height, fps) = parse_canvas(canvas)?;
+    let (width, height, fps) = parse_canvas_size(canvas)?;
     if let Some(path) = &output
         && path.exists()
     {
@@ -1772,7 +1918,7 @@ fn import_obs(
 }
 
 /// `--canvas WIDTHxHEIGHT[@FPS]`.
-fn parse_canvas(canvas: Option<&str>) -> Result<(Option<u32>, Option<u32>, Option<u32>)> {
+fn parse_canvas_size(canvas: Option<&str>) -> Result<(Option<u32>, Option<u32>, Option<u32>)> {
     let Some(canvas) = canvas else {
         return Ok((None, None, None));
     };
@@ -2226,6 +2372,9 @@ fn status(json: bool) -> Result<ExitCode> {
             recording_free_bytes: None,
             program_bytes_per_second: None,
             daemon: None,
+            vertical_scene: None,
+            vertical_preview: None,
+            vertical_streams: Vec::new(),
         },
     };
     if json {
@@ -2544,7 +2693,10 @@ fn switched(method: Method, json: bool) -> Result<ExitCode> {
         println!("{}", serde_json::to_string_pretty(&switched)?);
         return Ok(ExitCode::SUCCESS);
     }
-    let how = how(switched.transition.as_ref());
+    let mut how = how(switched.transition.as_ref());
+    if !switched.canvas.is_main() {
+        how = format!(" on the vertical canvas{how}");
+    }
     match switched.take.zip(switched.time_seconds) {
         Some((take, t)) => println!(
             "Scene {:?} on air{how} at {t:.2} s in take {take}",
@@ -2911,8 +3063,11 @@ fn parse_permission(value: &str) -> Result<isocast_protocol::devices::Permission
     })
 }
 
-fn get(resolved: bool, json: bool) -> Result<ExitCode> {
-    let params = resolved.then_some(isocast_protocol::api::GetParams { resolved });
+fn get(resolved: bool, canvas: CanvasId, json: bool) -> Result<ExitCode> {
+    if !resolved && !canvas.is_main() {
+        bail!("--canvas says whose layout --resolved shows; give --resolved too");
+    }
+    let params = resolved.then_some(isocast_protocol::api::GetParams { resolved, canvas });
     let live: Live = Client::connect_or_launch()?.call(Method::Get(params))?;
     if json {
         println!("{}", serde_json::to_string_pretty(&live)?);
@@ -3569,6 +3724,32 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                     None => println!("scene {scene:?} on air{how}"),
                 }
             }
+            Event::CanvasSceneChanged {
+                canvas,
+                scene,
+                take,
+                time_seconds,
+                transition,
+            } => {
+                let how = how(transition.as_ref());
+                let canvas = serde_json::to_value(canvas)?;
+                let canvas = canvas.as_str().unwrap_or("other");
+                match take.zip(time_seconds) {
+                    Some((take, t)) => println!(
+                        "scene {scene:?} on air on the {canvas} canvas{how} at {t:.2} s in take \
+                         {take}"
+                    ),
+                    None => println!("scene {scene:?} on air on the {canvas} canvas{how}"),
+                }
+            }
+            Event::CanvasPreviewChanged { canvas, scene } => {
+                let canvas = serde_json::to_value(canvas)?;
+                let canvas = canvas.as_str().unwrap_or("other");
+                match scene {
+                    Some(scene) => println!("scene {scene:?} in the {canvas} canvas's preview"),
+                    None => println!("the {canvas} canvas's preview cleared"),
+                }
+            }
             Event::PreviewChanged { scene } => println!("scene {scene:?} in preview"),
             Event::PreviewCleared => println!("preview cleared"),
             Event::Marker {
@@ -3890,7 +4071,12 @@ fn print_stream_lines(stream: &StreamStatus) {
     };
     let main = stream.id == MAIN_DESTINATION;
     println!(
-        "Stream{} {state}: {} ({server}){}{}",
+        "{}{} {state}: {} ({server}){}{}",
+        if stream.canvas.is_main() {
+            "Stream"
+        } else {
+            "Vertical stream"
+        },
         if main {
             String::new()
         } else {

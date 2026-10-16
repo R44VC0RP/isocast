@@ -36,8 +36,9 @@ use crate::obs::Unsupported;
 use crate::stream::StreamSettings;
 use crate::{
     AudioSetup, Canvas, Encoder, IsoRecording, Issue, Keyframes, LoadError, ProgramRecording,
-    Recording, SETUP_VERSION, Scene, Setup, Source, Transition, default_iso_filename,
-    default_keep_free_gb, default_program_filename, default_true,
+    Recording, SETUP_VERSION, Scene, Setup, Source, Transition, VerticalCanvas, VerticalRecording,
+    default_iso_filename, default_keep_free_gb, default_program_filename, default_true,
+    default_vertical_height, default_vertical_width,
 };
 
 /// A scene collection or a profile.
@@ -101,6 +102,11 @@ pub struct Collection {
     /// Which of the collection's sources the recordings take.
     #[serde(default, skip_serializing_if = "CollectionRecording::is_empty")]
     pub recording: CollectionRecording,
+    /// The vertical canvas the scenes' `vertical` arrangements are laid out
+    /// on, if the collection has one. Its frame rate, recording and stream
+    /// are the profile's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<CollectionVertical>,
     #[serde(
         default,
         skip_serializing_if = "crate::virtual_camera::VirtualCameraSettings::is_default"
@@ -115,6 +121,25 @@ pub struct CollectionCanvas {
     pub width: u32,
     /// An even number of pixels from 16 to 8192.
     pub height: u32,
+}
+
+/// The collection's part of the setup's `vertical`: its size, and whether
+/// it follows the main canvas's scene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionVertical {
+    /// An even number of pixels from 16 to 8192.
+    #[serde(default = "default_vertical_width")]
+    pub width: u32,
+    /// An even number of pixels from 16 to 8192.
+    #[serde(default = "default_vertical_height")]
+    pub height: u32,
+    /// Show the scene the main canvas has on air, switching with it.
+    #[serde(
+        default = "default_true",
+        skip_serializing_if = "crate::filter::is_true"
+    )]
+    pub follow_main: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -185,6 +210,10 @@ pub struct Profile {
     /// Keychain).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<StreamSettings>,
+    /// How the vertical canvas is put out, when the scene collection has
+    /// one: its frame rate, recording and stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<ProfileVertical>,
     #[serde(default, skip_serializing_if = "crate::hotkeys::Config::is_absent")]
     pub hotkeys: crate::hotkeys::Config,
     #[serde(
@@ -192,6 +221,29 @@ pub struct Profile {
         skip_serializing_if = "crate::developer::DeveloperSettings::is_default"
     )]
     pub developer: crate::developer::DeveloperSettings,
+}
+
+/// The profile's part of the setup's `vertical`. Unused while the scene
+/// collection has no vertical canvas.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileVertical {
+    /// Frames per second, from 1 to 240; the profile's `canvas.fps` if
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    /// The vertical program recording. Absent: not recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<VerticalRecording>,
+    /// Live streaming of the vertical program, if set up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<StreamSettings>,
+}
+
+impl ProfileVertical {
+    fn is_empty(&self) -> bool {
+        self.fps.is_none() && self.recording.is_none() && self.stream.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -297,6 +349,7 @@ impl Setup {
                             source_audio,
                         },
                 },
+            vertical: collection_vertical,
         } = collection;
         let Profile {
             version: _,
@@ -325,9 +378,33 @@ impl Setup {
                     replay,
                 },
             stream,
+            vertical: profile_vertical,
             hotkeys,
             developer,
         } = profile;
+        // The collection decides whether there is a vertical canvas; the
+        // profile only says how it is put out.
+        let vertical = collection_vertical.map(
+            |CollectionVertical {
+                 width,
+                 height,
+                 follow_main,
+             }| {
+                let ProfileVertical {
+                    fps,
+                    recording,
+                    stream,
+                } = profile_vertical.unwrap_or_default();
+                VerticalCanvas {
+                    width,
+                    height,
+                    fps,
+                    follow_main,
+                    recording,
+                    stream,
+                }
+            },
+        );
         Setup {
             virtual_camera,
             version,
@@ -361,6 +438,7 @@ impl Setup {
                 replay,
             },
             stream,
+            vertical,
             hotkeys,
             developer,
         }
@@ -406,9 +484,33 @@ impl Setup {
                     replay,
                 },
             stream,
+            vertical,
             hotkeys,
             developer,
         } = self;
+        let (collection_vertical, profile_vertical) = match vertical {
+            Some(VerticalCanvas {
+                width,
+                height,
+                fps,
+                follow_main,
+                recording,
+                stream,
+            }) => (
+                Some(CollectionVertical {
+                    width,
+                    height,
+                    follow_main,
+                }),
+                Some(ProfileVertical {
+                    fps,
+                    recording,
+                    stream,
+                })
+                .filter(|vertical| !vertical.is_empty()),
+            ),
+            None => (None, None),
+        };
         let collection = Collection {
             virtual_camera,
             version,
@@ -428,6 +530,7 @@ impl Setup {
                     source_audio,
                 },
             },
+            vertical: collection_vertical,
         };
         let profile = Profile {
             version,
@@ -453,6 +556,7 @@ impl Setup {
                 replay,
             },
             stream,
+            vertical: profile_vertical,
             hotkeys,
             developer,
         };
@@ -467,6 +571,9 @@ const PROFILE_FIELDS: &[&str] = &[
     "canvas.fps",
     "audio",
     "stream",
+    "vertical.fps",
+    "vertical.recording",
+    "vertical.stream",
     "recording.folder",
     "recording.keep_free_gb",
     "recording.replay",
@@ -514,11 +621,13 @@ impl Collection {
                 layout: None,
                 items: Vec::new(),
                 transition: None,
+                vertical: None,
             }],
             keyframes: Vec::new(),
             // OBS's default transition.
             transition: Transition::fade(300),
             recording: CollectionRecording::default(),
+            vertical: None,
             virtual_camera: Default::default(),
         }
     }
@@ -550,6 +659,7 @@ impl Profile {
                 replay: Default::default(),
             },
             stream: None,
+            vertical: None,
             hotkeys: Default::default(),
             developer: Default::default(),
         }
@@ -858,7 +968,28 @@ mod tests {
         full.recording.keep_free_gb = 5.0;
         full.stream =
             Some(serde_json::from_value(serde_json::json!({"service": "twitch"})).unwrap());
-        for setup in [example(), full] {
+        // A vertical canvas: its size, scene arrangements and outputs.
+        let mut vertical = full.clone();
+        vertical.vertical = Some(crate::VerticalCanvas {
+            width: 720,
+            height: 1280,
+            fps: Some(30),
+            follow_main: false,
+            recording: Some(VerticalRecording::default()),
+            stream: Some(
+                serde_json::from_value(serde_json::json!({"service": "youtube"})).unwrap(),
+            ),
+        });
+        vertical.scenes[0].vertical = Some(crate::SceneLayout {
+            layout: None,
+            items: vertical.scenes[0].items.clone(),
+        });
+        // A legacy collection doesn't get one from a profile that has one.
+        let (_, vertical_profile) = vertical.clone().into_parts("Default");
+        let (legacy, _) = example().into_parts("Default");
+        assert!(vertical_profile.vertical.is_some());
+        assert_eq!(Setup::from_parts(legacy, vertical_profile).vertical, None);
+        for setup in [example(), full, vertical] {
             let (collection, profile) = setup.clone().into_parts("Default");
             assert_eq!(profile.name, "Default");
             assert_eq!(collection.name, setup.name);

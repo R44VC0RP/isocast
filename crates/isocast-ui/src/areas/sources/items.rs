@@ -11,7 +11,7 @@ use std::rc::Rc;
 use isocast_protocol::api::{
     CapacityEstimate, CapacityParams, IsoAdmission, Method, SnapshotParams,
 };
-use isocast_protocol::{SceneItem, Setup};
+use isocast_protocol::{CanvasId, SceneItem, Setup};
 use serde_json::{Map, Value, json};
 
 use crate::ToastKind;
@@ -23,8 +23,25 @@ use crate::toasts::Toast;
 
 // ---------- The setup as JSON ----------
 
+/// The whole live setup (structural changes write it back whole).
 fn setup_json(app: &Rc<App>) -> Option<Value> {
     app.session.borrow().setup_json().cloned()
+}
+
+/// The setup as the canvas being edited has its items (the vertical
+/// ones while editing the vertical canvas, #86): for reading items only,
+/// never to write back whole.
+fn canvas_json(app: &Rc<App>) -> Option<Value> {
+    app.session.borrow().canvas_json().cloned()
+}
+
+/// Prune `items` (a JSON list) with `prune`, in a scene's main items and
+/// its vertical ones.
+fn prune_scene(scene: &mut Value, prune: impl Fn(&Value) -> Value) {
+    scene["items"] = prune(&scene["items"]);
+    if scene["vertical"].is_object() {
+        scene["vertical"]["items"] = prune(&scene["vertical"]["items"]);
+    }
 }
 
 fn scenes_of(setup: &Value) -> Vec<Value> {
@@ -141,7 +158,7 @@ fn without_source(setup: &Value, id: &str) -> Value {
         scenes_of(setup)
             .into_iter()
             .map(|mut scene| {
-                scene["items"] = prune(&scene["items"], id);
+                prune_scene(&mut scene, |items| prune(items, id));
                 scene
             })
             .collect(),
@@ -198,7 +215,7 @@ fn without_scene(setup: &Value, id: &str) -> Value {
             .into_iter()
             .filter(|s| s["id"] != id)
             .map(|mut scene| {
-                scene["items"] = prune(&scene["items"], id);
+                prune_scene(&mut scene, |items| prune(items, id));
                 scene
             })
             .collect(),
@@ -398,7 +415,7 @@ pub fn object_patch(from: &Value, to: &Value) -> Value {
 pub fn selected_json(app: &Rc<App>) -> Option<(String, Vec<Value>)> {
     let s = app.session.borrow();
     let selection = s.selection.clone()?;
-    let setup = s.setup_json()?;
+    let setup = s.canvas_json()?;
     let chain = item_chain_json(setup, &selection.scene, &selection.path)?;
     Some((selection.scene, chain))
 }
@@ -407,7 +424,7 @@ pub fn selected_json(app: &Rc<App>) -> Option<(String, Vec<Value>)> {
 fn chain_at(app: &Rc<App>, path: &str) -> Option<(String, Vec<Value>)> {
     let s = app.session.borrow();
     let scene = s.editing_scene()?;
-    let chain = item_chain_json(s.setup_json()?, &scene, path)?;
+    let chain = item_chain_json(s.canvas_json()?, &scene, path)?;
     Some((scene, chain))
 }
 
@@ -603,7 +620,7 @@ pub fn choose_iso_audio(app: &Rc<App>, id: &str, audio: &str) {
     app.edit(patch, EditOptions::default());
 }
 
-/// How many items in every scene show source `id`.
+/// How many items in every scene show source `id`, on either canvas.
 fn uses(setup: &Setup, id: &str) -> usize {
     fn walk(items: &[SceneItem], id: &str) -> usize {
         items
@@ -611,16 +628,20 @@ fn uses(setup: &Setup, id: &str) -> usize {
             .map(|i| usize::from(i.source.as_deref() == Some(id)) + walk(&i.children, id))
             .sum()
     }
-    setup.scenes.iter().map(|s| walk(&s.items, id)).sum()
+    setup
+        .scenes
+        .iter()
+        .map(|s| walk(&s.items, id) + s.vertical.as_ref().map_or(0, |v| walk(&v.items, id)))
+        .sum()
 }
 
 /// Remove an item from its scene. As in OBS, a video source no other item
 /// shows goes with it. Undo brings either back.
 pub fn remove_from_scene(app: &Rc<App>, scene: &str, chain: &[Value]) {
     let Some(item) = chain.last() else { return };
-    let (setup, typed) = {
+    let (setup, typed, canvas) = {
         let s = app.session.borrow();
-        (s.setup_json().cloned(), s.setup.clone())
+        (s.setup_json().cloned(), s.setup.clone(), s.edit_canvas())
     };
     let (Some(setup), Some(typed)) = (setup, typed) else {
         return;
@@ -629,7 +650,10 @@ pub fn remove_from_scene(app: &Rc<App>, scene: &str, chain: &[Value]) {
         .as_str()
         .and_then(|id| model::find_source(&typed, id));
     app.select("");
+    // On the vertical canvas only the item goes: the main canvas (or its
+    // layout the vertical one falls back to) may still show the source.
     if let Some(source) = source
+        && canvas == CanvasId::Main
         && source.kind.has_video()
         && uses(&typed, &source.id) <= 1
     {
@@ -652,11 +676,8 @@ pub fn remove_from_scene(app: &Rc<App>, scene: &str, chain: &[Value]) {
         .map(model::scene_name)
         .unwrap_or(scene)
         .to_string();
-    let before: Vec<Value> = scenes_of(&setup)
-        .into_iter()
-        .find(|s| s["id"] == scene)
-        .and_then(|s| s["items"].as_array().cloned())
-        .unwrap_or_default();
+    let vertical = canvas == CanvasId::Vertical;
+    let before = model::canvas_items(&setup, scene, vertical);
     app.edit(
         item_patch_json(scene, chain, json!({ "remove": true })),
         EditOptions::default(),
@@ -668,18 +689,15 @@ pub fn remove_from_scene(app: &Rc<App>, scene: &str, chain: &[Value]) {
             format!("Removed “{label}” from {scene_name}"),
             "",
         )
+        // Back on the canvas it was removed from, whichever is edited now.
         .action("Undo", move |app| {
-            let now: Vec<Value> = setup_json(app)
-                .and_then(|s| {
-                    scenes_of(&s)
-                        .into_iter()
-                        .find(|x| x["id"] == scene.as_str())
-                        .and_then(|x| x["items"].as_array().cloned())
-                })
+            let now = setup_json(app)
+                .map(|s| model::canvas_items(&s, &scene, vertical))
                 .unwrap_or_default();
-            app.edit(
+            app.edit_on(
                 json!({ "scenes": [{ "id": scene, "items": replace_list(&now, &before) }] }),
                 EditOptions::default(),
+                canvas,
             );
         }),
     );
@@ -702,7 +720,7 @@ pub fn remove_selected(app: &Rc<App>) {
 /// children) in a new order.
 fn reorder(app: &Rc<App>, scene: &str, parents: &[Value], items: &[Value]) {
     let patch = if parents.is_empty() {
-        let old: Vec<Value> = setup_json(app)
+        let old: Vec<Value> = canvas_json(app)
             .and_then(|s| {
                 scenes_of(&s)
                     .into_iter()
@@ -733,7 +751,7 @@ pub fn order_selected(app: &Rc<App>, place: &str) {
     let parents = &chain[..chain.len() - 1];
     let siblings: Vec<Value> = match parents.last() {
         Some(parent) => parent["children"].as_array().cloned().unwrap_or_default(),
-        None => setup_json(app)
+        None => canvas_json(app)
             .and_then(|s| {
                 scenes_of(&s)
                     .into_iter()
@@ -808,7 +826,7 @@ pub fn move_row(app: &Rc<App>, rows: &[(String, String)], from: usize, to: usize
     let parents = &chain[..chain.len() - 1];
     let level: Vec<Value> = match parents.last() {
         Some(p) => p["children"].as_array().cloned().unwrap_or_default(),
-        None => setup_json(app)
+        None => canvas_json(app)
             .and_then(|s| {
                 scenes_of(&s)
                     .into_iter()
@@ -862,7 +880,7 @@ pub fn paste(app: &Rc<App>, item: &Value, duplicate: bool) {
     let (scene, typed, setup) = {
         let s = app.session.borrow();
         let (Some(scene), Some(typed), Some(setup)) =
-            (s.editing_scene(), s.setup.clone(), s.setup_json().cloned())
+            (s.editing_scene(), s.setup.clone(), s.canvas_json().cloned())
         else {
             return;
         };
@@ -1015,11 +1033,12 @@ pub fn whole(v: f64) -> Value {
     json!(v.round().max(0.0) as u64)
 }
 
+/// The size of the canvas being edited (the vertical one's while editing
+/// it).
 fn canvas_size(app: &Rc<App>) -> (f64, f64) {
     app.session
         .borrow()
-        .setup
-        .as_ref()
+        .edited_setup()
         .map(|s| (s.canvas.width as f64, s.canvas.height as f64))
         .unwrap_or((1920.0, 1080.0))
 }
@@ -1172,7 +1191,7 @@ pub fn rotate_by(app: &Rc<App>, degrees: f64) {
 fn level_of(app: &Rc<App>, scene: &str, parents: &[Value]) -> Vec<Value> {
     match parents.last() {
         Some(parent) => parent["children"].as_array().cloned().unwrap_or_default(),
-        None => setup_json(app)
+        None => canvas_json(app)
             .and_then(|s| {
                 scenes_of(&s)
                     .into_iter()
@@ -1201,6 +1220,9 @@ fn group_id(app: &Rc<App>) -> String {
     let mut taken = model::taken_ids(setup);
     for scene in &setup.scenes {
         keys(&scene.items, &mut taken);
+        if let Some(vertical) = &scene.vertical {
+            keys(&vertical.items, &mut taken);
+        }
     }
     model::new_id("Group", taken)
 }
@@ -1341,7 +1363,7 @@ pub fn ungroup(app: &Rc<App>, path: &str) {
 /// The top-level groups of the scene being edited: (key, label).
 pub fn groups(app: &Rc<App>) -> Vec<(String, String)> {
     let s = app.session.borrow();
-    let (Some(setup), Some(scene)) = (s.setup.as_ref(), s.editing_scene()) else {
+    let (Some(setup), Some(scene)) = (s.edited_setup(), s.editing_scene()) else {
         return Vec::new();
     };
     model::find_scene(setup, &scene)

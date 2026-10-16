@@ -156,7 +156,7 @@ pub struct Runner {
     app: AppWindow,
     hub: Rc<App>,
     updates: Receiver<Update>,
-    pictures: Receiver<(bool, Incoming)>,
+    pictures: Receiver<(crate::preview::Role, Incoming)>,
     now: Rc<Cell<Duration>>,
     target: Option<wgpu::Texture>,
     run: Run,
@@ -326,8 +326,8 @@ pub fn run(run: Run, keep_images: bool, dump: &[usize], dir: &std::path::Path) -
         runner
             .hub
             .canvas
-            .start_pictures(&runner.hub, output, false, move |program, incoming| {
-                let _ = picture_tx.send((program, incoming));
+            .start_pictures(&runner.hub, output, false, move |role, incoming| {
+                let _ = picture_tx.send((role, incoming));
             });
         runner.wait_until(Duration::from_secs(10), "the engine's first frame", |r| {
             r.frames_in > 0
@@ -529,13 +529,15 @@ impl Runner {
             }
             self.hub.apply(update);
         }
-        while let Ok((program, incoming)) = self.pictures.try_recv() {
-            if !program && let Incoming::Frame(frame) = &incoming {
+        while let Ok((role, incoming)) = self.pictures.try_recv() {
+            if role == crate::preview::Role::Editor
+                && let Incoming::Frame(frame) = &incoming
+            {
                 self.frames_in += 1;
                 self.picture_revision = frame.revision.or(self.picture_revision);
                 self.picture_size = (frame.width(), frame.height());
             }
-            self.hub.canvas.incoming(program, incoming);
+            self.hub.canvas.incoming(role, incoming);
         }
     }
 

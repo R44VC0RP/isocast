@@ -368,6 +368,7 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
         audio: AudioSetup::default(),
         // Streaming is set up when wanted (a service and its key).
         stream: None,
+        vertical: None,
         hotkeys: Default::default(),
         recording: Recording {
             folder,
@@ -538,6 +539,7 @@ fn scenes(canvas: &Canvas, camera: bool, layout: Layout) -> Vec<Scene> {
         layout: None,
         items,
         transition: None,
+        vertical: None,
     };
     let screen = scene("screen", "Screen", vec![item("screen", full, Fit::Contain)]);
     if !camera {

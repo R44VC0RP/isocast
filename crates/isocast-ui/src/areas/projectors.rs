@@ -1133,6 +1133,7 @@ impl Projectors {
                             Method::SwitchScene {
                                 scene,
                                 transition: cut(),
+                                canvas: Default::default(),
                             },
                             |app, result| {
                                 if let Err(error) = result {

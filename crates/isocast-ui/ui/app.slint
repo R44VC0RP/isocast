@@ -92,6 +92,12 @@ component Workspace inherits VerticalLayout {
     out property <length> program-height: stage.program-height;
     out property <int> program-pixel-width: stage.program-pixel-width;
     out property <int> program-pixel-height: stage.program-pixel-height;
+    out property <length> vertical-x: stage.vertical-x;
+    out property <length> vertical-y: stage.vertical-y;
+    out property <length> vertical-width: stage.vertical-width;
+    out property <length> vertical-height: stage.vertical-height;
+    out property <int> vertical-pixel-width: stage.vertical-pixel-width;
+    out property <int> vertical-pixel-height: stage.vertical-pixel-height;
     out property <length> stage-x: stage.stage-x;
     out property <length> stage-y: stage.stage-y;
     out property <length> stage-width: stage.stage-width;
@@ -376,6 +382,13 @@ export component AppWindow inherits Window {
     out property <length> program-height: workspace.program-height;
     out property <int> program-pixel-width: workspace.program-pixel-width;
     out property <int> program-pixel-height: workspace.program-pixel-height;
+    // The vertical canvas's program picture (#86).
+    out property <length> vertical-x: workspace.vertical-x;
+    out property <length> vertical-y: workspace.vertical-y;
+    out property <length> vertical-width: workspace.vertical-width;
+    out property <length> vertical-height: workspace.vertical-height;
+    out property <int> vertical-pixel-width: workspace.vertical-pixel-width;
+    out property <int> vertical-pixel-height: workspace.vertical-pixel-height;
     // The whole preview area (the native layers' stage).
     out property <length> stage-x: workspace.stage-x;
     out property <length> stage-y: workspace.stage-y;

@@ -55,6 +55,7 @@ pub fn load(window: &AppWindow) {
     flag("docks_locked", &|v| ui.set_docks_locked(v));
     flag("preview_locked", &|v| ui.set_preview_locked(v));
     flag("studio", &|v| ui.set_studio(v));
+    flag("vertical_preview", &|v| ui.set_show_vertical(v));
     // The Create view (area G).
     flag("create", &|v| {
         window.global::<crate::CreateArea>().set_active(v)
@@ -105,6 +106,7 @@ pub fn save(window: &AppWindow) {
         "docks_locked": ui.get_docks_locked(),
         "preview_locked": ui.get_preview_locked(),
         "studio": ui.get_studio(),
+        "vertical_preview": ui.get_show_vertical(),
         "create": window.global::<crate::CreateArea>().get_active(),
         "docks_height": ui.get_docks_height(),
         "scenes_width": ui.get_scenes_width(),
@@ -150,6 +152,7 @@ pub fn reset(window: &AppWindow, docks_only: bool) {
         ui.set_show_status_bar(true);
         ui.set_preview_locked(false);
         ui.set_preview_scale("window".into());
+        ui.set_show_vertical(true);
     }
 }
 

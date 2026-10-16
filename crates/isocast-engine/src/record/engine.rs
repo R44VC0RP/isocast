@@ -10,9 +10,9 @@
 use parking_lot::{Condvar, Mutex};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -22,7 +22,10 @@ use isocast_protocol::api::{
     AudioLevel, ChannelLevel, EngineInfo, ScenesInfo, SourceRun, SourceStatus,
 };
 use isocast_protocol::manifest::SessionStatus;
-use isocast_protocol::{Canvas, Codec, Monitoring, PROGRAM, Setup, SourceKind, TransitionKind};
+use isocast_protocol::{
+    Canvas, CanvasId, Codec, Monitoring, PROGRAM, Setup, SourceKind, Transition, TransitionKind,
+    VERTICAL_PROGRAM,
+};
 
 use super::disk::{DiskMeter, DiskProbe};
 use super::file::{Done, Split, file_end, write_files};
@@ -41,7 +44,7 @@ use super::{
     OnAir, Output, Packet, QUEUE_DEPTH, RecordOptions, Report, SPACE_CHECK_INTERVAL, SPEED_MARGIN,
     SPLIT_LEAD, SPLIT_SOON_LEAD, START_DELAY, STATUS_INTERVAL, SessionControl, Shared, Slots,
     SourceFilters, SplitRefused, SplitTake, SplitTiming, Take, create_writers, expand_home,
-    interrupted_note, interrupted_sessions, live_status, plan_take, sidechain_sources,
+    interrupted_note, interrupted_sessions, is_program, live_status, plan_take, sidechain_sources,
     take_manifest, wait_for_frame, write_manifest, write_manifest_durable,
 };
 use crate::audio_filter::AudioStage;
@@ -286,7 +289,7 @@ impl<F: Clone> Drop for ProgramTap<F> {
 /// active. This keeps the inner state, not the Engine: dropping the Engine
 /// still stops it, which a parked encoder can observe without a receiver.
 #[derive(Clone)]
-pub(crate) struct ProgramTapSource<P: Platform>(Arc<Inner<P>>);
+pub(crate) struct ProgramTapSource<P: Platform>(Arc<Inner<P>>, CanvasId);
 
 impl<P: Platform> ProgramTapSource<P> {
     pub(crate) fn stopped(&self) -> bool {
@@ -297,15 +300,18 @@ impl<P: Platform> ProgramTapSource<P> {
         &self,
         depth: usize,
         missed_audio_chunks: Arc<AtomicU64>,
-    ) -> ProgramTap<P::Frame> {
+    ) -> Result<ProgramTap<P::Frame>> {
         let inner = &self.0;
         // Serialize acquiring the canvas with update's refusal check.
         let _state = inner.state.lock();
+        let output = inner
+            .output(self.1)
+            .ok_or_else(|| anyhow::anyhow!("vertical: canvas is not enabled"))?;
         let from = inner.platform.now();
         let missed_frames = Arc::new(AtomicU64::new(0));
         let (tx, packets) = super::tap::channel(depth, missed_frames.clone());
         let keys = (
-            inner.program_video.add_counted(
+            output.program_video.add_counted(
                 super::tap::Output::Live(tx.clone()),
                 0,
                 from,
@@ -322,14 +328,14 @@ impl<P: Platform> ProgramTapSource<P> {
                 false,
             ),
         );
-        ProgramTap {
+        Ok(ProgramTap {
             packets,
             missed_frames,
             missed_audio_chunks,
-            video: inner.program_video.clone(),
+            video: output.program_video.clone(),
             audio: inner.program_audio.clone(),
             keys,
-        }
+        })
     }
 }
 
@@ -357,16 +363,41 @@ struct Inner<P: Platform> {
     /// Keep one in flight per source (including removed/changed sources).
     opening: Mutex<HashSet<String>>,
     wake: Condvar,
-    /// The program's newest canvases.
-    program: Arc<FrameSlot<P::Frame>>,
-    /// Studio mode's preview scene, drawn while someone wants it.
-    preview: Arc<FrameSlot<P::Frame>>,
-    preview_scene: Mutex<Option<Arc<str>>>,
+    main: CanvasOutput<P>,
+    /// Created only when a setup enables it. Its source slots and audio mix
+    /// belong to the same engine; only composition and output are separate.
+    vertical: OnceLock<CanvasOutput<P>>,
     /// Scenes drawn for monitors on air or not (`scene:ID` targets:
     /// projectors and the multiview), off the program's thread.
     scene_feeds: Arc<SceneFeeds<P::Frame>>,
     /// A camera-only source is needed only while that output is running.
     camera_source: Mutex<Option<String>>,
+    program_audio: Arc<Routes<P::Frame>>,
+    program_meter: Arc<StereoMeter>,
+    /// Monitors' H.264 streams, by what they show.
+    frame_streams: Arc<frame_stream::Streams>,
+    monitor: Arc<MonitorSlot>,
+    /// The newest levels measured.
+    levels: Mutex<Vec<AudioLevel>>,
+    /// The loudest levels since a recording's status last read them.
+    loudest: Critical<BTreeMap<String, (f64, f64)>>,
+    recording: AtomicBool,
+    /// Measured write speeds by folder, and when.
+    speeds: Mutex<HashMap<PathBuf, (Time, f64)>>,
+}
+
+/// One composition of the engine's captured sources. Each output size needs
+/// its own bounded frame pool; captured source frames are shared, never copied
+/// or captured twice. No vertical worker or pool exists in a main-only setup.
+struct CanvasOutput<P: Platform> {
+    control: Arc<SessionControl>,
+    follow_main: AtomicBool,
+    enabled: AtomicBool,
+    /// The program's newest canvases.
+    program: Arc<FrameSlot<P::Frame>>,
+    /// Studio mode's preview scene, drawn while someone wants it.
+    preview: Arc<FrameSlot<P::Frame>>,
+    preview_scene: Mutex<Option<Arc<str>>>,
     /// The highest rate the preview was asked for since the program last
     /// looked (0: nobody).
     preview_wanted: AtomicU32,
@@ -374,28 +405,16 @@ struct Inner<P: Platform> {
     /// they change.
     scenes: SceneThread<P::Frame>,
     program_video: Arc<Routes<P::Frame>>,
-    program_audio: Arc<Routes<P::Frame>>,
-    program_meter: Arc<StereoMeter>,
-    /// Monitors' H.264 streams, by what they show.
-    frame_streams: Arc<frame_stream::Streams>,
     /// The setup revision each recent program (and preview) frame was
     /// drawn from, by tick, so monitors can tell clients which layout a
     /// frame shows.
     drawn: Arc<frame_stream::Drawn>,
-    monitor: Arc<MonitorSlot>,
-    /// The newest levels measured.
-    levels: Mutex<Vec<AudioLevel>>,
-    /// The loudest levels since a recording's status last read them.
-    loudest: Critical<BTreeMap<String, (f64, f64)>>,
-    recording: AtomicBool,
     frames_drawn: AtomicU64,
     frames_missed: AtomicU64,
     /// Program frames drawn per second over the last second (`f64` bits).
     program_fps: AtomicU64,
     /// What the compositor's recent ticks cost.
     timings: Mutex<CompositorTimings>,
-    /// Measured write speeds by folder, and when.
-    speeds: Mutex<HashMap<PathBuf, (Time, f64)>>,
     /// The program's shared H.264/AAC encoders (the stream's and the
     /// replay buffer's).
     encoders: crate::stream::encoder::Encoders,
@@ -408,6 +427,7 @@ struct State<P: Platform> {
     stingers: HashMap<String, (source::Opened<P>, Duration)>,
     mixer: Option<MixerRun<P::Frame>>,
     compositor: Option<CompositorRun>,
+    vertical_compositor: Option<CompositorRun>,
     /// Sources a recording uses, which keep running as they are until it
     /// ends.
     pins: Vec<String>,
@@ -464,7 +484,71 @@ struct CompositorRun {
     canvas: (u32, u32, u32),
 }
 
+impl<P: Platform> CanvasOutput<P> {
+    fn new(
+        platform: &P,
+        timeline: &Arc<Timeline>,
+        control: Arc<SessionControl>,
+        on_event: &Option<OnEngineEvent>,
+    ) -> Self {
+        let scenes = SceneThread::start(
+            {
+                let platform = platform.clone();
+                Arc::new(move |frame: &P::Frame| platform.frame_size(frame))
+            },
+            control.data().clone(),
+            {
+                let on_event = on_event.clone();
+                Arc::new(move |message: String| {
+                    if let Some(on_event) = &on_event {
+                        on_event(EngineEvent::Warning(message));
+                    }
+                })
+            },
+            {
+                let on_event = on_event.clone();
+                Arc::new(move |message, broken| {
+                    if let Some(on_event) = &on_event {
+                        on_event(EngineEvent::WorkerFailed {
+                            name: "scenes".into(),
+                            message,
+                            broken,
+                        });
+                    }
+                })
+            },
+        );
+        Self {
+            control,
+            follow_main: AtomicBool::new(false),
+            enabled: AtomicBool::new(true),
+            program: Arc::new(FrameSlot::with_capacity(timeline.clone(), 1)),
+            preview: Arc::new(FrameSlot::with_capacity(timeline.clone(), 1)),
+            preview_scene: Mutex::new(None),
+            preview_wanted: AtomicU32::new(0),
+            scenes,
+            program_video: Arc::default(),
+            drawn: Arc::default(),
+            frames_drawn: AtomicU64::new(0),
+            frames_missed: AtomicU64::new(0),
+            program_fps: AtomicU64::new(0),
+            timings: Mutex::default(),
+            encoders: Default::default(),
+        }
+    }
+}
+
 impl<P: Platform> Inner<P> {
+    fn output(&self, canvas: CanvasId) -> Option<&CanvasOutput<P>> {
+        match canvas {
+            CanvasId::Main => Some(&self.main),
+            CanvasId::Vertical => self
+                .vertical
+                .get()
+                .filter(|v| v.enabled.load(Ordering::SeqCst)),
+        }
+    }
+
     fn worker<T>(&self, name: &str, run: impl FnOnce() -> T) -> Result<T, String> {
         let result = isocast_diagnostics::contain(name, run);
         if let Err(message) = &result {
@@ -475,14 +559,27 @@ impl<P: Platform> Inner<P> {
             let broken = self.state.is_broken()
                 || self.wanted.is_broken()
                 || self.loudest.is_broken()
-                || self.program_video.list.is_broken()
-                || self.program_audio.list.is_broken();
+                || self.main.program_video.list.is_broken()
+                || self.program_audio.list.is_broken()
+                || self
+                    .vertical
+                    .get()
+                    .is_some_and(|output| output.program_video.list.is_broken());
             if broken {
                 self.emergency.store(true, Ordering::SeqCst);
             }
             if name == "compositor" {
-                self.program.stop(message.clone());
-                self.program_fps.store(0.0f64.to_bits(), Ordering::Relaxed);
+                self.main.program.stop(message.clone());
+                self.main
+                    .program_fps
+                    .store(0.0f64.to_bits(), Ordering::Relaxed);
+            } else if name == "vertical compositor"
+                && let Some(output) = self.vertical.get()
+            {
+                output.program.stop(message.clone());
+                output
+                    .program_fps
+                    .store(0.0f64.to_bits(), Ordering::Relaxed);
             }
             self.event(EngineEvent::WorkerFailed {
                 name: name.into(),
@@ -499,7 +596,20 @@ impl<P: Platform> Inner<P> {
         match target {
             PROGRAM => self.control.want_program(fps),
             "preview" => {
-                self.preview_wanted.fetch_max(fps.max(1), Ordering::SeqCst);
+                self.main
+                    .preview_wanted
+                    .fetch_max(fps.max(1), Ordering::SeqCst);
+            }
+            VERTICAL_PROGRAM | "vertical-preview" => {
+                if let Some(output) = self.output(CanvasId::Vertical) {
+                    if target == VERTICAL_PROGRAM {
+                        output.control.want_program(fps);
+                    } else {
+                        output
+                            .preview_wanted
+                            .fetch_max(fps.max(1), Ordering::SeqCst);
+                    }
+                }
             }
             _ => {}
         }
@@ -556,41 +666,13 @@ impl<P: Platform> Engine<P> {
         control.set_audio(&setup);
         control.set_filters(&setup);
         let monitor = Arc::new(Monitor::new(&setup.audio.monitoring_device));
-        let scenes = SceneThread::start(
-            {
-                let platform = platform.clone();
-                Arc::new(move |frame: &P::Frame| platform.frame_size(frame))
-            },
-            control.data().clone(),
-            {
-                let on_event = on_event.clone();
-                Arc::new(move |message: String| {
-                    if let Some(on_event) = &on_event {
-                        on_event(EngineEvent::Warning(message));
-                    }
-                })
-            },
-            {
-                let on_event = on_event.clone();
-                Arc::new(move |message, broken| {
-                    if let Some(on_event) = &on_event {
-                        on_event(EngineEvent::WorkerFailed {
-                            name: "scenes".into(),
-                            message,
-                            broken,
-                        });
-                    }
-                })
-            },
-        );
         let inner = Arc::new(Inner {
             emergency: AtomicBool::new(false),
             worker_errors: Mutex::new(Vec::new()),
             platform: platform.clone(),
+            main: CanvasOutput::new(platform, &timeline, control.clone(), &on_event),
+            vertical: OnceLock::new(),
             control,
-            // Only ever read newest first: no older canvases are kept.
-            program: Arc::new(FrameSlot::with_capacity(timeline.clone(), 1)),
-            preview: Arc::new(FrameSlot::with_capacity(timeline.clone(), 1)),
             scene_feeds: Arc::new(SceneFeeds::new(timeline.clone())),
             timeline,
             epoch: AtomicI64::new(i64::MIN),
@@ -602,31 +684,22 @@ impl<P: Platform> Engine<P> {
                 stingers: HashMap::new(),
                 mixer: None,
                 compositor: None,
+                vertical_compositor: None,
                 pins: Vec::new(),
                 revision: 0,
             }),
             wanted: Critical::new(None),
             opening: Mutex::new(HashSet::new()),
             wake: Condvar::new(),
-            preview_scene: Mutex::new(None),
             camera_source: Mutex::new(None),
-            preview_wanted: AtomicU32::new(0),
-            scenes,
-            program_video: Arc::default(),
             program_audio: Arc::default(),
             program_meter: Arc::default(),
             frame_streams: Arc::default(),
-            drawn: Arc::default(),
             monitor: Arc::new(Mutex::new(monitor)),
             levels: Mutex::new(Vec::new()),
             loudest: Critical::new(BTreeMap::new()),
             recording: AtomicBool::new(false),
-            frames_drawn: AtomicU64::new(0),
-            frames_missed: AtomicU64::new(0),
-            program_fps: AtomicU64::new(0),
-            timings: Mutex::default(),
             speeds: Mutex::new(HashMap::new()),
-            encoders: Default::default(),
         });
         reconcile(&inner, setup);
 
@@ -699,8 +772,8 @@ impl<P: Platform> Engine<P> {
         let setup = Arc::new(setup.clone());
         {
             let mut state = inner.state.lock();
-            if let Some(message) = canvas_refusal(inner, &state.setup.canvas, &setup.canvas) {
-                return Err(format!("canvas: {message}"));
+            if let Some(issue) = setup_refusal(inner, &state.setup, &setup) {
+                return Err(format!("{}: {}", issue.path, issue.message));
             }
             // Stinger videos it adds load in the background; a switch to
             // one waits for it.
@@ -725,6 +798,13 @@ impl<P: Platform> Engine<P> {
         canvas_refusal(&self.inner, &state.setup.canvas, canvas)
     }
 
+    /// A plan and its apply use the same output-ownership checks, including
+    /// a vertical canvas whose frame rate inherits a change to the main one.
+    pub fn setup_refusal(&self, setup: &Setup) -> Option<isocast_protocol::Issue> {
+        let state = self.inner.state.read();
+        setup_refusal(&self.inner, &state.setup, setup)
+    }
+
     /// Stop everything: the recording, if one runs, should be stopped
     /// first.
     pub fn stop(&self) {
@@ -734,10 +814,11 @@ impl<P: Platform> Engine<P> {
         for thread in self.threads.lock().drain(..) {
             let _ = thread.join();
         }
-        let (compositor, mixer, sources, stingers) = {
+        let (compositor, vertical_compositor, mixer, sources, stingers) = {
             let mut state = inner.state.lock();
             (
                 state.compositor.take(),
+                state.vertical_compositor.take(),
                 state.mixer.take(),
                 std::mem::take(&mut state.sources),
                 std::mem::take(&mut state.stingers),
@@ -746,7 +827,14 @@ impl<P: Platform> Engine<P> {
         if let Some(compositor) = compositor {
             stop_compositor(compositor);
         }
-        inner.scenes.stop();
+        if let Some(compositor) = vertical_compositor {
+            stop_compositor(compositor);
+        }
+        inner.main.scenes.stop();
+        if let Some(output) = inner.vertical.get() {
+            output.scenes.stop();
+            output.program_video.clear();
+        }
         if let Some(mixer) = mixer {
             stop_mixer(inner, mixer, &BTreeMap::new());
         }
@@ -755,7 +843,7 @@ impl<P: Platform> Engine<P> {
         drop(Closing(inner.monitor.lock().clone()));
         // A tap holds these routes itself, so they outlive the engine:
         // dropping the outputs is what tells a stream the program ended.
-        inner.program_video.clear();
+        inner.main.program_video.clear();
         inner.program_audio.clear();
     }
 
@@ -768,9 +856,16 @@ impl<P: Platform> Engine<P> {
     /// Start/resume must not announce working program output after its worker
     /// has failed. Stop remains available to finalize every recording.
     pub fn program_failure(&self) -> Option<String> {
-        self.inner.program.stopped().map(|reason| format!(
+        let main = self.inner.main.program.stopped().map(|reason| format!(
             "program output has failed: {reason}; stop the recording and restart the live engine"
-        ))
+        ));
+        main.or_else(|| {
+            let setup = self.inner.state.read().setup.clone();
+            setup.vertical.as_ref()?.recording.as_ref().filter(|recording| recording.enabled)?;
+            self.inner.output(CanvasId::Vertical)?.program.stopped().map(|reason| {
+                format!("vertical program output has failed: {reason}; stop the recording and restart the live engine")
+            })
+        })
     }
 
     /// The platform it runs on.
@@ -788,7 +883,7 @@ impl<P: Platform> Engine<P> {
         let inner = &self.inner;
         let state = inner.state.read();
         let clocks = inner.timeline.clocks.info();
-        let mut compositor = inner.timings.lock().info();
+        let mut compositor = inner.main.timings.lock().info();
         if let Some(clock) = clocks.iter().find(|clock| clock.id == "program") {
             compositor.wake_lateness_us = clock.wake_lateness_us;
         }
@@ -797,6 +892,27 @@ impl<P: Platform> Engine<P> {
             held_by.push("recording".to_string());
         }
         EngineInfo {
+            vertical: state.setup.vertical.as_ref().and_then(|vertical| {
+                let output = inner.output(CanvasId::Vertical)?;
+                let mut compositor = output.timings.lock().info();
+                if let Some(clock) = clocks.iter().find(|clock| clock.id == VERTICAL_PROGRAM) {
+                    compositor.wake_lateness_us = clock.wake_lateness_us;
+                }
+                let (raster_us, content, content_mb) = output.scenes.content();
+                Some(isocast_protocol::api::CanvasEngineInfo {
+                    canvas: vertical.canvas(&state.setup.canvas),
+                    program_frames: output.frames_drawn.load(Ordering::Relaxed),
+                    missed_frames: output.frames_missed.load(Ordering::Relaxed),
+                    fps: f64::from_bits(output.program_fps.load(Ordering::Relaxed)),
+                    compositor,
+                    scenes: ScenesInfo {
+                        resolve_us: output.scenes.resolve_us(),
+                        raster_us,
+                        content,
+                        content_mb,
+                    },
+                })
+            }),
             clocks,
             worker_errors: self
                 .inner
@@ -804,22 +920,28 @@ impl<P: Platform> Engine<P> {
                 .lock()
                 .iter()
                 .cloned()
-                .chain(self.inner.scenes.failure())
+                .chain(self.inner.main.scenes.failure())
+                .chain(
+                    self.inner
+                        .vertical
+                        .get()
+                        .and_then(|output| output.scenes.failure()),
+                )
                 .collect(),
             uptime_seconds: inner.epoch().map_or(0.0, |epoch| {
                 inner.platform.now().saturating_since(epoch).as_secs_f64()
             }),
             canvas: state.setup.canvas.clone(),
             sources: statuses(&state),
-            program_frames: inner.frames_drawn.load(Ordering::Relaxed),
-            missed_frames: inner.frames_missed.load(Ordering::Relaxed),
-            fps: f64::from_bits(inner.program_fps.load(Ordering::Relaxed)),
+            program_frames: inner.main.frames_drawn.load(Ordering::Relaxed),
+            missed_frames: inner.main.frames_missed.load(Ordering::Relaxed),
+            fps: f64::from_bits(inner.main.program_fps.load(Ordering::Relaxed)),
             outputs: held_by,
             compositor,
             scenes: {
-                let (raster_us, content, content_mb) = inner.scenes.content();
+                let (raster_us, content, content_mb) = inner.main.scenes.content();
                 ScenesInfo {
-                    resolve_us: inner.scenes.resolve_us(),
+                    resolve_us: inner.main.scenes.resolve_us(),
                     raster_us,
                     content,
                     content_mb,
@@ -834,7 +956,11 @@ impl<P: Platform> Engine<P> {
     /// generation (program and preview frames carry the generation they
     /// were drawn at). `None` before the scenes are first resolved.
     pub fn resolved(&self) -> Option<isocast_protocol::api::Resolved> {
-        let scenes = self.inner.scenes.latest()?;
+        self.resolved_canvas(CanvasId::Main)
+    }
+
+    pub fn resolved_canvas(&self, canvas: CanvasId) -> Option<isocast_protocol::api::Resolved> {
+        let scenes = self.inner.output(canvas)?.scenes.latest()?;
         Some(isocast_protocol::api::Resolved {
             generation: scenes.generation,
             revision: scenes.revision,
@@ -863,13 +989,103 @@ impl<P: Platform> Engine<P> {
 
     /// Stage `scene` as studio mode's preview (or none).
     pub fn set_preview(&self, scene: Option<String>) {
+        let _ = self.set_canvas_preview(CanvasId::Main, scene);
+    }
+
+    pub fn set_canvas_preview(
+        &self,
+        canvas: CanvasId,
+        scene: Option<String>,
+    ) -> Result<(), String> {
+        let output = self
+            .inner
+            .output(canvas)
+            .ok_or("vertical: canvas is not enabled")?;
+        if let Some(id) = &scene
+            && !self
+                .inner
+                .state
+                .read()
+                .setup
+                .scenes
+                .iter()
+                .any(|s| s.id == *id)
+        {
+            return Err(format!("scene: no scene {id:?}"));
+        }
         let scene: Option<Arc<str>> = scene.map(Into::into);
-        let mut staged = self.inner.preview_scene.lock();
+        let mut staged = output.preview_scene.lock();
         // Frames of another scene must not show as this one's.
         if *staged != scene {
-            self.inner.preview.clear();
+            output.preview.clear();
         }
-        *staged = scene;
+        *staged = scene.clone();
+        drop(staged);
+        if canvas == CanvasId::Main
+            && self
+                .inner
+                .output(CanvasId::Vertical)
+                .is_some_and(|output| output.follow_main.load(Ordering::SeqCst))
+        {
+            self.set_canvas_preview(CanvasId::Vertical, scene.map(|scene| scene.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub fn switch_canvas_scene(
+        &self,
+        canvas: CanvasId,
+        at: Time,
+        scene: String,
+        mut transition: Transition,
+    ) -> Result<Option<(u32, f64)>, String> {
+        self.inner.control.prepare(&mut transition)?;
+        let state = self.inner.state.read();
+        if !state.setup.scenes.iter().any(|s| s.id == scene) {
+            return Err(format!(
+                "scene: no scene {scene:?}; scenes: {}",
+                state
+                    .setup
+                    .scenes
+                    .iter()
+                    .map(|scene| scene.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let output = self
+            .inner
+            .output(canvas)
+            .ok_or("vertical: canvas is not enabled")?;
+        if canvas == CanvasId::Vertical && output.follow_main.load(Ordering::SeqCst) {
+            return Err(
+                "vertical.follow_main: set false to switch the vertical canvas independently"
+                    .into(),
+            );
+        }
+        let placed = output
+            .control
+            .switch_scene(at, scene, transition)
+            .ok()
+            .flatten();
+        if canvas == CanvasId::Vertical {
+            let mut main = self.inner.control.state.lock();
+            main.changed = true;
+            return Ok(main.check_end(at).ok().and_then(|()| main.place(at)));
+        }
+        Ok(placed)
+    }
+
+    pub fn canvas_scene(&self, canvas: CanvasId) -> Option<String> {
+        let output = self.inner.output(canvas)?;
+        let control = if output.follow_main.load(Ordering::SeqCst) {
+            &self.inner.control
+        } else {
+            &output.control
+        };
+        control
+            .on_air(self.inner.platform.now())
+            .map(|on_air| on_air.scene.to_string())
     }
 
     /// The newest frame of `target` — [`PROGRAM`], `"preview"` (studio
@@ -880,7 +1096,7 @@ impl<P: Platform> Engine<P> {
         // The program and the preview are drawn only while someone asks:
         // an idle one has no picture until its next frame.
         Ok(match target {
-            PROGRAM | "preview" => wait_for_frame(&slot),
+            PROGRAM | "preview" | VERTICAL_PROGRAM | "vertical-preview" => wait_for_frame(&slot),
             scene if scene.starts_with(scene_feeds::PREFIX) => wait_for_frame(&slot),
             _ => slot.newest_timed(),
         })
@@ -914,9 +1130,9 @@ impl<P: Platform> Engine<P> {
                 let (jpeg, width, height) = platform
                     .encode_jpeg(&frame, max_width, quality)
                     .map_err(|err| format!("{err:#}"))?;
-                let stamp = matches!(target, PROGRAM | "preview")
-                    .then(|| frame_stream::stamp_at(&self.inner.drawn, at))
-                    .flatten();
+                let stamp = target_canvas(target)
+                    .and_then(|canvas| self.inner.output(canvas))
+                    .and_then(|output| frame_stream::stamp_at(&output.drawn, at));
                 return Ok(Some(JpegFrame {
                     seq: at.as_nanos().max(0) as u64,
                     width,
@@ -980,7 +1196,7 @@ impl<P: Platform> Engine<P> {
     ) -> Result<SharedFeed<P::SharedSurface>, String> {
         let fps = fps.clamp(1, 60);
         slot_of(&self.inner, target, fps)?;
-        let filters = (filtered && !matches!(target, PROGRAM | "preview")).then(|| {
+        let filters = (filtered && target_canvas(target).is_none()).then(|| {
             let (inner, id) = (self.inner.clone(), target.to_string());
             Box::new(move || {
                 let setup = inner.state.read().setup.clone();
@@ -1020,7 +1236,7 @@ impl<P: Platform> Engine<P> {
         settings.check_start(&setup).map_err(anyhow::Error::msg)?;
         let (width, height) = settings.size(&setup);
         let fps = setup.canvas.fps;
-        if settings.target == Target::Preview && self.inner.preview_scene.lock().is_none() {
+        if settings.target == Target::Preview && self.inner.main.preview_scene.lock().is_none() {
             bail!(
                 "virtual_camera.target: preview is empty; stage a scene with isocast preview ID, or choose program, scene or source"
             );
@@ -1053,7 +1269,7 @@ impl<P: Platform> Engine<P> {
                     bail!("virtual_camera: the engine stopped");
                 }
                 if settings.target == Target::Scene {
-                    return Ok(inner.scenes.latest().map(|scenes| {
+                    return Ok(inner.main.scenes.latest().map(|scenes| {
                         super::virtual_camera::Input::Scene(scenes, settings.scene.clone().unwrap())
                     }));
                 }
@@ -1095,15 +1311,44 @@ impl<P: Platform> Engine<P> {
     pub fn tap_program(&self, depth: usize) -> ProgramTap<P::Frame> {
         self.program_tap_source()
             .tap(depth, Arc::new(AtomicU64::new(0)))
+            .expect("the main canvas always exists")
     }
 
     pub(crate) fn program_tap_source(&self) -> ProgramTapSource<P> {
-        ProgramTapSource(self.inner.clone())
+        ProgramTapSource(self.inner.clone(), CanvasId::Main)
+    }
+
+    pub(crate) fn canvas_tap_source(&self, canvas: CanvasId) -> Result<ProgramTapSource<P>> {
+        if self.inner.output(canvas).is_none() {
+            bail!("vertical: canvas is not enabled");
+        }
+        Ok(ProgramTapSource(self.inner.clone(), canvas))
     }
 
     /// The program's shared encoders, for outputs that take it compressed.
     pub(crate) fn encoders(&self) -> &crate::stream::encoder::Encoders {
-        &self.inner.encoders
+        &self.inner.main.encoders
+    }
+
+    pub(crate) fn canvas_encoders(
+        &self,
+        canvas: CanvasId,
+    ) -> Result<&crate::stream::encoder::Encoders> {
+        self.inner
+            .output(canvas)
+            .map(|output| &output.encoders)
+            .ok_or_else(|| anyhow::anyhow!("vertical: canvas is not enabled"))
+    }
+
+    pub fn stream_canvas(
+        &self,
+        canvas: CanvasId,
+        id: &str,
+        settings: isocast_protocol::stream::StreamSettings,
+        key: String,
+        on_change: crate::stream::OnChange,
+    ) -> Result<crate::stream::Stream> {
+        crate::stream::start_canvas(self, canvas, id, settings, key, on_change)
     }
 
     /// Whether a recording is running.
@@ -1183,6 +1428,11 @@ fn statuses<P: Platform>(state: &State<P>) -> Vec<SourceStatus> {
 fn needed_sources(setup: &Setup) -> Vec<String> {
     let mut ids: Vec<&str> = Vec::new();
     ids.extend(setup.scenes.iter().flat_map(|s| s.all_sources()));
+    // Vertical layouts use the very same opened sources and frame slots.
+    let vertical = setup.for_canvas(CanvasId::Vertical);
+    if let Some(vertical) = &vertical {
+        ids.extend(vertical.scenes.iter().flat_map(|s| s.all_sources()));
+    }
     ids.extend(setup.recording.program.audio.iter().map(String::as_str));
     ids.extend(sidechain_sources(setup));
     let iso = &setup.recording.iso;
@@ -1214,13 +1464,48 @@ fn needed_sources(setup: &Setup) -> Vec<String> {
 /// frames are being recorded or streamed at the current size and rate.
 fn canvas_refusal<P: Platform>(inner: &Inner<P>, current: &Canvas, new: &Canvas) -> Option<String> {
     let canvas = |c: &Canvas| (c.width, c.height, c.fps);
-    (canvas(current) != canvas(new) && !inner.program_video.is_empty()).then(|| {
+    (canvas(current) != canvas(new) && !inner.main.program_video.is_empty()).then(|| {
         format!(
             "the canvas stays {}×{} at {} fps while recording, streaming or keeping a replay \
              buffer; change it once they stop",
             current.width, current.height, current.fps
         )
     })
+}
+
+fn setup_refusal<P: Platform>(
+    inner: &Inner<P>,
+    current: &Setup,
+    new: &Setup,
+) -> Option<isocast_protocol::Issue> {
+    if let Some(message) = canvas_refusal(inner, &current.canvas, &new.canvas) {
+        return Some(isocast_protocol::Issue {
+            path: "canvas".into(),
+            message,
+        });
+    }
+    let vertical_size = |setup: &Setup| setup.vertical.as_ref().map(|v| v.canvas(&setup.canvas));
+    if vertical_size(current) != vertical_size(new)
+        && (inner.vertical.get().is_some_and(|output| !output.program_video.is_empty())
+            // Recording has snapshotted its formats before routes are added
+            // (source opens, disk checks and encoder placement may still run).
+            || inner.recording.load(Ordering::SeqCst) && current.vertical.is_some())
+    {
+        return Some(isocast_protocol::Issue {
+            path: "vertical".into(),
+            message: "the canvas stays at its current size and fps while recording or streaming; change it once they stop".into(),
+        });
+    }
+    if inner.recording.load(Ordering::SeqCst)
+        && current.vertical.as_ref().map(|v| v.follow_main)
+            != new.vertical.as_ref().map(|v| v.follow_main)
+    {
+        return Some(isocast_protocol::Issue {
+            path: "vertical.follow_main".into(),
+            message: "change scene linking once the recording stops".into(),
+        });
+    }
+    None
 }
 
 /// The stinger videos `setup`'s transitions play.
@@ -1647,15 +1932,63 @@ fn publish<P: Platform>(inner: &Arc<Inner<P>>, state: &mut State<P>) {
             program_slots.push((stinger_id(file), video.slot.clone()));
         }
     }
-    inner.scenes.submit(SceneInput {
+    inner.main.scenes.submit(SceneInput {
         setup: setup.clone(),
         revision: state.revision,
-        slots: program_slots,
+        slots: program_slots.clone(),
     });
+
+    if let Some(vertical_setup) = setup.for_canvas(CanvasId::Vertical) {
+        let output = inner.vertical.get_or_init(|| {
+            CanvasOutput::new(
+                &inner.platform,
+                &inner.timeline,
+                Arc::new(SessionControl::with_data(inner.control.data().clone())),
+                &inner.on_event,
+            )
+        });
+        let follow = setup.vertical.as_ref().expect("vertical setup").follow_main;
+        let was_following = output.follow_main.swap(follow, Ordering::SeqCst);
+        if output
+            .control
+            .on_air(inner.platform.now())
+            .is_none_or(|on_air| !setup.scenes.iter().any(|scene| scene.id == *on_air.scene))
+            || (was_following && !follow)
+        {
+            let scene = inner
+                .control
+                .on_air(inner.platform.now())
+                .map(|on_air| on_air.scene.to_string())
+                .or_else(|| setup.scenes.first().map(|s| s.id.clone()));
+            if let Some(scene) = scene {
+                let _ =
+                    output
+                        .control
+                        .switch_scene(inner.platform.now(), scene, Transition::default());
+            }
+        }
+        output.enabled.store(true, Ordering::SeqCst);
+        if follow {
+            let preview = inner.main.preview_scene.lock().clone();
+            let mut staged = output.preview_scene.lock();
+            if *staged != preview {
+                output.preview.clear();
+                *staged = preview;
+            }
+        }
+        output.scenes.submit(SceneInput {
+            setup: Arc::new(vertical_setup),
+            revision: state.revision,
+            slots: program_slots,
+        });
+    }
 
     let control = &inner.control;
     let mut frames = slots;
-    frames.push((PROGRAM.to_string(), inner.program.clone()));
+    frames.push((PROGRAM.to_string(), inner.main.program.clone()));
+    if let Some(output) = inner.output(CanvasId::Vertical) {
+        frames.push((VERTICAL_PROGRAM.to_string(), output.program.clone()));
+    }
     control.set_frames(frames);
     *control.browsers.lock() = state
         .sources
@@ -1680,6 +2013,7 @@ fn publish<P: Platform>(inner: &Arc<Inner<P>>, state: &mut State<P>) {
     if inner.epoch().is_some() && !inner.stopping.load(Ordering::SeqCst) {
         ensure_mixer(inner, state);
         ensure_compositor(inner, state);
+        ensure_vertical_compositor(inner, state);
     }
 }
 
@@ -1798,7 +2132,7 @@ fn ensure_compositor<P: Platform>(inner: &Arc<Inner<P>>, state: &mut State<P>) {
     let canvas = &state.setup.canvas;
     let wanted = (canvas.width, canvas.height, canvas.fps);
     if let Some(run) = &state.compositor
-        && (run.canvas == wanted || !inner.program_video.is_empty())
+        && (run.canvas == wanted || !inner.main.program_video.is_empty())
     {
         return;
     }
@@ -1820,7 +2154,7 @@ fn ensure_compositor<P: Platform>(inner: &Arc<Inner<P>>, state: &mut State<P>) {
         let stop = stop.clone();
         move || {
             let _ = inner.worker("compositor", || {
-                run_program(&inner, compositor, wanted.2, &stop)
+                run_program(&inner, CanvasId::Main, compositor, wanted.2, &stop)
             });
         }
     });
@@ -1838,6 +2172,70 @@ fn stop_compositor(mut run: CompositorRun) {
     }
 }
 
+fn ensure_vertical_compositor<P: Platform>(inner: &Arc<Inner<P>>, state: &mut State<P>) {
+    let wanted = state
+        .setup
+        .vertical
+        .as_ref()
+        .map(|v| v.canvas(&state.setup.canvas));
+    if let (Some(run), Some(canvas)) = (&state.vertical_compositor, &wanted)
+        && run.canvas == (canvas.width, canvas.height, canvas.fps)
+    {
+        return;
+    }
+    if let Some(old) = state.vertical_compositor.take() {
+        stop_compositor(old);
+    }
+    let Some(output) = inner.vertical.get() else {
+        return;
+    };
+    let Some(canvas) = wanted else {
+        output.enabled.store(false, Ordering::SeqCst);
+        output.program.clear();
+        output.preview.clear();
+        output
+            .program_fps
+            .store(0.0f64.to_bits(), Ordering::Relaxed);
+        inner
+            .timeline
+            .set_on_air(CanvasId::Vertical, std::iter::empty(), inner.platform.now());
+        return;
+    };
+    let compositor = match Compositor::new(&inner.platform, (canvas.width, canvas.height)) {
+        Ok(compositor) => compositor,
+        Err(err) => {
+            let message = format!("could not set up the GPU for the vertical program: {err:#}");
+            output.program.stop(message.clone());
+            inner.event(EngineEvent::Warning(message));
+            return;
+        }
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread = thread::spawn({
+        let inner = inner.clone();
+        let stop = stop.clone();
+        let fps = canvas.fps;
+        move || {
+            let _ = inner.worker("vertical compositor", || {
+                run_program(&inner, CanvasId::Vertical, compositor, fps, &stop)
+            });
+        }
+    });
+    state.vertical_compositor = Some(CompositorRun {
+        stop,
+        thread: Some(thread),
+        canvas: (canvas.width, canvas.height, canvas.fps),
+    });
+}
+
+fn target_canvas(target: &str) -> Option<CanvasId> {
+    match target {
+        PROGRAM | "preview" => Some(CanvasId::Main),
+        VERTICAL_PROGRAM | "vertical-preview" => Some(CanvasId::Vertical),
+        _ => None,
+    }
+}
+
 /// Where a monitor stream finds `target`'s frames, asked for at `fps` (the
 /// program and the preview are drawn at least that often, on the canvas's
 /// frame grid, and say which setup revision each frame shows).
@@ -1850,19 +2248,16 @@ fn stream_source<P: Platform>(
         return Err("the live engine stopped".into());
     }
     let slot = slot_of(inner, target, fps)?;
-    let canvas = matches!(target, PROGRAM | "preview");
-    let grid = match canvas {
-        true => inner.epoch().zip(
-            inner
-                .state
-                .lock()
-                .compositor
-                .as_ref()
-                .map(|run| run.canvas.2),
-        ),
-        false => None,
-    };
-    let drawn = canvas.then(|| inner.drawn.clone());
+    let canvas = target_canvas(target);
+    let grid = canvas.and_then(|canvas| {
+        let state = inner.state.lock();
+        let run = match canvas {
+            CanvasId::Main => &state.compositor,
+            CanvasId::Vertical => &state.vertical_compositor,
+        };
+        inner.epoch().zip(run.as_ref().map(|run| run.canvas.2))
+    });
+    let drawn = canvas.and_then(|canvas| inner.output(canvas).map(|output| output.drawn.clone()));
     Ok(frame_stream::Source { slot, grid, drawn })
 }
 
@@ -1880,12 +2275,25 @@ fn slot_of<P: Platform>(
     // The program and the preview are drawn while they are asked for.
     inner.want(target, fps);
     match target {
-        PROGRAM => Ok(inner.program.clone()),
+        PROGRAM => Ok(inner.main.program.clone()),
         "preview" => {
-            if inner.preview_scene.lock().is_none() {
+            if inner.main.preview_scene.lock().is_none() {
                 return Err("nothing is staged in preview; stage a scene with `preview`".into());
             }
-            Ok(inner.preview.clone())
+            Ok(inner.main.preview.clone())
+        }
+        VERTICAL_PROGRAM | "vertical-preview" => {
+            let output = inner
+                .output(CanvasId::Vertical)
+                .ok_or("vertical: canvas is not enabled")?;
+            if target == "vertical-preview" {
+                if output.preview_scene.lock().is_none() {
+                    return Err("nothing is staged in vertical preview; stage a scene with `preview --canvas vertical`".into());
+                }
+                Ok(output.preview.clone())
+            } else {
+                Ok(output.program.clone())
+            }
         }
         id => {
             let state = inner.state.read();
@@ -1953,7 +2361,7 @@ fn scene_slot<P: Platform>(
         let spawned = isocast_diagnostics::spawn(
             "scene feeds",
             move || {
-                let scenes = || weak.upgrade().and_then(|inner| inner.scenes.latest());
+                let scenes = || weak.upgrade().and_then(|inner| inner.main.scenes.latest());
                 let stop = || {
                     weak.upgrade()
                         .is_none_or(|inner| inner.stopping.load(Ordering::SeqCst))
@@ -1983,6 +2391,7 @@ fn scene_slot<P: Platform>(
 /// still published at every tick.
 fn run_program<P: Platform>(
     inner: &Arc<Inner<P>>,
+    canvas: CanvasId,
     mut compositor: Compositor<P>,
     fps: u32,
     stop: &AtomicBool,
@@ -1990,12 +2399,22 @@ fn run_program<P: Platform>(
     let Some(epoch) = inner.epoch() else {
         return;
     };
+    let Some(output) = inner.output(canvas) else {
+        return;
+    };
     let platform = &inner.platform;
     platform.real_time_thread();
     compositor.set_epoch(epoch);
     let frame = Duration::from_secs(1) / fps;
     // The version of the compiled scenes the compositor draws.
-    let mut clock = inner.timeline.clocks.start("program".into(), frame);
+    let mut clock = inner.timeline.clocks.start(
+        match canvas {
+            CanvasId::Main => PROGRAM,
+            CanvasId::Vertical => VERTICAL_PROGRAM,
+        }
+        .into(),
+        frame,
+    );
     let mut version = 0;
     let mut warned = false;
     // The sources on air, kept between ticks.
@@ -2006,7 +2425,7 @@ fn run_program<P: Platform>(
     let first = platform.now().ticks_since(epoch, fps).max(0) as u64 + 1;
     // Where the frame rate is measured from: a time and the frames drawn
     // by then.
-    let mut window = (platform.now(), inner.frames_drawn.load(Ordering::Relaxed));
+    let mut window = (platform.now(), output.frames_drawn.load(Ordering::Relaxed));
     // What the compositor's inputs come from: the setup revision and the
     // layout generation.
     let mut stamp = frame_stream::Stamp {
@@ -2025,14 +2444,14 @@ fn run_program<P: Platform>(
         let now = platform.now();
         let elapsed = now.saturating_since(window.0);
         if elapsed >= Duration::from_secs(1) {
-            let drawn = inner.frames_drawn.load(Ordering::Relaxed);
+            let drawn = output.frames_drawn.load(Ordering::Relaxed);
             let rate = drawn.saturating_sub(window.1) as f64 / elapsed.as_secs_f64();
-            inner.program_fps.store(rate.to_bits(), Ordering::Relaxed);
+            output.program_fps.store(rate.to_bits(), Ordering::Relaxed);
             window = (now, drawn);
         }
         // One atomic load, unless the scenes changed.
-        if inner.scenes.version() != version
-            && let Some(scenes) = inner.scenes.latest()
+        if output.scenes.version() != version
+            && let Some(scenes) = output.scenes.latest()
             && scenes.version != version
         {
             let newest = scenes.version;
@@ -2045,16 +2464,20 @@ fn run_program<P: Platform>(
                 stamp = of;
             }
         }
-        let control = &inner.control;
+        let control = if output.follow_main.load(Ordering::SeqCst) {
+            &inner.control
+        } else {
+            &output.control
+        };
         let now = platform.now();
-        program_rates.ask(control.take_program_wanted(), fps, now);
-        preview_rates.ask(inner.preview_wanted.swap(0, Ordering::SeqCst), fps, now);
-        let outputs = !inner.program_video.is_empty();
+        program_rates.ask(output.control.take_program_wanted(), fps, now);
+        preview_rates.ask(output.preview_wanted.swap(0, Ordering::SeqCst), fps, now);
+        let outputs = !output.program_video.is_empty();
         let monitored = program_rates.any(now);
         let preview_wanted = preview_rates.any(now);
         if now > tick + 3 * frame {
             if outputs || monitored {
-                inner.frames_missed.fetch_add(1, Ordering::Relaxed);
+                output.frames_missed.fetch_add(1, Ordering::Relaxed);
             }
             continue;
         }
@@ -2064,7 +2487,7 @@ fn run_program<P: Platform>(
         if compositor.visible(on_air.as_ref(), ahead.as_ref(), tick, &mut on_air_sources) {
             inner
                 .timeline
-                .set_on_air(on_air_sources.iter().map(|id| &**id), tick);
+                .set_on_air(canvas, on_air_sources.iter().map(|id| &**id), tick);
         }
         if outputs || program_rates.draws(n, fps) {
             let draw_started = std::time::Instant::now();
@@ -2072,34 +2495,34 @@ fn run_program<P: Platform>(
                 Ok(Some((image, reused))) => {
                     gave = Some((reused, compositor.draws(), compositor.animated()));
                     // Before the frame, so whoever takes it finds its revision.
-                    frame_stream::drawn(&inner.drawn, tick, stamp);
-                    inner.program.push(image.clone(), tick);
-                    inner.program_video.video(&image, tick);
-                    inner.frames_drawn.fetch_add(1, Ordering::Relaxed);
+                    frame_stream::drawn(&output.drawn, tick, stamp);
+                    output.program.push(image.clone(), tick);
+                    output.program_video.video(&image, tick);
+                    output.frames_drawn.fetch_add(1, Ordering::Relaxed);
                 }
                 Ok(None) => {
-                    inner.frames_missed.fetch_add(1, Ordering::Relaxed);
+                    output.frames_missed.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(err) => {
-                    inner.frames_missed.fetch_add(1, Ordering::Relaxed);
+                    output.frames_missed.fetch_add(1, Ordering::Relaxed);
                     if !std::mem::replace(&mut warned, true) {
                         inner.event(EngineEvent::Warning(format!(
-                            "the program could not draw a frame: {err:#}"
+                            "the {canvas:?} program could not draw a frame: {err:#}"
                         )));
                     }
                 }
             }
-            inner
+            output
                 .timings
                 .lock()
                 .draw(draw_started.elapsed(), compositor.gpu_wait);
         } else if !monitored && !outputs {
             // Nothing wants the program: let its canvas go back to the pool.
-            inner.program.clear();
+            output.program.clear();
             compositor.forget(Feed::Program);
         }
         let scene = preview_wanted
-            .then(|| inner.preview_scene.lock().clone())
+            .then(|| output.preview_scene.lock().clone())
             .flatten();
         match scene {
             Some(scene) if preview_rates.draws(n, fps) => {
@@ -2107,12 +2530,12 @@ fn run_program<P: Platform>(
                 if let Ok(Some((image, _))) =
                     compositor.draw(Feed::Preview, Some(&staged), tick, tick + frame / 2)
                 {
-                    inner.preview.push(image, tick);
+                    output.preview.push(image, tick);
                 }
             }
             Some(_) => {}
             None => {
-                inner.preview.clear();
+                output.preview.clear();
                 compositor.forget(Feed::Preview);
             }
         }
@@ -2120,13 +2543,32 @@ fn run_program<P: Platform>(
             (gave, cpu, platform.thread_cpu_time())
         {
             let spent = to.saturating_sub(from);
-            inner.timings.lock().tick(spent, reused, draws, animated);
+            output.timings.lock().tick(spent, reused, draws, animated);
         }
         // Pictures of another size than layout took them to be: the scenes
         // are laid out again, and adopted at a coming tick.
         let resized = compositor.resized();
         if resized.len() > 0 {
-            inner.scenes.resized(resized);
+            output.scenes.resized(resized);
+        }
+    }
+}
+
+fn program_errors<P: Platform>(
+    inner: &Inner<P>,
+    plans: &[Arc<FilePlan>],
+    errors: &mut Vec<String>,
+) {
+    for canvas in [CanvasId::Main, CanvasId::Vertical] {
+        if plans.iter().any(|plan| plan.source == canvas.program())
+            && let Some(reason) = inner
+                .output(canvas)
+                .and_then(|output| output.program.stopped())
+        {
+            errors.push(format!(
+                "{}: {reason}; program output failed",
+                canvas.program()
+            ));
         }
     }
 }
@@ -2460,15 +2902,32 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     let mut warnings = Vec::new();
     let iso = &setup.recording.iso;
     let program = &setup.recording.program;
+    let vertical_setup = setup.for_canvas(CanvasId::Vertical);
+    let vertical_enabled = vertical_setup
+        .as_ref()
+        .is_some_and(|s| s.recording.program.enabled);
+    let vertical_output = inner.output(CanvasId::Vertical);
+    let vertical_control = vertical_enabled.then(|| {
+        if setup.vertical.as_ref().expect("vertical setup").follow_main {
+            &**control
+        } else {
+            &*vertical_output.expect("vertical output").control
+        }
+    });
     if program.enabled
-        && let Some(reason) = inner.program.stopped()
+        && let Some(reason) = inner.main.program.stopped()
     {
         bail!(
             "program output has failed: {reason}; stop the recording and restart the live engine"
         );
     }
+    if vertical_enabled
+        && let Some(reason) = vertical_output.and_then(|output| output.program.stopped())
+    {
+        bail!("vertical program output has failed: {reason}; restart the live engine");
+    }
     let iso_enabled = iso.enabled && !iso.sources.is_empty();
-    if !iso_enabled && !program.enabled {
+    if !iso_enabled && !program.enabled && !vertical_enabled {
         bail!(
             "nothing to record: set recording.program.enabled = true, or set \
              recording.iso.enabled = true and list video sources in recording.iso.sources"
@@ -2499,7 +2958,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 .map(String::as_str),
         );
     }
-    if program.enabled {
+    if program.enabled || vertical_enabled {
         required.extend(program.audio.iter().map(String::as_str));
     }
     let waiting_since = platform.now();
@@ -2717,7 +3176,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     let _warm = if setup.stream.is_some() || !setup.recording.replay.is_default() {
         let spec =
             crate::replay::encoder_spec(engine, &setup.recording.replay, setup.stream.as_ref());
-        match inner.encoders.warm(engine, &spec, &options.stop) {
+        match inner.main.encoders.warm(engine, &spec, &options.stop) {
             Ok(subscription) => Some(subscription),
             Err(error) => {
                 // A missing optional H.264 encoder must not prevent an otherwise
@@ -2736,6 +3195,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     // joins a placed session rather than stalling the writers.
     let _warm_destinations =
         crate::stream::warm_destinations(engine, setup, &options.stop, &mut warnings);
+    let _warm_vertical = crate::stream::warm_vertical(engine, setup, &options.stop, &mut warnings);
     if options.stop.load(Ordering::SeqCst) {
         bail!("the recording was stopped before it started, so nothing was recorded");
     }
@@ -2744,7 +3204,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     let iso_gpu = IsoGpu::default();
     let ycbcr_only = matches!(iso.encoder.codec, Codec::H264 | Codec::Hevc);
     let mut runners: BTreeMap<String, IsoRunner<P>> = BTreeMap::new();
-    for plan in plans.iter().filter(|plan| plan.source != PROGRAM) {
+    for plan in plans.iter().filter(|plan| !is_program(&plan.source)) {
         let id = plan.source.as_str();
         if runners.contains_key(id) {
             continue;
@@ -2802,8 +3262,12 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         let (tx, rx) = sync_channel(QUEUE_DEPTH);
         let missed_audio = Arc::new(AtomicU64::new(0));
         if plan.source == PROGRAM {
-            let key = inner.program_video.add(tx.clone(), 0, epoch, None);
-            routes.0.push((inner.program_video.clone(), key));
+            let key = inner.main.program_video.add(tx.clone(), 0, epoch, None);
+            routes.0.push((inner.main.program_video.clone(), key));
+        } else if plan.source == VERTICAL_PROGRAM {
+            let video = &vertical_output.expect("vertical output").program_video;
+            let key = video.add(tx.clone(), 0, epoch, None);
+            routes.0.push((video.clone(), key));
         } else if let Some(runner) = runners.get_mut(plan.source.as_str()) {
             runner.outputs.push(tx.clone());
         }
@@ -2848,11 +3312,17 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     // Frames captured before the recording don't count in its report.
     let mut counted: Vec<(String, Arc<FrameSlot<P::Frame>>)> = plans
         .iter()
-        .filter(|p| p.source != PROGRAM)
+        .filter(|p| !is_program(&p.source))
         .map(|p| (p.source.clone(), slots[&p.source].clone()))
         .collect();
     if program.enabled {
-        counted.push((PROGRAM.to_string(), inner.program.clone()));
+        counted.push((PROGRAM.to_string(), inner.main.program.clone()));
+    }
+    if vertical_enabled {
+        counted.push((
+            VERTICAL_PROGRAM.to_string(),
+            vertical_output.expect("vertical output").program.clone(),
+        ));
     }
     let captured_before: Vec<u64> = counted
         .iter()
@@ -2862,11 +3332,22 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     // Before the start is announced, so a split asked for as soon as it
     // is goes to this recording.
     control.begin_recording(epoch, clock.clone());
+    if let Some(vertical) = vertical_control
+        && !std::ptr::eq(vertical, &**control)
+    {
+        vertical.begin_recording(epoch, clock.clone());
+    }
     if let Some(duration) = options.duration {
         control.end_recording(epoch + duration);
+        if let Some(vertical) = vertical_control {
+            vertical.end_recording(epoch + duration);
+        }
     }
     // However the recording ends, a split asked for meanwhile is answered.
     let _finish = FinishRecording(control);
+    let _vertical_finish = vertical_control
+        .filter(|vertical| !std::ptr::eq(*vertical, &**control))
+        .map(FinishRecording);
     if let Some(on_start) = options.on_start {
         let paths: Vec<PathBuf> = plans.iter().map(|p| p.spec.path.clone()).collect();
         on_start(&paths, &first.manifest_path);
@@ -2876,7 +3357,15 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     let write = |take: &Take, status, errors: &[String]| {
         write_manifest(
             &take.manifest_path,
-            &take_manifest(platform, setup, take, status, errors, Some(control)),
+            &take_manifest(
+                platform,
+                setup,
+                take,
+                status,
+                errors,
+                Some(control),
+                vertical_control,
+            ),
         )
     };
     write(&takes[0], SessionStatus::Recording, &[])?;
@@ -2897,7 +3386,14 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 split_senders.push(split_tx);
                 let done = done_tx.clone();
                 let clock = clock.clone();
-                let source = slots.get(&plan.source).cloned();
+                // Program writers have producers too. If either compositor
+                // stops, its audio must not keep a dead video writer taking
+                // split handoffs whose first frame can never arrive.
+                let source = match plan.source.as_str() {
+                    PROGRAM => Some(inner.main.program.clone()),
+                    VERTICAL_PROGRAM => vertical_output.map(|output| output.program.clone()),
+                    id => slots.get(id).cloned(),
+                };
                 scope.spawn(move || {
                     platform.real_time_thread();
                     write_files(
@@ -2938,7 +3434,11 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 let now = platform.now();
                 if inner.emergency.load(Ordering::SeqCst)
                     || inner.state.is_broken()
-                    || inner.scenes.broken()
+                    || inner.main.scenes.broken()
+                    || inner
+                        .vertical
+                        .get()
+                        .is_some_and(|output| output.scenes.broken())
                 {
                     shared.stop_at(now.max(shared.epoch));
                     break;
@@ -3000,6 +3500,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                                 SessionStatus::Recording,
                                 errors,
                                 Some(control),
+                                vertical_control,
                             ),
                         )
                     } else {
@@ -3215,11 +3716,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                     if !take.finalized && take.results.iter().all(Option::is_some) {
                         take.finalized = true;
                         let mut errors = take.errors();
-                        if take.plans.iter().any(|p| p.source == PROGRAM)
-                            && let Some(reason) = inner.program.stopped()
-                        {
-                            errors.push(format!("program: {reason}; program output failed"));
-                        }
+                        program_errors(inner, &take.plans, &mut errors);
                         let manifest = take_manifest(
                             platform,
                             setup,
@@ -3227,6 +3724,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                             take.status(&errors),
                             &errors,
                             Some(control),
+                            vertical_control,
                         );
                         let _ = write_manifest(&take.manifest_path, &manifest);
                         take.manifest = Some(manifest);
@@ -3275,6 +3773,9 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 let end = shared.end();
                 if end != Time::MAX {
                     control.end_recording(end);
+                    if let Some(vertical) = vertical_control {
+                        vertical.end_recording(end);
+                    }
                 }
                 if now >= end {
                     break;
@@ -3317,7 +3818,11 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         let mut errors = coordinator.err().into_iter().collect::<Vec<_>>();
         if inner.emergency.load(Ordering::SeqCst)
             || inner.state.is_broken()
-            || inner.scenes.broken()
+            || inner.main.scenes.broken()
+            || inner
+                .vertical
+                .get()
+                .is_some_and(|output| output.scenes.broken())
         {
             errors.push(
                 "recording interrupted: broken shared state; writers finalized by emergency stop"
@@ -3365,11 +3870,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     let mut file_errors = Vec::new();
     for (i, take) in takes.iter_mut().enumerate() {
         let mut take_errors = take.errors();
-        if !take.finalized
-            && take.plans.iter().any(|p| p.source == PROGRAM)
-            && let Some(reason) = inner.program.stopped()
-        {
-            take_errors.push(format!("program: {reason}; program output failed"));
+        if !take.finalized {
+            program_errors(inner, &take.plans, &mut take_errors);
         }
         file_errors.extend(take_errors.iter().cloned());
         if i == last {
@@ -3385,6 +3887,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 take.status(&take_errors),
                 &take_errors,
                 Some(control),
+                vertical_control,
             );
             if let Err(err) = write_manifest(&take.manifest_path, &manifest) {
                 file_errors.push(format!("{err:#}"));

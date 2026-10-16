@@ -21,6 +21,19 @@ export global Ui {
     in property <int> canvas-width: 1920;
     in property <int> canvas-height: 1080;
     in property <int> canvas-fps: 30;
+    // The vertical canvas (#86): the setup has one, its size, its monitor
+    // shown beside the others (View → Vertical Canvas), and the editor
+    // edits it (the canvas-* above are then its).
+    in property <bool> has-vertical;
+    in property <int> vertical-width: 1080;
+    in property <int> vertical-height: 1920;
+    in-out property <bool> show-vertical: true;
+    in property <bool> editing-vertical;
+    // Which of two candidate layouts the vertical column uses (snapshots
+    // choose between them, `--state vertical-layout:wide|compact`; not
+    // saved): "wide" (up to 30% of the stage, as tall as the edited
+    // monitor) or "compact" (up to 20%, at most 60% of its height).
+    in-out property <string> vertical-layout: "compact";
     // Streaming (the program's LIVE badge and its green ring; recording
     // alone keeps PGM and the 1px ring).
     in property <bool> live;

@@ -265,7 +265,8 @@ impl Area for Sources {
                 let s = app.session.borrow();
                 s.editing_scene().and_then(|scene| {
                     let setup = s.setup.clone()?;
-                    let sc = setup_model::find_scene(&setup, &scene)?;
+                    let edited = s.edited_setup()?;
+                    let sc = setup_model::find_scene(edited, &scene)?;
                     let chain = setup_model::item_chain(sc, &path)?;
                     let source = chain[chain.len() - 1].source.clone()?;
                     Some((items::is_iso(&setup, &source), source))
@@ -1241,8 +1242,10 @@ fn show_lists(app: &Rc<App>) {
         SceneRow {
             id: scene.id.as_str().into(),
             name: name.into(),
-            on_air: s.scene.as_deref() == Some(&scene.id),
-            in_preview: s.preview.as_deref() == Some(&scene.id),
+            // On the canvas whose scenes are switched (the vertical one's
+            // own, #86).
+            on_air: s.on_air() == Some(&scene.id),
+            in_preview: s.staged() == Some(&scene.id),
             tooltip: if i < 9 {
                 format!("{name} ({})", i + 1)
             } else {
@@ -1254,9 +1257,12 @@ fn show_lists(app: &Rc<App>) {
     kit::update_rows(&app.sources.scene_rows, scenes.collect());
     let collapsed = app.sources.collapsed.borrow();
     let mut rows = Vec::new();
+    // The items of the canvas being edited (the vertical ones while editing
+    // it); sources and ISO files are the setup's own.
+    let edited = s.edited_setup().cloned().unwrap_or_else(|| setup.clone());
     if let Some(scene) = s
         .editing_scene()
-        .and_then(|id| setup_model::find_scene(&setup, &id))
+        .and_then(|id| setup_model::find_scene(&edited, &id))
     {
         // Top first, as OBS lists them; children under their group.
         struct Walk<'a> {
@@ -1660,16 +1666,20 @@ fn nudge(app: &Rc<App>, by: &str) {
     let locked = app
         .window()
         .is_some_and(|w| w.global::<Ui>().get_preview_locked());
-    let patch = app.session.borrow().selected(|scene, chain| {
+    // On the canvas being edited (the vertical one's items while editing
+    // it, #86).
+    let s = app.session.borrow();
+    let patch = s.selected(|scene, chain| {
         let item = chain[chain.len() - 1];
         // Items placed by their layout (no rect) aren't moved here.
         let rect = item.rect.filter(|_| !item.locked)?;
-        Some(setup_model::item_patch(
+        Some(s.canvas_item_patch(
             &scene.id,
             chain,
             json!({ "rect": { "x": rect.x as i64 + dx, "y": rect.y as i64 + dy } }),
         ))
     });
+    drop(s);
     if let Some(Some(patch)) = patch
         && !locked
     {

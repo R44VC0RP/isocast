@@ -6,7 +6,10 @@
 // and the control bar. In Studio Mode it splits into Preview (left,
 // edited) and Program (right), each with its own viewer line (a PREVIEW
 // or PROGRAM tag and the scene's name), and the studio column (area C)
-// between them, as in OBS.
+// between them, as in OBS. A vertical canvas (#86) adds its program in a
+// column of its own at the stage's right (a VERTICAL tag, its scene and a
+// menu over it); editing the vertical canvas puts it in the monitors
+// instead, and that column goes.
 
 import { Theme } from "../../theme.slint";
 import { Ui } from "../../state.slint";
@@ -15,9 +18,11 @@ import { CanvasArea } from "state.slint";
 import { Monitor } from "monitor.slint";
 import { StudioColumn } from "../controls/studio.slint";
 
-// The canvas's format: "1920×1080 · 30p".
+// The canvas's format: "1920×1080 · 30p" ("Vertical · 1080×1920 · 30p"
+// while editing the vertical canvas).
 global Format {
-    out property <string> canvas: Ui.canvas-width + "×" + Ui.canvas-height + " · " + Ui.canvas-fps + "p";
+    out property <string> canvas: (Ui.editing-vertical ? "Vertical · " : "") + Ui.canvas-width + "×" + Ui.canvas-height + " · " + Ui.canvas-fps + "p";
+    out property <string> vertical: Ui.vertical-width + "×" + Ui.vertical-height;
 }
 
 // A viewer line's small text (11px `text-3`).
@@ -172,6 +177,43 @@ component MonitorHead inherits Rectangle {
     }
 }
 
+// The vertical monitor's line (#86): its tag (VERTICAL, green while it
+// streams), its scene, and its menu (Vertical Canvas: show, edit, record,
+// stream, settings).
+component VerticalHead inherits Rectangle {
+    height: Theme.statusbar;
+    accessible-role: groupbox;
+    accessible-label: "Vertical " + CanvasArea.vertical-name;
+
+    HorizontalLayout {
+        padding-left: 2px;
+        padding-right: 2px;
+        spacing: Theme.space-2;
+        Tag {
+            text: CanvasArea.vertical-record ? "VERTICAL · REC" : "VERTICAL";
+            tone: CanvasArea.vertical-live ? TagTone.program : TagTone.neutral;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: CanvasArea.vertical-name;
+            color: Theme.text;
+            font-size: Theme.fs-sm;
+            font-weight: Theme.weight-medium;
+            letter-spacing: Theme.tracking-sm;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        VerticalLayout {
+            alignment: center;
+            TextMenuButton {
+                text: Format.vertical;
+                menu-open: Menus.open && Menus.owner == "viewer:vertical";
+                clicked => { Menus.request("viewer:vertical", self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+            }
+        }
+    }
+}
+
 export component Stage inherits Rectangle {
     // The edited monitor (the only one, or Studio Mode's preview), in
     // window coordinates (see Monitor).
@@ -199,6 +241,13 @@ export component Stage inherits Rectangle {
     out property <length> program-height: Ui.studio ? program.picture-height : 0;
     out property <int> program-pixel-width: program.picture-pixel-width;
     out property <int> program-pixel-height: program.picture-pixel-height;
+    // The vertical canvas's program picture (#86; zero size when hidden).
+    out property <length> vertical-x: vertical.picture-left;
+    out property <length> vertical-y: vertical.picture-top;
+    out property <length> vertical-width: root.v-shown ? vertical.picture-width : 0;
+    out property <length> vertical-height: root.v-shown ? vertical.picture-height : 0;
+    out property <int> vertical-pixel-width: vertical.picture-pixel-width;
+    out property <int> vertical-pixel-height: vertical.picture-pixel-height;
     // The whole stage (the native layers' area).
     out property <length> stage-x: root.absolute-position.x;
     out property <length> stage-y: root.absolute-position.y;
@@ -211,9 +260,18 @@ export component Stage inherits Rectangle {
     property <length> head: Theme.statusbar;
     property <bool> actual: Ui.preview-scale == "canvas";
     property <float> aspect: max(1, Ui.canvas-width) / max(1, Ui.canvas-height);
+    // The vertical column (#86): its picture as tall as the stage allows,
+    // at most 30% of the stage's width; the rest is the main stage's.
+    property <bool> v-shown: Ui.has-setup && Ui.has-vertical && Ui.show-vertical && !Ui.editing-vertical;
+    property <float> v-aspect: max(1, Ui.vertical-width) / max(1, Ui.vertical-height);
+    property <bool> v-compact: Ui.vertical-layout == "compact";
+    property <length> v-pic-w: min(root.width * (root.v-compact ? 0.2 : 0.3), max(0px, root.height - root.pad - root.head) * (root.v-compact ? 0.6 : 1) * root.v-aspect);
+    property <length> v-pic-h: root.v-pic-w / root.v-aspect;
+    property <length> v-column: root.v-shown ? root.v-pic-w + root.pad : 0px;
+    property <length> main-w: max(0px, root.width - root.v-column);
     // Studio Mode: each side's picture, as large as fits (or one canvas
     // pixel to a screen pixel).
-    property <length> side: max(0px, (root.width - 2 * root.pad - root.column - 2 * root.pad) / 2);
+    property <length> side: max(0px, (root.main-w - 2 * root.pad - root.column - 2 * root.pad) / 2);
     property <length> pic-w: root.actual ? max(1, Ui.canvas-width) * 1phx : min(root.side, max(0px, root.height - 2 * root.pad - root.head) * root.aspect);
     property <length> pic-h: root.pic-w / root.aspect;
     property <length> slot-y: (root.height - root.head - root.pic-h) / 2;
@@ -240,7 +298,7 @@ export component Stage inherits Rectangle {
         cache-rendering-hint: true;
         visible: !Ui.studio;
         y: 0;
-        width: root.width;
+        width: root.main-w;
         zoom: editor.scale * 1px / 1phx;
     }
 
@@ -250,13 +308,13 @@ export component Stage inherits Rectangle {
     editor := Monitor {
         x: Ui.studio ? root.pad + (root.side - root.pic-w) : root.pad;
         y: Ui.studio ? root.slot-y + root.head : root.head;
-        width: Ui.studio ? root.pic-w : max(0px, root.width - 2 * root.pad);
+        width: Ui.studio ? root.pic-w : max(0px, root.main-w - 2 * root.pad);
         height: Ui.studio ? root.pic-h : max(0px, root.height - root.head - root.pad);
         pad: Ui.studio ? 0 : 1px;
         actual-size: root.actual;
         editor: true;
         picture: CanvasArea.picture;
-        program-live: !Ui.studio && Ui.live;
+        program-live: !Ui.studio && (Ui.editing-vertical ? CanvasArea.vertical-live : Ui.live);
         empty-text: CanvasArea.empty-text;
         waiting: CanvasArea.waiting;
         error-text: CanvasArea.picture-error;
@@ -264,14 +322,14 @@ export component Stage inherits Rectangle {
 
     program := Monitor {
         visible: Ui.studio;
-        x: root.width - root.pad - root.side;
+        x: root.main-w - root.pad - root.side;
         y: root.slot-y + root.head;
         width: Ui.studio ? root.pic-w : 0;
         height: Ui.studio ? root.pic-h : 0;
         actual-size: root.actual;
         editor: false;
         picture: CanvasArea.program-picture;
-        program-live: Ui.live;
+        program-live: Ui.editing-vertical ? CanvasArea.vertical-live : Ui.live;
         empty-text: CanvasArea.program-empty-text;
         waiting: CanvasArea.program-waiting;
     }
@@ -297,6 +355,31 @@ export component Stage inherits Rectangle {
         name: CanvasArea.program-name;
         info: Format.canvas;
     }
+    // The vertical canvas's program: kept made and hidden (as Studio
+    // Mode's program is), its line over it; as tall as the edited monitor
+    // when the stage's height limits it, else centred.
+    property <length> v-head-y: max(0px, (root.height - root.pad - root.head - root.v-pic-h) / 2);
+    vertical := Monitor {
+        visible: root.v-shown;
+        x: root.main-w;
+        y: root.v-head-y + root.head;
+        width: root.v-shown ? root.v-pic-w : 0;
+        height: root.v-shown ? root.v-pic-h : 0;
+        canvas-width: max(1, Ui.vertical-width);
+        canvas-height: max(1, Ui.vertical-height);
+        label: "Vertical";
+        editor: false;
+        picture: CanvasArea.vertical-picture;
+        program-live: CanvasArea.vertical-live;
+        empty-text: CanvasArea.vertical-empty-text;
+        waiting: CanvasArea.vertical-waiting;
+    }
+    if root.v-shown: VerticalHead {
+        x: root.main-w;
+        y: root.v-head-y;
+        width: root.v-pic-w;
+    }
+
     if Ui.studio: StudioColumn {
         // Not cached: made again with Studio Mode (see app.slint, cache-docks).
         x: root.pad + root.side + root.pad;

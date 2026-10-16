@@ -19,7 +19,8 @@ use isocast_protocol::manifest::{
     SessionStatus,
 };
 use isocast_protocol::{
-    AudioSettings, Container, Filter, PROGRAM, PanLaw, Setup, Transition, TransitionKind,
+    AudioSettings, CanvasId, Container, Filter, PROGRAM, PanLaw, Setup, Transition, TransitionKind,
+    VERTICAL_PROGRAM,
 };
 
 pub use isocast_protocol::api::{
@@ -894,7 +895,12 @@ impl Shared {
 /// start, or nothing is recorded.
 pub fn record<P: Platform>(platform: &P, setup: &Setup, options: &RecordOptions) -> Result<Report> {
     let iso = &setup.recording.iso;
-    if !(iso.enabled && !iso.sources.is_empty()) && !setup.recording.program.enabled {
+    if !(iso.enabled && !iso.sources.is_empty())
+        && !setup.recording.program.enabled
+        && !setup
+            .for_canvas(CanvasId::Vertical)
+            .is_some_and(|s| s.recording.program.enabled)
+    {
         bail!(
             "nothing to record: set recording.program.enabled = true, or set \
              recording.iso.enabled = true and list video sources in recording.iso.sources"
@@ -1033,6 +1039,21 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
             program_audio.clone(),
         ));
     }
+    let vertical = setup.for_canvas(CanvasId::Vertical);
+    if let Some(vertical) = &vertical {
+        let program = &vertical.recording.program;
+        if program.enabled {
+            let (width, height) = program.size(&vertical.canvas);
+            files.push((
+                file_name(&program.filename, VERTICAL_PROGRAM, &now),
+                VERTICAL_PROGRAM.to_string(),
+                PROGRAM,
+                (width, height, vertical.canvas.fps),
+                &program.encoder,
+                program_audio,
+            ));
+        }
+    }
     let names: Vec<(String, &str)> = files
         .iter()
         .map(|(stem, _, _, _, encoder, _)| (stem.clone(), extension(encoder.container)))
@@ -1109,7 +1130,7 @@ fn create_writers<P: Platform>(platform: &P, plans: &[Arc<FilePlan>]) -> Result<
     for plan in plans {
         match platform.create_writer(&plan.spec) {
             Ok(mut writer) => {
-                if plan.source == PROGRAM {
+                if is_program(&plan.source) {
                     writer.prioritize_video();
                 }
                 writers.push(writer);
@@ -1121,6 +1142,10 @@ fn create_writers<P: Platform>(platform: &P, plans: &[Arc<FilePlan>]) -> Result<
         }
     }
     Ok(writers)
+}
+
+fn is_program(id: &str) -> bool {
+    matches!(id, PROGRAM | VERTICAL_PROGRAM)
 }
 
 /// Live counters for every file. A frame counts as dropped once a newer
@@ -1180,6 +1205,7 @@ fn take_manifest<P: Platform>(
     status: SessionStatus,
     errors: &[String],
     control: Option<&SessionControl>,
+    vertical_control: Option<&SessionControl>,
 ) -> SessionManifest {
     let finished = status != SessionStatus::Recording;
     let mapped = |at| control.map_or(at, |c| c.recording_time(at));
@@ -1258,6 +1284,11 @@ fn take_manifest<P: Platform>(
             .flatten(),
         markers,
         scenes,
+        vertical_scenes: vertical_control.map_or_else(Vec::new, |control| {
+            control
+                .timeline(take.epoch, take.end.unwrap_or(Time::MAX))
+                .1
+        }),
         pauses: control.map_or_else(Vec::new, |c| {
             let state = c.state.lock();
             state.clock.as_ref().map_or_else(Vec::new, |clock| {

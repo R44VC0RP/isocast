@@ -277,27 +277,46 @@ impl Daemon {
     fn document(&self, kind: LibraryKind, field: &str, id: &str) -> Result<Document, RpcError> {
         let (root, _) = self.library_view();
         check_exists(&root, kind, field, id)?;
-        {
+        let path = store::document_path(&root, kind, id);
+        let live = {
             let state = self.state.read();
             let in_use = state.file.current().is_some_and(|c| match kind {
                 LibraryKind::Collection => c.collection == id,
                 LibraryKind::Profile => c.profile == id,
             });
-            if in_use && let Some(setup) = &state.setup {
-                let profile_name = state
-                    .file
-                    .current_names(None)
-                    .1
-                    .map(|p| p.name)
-                    .unwrap_or_default();
-                let (collection, profile) = setup.clone().into_parts(&profile_name);
-                return Ok(match kind {
-                    LibraryKind::Collection => Document::Collection(collection),
-                    LibraryKind::Profile => Document::Profile(profile),
-                });
+            match &state.setup {
+                Some(setup) if in_use => {
+                    let profile_name = state
+                        .file
+                        .current_names(None)
+                        .1
+                        .map(|p| p.name)
+                        .unwrap_or_default();
+                    Some((
+                        setup.vertical.is_none(),
+                        setup.clone().into_parts(&profile_name),
+                    ))
+                }
+                _ => None,
             }
+        };
+        if let Some((parked, (collection, mut profile))) = live {
+            return Ok(match kind {
+                LibraryKind::Collection => Document::Collection(collection),
+                LibraryKind::Profile => {
+                    // The live setup has no vertical canvas (its collection
+                    // has none), but the saved profile keeps its vertical
+                    // frame rate, recording and stream for one that does
+                    // (`store::write` parks them): show them as saved.
+                    if parked && profile.vertical.is_none() {
+                        profile.vertical = store::read_profile(&path)
+                            .ok()
+                            .and_then(|saved| saved.vertical);
+                    }
+                    Document::Profile(profile)
+                }
+            });
         }
-        let path = store::document_path(&root, kind, id);
         let read = match kind {
             LibraryKind::Collection => store::read_document(&path).map(Document::Collection),
             LibraryKind::Profile => store::read_profile(&path).map(Document::Profile),
@@ -708,6 +727,7 @@ impl Daemon {
             }
         }
         .restore(&setup);
+        let vertical_before = crate::vertical_link(&state);
         // The live engine runs the new pair from its next frame: sources
         // open and close as for any change.
         if let Some(engine) = &state.engine {
@@ -737,6 +757,9 @@ impl Daemon {
             engine.set_preview(state.preview.clone());
         }
         let preview = state.preview.clone();
+        // A new collection's vertical canvas starts from its restored main
+        // scene and preview: ids the one before chose may mean other scenes.
+        let vertical_events = crate::sync_vertical(&mut state, vertical_before, collection_changed);
         drop(state);
         {
             let _files = self.saved.lock();
@@ -773,6 +796,9 @@ impl Daemon {
                 time_seconds: None,
                 transition: None,
             });
+        }
+        for event in vertical_events {
+            self.publish(event);
         }
         let (kind, id) = match (&params.collection, &params.profile) {
             (Some(id), None) => (Some(LibraryKind::Collection), Some(id.as_str())),
@@ -1025,6 +1051,7 @@ impl Daemon {
                     destination: None,
                     service: Some(stream.service),
                     server,
+                    canvas: isocast_protocol::CanvasId::Main,
                 },
             };
             match self.stream_key_set(params) {

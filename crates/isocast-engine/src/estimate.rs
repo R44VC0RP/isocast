@@ -11,7 +11,7 @@ use isocast_protocol::api::{
     OutputKind,
 };
 use isocast_protocol::change::merge_patch;
-use isocast_protocol::{Codec, PROGRAM, Setup, SourceKind};
+use isocast_protocol::{CanvasId, Codec, PROGRAM, Setup, SourceKind, VERTICAL_PROGRAM};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -239,7 +239,78 @@ fn codec_cost(codec: Codec) -> Option<f64> {
     }
 }
 
-fn judge(chip: &Chip, setup: &Setup, formats: Formats, streaming: bool) -> Judgement {
+/// Whether the setup has a vertical stream section.
+fn has_vertical_stream(setup: &Setup) -> bool {
+    setup.vertical.as_ref().is_some_and(|v| v.stream.is_some())
+}
+
+/// Whether streaming streams the main canvas: its `[stream]`, or (with no
+/// stream section anywhere, as before the vertical canvas) the stream it
+/// would get. A setup that only streams its vertical canvas has none.
+fn streams_main(setup: &Setup) -> bool {
+    match &setup.stream {
+        Some(stream) => {
+            stream.enabled
+                || stream
+                    .destinations
+                    .iter()
+                    .any(|destination| destination.enabled)
+        }
+        None => !has_vertical_stream(setup),
+    }
+}
+
+/// The vertical canvas's encodes (its program file and its stream's
+/// distinct formats), from the setup it sees. Its ISO sources are the
+/// main canvas's files, so none are counted here.
+fn vertical_outputs(
+    setup: &Setup,
+    streaming: bool,
+    push: &mut impl FnMut(String, OutputKind, (u32, u32, u32), Codec, bool),
+) {
+    let Some(vertical) = setup.for_canvas(CanvasId::Vertical) else {
+        return;
+    };
+    let fps = vertical.canvas.fps;
+    let program = &vertical.recording.program;
+    if program.enabled {
+        let (w, h) = program.size(&vertical.canvas);
+        push(
+            VERTICAL_PROGRAM.into(),
+            OutputKind::Program,
+            (w, h, fps),
+            program.encoder.codec,
+            false,
+        );
+    }
+    if streaming && let Some(stream) = &vertical.stream {
+        let canvas = (vertical.canvas.width, vertical.canvas.height);
+        for (i, encode) in stream.encodes(canvas).iter().enumerate() {
+            let name = if i == 0 {
+                "vertical-stream".to_string()
+            } else {
+                format!("vertical-stream:{}", encode.ids[0])
+            };
+            push(
+                name,
+                OutputKind::Stream,
+                (encode.width, encode.height, fps),
+                Codec::H264,
+                false,
+            );
+        }
+    }
+}
+
+/// `main_stream` and `vertical_stream` say which canvases stream (each
+/// only if it has something to stream).
+fn judge(
+    chip: &Chip,
+    setup: &Setup,
+    formats: Formats,
+    main_stream: bool,
+    vertical_stream: bool,
+) -> Judgement {
     let mut outputs = Vec::new();
     let mut push = |output: String,
                     kind: OutputKind,
@@ -273,7 +344,7 @@ fn judge(chip: &Chip, setup: &Setup, formats: Formats, streaming: bool) -> Judge
             false,
         );
     }
-    if streaming {
+    if main_stream && streams_main(setup) {
         // One encode per distinct format among the enabled destinations
         // (#73): the main one's is `stream`, others `stream:<id>`.
         let canvas = (setup.canvas.width, setup.canvas.height);
@@ -310,6 +381,7 @@ fn judge(chip: &Chip, setup: &Setup, formats: Formats, streaming: bool) -> Judge
             }
         }
     }
+    vertical_outputs(setup, vertical_stream, &mut push);
     if recording.iso.enabled {
         for id in &recording.iso.sources {
             let (w, h, f, assumed) = iso_format(setup, formats, id);
@@ -418,17 +490,18 @@ fn summary(judgement: &Judgement) -> String {
             "this Mac's encoders keep up with these files (the busiest engine at about {busiest})"
         ),
         Capacity::NoMargin => format!(
-            "this Mac's encoders keep up with these files with no margin (the busiest engine \
-             at about {busiest}): anything else using them, like a stream or a video call, may \
-             cost ISO frames"
+            "this Mac's encoders are predicted to keep up with these files with no margin \
+             (the busiest engine at about {busiest}): anything else using them, like a stream \
+             or a video call, may cost frames"
         ),
         Capacity::CannotKeepUp => {
             let iso = judgement.outputs.iter().any(|o| !o.protected);
             if iso {
                 format!(
                     "this Mac's encoders can't keep up with these files (the busiest engine at \
-                     about {busiest}): ISO files will drop at least {:.0}% of their frames so \
-                     the program and stream stay whole",
+                     about {busiest}): ISO files are shed first (estimated {:.0}% frame loss) \
+                     to prioritize program recordings and streams; those can also drop if \
+                     their own workload is too high",
                     judgement.iso_drop.max(1.0)
                 )
             } else {
@@ -563,7 +636,7 @@ fn options(setup: &Setup, formats: Formats, streaming: bool) -> Vec<Option_> {
             });
         }
     }
-    if streaming {
+    if streaming && streams_main(setup) {
         if setup.stream.is_some() {
             let (w, h) = stream_size(setup);
             let short = w.min(h);
@@ -588,6 +661,7 @@ fn options(setup: &Setup, formats: Formats, streaming: bool) -> Vec<Option_> {
             off: true,
         });
     }
+    out.extend(vertical_options(setup, streaming));
     let fps = setup.canvas.fps;
     if fps >= 48 && fps.is_multiple_of(2) {
         out.push(Option_ {
@@ -596,6 +670,84 @@ fn options(setup: &Setup, formats: Formats, streaming: bool) -> Vec<Option_> {
             method: None,
             cost: COST_CANVAS_RATE,
             target: "canvas".into(),
+            off: false,
+        });
+    }
+    out
+}
+
+/// Changes to the vertical canvas's own encodes, as patches of its
+/// `vertical` fields: its program's codec and size, its stream's size and
+/// its frame rate.
+fn vertical_options(setup: &Setup, streaming: bool) -> Vec<Option_> {
+    let mut out = Vec::new();
+    let Some(vertical) = setup.for_canvas(CanvasId::Vertical) else {
+        return out;
+    };
+    let program = &vertical.recording.program;
+    if program.enabled {
+        let table = table();
+        let to = match program.encoder.codec {
+            Codec::H264 if table.codec_cost.hevc < table.codec_cost.h264 => Some(("hevc", "HEVC")),
+            Codec::Hevc if table.codec_cost.h264 < table.codec_cost.hevc => Some(("h264", "H.264")),
+            _ => None,
+        };
+        if let Some((to, name)) = to {
+            out.push(Option_ {
+                description: format!("record the vertical program as {name}"),
+                patch: Some(json!({
+                    "vertical": { "recording": { "encoder": { "codec": to } } }
+                })),
+                method: None,
+                cost: COST_ISO_CODEC,
+                target: "vertical-program-codec".into(),
+                off: false,
+            });
+        }
+        let (cw, ch) = (vertical.canvas.width, vertical.canvas.height);
+        let (w, h) = program.size(&vertical.canvas);
+        let short = cw.min(ch);
+        for (step, side) in SIDES.iter().filter(|s| **s < w.min(h)).take(2).enumerate() {
+            let (nw, nh) = (scaled(cw, *side, short), scaled(ch, *side, short));
+            out.push(Option_ {
+                description: format!("record the vertical program at {nw}×{nh}"),
+                patch: Some(json!({
+                    "vertical": { "recording": { "width": nw, "height": nh } }
+                })),
+                method: None,
+                cost: COST_PROGRAM_SIZE * (step as u32 + 1),
+                target: VERTICAL_PROGRAM.into(),
+                off: false,
+            });
+        }
+    }
+    if streaming && vertical.stream.is_some() {
+        let (w, h) = stream_size(&vertical);
+        let short = w.min(h);
+        if short > 720 {
+            let (nw, nh) = (scaled(w, 720, short), scaled(h, 720, short));
+            out.push(Option_ {
+                description: format!("stream the vertical canvas at {nw}×{nh}"),
+                patch: Some(json!({ "vertical": { "stream": { "width": nw, "height": nh } } })),
+                method: None,
+                cost: COST_STREAM_SIZE,
+                target: "vertical-stream".into(),
+                off: false,
+            });
+        }
+    }
+    // Only a rate of its own: one it inherits halves with the main canvas's.
+    let own = setup.vertical.as_ref().and_then(|v| v.fps);
+    if let Some(fps) = own
+        && fps >= 48
+        && fps.is_multiple_of(2)
+    {
+        out.push(Option_ {
+            description: format!("record and stream the vertical canvas at {} fps", fps / 2),
+            patch: Some(json!({ "vertical": { "fps": fps / 2 } })),
+            method: None,
+            cost: COST_CANVAS_RATE,
+            target: "vertical-canvas".into(),
             off: false,
         });
     }
@@ -660,16 +812,22 @@ fn try_options(
             },
             None => setup.clone(),
         };
+        // `stream_stop` stops the main canvas's streams only.
         let streams = streaming && method != Some("stream_stop");
-        let judgement = judge(chip, &changed, formats, streams);
+        let judgement = judge(chip, &changed, formats, streams, streaming);
         if judgement.outputs.iter().all(|o| o.pixels_per_second == 0.0)
             && !judgement.outputs.is_empty()
         {
             continue;
         }
         let touches = |key: &str| patch.as_ref().is_some_and(|p| p.get(key).is_some());
-        let after_take =
-            recording && patch.is_some() || touches("canvas") && streaming && method.is_none();
+        // A canvas's rate holds while it streams.
+        let vertical_rate = patch
+            .as_ref()
+            .and_then(|p| p.get("vertical"))
+            .is_some_and(|v| v.get("fps").is_some());
+        let after_take = recording && patch.is_some()
+            || (touches("canvas") || vertical_rate) && streaming && method.is_none();
         tried.push((
             combo.iter().map(|o| o.cost).sum(),
             combo.len(),
@@ -763,7 +921,7 @@ fn admission(
             "add_iso: turning on {id:?}'s ISO file leaves an invalid setup"
         ));
     };
-    let full = judge(chip, &added, formats, streaming);
+    let full = judge(chip, &added, formats, streaming, streaming);
     if full.capacity != Capacity::CannotKeepUp {
         let (w, h, fps, _) = iso_format(&added, formats, id);
         return Ok(IsoAdmission {
@@ -830,7 +988,13 @@ fn admission(
 pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstimate, String> {
     let chip = chip(&inputs.machine.chip);
     let setup = inputs.setup;
-    let mut judgement = judge(&chip, setup, inputs.formats, inputs.streaming);
+    let mut judgement = judge(
+        &chip,
+        setup,
+        inputs.formats,
+        inputs.streaming,
+        inputs.streaming,
+    );
     let mut measured = None;
     if let Some((memory, machine)) = inputs.memory {
         let workload = capacity::workload(setup, |id| {
@@ -934,7 +1098,13 @@ pub fn check<P: crate::Platform>(
     memory: Option<(&Memory, &str)>,
 ) -> Option<isocast_protocol::api::Check> {
     use isocast_protocol::api::{Check, CheckStatus};
+    let vertical_program = setup
+        .vertical
+        .as_ref()
+        .and_then(|v| v.recording.as_ref())
+        .is_some_and(|r| r.enabled);
     let has_video = setup.recording.program.enabled
+        || vertical_program
         || (setup.recording.iso.enabled && !setup.recording.iso.sources.is_empty());
     if !has_video {
         return None;
@@ -957,7 +1127,8 @@ pub fn check<P: crate::Platform>(
         .ok()
     };
     let recording = run(false)?;
-    let streaming = setup.stream.as_ref().and_then(|_| run(true));
+    let streams = setup.stream.is_some() || has_vertical_stream(setup);
+    let streaming = if streams { run(true) } else { None };
     let worst = match &streaming {
         Some(s) if s.load > recording.load => s,
         _ => &recording,

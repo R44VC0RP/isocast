@@ -973,6 +973,8 @@ impl Settings {
             }
             "canvas_width" => json!({"canvas": {"width": whole}}),
             "canvas_height" => json!({"canvas": {"height": whole}}),
+            "vertical_width" => json!({"vertical": {"width": whole}}),
+            "vertical_height" => json!({"vertical": {"height": whole}}),
             "reconnect_delay" => json!({"stream": {"reconnect": {"delay_seconds": whole}}}),
             "reconnect_retries" => json!({"stream": {"reconnect": {"max_retries": whole}}}),
             _ => return,
@@ -991,6 +993,59 @@ impl Settings {
             "iso_filtered" => json!({"recording": {"iso": {"filtered": on}}}),
             "reconnect" => json!({"stream": {"reconnect": {"enabled": on}}}),
             "developer" => json!({"developer": {"enabled": on}}),
+            // The vertical canvas (#86): back as saved, else 1080×1920
+            // following the main canvas's scenes; or none.
+            "vertical" if on => {
+                let saved = self
+                    .draft
+                    .borrow()
+                    .as_ref()
+                    .map(|d| d.base["vertical"].clone())
+                    .filter(Value::is_object);
+                json!({"vertical": saved.unwrap_or_else(|| json!({
+                    "width": 1080, "height": 1920, "follow_main": true,
+                }))})
+            }
+            // Never drops scenes' own vertical layouts with it (the engine
+            // refuses that too): say which, and how to put them back on
+            // the main layout first.
+            "vertical" => {
+                let own: Vec<String> = app
+                    .session
+                    .borrow()
+                    .setup
+                    .as_ref()
+                    .map(|setup| {
+                        setup
+                            .scenes
+                            .iter()
+                            .filter(|scene| scene.vertical.is_some())
+                            .map(|scene| format!("“{}”", crate::model::scene_name(scene)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !own.is_empty() {
+                    if let Some(d) = self.draft.borrow_mut().as_mut() {
+                        d.refused = format!(
+                            "The vertical canvas stays on: {} {} a vertical layout of {} own. \
+                             To keep nothing you’d lose, put each back on the main layout \
+                             first (View › Vertical Canvas › Use Main Layout for This Scene, \
+                             while editing the vertical canvas).",
+                            own.join(", "),
+                            if own.len() == 1 { "has" } else { "have" },
+                            if own.len() == 1 { "its" } else { "their" },
+                        );
+                    }
+                    return self.show(app);
+                }
+                if let Some(d) = self.draft.borrow_mut().as_mut() {
+                    d.refused.clear();
+                }
+                json!({"vertical": null})
+            }
+            "vertical_follow" => json!({"vertical": {"follow_main": on}}),
+            // Kept when off, with its file name and encoder.
+            "vertical_record" => json!({"vertical": {"recording": {"enabled": on}}}),
             // Back on: the hours it had (a custom `auto_off_hours` too).
             "developer_auto_off" => json!({"developer": {"auto_off_hours": if on {
                 self.auto_off_hours()
@@ -1250,6 +1305,7 @@ impl Settings {
             destination: (id != MAIN_DESTINATION).then_some(id),
             service: Some(service),
             server,
+            canvas: isocast_protocol::CanvasId::Main,
         })
     }
 
@@ -1736,6 +1792,15 @@ impl Settings {
             kit::option(&f, &f, "")
         })));
         area.set_fps(fps.to_string().into());
+        let vertical = &draft["vertical"];
+        area.set_vertical_on(vertical.is_object());
+        area.set_vertical_width(vertical["width"].as_u64().unwrap_or(1080) as f32);
+        area.set_vertical_height(vertical["height"].as_u64().unwrap_or(1920) as f32);
+        area.set_vertical_follow(vertical["follow_main"].as_bool() != Some(false));
+        area.set_vertical_record(
+            vertical["recording"].is_object()
+                && vertical["recording"]["enabled"].as_bool() != Some(false),
+        );
 
         // Advanced
         let reconnect = &stream["reconnect"];
@@ -2255,6 +2320,10 @@ fn pick(setup: &Value) -> Value {
     });
     if setup["stream"].is_object() {
         out["stream"] = setup["stream"].clone();
+    }
+    // The vertical canvas (#86); absent without one.
+    if setup["vertical"].is_object() {
+        out["vertical"] = setup["vertical"].clone();
     }
     // Developer mode (Advanced), the profile's; absent while it is off.
     if setup["developer"].is_object() {

@@ -16,7 +16,7 @@ use isocast_protocol::api::{AudioLevel, SourceStatus, Status};
 use isocast_protocol::change::merge_patch;
 use isocast_protocol::devices::Devices;
 use isocast_protocol::stream::StreamStatus;
-use isocast_protocol::{Scene, SceneItem, Setup};
+use isocast_protocol::{CanvasId, Scene, SceneItem, Setup};
 use serde_json::Value;
 
 use crate::app::App;
@@ -176,15 +176,34 @@ pub struct Session {
     pub stream: Option<StreamStatus>,
     /// Each stream destination's own status, the main one first (#73).
     pub streams: Vec<StreamStatus>,
+    /// The vertical canvas's stream destinations (#86), kept apart so the
+    /// main canvas's stream shows only its own.
+    pub vertical_streams: Vec<StreamStatus>,
+    /// Starting or stopping the vertical canvas's stream.
+    pub busy_vertical_stream: bool,
     pub devices: Option<Devices>,
     /// The live engine's sources by id.
     pub running: HashMap<String, SourceStatus>,
     /// The newest audio levels by source id ("program" for the mix).
     pub levels: HashMap<String, AudioLevel>,
     pub scene: Option<String>,
+    /// The scene on air on the vertical canvas (Status; the main one's
+    /// while it follows the main canvas).
+    pub vertical_scene: Option<String>,
+    /// The scene in the vertical canvas's own preview (Studio Mode).
+    pub vertical_preview: Option<String>,
     pub preview: Option<String>,
     pub studio: bool,
     pub selection: Option<Selection>,
+    /// The canvas editor edits the vertical canvas (#86), while the setup
+    /// has one (else the main canvas, as without this).
+    pub vertical_edit: bool,
+    /// The setup shown as its vertical canvas (`Setup::for_canvas`): its
+    /// size and each scene's vertical items (or the main ones it falls
+    /// back to). None without a vertical canvas.
+    pub vertical: Option<Rc<Setup>>,
+    /// `shown` as the vertical canvas edits it (see `canvas_json`).
+    pub(crate) vertical_shown: Option<Value>,
     pub busy_record: bool,
     pub busy_stream: bool,
     /// The virtual camera, from Status and `virtual_camera` events.
@@ -226,9 +245,9 @@ impl Session {
     pub fn editing_scene(&self) -> Option<String> {
         let setup = self.setup.as_ref()?;
         let wanted = if self.studio {
-            self.preview.as_ref().or(self.scene.as_ref())
+            self.staged().or(self.on_air())
         } else {
-            self.scene.as_ref()
+            self.on_air()
         };
         match wanted {
             Some(id) if model::find_scene(setup, id).is_some() => Some(id.clone()),
@@ -236,11 +255,103 @@ impl Session {
         }
     }
 
-    /// The selected item's scene and chain (top level down), if it still
-    /// exists in the setup shown.
+    /// Whether the canvas editor edits the vertical canvas.
+    pub fn editing_vertical(&self) -> bool {
+        self.vertical_edit && self.vertical.is_some()
+    }
+
+    /// The canvas whose items edits change (see `App::edit`).
+    pub fn edit_canvas(&self) -> CanvasId {
+        if self.editing_vertical() {
+            CanvasId::Vertical
+        } else {
+            CanvasId::Main
+        }
+    }
+
+    /// The vertical canvas has scenes of its own on air (it doesn't
+    /// follow the main canvas's).
+    pub fn vertical_independent(&self) -> bool {
+        self.setup
+            .as_ref()
+            .and_then(|x| x.vertical.as_ref())
+            .is_some_and(|v| !v.follow_main)
+    }
+
+    /// The canvas whose scenes the Scenes dock and Studio Mode switch:
+    /// the vertical one while editing it and it has scenes of its own,
+    /// else the main one (which the vertical canvas follows).
+    pub fn scene_canvas(&self) -> CanvasId {
+        if self.editing_vertical() && self.vertical_independent() {
+            CanvasId::Vertical
+        } else {
+            CanvasId::Main
+        }
+    }
+
+    /// The scene on air on the canvas whose scenes are switched.
+    pub fn on_air(&self) -> Option<&String> {
+        match self.scene_canvas() {
+            CanvasId::Vertical => self.vertical_scene.as_ref(),
+            CanvasId::Main => self.scene.as_ref(),
+        }
+    }
+
+    /// The scene in its preview (Studio Mode).
+    pub fn staged(&self) -> Option<&String> {
+        match self.scene_canvas() {
+            CanvasId::Vertical => self.vertical_preview.as_ref(),
+            CanvasId::Main => self.preview.as_ref(),
+        }
+    }
+
+    /// The setup shown as JSON as the canvas editor and the Sources dock
+    /// edit it: while editing the vertical canvas each scene's vertical
+    /// items (the main ones where it has none of its own) and the vertical
+    /// canvas's size; else the setup shown. Only for reading items: whole
+    /// setups written back come from [`Session::setup_json`].
+    pub fn canvas_json(&self) -> Option<&Value> {
+        if self.editing_vertical() {
+            self.vertical_shown.as_ref()
+        } else {
+            self.shown.as_ref()
+        }
+    }
+
+    /// The setup the canvas editor shows and edits: the vertical canvas's
+    /// while editing it, else the setup shown.
+    pub fn edited_setup(&self) -> Option<&Rc<Setup>> {
+        if self.editing_vertical() {
+            self.vertical.as_ref()
+        } else {
+            self.setup.as_ref()
+        }
+    }
+
+    /// The newest confirmed setup as the canvas editor edits it (its
+    /// vertical canvas while editing that).
+    pub fn confirmed_edited(&self) -> Option<Rc<Setup>> {
+        let setup = self.confirmed_setup()?;
+        if self.editing_vertical() {
+            setup.for_canvas(CanvasId::Vertical).map(Rc::new)
+        } else {
+            Some(setup)
+        }
+    }
+
+    /// A patch changing `fields` of the item at the end of `chain` in scene
+    /// `scene`. Sent with `App::edit`, it changes the canvas being edited
+    /// (see [`model::route_vertical`]).
+    pub fn canvas_item_patch(&self, scene: &str, chain: &[&SceneItem], fields: Value) -> Value {
+        model::item_patch(scene, chain, fields)
+    }
+
+    /// The selected item's scene and chain (top level down) on the canvas
+    /// being edited (the vertical items while editing the vertical canvas),
+    /// if it still exists in the setup shown.
     pub fn selected<R>(&self, f: impl FnOnce(&Scene, &[&SceneItem]) -> R) -> Option<R> {
         let selection = self.selection.as_ref()?;
-        let setup = self.setup.as_ref()?;
+        let setup = self.edited_setup()?;
         let scene = model::find_scene(setup, &selection.scene)?;
         let chain = model::item_chain(scene, &selection.path)?;
         Some(f(scene, &chain))
@@ -297,6 +408,15 @@ impl Session {
             },
             None => None,
         };
+        self.vertical = self
+            .setup
+            .as_ref()
+            .and_then(|setup| setup.for_canvas(CanvasId::Vertical))
+            .map(Rc::new);
+        self.vertical_shown = value
+            .as_ref()
+            .filter(|_| self.vertical.is_some())
+            .map(model::vertical_view);
         self.shown = value;
     }
 
@@ -357,6 +477,13 @@ impl Session {
 
     /// One destination's status changed (a `stream` event).
     pub fn set_stream(&mut self, status: StreamStatus) {
+        if !status.canvas.is_main() {
+            match self.vertical_streams.iter_mut().find(|s| s.id == status.id) {
+                Some(slot) => *slot = status,
+                None => self.vertical_streams.push(status),
+            }
+            return;
+        }
         match self.streams.iter_mut().find(|s| s.id == status.id) {
             Some(slot) => *slot = status,
             None => self.streams.push(status),

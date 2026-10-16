@@ -8,7 +8,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::Issues;
+use crate::{CanvasId, Issues};
 
 /// Streaming the program (the canvas and the program mix) to a service
 /// over RTMP or RTMPS, as H.264 and AAC.
@@ -339,6 +339,24 @@ impl StreamSettings {
         out
     }
 
+    /// Every destination of this section as the canvas `canvas` streams
+    /// it: as [`resolve`](Self::resolve), with the canvas's own Keychain
+    /// accounts (see [`canvas_key_account`]).
+    pub fn resolve_canvas(&self, canvas: CanvasId) -> Vec<Destination> {
+        let mut out = self.resolve();
+        if !canvas.is_main() {
+            for destination in &mut out {
+                destination.key_account = canvas_key_account(
+                    canvas,
+                    &destination.id,
+                    destination.settings.service,
+                    destination.settings.server.as_deref(),
+                );
+            }
+        }
+        out
+    }
+
     /// The destination `id`, if there is one.
     pub fn destination(&self, id: &str) -> Option<Destination> {
         self.resolve().into_iter().find(|d| d.id == id)
@@ -573,6 +591,24 @@ pub fn destination_key_account(id: &str, service: StreamService, server: Option<
     }
 }
 
+/// The Keychain account for destination `id`'s key on `canvas`: on the
+/// main canvas [`destination_key_account`]'s, unchanged. The vertical
+/// namespace is a prefix that no preset name or valid RTMP(S) URL can
+/// begin with. A suffix is not safe: a custom application's path can
+/// contain it and collide with another canvas's account.
+pub fn canvas_key_account(
+    canvas: CanvasId,
+    id: &str,
+    service: StreamService,
+    server: Option<&str>,
+) -> String {
+    if canvas.is_main() {
+        return destination_key_account(id, service, server);
+    }
+    let base = key_account(service, server);
+    format!("canvas:vertical:{id}:{base}")
+}
+
 /// A size sent, given as `{prefix}.width` and `.height`.
 fn check_size(prefix: &str, width: Option<u32>, height: Option<u32>, issues: &mut Issues) {
     match (width, height) {
@@ -723,6 +759,10 @@ pub struct StreamStatus {
     /// the id of one of its `destinations`.
     #[serde(default = "main_id")]
     pub id: String,
+    /// Which canvas it streams: absent for the main one, `vertical` for
+    /// the vertical canvas's (`[vertical.stream]`), whose ids are its own.
+    #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+    pub canvas: CanvasId,
     /// Whether `stream start` (without `only`) streams to it.
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -812,6 +852,7 @@ impl StreamStatus {
     pub fn offline(settings: &StreamSettings, key_set: bool) -> Self {
         Self {
             id: main_id(),
+            canvas: CanvasId::default(),
             enabled: settings.enabled,
             state: StreamState::Offline,
             service: settings.service,
@@ -976,6 +1017,22 @@ mod tests {
         assert_eq!(youtube.key_account(), "youtube");
         let custom = settings(StreamService::Custom, Some("rtmp://Host:1935/live/"));
         assert_eq!(custom.key_account(), "rtmp://host/live");
+        // A custom application's name can contain the old canvas suffix;
+        // it must not select another canvas's credential account.
+        let named_like_canvas = settings(
+            StreamService::Custom,
+            Some("rtmp://host/live [vertical canvas]"),
+        );
+        assert!(named_like_canvas.server().is_ok());
+        assert_ne!(
+            named_like_canvas.key_account(),
+            canvas_key_account(
+                CanvasId::Vertical,
+                MAIN_DESTINATION,
+                custom.service,
+                custom.server.as_deref()
+            )
+        );
         assert!(settings(StreamService::Custom, None).server().is_err());
         let kick = settings(
             StreamService::Kick,

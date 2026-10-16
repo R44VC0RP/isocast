@@ -17,7 +17,7 @@ use isocast_engine::hotkeys::GlobalHotkeys;
 use isocast_engine::hotkeys::{Edge, Key};
 use isocast_protocol::Setup;
 use isocast_protocol::api::{
-    ApplyParams, Event, Method, Request, RpcError, SnapshotParams, StartParams,
+    ApplyParams, Event, Method, Request, RpcError, SnapshotParams, StartParams, StreamStartParams,
 };
 use isocast_protocol::change::Change;
 use isocast_protocol::hotkeys::{
@@ -635,15 +635,6 @@ impl Daemon {
                     }
                 }
                 "recording.split" => Method::Split,
-                "streaming.start" => Method::StreamStart(None),
-                "streaming.stop" => Method::StreamStop(None),
-                "streaming.toggle" => {
-                    if self.state.read().streaming() {
-                        Method::StreamStop(None)
-                    } else {
-                        Method::StreamStart(None)
-                    }
-                }
                 "replay.start" => Method::ReplayStart,
                 "replay.stop" => Method::ReplayStop,
                 "replay.save" => Method::ReplaySave,
@@ -654,7 +645,6 @@ impl Daemon {
                         Method::ReplayStart
                     }
                 }
-                "transition.take" => Method::Take { transition: None },
                 "timeline.close" => Method::TimelineClose,
                 "studio.toggle" => {
                     let mut state = self.state.lock();
@@ -672,14 +662,36 @@ impl Daemon {
                             .clone()
                             .ok_or_else(|| invalid("studio.toggle: no program scene"))?;
                         drop(state);
-                        self.preview(scene)?;
+                        self.preview(scene, isocast_protocol::CanvasId::Main)?;
                     }
                     return Ok(());
                 }
                 _ => return Err(invalid(format!("action: {action} is not available"))),
             },
+            // A canvas's streams; the main one's unless args say vertical
+            // (as before canvases, with no args).
+            Arguments::Stream(args) => {
+                let canvas = args.canvas;
+                let params = |canvas: isocast_protocol::CanvasId| {
+                    (!canvas.is_main()).then(|| StreamStartParams {
+                        canvas,
+                        ..Default::default()
+                    })
+                };
+                let stop = match action {
+                    "streaming.start" => false,
+                    "streaming.stop" => true,
+                    "streaming.toggle" => self.state.read().streaming_on(canvas),
+                    _ => return Err(invalid(format!("action: {action} is not available"))),
+                };
+                if stop {
+                    Method::StreamStop(params(canvas))
+                } else {
+                    Method::StreamStart(params(canvas))
+                }
+            }
             Arguments::Marker(args) => Method::Marker { label: args.label },
-            Arguments::Scene(args) => self.hotkey_scene(action, args.scene),
+            Arguments::Scene(args) => self.hotkey_scene(action, args.scene, args.canvas),
             Arguments::Index(args) => {
                 let state = self.state.read();
                 let ids = state.scene_ids();
@@ -695,7 +707,7 @@ impl Daemon {
                     })?
                     .clone();
                 drop(state);
-                self.hotkey_scene(action, scene)
+                self.hotkey_scene(action, scene, isocast_protocol::CanvasId::Main)
             }
             Arguments::Source(args) => {
                 if binding.hold() {
@@ -753,13 +765,18 @@ impl Daemon {
                 return self.hotkey_patch(json!({"scenes":[{"id":args.scene,"items":items}]}));
             }
             Arguments::Transition(args) => {
-                if action == "transition.set" {
-                    return self.hotkey_patch(json!({"transition":args.transition}));
-                }
-                Method::Take {
-                    transition: Some(args.transition),
-                }
+                return self.hotkey_patch(json!({"transition":args.transition}));
             }
+            // A canvas's preview on air; the main one's unless args say
+            // vertical (as before canvases, with no canvas).
+            Arguments::Take(args) => Method::Take {
+                transition: None,
+                canvas: args.canvas,
+            },
+            Arguments::TakeWith(args) => Method::Take {
+                transition: Some(args.transition),
+                canvas: args.canvas,
+            },
             Arguments::Id(args) => Method::LibrarySwitch(LibrarySwitchParams {
                 profile: (action == "profile.switch").then_some(args.id.clone()),
                 collection: (action == "collection.switch").then_some(args.id),
@@ -817,6 +834,11 @@ impl Daemon {
                 error.message = format!("args.{}", hotkeys::bounded(&error.message, 2048));
                 return Err(error);
             }
+            // A canvas that can't do it (none, or following the main one).
+            if error.message.starts_with("canvas: ") {
+                error.message = format!("args.{}", hotkeys::bounded(&error.message, 2048));
+                return Err(error);
+            }
             let field = match action {
                 "scene.switch" | "scene.preview" => "args.scene",
                 "scene.switch_index" | "scene.preview_index" => "args.index",
@@ -829,13 +851,29 @@ impl Daemon {
         })
     }
 
-    fn hotkey_scene(&self, action: &str, scene: String) -> Method {
-        if action.starts_with("scene.preview") || self.state.lock().preview.is_some() {
-            Method::Preview { scene }
+    /// Select `scene` on `canvas`: into its preview for `scene.preview`, or
+    /// while it has one staged (Studio Mode), else on air.
+    fn hotkey_scene(
+        &self,
+        action: &str,
+        scene: String,
+        canvas: isocast_protocol::CanvasId,
+    ) -> Method {
+        let staged = {
+            let state = self.state.read();
+            if canvas.is_main() {
+                state.preview.is_some()
+            } else {
+                state.vertical_preview.is_some()
+            }
+        };
+        if action.starts_with("scene.preview") || staged {
+            Method::Preview { scene, canvas }
         } else {
             Method::SwitchScene {
                 scene,
                 transition: None,
+                canvas,
             }
         }
     }

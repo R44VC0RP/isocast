@@ -8,6 +8,12 @@
 //! shared program encoder (`isocast_engine::stream::encoder`); one with its
 //! own bitrate or size gets an encoder of its own only if this Mac's
 //! encoders have room (#66's estimate), else the start is refused.
+//!
+//! The vertical canvas (#86) streams its own program to its own
+//! `[vertical.stream]` destinations: their ids, keys and states are its
+//! own. The daemon keeps every canvas's streams in one list, a vertical
+//! destination under `vertical:<id>` (ids have no colons, so never a main
+//! one's), and each call picks one canvas's.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use isocast_engine::capacity;
 use isocast_engine::stream::{KEY_ENV, OnChange, Stream};
+use isocast_protocol::CanvasId;
 use isocast_protocol::api::{
     ApplyParams, Capacity, DESTINATION_CLEARABLE, Event, RpcError, StreamDestinationParams,
     StreamDestinations, StreamStartParams, Streaming,
@@ -52,6 +59,58 @@ fn invalid(message: impl Into<String>) -> RpcError {
     }
 }
 
+/// How a vertical destination's stream is keyed in the daemon's state.
+const VERTICAL_SLOT: &str = "vertical:";
+
+/// Where `canvas`'s destination `id` is kept in the daemon's state.
+pub(crate) fn slot(canvas: CanvasId, id: &str) -> String {
+    if canvas.is_main() {
+        id.to_string()
+    } else {
+        format!("{VERTICAL_SLOT}{id}")
+    }
+}
+
+/// The canvas and destination id a state slot holds.
+pub(crate) fn slot_canvas(slot: &str) -> (CanvasId, &str) {
+    match slot.strip_prefix(VERTICAL_SLOT) {
+        Some(id) => (CanvasId::Vertical, id),
+        None => (CanvasId::Main, slot),
+    }
+}
+
+/// "the vertical canvas's " for `canvas` vertical, else nothing, before
+/// "stream".
+fn canvas_words(canvas: CanvasId) -> &'static str {
+    if canvas.is_main() { "" } else { "vertical " }
+}
+
+/// ` --canvas vertical` for commands about the vertical canvas.
+fn canvas_flag(canvas: CanvasId) -> &'static str {
+    if canvas.is_main() {
+        ""
+    } else {
+        " --canvas vertical"
+    }
+}
+
+/// The live setup's stream settings for `canvas`: `[stream]`, or the
+/// vertical canvas's `[vertical.stream]`.
+pub(crate) fn canvas_stream_settings(state: &State, canvas: CanvasId) -> Option<StreamSettings> {
+    if canvas.is_main() {
+        stream_settings(state)
+    } else {
+        state.setup.as_ref()?.vertical.as_ref()?.stream.clone()
+    }
+}
+
+/// A slot's status, saying its canvas (the engine's streams may not).
+fn slot_status(slot: &str, output: &Output) -> StreamStatus {
+    let mut status = output.status();
+    status.canvas = slot_canvas(slot).0;
+    status
+}
+
 /// A destination's stream in the daemon's state.
 pub(crate) enum Output {
     /// Running, or ended (kept for its final status until the next start).
@@ -81,31 +140,45 @@ pub(crate) struct Reported {
     bitrate: bool,
 }
 
-/// "the stream", or "the stream to youtube" when the setup has more than
-/// one destination.
-fn label(state: &State, id: &str) -> String {
-    let several = stream_settings(state).is_some_and(|s| !s.destinations.is_empty())
-        || state.streams.len() > 1;
+/// "the stream", or "the stream to youtube" when the canvas has more
+/// than one destination ("the vertical stream…" for the vertical canvas).
+fn label(state: &State, slot: &str) -> String {
+    let (canvas, id) = slot_canvas(slot);
+    let several = canvas_stream_settings(state, canvas).is_some_and(|s| !s.destinations.is_empty())
+        || state
+            .streams
+            .iter()
+            .filter(|(other, _)| slot_canvas(other).0 == canvas)
+            .count()
+            > 1;
+    let what = canvas_words(canvas);
     if several {
-        format!("the stream to {id}")
+        format!("the {what}stream to {id}")
     } else {
-        "the stream".into()
+        format!("the {what}stream")
     }
 }
 
-/// Every destination's status, the main one first: the running (or ended)
-/// stream's own, else the live setup's destination, offline. A stream
-/// still running for a destination the setup no longer has comes last.
+/// Every main-canvas destination's status (see [`canvas_statuses`]).
 pub(crate) fn stream_statuses(state: &State) -> Vec<StreamStatus> {
+    canvas_statuses(state, CanvasId::Main)
+}
+
+/// Every destination's status on `canvas`, the main one first: the
+/// running (or ended) stream's own, else the live setup's destination,
+/// offline. A stream still running for a destination the setup no longer
+/// has comes last.
+pub(crate) fn canvas_statuses(state: &State, canvas: CanvasId) -> Vec<StreamStatus> {
     let mut out = Vec::new();
     let from_env = std::env::var(KEY_ENV).is_ok_and(|key| !key.trim().is_empty());
-    if let Some(settings) = stream_settings(state) {
-        for destination in settings.resolve() {
+    if let Some(settings) = canvas_stream_settings(state, canvas) {
+        for destination in settings.resolve_canvas(canvas) {
+            let key = slot(canvas, &destination.id);
             let known = state
                 .streams
                 .iter()
-                .find(|(id, _)| *id == destination.id)
-                .map(|(_, output)| output.status());
+                .find(|(other, _)| *other == key)
+                .map(|(other, output)| slot_status(other, output));
             if let Some(mut status) = known.clone().filter(StreamStatus::is_active) {
                 status.enabled = destination.enabled;
                 out.push(status);
@@ -116,7 +189,8 @@ pub(crate) fn stream_statuses(state: &State) -> Vec<StreamStatus> {
             // would use (#59).
             let account = &destination.key_account;
             let key_set = from_env || has_stream_key(account).unwrap_or(false);
-            let offline = StreamStatus::offline_destination(&destination, key_set);
+            let mut offline = StreamStatus::offline_destination(&destination, key_set);
+            offline.canvas = canvas;
             let mut status = match known {
                 Some(ended) => StreamStatus {
                     service: offline.service,
@@ -134,9 +208,10 @@ pub(crate) fn stream_statuses(state: &State) -> Vec<StreamStatus> {
             out.push(status);
         }
     }
-    for (id, output) in &state.streams {
-        if !out.iter().any(|status| status.id == *id) {
-            out.push(output.status());
+    for (key, output) in &state.streams {
+        let (other, id) = slot_canvas(key);
+        if other == canvas && !out.iter().any(|status| status.id == id) {
+            out.push(slot_status(key, output));
         }
     }
     out
@@ -159,6 +234,13 @@ impl State {
     pub(crate) fn streaming(&self) -> bool {
         self.streams.iter().any(|(_, output)| output.is_active())
     }
+
+    /// A stream of `canvas` is running (or reconnecting).
+    pub(crate) fn streaming_on(&self, canvas: CanvasId) -> bool {
+        self.streams
+            .iter()
+            .any(|(key, output)| slot_canvas(key).0 == canvas && output.is_active())
+    }
 }
 
 impl Daemon {
@@ -169,31 +251,34 @@ impl Daemon {
         self: &Arc<Self>,
         params: StreamStartParams,
     ) -> Result<Streaming, RpcError> {
+        let canvas = params.canvas;
         let mut state = self.state.lock();
-        let settings = stream_settings(&state).ok_or_else(|| {
-            wrong(
-                "the live setup has no stream; add one (for example the patch \
-                 {\"stream\": {\"service\": \"twitch\"}} with `isocast apply --patch` or MCP's \
-                 apply_change, or `isocast stream destination add twitch`), then set the key \
-                 (`isocast stream key set`, or MCP's set_stream_key)",
-            )
-        })?;
-        let chosen = choose(&settings, &params.only)?;
-        let active: Vec<String> = state
-            .streams
-            .iter()
-            .filter(|(_, output)| output.is_active())
-            .map(|(id, _)| id.clone())
-            .collect();
+        let settings = match canvas_stream_settings(&state, canvas) {
+            Some(settings) => settings,
+            None if canvas.is_main() => {
+                return Err(wrong(
+                    "the live setup has no stream; add one (for example the patch \
+                     {\"stream\": {\"service\": \"twitch\"}} with `isocast apply --patch` or \
+                     MCP's apply_change, or `isocast stream destination add twitch`), then set \
+                     the key (`isocast stream key set`, or MCP's set_stream_key)",
+                ));
+            }
+            None => return Err(no_vertical_stream(&state)),
+        };
+        let chosen = choose(&settings, canvas, &params.only)?;
+        // This canvas's destinations already streaming, by id.
+        let active = active_ids(&state, canvas);
         let starting: Vec<Destination> = chosen
             .into_iter()
             .filter(|d| !active.contains(&d.id))
             .collect();
         if starting.is_empty() {
             return Err(wrong(format!(
-                "already streaming to {}; stop it first (`isocast stream stop`, or MCP's \
+                "already streaming {}to {}; stop it first (`isocast stream stop{}`, or MCP's \
                  stop_stream)",
-                active.join(", ")
+                canvas_words(canvas),
+                active.join(", "),
+                canvas_flag(canvas),
             )));
         }
         // Every destination must be ready before any starts: nothing
@@ -202,18 +287,19 @@ impl Daemon {
         let mut problems = Vec::new();
         for destination in &starting {
             if let Err(err) = destination.settings.server() {
+                let prefix = if canvas.is_main() { "" } else { "vertical." };
                 problems.push(if destination.id == MAIN_DESTINATION {
-                    err
+                    format!("{prefix}{err}")
                 } else {
                     format!(
-                        "stream.destinations ({}): {}",
+                        "{prefix}stream.destinations ({}): {}",
                         destination.id,
                         err.trim_start_matches("stream.")
                     )
                 });
                 continue;
             }
-            match destination_key(destination) {
+            match destination_key(destination, canvas) {
                 Ok(key) => keys.push(key),
                 Err(message) => problems.push(message),
             }
@@ -221,7 +307,7 @@ impl Daemon {
         if !problems.is_empty() {
             return Err(failed(problems.join("; ")));
         }
-        self.check_stream_capacity(&state, &settings, &starting, &active)?;
+        self.check_stream_capacity(&state, canvas, &starting)?;
         for (destination, key) in starting.iter().zip(&keys) {
             isocast_diagnostics::redact::remember_secret(
                 key_service(),
@@ -240,31 +326,39 @@ impl Daemon {
         let mut started = Vec::new();
         for (destination, key) in starting.into_iter().zip(keys) {
             let id = destination.id.clone();
+            let slot_id = slot(canvas, &id);
             // Another start may have begun this one meanwhile.
             if state
                 .streams
                 .iter()
-                .any(|(other, output)| *other == id && output.is_active())
+                .any(|(other, output)| *other == slot_id && output.is_active())
             {
                 continue;
             }
             // Its previous stream, finished, makes way.
-            state.streams.retain(|(other, _)| *other != id);
-            state.stream_reported.remove(&id);
+            state.streams.retain(|(other, _)| *other != slot_id);
+            state.stream_reported.remove(&slot_id);
             let daemon = Arc::downgrade(self);
             let on_change: OnChange = Box::new(move |status| {
                 if let Some(daemon) = daemon.upgrade() {
-                    daemon.publish(Event::Stream {
-                        stream: status.clone(),
-                    });
+                    let mut stream = status.clone();
+                    stream.canvas = canvas;
+                    daemon.publish(Event::Stream { stream });
                 }
             });
-            let output = match engine.stream(&id, destination.settings.clone(), key, on_change) {
+            let settings = destination.settings.clone();
+            let made = if canvas.is_main() {
+                engine.stream(&id, settings, key, on_change)
+            } else {
+                engine.stream_canvas(canvas, &id, settings, key, on_change)
+            };
+            let output = match made {
                 Ok(stream) => Output::Running(stream),
                 Err(err) => {
                     // One destination's encoder failing doesn't stop the
                     // others.
                     let mut status = StreamStatus::offline_destination(&destination, true);
+                    status.canvas = canvas;
                     status.state = StreamState::Failed;
                     status.last_error = Some(format!("{err:#}"));
                     self.publish(Event::Stream {
@@ -276,16 +370,28 @@ impl Daemon {
             // In the state while it connects, so the engine stays up for
             // it, a second start leaves it alone and `stream stop` can
             // cancel it.
-            state.streams.push((id.clone(), output));
-            started.push(id);
+            state.streams.push((slot_id.clone(), output));
+            started.push(slot_id);
         }
-        // Main first, as the setup lists them.
-        let order = settings.destination_ids();
-        state.streams.sort_by_key(|(id, _)| {
-            order
-                .iter()
-                .position(|other| other == id)
-                .unwrap_or(usize::MAX)
+        // The main canvas's first, each canvas's main destination first, as
+        // the setups list them.
+        let main_order = stream_settings(&state)
+            .map(|s| s.destination_ids())
+            .unwrap_or_default();
+        let vertical_order = canvas_stream_settings(&state, CanvasId::Vertical)
+            .map(|s| s.destination_ids())
+            .unwrap_or_default();
+        state.streams.sort_by_key(|(key, _)| {
+            let (other, id) = slot_canvas(key);
+            let order = if other.is_main() {
+                &main_order
+            } else {
+                &vertical_order
+            };
+            (
+                !other.is_main(),
+                order.iter().position(|o| o == id).unwrap_or(usize::MAX),
+            )
         });
         drop(state);
         if started.is_empty() {
@@ -298,12 +404,12 @@ impl Daemon {
             let state = self.state.read();
             let statuses: Vec<StreamStatus> = started
                 .iter()
-                .filter_map(|id| {
+                .filter_map(|key| {
                     state
                         .streams
                         .iter()
-                        .find(|(other, _)| other == id)
-                        .map(|(_, output)| output.status())
+                        .find(|(other, _)| other == key)
+                        .map(|(other, output)| slot_status(other, output))
                 })
                 .collect();
             drop(state);
@@ -339,7 +445,7 @@ impl Daemon {
                 ),
             }));
         }
-        let destinations = stream_statuses(&self.state.read());
+        let destinations = canvas_statuses(&self.state.read(), canvas);
         let first = finals
             .iter()
             .find(|status| status.id == MAIN_DESTINATION)
@@ -353,37 +459,71 @@ impl Daemon {
 
     /// Refuse a start whose destinations need more H.264 encodes than this
     /// Mac's encoders can take (#66's estimate). Destinations sharing a
-    /// format share an encode, so this only matters when one has its own
-    /// bitrate or size.
+    /// format on one canvas share an encode, so this only matters when one
+    /// has its own bitrate or size, or when both canvases stream (each
+    /// canvas's program is its own encode). Judged on the whole live setup:
+    /// both canvases, with every stream running on either and these.
     fn check_stream_capacity(
         &self,
         state: &State,
-        settings: &StreamSettings,
+        canvas: CanvasId,
         starting: &[Destination],
-        active: &[String],
     ) -> Result<(), RpcError> {
         let Some(setup) = state.setup.as_ref() else {
             return Ok(());
         };
-        // The destinations that will stream: the running ones and these.
+        // The destinations that will stream: the running ones (either
+        // canvas's) and these.
+        let on = |other: CanvasId, id: &str| {
+            state
+                .streams
+                .iter()
+                .any(|(key, output)| output.is_active() && slot_canvas(key) == (other, id))
+                || (other == canvas && starting.iter().any(|d| d.id == id))
+        };
+        let switch = |stream: &mut StreamSettings, other: CanvasId| {
+            stream.enabled = on(other, MAIN_DESTINATION);
+            for extra in &mut stream.destinations {
+                extra.enabled = on(other, &extra.id);
+            }
+        };
         let mut candidate = setup.clone();
-        let on = |id: &str| active.iter().any(|a| a == id) || starting.iter().any(|d| d.id == id);
-        let mut stream = settings.clone();
-        stream.enabled = on(MAIN_DESTINATION);
-        for extra in &mut stream.destinations {
-            extra.enabled = on(&extra.id);
+        let mut encodes = Vec::new();
+        let main_size = (setup.canvas.width, setup.canvas.height);
+        if let Some(stream) = candidate.stream.as_mut() {
+            switch(stream, CanvasId::Main);
+            let made = stream.encodes(main_size);
+            encodes.extend(made.into_iter().map(|e| (CanvasId::Main, e)));
         }
-        let canvas = (setup.canvas.width, setup.canvas.height);
-        let encodes = stream.encodes(canvas);
+        if candidate
+            .stream
+            .as_ref()
+            .is_some_and(|s| s.encodes(main_size).is_empty())
+        {
+            candidate.stream = None;
+        }
+        if let Some(vertical) = candidate.vertical.as_mut() {
+            let size = (vertical.width, vertical.height);
+            if let Some(stream) = vertical.stream.as_mut() {
+                switch(stream, CanvasId::Vertical);
+                let made = stream.encodes(size);
+                if made.is_empty() {
+                    vertical.stream = None;
+                }
+                encodes.extend(made.into_iter().map(|e| (CanvasId::Vertical, e)));
+            }
+        }
         if encodes.len() <= 1 {
             return Ok(());
         }
-        candidate.stream = Some(stream);
         // Judged against what runs now: the recording's files only while
         // one records (starting one later warns on its own, #66).
         if state.session.is_none() {
             candidate.recording.program.enabled = false;
             candidate.recording.iso.enabled = false;
+            if let Some(vertical) = candidate.vertical.as_mut() {
+                vertical.recording = None;
+            }
         }
         let memory = capacity::memory_path(state.file.legacy());
         let estimate = match crate::estimate_capacity(
@@ -401,24 +541,37 @@ impl Daemon {
         if estimate.capacity != Capacity::CannotKeepUp {
             return Ok(());
         }
+        let name = |other: CanvasId, id: &str| {
+            if other.is_main() {
+                id.to_string()
+            } else {
+                format!("{id} (vertical)")
+            }
+        };
         let own: Vec<String> = encodes[1..]
             .iter()
-            .flat_map(|encode| encode.ids.clone())
-            .filter(|id| starting.iter().any(|d| d.id == *id))
+            .flat_map(|(other, encode)| encode.ids.iter().map(move |id| (*other, id)))
+            .filter(|(other, id)| *other == canvas && starting.iter().any(|d| d.id == **id))
+            .map(|(other, id)| name(other, id))
             .collect();
-        let shared = &encodes[0];
-        let one = own.len() == 1;
+        let (shared_canvas, shared) = &encodes[0];
+        let one = own.len() <= 1;
+        let flag = canvas_flag(canvas);
         Err(failed(format!(
-            "not streaming: {} {} an H.264 encoder of {} own, as {} bitrate or size differs \
-             from {}'s {}×{} at {} kb/s; with {} encodes at once{}, {}. Give {} the same \
-             video_bitrate_kbps and size to share one encoder (`isocast stream destination set \
-             ID --clear video_bitrate_kbps --clear size`), or start without {} (`isocast stream \
-             start --only …`)",
-            own.join(", "),
+            "not streaming: {} {} an H.264 encoder of {} own, as {} canvas, bitrate or size \
+             differs from {}'s {}×{} at {} kb/s; with {} encodes at once{}, {}. Give {} the \
+             same video_bitrate_kbps and size to share one encoder (`isocast stream destination \
+             set ID{flag} --clear video_bitrate_kbps --clear size`), stop the other canvas's \
+             streams, or start without {} (`isocast stream start{flag} --only …`)",
+            if own.is_empty() {
+                "these destinations".to_string()
+            } else {
+                own.join(", ")
+            },
             if one { "needs" } else { "need" },
             if one { "its" } else { "their" },
             if one { "its" } else { "their" },
-            shared.ids[0],
+            name(*shared_canvas, &shared.ids[0]),
             shared.width,
             shared.height,
             shared.video_bitrate_kbps,
@@ -437,13 +590,20 @@ impl Daemon {
     /// Stop streaming to every destination (or `only` those); the others
     /// keep going.
     pub(crate) fn stream_stop(&self, params: StreamStartParams) -> Result<Streaming, RpcError> {
+        let canvas = params.canvas;
         let mut state = self.state.lock();
+        // This canvas's streams, by destination id; the other canvas's are
+        // left alone.
+        let mine = |key: &str| {
+            let (other, id) = slot_canvas(key);
+            (other == canvas).then(|| id.to_string())
+        };
         if !params.only.is_empty() {
-            let known: Vec<String> = stream_settings(&state)
+            let known: Vec<String> = canvas_stream_settings(&state, canvas)
                 .map(|s| s.destination_ids())
                 .unwrap_or_default()
                 .into_iter()
-                .chain(state.streams.iter().map(|(id, _)| id.clone()))
+                .chain(state.streams.iter().filter_map(|(key, _)| mine(key)))
                 .collect();
             for id in &params.only {
                 if !known.contains(id) {
@@ -454,39 +614,56 @@ impl Daemon {
                 }
             }
         }
-        let wanted = |id: &str| params.only.is_empty() || params.only.iter().any(|o| o == id);
+        let wanted = |key: &str| {
+            mine(key).is_some_and(|id| params.only.is_empty() || params.only.contains(&id))
+        };
+        // Their slots.
         let active: Vec<String> = state
             .streams
             .iter()
-            .filter(|(id, output)| wanted(id) && output.is_active())
-            .map(|(id, _)| id.clone())
+            .filter(|(key, output)| wanted(key) && output.is_active())
+            .map(|(key, _)| key.clone())
             .collect();
         if active.is_empty() {
             // A stream that failed stays in the status until the next
             // start; say so rather than only "not streaming".
+            let several = state
+                .streams
+                .iter()
+                .filter(|(key, _)| mine(key).is_some())
+                .count()
+                > 1;
             let failures: Vec<String> = state
                 .streams
                 .iter()
-                .filter(|(id, _)| wanted(id))
-                .map(|(id, output)| (id, output.status()))
+                .filter(|(key, _)| wanted(key))
+                .map(|(key, output)| (slot_canvas(key).1, output.status()))
                 .filter(|(_, status)| status.state == StreamState::Failed)
                 .map(|(id, status)| {
                     let why = status.last_error.as_deref().unwrap_or("no reason given");
-                    if state.streams.len() > 1 {
+                    if several {
                         format!("{id}: {why}")
                     } else {
                         why.to_string()
                     }
                 })
                 .collect();
+            let what = canvas_words(canvas);
             let message = if failures.is_empty() {
                 match params.only.as_slice() {
-                    [] => "not streaming".to_string(),
-                    only => format!("not streaming to {}", only.join(", ")),
+                    [] => format!(
+                        "not streaming{}",
+                        if canvas.is_main() {
+                            ""
+                        } else {
+                            " the vertical canvas"
+                        }
+                    ),
+                    only => format!("not streaming {what}to {}", only.join(", ")),
                 }
             } else {
                 format!(
-                    "not streaming: the stream already failed ({})",
+                    "not streaming: the {what}stream already failed ({})",
                     failures.join("; ")
                 )
             };
@@ -512,9 +689,13 @@ impl Daemon {
             handles
                 .into_iter()
                 .filter_map(|handle| handle.join().ok())
+                .map(|mut status| {
+                    status.canvas = canvas;
+                    status
+                })
                 .collect()
         });
-        let mut destinations = stream_statuses(&self.state.read());
+        let mut destinations = canvas_statuses(&self.state.read(), canvas);
         // The stopped ones as they ended (their offline status from the
         // setup loses the counters).
         for status in &finals {
@@ -555,18 +736,19 @@ impl Daemon {
     /// when encoding/sending stalls.
     pub(crate) fn warn_stream_drops(&self) {
         let mut state = self.state.lock();
-        let statuses: Vec<StreamStatus> = state
+        let statuses: Vec<(String, StreamStatus)> = state
             .streams
             .iter()
-            .filter_map(|(_, output)| match output {
-                Output::Running(stream) => Some(stream.status()),
+            .filter_map(|(key, output)| match output {
+                Output::Running(stream) => Some((key.clone(), stream.status())),
                 Output::Failed(_) => None,
             })
             .collect();
         let mut warnings = Vec::new();
-        for status in statuses {
-            let what = label(&state, &status.id);
-            let reported = state.stream_reported.entry(status.id.clone()).or_default();
+        for (key, status) in statuses {
+            let what = label(&state, &key);
+            let (canvas, _) = slot_canvas(&key);
+            let reported = state.stream_reported.entry(key.clone()).or_default();
             // While reconnecting, the stream's state events say why frames
             // go.
             if status.state != StreamState::Live {
@@ -599,10 +781,10 @@ impl Daemon {
             if let Some(warning) = &status.bitrate_warning
                 && !reported.bitrate
             {
-                warnings.push(if status.id == MAIN_DESTINATION {
+                warnings.push(if status.id == MAIN_DESTINATION && canvas.is_main() {
                     warning.clone()
                 } else {
-                    format!("{}: {warning}", status.id)
+                    format!("{}{}: {warning}", canvas_words(canvas), status.id)
                 });
             }
             reported.bitrate = status.bitrate_warning.is_some();
@@ -634,18 +816,22 @@ impl Daemon {
                 "clear: only `stream_destination_set` clears fields; leave them out instead",
             ));
         }
+        let canvas = params.canvas;
         let (revision, mut setup) = self.live_setup()?;
-        let id = match setup.stream.as_mut() {
+        let section = stream_section(&mut setup, canvas)?;
+        let id = match section.as_mut() {
             None => {
                 if params
                     .id
                     .as_deref()
                     .is_some_and(|id| id != MAIN_DESTINATION)
                 {
-                    return Err(invalid(
-                        "id: the live setup has no stream yet, so its first destination is the \
-                         [stream] section itself, id \"main\"; leave the id out",
-                    ));
+                    return Err(invalid(format!(
+                        "id: the {}canvas has no stream yet, so its first destination is the \
+                         {} section itself, id \"main\"; leave the id out",
+                        canvas_words(canvas),
+                        section_name(canvas),
+                    )));
                 }
                 let mut stream: StreamSettings =
                     serde_json::from_value(serde_json::json!({ "service": service }))
@@ -656,13 +842,14 @@ impl Daemon {
                     stream.video_bitrate_kbps = kbps;
                 }
                 (stream.width, stream.height) = (params.width, params.height);
-                setup.stream = Some(stream);
+                *section = Some(stream);
                 MAIN_DESTINATION.to_string()
             }
             Some(stream) => {
                 if stream.destinations.len() + 1 >= MAX_DESTINATIONS {
                     return Err(failed(format!(
-                        "the live setup already has {} destinations, the most it may have",
+                        "the live setup's {} already has {} destinations, the most it may have",
+                        section_name(canvas),
                         stream.destinations.len() + 1
                     )));
                 }
@@ -701,24 +888,38 @@ impl Daemon {
                 id
             }
         };
-        self.apply_destinations(revision, setup, Some(id))
+        self.apply_destinations(revision, setup, canvas, Some(id))
     }
 
-    /// Remove destination `id` from the live setup (not while it streams).
+    /// Remove `canvas`'s destination `id` from the live setup (not while
+    /// it streams).
     pub(crate) fn stream_destination_remove(
         &self,
         id: String,
+        canvas: CanvasId,
     ) -> Result<StreamDestinations, RpcError> {
         let (revision, mut setup) = self.live_setup()?;
-        let Some(stream) = setup.stream.as_mut() else {
-            return Err(wrong("the live setup has no stream destinations"));
+        let Some(stream) = stream_section(&mut setup, canvas)?.as_mut() else {
+            return Err(wrong(format!(
+                "the {}canvas has no stream destinations",
+                canvas_words(canvas)
+            )));
         };
         if id == MAIN_DESTINATION {
-            return Err(invalid(
+            let flag = canvas_flag(canvas);
+            return Err(invalid(if canvas.is_main() {
                 "id: \"main\" is the [stream] section itself; turn it off instead (`isocast \
                  stream destination set main --enabled false`), or remove the whole stream with \
-                 the patch {\"stream\": null}",
-            ));
+                 the patch {\"stream\": null}"
+                    .to_string()
+            } else {
+                format!(
+                    "id: \"main\" is the [vertical.stream] section itself; turn it off instead \
+                     (`isocast stream destination set main{flag} --enabled false`), or remove \
+                     the vertical canvas's whole stream with the patch \
+                     {{\"vertical\": {{\"stream\": null}}}}"
+                )
+            }));
         }
         let Some(index) = stream.destinations.iter().position(|d| d.id == id) else {
             return Err(invalid(format!(
@@ -726,26 +927,29 @@ impl Daemon {
                 stream.destination_ids().join(", ")
             )));
         };
+        let key = slot(canvas, &id);
         if self
             .state
             .read()
             .streams
             .iter()
-            .any(|(other, output)| *other == id && output.is_active())
+            .any(|(other, output)| *other == key && output.is_active())
         {
             return Err(wrong(format!(
-                "streaming to {id}; stop it first (`isocast stream stop --only {id}`)"
+                "streaming {}to {id}; stop it first (`isocast stream stop{} --only {id}`)",
+                canvas_words(canvas),
+                canvas_flag(canvas),
             )));
         }
         stream.destinations.remove(index);
-        let removed = self.apply_destinations(revision, setup, None)?;
+        let removed = self.apply_destinations(revision, setup, canvas, None)?;
         // Its ended stream goes with it: no ghost in status or `stream stop`.
         let mut state = self.state.lock();
         state
             .streams
-            .retain(|(other, output)| *other != id || output.is_active());
-        state.stream_reported.remove(&id);
-        let destinations = stream_statuses(&state);
+            .retain(|(other, output)| *other != key || output.is_active());
+        state.stream_reported.remove(&key);
+        let destinations = canvas_statuses(&state, canvas);
         Ok(StreamDestinations {
             destinations,
             ..removed
@@ -771,12 +975,15 @@ impl Daemon {
             }
         }
         let clears = |field: &str| params.clear.iter().any(|c| c == field);
+        let canvas = params.canvas;
         let (revision, mut setup) = self.live_setup()?;
-        let Some(stream) = setup.stream.as_mut() else {
-            return Err(wrong(
-                "the live setup has no stream; add a destination first (`isocast stream \
-                 destination add SERVICE`)",
-            ));
+        let Some(stream) = stream_section(&mut setup, canvas)?.as_mut() else {
+            return Err(wrong(format!(
+                "the {}canvas has no stream; add a destination first (`isocast stream \
+                 destination add SERVICE{}`)",
+                canvas_words(canvas),
+                canvas_flag(canvas),
+            )));
         };
         if id == MAIN_DESTINATION {
             if let Some(service) = params.service {
@@ -836,7 +1043,7 @@ impl Daemon {
                 (extra.width, extra.height) = (params.width, params.height);
             }
         }
-        self.apply_destinations(revision, setup, Some(id))
+        self.apply_destinations(revision, setup, canvas, Some(id))
     }
 
     /// The live setup and its revision, to change.
@@ -852,6 +1059,7 @@ impl Daemon {
         &self,
         revision: u64,
         setup: isocast_protocol::Setup,
+        canvas: CanvasId,
         id: Option<String>,
     ) -> Result<StreamDestinations, RpcError> {
         let applied = self.apply(ApplyParams {
@@ -862,22 +1070,83 @@ impl Daemon {
         Ok(StreamDestinations {
             revision: applied.revision,
             id,
-            destinations: stream_statuses(&self.state.read()),
+            destinations: canvas_statuses(&self.state.read(), canvas),
         })
     }
 }
 
+/// How the setup names `canvas`'s stream section.
+fn section_name(canvas: CanvasId) -> &'static str {
+    if canvas.is_main() {
+        "[stream]"
+    } else {
+        "[vertical.stream]"
+    }
+}
+
+/// `canvas`'s stream section of `setup`, to change: `[stream]`, or the
+/// vertical canvas's `[vertical.stream]` (which needs a `[vertical]`).
+fn stream_section(
+    setup: &mut isocast_protocol::Setup,
+    canvas: CanvasId,
+) -> Result<&mut Option<StreamSettings>, RpcError> {
+    if canvas.is_main() {
+        return Ok(&mut setup.stream);
+    }
+    match setup.vertical.as_mut() {
+        Some(vertical) => Ok(&mut vertical.stream),
+        None => Err(wrong(NO_VERTICAL)),
+    }
+}
+
+/// Why the vertical canvas can't do something without a `[vertical]`.
+pub(crate) const NO_VERTICAL: &str = "canvas: the live setup has no vertical canvas; add one with the \
+     patch {\"vertical\": {}} (`isocast apply --patch`, or MCP's apply_change), then its \
+     stream destinations with `isocast stream destination add SERVICE --canvas vertical`";
+
+/// Why the vertical canvas can't stream: no `[vertical]`, or no
+/// `[vertical.stream]` in it.
+fn no_vertical_stream(state: &State) -> RpcError {
+    let has_vertical = state.setup.as_ref().is_some_and(|s| s.vertical.is_some());
+    if !has_vertical {
+        return wrong(NO_VERTICAL);
+    }
+    wrong(
+        "canvas: the vertical canvas has no stream; add one (`isocast stream destination add twitch \
+         --canvas vertical`, or MCP's stream_destination_add with canvas \"vertical\"), then \
+         set its key (`isocast stream key set --canvas vertical`)",
+    )
+}
+
+/// `canvas`'s destinations streaming (or reconnecting), by id.
+fn active_ids(state: &State, canvas: CanvasId) -> Vec<String> {
+    state
+        .streams
+        .iter()
+        .filter(|(_, output)| output.is_active())
+        .map(|(key, _)| slot_canvas(key))
+        .filter(|(other, _)| *other == canvas)
+        .map(|(_, id)| id.to_string())
+        .collect()
+}
+
 /// The destinations a start means: `only` (each must exist; a turned-off
 /// one starts too), else every enabled one.
-fn choose(settings: &StreamSettings, only: &[String]) -> Result<Vec<Destination>, RpcError> {
-    let all = settings.resolve();
+fn choose(
+    settings: &StreamSettings,
+    canvas: CanvasId,
+    only: &[String],
+) -> Result<Vec<Destination>, RpcError> {
+    let all = settings.resolve_canvas(canvas);
     if only.is_empty() {
         let enabled: Vec<Destination> = all.into_iter().filter(|d| d.enabled).collect();
         if enabled.is_empty() {
+            let flag = canvas_flag(canvas);
             return Err(wrong(format!(
-                "every stream destination is turned off; turn one on (`isocast stream \
-                 destination set ID --enabled true`) or name it (`isocast stream start --only \
-                 ID`); destinations: {}",
+                "every {}stream destination is turned off; turn one on (`isocast stream \
+                 destination set ID{flag} --enabled true`) or name it (`isocast stream \
+                 start{flag} --only ID`); destinations: {}",
+                canvas_words(canvas),
                 settings.destination_ids().join(", ")
             )));
         }
@@ -906,23 +1175,32 @@ fn choose(settings: &StreamSettings, only: &[String]) -> Result<Vec<Destination>
 
 /// The key `destination` streams with: `ISOCAST_STREAM_KEY` (local
 /// testing), else its Keychain item. Says what to do when there is none.
-fn destination_key(destination: &Destination) -> Result<String, String> {
+fn destination_key(destination: &Destination, canvas: CanvasId) -> Result<String, String> {
     if let Ok(key) = std::env::var(KEY_ENV)
         && !key.trim().is_empty()
     {
         return Ok(key.trim().to_string());
     }
     let account = &destination.key_account;
+    let flag = canvas_flag(canvas);
     match stream_key(account) {
         Ok(Some(key)) => Ok(key),
-        Ok(None) if destination.id == MAIN_DESTINATION => Err(format!(
+        Ok(None) if destination.id == MAIN_DESTINATION && canvas.is_main() => Err(format!(
             "no stream key is set for {}; run `isocast stream key set` (it reads the key from \
              stdin), or MCP's set_stream_key",
             key_label(destination.settings.service, account)
         )),
-        Ok(None) => Err(format!(
+        Ok(None) if canvas.is_main() => Err(format!(
             "no stream key is set for destination {} ({}); run `isocast stream key set \
              --destination {}`, or MCP's set_stream_key with destination",
+            destination.id,
+            destination.settings.service.id(),
+            destination.id
+        )),
+        Ok(None) => Err(format!(
+            "no stream key is set for the vertical canvas's destination {} ({}; its keys are \
+             its own, not the main canvas's); run `isocast stream key set{flag} --destination \
+             {}`, or MCP's set_stream_key with canvas \"vertical\"",
             destination.id,
             destination.settings.service.id(),
             destination.id

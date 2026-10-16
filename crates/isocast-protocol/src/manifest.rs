@@ -34,6 +34,9 @@ pub struct SessionManifest {
     /// start of the session.
     #[serde(default)]
     pub scenes: Vec<SceneChange>,
+    /// Scene switches on the second canvas, on the same recording clock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vertical_scenes: Vec<SceneChange>,
     /// Spans cut out of this take. Old manifests have no pauses.
     #[serde(default)]
     pub pauses: Vec<Pause>,

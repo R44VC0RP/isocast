@@ -7,6 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use isocast_protocol::{CanvasId, Setup};
 use serde_json::{Map, Value, json};
 use slint::{ComponentHandle, SharedString};
 
@@ -270,7 +271,8 @@ fn default_name(app: &Rc<App>, kind: &str) -> String {
 /// already.
 fn new_item(app: &Rc<App>, scene: &str, fields: Value, visible: bool) -> Value {
     let s = app.session.borrow();
-    let Some(setup) = s.setup.clone() else {
+    // The canvas being edited: its size, and its items (#86).
+    let Some(setup) = s.edited_setup().cloned() else {
         return fields;
     };
     let mut item = fields;
@@ -308,6 +310,15 @@ fn new_item(app: &Rc<App>, scene: &str, fields: Value, visible: bool) -> Value {
     item
 }
 
+/// The setup as canvas `canvas` has it (the vertical canvas's items and
+/// size, or the main ones).
+fn canvas_setup(s: &crate::session::Session, canvas: CanvasId) -> Option<Rc<Setup>> {
+    match canvas {
+        CanvasId::Main => s.setup.clone(),
+        CanvasId::Vertical => s.vertical.clone(),
+    }
+}
+
 fn item_key(item: &Value) -> String {
     item["id"]
         .as_str()
@@ -319,11 +330,14 @@ fn item_key(item: &Value) -> String {
 
 /// Size a new item from its source's picture: its own size if it fits on
 /// the canvas, else as large as fits; centred. Waits up to 3 s for the
-/// live engine to open the source.
-fn place_new(app: &Rc<App>, scene: String, key: String, tries: u32) {
+/// live engine to open the source. `canvas`: the canvas it was added to
+/// (#86), whichever is edited by then.
+fn place_new(app: &Rc<App>, scene: String, key: String, tries: u32, canvas: CanvasId) {
     let source = {
         let s = app.session.borrow();
-        let Some(setup) = s.setup.clone() else { return };
+        let Some(setup) = canvas_setup(&s, canvas) else {
+            return;
+        };
         setup_model::find_scene(&setup, &scene)
             .and_then(|sc| sc.items.iter().find(|i| setup_model::key(i) == key))
             .and_then(|i| i.source.clone())
@@ -340,7 +354,7 @@ fn place_new(app: &Rc<App>, scene: String, key: String, tries: u32) {
         let weak = Rc::downgrade(app);
         slint::Timer::single_shot(Duration::from_millis(100), move || {
             if let Some(app) = weak.upgrade() {
-                place_new(&app, scene, key, tries + 1);
+                place_new(&app, scene, key, tries + 1, canvas);
             }
         });
         return;
@@ -349,11 +363,7 @@ fn place_new(app: &Rc<App>, scene: String, key: String, tries: u32) {
         let Some((w, h)) = size.filter(|(w, h)| *w > 0.0 && *h > 0.0) else {
             return;
         };
-        let (cw, ch) = app
-            .session
-            .borrow()
-            .setup
-            .as_ref()
+        let (cw, ch) = canvas_setup(&app.session.borrow(), canvas)
             .map(|s| (s.canvas.width as f64, s.canvas.height as f64))
             .unwrap_or((1920.0, 1080.0));
         let scale = 1f64.min(cw / w).min(ch / h);
@@ -361,17 +371,14 @@ fn place_new(app: &Rc<App>, scene: String, key: String, tries: u32) {
             "x": items::int((cw - w) / 2.0), "y": items::int((ch - h) / 2.0),
             "width": items::whole(w), "height": items::whole(h),
         });
-        let still = app
-            .session
-            .borrow()
-            .setup
-            .as_ref()
-            .and_then(|s| setup_model::find_scene(s, &scene))
+        let still = canvas_setup(&app.session.borrow(), canvas)
+            .and_then(|s| setup_model::find_scene(&s, &scene).cloned())
             .is_some_and(|sc| sc.items.iter().any(|i| setup_model::key(i) == key));
         if still {
-            app.edit(
+            app.edit_on(
                 json!({ "scenes": [{ "id": scene, "items": [{ "id": key, "rect": rect, "fit": "none", "style": { "transform": { "scale": scale } } }] }] }),
                 EditOptions::default(),
+                canvas,
             );
         }
     };
@@ -430,13 +437,14 @@ fn add_source(
     }
     let scene = scene.to_string();
     let key = item.as_ref().map(item_key);
+    let canvas = app.session.borrow().edit_canvas();
     app.edit_then(patch, EditOptions::default(), move |app, applied| {
         if !applied {
             return;
         }
         if let Some(key) = key {
             app.select(&key);
-            place_new(app, scene, key, 0);
+            place_new(app, scene, key, 0, canvas);
         } else {
             app.toast(
                 ToastKind::Success,
@@ -658,6 +666,7 @@ impl Dialogs {
             };
             let item = new_item(app, &scene, fields, visible);
             let key = item_key(&item);
+            let canvas = app.session.borrow().edit_canvas();
             app.edit_then(
                 json!({ "scenes": [{ "id": scene, "items": [item] }] }),
                 EditOptions::default(),
@@ -665,7 +674,7 @@ impl Dialogs {
                     if applied {
                         app.select(&key);
                         if !is_scene {
-                            place_new(app, scene, key, 0);
+                            place_new(app, scene, key, 0, canvas);
                         }
                     }
                 },

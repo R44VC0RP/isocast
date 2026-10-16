@@ -1050,6 +1050,60 @@ export component VideoPage inherits SetPage {
             }
         }
     }
+    SetGroup {
+        title: "Vertical Canvas";
+        hint: SettingsArea.vertical-on
+            ? "A second, upright canvas, using the main frame rate unless overridden in the setup. Each scene reuses its main layout until you edit its vertical layout (View › Vertical Canvas › Edit Vertical Canvas)."
+            : "A second, upright canvas for phones, recorded and streamed beside the main one.";
+        SwitchRow {
+            label: "Vertical Canvas";
+            place: SettingsArea.vertical-on ? RowPlace.first : RowPlace.only;
+            on <=> SettingsArea.vertical-on;
+            toggled(on) => { SettingsArea.set-flag("vertical", on); }
+        }
+        if SettingsArea.vertical-on: GroupRow {
+            label: "Resolution";
+            place: RowPlace.middle;
+            Centred {
+                NumberField {
+                    width: Theme.field-xs;
+                    small: true;
+                    prefix: "W";
+                    value: SettingsArea.vertical-width;
+                    minimum: 16;
+                    maximum: 8192;
+                    step: 2;
+                    label: "Vertical canvas width";
+                    changed(value) => { SettingsArea.set-number("vertical_width", value); }
+                }
+            }
+            Centred {
+                NumberField {
+                    width: Theme.field-xs;
+                    small: true;
+                    prefix: "H";
+                    value: SettingsArea.vertical-height;
+                    minimum: 16;
+                    maximum: 8192;
+                    step: 2;
+                    label: "Vertical canvas height";
+                    changed(value) => { SettingsArea.set-number("vertical_height", value); }
+                }
+            }
+        }
+        if SettingsArea.vertical-on: SwitchRow {
+            label: "Follow Main Scenes";
+            place: RowPlace.middle;
+            on <=> SettingsArea.vertical-follow;
+            toggled(on) => { SettingsArea.set-flag("vertical_follow", on); }
+        }
+        if SettingsArea.vertical-on: SwitchRow {
+            label: "Record Vertical Program";
+            place: RowPlace.last;
+            on <=> SettingsArea.vertical-record;
+            toggled(on) => { SettingsArea.set-flag("vertical_record", on); }
+        }
+    }
 }
 
 // ---------- Hotkeys ----------

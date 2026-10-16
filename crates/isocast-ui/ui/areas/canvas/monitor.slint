@@ -64,6 +64,10 @@ export component Monitor inherits Rectangle {
     in property <length> pad: 0px;
     // One canvas pixel to a screen pixel (Preview Scaling → Canvas).
     in property <bool> actual-size;
+    // The canvas shown: the edited one, or the vertical one (#86).
+    in property <int> canvas-width: max(1, Ui.canvas-width);
+    in property <int> canvas-height: max(1, Ui.canvas-height);
+    in property <string> label: root.editor ? "Preview" : "Program";
 
     // The picture's size on screen, in physical pixels: the texture is
     // drawn at this size so it is shown 1:1.
@@ -89,8 +93,6 @@ export component Monitor inherits Rectangle {
     // Points per canvas pixel.
     out property <float> scale: k;
 
-    property <int> canvas-width: max(1, Ui.canvas-width);
-    property <int> canvas-height: max(1, Ui.canvas-height);
     property <bool> has-selection: root.editor && Ui.selected-item != "";
     property <float> fit: max(0.0001, min((root.width - 2 * root.pad) / 1px / root.canvas-width, (root.height - 2 * root.pad) / 1px / root.canvas-height));
     property <float> k: root.actual-size ? 1phx / 1px : root.fit;
@@ -113,7 +115,7 @@ export component Monitor inherits Rectangle {
 
     background: transparent;
     accessible-role: image;
-    accessible-label: root.editor ? "Preview" : "Program";
+    accessible-label: root.label;
     accessible-description: root.has-selection ? "Selected: " + Ui.selected-name : "";
 
     // The monitor's ring: 1px `line`, or 2px `onair` while the program is

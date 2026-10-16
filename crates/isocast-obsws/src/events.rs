@@ -221,15 +221,15 @@ impl Tracker {
                 )]
             }
             Event::Started {
-                files,
-                cause,
-                manifest,
-                ..
+                cause, manifest, ..
             } => {
-                let path = program_in(manifest.as_deref())
-                    .or_else(|| files.last().map(|f| f.to_string_lossy().into_owned()));
+                let path = program_in(manifest.as_deref()).or_else(|| {
+                    ctx.status()
+                        .ok()
+                        .and_then(|status| crate::requests::program_file(&status))
+                });
                 let split = cause == Some(TakeCause::Split) && self.recording;
-                self.record_path = path.clone().or(self.record_path.take());
+                self.record_path = path.clone();
                 if split {
                     return vec![ev(
                         sub::OUTPUTS,
@@ -250,11 +250,20 @@ impl Tracker {
                     record(true, "STARTED", path),
                 ]
             }
-            Event::Stopped { .. } => {
+            Event::Stopped { report, .. } => {
                 if !self.recording {
                     return Vec::new();
                 }
                 self.recording = false;
+                if let Some(file) = report.as_ref().and_then(|report| {
+                    report
+                        .files
+                        .iter()
+                        .rev()
+                        .find(|file| file.source == isocast_protocol::PROGRAM)
+                }) {
+                    self.record_path = Some(file.path.to_string_lossy().into_owned());
+                }
                 vec![
                     record(true, "STOPPING", None),
                     record(false, "STOPPED", self.record_path.clone()),
@@ -269,7 +278,9 @@ impl Tracker {
                 },
                 None,
             )],
-            // OBS has one stream: every destination as one (#73, #74).
+            // OBS aggregates every main-canvas destination (#73, #74),
+            // but has no second canvas (#86).
+            Event::Stream { stream } if !stream.canvas.is_main() => Vec::new(),
             Event::Stream { stream } => {
                 self.streams.insert(stream.id, stream.state);
                 let now = stream_state(self.streams.values().copied());
@@ -379,7 +390,7 @@ fn program_in(manifest: Option<&std::path::Path>) -> Option<String> {
     let file = value["files"]
         .as_array()?
         .iter()
-        .find(|f| f["source"] == isocast_protocol::PROGRAM)?["file"]
+        .find(|f| f["source"] == isocast_protocol::PROGRAM)?["path"]
         .as_str()?;
     Some(manifest.with_file_name(file).to_string_lossy().into_owned())
 }

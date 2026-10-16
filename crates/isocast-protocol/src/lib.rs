@@ -84,6 +84,10 @@ pub struct Setup {
     /// part of a setup: `isocast stream key set` keeps it in the Keychain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<stream::StreamSettings>,
+    /// A second, vertical canvas (for Shorts, Reels, TikTok) showing the
+    /// same scenes, with its own recording and stream. Absent: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<VerticalCanvas>,
     /// Profile hotkeys. Absent/empty keeps legacy profiles unchanged.
     #[serde(default, skip_serializing_if = "hotkeys::Config::is_absent")]
     pub hotkeys: hotkeys::Config,
@@ -178,6 +182,150 @@ pub struct Canvas {
     pub height: u32,
     /// Frames per second, from 1 to 240.
     pub fps: u32,
+}
+
+/// Which canvas: the main one, or the setup's vertical one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CanvasId {
+    /// The setup's `canvas`.
+    #[default]
+    Main,
+    /// The setup's `vertical` canvas.
+    Vertical,
+}
+
+impl CanvasId {
+    pub fn is_main(&self) -> bool {
+        *self == Self::Main
+    }
+
+    /// The reserved source name of this canvas's program recording in
+    /// manifests and reports: [`PROGRAM`] or [`VERTICAL_PROGRAM`].
+    pub fn program(self) -> &'static str {
+        match self {
+            Self::Main => PROGRAM,
+            Self::Vertical => VERTICAL_PROGRAM,
+        }
+    }
+}
+
+/// A second canvas, upright by default, that shows the setup's scenes. A
+/// scene is laid out on it by its `vertical` arrangement if it has one,
+/// else by its own items and layout, placed again on this canvas's size
+/// (not scaled from the main canvas). Its program has the same audio mix
+/// as the main one (`recording.program.audio`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerticalCanvas {
+    /// An even number of pixels from 16 to 8192.
+    #[serde(default = "default_vertical_width")]
+    pub width: u32,
+    /// An even number of pixels from 16 to 8192.
+    #[serde(default = "default_vertical_height")]
+    pub height: u32,
+    /// Frames per second, from 1 to 240; the main canvas's if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    /// Show the scene the main canvas has on air, switching with it. False
+    /// lets the vertical canvas put its own scene on air.
+    #[serde(default = "default_true", skip_serializing_if = "filter::is_true")]
+    pub follow_main: bool,
+    /// The vertical program recording. Absent: not recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<VerticalRecording>,
+    /// Live streaming of the vertical program, if set up (its own
+    /// service; the key stays in the Keychain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<stream::StreamSettings>,
+}
+
+fn default_vertical_width() -> u32 {
+    1080
+}
+
+fn default_vertical_height() -> u32 {
+    1920
+}
+
+impl Default for VerticalCanvas {
+    fn default() -> Self {
+        Self {
+            width: default_vertical_width(),
+            height: default_vertical_height(),
+            fps: None,
+            follow_main: true,
+            recording: None,
+            stream: None,
+        }
+    }
+}
+
+impl VerticalCanvas {
+    /// The vertical canvas, with `main`'s frame rate unless it has its own.
+    pub fn canvas(&self, main: &Canvas) -> Canvas {
+        Canvas {
+            width: self.width,
+            height: self.height,
+            fps: self.fps.unwrap_or(main.fps),
+        }
+    }
+}
+
+/// How the vertical program is recorded, in `recording.folder` alongside
+/// the main program. Its sound is the main program's mix
+/// (`recording.program.audio`): both canvases share one audio mix.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerticalRecording {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// File name without extension. Tokens: {date}, {time}. Must differ
+    /// from `recording.program.filename`.
+    #[serde(default = "default_vertical_filename")]
+    pub filename: String,
+    #[serde(default)]
+    pub encoder: Encoder,
+    /// Must be empty: the vertical program has the main program's audio
+    /// mix (`recording.program.audio`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio: Vec<String>,
+    /// The file's size, if not the vertical canvas's (each side even, from
+    /// 16 up to the vertical canvas's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+fn default_vertical_filename() -> String {
+    "{date} {time} vertical".into()
+}
+
+impl Default for VerticalRecording {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            filename: default_vertical_filename(),
+            encoder: Encoder::default(),
+            audio: Vec::new(),
+            width: None,
+            height: None,
+        }
+    }
+}
+
+/// How a scene is arranged on the vertical canvas, in place of its own
+/// `layout` and `items`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SceneLayout {
+    /// How its items with a `layout` are laid out, as the scene's `layout`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Layout>,
+    /// Items drawn back to front, in vertical canvas pixels.
+    #[serde(default)]
+    pub items: Vec<SceneItem>,
 }
 
 /// One input. `id` is the stable machine identifier; `name` is a label.
@@ -311,6 +459,11 @@ pub struct Scene {
     /// override).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<Transition>,
+    /// Its arrangement on the setup's vertical canvas, in place of `layout`
+    /// and `items`. Absent: the same items and layout, placed again on the
+    /// vertical canvas's size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<SceneLayout>,
 }
 
 impl Scene {
@@ -794,6 +947,10 @@ pub struct Rect {
 /// The source name of the program recording in manifests and reports;
 /// reserved, so no source can use it.
 pub const PROGRAM: &str = "program";
+
+/// The source name of the vertical canvas's program recording in manifests
+/// and reports; reserved, so no source can use it.
+pub const VERTICAL_PROGRAM: &str = "vertical-program";
 
 fn default_true() -> bool {
     true
@@ -1494,10 +1651,61 @@ impl Setup {
                 replay: Default::default(),
             },
             stream: None,
+            vertical: None,
             hotkeys: Default::default(),
             virtual_camera: Default::default(),
             developer: Default::default(),
         })
+    }
+
+    /// This setup as one canvas sees it, as a setup of its own: for `Main`
+    /// a copy; for `Vertical` (None without a vertical canvas) the vertical
+    /// canvas as `canvas`, each scene's vertical arrangement (if it has
+    /// one) as its `layout` and `items`, the vertical recording as
+    /// `recording.program` (with the main program's audio mix; disabled if
+    /// there is none) and the vertical stream as `stream`. ISO files, the
+    /// replay buffer and the virtual camera are the main canvas's, so ISO
+    /// recording is off in it and the other two have their defaults, and it
+    /// has no `vertical` of its own. Clones the
+    /// whole setup: call it off the frame thread.
+    pub fn for_canvas(&self, canvas: CanvasId) -> Option<Setup> {
+        let vertical = match canvas {
+            CanvasId::Main => return Some(self.clone()),
+            CanvasId::Vertical => self.vertical.as_ref()?,
+        };
+        let mut setup = self.clone();
+        setup.vertical = None;
+        setup.canvas = vertical.canvas(&self.canvas);
+        for scene in &mut setup.scenes {
+            if let Some(SceneLayout { layout, items }) = scene.vertical.take() {
+                scene.layout = layout;
+                scene.items = items;
+            }
+        }
+        let main = &self.recording.program;
+        setup.recording.program = match &vertical.recording {
+            Some(recording) => ProgramRecording {
+                enabled: recording.enabled,
+                filename: recording.filename.clone(),
+                encoder: recording.encoder.clone(),
+                audio: main.audio.clone(),
+                width: recording.width,
+                height: recording.height,
+            },
+            None => ProgramRecording {
+                enabled: false,
+                filename: default_vertical_filename(),
+                encoder: main.encoder.clone(),
+                audio: main.audio.clone(),
+                width: None,
+                height: None,
+            },
+        };
+        setup.recording.iso.enabled = false;
+        setup.recording.replay = Default::default();
+        setup.stream = vertical.stream.clone();
+        setup.virtual_camera = Default::default();
+        Some(setup)
     }
 
     /// Check references and values the type system cannot express. An empty
@@ -1578,6 +1786,13 @@ impl Setup {
                     "\"program\" is reserved for the program recording; pick another id",
                 );
             }
+            if source.id == VERTICAL_PROGRAM {
+                issues.add(
+                    format!("sources[{i}].id"),
+                    "\"vertical-program\" is reserved for the vertical program recording; pick \
+                     another id",
+                );
+            }
             source.kind.check(&format!("sources[{i}]"), &mut issues);
             fields::report(
                 &mut issues,
@@ -1633,6 +1848,13 @@ impl Setup {
             issues.check_id(format!("scenes[{i}].id"), &scene.id, &mut scene_ids);
             if let Some(layout) = &scene.layout {
                 layout::check(&format!("scenes[{i}].layout"), layout, true, &mut issues);
+            }
+            if scene.vertical.is_some() && self.vertical.is_none() {
+                issues.add(
+                    format!("scenes[{i}].vertical"),
+                    "a vertical arrangement needs the setup's vertical canvas; add [vertical] \
+                     or remove this",
+                );
             }
         }
 
@@ -1830,7 +2052,105 @@ impl Setup {
         for issue in &mut issues.0 {
             self.identify_source_issue(issue);
         }
+        if let Some(vertical) = &self.vertical {
+            self.validate_vertical(vertical, &mut issues);
+        }
         issues.0
+    }
+
+    /// The vertical canvas's problems: its own fields, then everything the
+    /// setup it sees ([`Setup::for_canvas`]) adds to the main canvas's
+    /// problems, under the vertical fields they come from (`vertical.width`,
+    /// `vertical.recording.encoder`, `scenes[2].vertical.items[0].rect`…).
+    fn validate_vertical(&self, vertical: &VerticalCanvas, issues: &mut Issues) {
+        if let Some(recording) = &vertical.recording {
+            if !recording.audio.is_empty() {
+                issues.add(
+                    "vertical.recording.audio",
+                    "the vertical program has the main program's audio mix: both canvases \
+                     share one mix, so leave this empty and list the audio sources in \
+                     recording.program.audio",
+                );
+            }
+            if recording.enabled
+                && self.recording.program.enabled
+                && recording.filename == self.recording.program.filename
+            {
+                issues.add(
+                    "vertical.recording.filename",
+                    format!(
+                        "{:?} is recording.program.filename too, and both programs are written \
+                         to recording.folder; give the vertical file its own name, like \
+                         \"{{date}} {{time}} vertical\"",
+                        recording.filename
+                    ),
+                );
+            }
+        }
+        let Some(setup) = self.for_canvas(CanvasId::Vertical) else {
+            return;
+        };
+        let main: HashSet<(String, String)> = issues
+            .0
+            .iter()
+            .map(|issue| (issue.path.clone(), issue.message.clone()))
+            .collect();
+        for mut issue in setup.validate() {
+            match self.vertical_path(vertical, &issue.path) {
+                VerticalPath::Own(path) => issue.path = path,
+                VerticalPath::Main => continue,
+                VerticalPath::Shared => {
+                    if main.contains(&(issue.path.clone(), issue.message.clone())) {
+                        continue;
+                    }
+                    issue.message = format!("on the vertical canvas: {}", issue.message);
+                }
+            }
+            issues.0.push(issue);
+        }
+    }
+
+    /// Where a problem of the vertical canvas's setup (`path` in it) is in
+    /// this setup.
+    fn vertical_path(&self, vertical: &VerticalCanvas, path: &str) -> VerticalPath {
+        let under = |field: &str| {
+            path.strip_prefix(field)
+                .filter(|rest| rest.is_empty() || rest.starts_with(['.', '[']))
+        };
+        if let Some(rest) = under("canvas.width").or(under("canvas.height")) {
+            let field = &path["canvas.".len()..path.len() - rest.len()];
+            return VerticalPath::Own(format!("vertical.{field}{rest}"));
+        }
+        if let Some(rest) = under("canvas.fps") {
+            return match vertical.fps {
+                Some(_) => VerticalPath::Own(format!("vertical.fps{rest}")),
+                // Inherited: the main canvas reports it.
+                None => VerticalPath::Main,
+            };
+        }
+        if under("recording.program.audio").is_some() {
+            // The main program's mix, checked there.
+            return VerticalPath::Main;
+        }
+        if let Some(rest) = under("recording.program") {
+            return match vertical.recording {
+                Some(_) => VerticalPath::Own(format!("vertical.recording{rest}")),
+                // Disabled stand-in with the main encoder: nothing of its own.
+                None => VerticalPath::Main,
+            };
+        }
+        if let Some(rest) = under("stream") {
+            return VerticalPath::Own(format!("vertical.stream{rest}"));
+        }
+        if let Some(rest) = path.strip_prefix("scenes[")
+            && let Some((index, rest)) = rest.split_once(']')
+            && let Some(scene) = index.parse::<usize>().ok().and_then(|i| self.scenes.get(i))
+            && scene.vertical.is_some()
+            && (rest.is_empty() || rest.starts_with(".layout") || rest.starts_with(".items"))
+        {
+            return VerticalPath::Own(format!("scenes[{index}].vertical{rest}"));
+        }
+        VerticalPath::Shared
     }
 
     /// Add a source's stable identity to a checker/plugin issue.
@@ -1918,6 +2238,17 @@ impl Setup {
 
 #[derive(Default)]
 pub(crate) struct Issues(Vec<Issue>);
+
+/// Where a problem the vertical canvas's setup has belongs.
+enum VerticalPath {
+    /// At this vertical field.
+    Own(String),
+    /// The main canvas's, which reports it itself.
+    Main,
+    /// Shared with the main canvas: reported unless the main canvas has
+    /// the same problem.
+    Shared,
+}
 
 /// The ids scene items may name: video sources, scenes and keyframe sets.
 struct Known<'a> {

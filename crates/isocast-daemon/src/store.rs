@@ -752,10 +752,21 @@ impl Versioned for Profile {
 /// only if its text changed. The profile keeps the name its file has (a
 /// rename may have come after the change).
 pub fn write(target: &Target, setup: &Setup, parts: Parts) -> Result<()> {
-    let profile_name = read_profile(&target.profile)
-        .map(|profile| profile.name)
-        .unwrap_or_else(|_| target.profile_name.clone());
-    let (collection, profile) = setup.clone().into_parts(&profile_name);
+    let existing = read_profile(&target.profile).ok();
+    let profile_name = existing
+        .as_ref()
+        .map(|profile| profile.name.clone())
+        .unwrap_or_else(|| target.profile_name.clone());
+    let (collection, mut profile) = setup.clone().into_parts(&profile_name);
+    // The scene collection decides whether there is a vertical canvas; the
+    // profile's vertical frame rate, recording and stream are kept while
+    // the live one has none (a collection without one, or one turned off),
+    // so switching back finds them again.
+    if setup.vertical.is_none()
+        && let Some(existing) = existing
+    {
+        profile.vertical = existing.vertical;
+    }
     if parts.collection {
         write_document(&target.collection, &collection, COLLECTION_HEADER)?;
     }

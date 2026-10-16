@@ -299,7 +299,7 @@ impl Area for Controls {
             self.show_dialog(app, &area);
         }
         if changed.any(Changed::SETUP | Changed::SCENES) {
-            area.set_can_take(app.session.borrow().preview.is_some());
+            area.set_can_take(app.session.borrow().staged().is_some());
         }
         self.show_times(app, window);
         self.arm_ticker(app);
@@ -361,7 +361,9 @@ impl Area for Controls {
                 }
             }
             Event::Status { live } => self.note_drops(app, Some(&live.files), None),
-            Event::Stream { stream } => {
+            // The main canvas's stream only: the vertical canvas's has
+            // its own status (#86).
+            Event::Stream { stream } if stream.canvas.is_main() => {
                 let on = matches!(
                     stream.state,
                     StreamState::Live | StreamState::Connecting | StreamState::Reconnecting

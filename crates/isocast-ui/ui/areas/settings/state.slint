@@ -269,6 +269,13 @@ export global SettingsArea {
     in-out property <float> canvas-height;
     in-out property <string> fps;
     in-out property <[DropdownOption]> fps-options;
+    // The vertical canvas (#86): on, its size, whether it follows the
+    // main canvas's scenes, and whether recordings write it too.
+    in-out property <bool> vertical-on;
+    in-out property <float> vertical-width: 1080;
+    in-out property <float> vertical-height: 1920;
+    in-out property <bool> vertical-follow: true;
+    in-out property <bool> vertical-record;
 
     // ---- Hotkeys: the profile's bindings by action group (they apply at
     // once, through hotkeys_set), then Isocast's fixed keys.
