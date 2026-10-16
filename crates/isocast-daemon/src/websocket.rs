@@ -62,13 +62,18 @@ fn invalid(message: impl Into<String>) -> RpcError {
     }
 }
 
+/// `ISOCAST_WEBSOCKET_PASSWORD`, if set.
+fn env_password() -> Option<String> {
+    std::env::var(PASSWORD_ENV).ok().filter(|p| !p.is_empty())
+}
+
 /// The password clients must give, if any; an error if one should exist
 /// but can't be read (the server then stays off).
 fn password(settings: &WebsocketSettings) -> Result<Option<String>, String> {
     if !settings.authentication {
         return Ok(None);
     }
-    if let Some(password) = std::env::var(PASSWORD_ENV).ok().filter(|p| !p.is_empty()) {
+    if let Some(password) = env_password() {
         isocast_diagnostics::redact::remember_secret(PASSWORD_ENV, "env", &password);
         return Ok(Some(password));
     }
@@ -139,23 +144,32 @@ impl Runtime {
         if let Some(bind) = params.bind {
             settings.bind = bind;
         }
-        // Every outcome below but no_password ends with a password.
-        let after = WebsocketSettings {
-            authentication: !params.no_password,
-            ..settings.clone()
-        };
-        if let Some(problem) = after.problem() {
-            return Err(invalid(problem));
-        }
         if params.no_password && params.password.is_some() {
             return Err(invalid(
                 "password: give a password or no_password, not both",
             ));
         }
+        // What isn't given stays: a port or address change keeps the
+        // authentication as it was (#74); --password turns it back on.
+        let authentication = if params.no_password {
+            false
+        } else if params.password.is_some() {
+            true
+        } else {
+            settings.authentication
+        };
+        let after = WebsocketSettings {
+            authentication,
+            ..settings.clone()
+        };
+        if let Some(problem) = after.problem() {
+            return Err(invalid(problem));
+        }
         let mut generated = None;
+        let mut stored_now = false;
         if params.no_password {
             settings.authentication = false;
-            // The stored password goes too; enabling again makes a new one.
+            // The stored password goes too; --password sets a new one.
             delete_secret(&service(), &account()).map_err(failed)?;
         } else if let Some(password) = params.password {
             if password.is_empty() {
@@ -166,19 +180,39 @@ impl Runtime {
             set_secret(&service(), &account(), &password).map_err(failed)?;
             isocast_diagnostics::redact::remember_secret(&service(), &account(), &password);
             settings.authentication = true;
-        } else if !settings.authentication || password(&settings).is_err() {
-            // On for the first time, or turned back on after --no-password,
-            // without a password: make one and show it once.
+            stored_now = true;
+        } else if settings.authentication && password(&settings).is_err() {
+            // On for the first time without a password: make one and show
+            // it once.
             let new = isocast_obsws::generate_password().map_err(|err| failed(err.into()))?;
             set_secret(&service(), &account(), &new).map_err(failed)?;
             isocast_diagnostics::redact::remember_secret(&service(), &account(), &new);
-            settings.authentication = true;
+            stored_now = true;
             generated = Some(new);
         }
+        let warning = if settings.authentication && env_password().is_some() {
+            // Clients must give the environment's password, not the
+            // Keychain's: say so where the user is looking.
+            let stored = stored_now
+                || matches!(secret(&service(), &account()), Ok(Some(p)) if !p.is_empty());
+            Some(if stored {
+                format!(
+                    "{PASSWORD_ENV} is set in isocastd's environment and overrides the stored \
+                     password: clients must give {PASSWORD_ENV}'s value until it is unset and \
+                     isocastd restarted"
+                )
+            } else {
+                format!("clients must give {PASSWORD_ENV}'s value (set in isocastd's environment)")
+            })
+        } else {
+            None
+        };
         save(&settings)?;
         inner.settings = settings;
         restart(&mut inner, daemon);
-        Ok(status(&inner, generated))
+        let mut status = status(&inner, generated);
+        status.warning = warning;
+        Ok(status)
     }
 
     pub(super) fn disable(&self) -> Result<WebsocketStatus, RpcError> {
@@ -283,6 +317,7 @@ fn status(inner: &Inner, generated_password: Option<String>) -> WebsocketStatus 
         rpc_version: RPC_VERSION,
         last_error: inner.last_error.clone(),
         generated_password,
+        warning: None,
     }
 }
 
@@ -310,6 +345,10 @@ impl Engine for Bridge {
             (Some(result), None) => Ok(result),
             (None, None) => Ok(serde_json::Value::Null),
         }
+    }
+
+    fn log(&self, line: &str) {
+        isocast_diagnostics::diagnostic!("{line}");
     }
 
     fn watch(&self, kinds: EventKinds) -> Watching {

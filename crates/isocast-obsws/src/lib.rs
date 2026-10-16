@@ -48,6 +48,8 @@ pub trait Engine: Send + Sync + 'static {
     /// as `watch` sends them. The channel closes if the watcher falls too
     /// far behind; dropping the [`Watching`] stops it.
     fn watch(&self, kinds: EventKinds) -> Watching;
+    /// Write a line to the engine's log.
+    fn log(&self, line: &str);
 }
 
 /// Events coming from [`Engine::watch`].
@@ -84,6 +86,9 @@ pub(crate) struct Shared {
     pub isocast_version: String,
     /// Each identified session's inbox for `BroadcastCustomEvent`.
     pub custom: parking_lot::Mutex<Vec<mpsc::Sender<Value>>>,
+    /// When a refused web page's connection was last logged, and how many
+    /// were refused since without a log line.
+    pub origin_log: parking_lot::Mutex<(Option<Instant>, u32)>,
 }
 
 impl Server {
@@ -101,6 +106,7 @@ impl Server {
             salt: random_base64(32)?,
             isocast_version: config.isocast_version,
             custom: parking_lot::Mutex::new(Vec::new()),
+            origin_log: parking_lot::Mutex::new((None, 0)),
         });
         let accept = thread::Builder::new().name("obs-websocket".into()).spawn({
             let shared = shared.clone();
@@ -237,6 +243,103 @@ mod tests {
             authentication("supersecretpassword", salt, challenge),
             "1Ct943GAT+6YQUUX47Ia/ncufilbe6+oD6lY+5kaCu4="
         );
+    }
+
+    /// An engine whose method table always fails, logging to a list.
+    struct Failing(std::sync::Mutex<Vec<String>>);
+
+    impl Engine for Failing {
+        fn call(&self, _: Method, _: &str) -> Result<Value, RpcError> {
+            Err(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: "isocastd is stopping".into(),
+            })
+        }
+        fn watch(&self, _: EventKinds) -> Watching {
+            Watching {
+                events: mpsc::channel().1,
+                guard: Box::new(()),
+            }
+        }
+        fn log(&self, line: &str) {
+            self.0.lock().unwrap().push(line.into());
+        }
+    }
+
+    fn serve(password: Option<&str>) -> (Server, Arc<Failing>) {
+        let engine = Arc::new(Failing(Default::default()));
+        let config = Config {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            password: password.map(Into::into),
+            isocast_version: "test".into(),
+        };
+        (Server::start(config, engine.clone()).unwrap(), engine)
+    }
+
+    fn connect(
+        server: &Server,
+        origin: Option<&str>,
+    ) -> Result<tungstenite::WebSocket<std::net::TcpStream>, tungstenite::Error> {
+        use tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{}", server.local_addr())
+            .into_client_request()
+            .unwrap();
+        if let Some(origin) = origin {
+            request
+                .headers_mut()
+                .insert("Origin", origin.parse().unwrap());
+        }
+        let stream = std::net::TcpStream::connect(server.local_addr()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        tungstenite::client::client(request, stream)
+            .map(|(ws, _)| ws)
+            .map_err(|err| match err {
+                tungstenite::HandshakeError::Failure(err) => err,
+                tungstenite::HandshakeError::Interrupted(_) => tungstenite::Error::ConnectionClosed,
+            })
+    }
+
+    #[test]
+    fn identify_closes_when_the_engine_cannot_be_read() {
+        let (server, _) = serve(None);
+        let mut ws = connect(&server, None).unwrap();
+        let hello = ws.read().unwrap();
+        assert!(hello.to_text().unwrap().contains("\"op\":0"));
+        ws.send(tungstenite::Message::text(
+            r#"{"op":1,"d":{"rpcVersion":1}}"#,
+        ))
+        .unwrap();
+        let started = Instant::now();
+        let close = match ws.read() {
+            Ok(tungstenite::Message::Close(frame)) => frame.unwrap(),
+            other => panic!("expected a close, got {other:?}"),
+        };
+        assert_eq!(u16::from(close.code), 4000, "{close:?}");
+        assert!(close.reason.contains("connect again"), "{close:?}");
+        // It tried again before giving up (50 + 100 ms).
+        assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+
+    #[test]
+    fn refused_web_pages_are_logged_once_per_interval() {
+        let (server, engine) = serve(None);
+        for _ in 0..3 {
+            let refused = connect(&server, Some("https://evil.example"));
+            assert!(
+                matches!(&refused, Err(tungstenite::Error::Http(r)) if r.status() == 403),
+                "{refused:?}"
+            );
+        }
+        let lines = engine.0.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("127.0.0.1:"), "{lines:?}");
+        assert!(lines[0].contains("\"https://evil.example\""), "{lines:?}");
+        // With a password, browsers may connect (and nothing is logged).
+        let (server, engine) = serve(Some("secret"));
+        assert!(connect(&server, Some("https://example.com")).is_ok());
+        assert!(engine.0.lock().unwrap().is_empty());
     }
 
     #[test]

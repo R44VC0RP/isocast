@@ -1942,8 +1942,8 @@ Usage: isocast websocket enable [OPTIONS]
 Options:
       --port <PORT>  The TCP port (OBS's is 4455)
       --bind <BIND>  The address to listen on: 127.0.0.1 (this Mac only, the default), an address of this Mac, or 0.0.0.0 (every network)
-      --password     Set a new password: read from stdin, or asked for without echo
-      --no-password  Let clients connect without a password (any program on this Mac, but not web pages); only with a loopback --bind
+      --password     Set a new password: read from stdin, or asked for without echo. Also turns the password back on after --no-password
+      --no-password  Let clients connect without a password (any program on this Mac, but not web pages: connections with an Origin header are refused and logged in isocastd's log); only with a loopback --bind. Kept, also when --port or --bind changes, until --password sets one
       --json         
   -h, --help         Print help
 ```

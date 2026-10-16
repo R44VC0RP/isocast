@@ -70,14 +70,17 @@ pub struct WebsocketEnableParams {
     /// 0.0.0.0 for every network).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<String>,
-    /// The password clients authenticate with, kept in the Keychain. Left
-    /// out, the stored one stays; when none is stored one is generated and
+    /// The password clients authenticate with, kept in the Keychain; it
+    /// turns authentication back on after `no_password`. Left out, the
+    /// stored one and the authentication stay as they were; with
+    /// authentication on and no password stored, one is generated and
     /// returned once as `generated_password`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     /// Remove the password: any program on this Mac that reaches the port
     /// may connect, except web pages (connections with an Origin header
-    /// are refused). Only with a loopback bind (127.0.0.1 or ::1).
+    /// are refused, and logged in isocastd's log). Only with a loopback
+    /// bind (127.0.0.1 or ::1). Stays until a `password` is given.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_password: bool,
 }
@@ -110,6 +113,11 @@ pub struct WebsocketStatus {
     /// enter it in the OBS client. Never in `websocket_status`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_password: Option<String>,
+    /// Something `websocket_enable` did differently from what was asked
+    /// (`ISOCAST_WEBSOCKET_PASSWORD` overrides the stored password). Never
+    /// in `websocket_status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 impl WebsocketSettings {

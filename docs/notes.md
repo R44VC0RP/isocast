@@ -1630,6 +1630,16 @@ each section. Delete entries that stop being true.
   kept all 108,056 frames with equal 3601.866667 s video/audio. This is a
   measured nonzero underrun count, not a claim of glitch-free monitoring.
 
+- 2026-10-16 (#74): **obs-websocket's stream is every destination.** OBS
+  has one stream output and Start Streaming starts every enabled
+  destination, so GetStreamStatus, Start/Stop/ToggleStream and
+  StreamStateChanged combine them as the app's status bar does (live when
+  any is; counters summed over the live ones). `websocket enable` changes
+  only what it is given, authentication included: after --no-password, a
+  port or bind change stays without a password (a wide bind is refused);
+  --password turns it back on. Its `warning` field (enable only) says when
+  ISOCAST_WEBSOCKET_PASSWORD overrides the Keychain password.
+
 - 2026-10-16 (#82): **A given-up source open frees the way for a fresh
   one.** Native opens can't be cancelled, so `bounded_open` keeps each
   timed-out open's thread until macOS returns, but keys them by source and
@@ -5295,6 +5305,13 @@ each section. Delete entries that stop being true.
   couldn't-restart warning stays until dismissed (OK).
 
 ## Gotchas
+
+- 2026-10-16 (#74): a CLI-stored stream key can't be read by an ad-hoc
+  signed isocastd from another build (702, "stored by another build"):
+  for local streaming tests start the engine with ISOCAST_STREAM_KEY set.
+  Also `isocast apply --live` takes thousands of patches a second from a
+  script, far faster than a real drag; an obs-websocket session's watch
+  queue (64) then overflows and resyncs.
 
 - 2026-10-16 (#82): a third-party HAL driver that stops answering makes
   every Core Audio call into it wait for coreaudiod's 60-150 s timeouts:

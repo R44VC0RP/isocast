@@ -753,13 +753,13 @@ Turn off the obs-websocket server, disconnecting its clients. Returns its status
 
 ## websocket_enable
 
-Turn on the obs-websocket v5 server (off by default; kept across restarts), optionally setting port (4455), bind (127.0.0.1, this Mac only; 0.0.0.0 for every network), password (kept in the Keychain) or no_password (loopback bind only; web pages are then refused). Without a stored password one is generated and returned once as generated_password, for the user to enter in the OBS tool. Returns its status.
+Turn on the obs-websocket v5 server (off by default; kept across restarts), optionally setting port (4455), bind (127.0.0.1, this Mac only; 0.0.0.0 for every network), password (kept in the Keychain) or no_password (loopback bind only; web pages are then refused and logged; kept until a password is given). Settings left out stay as they were. With a password required and none stored, one is generated and returned once as generated_password, for the user to enter in the OBS tool. Returns its status, with a warning if ISOCAST_WEBSOCKET_PASSWORD overrides the stored password.
 
 | Argument | Type | Description |
 |---|---|---|
 | `bind` | string (optional) | The address to listen on (an IPv4 or IPv6 address of this Mac; 0.0.0.0 for every network). |
-| `no_password` | boolean | Remove the password: any program on this Mac that reaches the port may connect, except web pages (connections with an Origin header are refused). Only with a loopback bind (127.0.0.1 or ::1). |
-| `password` | string (optional) | The password clients authenticate with, kept in the Keychain. Left out, the stored one stays; when none is stored one is generated and returned once as `generated_password`. |
+| `no_password` | boolean | Remove the password: any program on this Mac that reaches the port may connect, except web pages (connections with an Origin header are refused, and logged in isocastd's log). Only with a loopback bind (127.0.0.1 or ::1). Stays until a `password` is given. |
+| `password` | string (optional) | The password clients authenticate with, kept in the Keychain; it turns authentication back on after `no_password`. Left out, the stored one and the authentication stay as they were; with authentication on and no password stored, one is generated and returned once as `generated_password`. |
 | `port` | integer (optional) | The TCP port, 1–65535. |
 
 ## websocket_status

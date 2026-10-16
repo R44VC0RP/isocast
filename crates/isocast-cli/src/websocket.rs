@@ -21,10 +21,14 @@ pub enum Command {
         #[arg(long)]
         bind: Option<String>,
         /// Set a new password: read from stdin, or asked for without echo.
+        /// Also turns the password back on after --no-password.
         #[arg(long, conflicts_with = "no_password")]
         password: bool,
         /// Let clients connect without a password (any program on this
-        /// Mac, but not web pages); only with a loopback --bind.
+        /// Mac, but not web pages: connections with an Origin header are
+        /// refused and logged in isocastd's log); only with a loopback
+        /// --bind. Kept, also when --port or --bind changes, until
+        /// --password sets one.
         #[arg(long)]
         no_password: bool,
         #[arg(long)]
@@ -115,6 +119,9 @@ fn print(status: &WebsocketStatus) {
     }
     if let Some(password) = &status.generated_password {
         println!("  password (shown once; enter it in the OBS tool): {password}");
+    }
+    if let Some(warning) = &status.warning {
+        println!("  warning: {warning}");
     }
     if let Some(error) = &status.last_error {
         println!("  {error}");

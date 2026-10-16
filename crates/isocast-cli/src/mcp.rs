@@ -1110,9 +1110,12 @@ impl Isocast {
         description = "Turn on the obs-websocket v5 server (off by default; kept across \
                        restarts), optionally setting port (4455), bind (127.0.0.1, this Mac \
                        only; 0.0.0.0 for every network), password (kept in the Keychain) or \
-                       no_password (loopback bind only; web pages are then refused). Without a stored password one is generated and returned \
+                       no_password (loopback bind only; web pages are then refused and logged; kept \
+                       until a password is given). Settings left out stay as they were. With \
+                       a password required and none stored, one is generated and returned \
                        once as generated_password, for the user to enter in the OBS tool. \
-                       Returns its status.",
+                       Returns its status, with a warning if ISOCAST_WEBSOCKET_PASSWORD \
+                       overrides the stored password.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,

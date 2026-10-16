@@ -17,6 +17,7 @@ use tungstenite::{Message, WebSocket};
 use crate::events::{self, Tracker, sub};
 use crate::requests::{self, Ctx, code};
 use crate::{OBS_WEBSOCKET_VERSION, RPC_VERSION, Shared, Watching};
+use isocast_protocol::api::Event;
 
 /// How often a session looks for events while the client is quiet.
 const POLL: Duration = Duration::from_millis(15);
@@ -25,6 +26,12 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Messages larger than this close the connection (OBS has no limit; a
 /// screenshot request is the largest anyone sends, and it's small).
 const MAX_MESSAGE: usize = 16 << 20;
+/// Refused web pages are logged at most this often.
+const ORIGIN_LOG_EVERY: Duration = Duration::from_secs(10);
+/// Events a pump takes at most; the rest wait for the next one.
+const PUMP_BATCH: usize = 1024;
+/// Tries to read the setup and status a session starts from.
+const TRACKER_TRIES: u32 = 3;
 
 const JSON_PROTOCOL: &str = "obswebsocket.json";
 const MSGPACK_PROTOCOL: &str = "obswebsocket.msgpack";
@@ -106,12 +113,16 @@ pub fn run(stream: TcpStream, peer: SocketAddr, shared: &Arc<Shared>) {
     // JSON unless the client asks for MessagePack first; refuse one that
     // offers neither.
     let mut msgpack = false;
+    let mut refused_origin = None;
     #[allow(clippy::result_large_err)] // tungstenite's callback type.
     let negotiate =
         |request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
             // Browsers always send Origin and OBS tools don't: without a
             // password, a web page must not drive the recorder (#74).
-            if shared.password.is_none() && request.headers().contains_key("Origin") {
+            if shared.password.is_none()
+                && let Some(origin) = request.headers().get("Origin")
+            {
+                refused_origin = Some(String::from_utf8_lossy(origin.as_bytes()).into_owned());
                 let mut refusal = ErrorResponse::new(Some(
                     "Isocast's obs-websocket has no password, so it refuses connections from \
                      web pages; set a password to connect from a browser"
@@ -148,7 +159,12 @@ pub fn run(stream: TcpStream, peer: SocketAddr, shared: &Arc<Shared>) {
     let config = tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE))
         .max_frame_size(Some(MAX_MESSAGE));
-    let Ok(mut ws) = tungstenite::accept_hdr_with_config(stream, negotiate, Some(config)) else {
+    // (A failed handshake holds the callback, so `.ok()` before logging.)
+    let accepted = tungstenite::accept_hdr_with_config(stream, negotiate, Some(config)).ok();
+    if let Some(origin) = refused_origin {
+        log_refused_origin(shared, peer, &origin);
+    }
+    let Some(mut ws) = accepted else {
         return;
     };
     let _ = ws.get_ref().set_read_timeout(Some(POLL));
@@ -182,6 +198,29 @@ pub fn run(stream: TcpStream, peer: SocketAddr, shared: &Arc<Shared>) {
     }
     let _ = ws.get_ref().shutdown(std::net::Shutdown::Both);
     // Its custom-event sender goes at the next broadcast.
+}
+
+/// Say in the engine's log that a web page was refused (a page can retry
+/// in a loop, so at most one line per 10 s, counting the rest).
+fn log_refused_origin(shared: &Shared, peer: SocketAddr, origin: &str) {
+    let mut last = shared.origin_log.lock();
+    if last.0.is_some_and(|at| at.elapsed() < ORIGIN_LOG_EVERY) {
+        last.1 += 1;
+        return;
+    }
+    let others = std::mem::take(&mut last.1);
+    *last = (Some(Instant::now()), 0);
+    drop(last);
+    // The page chose the header: quoted and cut short.
+    let origin: String = origin.chars().take(200).collect();
+    let mut line = format!(
+        "isocastd: obs-websocket refused a web page's connection from {peer} (Origin {origin:?}): \
+         it has no password, so browsers may not connect"
+    );
+    if others > 0 {
+        line.push_str(&format!(" ({others} more refused since the last line)"));
+    }
+    shared.engine.log(&line);
 }
 
 fn would_block(error: &io::Error) -> bool {
@@ -289,24 +328,16 @@ impl Session<'_> {
 
     /// Pass on the events that came since last time.
     fn pump(&mut self, ws: &mut WebSocket<TcpStream>) -> Result<(), Close> {
-        let mut out = Vec::new();
+        let mut queued = Vec::new();
         let mut lost = false;
         if let Some(watching) = &self.watching {
-            loop {
+            while queued.len() < PUMP_BATCH {
                 match watching.events.try_recv() {
                     Ok(bytes) => {
-                        let Ok(note) =
+                        if let Ok(note) =
                             serde_json::from_slice::<isocast_protocol::api::Notification>(&bytes)
-                        else {
-                            continue;
-                        };
-                        let ctx = Ctx {
-                            shared: self.shared,
-                            peer: &self.peer,
-                            stats: &self.stats,
-                        };
-                        if let Some(tracker) = self.tracker.as_mut() {
-                            out.extend(tracker.translate(&ctx, note.params));
+                        {
+                            queued.push(note.params);
                         }
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -317,15 +348,33 @@ impl Session<'_> {
                 }
             }
         }
+        let mut out = Vec::new();
+        let ctx = Ctx {
+            shared: self.shared,
+            peer: &self.peer,
+            stats: &self.stats,
+        };
+        if let Some(tracker) = self.tracker.as_mut() {
+            // One read of the setup covers every setup_changed queued (a
+            // canvas drag sends many a second): it reads the newest
+            // setup, so the later ones would find nothing new (#74).
+            let mut compared = false;
+            for event in queued {
+                if matches!(event, Event::SetupChanged { .. }) {
+                    if compared {
+                        continue;
+                    }
+                    compared = true;
+                }
+                out.extend(tracker.translate(&ctx, event));
+            }
+        }
         if lost {
             // It fell behind and was dropped: watch again, and send what
             // changed meanwhile.
-            self.watch();
-            let ctx = Ctx {
-                shared: self.shared,
-                peer: &self.peer,
-                stats: &self.stats,
-            };
+            self.watching = Some(self.shared.engine.watch(events::kinds(
+                self.subscriptions & sub::INPUT_VOLUME_METERS != 0,
+            )));
             if let Some(tracker) = self.tracker.as_mut() {
                 out.extend(tracker.resync(&ctx));
             }
@@ -352,6 +401,24 @@ impl Session<'_> {
             self.send(ws, op::EVENT, data)?;
         }
         Ok(())
+    }
+
+    /// What the session's events start from. Reading the setup and status
+    /// can fail while isocastd is busy or stopping: try again briefly,
+    /// then close rather than run without events (#74).
+    fn start_tracker(&self) -> Result<Tracker, Close> {
+        for attempt in 1..=TRACKER_TRIES {
+            if let Some(tracker) = Tracker::new(&self.ctx()) {
+                return Ok(tracker);
+            }
+            if attempt < TRACKER_TRIES {
+                std::thread::sleep(Duration::from_millis(50 * u64::from(attempt)));
+            }
+        }
+        Err(closing(
+            close::UNKNOWN_REASON,
+            "Isocast could not read its setup and status to follow events; connect again.",
+        ))
     }
 
     fn watch(&mut self) {
@@ -440,7 +507,7 @@ impl Session<'_> {
                 }
                 self.subscriptions = subscriptions(data)?.unwrap_or(sub::ALL);
                 self.identified = true;
-                self.tracker = Tracker::new(&self.ctx());
+                self.tracker = Some(self.start_tracker()?);
                 self.watch();
                 let (tx, rx) = mpsc::channel();
                 self.shared.custom.lock().push(tx);

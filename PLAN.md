@@ -3823,3 +3823,15 @@ One line per finished task, newest last.
   Pacing row, the 6-hour auto-off and Settings after Review… (before: OK
   and Apply disabled); rtmp unit test extended; gates clean on
   isocast-m2-b.
+- #74 (2026-10-16): obs-websocket follow-ups: one Get + diff per pump for
+  every queued setup_changed (300 live applies: 256 session Gets on main,
+  11 here, same events); identify closes 4000 after two retries when the
+  tracker can't start; refused web pages logged (peer + Origin, one line
+  per 10 s); `websocket enable --port/--bind` keeps no-password instead of
+  generating a password; `enable` warns when ISOCAST_WEBSOCKET_PASSWORD
+  overrides the stored password; GetStreamStatus/Start/Stop and
+  StreamStateChanged treat every destination as one stream (main off,
+  backup live: active, was inactive with 604/501). Verified on an
+  isolated engine with obs-websocket-js (msgpack 80/80, JSON 77/77),
+  obsws-python 9/9, local mediamtx; latency unchanged (3 interleaved
+  rounds).

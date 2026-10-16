@@ -12,7 +12,7 @@ use isocast_protocol::stream::StreamState;
 use isocast_protocol::virtual_camera::VirtualCameraState;
 use serde_json::{Value, json};
 
-use crate::requests::{Ctx, db_to_mul, monitor_type, settings_of, transition_name};
+use crate::requests::{Ctx, db_to_mul, monitor_type, settings_of, stream_state, transition_name};
 use crate::world::{self, World, uuid};
 
 /// obs-websocket's EventSubscription bits.
@@ -75,6 +75,8 @@ pub struct Tracker {
     studio: bool,
     recording: bool,
     record_path: Option<String>,
+    /// Each stream destination's state; OBS sees them as one stream.
+    streams: HashMap<String, StreamState>,
     stream: StreamState,
     camera: VirtualCameraState,
     replay: ReplayState,
@@ -89,6 +91,7 @@ impl Tracker {
             studio: false,
             recording: false,
             record_path: None,
+            streams: HashMap::new(),
             stream: StreamState::Offline,
             camera: VirtualCameraState::Stopped,
             replay: ReplayState::Off,
@@ -101,10 +104,11 @@ impl Tracker {
         self.studio = status.preview.is_some();
         self.recording = status.state != EngineState::Idle;
         self.record_path = crate::requests::program_file(status);
-        self.stream = status
-            .stream
-            .as_ref()
-            .map_or(StreamState::Offline, |s| s.state);
+        self.streams = crate::requests::streams(status)
+            .iter()
+            .map(|s| (s.id.clone(), s.state))
+            .collect();
+        self.stream = stream_state(self.streams.values().copied());
         self.camera = status
             .virtual_camera
             .as_ref()
@@ -265,16 +269,15 @@ impl Tracker {
                 },
                 None,
             )],
-            // OBS has one stream: the main destination's (#73).
-            Event::Stream { stream } if stream.id != isocast_protocol::stream::MAIN_DESTINATION => {
-                Vec::new()
-            }
+            // OBS has one stream: every destination as one (#73, #74).
             Event::Stream { stream } => {
-                let before = std::mem::replace(&mut self.stream, stream.state);
-                if before == stream.state {
+                self.streams.insert(stream.id, stream.state);
+                let now = stream_state(self.streams.values().copied());
+                let before = std::mem::replace(&mut self.stream, now);
+                if before == now {
                     return Vec::new();
                 }
-                stream_event(before, stream.state).into_iter().collect()
+                stream_event(before, now).into_iter().collect()
             }
             Event::VirtualCamera { camera } => {
                 let before = std::mem::replace(&mut self.camera, camera.state);

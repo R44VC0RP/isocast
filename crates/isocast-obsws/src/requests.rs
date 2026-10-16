@@ -8,7 +8,7 @@ use isocast_protocol::api::{
 use isocast_protocol::change::Change;
 use isocast_protocol::library::{Library, LibrarySwitchParams};
 use isocast_protocol::replay::ReplayState;
-use isocast_protocol::stream::StreamState;
+use isocast_protocol::stream::{StreamState, StreamStatus};
 use isocast_protocol::virtual_camera::VirtualCameraState;
 use isocast_protocol::{Scene, SceneItem, Source};
 use serde::de::DeserializeOwned;
@@ -1315,33 +1315,43 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
         // Stream
         "GetStreamStatus" => {
             let status = ctx.status()?;
-            let stream = status.stream.as_ref();
-            let state = stream.map(|s| s.state);
+            let streams = streams(&status);
+            let state = stream_state(streams.iter().map(|s| s.state));
             let active = matches!(
                 state,
-                Some(StreamState::Connecting | StreamState::Live | StreamState::Reconnecting)
+                StreamState::Connecting | StreamState::Live | StreamState::Reconnecting
             );
-            let seconds = stream.map_or(0.0, |s| s.elapsed_seconds);
+            // The live destinations' numbers (all of them when none is).
+            let counted: Vec<&StreamStatus> = if active {
+                streams.iter().filter(|s| s.is_active()).collect()
+            } else {
+                streams.iter().collect()
+            };
+            let seconds = counted
+                .iter()
+                .map(|s| s.elapsed_seconds)
+                .fold(0.0, f64::max);
             Ok(json!({
                 "outputActive": active,
-                "outputReconnecting": state == Some(StreamState::Reconnecting),
+                "outputReconnecting": state == StreamState::Reconnecting,
                 "outputTimecode": timecode(seconds),
                 "outputDuration": millis(seconds),
-                "outputCongestion": 0.0,
+                "outputCongestion": counted.iter().map(|s| s.congestion).fold(0.0, f64::max),
                 // Typed clients (obws, goobs) want whole numbers here.
-                "outputBytes": stream.map_or(0, |s| (s.total_kbps * 1000.0 / 8.0 * seconds).max(0.0) as u64),
-                "outputSkippedFrames": stream.map_or(0, |s| s.dropped_frames),
-                "outputTotalFrames": stream.map_or(0, |s| s.frames_sent + s.dropped_frames),
+                "outputBytes": counted
+                    .iter()
+                    .map(|s| (s.total_kbps * 1000.0 / 8.0 * s.elapsed_seconds).max(0.0) as u64)
+                    .sum::<u64>(),
+                "outputSkippedFrames": counted.iter().map(|s| s.dropped_frames).sum::<u64>(),
+                "outputTotalFrames": counted
+                    .iter()
+                    .map(|s| s.frames_sent + s.dropped_frames)
+                    .sum::<u64>(),
             }))
         }
         "StartStream" | "StopStream" | "ToggleStream" => {
             let status = ctx.status()?;
-            let active = status.stream.as_ref().is_some_and(|s| {
-                matches!(
-                    s.state,
-                    StreamState::Connecting | StreamState::Live | StreamState::Reconnecting
-                )
-            });
+            let active = streams(&status).iter().any(StreamStatus::is_active);
             let start = match request_type {
                 "StartStream" => true,
                 "StopStream" => false,
@@ -1527,6 +1537,34 @@ pub fn program_file(status: &Status) -> Option<String> {
         .and_then(|i| status.files.get(i))
         .or(status.files.last())
         .map(|f| f.to_string_lossy().into_owned())
+}
+
+/// Every stream destination, the main one first. OBS has one stream
+/// output and Isocast's Start Streaming starts every enabled destination,
+/// so OBS clients see them as one (#74): with the main destination off and
+/// another live, the stream is live.
+pub fn streams(status: &Status) -> &[StreamStatus] {
+    if status.streams.is_empty() {
+        status.stream.as_slice()
+    } else {
+        &status.streams
+    }
+}
+
+/// The destinations' state as one, as the app's status bar shows it: live
+/// when any is, else reconnecting, connecting, failed, offline.
+pub fn stream_state(states: impl IntoIterator<Item = StreamState>) -> StreamState {
+    let rank = |state: StreamState| match state {
+        StreamState::Live => 4,
+        StreamState::Reconnecting => 3,
+        StreamState::Connecting => 2,
+        StreamState::Failed => 1,
+        StreamState::Offline => 0,
+    };
+    states
+        .into_iter()
+        .max_by_key(|state| rank(*state))
+        .unwrap_or(StreamState::Offline)
 }
 
 fn vcam_active(status: &Status) -> bool {
