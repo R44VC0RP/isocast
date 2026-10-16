@@ -943,6 +943,9 @@ fn test_pattern<P: Platform>(
     let generator = Generator::spawn({
         let (platform, slot, timeline) = (platform.clone(), slot.clone(), timeline.clone());
         move |stop| {
+            // On time like a device's frames (#78): at the default QoS its
+            // wakes ran up to 100 ms late, showing a pulse frames late.
+            platform.real_time_thread();
             let Some(start) = timeline.wait(stop) else {
                 return;
             };

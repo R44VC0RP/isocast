@@ -1484,6 +1484,10 @@ def scenario_replay(e, cfg, evidence):
                         saves.append(e.rpc("replay_save"))
                 manifest = until(lambda: finished(started["manifest"]), seconds + 40, "take finalization")
                 until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
+                live = e.rpc("status").get("engine") or {}
+                clocks = [{k: c[k] for k in ("id", "wake_max_us", "late_wakes")}
+                          for c in live.get("clocks", [])]
+                clocks.append({"id": "compositor", "reused": live.get("compositor", {}).get("reused")})
                 final = e.rpc("stream_stop")
                 listener.wait(timeout=10)
             finally:
@@ -1498,6 +1502,7 @@ def scenario_replay(e, cfg, evidence):
                 "delivered_fps": final["frames_sent"] / final["elapsed_seconds"]}
         evidence.setdefault("drops", {})[str(output)] = loss
         check_loss(loss, loss_limit(evidence))
+        evidence.setdefault("clocks", {})[name] = clocks
         files = check_take(Path(started["manifest"]), manifest, evidence=evidence)
         ffmpeg("-xerror", "-i", output, "-f", "null", "-")
         replays = [check_replay(saved, seconds, 2, fps) for saved in saves]

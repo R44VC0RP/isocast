@@ -5247,6 +5247,17 @@ each section. Delete entries that stop being true.
   script waits on (a CLI command, a reply); `libc::fsync` is ~0.1 ms.
   To time a CLI command, run several builds interleaved against one
   isolated daemon: single runs vary by ~0.5 ms.
+- 2026-10-16 (#78): a sync offset of exactly two frames (33.31 ms at
+  60 fps) in an e2e file is a source picture arriving late, not a muxing
+  bug: the program takes each source's newest frame at draw time and never
+  waits, while audio is stamped by sample. Read the burnt-in `FRAME`/`T+`
+  label around the flash (`crop=1000:290:0:0`): a repeated frame then a
+  jump is a late source. The replay scenario's evidence keeps every media
+  clock's `wake_max_us`/`late_wakes` and the compositor's `reused` count.
+  At the default QoS a generator thread in the background-only daemon woke
+  up to 104 ms late with *no* load (CPU load with 8× `yes` made it better,
+  14-26 ms), so loading the CPU doesn't reproduce it; repeated idle runs do
+  (2/15 on m2-b).
 - 2026-10-15 (#64): a media source doesn't advance while nothing records
   or streams: `snapshot` on an idle engine shows the clip's first frame
   every time. Start a recording before snapshotting media. Snapshots of a

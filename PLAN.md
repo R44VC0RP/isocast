@@ -658,6 +658,12 @@ layout editing, Windows, release prep).
   source, waiting within the 8 s for one to return), and the error says
   what to do. Root cause on Ryan's Mac: the Studio Audio HAL driver stopped
   answering Core Audio after the 7 h take (startRunning blocked 11.5 min).
+- [x] **A.4 Replay flash/beep offset (GitHub #78):** not the save, the
+  shared encoder or the file: the test pattern's generator thread (default
+  QoS) woke up to 104 ms late and skipped the pulse's first frames, so the
+  program (recording too) showed the flash two frames late. It now runs at
+  the program thread's QoS. M2-b interleaved: base 2/15 runs at 33.31 ms,
+  fixed 0/30, generator late wakes 1-7 per run to 0.
 - [ ] **A.4 Split + stream losses (GitHub #60), qualification partial:**
   synchronous native stream submission stalls now signal pressure; final
   build's 16 post-split takes have zero protected losses. Cold stream startup
@@ -1383,6 +1389,14 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   Final stock stress isos PASS (new limit four); workspace fmt/clippy and
   212 tests/doctests pass. Tier-1 review and commits remain the coordinator's.
 
+- A.4 / #78 (2026-10-16): the e2e replay's intermittent 33.31 ms
+  flash/beep offset is the test pattern generator waking late (37-104 ms,
+  default QoS) and skipping the pulse's first frames; burnt-in FRAME labels
+  in both failing saves show the stale frame repeated and frames 1139-1141 /
+  1200-1201 missing, and the same take's recording has the same late flash.
+  The generator now asks for real-time QoS. M2-b, no load, interleaved:
+  base 2/15 FAIL (33.31 ms), fix 0/30 (all 0.021 ms), generator max wake
+  ≤12.4 ms with 0 late wakes, compositor reused frames 3-7 to 0.
 - A.4 / #77 (2026-10-16): a warm reservation no longer keeps a program
   tap; first real join restores it synchronously without recreating the
   native encoder or resetting counters/timestamps. M2-b final CPU baseline /
