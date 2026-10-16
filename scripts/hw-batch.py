@@ -507,7 +507,9 @@ def run_job(path):
             if not pinned:
                 hold(locks, mac_lock(next(m for m, h in MACS.items() if h == host)), job_id)
             running.write_text(json.dumps(job, indent=2) + "\n")
-            reserved = [host] + ([MACS[job["receiver"]]] if job.get("receiver") else [])
+            # Only the job's own Mac: a soak's stream receiver just copies
+            # packets to disk, so builds (nice 15) may share it.
+            reserved = [host]
             reserve_builds(reserved, job_id, job["timeout_min"], logf)
             log(f"{job_id}: pushing to {host}")
             env = dict(os.environ, ISOCAST_TESTMAC=host)

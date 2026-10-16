@@ -312,7 +312,8 @@ for p in sys.argv[1:]:
         j = json.load(open(p))
     except (OSError, ValueError):
         continue
-    for m in (j.get("mac"), j.get("receiver"), j.get("host")):
+    # Not the receiver: a soak receiver only copies packets to disk.
+    for m in (j.get("mac"), j.get("host")):
         if m == "any":
             print("isocast-m2-a\nisocast-m2-b")
         elif m:
