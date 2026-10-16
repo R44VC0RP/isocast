@@ -410,7 +410,11 @@ sync() {
     choose_host
     install_remote
     remote __prepare "$lane"
-    files | rsync -a --from0 --files-from=- -e "ssh -o ConnectTimeout=10" "$here/" "$host:isocast-builds/$lane/src/"
+    # Compare by content and give changed files the current time (-c, no
+    # -t): a lane's target may be seeded from another lane's newer build,
+    # and cargo trusts mtimes, so a copied-over older source mtime could
+    # leave a changed crate uncompiled (seen 2026-10-16).
+    files | rsync -rlpc --from0 --files-from=- -e "ssh -o ConnectTimeout=10" "$here/" "$host:isocast-builds/$lane/src/"
     files | ssh_remote "sh $remote_script __clean $lane"
 }
 
