@@ -13,7 +13,7 @@
 
 mod colors;
 mod dialogs;
-mod items;
+pub(super) mod items;
 mod preview;
 
 use std::cell::RefCell;
@@ -557,6 +557,28 @@ impl Area for Sources {
             app.select(path);
             return Some(self.item_menu(app, false, true));
         }
+        // The ISO badge's: recording the file, and its audio tracks.
+        if let Some(path) = owner.strip_prefix("sources:iso:") {
+            app.select(path);
+            let s = app.session.borrow();
+            let setup = s.setup.clone()?;
+            let source = s
+                .selected(|_, chain| chain[chain.len() - 1].source.clone())
+                .flatten()?;
+            drop(s);
+            let on = items::is_iso(&setup, &source);
+            let menu = MenuBuilder::new()
+                .item("iso", "Record ISO File")
+                .checked(on);
+            if !on {
+                return Some(menu);
+            }
+            return Some(items::iso_audio_menu(
+                menu.separator().heading("ISO Audio"),
+                &setup,
+                &source,
+            ));
+        }
         if owner == "sources:list" {
             return Some(self.list_menu(app, false));
         }
@@ -609,6 +631,7 @@ impl Area for Sources {
         }
         let path = owner
             .strip_prefix("sources:item:")
+            .or_else(|| owner.strip_prefix("sources:iso:"))
             .or_else(|| owner.strip_prefix("canvas:item:"))
             .map(str::to_string);
         let selected_path = || {
@@ -620,7 +643,15 @@ impl Area for Sources {
                     .map(|s| s.path.clone())
             })
         };
-        if let Some(group) = id.strip_prefix("into:") {
+        if let Some(audio) = id.strip_prefix("iso_audio:") {
+            let found = app
+                .session
+                .borrow()
+                .selected(|_, chain| chain[chain.len() - 1].source.clone());
+            if let Some(Some(source)) = found {
+                items::choose_iso_audio(app, &source, audio);
+            }
+        } else if let Some(group) = id.strip_prefix("into:") {
             if let Some(path) = selected_path() {
                 items::move_to_group(app, &path, group);
             }
@@ -1073,6 +1104,14 @@ impl Sources {
             .separator();
         if let Some((true, on)) = iso {
             menu = menu.item("iso", "Record ISO File").checked(on);
+            if let (true, Some(src), Some(setup)) =
+                (on, &source, app.session.borrow().setup.as_ref())
+            {
+                menu = menu.submenu(
+                    "ISO Audio",
+                    items::iso_audio_menu(MenuBuilder::new(), setup, &src.id),
+                );
+            }
         }
         menu = menu.item("lock", "Lock").checked(item.locked).separator();
         if source.is_some() {

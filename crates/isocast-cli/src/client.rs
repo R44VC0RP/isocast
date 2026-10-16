@@ -91,6 +91,86 @@ pub fn check_engine(client: &mut Client) {
     }
 }
 
+/// Where an ISO file's audio tracks come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IsoAudioFrom {
+    /// Its own list, `recording.iso.source_audio.<source>`.
+    SourceAudio,
+    /// The shared `recording.iso.audio`.
+    Shared,
+    /// Neither is set: the source's own sound.
+    Own,
+}
+
+/// One ISO file's audio tracks, as the live setup chooses them.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IsoAudio {
+    pub source: String,
+    /// Whether the file is recorded (`recording.iso.sources` lists it).
+    pub recorded: bool,
+    /// Its audio tracks in order, if the source has the sound its kind
+    /// can have (a media file without audio adds no own track).
+    pub audio: Vec<String>,
+    pub from: IsoAudioFrom,
+}
+
+/// Every video source's ISO tracks in `setup`, ISO sources first.
+pub fn iso_audio(setup: &isocast_protocol::Setup) -> Vec<IsoAudio> {
+    let iso = &setup.recording.iso;
+    let mut rows: Vec<IsoAudio> = setup
+        .sources
+        .iter()
+        .filter(|s| s.kind.has_video())
+        .map(|source| IsoAudio {
+            source: source.id.clone(),
+            recorded: iso.sources.contains(&source.id),
+            audio: iso.audio_for(source, source.kind.has_audio()),
+            from: match (iso.source_audio.contains_key(&source.id), &iso.audio) {
+                (true, _) => IsoAudioFrom::SourceAudio,
+                (false, Some(_)) => IsoAudioFrom::Shared,
+                (false, None) => IsoAudioFrom::Own,
+            },
+        })
+        .collect();
+    rows.sort_by_key(|row| !row.recorded);
+    rows
+}
+
+/// Choose the audio tracks of video source `source`'s ISO file in the live
+/// setup: `Some(ids)` exactly those (`[]`: no audio), `None` back to
+/// `recording.iso.audio`'s choice. A merge patch at the live revision.
+pub fn set_iso_audio(
+    client: &mut Client,
+    source: &str,
+    audio: Option<&[String]>,
+) -> Result<Applied> {
+    let live: Live = client.call(Method::Get(None))?;
+    let Some(setup) = live.setup else {
+        bail!("there is no live setup; apply one first");
+    };
+    let video: Vec<&str> = setup
+        .sources
+        .iter()
+        .filter(|s| s.kind.has_video())
+        .map(|s| s.id.as_str())
+        .collect();
+    if !video.contains(&source) {
+        bail!(
+            "source: no video source {source:?}; video sources: {}",
+            video.join(", ")
+        );
+    }
+    let patch = serde_json::json!({
+        "recording": { "iso": { "source_audio": { source: audio } } }
+    });
+    client.call(Method::Apply(Box::new(ApplyParams {
+        revision: live.revision,
+        change: Change::Patch(patch),
+        live: false,
+    })))
+}
+
 /// Stop isocastd and start it again (after permissions change, it only
 /// sees them once restarted). The daemon refuses, atomically, while it
 /// records, streams, exports or feeds the virtual camera

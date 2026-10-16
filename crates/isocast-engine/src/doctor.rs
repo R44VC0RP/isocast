@@ -175,7 +175,7 @@ pub fn doctor<P: Platform>(platform: &P, setup: Option<&Setup>, folder: Option<&
         needed.extend(
             iso.sources
                 .iter()
-                .chain(iso.audio.iter().flatten())
+                .chain(iso.listed_audio())
                 .map(String::as_str),
         );
     }

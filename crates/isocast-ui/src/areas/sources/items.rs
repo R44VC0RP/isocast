@@ -16,6 +16,7 @@ use serde_json::{Map, Value, json};
 
 use crate::ToastKind;
 use crate::app::App;
+use crate::kit::MenuBuilder;
 use crate::model;
 use crate::session::EditOptions;
 use crate::toasts::Toast;
@@ -158,6 +159,12 @@ fn without_source(setup: &Value, id: &str) -> Value {
         }
         if iso.get("audio").is_some() {
             iso["audio"] = drop(&iso["audio"]);
+        }
+        if let Some(lists) = iso.get_mut("source_audio").and_then(Value::as_object_mut) {
+            lists.remove(id);
+            for list in lists.values_mut() {
+                *list = drop(list);
+            }
         }
     }
     out
@@ -520,6 +527,76 @@ fn set_iso_now(app: &Rc<App>, id: &str, on: bool) {
         let mut patch = json!({ "recording": { "iso": { "sources": sources } } });
         if on && !iso.enabled {
             patch["recording"]["iso"]["enabled"] = json!(true);
+        }
+        patch
+    };
+    app.edit(patch, EditOptions::default());
+}
+
+/// The "ISO Audio" menu of video source `id`'s ISO file: "Same as Other
+/// ISO Files" (the shared choice) and each audio source, checked when the
+/// file records it. Ids are `iso_audio:default` and `iso_audio:<audio id>`.
+pub fn iso_audio_menu(mut menu: MenuBuilder, setup: &Setup, id: &str) -> MenuBuilder {
+    let iso = &setup.recording.iso;
+    let Some(source) = setup.source(id) else {
+        return menu;
+    };
+    let tracks = iso.audio_for(source, source.kind.has_audio());
+    menu = menu
+        .item("iso_audio:default", "Same as Other ISO Files")
+        .checked(!iso.source_audio.contains_key(id))
+        .separator();
+    for audio in setup.sources.iter().filter(|s| s.kind.has_audio()) {
+        menu = menu
+            .item(
+                &format!("iso_audio:{}", audio.id),
+                model::source_name(audio),
+            )
+            .checked(tracks.contains(&audio.id));
+    }
+    menu
+}
+
+/// The `source_audio` entry an `iso_audio:` item of [`iso_audio_menu`]
+/// for source `id` makes: null (back to the shared choice) for `default`,
+/// else the file's tracks with `audio` added or taken out, starting from
+/// what it records now.
+pub fn toggled_iso_audio(setup: &Setup, id: &str, audio: &str) -> Value {
+    let Some(source) = setup.source(id) else {
+        return Value::Null;
+    };
+    if audio == "default" {
+        return Value::Null;
+    }
+    let mut tracks = setup
+        .recording
+        .iso
+        .audio_for(source, source.kind.has_audio());
+    match tracks.iter().position(|t| t == audio) {
+        Some(at) => {
+            tracks.remove(at);
+        }
+        None => tracks.push(audio.to_string()),
+    }
+    json!(tracks)
+}
+
+/// Act on an `iso_audio:` item of [`iso_audio_menu`] for source `id`.
+pub fn choose_iso_audio(app: &Rc<App>, id: &str, audio: &str) {
+    let patch = {
+        let s = app.session.borrow();
+        let Some(setup) = s.setup.as_ref() else {
+            return;
+        };
+        let Some(source) = setup.source(id) else {
+            return;
+        };
+        let list = toggled_iso_audio(setup, id, audio);
+        let mut patch = json!({ "recording": { "iso": { "source_audio": { id: list } } } });
+        // The list says whether the file has the source's own sound; an
+        // audio.iso opt-in or opt-out would override it.
+        if audio == id && source.audio.iso.is_some() {
+            patch["sources"] = json!([{ "id": id, "audio": { "iso": null } }]);
         }
         patch
     };

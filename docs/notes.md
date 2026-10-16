@@ -1598,6 +1598,28 @@ each section. Delete entries that stop being true.
   UnknownRequestType with "Isocast does not support X" (the protocol has
   no separate "unsupported" code). It reports obsVersion 30.2.0 and
   obs-websocket 5.5.0, the versions whose requests it maps.
+- 2026-10-15 (#72): **per-ISO audio is `recording.iso.source_audio`, a map
+  from an ISO source's id to its audio tracks**, beside the shared
+  `recording.iso.audio` (both in the scene collection, as they name its
+  sources). Not `sources[].iso_audio`: sources is a list of tables and
+  `audio.iso` is already that source's own-sound bool, while the ISO choice
+  itself lives in `recording.iso.sources`; a map merges by key in patches
+  (`{"cam": null}` = back to the default). An entry replaces the shared
+  list for that file only; `audio.iso` still adds/drops the file's own
+  sound on top of either list. Keys must be video sources (not necessarily
+  listed in `recording.iso.sources`, so turning a file off and on keeps its
+  routing); the app's Remove cascades the key and values. OBS import maps
+  Source Record's "different audio" source to that source's entry; without
+  it Source Record records the source's own sound (source-record.c uses the
+  filter's parent), so the shared list is now left omitted instead of `[]`.
+  App: Settings › Output shows "Audio: Same as Others / each source"
+  checkboxes under each recorded ISO source (a menu button inside the
+  sheet was tried: in the offscreen loop the sheet's PopupWindow offsets
+  `absolute-position`, so the menu opened ~(500, 274) pt from its button);
+  the Sources dock's ISO badge gets a right-click/Control-click menu with
+  the same choices flat under Record ISO File (picked over an "ISO Audio ▸"
+  submenu there: the badge menu is short, so one click), and the item's
+  context menu has an "ISO Audio ▸" submenu (that menu is long).
 
 - 2026-10-15 (#18, G.2): **the replay buffer is a sink of a shared program
   encoder.** The stream's H.264/AAC encode thread became

@@ -15,7 +15,7 @@
 //! supplies what it can find out ([`Options::devices`],
 //! [`Options::content_size`]); anything else is assumed and noted.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
@@ -1314,7 +1314,8 @@ struct Importer<'a, 'v> {
     sources: Vec<Source>,
     scenes: Vec<Scene>,
     iso: Vec<String>,
-    iso_audio: Vec<String>,
+    /// Source Record's "different audio" source, by recorded source.
+    iso_audio: BTreeMap<String, Vec<String>>,
     iso_encoder: Option<Encoder>,
     unsupported: Vec<Unsupported>,
     notes: Vec<String>,
@@ -1401,7 +1402,7 @@ impl<'a, 'v> Importer<'a, 'v> {
             sources: Vec::new(),
             scenes: Vec::new(),
             iso: Vec::new(),
-            iso_audio: Vec::new(),
+            iso_audio: BTreeMap::new(),
             iso_encoder: None,
             unsupported: Vec::new(),
             notes,
@@ -2509,11 +2510,12 @@ impl<'a, 'v> Importer<'a, 'v> {
             && let Some(name) = text(s, "audio_source")
             && let Some(&j) = self.by_name.get(name)
             && let Target::Source {
-                id, audio: true, ..
+                id: audio,
+                audio: true,
+                ..
             } = &self.targets[j]
-            && !self.iso_audio.contains(id)
         {
-            self.iso_audio.push(id.clone());
+            self.iso_audio.insert(id.into(), vec![audio.clone()]);
         }
         let codec = match int(s, "codec_type").map(|c| (c as u32).to_be_bytes()) {
             Some(code) => match &code {
@@ -3217,7 +3219,9 @@ impl<'a, 'v> Importer<'a, 'v> {
                     container,
                     ..Encoder::default()
                 }),
-                audio: Some(std::mem::take(&mut self.iso_audio)),
+                // Without "different audio", Source Record records the
+                // source's own sound, as Isocast's ISO files do by default.
+                source_audio: std::mem::take(&mut self.iso_audio),
                 ..IsoRecording::default()
             },
             keep_free_gb: default_keep_free_gb(),
@@ -4122,7 +4126,8 @@ mod tests {
         let iso = &imported.setup.recording.iso;
         assert!(iso.enabled);
         assert_eq!(iso.sources, ["cam"]);
-        assert_eq!(iso.audio.as_deref().unwrap(), ["mic"]);
+        assert_eq!(iso.audio, None);
+        assert_eq!(iso.source_audio["cam"], ["mic"]);
         assert_eq!(
             (iso.encoder.codec, iso.encoder.quality),
             (Codec::Prores422, 80.into())

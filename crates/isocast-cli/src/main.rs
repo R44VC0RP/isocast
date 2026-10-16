@@ -445,6 +445,24 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Choose the audio sources an ISO file carries, in the live setup:
+    /// `isocast iso-audio camera mic` gives the camera's ISO file the mic
+    /// only, --none no audio, --default back to recording.iso.audio (or,
+    /// without it, the source's own sound). Without a source, list each
+    /// video source's ISO tracks.
+    IsoAudio {
+        /// A video source's id.
+        source: Option<String>,
+        /// Audio source ids, in track order.
+        #[arg(requires = "source")]
+        audio: Vec<String>,
+        #[arg(long, requires = "source", conflicts_with_all = ["audio", "none"])]
+        default: bool,
+        #[arg(long, requires = "source", conflicts_with = "audio")]
+        none: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Restart isocastd, for example after granting it screen recording
     /// permission. Refused, atomically by isocastd, while it records,
     /// streams, exports or feeds the virtual camera.
@@ -1121,6 +1139,57 @@ fn run(cli: Cli) -> Result<ExitCode> {
             };
             let mut client = Client::connect_or_launch()?;
             let applied = client::set_audio(&mut client, &source, &change)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&applied)?);
+            } else {
+                println!("Live setup is now at revision {}.", applied.revision);
+                for note in &applied.notes {
+                    println!("note: {note}");
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::IsoAudio {
+            source,
+            audio,
+            default,
+            none,
+            json,
+        } => {
+            let mut client = Client::connect_or_launch()?;
+            let Some(source) = source else {
+                let live: Live = client.call(Method::Get(None))?;
+                let Some(setup) = live.setup else {
+                    bail!("there is no live setup; apply one first");
+                };
+                let rows = client::iso_audio(&setup);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                } else {
+                    for row in &rows {
+                        let tracks = match row.audio.is_empty() {
+                            true => "no audio".to_string(),
+                            false => row.audio.join(", "),
+                        };
+                        let from = match row.from {
+                            client::IsoAudioFrom::SourceAudio => "its own list",
+                            client::IsoAudioFrom::Shared => "recording.iso.audio",
+                            client::IsoAudioFrom::Own => "own sound",
+                        };
+                        let off = if row.recorded { "" } else { " (no ISO file)" };
+                        println!("  {:<14} {tracks} — {from}{off}", row.source);
+                    }
+                }
+                return Ok(ExitCode::SUCCESS);
+            };
+            if !(default || none) && audio.is_empty() {
+                bail!(
+                    "give the audio sources for {source}'s ISO file, --none for no audio, or \
+                     --default for recording.iso.audio's choice"
+                );
+            }
+            let list = (!default).then_some(audio.as_slice());
+            let applied = client::set_iso_audio(&mut client, &source, list)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&applied)?);
             } else {

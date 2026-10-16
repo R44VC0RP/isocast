@@ -17,10 +17,21 @@ export struct ServiceChoice {
 }
 
 // A video source the ISO files can record (Output → ISO Recording).
+// An audio source an ISO file can carry, and whether it does.
+export struct IsoTrack {
+    id: string,
+    name: string,
+    on: bool,
+}
+
 export struct IsoChoice {
     id: string,
     name: string,
     on: bool,
+    // Its file's audio: the other ISO files' choice (no list of its own),
+    // and each audio source, checked when the file carries it.
+    shared-audio: bool,
+    tracks: [IsoTrack],
 }
 
 // An Audio Input Capture source and its device (Audio → Audio Devices).
@@ -209,6 +220,8 @@ export global SettingsArea {
     callback browse-folder();
     callback choose-quality(int);
     callback set-iso-source(string, bool);
+    // An ISO file's audio (source, audio source or "default").
+    callback set-iso-audio(string, string);
 
     // ---- Audio
     in-out property <[MicRow]> mics;

@@ -32,6 +32,9 @@ component IsoToggle inherits Rectangle {
     // focused), so the name keeps it.
     in property <bool> collapsible;
     callback clicked();
+    // A right-click or Control-click on the badge: its menu (recording the
+    // file and its audio tracks), at the pointer.
+    callback menu(length, length);
 
     forward-focus: fs;
     property <bool> keyboard;
@@ -54,9 +57,22 @@ component IsoToggle inherits Rectangle {
         opacity: root.on ? 1 : ta.has-hover ? 0.7 : Theme.disabled-opacity;
     }
     ta := TouchArea {
+        property <bool> menu-press;
         x: badge.x;
         width: badge.width;
-        clicked => { root.clicked(); }
+        clicked => {
+            if !self.menu-press {
+                root.clicked();
+            }
+        }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                self.menu-press = event.button == PointerEventButton.left && event.modifiers.meta;
+            }
+            if event.kind == PointerEventKind.up && (event.button == PointerEventButton.right || (event.button == PointerEventButton.left && event.modifiers.meta)) {
+                root.menu(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+            }
+        }
     }
     fs := FocusScope {
         focus-on-click: false;
@@ -221,6 +237,10 @@ export component SourcesDock inherits Dock {
                     row-hovered: row.has-hover;
                     collapsible: root.narrow;
                     clicked => { SourcesArea.toggle-iso(item.path); }
+                    menu(x, y) => {
+                        list.focus-list();
+                        Menus.request("sources:iso:" + item.path, x, y, 0, 0);
+                    }
                 }
                 if !item.can-iso: Rectangle {
                     width: root.narrow ? 0px : Theme.lane;

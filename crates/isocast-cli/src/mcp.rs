@@ -217,6 +217,17 @@ struct SetAudioParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct SetIsoAudioParams {
+    /// The id of a video source in the live setup: its ISO file.
+    source: String,
+    /// The audio sources' ids that file carries, in track order ([] for
+    /// no audio). Null or absent puts it back to recording.iso.audio (or,
+    /// without that list, the source's own sound).
+    #[serde(default)]
+    audio: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct SwitchSceneParams {
     /// The id of a scene in the setup.
     scene: String,
@@ -292,7 +303,7 @@ struct ImportDocumentsParams {
     /// Or a scene collection, as get_collection_or_profile returns one: the
     /// setup's version, name, canvas.width/height, sources, scenes,
     /// transition and recording.program.audio / recording.iso.sources /
-    /// recording.iso.audio.
+    /// recording.iso.audio / recording.iso.source_audio.
     #[serde(default)]
     #[schemars(schema_with = "setup_schema")]
     collection: Option<serde_json::Value>,
@@ -1687,6 +1698,34 @@ impl Isocast {
                 monitor: params.monitor,
             };
             crate::client::set_audio(&mut client, &params.source, &change)
+        })
+        .await
+        .map_err(|err| format!("{err}"))?
+        .map(Json)
+        .map_err(|err| format!("{err:#}"))
+    }
+
+    #[tool(
+        description = "Choose the audio tracks of one source's ISO file in the live setup \
+                       (recording.iso.source_audio): a camera's file with the mic only, a \
+                       screen's with desktop audio only. Other ISO files keep \
+                       recording.iso.audio, or their own sound. Applies from the next \
+                       recording; the manifest lists each file's tracks.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn set_iso_audio(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<SetIsoAudioParams>>,
+    ) -> Result<Json<Applied>, String> {
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            events.ensure_watching();
+            let mut client = Client::connect_or_launch()?;
+            crate::client::set_iso_audio(&mut client, &params.source, params.audio.as_deref())
         })
         .await
         .map_err(|err| format!("{err}"))?

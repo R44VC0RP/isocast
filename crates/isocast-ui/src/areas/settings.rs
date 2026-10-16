@@ -31,8 +31,8 @@ use crate::kit::{self, model};
 use crate::platform::{self, Choose};
 use crate::session::EditOptions;
 use crate::{
-    AppWindow, DeviceChoice, DropdownOption, HotkeyGroup, HotkeyRow, IsoChoice, MicRow, NavTab,
-    ServiceChoice, SettingsArea, ToastKind, Ui,
+    AppWindow, DeviceChoice, DropdownOption, HotkeyGroup, HotkeyRow, IsoChoice, IsoTrack, MicRow,
+    NavTab, ServiceChoice, SettingsArea, ToastKind, Ui,
 };
 
 /// Snapshot states (`--state NAME[:ARG]`).
@@ -466,6 +466,9 @@ impl Area for Settings {
         on!(on_set_iso_source, |app, id, on| app
             .settings
             .set_iso_source(&app, &id, on));
+        on!(on_set_iso_audio, |app, id, audio| app
+            .settings
+            .set_iso_audio(&app, &id, &audio));
         on!(on_set_mic, |app, id, device| {
             if let Some(d) = app.settings.draft.borrow_mut().as_mut() {
                 d.mics.insert(id.into(), device.into());
@@ -926,6 +929,25 @@ impl Settings {
         self.change(app, patch);
     }
 
+    /// The live setup with the draft's ISO settings, for the ISO audio
+    /// menus.
+    fn drafted(&self, app: &Rc<App>) -> Option<Setup> {
+        let iso = self.draft_value(&["recording", "iso"])?;
+        draft_setup(app.session.borrow().setup.as_deref(), &iso)
+    }
+
+    /// Video source `source`'s ISO file: back to the other files' audio
+    /// (`default`), or with audio source `audio` added or taken out.
+    fn set_iso_audio(&self, app: &Rc<App>, source: &str, audio: &str) {
+        if let Some(setup) = self.drafted(app) {
+            let list = super::sources::items::toggled_iso_audio(&setup, source, audio);
+            self.change(
+                app,
+                json!({"recording": {"iso": {"source_audio": {source: list}}}}),
+            );
+        }
+    }
+
     fn set_iso_source(&self, app: &Rc<App>, id: &str, on: bool) {
         let mut sources: Vec<Value> = self
             .draft_value(&["recording", "iso", "sources"])
@@ -1303,8 +1325,9 @@ impl Settings {
             .as_array()
             .map(|list| list.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
+        let drafted = draft_setup(s.setup.as_deref(), &draft["recording"]["iso"]);
         area.set_iso_sources(model(
-            s.setup
+            drafted
                 .iter()
                 .flat_map(|setup| setup.sources.iter())
                 .filter(|source| source.kind.has_video())
@@ -1312,6 +1335,25 @@ impl Settings {
                     id: source.id.as_str().into(),
                     name: crate::model::source_name(source).into(),
                     on: chosen.contains(&source.id.as_str()),
+                    shared_audio: drafted.as_ref().is_some_and(|setup| {
+                        !setup.recording.iso.source_audio.contains_key(&source.id)
+                    }),
+                    tracks: model(drafted.iter().flat_map(|setup| {
+                        let tracks = setup
+                            .recording
+                            .iso
+                            .audio_for(source, source.kind.has_audio());
+                        setup
+                            .sources
+                            .iter()
+                            .filter(|a| a.kind.has_audio())
+                            .map(move |a| IsoTrack {
+                                id: a.id.as_str().into(),
+                                name: crate::model::source_name(a).into(),
+                                on: tracks.contains(&a.id),
+                            })
+                            .collect::<Vec<_>>()
+                    })),
                 }),
         ));
 
@@ -1876,6 +1918,13 @@ impl Settings {
 }
 
 /// The parts of a setup Settings changes.
+/// `setup` with ISO settings `iso` (the draft's), if they read as such.
+fn draft_setup(setup: Option<&Setup>, iso: &Value) -> Option<Setup> {
+    let mut setup = setup?.clone();
+    setup.recording.iso = serde_json::from_value(iso.clone()).ok()?;
+    Some(setup)
+}
+
 fn pick(setup: &Value) -> Value {
     let mut out = json!({
         "name": setup["name"],

@@ -1159,7 +1159,7 @@ fn needed_sources(setup: &Setup) -> Vec<String> {
         ids.extend(
             iso.sources
                 .iter()
-                .chain(iso.audio.iter().flatten())
+                .chain(iso.listed_audio())
                 .map(String::as_str),
         );
     }
@@ -2423,7 +2423,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         required.extend(
             iso.sources
                 .iter()
-                .chain(iso.audio.iter().flatten())
+                .chain(iso.listed_audio())
                 .map(String::as_str),
         );
     }
@@ -2449,12 +2449,10 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             for id in &required {
                 // Which list makes the recording need it, for the way out.
                 let has = |list: &[String]| list.iter().any(|s| s == id);
-                let list = if iso_enabled && has(&iso.sources) {
-                    "recording.iso.sources"
-                } else if iso_enabled && has(iso.audio.as_deref().unwrap_or(&[])) {
-                    "recording.iso.audio"
-                } else {
-                    "recording.program.audio"
+                let list = match iso.audio_field(id) {
+                    _ if iso_enabled && has(&iso.sources) => "recording.iso.sources".into(),
+                    Some(field) if iso_enabled => field,
+                    _ => "recording.program.audio".to_string(),
                 };
                 let why = match state.sources.get(*id) {
                     Some(live) if reopening(id, live) => {
@@ -2527,12 +2525,9 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         }
         // Keep the recorded sources as they are until the recording ends.
         if iso_enabled {
-            state.pins.extend(
-                iso.sources
-                    .iter()
-                    .chain(iso.audio.iter().flatten())
-                    .cloned(),
-            );
+            state
+                .pins
+                .extend(iso.sources.iter().chain(iso.listed_audio()).cloned());
         }
     }
     let first = plan_take(setup, &formats, &folder, 1)?;

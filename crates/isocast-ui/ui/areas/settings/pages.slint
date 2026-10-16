@@ -10,7 +10,7 @@ import { Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
 import {
     Button, ButtonVariant, Callout, CalloutKind, ControlSize, Dropdown, FocusRing, GroupHint, GroupRow, IconButton,
-    NumberField, RowPlace, Segmented, Switch, TextField,
+    Checkbox, NumberField, RowPlace, Segmented, Switch, TextField,
 } from "../../kit.slint";
 import { BindingRow, SettingsArea } from "state.slint";
 import { Centred, SetGroup, SetPage, ShortcutKeys } from "parts.slint";
@@ -680,7 +680,7 @@ export component OutputPage inherits SetPage {
         reset-label: "Put ISO Recording back as saved";
         reset => { SettingsArea.revert-group("iso"); }
         hint: SettingsArea.iso-on
-            ? "Each source switched on here is recorded to its own file, at its own size, on the program’s clock. Also in each source’s right-click menu."
+            ? "Each source switched on here is recorded to its own file, at its own size, on the program’s clock, with the audio chosen under it. Also in each source’s right-click menu."
             : "Each source chosen below in its own file, at its own size, on the program’s clock.\nAlso in each source’s right-click menu.";
         SwitchRow {
             label: "Record ISO Files";
@@ -695,11 +695,36 @@ export component OutputPage inherits SetPage {
         }
         if SettingsArea.iso-on: VerticalLayout {
             spacing: 1px;
-            for source in SettingsArea.iso-sources: SwitchRow {
-                label: source.name;
-                indent: Theme.space-4;
-                on: source.on;
-                toggled(on) => { SettingsArea.set-iso-source(source.id, on); }
+            for source in SettingsArea.iso-sources: VerticalLayout {
+                spacing: 1px;
+                SwitchRow {
+                    label: source.name;
+                    indent: Theme.space-4;
+                    on: source.on;
+                    toggled(on) => { SettingsArea.set-iso-source(source.id, on); }
+                }
+                // Its file's audio, while it records.
+                if source.on: GroupRow {
+                    label: "Audio";
+                    indent: Theme.space-4 * 2;
+                    trailing-pad: Theme.space-2;
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: Theme.space-4;
+                        Checkbox {
+                            small: true;
+                            text: "Same as Others";
+                            checked: source.shared-audio;
+                            toggled => { SettingsArea.set-iso-audio(source.id, "default"); }
+                        }
+                        for track in source.tracks: Checkbox {
+                            small: true;
+                            text: track.name;
+                            checked: track.on;
+                            toggled => { SettingsArea.set-iso-audio(source.id, track.id); }
+                        }
+                    }
+                }
             }
         }
         if SettingsArea.iso-on: EncoderRows {

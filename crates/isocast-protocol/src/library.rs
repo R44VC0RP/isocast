@@ -25,6 +25,7 @@
 //! - Which sources are recorded is the collection's (they must exist in
 //!   it); whether ISO files are written at all, and how, is the profile's.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use schemars::JsonSchema;
@@ -155,11 +156,14 @@ pub struct CollectionIso {
     /// Explicit shared ISO tracks; omitted uses each source's own sound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<Vec<String>>,
+    /// Tracks for one ISO file, by its source, instead of `audio`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_audio: BTreeMap<String, Vec<String>>,
 }
 
 impl CollectionIso {
     fn is_empty(&self) -> bool {
-        self.sources.is_empty() && self.audio.is_none()
+        self.sources.is_empty() && self.audio.is_none() && self.source_audio.is_empty()
     }
 }
 
@@ -290,6 +294,7 @@ impl Setup {
                         CollectionIso {
                             sources: iso_sources,
                             audio: iso_audio,
+                            source_audio,
                         },
                 },
         } = collection;
@@ -349,6 +354,7 @@ impl Setup {
                     filename: iso_filename,
                     encoder: iso_encoder,
                     audio: iso_audio,
+                    source_audio,
                     filtered,
                 },
                 keep_free_gb,
@@ -393,6 +399,7 @@ impl Setup {
                             filename: iso_filename,
                             encoder: iso_encoder,
                             audio: iso_audio,
+                            source_audio,
                             filtered,
                         },
                     keep_free_gb,
@@ -418,6 +425,7 @@ impl Setup {
                 iso: CollectionIso {
                     sources: iso_sources,
                     audio: iso_audio,
+                    source_audio,
                 },
             },
         };

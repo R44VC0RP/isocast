@@ -3485,3 +3485,11 @@ One line per finished task, newest last.
   (msgpack 82/82, JSON 77/77 checks), obsws-python (9/9) and obs-cmd/obws;
   Get responses match protocol.json; GetVersion p50 0.07 ms, SetInputMute
   19 ms.
+- #72 (2026-10-15): each ISO file can carry its own audio tracks
+  (`recording.iso.source_audio`, CLI `isocast iso-audio`, MCP
+  `set_iso_audio`, Settings › Output checkboxes, the Sources dock's ISO
+  badge menu, OBS Source Record "different audio"). Verified with pulse
+  sources (tones 700/1700 Hz): camera ISO only the mic, screen ISO only
+  desktop audio, program the mix, every track in sync (0.021 ms), across a
+  split, pause/resume and a timeline export; setups without the field give
+  the same documents, manifests and tracks as main.
