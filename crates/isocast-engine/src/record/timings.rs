@@ -39,9 +39,12 @@ impl Default for CompositorTimings {
 }
 
 impl CompositorTimings {
-    pub(crate) fn draw(&mut self, wall: Duration, gpu_wait: Duration) {
+    pub(crate) fn draw_wall(&mut self, wall: Duration) {
         self.draw.push(wall);
-        self.gpu_wait.push(gpu_wait);
+    }
+
+    pub(crate) fn gpu(&mut self, elapsed: Duration) {
+        self.gpu_wait.push(elapsed);
     }
 
     /// A tick that gave the program a frame took `cpu` of the thread's

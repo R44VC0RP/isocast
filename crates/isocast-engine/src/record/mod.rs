@@ -37,6 +37,7 @@ mod iso_frames;
 mod mix;
 mod monitor;
 mod pause;
+pub mod pressure;
 mod program;
 mod scene_feeds;
 mod scenes;
@@ -872,6 +873,12 @@ pub enum Packet<F> {
     Audio {
         track: usize,
         samples: Arc<[f32]>,
+        pts: Time,
+    },
+    /// An ISO file's frame for `pts` that encoder admission left out
+    /// before it was drawn (see [`pressure::IsoCredit`]): the file counts
+    /// the tick as a refused frame.
+    Skipped {
         pts: Time,
     },
 }

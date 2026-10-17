@@ -343,7 +343,8 @@ impl<F: Clone> Mixer<F> {
                         input.push(&samples, pts.ticks_since(epoch, SAMPLE_RATE));
                     }
                 }
-                Ok(Packet::Video { .. }) | Err(RecvTimeoutError::Timeout) => {}
+                Ok(Packet::Video { .. } | Packet::Skipped { .. })
+                | Err(RecvTimeoutError::Timeout) => {}
                 // Every source has stopped: mix silence until the end.
                 Err(RecvTimeoutError::Disconnected) => {
                     std::thread::sleep(Duration::from_millis(5));

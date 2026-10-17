@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use isocast_protocol::{Crop, Filter, ItemTransition, MatteLayout, Stinger, TransitionKind};
 
 use super::scenes::ProgramScenes;
@@ -21,16 +21,12 @@ use super::{Changing, OnAir};
 use crate::compiled::{CompiledScenes, LaidOut, NodeId};
 use crate::draw_list::DrawList;
 use crate::filter::Filters;
-use crate::gpu::{FrameImporter, Gpu, GpuFrame};
+use crate::gpu::{FrameImporter, Gpu, GpuFrame, InFlight, PendingFrame};
 use crate::render::{Affine, Layer, Rect, Renderer};
 use crate::scene::ItemLook;
 use crate::transition::{self, Overlay, Transitions, stinger_id};
 use crate::ycbcr::ToYCbCr;
 use crate::{FramePool, Platform, Time};
-
-/// How long to wait for the GPU to draw one canvas frame before giving up
-/// on it.
-const DRAW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// What a frame is drawn for: the program, or studio mode's preview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,12 +35,18 @@ pub(super) enum Feed {
     Preview = 1,
 }
 
+/// The encoder frame and BGRA monitor picture, and whether they were reused.
+type Drawn<F> = (PendingFrame<(F, Option<F>)>, bool);
+
 pub(super) struct Compositor<P: Platform> {
     gpu: Gpu,
     renderer: Renderer,
     importer: P::Importer,
     /// The canvas the scene is drawn on, then converted into a frame.
     picture: wgpu::Texture,
+    /// With no monitor, keep drawing into one private texture instead of
+    /// cycling native BGRA buffers that nobody will read.
+    private_picture: wgpu::Texture,
     picture_view: wgpu::TextureView,
     to_ycbcr: ToYCbCr,
     /// What the conversion reads: `picture`.
@@ -52,6 +54,9 @@ pub(super) struct Compositor<P: Platform> {
     /// Y'CbCr frames the canvas is converted into, handed to the program's
     /// outputs (encoders take them as they are).
     pool: P::FramePool,
+    /// The actual BGRA canvas, handed to monitors without a YUV round trip.
+    rgb_pool: P::FramePool,
+    pictures: Vec<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup, u64)>,
     canvas: (u32, u32),
     /// The scenes it draws, as last adopted.
     inputs: Option<Arc<ProgramScenes<P::Frame>>>,
@@ -100,8 +105,7 @@ pub(super) struct Compositor<P: Platform> {
     starts: [Vec<(Arc<str>, Time)>; 2],
     /// Animated properties evaluated for the last frame drawn.
     animated: u32,
-    /// Final submission/completion wall time of the most recent draw.
-    pub(super) gpu_wait: std::time::Duration,
+    in_flight: InFlight,
 }
 
 /// A source's newest frame, as drawn.
@@ -124,7 +128,8 @@ struct SourceFrame<F> {
 
 /// What a feed drew last.
 struct Shown<F> {
-    frame: Option<F>,
+    frame: Option<PendingFrame<(F, Option<F>)>>,
+    rgb: bool,
     version: u64,
     scene: Option<usize>,
     generation: u64,
@@ -135,6 +140,7 @@ impl<F> Default for Shown<F> {
     fn default() -> Self {
         Self {
             frame: None,
+            rgb: false,
             version: 0,
             scene: None,
             generation: 0,
@@ -182,7 +188,7 @@ struct Playing {
 
 impl<P: Platform> Compositor<P> {
     pub(super) fn new(platform: &P, canvas: (u32, u32)) -> Result<Self> {
-        Self::with_gpu(platform, canvas, Gpu::new()?)
+        Self::with_gpu(platform, canvas, Gpu::for_platform(platform)?)
     }
 
     /// A compositor drawing on `gpu`, shared with others (the scene feeds'
@@ -193,6 +199,7 @@ impl<P: Platform> Compositor<P> {
         let transitions = Transitions::new(&gpu, renderer.format());
         let importer = platform.frame_importer(&gpu)?;
         let pool = platform.ycbcr_frame_pool(canvas.0, canvas.1)?;
+        let rgb_pool = platform.frame_pool(canvas.0, canvas.1)?;
         let picture = crate::scene::canvas_texture(&gpu, renderer.format(), canvas);
         let picture_view = picture.create_view(&Default::default());
         let to_ycbcr = ToYCbCr::new(&gpu);
@@ -201,11 +208,14 @@ impl<P: Platform> Compositor<P> {
             gpu,
             renderer,
             importer,
+            private_picture: picture.clone(),
             picture,
             picture_view,
             to_ycbcr,
             picture_bound,
             pool,
+            rgb_pool,
+            pictures: Vec::new(),
             canvas,
             inputs: None,
             list: None,
@@ -229,13 +239,17 @@ impl<P: Platform> Compositor<P> {
             epoch: Time::from_nanos(0),
             starts: Default::default(),
             animated: 0,
-            gpu_wait: std::time::Duration::ZERO,
+            in_flight: InFlight::default(),
         })
     }
 
     /// The canvas size it draws.
     pub(super) fn canvas(&self) -> (u32, u32) {
         self.canvas
+    }
+
+    pub(super) fn device_lost(&self) -> bool {
+        self.gpu.is_lost()
     }
 
     /// The engine's clock started at `epoch`.
@@ -429,8 +443,11 @@ impl<P: Platform> Compositor<P> {
         on_air: Option<&OnAir>,
         tick: Time,
         limit: Time,
-    ) -> Result<Option<(P::Frame, bool)>> {
-        self.gpu_wait = std::time::Duration::ZERO;
+        rgb: bool,
+    ) -> Result<Option<Drawn<P::Frame>>> {
+        if !self.in_flight.available()? {
+            return Ok(None);
+        }
         let changing = on_air.and_then(|on_air| on_air.from.as_ref());
         let scene = self.scene(on_air.map(|on_air| &*on_air.scene));
         let from = changing.and_then(|changing| self.scene(Some(&changing.scene)));
@@ -459,17 +476,50 @@ impl<P: Platform> Compositor<P> {
             && shown.generation == generation
             && shown.scene == scene
             && shown.seen == self.seen
+            && shown.rgb == rgb
         {
             return Ok(Some((frame.clone(), true)));
         }
-        let Some(canvas) = self.pool.take()? else {
+        let monitor = rgb;
+        let rgb = if monitor { self.rgb_pool.take()? } else { None };
+        let canvas = match feed {
+            Feed::Program => self.pool.take()?,
+            Feed::Preview => rgb.clone(),
+        };
+        // Cached imports do not retain their CVPixelBuffers. Hold every
+        // sampled source through completion, including filters submitted
+        // above even if no output buffer is available.
+        let inputs: Vec<_> = self
+            .frames
+            .iter()
+            .flatten()
+            .map(|frame| frame._frame.clone())
+            .collect();
+        let canvas = canvas.filter(|_| !monitor || rgb.is_some());
+        let Some(canvas) = canvas else {
+            let encoder = self.gpu.device.create_command_encoder(&Default::default());
+            let done = self.in_flight.submit(&self.gpu, encoder.finish());
+            done.then(move |_| drop(inputs));
             return Ok(None);
         };
         if let Some(list) = &mut self.list {
             list.next_tick();
             list.take_draws();
         }
-        let (luma, chroma) = self.target_views(&canvas)?;
+        match &rgb {
+            Some(rgb) => self.picture_target(rgb)?,
+            None if self.picture != self.private_picture => {
+                self.picture = self.private_picture.clone();
+                self.picture_view = self.picture.create_view(&Default::default());
+                self.picture_bound = self.to_ycbcr.bind(&self.gpu, &self.picture);
+            }
+            None => {}
+        }
+        let ycbcr = if feed == Feed::Program {
+            Some(self.target_views(&canvas)?)
+        } else {
+            None
+        };
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         match changing {
             None => {
@@ -480,26 +530,62 @@ impl<P: Platform> Compositor<P> {
                 self.draw_transition(feed, changing, scene, from, tick, limit)?;
             }
         }
-        self.to_ycbcr
-            .encode(&mut encoder, &self.picture_bound, &luma, &chroma);
-        let submitted = std::time::Instant::now();
-        let submission = self.gpu.queue.submit([encoder.finish()]);
+        if let Some((luma, chroma)) = ycbcr {
+            self.to_ycbcr
+                .encode(&mut encoder, &self.picture_bound, &luma, &chroma);
+        }
+        let done = self.in_flight.submit(&self.gpu, encoder.finish());
+        done.then(move |_| drop(inputs));
         self.draws = self.list.as_mut().map_or(0, DrawList::take_draws);
         self.animated = self.list.as_mut().map_or(0, DrawList::take_animated);
-        // The encoder must read a finished picture.
-        let completed = self.gpu.device.poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: Some(DRAW_TIMEOUT),
-        });
-        self.gpu_wait = submitted.elapsed();
-        completed.context("the GPU did not finish drawing the program")?;
+        let canvas = PendingFrame::new((canvas, rgb), done);
         let shown = &mut self.shown[feed as usize];
         shown.frame = Some(canvas.clone());
+        shown.rgb = monitor;
         shown.version = version;
         shown.generation = generation;
         shown.scene = scene;
         std::mem::swap(&mut shown.seen, &mut self.seen);
         Ok(Some((canvas, false)))
+    }
+
+    /// Finish handing off submitted frames before replacing this compositor.
+    pub(super) fn drain(&mut self) -> Result<()> {
+        self.in_flight.drain()
+    }
+
+    fn picture_target(&mut self, frame: &P::Frame) -> Result<()> {
+        let texture = match self.importer.target_cached(frame)? {
+            Some(texture) => texture,
+            None => {
+                self.picture = self.importer.target(frame)?;
+                self.picture_view = self.picture.create_view(&Default::default());
+                self.picture_bound = self.to_ycbcr.bind(&self.gpu, &self.picture);
+                return Ok(());
+            }
+        };
+        self.count += 1;
+        let count = self.count;
+        self.pictures.retain(|picture| count - picture.3 < 600);
+        let index = match self
+            .pictures
+            .iter()
+            .position(|picture| picture.0 == texture)
+        {
+            Some(index) => index,
+            None => {
+                let view = texture.create_view(&Default::default());
+                let bound = self.to_ycbcr.bind(&self.gpu, &texture);
+                self.pictures.push((texture, view, bound, count));
+                self.pictures.len() - 1
+            }
+        };
+        let picture = &mut self.pictures[index];
+        picture.3 = count;
+        self.picture = picture.0.clone();
+        self.picture_view = picture.1.clone();
+        self.picture_bound = picture.2.clone();
+        Ok(())
     }
 
     /// The sources a frame of `scene` (changing from `from`) shows, into
@@ -1031,6 +1117,15 @@ impl<P: Platform> Compositor<P> {
                 (texture, view)
             })
         })
+    }
+}
+
+impl<P: Platform> Drop for Compositor<P> {
+    fn drop(&mut self) {
+        // Also covers a scene disappearing or a contained worker failure.
+        // On timeout InFlight cancels delivery, but GPU callbacks retain
+        // the native buffers until it is actually safe to release them.
+        let _ = self.in_flight.drain();
     }
 }
 

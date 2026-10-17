@@ -552,6 +552,21 @@ come later (clips already carry in/out points on their take).
 - [ ] **S.3 Astra optimization rounds.** GPT-6 Astra (opencode, xhigh)
   sessions with S.1/S.2 as their measuring stick, one hot path at a time,
   until Isocast beats OBS on every measure we can control.
+  - [ ] **S.3 #26/#29 Shared GPU and upstream ISO admission.** One device
+    per process, bounded asynchronous GPU hand-offs, BGRA native monitors,
+    and ISO admission before conversion.
+    - [x] Implementation and remote release/workspace gates.
+    - [x] M2 paired A/B, strict e2e, cycles/disk/ISO stress, native surface
+      and virtual-camera readback. Final program/stream/ISO drops are zero
+      in all three benchmark workloads; memory trade-offs are measured.
+    - [x] Tier-1 first review (3f327f7): merge with follow-ups.
+    - [x] Fix round 1: timeout/lost-device recovery, coordinator-published
+      ISO split demand, H.264 monitor readbacks; main 603c3ac integrated,
+      remote gates and strict e2e 18/18 pass. Overloaded split cycles account
+      all ticks in 152 files; quick A/B plus longer multiwindow confirmation
+      keep every protected output whole, with no material performance change.
+    - [ ] Coordinator re-review and completion of the uncommitted merge.
+      Handoff: `perf-gpu/scratch/REPORT.md`, Fix round 1.
   - [x] **S.3a Recording-stop latency.** Finalize when the last video frame
     and all audio arrive, retaining the late-input allowance. Four paired
     rounds against main and OBS on M4 Max and M2; normal files complete,
@@ -1550,6 +1565,15 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   signature, notes embedded, only appcast.xml uploaded; tampered feeds,
   drafts, wrong version/key/checksum and extra assets refused.
   actionlint and shellcheck clean.
+- S.3 #26/#29 implementation (2026-10-17): one process GPU, completion
+  hand-offs and pre-conversion ISO admission; final remote gates clean,
+  strict e2e 17/17, cycles/disk/ISO stress and native readbacks pass. Final
+  three-pair multiwindow A/B: daemon 71.6→66.2% CPU, GPU 580.7→483.3 ms/s,
+  0 program/ISO drops in 3×64 s takes; live footprint 305.6→438.1 MiB.
+  Flagship and dual CPU roughly flat/slightly higher, all protected outputs
+  and audio whole. Tier-1 review/commit remain with the coordinator; see
+  `/Volumes/IsocastBuild/perf-gpu/scratch/REPORT.md`.
+
 - #96 / 0.0.7 (2026-10-17): canvas-scoped stream failures, atomic poison
   recovery state, quiet ended-stream Stop, missing-tail frame counts,
   vertical replay and virtual camera. M2-a: fault/poison healthy outputs

@@ -2,9 +2,13 @@
 
 use std::future::Future;
 use std::pin::pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::task::{Context as TaskContext, Poll, Waker};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use parking_lot::{Condvar, Mutex};
 
 use crate::render::{TexelKind, Texels};
 
@@ -14,10 +18,44 @@ use crate::render::{TexelKind, Texels};
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    poll: mpsc::SyncSender<()>,
+    lost: Arc<AtomicBool>,
+    fault: Option<Arc<Fault>>,
 }
 
 impl Gpu {
     pub fn new() -> Result<Self> {
+        Self::with_thread(|| {})
+    }
+
+    /// Completion now hands frames to protected outputs, just as their
+    /// real-time drawing threads did before. Keep the same scheduling class
+    /// instead of inheriting the control thread that happened to open the GPU.
+    pub(crate) fn for_platform<P: crate::Platform>(platform: &P) -> Result<Self> {
+        let platform = platform.clone();
+        Self::with_thread(move || platform.real_time_thread())
+    }
+
+    fn with_thread(start: impl FnOnce() + Send + 'static) -> Result<Self> {
+        // All canvases, ISO stages and viewers in this process import into
+        // the same device. Keep it through stop/start cycles, not one driver
+        // connection (and shader cache) per output. A lost device is not
+        // reusable: its existing owners drain/fail independently, and new
+        // outputs share a fresh device without restarting the process.
+        static GPU: Mutex<Option<Gpu>> = Mutex::new(None);
+        let mut shared = GPU.lock();
+        if let Some(gpu) = &*shared
+            && !gpu.is_lost()
+        {
+            return Ok(gpu.clone());
+        }
+        *shared = None;
+        let gpu = Self::open(start)?;
+        *shared = Some(gpu.clone());
+        Ok(gpu)
+    }
+
+    fn open(start: impl FnOnce() + Send + 'static) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -35,7 +73,343 @@ impl Gpu {
             ..Default::default()
         }))
         .context("could not open the GPU")?;
-        Ok(Self { device, queue })
+        let lost = Arc::new(AtomicBool::new(false));
+        let failed = lost.clone();
+        device.set_device_lost_callback(move |_, _| failed.store(true, Ordering::Release));
+        let fault = Fault::configured().map(Arc::new);
+        let poll_fault = fault.clone();
+        let (poll, submissions) = mpsc::sync_channel(1);
+        let polling = device.clone();
+        std::thread::Builder::new()
+            .name("GPU completion".into())
+            .spawn(move || {
+                start();
+                while submissions.recv().is_ok() {
+                    // Coalesce notifications. One thread services callbacks;
+                    // drawing threads never wait for the driver to finish.
+                    loop {
+                        let kind = wgpu::PollType::Wait {
+                            submission_index: None,
+                            timeout: Some(Duration::from_secs(1)),
+                        };
+                        let result = match &poll_fault {
+                            Some(fault) => fault.poll(&polling, kind),
+                            None => polling.poll(kind),
+                        };
+                        // A producer stops submitting after its fence gets
+                        // old. Keep servicing that fence even with no more
+                        // notifications, or a transient stall freezes it.
+                        if !matches!(result, Err(wgpu::PollError::Timeout)) {
+                            break;
+                        }
+                    }
+                }
+            })
+            .context("could not start GPU completion thread")?;
+        isocast_diagnostics::diagnostic!("debug"; "opened shared GPU");
+        Ok(Self {
+            device,
+            queue,
+            poll,
+            lost,
+            fault,
+        })
+    }
+
+    pub(crate) fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
+    /// Submit with a callback attached to THIS command buffer, not whatever
+    /// another canvas happened to submit last on the shared queue.
+    fn submit(&self, commands: wgpu::CommandBuffer, previous: Option<Completion>) -> Completion {
+        if let Some(fault) = &self.fault {
+            fault.arm(&self.lost);
+        }
+        let done = Completion(Arc::new(Completed {
+            lost: self.lost.clone(),
+            ..Completed::default()
+        }));
+        let callback = done.clone();
+        let fault = self.fault.clone();
+        commands.on_submitted_work_done(move || {
+            let finish = move || match previous {
+                Some(previous) => previous.then(move |_| callback.finish()),
+                None => callback.finish(),
+            };
+            match fault {
+                Some(fault) => fault.complete(Box::new(finish)),
+                None => finish(),
+            }
+        });
+        self.queue.submit([commands]);
+        let _ = self.poll.try_send(());
+        done
+    }
+}
+
+/// Developer-only recovery exercise, without wedging/resetting the machine's
+/// GPU: `ISOCAST_GPU_FAULT=stall:AFTER_SECONDS:DURATION_SECONDS` withholds
+/// completion callbacks and returns real wait-time-sized timeouts until the
+/// interval ends. Only a later poll releases them, just as wgpu requires.
+/// `lost:AFTER_SECONDS` sets the same flag as the device-lost callback. Once
+/// per process, so a replacement device is not immediately lost again.
+struct Fault {
+    after: Duration,
+    stall: Option<Duration>,
+    state: Mutex<FaultState>,
+}
+
+#[derive(Default)]
+struct FaultState {
+    began: Option<Instant>,
+    until: Option<Instant>,
+    held: Vec<Box<dyn FnOnce() + Send>>,
+}
+
+impl Fault {
+    fn configured() -> Option<Self> {
+        if !isocast_diagnostics::developer() {
+            return None;
+        }
+        let value = std::env::var("ISOCAST_GPU_FAULT").ok()?;
+        let parts: Vec<_> = value.split(':').collect();
+        let seconds = |text: &str| Duration::try_from_secs_f64(text.parse().ok()?).ok();
+        let (after, stall) = match &parts[..] {
+            ["stall", after, duration] => (seconds(after)?, Some(seconds(duration)?)),
+            ["lost", after] => (seconds(after)?, None),
+            _ => return None,
+        };
+        Some(Self {
+            after,
+            stall,
+            state: Mutex::default(),
+        })
+    }
+
+    fn arm(&self, lost: &AtomicBool) {
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        if FIRED.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut state = self.state.lock();
+        let began = *state.began.get_or_insert_with(Instant::now);
+        if began.elapsed() < self.after || FIRED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        match self.stall {
+            Some(duration) => {
+                state.until = Some(Instant::now() + duration);
+                isocast_diagnostics::diagnostic!("warn"; "injected GPU completion stall for {} ms", duration.as_millis());
+            }
+            None => {
+                lost.store(true, Ordering::Release);
+                isocast_diagnostics::diagnostic!("warn"; "injected GPU device loss");
+            }
+        }
+    }
+
+    fn complete(&self, complete: Box<dyn FnOnce() + Send>) {
+        let mut state = self.state.lock();
+        if state.until.is_some() {
+            state.held.push(complete);
+        } else {
+            drop(state);
+            complete();
+        }
+    }
+
+    fn poll(
+        &self,
+        device: &wgpu::Device,
+        kind: wgpu::PollType,
+    ) -> Result<wgpu::PollStatus, wgpu::PollError> {
+        let (remaining, held) = {
+            let mut state = self.state.lock();
+            match state.until {
+                Some(until) if Instant::now() < until => (
+                    Some(until.saturating_duration_since(Instant::now())),
+                    Vec::new(),
+                ),
+                Some(_) => {
+                    state.until = None;
+                    (None, std::mem::take(&mut state.held))
+                }
+                None => (None, Vec::new()),
+            }
+        };
+        for complete in held {
+            complete();
+        }
+        if let Some(remaining) = remaining {
+            // Native completion may also be observed by queue.submit on a
+            // different thread; complete() holds those callbacks too.
+            device.poll(wgpu::PollType::Poll)?;
+            std::thread::sleep(remaining.min(Duration::from_secs(1)));
+            return Err(wgpu::PollError::Timeout);
+        }
+        device.poll(kind)
+    }
+}
+
+type OnComplete = Box<dyn FnOnce(Duration) + Send>;
+
+/// A fence for a submitted picture. Callbacks only hand frames to bounded
+/// queues; encoding and IO must never run on the polling/submit thread.
+#[derive(Clone, Default)]
+pub(crate) struct Completion(Arc<Completed>);
+
+struct Completed {
+    state: Mutex<(Option<Duration>, Vec<OnComplete>)>,
+    changed: Condvar,
+    submitted: Instant,
+    cancelled: AtomicBool,
+    lost: Arc<AtomicBool>,
+}
+
+impl Default for Completed {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new((None, Vec::new())),
+            changed: Condvar::new(),
+            submitted: Instant::now(),
+            cancelled: AtomicBool::new(false),
+            lost: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl Completion {
+    fn finish(&self) {
+        let elapsed = self.0.submitted.elapsed();
+        loop {
+            let callbacks = {
+                let mut state = self.0.state.lock();
+                if state.1.is_empty() {
+                    state.0 = Some(elapsed);
+                    break;
+                }
+                std::mem::take(&mut state.1)
+            };
+            for callback in callbacks {
+                if !self.0.cancelled.load(Ordering::Acquire) && !self.0.lost.load(Ordering::Acquire)
+                {
+                    callback(elapsed);
+                }
+            }
+        }
+        self.0.changed.notify_all();
+    }
+
+    pub(crate) fn then(&self, callback: impl FnOnce(Duration) + Send + 'static) {
+        let mut state = self.0.state.lock();
+        if let Some(elapsed) = state.0 {
+            drop(state);
+            if !self.0.cancelled.load(Ordering::Acquire) && !self.0.lost.load(Ordering::Acquire) {
+                callback(elapsed);
+            }
+        } else {
+            state.1.push(Box::new(callback));
+        }
+    }
+
+    pub(crate) fn ready(&self) -> Result<bool> {
+        anyhow::ensure!(
+            !self.0.lost.load(Ordering::Acquire),
+            "the GPU device was lost; recreate this output"
+        );
+        if self.0.state.lock().0.is_some() {
+            return Ok(true);
+        }
+        anyhow::ensure!(
+            self.0.submitted.elapsed() < Duration::from_secs(1),
+            "the GPU did not finish drawing a frame within one second"
+        );
+        Ok(false)
+    }
+
+    /// Only for final draining, never the frame loop.
+    pub(crate) fn wait(&self) -> Result<()> {
+        self.ready()?;
+        let mut state = self.0.state.lock();
+        self.0.changed.wait_while_for(
+            &mut state,
+            |state| state.0.is_none(),
+            Duration::from_secs(1).saturating_sub(self.0.submitted.elapsed()),
+        );
+        anyhow::ensure!(state.0.is_some(), "the GPU did not finish drawing a frame");
+        Ok(())
+    }
+}
+
+/// A producer can be at most three pictures ahead of GPU completion.
+/// Holding its input frames cannot grow without bound during a driver stall.
+#[derive(Default)]
+pub(crate) struct InFlight(Vec<Completion>);
+
+impl InFlight {
+    pub(crate) fn available(&mut self) -> Result<bool> {
+        for done in &self.0 {
+            done.ready()?;
+        }
+        self.0.retain(|done| !done.ready().unwrap_or(false));
+        Ok(self.0.len() < 3)
+    }
+
+    pub(crate) fn submit(&mut self, gpu: &Gpu, commands: wgpu::CommandBuffer) -> Completion {
+        // wgpu can run completion callbacks on ANY submitting thread.
+        // Preserve this producer's tick order even if a later callback
+        // starts on another thread before an earlier one has published.
+        let done = gpu.submit(commands, self.0.last().cloned());
+        self.0.push(done.clone());
+        done
+    }
+
+    pub(crate) fn drain(&mut self) -> Result<()> {
+        for done in &self.0 {
+            done.wait()?;
+        }
+        self.0.clear();
+        Ok(())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        for done in &self.0 {
+            done.0.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// A frame whose pixels must not be read until its submission completes.
+#[derive(Clone)]
+pub(crate) struct PendingFrame<F> {
+    frame: F,
+    pub(crate) done: Option<Completion>,
+}
+
+impl<F: Clone + Send + 'static> PendingFrame<F> {
+    pub(crate) fn new(frame: F, done: Completion) -> Self {
+        // A caller may abandon the pending result (stop, resize or error).
+        // Its native output buffer must still not return to the pool early.
+        let held = frame.clone();
+        done.then(move |_| drop(held));
+        Self {
+            frame,
+            done: Some(done),
+        }
+    }
+
+    pub(crate) fn ready(frame: F) -> Self {
+        Self { frame, done: None }
+    }
+
+    pub(crate) fn then(self, send: impl FnOnce(F, Duration) + Send + 'static) {
+        match self.done {
+            Some(done) => done.then(move |elapsed| send(self.frame, elapsed)),
+            None => send(self.frame, Duration::ZERO),
+        }
     }
 }
 
@@ -126,6 +500,13 @@ pub trait FrameImporter: Send {
     /// Show an 8-bit BGRA frame (from a frame pool) to the GPU as a
     /// `Bgra8Unorm` texture it can draw into.
     fn target(&mut self, frame: &Self::Frame) -> Result<wgpu::Texture>;
+
+    /// A BGRA render target cached by surface, without retaining the pool
+    /// buffer. The caller holds the frame through GPU completion.
+    fn target_cached(&mut self, frame: &Self::Frame) -> Result<Option<wgpu::Texture>> {
+        let _ = frame;
+        Ok(None)
+    }
 
     /// Show an 8-bit 4:2:0 Y'CbCr frame (from a Y'CbCr frame pool) to the
     /// GPU as textures it can draw into: its luma plane (`R8Unorm`) and its

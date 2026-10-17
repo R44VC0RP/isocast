@@ -2388,8 +2388,9 @@ pub struct CompositorInfo {
     /// Reused frames are included; microseconds over the last 600 draws.
     #[serde(default)]
     pub draw_wall_us: Percentiles,
-    /// Wall time in the final GPU submission/completion wait, not GPU
-    /// execution timestamps. Zero for reuse; same window as draw_wall_us.
+    /// Wall time from the final GPU submission to its completion hand-off,
+    /// not GPU execution timestamps or time blocked on the drawing thread.
+    /// Zero for reuse; the last 600 completed program frames.
     #[serde(default)]
     pub gpu_wait_us: Percentiles,
     /// CPU time the program's thread spent on each canvas tick that gave

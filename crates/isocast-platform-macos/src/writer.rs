@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -63,20 +63,11 @@ const KEYFRAME_INTERVAL_SECONDS: f64 = 1.0;
 /// boundary has reached disk. Queued encoding and AAC timing can lag inputs.
 const FRAGMENT_SECONDS: i64 = MOVIE_FRAGMENT_SECONDS;
 
-pub(crate) static PRIORITY_OUTPUTS: AtomicUsize = AtomicUsize::new(0);
-pub(crate) static PRIORITY_PRESSURE: AtomicUsize = AtomicUsize::new(0);
-/// Fraction of ISO pictures admitted, in thousandths. Reduce promptly under
-/// pressure, then probe for spare capacity slowly instead of sending bursts.
-pub(crate) static ISO_SHARE: AtomicU32 = AtomicU32::new(1000);
-static MAIN_OUTPUTS: AtomicUsize = AtomicUsize::new(0);
-static MAIN_PRESSURE: AtomicUsize = AtomicUsize::new(0);
-static VERTICAL_SHARE: AtomicU32 = AtomicU32::new(1000);
-
-/// ISOs yield first. Only sustained main pressure, after the ISO share has
-/// fallen to a tenth, may also hold vertical work. Main-only admission is unchanged.
-pub(crate) fn vertical_held() -> bool {
-    MAIN_PRESSURE.load(Ordering::Relaxed) > 0 && ISO_SHARE.load(Ordering::Relaxed) <= 100
-}
+// The shared-encoder admission controller is portable and lives in the
+// engine, which applies ISO admission before drawing a frame (#29).
+pub(crate) use isocast_engine::record::pressure::{
+    EncoderPressure, PRIORITY_OUTPUTS, PRIORITY_PRESSURE,
+};
 
 /// How far apart hardware sessions get their first pictures, and in what
 /// order. VideoToolbox places a session on one of the chip's video encode
@@ -191,116 +182,6 @@ pub(crate) fn cancel_encoder_start(ticket: u64) {
     encoder_starts().waiting.retain(|(.., t)| *t != ticket);
 }
 
-/// Admission feedback across the native sessions sharing this process's
-/// hardware encoders. Only an output's worker mutates its guard. Capture and
-/// the compositor never wait; low-priority writers return a counted refusal.
-pub(crate) struct EncoderPressure {
-    pub(crate) canvas: CanvasId,
-    stalled: bool,
-    adjusted: Instant,
-    credit: u32,
-}
-
-impl EncoderPressure {
-    pub(crate) fn new(canvas: CanvasId) -> Self {
-        if PRIORITY_OUTPUTS.fetch_add(1, Ordering::Relaxed) == 0 {
-            ISO_SHARE.store(1000, Ordering::Relaxed);
-        }
-        if canvas.is_main() && MAIN_OUTPUTS.fetch_add(1, Ordering::Relaxed) == 0 {
-            VERTICAL_SHARE.store(1000, Ordering::Relaxed);
-        }
-        Self {
-            canvas,
-            stalled: false,
-            adjusted: Instant::now(),
-            credit: 0,
-        }
-    }
-
-    pub(crate) fn held(&self) -> bool {
-        !self.canvas.is_main() && vertical_held()
-    }
-
-    pub(crate) fn admit(&mut self) -> bool {
-        if self.canvas.is_main() || MAIN_OUTPUTS.load(Ordering::Relaxed) == 0 {
-            return true;
-        }
-        if self.held() {
-            return false;
-        }
-        self.credit += VERTICAL_SHARE.load(Ordering::Relaxed);
-        if self.credit < 1000 {
-            return false;
-        }
-        self.credit -= 1000;
-        true
-    }
-
-    pub(crate) fn set(&mut self, stalled: bool) {
-        let now = Instant::now();
-        if stalled
-            && (!self.stalled || now.duration_since(self.adjusted) >= Duration::from_millis(100))
-        {
-            if self.canvas.is_main() && ISO_SHARE.load(Ordering::Relaxed) <= 100 {
-                let _ = VERTICAL_SHARE.try_update(Ordering::Relaxed, Ordering::Relaxed, |share| {
-                    Some(share * 3 / 4)
-                });
-            }
-            let _ = ISO_SHARE.try_update(Ordering::Relaxed, Ordering::Relaxed, |share| {
-                Some(share * 3 / 4)
-            });
-            self.adjusted = now;
-        } else if !stalled
-            && PRIORITY_PRESSURE.load(Ordering::Relaxed) == 0
-            && now.duration_since(self.adjusted) >= Duration::from_millis(500)
-        {
-            let _ = ISO_SHARE.try_update(Ordering::Relaxed, Ordering::Relaxed, |share| {
-                Some((share + 10).min(1000))
-            });
-            if self.canvas.is_main() {
-                let _ = VERTICAL_SHARE.try_update(Ordering::Relaxed, Ordering::Relaxed, |share| {
-                    Some((share + 10).min(1000))
-                });
-            }
-            self.adjusted = now;
-        }
-        if self.canvas.is_main()
-            && !stalled
-            && MAIN_PRESSURE.load(Ordering::Relaxed) == 0
-            && now.duration_since(self.adjusted) >= Duration::from_millis(500)
-        {
-            let _ = VERTICAL_SHARE.try_update(Ordering::Relaxed, Ordering::Relaxed, |share| {
-                Some((share + 10).min(1000))
-            });
-            self.adjusted = now;
-        }
-        if stalled != self.stalled {
-            if stalled {
-                PRIORITY_PRESSURE.fetch_add(1, Ordering::Relaxed);
-                if self.canvas.is_main() {
-                    MAIN_PRESSURE.fetch_add(1, Ordering::Relaxed);
-                }
-            } else {
-                PRIORITY_PRESSURE.fetch_sub(1, Ordering::Relaxed);
-                if self.canvas.is_main() {
-                    MAIN_PRESSURE.fetch_sub(1, Ordering::Relaxed);
-                }
-            }
-            self.stalled = stalled;
-        }
-    }
-}
-
-impl Drop for EncoderPressure {
-    fn drop(&mut self) {
-        self.set(false);
-        PRIORITY_OUTPUTS.fetch_sub(1, Ordering::Relaxed);
-        if self.canvas.is_main() {
-            MAIN_OUTPUTS.fetch_sub(1, Ordering::Relaxed);
-        }
-    }
-}
-
 /// One .mov or .mp4 file written by AVAssetWriter.
 pub struct AssetWriter {
     writer: Retained<AVAssetWriter>,
@@ -317,7 +198,6 @@ pub struct AssetWriter {
     last_video: Option<(PixelBuffer, CMTime)>,
     frame_duration: CMTime,
     priority: Option<EncoderPressure>,
-    iso_credit: u32,
     /// The video input has its first picture, so its hardware session has
     /// started; until then pictures wait for their turn in the start order
     /// (`start_ticket` is the request; see [`claim_encoder_start`]).
@@ -468,7 +348,6 @@ impl AssetWriter {
             last_video: None,
             frame_duration: unsafe { CMTime::new(1, spec.video.fps as i32) },
             priority: None,
-            iso_credit: 0,
             encoding: false,
             start_ticket: None,
             pixels: (spec.video.width, spec.video.height),
@@ -509,6 +388,10 @@ impl FileWriter for AssetWriter {
 
     fn append_video(&mut self, frame: &PixelBuffer, pts: Time) -> Result<bool> {
         autoreleasepool(|_| self.append_frame(frame, pts))
+    }
+
+    fn skip_video(&mut self) -> Result<()> {
+        autoreleasepool(|_| self.drain_ready())
     }
 
     // Developer mode (#47): frames waiting for AVAssetWriter's input.
@@ -571,23 +454,14 @@ impl AssetWriter {
         } else {
             PENDING_VIDEO
         };
+        // The engine admits ISO frames by the ISO share before drawing
+        // them (#29). Pressure that rose since then still pauses them.
         if self.priority.is_none()
             && self.last_video.is_some()
-            && PRIORITY_OUTPUTS.load(Ordering::Relaxed) > 0
+            && PRIORITY_PRESSURE.load(Ordering::Relaxed) > 0
         {
-            // Stop adding low-priority work immediately while a protected
-            // queue catches up. The reduced steady share avoids repeatedly
-            // refilling every encoder at full rate when that pause ends.
-            if PRIORITY_PRESSURE.load(Ordering::Relaxed) > 0 {
-                self.drain_ready()?;
-                return Ok(false);
-            }
-            self.iso_credit += ISO_SHARE.load(Ordering::Relaxed);
-            if self.iso_credit < 1000 {
-                self.drain_ready()?;
-                return Ok(false);
-            }
-            self.iso_credit -= 1000;
+            self.drain_ready()?;
+            return Ok(false);
         }
         if self.pending_video.len() >= limit {
             self.drain_ready()?;

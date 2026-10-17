@@ -1699,6 +1699,49 @@ each section. Delete entries that stop being true.
   headings, bold/italic, lists, code, quotes and links; tables lose their
   text, rules are blank and images show alt text. Later option:
   `sparkle:releaseNotesLink` to an HTML page with screenshots/video.
+- 2026-10-17 (#26/#29 fix round 1): **Timeouts must not stop completion
+  polling.** Once a producer's fences age past 1 s it stops submitting; the
+  GPU completion worker now retries Timeout until the work completes. A
+  developer-only `ISOCAST_GPU_FAULT=stall:2:2.5` withholds callbacks for
+  2.5 s: main recovers, reviewed head freezes, fixed head recovers at 60 fps.
+  `lost:2` simulates the device-lost flag: the cache opens a fresh device,
+  and a persistent live compositor rebuilds without resetting the engine's
+  clock/control. The next 4 s take keeps 240/240 frames, and projector plus
+  H.264 preview/scene readbacks work in the same process/live engine.
+  **Split demand is published before the split message**, separately from
+  writer demand so an old writer update cannot erase it. Isolated developer
+  `ISOCAST_DEBUG_SPLIT_STALL_MS=450`, seven shedding ISOs, start/stop/split/
+  pause cycles: 19 takes/152 files, 4,408 shed frames, zero uncounted ticks,
+  all ISO start offsets zero. Two very sparse files fooled the existing
+  inferred-FPS check; direct PTS-grid/full-decode checks pass. Main 603c3ac
+  integrated without committing; gates and strict e2e 18/18 pass. Re-review
+  and completion of the pending merge belong to the coordinator. Details:
+  `/Volumes/IsocastBuild/perf-gpu/scratch/REPORT.md`, section Fix round 1.
+
+- 2026-10-17 (#26/#29, hardware-qualified; review pending): **GPU completion is a
+  hand-off, not a wait on every producer.** Engine `Gpu::new` shares one
+  process-lifetime device. Command-buffer callbacks retain native inputs
+  and outputs until completion; producer-local fences preserve tick order
+  when wgpu dispatches callbacks on different submit threads. Each producer
+  has at most three GPU pictures in flight; one completion thread sleeps on
+  the GPU and drains callbacks at the platform's real-time scheduling class.
+  Program/stream frames remain YUV; native
+  monitors use pooled BGRA canvases, only allocated/drawn while watched.
+  Preview and watched scenes skip YUV conversion entirely. ISO pressure
+  moved to `record/pressure.rs`; skipped ticks still reach file workers for
+  split/stop/audio/commit accounting, without pixels. File workers request
+  every picture through startup and split boundaries; native writers still
+  hold if pressure rose after admission, and drain accepted work on skipped
+  ticks. This does not close #27's aggregate capture/encoder pool isolation.
+  Final remote gates, strict e2e (17/17), cycles/disk/ISO stress and native
+  surface/camera readbacks pass. Final three-pair A/B keeps all protected
+  outputs whole; the populated multiview + two projectors use 71.6→66.2%
+  daemon CPU and 580.7→483.3 GPU ms/s, but live footprint is 305.6→438.1 MiB.
+  One earlier program loss led to restoring real-time QoS on the completion
+  worker; the final 3×64 s pairs lose zero of 11,520 program frames per build.
+  These are not across-the-board CPU/memory wins. Tier-1 review remains:
+  `/Volumes/IsocastBuild/perf-gpu/scratch/REPORT.md`.
+
 - 2026-10-17 (#96 / 0.0.7): **Canvas failures are local, mixer failures shared.**
   A main compositor panic must not end healthy vertical streams; the daemon
   now selects that canvas's stream slots, just as for vertical failures.

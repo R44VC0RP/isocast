@@ -29,7 +29,7 @@ use isocast_protocol::{
 };
 
 use super::disk::{DiskMeter, DiskProbe};
-use super::file::{Done, Split, file_end, split_channel, write_files};
+use super::file::{Done, IsoDemand, Split, file_end, split_channel, write_files};
 use super::frame_stream::{self, FrameFeed};
 use super::iso_frames::IsoFrames;
 use super::mix::{MIX_DELAY, Meter, Mixer, StereoMeter};
@@ -51,7 +51,7 @@ use super::{
 use super::{AudioStopped, audio_stop_errors, file_audio_stops};
 use crate::audio_filter::AudioStage;
 use crate::critical::Critical;
-use crate::gpu::Gpu;
+use crate::gpu::{Completion, Gpu, PendingFrame};
 use crate::source::{self, Audio, AudioFeed, FrameSlot, Timeline, Video};
 use crate::transition::stinger_id;
 use crate::{FileWriter, Platform, SAMPLE_RATE, Time, space};
@@ -406,6 +406,8 @@ struct CanvasOutput<P: Platform> {
     enabled: AtomicBool,
     /// The program's newest canvases.
     program: Arc<FrameSlot<P::Frame>>,
+    /// The composited BGRA picture, before the encoder's YUV conversion.
+    program_rgb: Arc<FrameSlot<P::Frame>>,
     /// Studio mode's preview scene, drawn while someone wants it.
     preview: Arc<FrameSlot<P::Frame>>,
     preview_scene: Mutex<Option<Arc<str>>>,
@@ -545,6 +547,7 @@ impl<P: Platform> CanvasOutput<P> {
             follow_main: AtomicBool::new(false),
             enabled: AtomicBool::new(true),
             program: Arc::new(FrameSlot::with_capacity(timeline.clone(), 1)),
+            program_rgb: Arc::new(FrameSlot::with_capacity(timeline.clone(), 1)),
             preview: Arc::new(FrameSlot::with_capacity(timeline.clone(), 1)),
             preview_scene: Mutex::new(None),
             preview_wanted: AtomicU32::new(0),
@@ -1247,7 +1250,7 @@ impl<P: Platform> Engine<P> {
             fps,
             // Called with the stream's rate now (the highest any of its
             // viewers wants), which the program is drawn at least at.
-            move |fps| stream_source(&inner, &target, fps),
+            move |fps| stream_source(&inner, &target, fps, false),
         ))
     }
 
@@ -1288,7 +1291,7 @@ impl<P: Platform> Engine<P> {
         Ok(shared_frames::watch(
             &self.inner.platform,
             request,
-            move |fps| stream_source(&inner, &target, fps),
+            move |fps| stream_source(&inner, &target, fps, true),
             filters,
         ))
     }
@@ -2291,6 +2294,7 @@ fn ensure_vertical_compositor<P: Platform>(inner: &Arc<Inner<P>>, state: &mut St
     let Some(canvas) = wanted else {
         output.enabled.store(false, Ordering::SeqCst);
         output.program.clear();
+        output.program_rgb.clear();
         output.preview.clear();
         output
             .program_fps
@@ -2362,12 +2366,19 @@ fn stream_source<P: Platform>(
     inner: &Arc<Inner<P>>,
     target: &str,
     fps: u32,
+    rgb: bool,
 ) -> Result<frame_stream::Source<P::Frame>, String> {
     if inner.stopping.load(Ordering::SeqCst) {
         return Err("the live engine stopped".into());
     }
-    let slot = slot_of(inner, target, fps)?;
+    let mut slot = slot_of(inner, target, fps)?;
     let canvas = target_canvas(target);
+    if rgb
+        && matches!(target, PROGRAM | VERTICAL_PROGRAM)
+        && let Some(output) = canvas.and_then(|canvas| inner.output(canvas))
+    {
+        slot = output.program_rgb.clone();
+    }
     let grid = canvas.and_then(|canvas| {
         let state = inner.state.lock();
         let run = match canvas {
@@ -2615,6 +2626,7 @@ fn run_program<P: Platform>(
     );
     let mut version = 0;
     let mut warned = false;
+    let mut retry_gpu = std::time::Instant::now();
     // The sources on air, kept between ticks.
     let mut on_air_sources: Vec<Arc<str>> = Vec::new();
     // The rates monitors show the program and the preview at.
@@ -2635,6 +2647,35 @@ fn run_program<P: Platform>(
         clock.sleep_until(platform, tick + frame);
         if stop.load(Ordering::SeqCst) || inner.stopping.load(Ordering::SeqCst) {
             break;
+        }
+        // The live compositor survives between recordings. Reopening only
+        // the shared cache would leave this owner on its lost device forever,
+        // even though a new scene viewer could already obtain a healthy one.
+        if compositor.device_lost() {
+            output.frames_missed.fetch_add(1, Ordering::Relaxed);
+            if std::time::Instant::now() < retry_gpu {
+                continue;
+            }
+            retry_gpu = std::time::Instant::now() + Duration::from_secs(1);
+            match Compositor::new(platform, compositor.canvas()) {
+                Ok(mut replacement) => {
+                    replacement.set_epoch(epoch);
+                    compositor = replacement;
+                    version = 0;
+                    warned = false;
+                    inner.event(EngineEvent::Warning(format!(
+                        "the {canvas:?} GPU device was lost; its compositor was recreated"
+                    )));
+                }
+                Err(error) => {
+                    if !std::mem::replace(&mut warned, true) {
+                        inner.event(EngineEvent::Warning(format!(
+                            "could not reopen the {canvas:?} GPU: {error:#}"
+                        )));
+                    }
+                    continue;
+                }
+            }
         }
         if poison_after.is_some_and(|after| tick.saturating_since(epoch) >= after) {
             output.scenes.poison();
@@ -2703,14 +2744,34 @@ fn run_program<P: Platform>(
         }
         if outputs || program_rates.draws(n, fps) {
             let draw_started = std::time::Instant::now();
-            match compositor.draw(Feed::Program, on_air.as_ref(), tick, tick + frame / 2) {
+            match compositor.draw(
+                Feed::Program,
+                on_air.as_ref(),
+                tick,
+                tick + frame / 2,
+                monitored,
+            ) {
                 Ok(Some((image, reused))) => {
                     gave = Some((reused, compositor.draws(), compositor.animated()));
-                    // Before the frame, so whoever takes it finds its revision.
-                    frame_stream::drawn(&output.drawn, tick, stamp);
-                    output.program.push(image.clone(), tick);
-                    output.program_video.video(&image, tick);
-                    output.frames_drawn.fetch_add(1, Ordering::Relaxed);
+                    let inner = inner.clone();
+                    image.then(move |(image, rgb), gpu_wait| {
+                        let Some(output) = inner.output(canvas) else {
+                            return;
+                        };
+                        // Publish the stamp and pixels together, only after
+                        // the GPU has finished with this tick's inputs.
+                        frame_stream::drawn(&output.drawn, tick, stamp);
+                        if let Some(rgb) = rgb {
+                            output.program_rgb.push(rgb, tick);
+                        }
+                        output.program.push(image.clone(), tick);
+                        output.program_video.video(&image, tick);
+                        output.frames_drawn.fetch_add(1, Ordering::Relaxed);
+                        output
+                            .timings
+                            .lock()
+                            .gpu(if reused { Duration::ZERO } else { gpu_wait });
+                    });
                 }
                 Ok(None) => {
                     output.frames_missed.fetch_add(1, Ordering::Relaxed);
@@ -2724,13 +2785,11 @@ fn run_program<P: Platform>(
                     }
                 }
             }
-            output
-                .timings
-                .lock()
-                .draw(draw_started.elapsed(), compositor.gpu_wait);
+            output.timings.lock().draw_wall(draw_started.elapsed());
         } else if !monitored && !outputs {
             // Nothing wants the program: let its canvas go back to the pool.
             output.program.clear();
+            output.program_rgb.clear();
             compositor.forget(Feed::Program);
         }
         let scene = preview_wanted
@@ -2740,9 +2799,10 @@ fn run_program<P: Platform>(
             Some(scene) if preview_rates.draws(n, fps) => {
                 let staged = OnAir { scene, from: None };
                 if let Ok(Some((image, _))) =
-                    compositor.draw(Feed::Preview, Some(&staged), tick, tick + frame / 2)
+                    compositor.draw(Feed::Preview, Some(&staged), tick, tick + frame / 2, true)
                 {
-                    output.preview.push(image, tick);
+                    let slot = output.preview.clone();
+                    image.then(move |(rgb, _), _| slot.push(rgb, tick));
                 }
             }
             Some(_) => {}
@@ -2763,6 +2823,11 @@ fn run_program<P: Platform>(
         if resized.len() > 0 {
             output.scenes.resized(resized);
         }
+    }
+    if let Err(error) = compositor.drain() {
+        inner.event(EngineEvent::Warning(format!(
+            "the {canvas:?} program could not finish its GPU frames: {error:#}"
+        )));
     }
 }
 
@@ -2937,7 +3002,20 @@ struct IsoRunner<P: Platform> {
     /// Where frames are filtered or converted, made when the first frame
     /// needs it.
     stage: Option<Box<IsoFrames<P>>>,
-    outputs: Vec<Output<P::Frame>>,
+    outputs: Vec<IsoOutput<P::Frame>>,
+}
+
+/// Where an ISO file's frames go, and its share of the hardware encoders:
+/// ticks it would refuse are left out before they are drawn (#29).
+struct IsoOutput<F> {
+    tx: Output<F>,
+    /// From which frame time its file wants every picture (see
+    /// `IsoDemand`): its file starts on a picture, and so does the next
+    /// take's at a split.
+    wanted: Arc<IsoDemand>,
+    credit: super::pressure::IsoCredit,
+    /// It takes the current tick's frame.
+    admitted: bool,
 }
 
 /// The GPU the recording's ISO files filter and convert frames with, one
@@ -2959,7 +3037,7 @@ impl<P: Platform> IsoRunner<P> {
                 let mut gpu = gpu.lock();
                 match &*gpu {
                     Some(gpu) => gpu.clone(),
-                    None => gpu.insert(Gpu::new()?).clone(),
+                    None => gpu.insert(Gpu::for_platform(platform)?).clone(),
                 }
             };
             let stage = IsoFrames::new(platform, gpu, &self.id, self.size, self.filters.clone())
@@ -2978,9 +3056,9 @@ impl<P: Platform> IsoRunner<P> {
         gpu: &IsoGpu,
         image: P::Frame,
         tick: Time,
-    ) -> Result<Option<P::Frame>> {
+    ) -> Result<Option<PendingFrame<P::Frame>>> {
         if !self.needs_stage(platform, &image) {
-            return Ok(Some(image));
+            return Ok(Some(PendingFrame::ready(image)));
         }
         self.stage(platform, gpu)?.draw(&image, tick)
     }
@@ -3045,6 +3123,7 @@ fn run_iso<P: Platform>(
     let epoch = shared.epoch;
     let fps = runner.fps;
     let frame = Duration::from_secs(1) / fps;
+    let mut last_gpu: Option<Completion> = None;
     for n in 0.. {
         let tick = epoch.add_ticks(n, fps);
         // Frames up to half a frame after the tick are nearest to it; wait
@@ -3073,16 +3152,62 @@ fn run_iso<P: Platform>(
         let Some(image) = runner.slot.newest_until(tick + frame / 2) else {
             continue;
         };
-        // None: its frames are all still being written.
-        let Some(image) = runner.prepare(platform, gpu, image, tick)? else {
-            continue;
-        };
-        for output in &runner.outputs {
-            let _ = output.try_send(Packet::Video {
-                frame: image.clone(),
-                pts: tick,
-            });
+        // Encoder admission first, so a refused tick is never drawn.
+        let mut admitted = false;
+        for output in &mut runner.outputs {
+            output.admitted = tick.as_nanos() >= output.wanted.from() || output.credit.admit();
+            admitted |= output.admitted;
         }
+        let image = if admitted {
+            // None: its frames are all still being written.
+            let Some(image) = runner.prepare(platform, gpu, image, tick)? else {
+                continue;
+            };
+            Some(image)
+        } else {
+            None
+        };
+        let outputs: Vec<_> = runner
+            .outputs
+            .iter()
+            .map(|output| (output.tx.clone(), output.admitted))
+            .collect();
+        let send = move |image: Option<P::Frame>| {
+            for (output, admitted) in outputs {
+                let packet = match &image {
+                    Some(image) if admitted => Packet::Video {
+                        frame: image.clone(),
+                        pts: tick,
+                    },
+                    _ => Packet::Skipped { pts: tick },
+                };
+                let _ = output.try_send(packet);
+            }
+        };
+        match image {
+            Some(mut image) => {
+                // Unconverted pictures and skipped ticks must not overtake
+                // an earlier conversion still in flight on this ISO clock.
+                if image.done.is_none() {
+                    image.done = last_gpu.clone();
+                }
+                last_gpu = image.done.clone();
+                image.then(move |image, _| send(Some(image)));
+            }
+            None => match &last_gpu {
+                Some(done) => {
+                    done.ready()?;
+                    done.then(move |_| send(None));
+                }
+                None => send(None),
+            },
+        }
+    }
+    if let Some(stage) = &mut runner.stage {
+        stage.drain()?;
+    }
+    if let Some(done) = last_gpu {
+        done.wait()?;
     }
     Ok(())
 }
@@ -3519,6 +3644,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     for plan in plans {
         let (tx, rx) = sync_channel(QUEUE_DEPTH);
         let missed_audio = Arc::new(AtomicU64::new(0));
+        let wanted = Arc::new(IsoDemand::default());
         if plan.source == PROGRAM {
             let key = inner.main.program_video.add(tx.clone(), 0, epoch, None);
             routes.0.push((inner.main.program_video.clone(), key));
@@ -3527,7 +3653,12 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             let key = video.add(tx.clone(), 0, epoch, None);
             routes.0.push((video.clone(), key));
         } else if let Some(runner) = runners.get_mut(plan.source.as_str()) {
-            runner.outputs.push(tx.clone());
+            runner.outputs.push(IsoOutput {
+                tx: tx.clone(),
+                wanted: wanted.clone(),
+                credit: Default::default(),
+                admitted: false,
+            });
         }
         for (track, id) in plan.audio.iter().enumerate() {
             if id == PROGRAM {
@@ -3565,7 +3696,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             );
             routes.0.push((reader.clone(), key));
         }
-        receivers.push((rx, missed_audio));
+        receivers.push((rx, missed_audio, wanted));
     }
     // Frames captured before the recording don't count in its report.
     let mut counted: Vec<(String, Arc<FrameSlot<P::Frame>>)> = plans
@@ -3637,14 +3768,18 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     let mut errors = thread::scope(|scope| {
         let shared = &shared;
         let mut split_senders = Vec::new();
+        // Each file's demand for every picture, which a split sets before
+        // its writer thread can receive it (see `IsoDemand`).
+        let mut demands = Vec::new();
         let writer_threads: Vec<_> = writers
             .into_iter()
             .zip(receivers)
             .zip(takes[0].plans.clone())
             .enumerate()
-            .map(|(index, ((writer, (packets, missed_audio)), plan))| {
+            .map(|(index, ((writer, (packets, missed, wanted)), plan))| {
                 let (split_tx, split_rx) = split_channel();
                 split_senders.push(split_tx);
+                demands.push(wanted.clone());
                 let done = done_tx.clone();
                 let clock = clock.clone();
                 // Program writers have producers too. If either compositor
@@ -3658,16 +3793,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 scope.spawn(move || {
                     platform.real_time_thread();
                     write_files(
-                        writer,
-                        plan,
-                        index,
-                        packets,
-                        split_rx,
-                        done,
-                        shared,
-                        clock,
-                        missed_audio,
-                        source,
+                        writer, plan, index, packets, split_rx, done, shared, clock, missed,
+                        source, wanted,
                     )
                 })
             })
@@ -3913,13 +4040,18 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                             let mut gone = Vec::new();
                             let mut notes = Vec::new();
                             let current = takes.last().expect("a take");
-                            for (i, ((split, writer), file)) in split_senders
+                            for (i, (((split, demand), writer), file)) in split_senders
                                 .iter()
+                                .zip(&demands)
                                 .zip(writers)
                                 .zip(plan.plans.clone())
                                 .enumerate()
                             {
                                 let path = file.spec.path.clone();
+                                // Before the writer thread can take the split:
+                                // however far behind it is, admission hands
+                                // over every picture from `at` on.
+                                demand.split_sent(at);
                                 let sent = split.send(Split {
                                     at,
                                     take: index,
@@ -3929,6 +4061,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                                 // That file's writer thread has stopped (its
                                 // writer failed), so this take can't have it.
                                 if let Err(mpsc::SendError(split)) = sent {
+                                    demand.split_settled(at);
                                     split.writer.cancel();
                                     gone.push(i);
                                 } else {
@@ -4466,6 +4599,7 @@ mod tests {
             match packets.recv_timeout(Duration::ZERO) {
                 Ok(Packet::Video { pts, .. }) => video.push(pts.as_nanos()),
                 Ok(Packet::Audio { .. }) => audio += 1,
+                Ok(Packet::Skipped { .. }) => panic!("live taps never receive ISO skipped ticks"),
                 Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => panic!("every sender was removed"),
             }

@@ -30,9 +30,11 @@ client                                   isocastd
 - **A frame.** The viewer's thread picks frames like the H.264 monitors do
   (`Pace` in `frame_stream.rs`: the viewer's rate, on the canvas's frame
   grid, the newest again for a still picture), converts the program's
-  4:2:0 Y'CbCr and scales it in one GPU pass (the compositor's `Renderer`,
-  area filter when shrinking) into a free slot, waits for the GPU to finish,
-  and only then sends `{"frame"}`. So whatever the client samples is
+  BGRA canvas and scales it in one GPU pass (the compositor's `Renderer`,
+  area filter when shrinking) into a free slot. Captured sources in Y'CbCr
+  are converted in that pass. A command-buffer completion callback sends
+  `{"frame"}` only after the GPU finishes; the viewer's thread does not
+  wait for each draw. So whatever the client samples is
   complete; no cross-process GPU fence is needed.
 - **Release.** A slot stays the client's until it sends `release`. The
   client must keep a frame until its own GPU has finished reading it (in
@@ -40,6 +42,12 @@ client                                   isocastd
   it. With every slot held, the daemon draws nothing and stops asking for
   the program, so a stuck or hidden client costs nothing; it only stalls
   itself (rings are per viewer).
+- **One device.** Compositors, ISO conversions, scene feeds, viewers and
+  the virtual camera share one process-lifetime `Gpu`. One completion
+  thread services its callbacks; each producer has at most three pictures
+  in flight. Native buffers (including cached imports) are retained until
+  their GPU reads/writes finish. Producer-local fences preserve publication
+  order even when wgpu runs callbacks on different submitting threads.
 - **Revisions.** Program and preview frames carry the setup revision they
   were drawn from, as the H.264 stream's revision records do, so the app
   draws its selection box at the layout the picture shows: box and picture

@@ -38,7 +38,7 @@ pub struct Graphics<P: Platform> {
 
 impl<P: Platform> Graphics<P> {
     pub fn new(platform: &P) -> Result<Self> {
-        let gpu = Gpu::new()?;
+        let gpu = Gpu::for_platform(platform)?;
         let renderer = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm);
         let importer = platform.frame_importer(&gpu)?;
         let filters = Filters::new(&gpu, renderer.format(), false);

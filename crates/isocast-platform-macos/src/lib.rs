@@ -107,6 +107,13 @@ impl isocast_engine::FileWriter for MacWriter {
         }
     }
 
+    fn skip_video(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Asset(w) => w.skip_video(),
+            Self::CrashSafe(w) => w.skip_video(),
+        }
+    }
+
     fn append_audio(&mut self, track: usize, samples: &[f32], pts: Time) -> anyhow::Result<bool> {
         match self {
             Self::Asset(w) => w.append_audio(track, samples, pts),
