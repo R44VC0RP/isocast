@@ -540,6 +540,16 @@ pub enum Method {
     /// folder holding it); the take's files are never touched. Returns
     /// [`TimelineInfo`](crate::timeline::TimelineInfo).
     TimelineRelink(crate::timeline::TimelineRelinkParams),
+    /// Write a timeline as a project Final Cut Pro (`fcpxml`), Premiere Pro
+    /// (`xmeml`), DaVinci Resolve (`xmeml` with app `resolve`) or any
+    /// OpenTimelineIO reader (`otio`) opens (#104): every
+    /// ISO source on its own video track with the program on top, each
+    /// clip's angle the one track on there, crops as crop and transform,
+    /// markers, and each file's audio on its own tracks, all lined up from
+    /// the takes' manifests. It points at the takes' own files (nothing is
+    /// encoded, copied or changed). Returns
+    /// [`NleExported`](crate::timeline::NleExported).
+    TimelineExportNle(crate::timeline::TimelineExportNleParams),
 }
 
 /// Every method's name, as requests and plugin grants spell it

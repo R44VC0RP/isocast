@@ -247,6 +247,14 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-17 (#104): NLE export checked in DaVinci Resolve only. Final Cut
+  Pro's trial now comes from the App Store (needs an Apple ID) and Premiere
+  Pro needs a paid licence, so neither was opened. To check: on a Mac with
+  them, `isocast timeline export --nle fcpxml` (File › Import › XML in
+  Final Cut) and `isocast timeline export --nle xmeml` (File › Import in
+  Premiere), then compare frames at each cut with the EDITED file. Watch
+  Premiere's Basic Motion scale (written in the picture's own pixels) and
+  stereo audio tracks (one stereo clip per file track).
 - 2026-10-17 (#106): **Refresh 0.0.6's update notes.** After this branch
   is merged and the snapshot published (the workflow and
   `docs/releases/0.0.6.md` must be on the public main), run
@@ -1681,6 +1689,39 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-17 (#104): **NLE export (`timeline_export_nle`) writes stacked
+  tracks, not a multicam clip**: one video track per ISO source with the
+  program on top, every clip's stretch of every file on its track, only
+  the clip's angle switched on (FCPXML: lanes off one gap per clip, audio
+  lanes below with `srcEnable`). Same layout in all three formats, an
+  angle switch stays a visible cut, and Resolve reads it; multicam in
+  FCPXML is a follow-up. A clip's first frame in each file is the one on
+  screen at its in point (`floor((in - start_offset) * fps)`), as the
+  export picks it; whole-number rates only today (the writer handles
+  `num/den` rates like 60000/1001, unit-tested, but recordings tick at
+  whole rates). Media paths are absolute everywhere (Resolve imported no
+  OTIO clip with a relative or `file://` path). The project file is the
+  only file written (atomically: a uniquely named partial made with
+  create_new, then renamed; numbered names are taken by making them with
+  create_new). `--output` must end in the format's extension, so it can't
+  be a take's file, and replaces a file only if it carries the export's
+  marker ("Isocast timeline export": an XML comment after the DOCTYPE,
+  OTIO `metadata.isocast.export`) or with `replace` / `--replace`.
+- 2026-10-17 (#104): **Resolve gets xmeml (`--app resolve`)**, measured on
+  Resolve 21.1.1 free on isocast-m2-b: xmeml renders frame for frame as the
+  EDITED file (pattern decode 0/212 frames off, PSNR >= 46 dB, same level);
+  Resolve ignores FCPXML `srcEnable` (doubled program sound, +6 dB, and the
+  uncropped program around a 1:1 crop), and OTIO has no crops. In xmeml
+  Resolve fits a picture of another size first and counts Basic Motion's
+  scale from that fit (Premiere: from the picture's own pixels), and reads
+  a clip's `trackindex` as one channel (a stereo clip became a mono track
+  of its left channel, -3 dB), so its file has a track per channel, panned.
+  FCPXML `trim-rect` values are all percent of the picture's **height**
+  (Apple's DTD: "a percentage of original frame height"), left and right
+  too; positions are percent of the sequence's height. Resolve 21.1 reads
+  trim-rect that way (fix round 1: the first version wrote left/right in
+  percent of the width, and Resolve's re-export showed them scaled by
+  height/width); the "Resolve units" others reverse-engineered aren't used.
 - 2026-10-17 (#109): **A scene without a vertical arrangement is
   letterboxed on the vertical canvas**, replacing "re-laid out, not
   scaled" (#86), which drew a 16:9 scene's rect items at main-canvas
@@ -6029,6 +6070,18 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-17 (#104): **Driving DaVinci Resolve (free) on a test Mac**:
+  only Studio takes external scripts, its Scripts menu lists Lua only
+  (no Python found), and its Lua has no `io` (bmd.writestring only
+  serializes), so results leave as Resolve's own files (renders and
+  `Timeline:Export` OTIO/XML). Its windows have no usable AX tree: drive it
+  with cua-driver desktop clicks (`{"scope":"desktop"}`) and `press_key`
+  with pid + window_id; Workspace > Console's input takes a pasted
+  `dofile("…")`. A quit with a modal dialog up leaves it running: `pkill
+  -9`. The harness is in /Volumes/IsocastBuild/nle-export/scratch/resolve
+  (drive.py, nle_test.lua, run.sh; run with `hw-batch.py now cmd --gui
+  --mac m2-b --command 'bash ~/nle-export/resolve/run.sh 420'`). Resolve
+  21.1.1 needed Rosetta (installed on m2-b).
 - 2026-10-17 (#85): **take.sh on isocast-m2-a: a wedged Terminal.** The
   Terminal there had run since 2026-10-12 with one stale window ("Grant
   Isocast permissions.command", its shell gone) and answered neither

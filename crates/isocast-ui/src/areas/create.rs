@@ -37,10 +37,11 @@ use std::time::{Duration, Instant};
 use isocast_protocol::PROGRAM;
 use isocast_protocol::api::{EngineState, Event, Method};
 use isocast_protocol::timeline::{
-    ClipFile, ClipInfo, Crop, CropPreset, ExportStarted, Retaken, TimelineAngleParams,
-    TimelineCropParams, TimelineExportParams, TimelineInfo, TimelineList, TimelineMoveParams,
-    TimelineNewParams, TimelineOpenParams, TimelineRangeParams, TimelineRemoveParams,
-    TimelineRollParams, TimelineSplitParams, TimelineTarget, TimelineTrimParams,
+    ClipFile, ClipInfo, Crop, CropPreset, ExportStarted, NleApp, NleExported, NleFormat, Retaken,
+    TimelineAngleParams, TimelineCropParams, TimelineExportNleParams, TimelineExportParams,
+    TimelineInfo, TimelineList, TimelineMoveParams, TimelineNewParams, TimelineOpenParams,
+    TimelineRangeParams, TimelineRemoveParams, TimelineRollParams, TimelineSplitParams,
+    TimelineTarget, TimelineTrimParams,
 };
 use slint::{ComponentHandle, ModelRc, VecModel};
 
@@ -986,6 +987,82 @@ impl Create {
         });
     }
 
+    /// Export › For Final Cut Pro… (and Premiere Pro, Resolve,
+    /// OpenTimelineIO): ask where, then write the project file
+    /// (`timeline_export_nle`), which points at the takes' own files.
+    fn export_nle(&self, app: &Rc<App>, target: &str) {
+        let Some(name) = self.timeline.borrow().as_ref().map(|t| t.name.clone()) else {
+            return;
+        };
+        let (format, nle_app) = match target {
+            "final_cut" => (NleFormat::Fcpxml, NleApp::FinalCut),
+            "premiere" => (NleFormat::Xmeml, NleApp::Premiere),
+            "resolve" => (NleFormat::Xmeml, NleApp::Resolve),
+            _ => (NleFormat::Otio, NleApp::Resolve),
+        };
+        let label = match format {
+            NleFormat::Otio => String::new(),
+            _ => format!(" {}", nle_app.title()),
+        };
+        let file = format!(
+            "{}{label}.{}",
+            name.replace(['/', ':'], "-"),
+            format.extension()
+        );
+        let path = match crate::platform::save(&file, &[format.extension()], "Export") {
+            Some(Some(path)) => path,
+            Some(None) => return,
+            None => {
+                app.toast(
+                    ToastKind::Info,
+                    "No file panel here",
+                    format!(
+                        "Use `isocast timeline export --nle {}` instead.",
+                        format.name()
+                    ),
+                );
+                return;
+            }
+        };
+        let params = TimelineExportNleParams {
+            format,
+            app: Some(nle_app),
+            timeline: None,
+            folder: None,
+            path: Some(PathBuf::from(path)),
+            // The save panel asked before replacing a file.
+            replace: true,
+        };
+        app.call_as::<NleExported>(
+            Method::TimelineExportNle(params),
+            |app, result| match result {
+                Ok(exported) => {
+                    let shown = exported.path.clone();
+                    let mut detail = format!(
+                        "{} video and {} audio tracks · {}",
+                        exported.video_tracks.len(),
+                        exported.audio_tracks.len(),
+                        crate::platform::abbreviate_home(&exported.path.display().to_string())
+                    );
+                    if !exported.notes.is_empty() {
+                        detail.push_str(&format!(" · {}", exported.notes.join(" · ")));
+                    }
+                    app.show_toast(
+                        Toast::new(
+                            ToastKind::Success,
+                            format!("Exported for {}", exported.app.title()),
+                            detail,
+                        )
+                        .action("Show in Finder", move |_| {
+                            crate::platform::reveal(&shown.display().to_string())
+                        }),
+                    );
+                }
+                Err(error) => app.failed("Couldn’t export the timeline", &error),
+            },
+        );
+    }
+
     /// The menu of timelines: New, each one (the current one checked),
     /// Close.
     fn timelines_menu(&self) -> MenuBuilder {
@@ -1211,6 +1288,12 @@ impl Create {
         area.on_export(move || {
             if let Some(app) = weak.upgrade() {
                 app.create.export(&app, false);
+            }
+        });
+        let weak = Rc::downgrade(app);
+        area.on_export_nle(move |target| {
+            if let Some(app) = weak.upgrade() {
+                app.create.export_nle(&app, &target);
             }
         });
         let weak = Rc::downgrade(app);

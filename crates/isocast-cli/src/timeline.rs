@@ -19,6 +19,7 @@ use isocast_protocol::timeline::{
     TimelineExportParams, TimelineInfo, TimelineList, TimelineMoveParams, TimelineNewParams,
     TimelineOpenParams, TimelineRemoveParams, TimelineTarget,
 };
+use isocast_protocol::timeline::{NleApp, NleExported, NleFormat, TimelineExportNleParams};
 use serde::Serialize;
 
 use crate::client::Client;
@@ -98,6 +99,28 @@ pub enum TimelineCommand {
         /// export_progress,export_finished` follows it.
         #[arg(long)]
         background: bool,
+        /// Instead, write a project another editor opens, pointing at the
+        /// takes' own files (nothing is encoded or copied): fcpxml (Final
+        /// Cut Pro), xmeml (Premiere Pro; DaVinci Resolve with --app
+        /// resolve) or otio (OpenTimelineIO). Every ISO source on its own
+        /// track with the program on top, each clip's angle the one on.
+        #[arg(long, value_name = "FORMAT", value_parser = ["fcpxml", "xmeml", "otio"],
+              conflicts_with_all = ["vertical", "background"])]
+        nle: Option<String>,
+        /// With --nle: the editor it is for: final_cut (fcpxml's default),
+        /// premiere (xmeml's) or resolve (with xmeml: Resolve's picture
+        /// scale and a track per audio channel).
+        #[arg(long, value_name = "APP", value_parser = ["final_cut", "premiere", "resolve"],
+              requires = "nle")]
+        app: Option<String>,
+        /// With --nle: write exactly this file (ending in .fcpxml, .xml or
+        /// .otio); one already there is replaced only if it is an earlier
+        /// Isocast timeline export, or with --replace.
+        #[arg(long, value_name = "PATH", requires = "nle", conflicts_with = "folder")]
+        output: Option<PathBuf>,
+        /// With --output: replace whatever file is there.
+        #[arg(long, requires = "output")]
+        replace: bool,
         #[arg(long)]
         json: bool,
     },
@@ -359,9 +382,35 @@ pub fn run(command: TimelineCommand) -> Result<ExitCode> {
         TimelineCommand::Export {
             timeline,
             folder,
+            nle: Some(format),
+            app,
+            output,
+            replace,
+            json,
+            ..
+        } => {
+            let params = TimelineExportNleParams {
+                format: NleFormat::parse(&format).expect("clap checked it"),
+                app: app.as_deref().and_then(NleApp::parse),
+                timeline,
+                folder: folder.map(std::path::absolute).transpose()?,
+                path: output.map(std::path::absolute).transpose()?,
+                replace,
+            };
+            let exported: NleExported = client.call(Method::TimelineExportNle(params))?;
+            if json {
+                print(&exported)?;
+            } else {
+                print_nle(&exported);
+            }
+        }
+        TimelineCommand::Export {
+            timeline,
+            folder,
             vertical,
             background,
             json,
+            ..
         } => return export(client, timeline, folder, vertical, background, json),
         TimelineCommand::Trim {
             clip,
@@ -480,6 +529,38 @@ pub(crate) fn absolute(path: PathBuf) -> Result<PathBuf> {
         true => std::env::current_dir()?.join(path),
         false => path,
     })
+}
+
+fn print_nle(exported: &NleExported) {
+    println!(
+        "Wrote {} for {} ({}): timeline {}, {:.3} s at {} fps, {}x{}, {} media file{}",
+        exported.path.display(),
+        exported.app.title(),
+        exported.format.name(),
+        exported.timeline,
+        exported.duration_seconds,
+        exported.frame_rate,
+        exported.width,
+        exported.height,
+        exported.media,
+        if exported.media == 1 { "" } else { "s" }
+    );
+    for (kind, tracks) in [("V", &exported.video_tracks), ("A", &exported.audio_tracks)] {
+        for (n, track) in tracks.iter().enumerate() {
+            println!(
+                "  {kind}{}  {}: {} clip{}, {} on",
+                n + 1,
+                track.name,
+                track.clips,
+                if track.clips == 1 { "" } else { "s" },
+                track.enabled
+            );
+        }
+    }
+    if exported.markers > 0 {
+        println!("  {} marker(s)", exported.markers);
+    }
+    print_notes(&exported.notes);
 }
 
 fn print_notes(notes: &[String]) {

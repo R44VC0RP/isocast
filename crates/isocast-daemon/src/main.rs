@@ -94,6 +94,7 @@ mod export;
 mod hotkeys;
 mod isoprj;
 mod library;
+mod nle;
 mod optimize;
 mod plugins;
 mod projectors;
@@ -1653,6 +1654,7 @@ impl Daemon {
                 to_json(self.recent_projects(params.unwrap_or_default()))
             }
             Method::TimelineRelink(params) => self.timeline_relink(params).and_then(to_json),
+            Method::TimelineExportNle(params) => self.timeline_export_nle(params).and_then(to_json),
             Method::EstimateCapacity(params) => self.estimate_capacity(*params).and_then(to_json),
             Method::Stop | Method::Shutdown => match self.stop() {
                 // Shutting down while idle is fine.

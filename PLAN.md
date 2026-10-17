@@ -486,6 +486,14 @@ come later (clips already carry in/out points on their take).
     caches evict old keys; offline clips show "Offline"; deterministic
     editor motion suite in CI.
 
+- [x] **C.5 Export to Final Cut Pro, Premiere Pro and Resolve (#104).**
+  `timeline_export_nle` (CLI `isocast timeline export --nle
+  fcpxml|xmeml|otio [--app final_cut|premiere|resolve] [--output]`, MCP
+  `export_timeline_nle`, the editor's File › Export › For Final Cut Pro /
+  Premiere Pro / DaVinci Resolve… / OpenTimelineIO…): a project pointing
+  at the takes' own files, every ISO on its own track with the program on
+  top, the clip's angle the one on, crops, markers, audio per file.
+
 ### S. Stress testing and performance (Ryan, 2026-10-13)
 
 - [ ] **S.1 Head-to-head with OBS.** A repeatable benchmark that runs the
@@ -4293,6 +4301,13 @@ One line per finished task, newest last.
   Apple Virtual Sound Device records the same PCM as main; an aggregate
   going 18 -> 2 mid-take keeps the source running (logged), 18 -> 16
   keeps tones 1 and 2 exact.
+- C.5 (2026-10-17, #104): `timeline_export_nle` writes FCPXML 1.10, xmeml 5
+  and OTIO pointing at the takes' files. e2e edit: every track of all five
+  variants matches Isocast's export frame by frame (788 frames each);
+  FCPXML valid against the 1.10 DTD; OTIO's adapters read the xmeml, FCPXML
+  and OTIO alike. DaVinci Resolve 21.1.1 (free, isocast-m2-b) renders the
+  Resolve xmeml frame for frame as the EDITED file (0/212 off, >= 46 dB,
+  same level), angles of other sizes and crops included; markers land.
 - #103 (2026-10-17): a folder a plugin's request gives (`start{folder}`,
   `recording.folder` via `apply`/`start{setup}`/`init_setup`, an imported
   profile's) must already be a recordings folder (or `~/Movies/Isocast`),

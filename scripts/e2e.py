@@ -51,6 +51,9 @@ import time
 import traceback
 import wave
 import zipfile
+import urllib.parse
+import xml.etree.ElementTree as ET
+from fractions import Fraction
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -1228,9 +1231,178 @@ def scenario_edit(e, cfg, evidence):
             require(len(now) == len(was) and differ <= again,
                     f"{f['source']}: the crop changed {differ} packets of a file that isn't the edited "
                     f"one ({again} were encoded again at cuts)")
+    # NLE projects (#104): every track of each format must show, frame by
+    # frame, the take frames Isocast's export of that source shows, and the
+    # track that is on at each frame what the edited file shows.
+    evidence["nle"] = check_nle(e, cropped, segments, crop, crop_segments, fps, sources)
     changed = [p.name for p, digest in hashes.items() if hashlib.sha256(p.read_bytes()).hexdigest() != digest]
     require(not changed, f"edits or export changed take files: {changed}")
     evidence.update(timeline=e.rpc("timeline_get"), take_files_unchanged=len(hashes))
+
+
+def seconds_of(text):
+    """FCPXML's rational seconds ("1001/60000s", "5s")."""
+    return Fraction(text.rstrip("s"))
+
+
+def nle_tracks(fmt, path):
+    """A project file's video tracks, bottom up: each a list of items
+    (start, end in sequence frames, file, first file frame, enabled, crop),
+    plus the sequence's frame rate and its audio items (the same). The crop
+    is read back in each format's own units, as the spec defines them, to
+    (x, y, width, height) fractions of the picture (None without one):
+    xmeml's Crop filter in percent of each side; FCPXML's trim-rect in
+    percent of the picture's height (Apple's DTD), left and right too;
+    OTIO's metadata.isocast.crop."""
+    def fractions(left, right, top, bottom):
+        return (left, top, 1 - left - right, 1 - top - bottom)
+    tracks, audio = [], []
+    if fmt == "xmeml":
+        seq = ET.parse(path).getroot().find("sequence")
+        rate = int(seq.find("rate/timebase").text)
+        files = {f.get("id"): urllib.parse.unquote(f.find("pathurl").text.removeprefix("file://localhost"))
+                 for f in seq.iter("file") if f.find("pathurl") is not None}
+        def crop_of(clip):
+            for e in clip.iter("effect"):
+                if e.findtext("effectid") == "crop":
+                    v = {p.findtext("parameterid"): float(p.findtext("value")) / 100 for p in e.iter("parameter")}
+                    return fractions(v["left"], v["right"], v["top"], v["bottom"])
+            return None
+        def items(track):
+            for c in track.findall("clipitem"):
+                yield (int(c.find("start").text), int(c.find("end").text), files[c.find("file").get("id")],
+                       int(c.find("in").text), c.find("enabled").text == "TRUE", crop_of(c))
+        tracks = [list(items(t)) for t in seq.findall("media/video/track")]
+        audio = [i for t in seq.findall("media/audio/track") for i in items(t)]
+    elif fmt == "fcpxml":
+        root = ET.parse(path).getroot()
+        fps = {f.get("id"): 1 / seconds_of(f.get("frameDuration")) for f in root.iter("format")}
+        aspect = {f.get("id"): int(f.get("width")) / int(f.get("height")) for f in root.iter("format")}
+        asset_aspect = {a.get("id"): aspect[a.get("format")] for a in root.iter("asset")}
+        def crop_of(clip):
+            r = clip.find("adjust-crop/trim-rect")
+            if r is None:
+                return None
+            v = {k: float(r.get(k, "0")) / 100 for k in ("left", "right", "top", "bottom")}
+            a = asset_aspect[clip.get("ref")]
+            return fractions(v["left"] / a, v["right"] / a, v["top"], v["bottom"])
+        seq = root.find("library/event/project/sequence")
+        rate = fps[seq.get("format")]
+        assets = {a.get("id"): (urllib.parse.unquote(a.find("media-rep").get("src").removeprefix("file://")),
+                                fps[a.get("format")]) for a in root.iter("asset")}
+        lanes = {}
+        for gap in seq.find("spine").findall("gap"):
+            base = seconds_of(gap.get("offset"))
+            for c in gap.findall("asset-clip"):
+                file, file_fps = assets[c.get("ref")]
+                start = (base + seconds_of(c.get("offset"))) * rate
+                end = start + seconds_of(c.get("duration")) * rate
+                item = (int(start), int(end), file, int(seconds_of(c.get("start")) * file_fps),
+                        c.get("enabled", "1") == "1", crop_of(c))
+                require(start.denominator == 1 and end.denominator == 1, f"{path.name}: item off the frame grid")
+                if c.get("srcEnable") == "audio":
+                    audio.append(item)
+                else:
+                    lanes.setdefault(int(c.get("lane")), []).append(item)
+        tracks = [lanes[k] for k in sorted(lanes)]
+    else:
+        stack = read_json(path)["tracks"]
+        rate = None
+        for track in stack["children"]:
+            at, items = 0, []
+            for c in track["children"]:
+                r = c["source_range"]
+                seq_rate = rate or r["duration"]["rate"]
+                if c["OTIO_SCHEMA"].startswith("Gap"):
+                    at += round(r["duration"]["value"])
+                    continue
+                rate = rate or seq_rate
+                url = c["media_references"]["DEFAULT_MEDIA"]["target_url"]
+                file = str((path.parent / urllib.parse.unquote(url)).resolve())
+                length = round(r["duration"]["value"] * rate / r["duration"]["rate"])
+                crop = c["metadata"].get("isocast", {}).get("crop")
+                items.append((at, at + length, file, round(r["start_time"]["value"]), c["enabled"],
+                              crop and (crop["x"], crop["y"], crop["width"], crop["height"])))
+                at += length
+            if track["kind"] == "Video":
+                tracks.append(items)
+            else:
+                audio.extend(items)
+        rate = round(rate)
+    return tracks, int(rate), audio
+
+
+def check_nle(e, export, segments, crop, crop_segments, fps, sources):
+    """timeline_export_nle in each format, checked against Isocast's own
+    export `export` frame by frame."""
+    exported = {f["source"]: f for f in export["files"]}
+    order = [s for s in exported if s not in ("program", "edited")] + ["program"]
+    want = {}  # export file -> its pictures
+    for f in export["files"]:
+        want[f["source"]] = pattern_frames(Path(f["path"]), f["width"], f["height"])
+    def same(a, b, width):
+        apart = abs(a[1] - b[1])
+        return min(apart, width - apart) <= 3 and (a[2] > 50) == (b[2] > 50)
+    rows = []
+    for fmt, app in (("fcpxml", "final_cut"), ("fcpxml", "resolve"), ("xmeml", "premiere"),
+                     ("xmeml", "resolve"), ("otio", None)):
+        params = {"format": fmt, "folder": str(e.root / "nle")}
+        if app:
+            params["app"] = app
+        result = e.rpc("timeline_export_nle", params)
+        path = Path(result["path"])
+        require(path.is_file() and path.suffix == {"fcpxml": ".fcpxml", "xmeml": ".xml", "otio": ".otio"}[fmt],
+                f"{fmt}: no project file: {result}")
+        if fmt != "otio":
+            ET.parse(path)  # well-formed
+        tracks, rate, audio = nle_tracks(fmt, path)
+        require(rate == fps, f"{path.name}: sequence at {rate} fps, the program at {fps}")
+        require([t["source"] for t in result["video_tracks"]] == order and len(tracks) == len(order),
+                f"{path.name}: video tracks {[t['source'] for t in result['video_tracks']]}, want {order}")
+        width = exported["program"]["width"]
+        bad, compared = [], 0
+        for source, track in zip(order, tracks):
+            require(len(track) == len(segments), f"{path.name}: {source} has {len(track)} clips, {len(segments)} segments")
+            for (start, end, file, first, enabled, cropped), seg in zip(track, segments):
+                require(enabled == ((seg[4] or "program") == source),
+                        f"{path.name}: {source} at {start}: enabled {enabled}, the clip's angle is {seg[4] or 'program'}")
+                index = segments.index(seg)
+                want_crop = (crop["x"], crop["y"], crop["width"], crop["height"]) if index in crop_segments else None
+                require((cropped is None) == (want_crop is None) and (cropped is None or all(
+                        abs(a - b) < 1e-3 for a, b in zip(cropped, want_crop))),
+                        f"{path.name}: {source} at {start}: crop read back as {cropped}, the clip's is {want_crop}")
+                src = sources.get(Path(file))
+                if src is None:
+                    sources[Path(file)] = src = (pattern_frames(Path(file), width, exported[source]["height"]), None)
+                frames = src[0]
+                for j in range(start, end):
+                    k = first + j - start
+                    got = want[source][j] if j < len(want[source]) else None
+                    compared += 1
+                    if got is None or k >= len(frames) or not same(frames[k], got, width):
+                        bad.append(f"{source} frame {j}: file frame {k}")
+                    if enabled and index not in crop_segments:
+                        edited = want["edited"][j]
+                        compared += 1
+                        if k >= len(frames) or not same(frames[k], edited, width):
+                            bad.append(f"edited frame {j}: {source} file frame {k}")
+        covered = [sum(e - s for s, e, *_ in t) for t in tracks]
+        require(all(c == len(want["program"]) for c in covered),
+                f"{path.name}: tracks cover {covered} frames, the export has {len(want['program'])}")
+        require(not bad, f"{path.name}: {len(bad)} of {compared} frames differ from Isocast's export: {bad[:5]}")
+        # Audio: each file's audio sits with its video (same start and first
+        # frame), on only for the program.
+        video_items = {(i[2], i[0]): i for t in tracks for i in t}
+        program_files = {i[2] for i in tracks[order.index("program")]}
+        require(audio, f"{path.name}: no audio")
+        for start, end, file, first, enabled, _ in audio:
+            v = video_items.get((file, start))
+            require(v is not None and v[3] == first and v[1] == end,
+                    f"{path.name}: audio of {Path(file).name} at {start} isn't with its video")
+            require(enabled == (file in program_files), f"{path.name}: audio of {Path(file).name} enabled {enabled}")
+        rows.append({"format": fmt, "app": result["app"], "file": path.name, "frames_compared": compared,
+                     "video_tracks": len(tracks), "audio_items": len(audio), "notes": result.get("notes", [])})
+    return rows
 
 
 def snapshot(e, name):

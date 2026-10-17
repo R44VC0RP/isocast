@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-100 tools. Arguments marked required must be given; ids, not names,
+101 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -180,6 +180,19 @@ Join a timeline's clips (the current one unless `timeline` is given), in order, 
 | `folder` | string (optional) | Where to write the joined files (made if missing); else the folder of the first clip's take. |
 | `timeline` | string (optional) | The timeline's id; the current one if absent. |
 | `vertical` | boolean | Also write a vertical (9:16) edited file, `<name> VERTICAL.<ext>`: each clip's angle (or its crop) fitted into the program's size turned on its side (1920x1080 → 1080x1920), so a 9:16 crop fills the frame; the program's sound. Every frame is encoded again. |
+
+## export_timeline_nle
+
+Write a timeline (the current one unless `timeline` is given) as a project another editor opens: `format` fcpxml (Final Cut Pro), xmeml (Premiere Pro; with `app` resolve, DaVinci Resolve) or otio (OpenTimelineIO). Every ISO source on its own video track with the program on top, each clip's angle the one track on at that clip, crops as crop and transform, markers, and each file's audio on its own tracks (the program's on, the ISO files' off), lined up from the take manifests. It points at the takes' own files: nothing is encoded, copied or changed. Written next to the first take (or in `folder`, numbered so nothing is overwritten), or exactly at `path` (replacing an earlier Isocast export there, or any file with `replace`). Returns the file, its tracks and notes on anything not as in Isocast's export.
+
+| Argument | Type | Description |
+|---|---|---|
+| `app` | NleApp | The editor it is for: `final_cut`, `premiere` or `resolve`. With xmeml, `resolve` writes the scale of a picture of another size than the sequence from Resolve's own fit, and each audio channel on its own track (Resolve reads xmeml audio a channel at a time). Absent: `final_cut` for fcpxml, `premiere` for xmeml, `resolve` for otio (the same file for any editor). Resolve's best format is xmeml: it ignores FCPXML's split of picture and sound. |
+| `folder` | string (optional) | Write it in this folder (made if missing), named after the timeline and numbered so nothing is overwritten; else the first clip's take's folder. Not with `path`. |
+| `format` (required) | NleFormat | `fcpxml` (Final Cut Pro), `xmeml` (Premiere Pro, or Resolve with app `resolve`) or `otio` (OpenTimelineIO). |
+| `path` | string (optional) | Write exactly this file (an absolute path ending in the format's extension: .fcpxml, .xml or .otio). A file already there is replaced only if it is an earlier Isocast timeline export, or with `replace`. Not with `folder`. |
+| `replace` | boolean | With `path`: replace whatever file is there. |
+| `timeline` | string (optional) | The timeline's id; the current one if absent. |
 
 ## get_collection_or_profile
 

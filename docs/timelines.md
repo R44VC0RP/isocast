@@ -145,6 +145,59 @@ recording while an export runs. Each file has one video sample description:
 frames encoded again carry their parameter sets in-band at every keyframe,
 so HEVC exports play in Chrome as well as Safari, QuickTime and ffmpeg.
 
+## Export to Final Cut Pro, Premiere Pro or Resolve
+
+In the editor, **File › Export › For Final Cut Pro… / For Premiere Pro… /
+For DaVinci Resolve… / OpenTimelineIO…** writes the timeline as a project
+that editor opens. The same from the CLI and MCP (`export_timeline_nle`):
+
+```sh
+isocast timeline export --nle fcpxml                 # Final Cut Pro (FCPXML 1.10)
+isocast timeline export --nle xmeml                  # Premiere Pro (Final Cut Pro 7 XML)
+isocast timeline export --nle xmeml --app resolve    # DaVinci Resolve
+isocast timeline export --nle otio                   # OpenTimelineIO
+isocast timeline export --nle fcpxml --output ~/Desktop/Talk.fcpxml
+```
+
+The project points at the takes' own program and ISO files: nothing is
+encoded, copied or changed, and the only file written is the project
+(next to the first take, or in `--folder`, numbered so nothing is
+overwritten; or exactly `--output`). Every ISO source has its own video
+track, the program's is on top, and each clip's stretch of every file is
+on its track, lined up from the take manifests (each file's start
+offset), so the angles stay in sync and another angle is a click away.
+At each clip only its angle's track is on: the sequence plays what the
+EDITED file shows. Cuts, trims, rolls and deletes are the clips' in and out
+points; a crop is a crop and a transform on the clip (on all its angles).
+Markers come along. The program's audio tracks are on; each ISO file's
+audio is on its own tracks, there but off (the EDITED file has the
+program's sound). The sequence runs at the first clip's program frame
+rate and size, from timecode 00:00:00:00.
+
+DaVinci Resolve (21.1, free) renders the xmeml (`--app resolve`) frame
+for frame as Isocast's EDITED file, with the same sound. Resolve also
+opens the other two, with less:
+
+- FCPXML: Resolve takes each clip's picture and sound together (it
+  ignores FCPXML's `srcEnable`), so the program's sound plays twice and
+  the uncropped program shows around a crop of another shape. Final Cut
+  Pro reads the split as written.
+- OpenTimelineIO has no crop or audio-track choice: crops are left out
+  (they are in each clip's `metadata.isocast`).
+
+Where the formats fall short:
+
+- FCPXML has no tracks: the ISO angles are lanes 1…n with the program
+  above them, and each file's audio is one clip on a lane below (a file
+  with several audio tracks keeps them together).
+- Media paths are absolute in every format (the editors relink a moved
+  folder by file name): Resolve imported no OpenTimelineIO clip whose path
+  was relative or a `file://` URL.
+- `--app` matters for xmeml only: Premiere counts a picture's scale in its
+  own pixels and Resolve from its own fit to the frame, and Resolve reads
+  xmeml audio a channel at a time, so its file has a track per channel (a
+  stereo pair panned left and right).
+
 Timelines are kept across restarts. Over MCP the same steps are
 `new_timeline`, `retake`, `get_timeline`, `remove_clip`, `move_clip`,
 `trim_clip`, `split_clip`, `delete_range`, `roll_cut`, `set_angle`,
