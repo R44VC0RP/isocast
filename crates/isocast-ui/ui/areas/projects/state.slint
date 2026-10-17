@@ -1,0 +1,19 @@
+// Project files (#88, src/areas/projects.rs): File › Open Recent's list,
+// the projects opened lately (the engine's `recent_projects`).
+
+export struct RecentRow {
+    // The project's name (with its folder's name when two share it).
+    title: string,
+    // Its project file.
+    path: string,
+    // The file is still there (a missing one is shown dimmed).
+    exists: bool,
+}
+
+export global ProjectsArea {
+    in property <[RecentRow]> recent;
+    callback open-recent(string);
+    // The editor window's own File menu (it has no `Ui` global wired).
+    callback open-file();
+    callback clear-recent();
+}

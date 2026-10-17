@@ -34,6 +34,7 @@ mod areas;
 mod background;
 mod clock;
 mod daemon;
+mod documents;
 mod form;
 mod frames;
 mod gpu;

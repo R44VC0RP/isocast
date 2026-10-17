@@ -1734,6 +1734,56 @@ each section. Delete entries that stop being true.
   watched scene on one GPU device, only while watched); scene tiles ask
   30 fps, PVW/PGM and single projectors the canvas rate. A `canvas`
   field (`main`) is there for #86's second canvas.
+- 2026-10-17 (#88 fix round 1): **Nothing from a project file becomes a
+  path unchecked.** An imported timeline's id is used as is only if it is
+  a valid id (`[a-z0-9-]`, `timeline::valid_id`), else slugged; every
+  timeline write refuses an invalid id; a uid that isn't short hex-ish is
+  replaced; a timeline whose takes aren't `….session.json` isn't taken in.
+  **A loose .isoprj opens read-only**: the folder must be the project's
+  (its `.isocast-project.json` has the file's project id, or, copied
+  without it, the folder is named with the file's date prefix and holds one
+  of its takes); otherwise the timelines are imported but nothing is
+  written there (no identity, no writer, no rename, no damaged-file move),
+  the folder never becomes a project, and Open Recent keeps the file's own
+  path. Chosen over asking (an agent/CLI can't answer a dialog) and over
+  refusing (a project file mailed alone should still show its edits).
+  **Timelines get a random `uid`** (16 hex digits; given to old ones on
+  load and written back) and match by uid when both have one; a file from
+  before uids matches only on the same `created_at` and the same id or
+  name, so two Macs' `untitled` timelines never replace each other.
+- 2026-10-16 (#88, project files): **`.isoprj` beside
+  `.isocast-project.json`, not instead of it.** The hidden file is the
+  project's identity: written once, on the recording path, when the
+  folder is made, and read by the engine, plugin sandboxes and recovery;
+  the `.isoprj` is rewritten on every edit, so it must not be what makes a
+  folder a project. The `.isoprj` carries the identity too (id, prefix,
+  created_at), and `project_open` restores a missing hidden file from it.
+  **The timelines folder stays the engine's working copy** (CLI
+  `timeline` commands unchanged, crash recovery of takes being recorded);
+  each project's file holds every timeline that uses one of its takes
+  (a timeline spanning projects is in each, with `../` paths to the
+  others), written from it by one background writer. That keeps every
+  write into a recording folder off the recording path: the recording
+  callbacks only send the folder on a channel, and the writer leaves a
+  folder alone while a recording writes into it. "Migration" is the
+  writer writing, at start, the files of every folder a timeline uses and
+  of every project folder without one. **Merge rules:** the writer never
+  overwrites a file it can't read (a newer version's or damaged; open
+  moves a damaged one aside to `.isoprj.damaged`), keeps timelines in the
+  file the engine doesn't have, and keeps a file's timeline whose
+  `revision` is higher than the engine's; two timelines are the same if
+  their ids match or (imported under another id) their name and
+  `created_at` do. `project_open` takes the file's newer edits, relinks
+  a timeline whose project folder moved (by project id), and imports the
+  rest under a free id. **The file's name follows the project's name**
+  (the folder name after its date), so a copy in a folder named otherwise
+  is renamed to match when it is opened. **Open while recording** behaves
+  as `timeline open`: the take being recorded lands on the opened
+  timeline. **`recording.open_editor` defaults off**: a window after every
+  stop gets in the way of many-take sessions and of CLI/MCP-driven
+  recordings; it is a profile setting so the CLI and MCP reach it.
+  **Per-clip fields the build doesn't know are kept** (`Clip::extra`), so
+  #87's crops survive in project files written by either build.
 - 2026-10-16 (#92): a plugin's sandbox includes a recordings folder that
   doesn't exist yet, as its nearest existing parent resolved plus the
   rest, instead of leaving it out. The first take into a new folder (the

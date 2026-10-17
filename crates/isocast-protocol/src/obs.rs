@@ -613,6 +613,7 @@ fn profile_from(
             },
             keep_free_gb: default_keep_free_gb(),
             replay: Default::default(),
+            open_editor: false,
         },
         stream,
         vertical: None,
@@ -3227,6 +3228,7 @@ impl<'a, 'v> Importer<'a, 'v> {
             },
             keep_free_gb: default_keep_free_gb(),
             replay: Default::default(),
+            open_editor: false,
         }
     }
 

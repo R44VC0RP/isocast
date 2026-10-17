@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-97 tools. Arguments marked required must be given; ids, not names,
+100 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -408,6 +408,16 @@ Open System Settings on the user's screen at the pane where a permission (screen
 |---|---|---|
 | `permission` (required) | PermissionKind | screen_recording, camera, microphone or system_audio. |
 
+## open_project
+
+Open a project file (`<name>.isoprj`, in every project folder) or a project folder by full `path`: its timelines join the engine's (taken in if the folder was copied from elsewhere, paths resolved where it is now), one becomes the current timeline (`timeline`, else the current one if it is the project's, else its newest; a project with none gets one of its takes), and the app shows the editor on it unless `editor` is false. Missing takes are listed in `offline` (relink_clip), never an error. Allowed while recording. Whether the app opens the editor when a recording stops is the setup's `recording.open_editor` (apply_change with patch {"recording": {"open_editor": true}}). Returns the project, its timelines and the one opened.
+
+| Argument | Type | Description |
+|---|---|---|
+| `editor` | boolean (optional) | Ask the app to show the editor on it (true if absent). |
+| `path` (required) | string | A `.isoprj` file, or a project folder (its `.isoprj`, or its takes if it has none yet). |
+| `timeline` | string (optional) | Which of the project's timelines to open (an id); else the current timeline if it is one of them, else its newest. |
+
 ## open_projector
 
 Open a projector: the program, studio mode's preview, a scene (`scene` id), a video source (`source` id) or a multiview grid (`layout`: top-8, 3x3 or 2x2; preview, program and scenes with labels and tally), full screen on a display (`fullscreen`, `display`: main, an id or a name from list_projectors) or in a window (`fullscreen` false, optional `frame` in points). The Isocast app shows it, and opens it when it next starts if it isn't running (`shown` says whether a window shows it). Opening a view that is already open moves it. Absent placement: where that view was last.
@@ -488,6 +498,14 @@ Read a UTF-8 page (default 4096 bytes, max 16384) from a redacted bug-report pre
 | `offset` | integer |  |
 | `preview_id` (required) | string |  |
 
+## recent_projects
+
+The project files opened lately (File › Open Recent), newest first, each with whether it is still there; `clear` forgets them.
+
+| Argument | Type | Description |
+|---|---|---|
+| `clear` | boolean | Forget them all (File › Open Recent › Clear Menu). |
+
 ## redo_edit
 
 Put back the last edit undo_edit took back. Returns the timeline.
@@ -503,6 +521,16 @@ Reload a browser source's page in the running recording, bypassing the cache, fo
 | Argument | Type | Description |
 |---|---|---|
 | `source` (required) | string | The browser source's id. |
+
+## relink_clip
+
+Point an offline clip (its take isn't where the timeline says: the project folder was moved or copied) at where its take is now: `path` is the take's manifest (….session.json) or the folder holding it; given a folder, every take that was in the clip's old folder is looked for there too. The take's files are never touched. Returns the timeline.
+
+| Argument | Type | Description |
+|---|---|---|
+| `clip` (required) | string | The clip's id, like `c2`. |
+| `path` (required) | string | The take's manifest (`….session.json`), or the folder holding a manifest of the same name. Given a folder, every take of every timeline that was in the clip's old folder is looked for there too. |
+| `timeline` | string (optional) | The timeline's id; the current one if absent. |
 
 ## remove_clip
 

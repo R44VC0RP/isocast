@@ -991,6 +991,7 @@ impl Settings {
             "program" => json!({"recording": {"program": {"enabled": on}}}),
             "iso" => json!({"recording": {"iso": {"enabled": on}}}),
             "iso_filtered" => json!({"recording": {"iso": {"filtered": on}}}),
+            "open_editor" => json!({"recording": {"open_editor": on}}),
             "reconnect" => json!({"stream": {"reconnect": {"enabled": on}}}),
             "developer" => json!({"developer": {"enabled": on}}),
             // The vertical canvas (#86): back as saved, else 1080×1920
@@ -1636,6 +1637,7 @@ impl Settings {
         area.set_folder(text(&rec["folder"]).into());
         area.set_folder_short(middle_short(&text(&rec["folder"])).into());
         area.set_keep_free(number(&rec["keep_free_gb"], 1.0));
+        area.set_open_editor(rec["open_editor"] == json!(true));
         area.set_replay_seconds(number(&rec["replay"]["seconds"], 30.0));
         area.set_replay_memory(number(&rec["replay"]["max_memory_mb"], 1024.0));
         let program_on = program["enabled"] != json!(false);

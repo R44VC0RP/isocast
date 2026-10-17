@@ -41,6 +41,7 @@ import { ClipBar } from "areas/create/clip-bar.slint";
 import { EditorView } from "areas/create/editor.slint";
 import { QuitDialog, QuitPrompt } from "quit.slint";
 import { DeveloperArea } from "areas/developer/state.slint";
+import { ProjectsArea } from "areas/projects/state.slint";
 import { OverlaySize, StatsOverlay } from "areas/developer/overlay.slint";
 import { PermissionsArea } from "areas/permissions/state.slint";
 import { PermissionsSheet } from "areas/permissions/sheet.slint";
@@ -53,6 +54,7 @@ export { Theme, Ui, ConnectionState, Menus, Toasts, EditCommands, SettingsForms 
 export { CanvasArea, SourcesArea, MixerArea, ControlsArea, SettingsArea, LibraryArea }
 export { CreateArea }
 export { DeveloperArea }
+export { ProjectsArea, RecentRow } from "areas/projects/state.slint";
 export { StatRow, OutputStat } from "areas/developer/state.slint";
 export { PermissionsArea, PermissionItem } from "areas/permissions/state.slint";
 export { WizardArea, ObsCollectionRow, ChangeRow } from "areas/wizard/state.slint";
@@ -469,6 +471,19 @@ export component AppWindow inherits Window {
         visible: root.native-menu;
         Menu {
             title: "File";
+            // Project files (#88, src/areas/projects.rs).
+            MenuItem { title: "Open…"; shortcut: @keys(Control + O); activated => { Ui.menu("open_project"); } }
+            Menu {
+                title: "Open Recent";
+                for row in ProjectsArea.recent: MenuItem {
+                    title: row.title;
+                    enabled: row.exists;
+                    activated => { ProjectsArea.open-recent(row.path); }
+                }
+                if ProjectsArea.recent.length > 0: MenuSeparator { }
+                MenuItem { title: "Clear Menu"; enabled: ProjectsArea.recent.length > 0; activated => { Ui.menu("clear_recent_projects"); } }
+            }
+            MenuSeparator { }
             MenuItem { title: "Show Recordings"; activated => { Ui.menu("show_recordings"); } }
             MenuSeparator { }
             MenuItem { title: "Add Scene"; shortcut: @keys(Control + Shift + N); activated => { Ui.menu("new_scene"); } }
@@ -790,6 +805,28 @@ export component AppWindow inherits Window {
 // does the studio's.
 export component EditorWindow inherits Window {
     title: CreateArea.has-timeline ? "Isocast Editor — " + CreateArea.timeline-name : "Isocast Editor";
+    // Off in offscreen pictures, as the studio's (#88).
+    in property <bool> native-menu: true;
+
+    // The menu bar while the editor is the key window (macOS shows the key
+    // window's): File › Open… and Open Recent, as the studio's (#88).
+    MenuBar {
+        visible: root.native-menu;
+        Menu {
+            title: "File";
+            MenuItem { title: "Open…"; shortcut: @keys(Control + O); activated => { ProjectsArea.open-file(); } }
+            Menu {
+                title: "Open Recent";
+                for row in ProjectsArea.recent: MenuItem {
+                    title: row.title;
+                    enabled: row.exists;
+                    activated => { ProjectsArea.open-recent(row.path); }
+                }
+                if ProjectsArea.recent.length > 0: MenuSeparator { }
+                MenuItem { title: "Clear Menu"; enabled: ProjectsArea.recent.length > 0; activated => { ProjectsArea.clear-recent(); } }
+            }
+        }
+    }
     preferred-width: 1280px;
     preferred-height: 800px;
     min-width: 900px;

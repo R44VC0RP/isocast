@@ -15,6 +15,7 @@ use std::time::Instant;
 use chrono::{Local, SecondsFormat};
 use isocast_engine::record::{SplitTake, SplitTiming};
 use isocast_protocol::api::{Event, RpcError, StartParams, TakeCause, timelines_path};
+use isocast_protocol::isoprj;
 use isocast_protocol::library::slug;
 use isocast_protocol::manifest::{SessionManifest, SessionStatus};
 use isocast_protocol::timeline::{
@@ -70,6 +71,10 @@ pub struct Timelines {
     /// Why no timeline is current although `current.json` names one (its
     /// file couldn't be read), until another is made current.
     current_problem: Option<String>,
+    /// Told the folders of the takes of every timeline written, so their
+    /// project files are written again (#88, `crate::isoprj`): a channel
+    /// send, never a write into a recording's folder.
+    writer: Option<std::sync::mpsc::Sender<PathBuf>>,
 }
 
 impl Timelines {
@@ -118,13 +123,114 @@ impl Timelines {
             )),
             _ => None,
         };
-        Self {
+        let mut loaded = Self {
             folder,
             current,
             timelines,
             problems,
             current_problem,
+            writer: None,
+        };
+        // Timelines from before uids get one now, kept on disk, so the
+        // project files written from them match them again (#88).
+        let without: Vec<String> = loaded
+            .timelines
+            .values()
+            .filter(|t| t.uid.is_none())
+            .map(|t| t.id.clone())
+            .collect();
+        for id in without {
+            if let Some(timeline) = loaded.timelines.get_mut(&id) {
+                timeline.uid = Some(isocast_protocol::timeline::new_uid());
+                let timeline = timeline.clone();
+                let _ = loaded.write(&timeline);
+            }
         }
+        loaded
+    }
+
+    /// Tell `writer` the take folders of every timeline written from now
+    /// on.
+    pub fn set_writer(&mut self, writer: std::sync::mpsc::Sender<PathBuf>) {
+        self.writer = Some(writer);
+    }
+
+    /// The folders holding the takes `id` names now (from memory) and in
+    /// `timeline`: those whose project files show it.
+    fn take_folders(&self, timeline: &Timeline) -> Vec<PathBuf> {
+        let mut folders: Vec<PathBuf> = isoprj::takes_of(timeline)
+            .chain(
+                self.timelines
+                    .get(&timeline.id)
+                    .into_iter()
+                    .flat_map(isoprj::takes_of),
+            )
+            .filter_map(|take| take.parent().map(Path::to_path_buf))
+            .collect();
+        folders.sort();
+        folders.dedup();
+        folders
+    }
+
+    /// Every take folder any timeline names (for the first project files).
+    pub fn all_take_folders(&self) -> Vec<PathBuf> {
+        let mut folders: Vec<PathBuf> = self
+            .timelines
+            .values()
+            .flat_map(isoprj::takes_of)
+            .filter_map(|take| take.parent().map(Path::to_path_buf))
+            .collect();
+        folders.sort();
+        folders.dedup();
+        folders
+    }
+
+    /// The timelines naming a take directly in `folder`.
+    pub fn using_folder(&self, folder: &Path) -> Vec<Timeline> {
+        self.timelines
+            .values()
+            .filter(|timeline| isoprj::uses_folder(timeline, folder))
+            .cloned()
+            .collect()
+    }
+
+    /// A free timeline id like `base` (`base`, `base-2`, …).
+    fn free_id(&self, base: &str) -> String {
+        (1..)
+            .map(|n| match n {
+                1 => base.to_string(),
+                n => format!("{base}-{n}"),
+            })
+            .find(|id| !self.timelines.contains_key(id) && !self.path(id).exists())
+            .expect("a free id")
+    }
+
+    /// Add a timeline from a project file (#88), under its own id if that
+    /// is free, else a numbered one; takes it listed as being recorded
+    /// never finished here, so they are listed as interrupted. Returns its
+    /// id here.
+    pub fn import(&mut self, mut timeline: Timeline) -> Result<String, RpcError> {
+        // Never the file's id as it is: it becomes a file name (#88, B1).
+        let base = match isocast_protocol::timeline::valid_id(&timeline.id) {
+            true => timeline.id.clone(),
+            false => slug(&timeline.id, &slug(&timeline.name, "timeline")),
+        };
+        timeline.id = self.free_id(&base);
+        if timeline.uid.as_deref().is_none_or(|uid| !valid_uid(uid)) {
+            timeline.uid = Some(isocast_protocol::timeline::new_uid());
+        }
+        for take in std::mem::take(&mut timeline.recording) {
+            timeline.removed.push(RemovedTake {
+                take,
+                clip: None,
+                reason: RemovedReason::Interrupted,
+                at: now_text(),
+            });
+        }
+        self.write(&timeline)?;
+        let id = timeline.id.clone();
+        self.timelines.insert(id.clone(), timeline);
+        Ok(id)
     }
 
     pub fn folder(&self) -> &Path {
@@ -334,17 +440,11 @@ impl Timelines {
                 .find(|name| !self.timelines.values().any(|t| &t.name == name))
                 .expect("a free name"),
         };
-        let base = slug(&name, "timeline");
-        let id = (1..)
-            .map(|n| match n {
-                1 => base.clone(),
-                n => format!("{base}-{n}"),
-            })
-            .find(|id| !self.timelines.contains_key(id) && !self.path(id).exists())
-            .expect("a free id");
+        let id = self.free_id(&slug(&name, "timeline"));
         let timeline = Timeline {
             version: TIMELINE_VERSION,
             id: id.clone(),
+            uid: Some(isocast_protocol::timeline::new_uid()),
             name,
             created_at: now_text(),
             clips: Vec::new(),
@@ -412,32 +512,35 @@ impl Timelines {
         to: &Path,
         project: Option<&str>,
     ) -> Result<Vec<String>, RpcError> {
-        let fix = |path: &mut PathBuf| match isocast_protocol::project::moved(path, from, to) {
-            Some(new) => {
-                *path = new;
-                true
-            }
-            None => false,
-        };
+        self.remap(
+            |path| isocast_protocol::project::moved(path, from, to),
+            project,
+        )
+    }
+
+    /// Every take path `remap` gives a new place for, in every timeline
+    /// (and its undo history), moved there; clips moved without a project
+    /// id get `project`. All or nothing, as [`Timelines::move_folder`].
+    /// Returns the timelines changed.
+    pub fn remap(
+        &mut self,
+        remap: impl Fn(&Path) -> Option<PathBuf>,
+        project: Option<&str>,
+    ) -> Result<Vec<String>, RpcError> {
         let mut changed: Vec<(String, Timeline)> = Vec::new();
         for (id, timeline) in &self.timelines {
             let mut moved = timeline.clone();
-            let mut any = false;
             for clip in &mut moved.clips {
-                if fix(&mut clip.take) {
-                    any = true;
-                    if clip.project.is_none() {
-                        clip.project = project.map(str::to_string);
-                    }
+                if clip.project.is_none() && remap(&clip.take).is_some() {
+                    clip.project = project.map(str::to_string);
                 }
             }
-            for removed in &mut moved.removed {
-                any |= fix(&mut removed.take);
-            }
-            for take in &mut moved.recording {
-                any |= fix(take);
-            }
-            if any {
+            // The undo history too (#88), so undoing after a move or a
+            // relink doesn't bring back the old folder.
+            isoprj::map_paths(&mut moved, |path| {
+                remap(path).unwrap_or_else(|| path.into())
+            });
+            if moved != *timeline {
                 changed.push((id.clone(), moved));
             }
         }
@@ -476,6 +579,13 @@ impl Timelines {
     }
 
     fn write(&self, timeline: &Timeline) -> Result<(), RpcError> {
+        // An id is a file name in the timelines folder: never a path.
+        if !isocast_protocol::timeline::valid_id(&timeline.id) {
+            return Err(invalid(format!(
+                "timeline: {:?} isn't a timeline id (lowercase letters, digits and dashes)",
+                timeline.id
+            )));
+        }
         std::fs::create_dir_all(&self.folder).map_err(|err| {
             failed(format!(
                 "could not make the timelines folder {}: {err}",
@@ -483,8 +593,19 @@ impl Timelines {
             ))
         })?;
         let json = serde_json::to_string_pretty(timeline).map_err(|err| failed(err.to_string()))?;
-        write_atomic(&self.path(&timeline.id), &json)
+        write_atomic(&self.path(&timeline.id), &json)?;
+        if let Some(writer) = &self.writer {
+            for folder in self.take_folders(timeline) {
+                let _ = writer.send(folder);
+            }
+        }
+        Ok(())
     }
+}
+
+/// Whether a uid from a file looks like one ours (hex, short).
+fn valid_uid(uid: &str) -> bool {
+    !uid.is_empty() && uid.len() <= 64 && uid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// Write `text` to `path` so a reader (or a crash) never sees half of it.
@@ -513,6 +634,7 @@ pub fn append(timeline: &mut Timeline, take: &Path, manifest: &SessionManifest) 
             .map(|file| file.id),
         angle: None,
         crop: None,
+        extra: Default::default(),
     });
     crate::edit::recorded(timeline);
     id
@@ -688,6 +810,7 @@ impl Default for Timelines {
             timelines: BTreeMap::new(),
             problems: Vec::new(),
             current_problem: None,
+            writer: None,
         }
     }
 }
@@ -1008,6 +1131,11 @@ impl Daemon {
         manifest: &SessionManifest,
     ) {
         takes.begun.lock().retain(|(n, _)| *n != number);
+        // Its project file lists it (#88), once the recording has stopped:
+        // a channel send, nothing written here.
+        if let Some(folder) = path.parent() {
+            self.isoprj.dirty(folder);
+        }
         let dropped = {
             let mut dropped = takes.dropped.lock();
             dropped
@@ -1395,6 +1523,24 @@ mod tests {
         assert!(err.message.contains("c3, c1, c4, c5"), "{}", err.message);
         let err = timelines.change(&id, |t| move_clip(t, 0, 4)).unwrap_err();
         assert!(err.message.contains("use 0 to 3"), "{}", err.message);
+        // A project file's timeline never names a path for its file (#88).
+        let mut evil = timelines.get(&id).unwrap().clone();
+        evil.id = "../../../Desktop/evil".into();
+        evil.uid = Some("../x".into());
+        let imported = timelines.import(evil).unwrap();
+        assert!(timeline::valid_id(&imported), "{imported}");
+        assert!(folder.join(format!("{imported}{EXTENSION}")).is_file());
+        assert_ne!(
+            timelines.get(&imported).unwrap().uid.as_deref(),
+            Some("../x")
+        );
+        let bad = Timeline {
+            id: "a/b".into(),
+            ..timelines.get(&id).unwrap().clone()
+        };
+        assert!(timelines.write(&bad).is_err());
+        timelines.timelines.remove(&imported);
+        let _ = std::fs::remove_file(folder.join(format!("{imported}{EXTENSION}")));
         // It all comes back from disk.
         let again = Timelines::load(folder.clone());
         assert_eq!(again.current(), Some("my-video"));

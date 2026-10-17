@@ -521,6 +521,22 @@ pub enum Method {
     /// whether it shows it. Returns
     /// [`Projector`](crate::projector::Projector).
     ProjectorPlace(Box<crate::projector::PlaceParams>),
+    /// Open a project file (`.isoprj`) or project folder in the editor
+    /// (#88): its timelines join the engine's (imported if it was copied
+    /// from elsewhere, with paths resolved where it is now), one becomes
+    /// the current timeline, and the app shows the editor on it
+    /// (`project_opened`). Missing takes are listed as offline, never an
+    /// error. Allowed while recording (like `timeline_open`). Returns
+    /// [`ProjectOpened`](crate::isoprj::ProjectOpened).
+    ProjectOpen(crate::isoprj::ProjectOpenParams),
+    /// Projects opened lately (File › Open Recent), newest first; with
+    /// `clear`, forget them. Its params are optional. Returns
+    /// [`RecentProjects`](crate::isoprj::RecentProjects).
+    RecentProjects(Option<crate::isoprj::RecentProjectsParams>),
+    /// Point an offline clip at where its take is now (a manifest, or the
+    /// folder holding it); the take's files are never touched. Returns
+    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
+    TimelineRelink(crate::timeline::TimelineRelinkParams),
 }
 
 /// Every method's name, as requests and plugin grants spell it
@@ -1291,6 +1307,15 @@ pub enum Event {
         canvas: CanvasId,
         scene: Option<String>,
     },
+    /// A project was opened (`project_open`): its timeline is now current,
+    /// and with `editor` the app shows the editor on it.
+    ProjectOpened {
+        path: PathBuf,
+        folder: PathBuf,
+        project: String,
+        timeline: String,
+        editor: bool,
+    },
 }
 
 /// What began a take, in `started` events.
@@ -1356,11 +1381,12 @@ pub enum EventKind {
     Projectors,
     CanvasSceneChanged,
     CanvasPreviewChanged,
+    ProjectOpened,
 }
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 32] = [
+    pub const NAMES: [&str; 33] = [
         "setup_changed",
         "started",
         "status",
@@ -1393,6 +1419,7 @@ impl EventKind {
         "projectors",
         "canvas_scene_changed",
         "canvas_preview_changed",
+        "project_opened",
     ];
 
     /// The kind's name, as events and `watch` spell it.
@@ -1436,6 +1463,7 @@ impl Event {
             Self::Projectors { .. } => EventKind::Projectors,
             Self::CanvasSceneChanged { .. } => EventKind::CanvasSceneChanged,
             Self::CanvasPreviewChanged { .. } => EventKind::CanvasPreviewChanged,
+            Self::ProjectOpened { .. } => EventKind::ProjectOpened,
         }
     }
 }

@@ -121,4 +121,59 @@ Timelines are kept across restarts. Over MCP the same steps are
 `redo_edit` and `export_timeline` ([mcp-tools.md](mcp-tools.md)). Note that
 `move_clip`'s `index` counts from 0, while the CLI's position counts from 1.
 
+## Project files (.isoprj)
+
+Every recording session writes into its own project folder, and every
+project folder holds a visible `<Project name>.isoprj`. Double-click it
+in the Finder (or **File › Open…**, ⌘O, or **File › Open Recent**) and
+Isocast opens the editor on it, beside the studio, even while recording.
+The same from the CLI and MCP:
+
+```sh
+isocast project open "~/Movies/Isocast/2026-10-16 10-00-00 Talk/Talk.isoprj"
+isocast project open "~/Movies/Isocast/2026-10-16 10-00-00 Talk"   # the folder works too
+isocast project recent            # File › Open Recent
+isocast timeline relink c2 /Volumes/Backup/Talk   # an offline clip's take is there now
+```
+
+Over MCP: `open_project`, `recent_projects` and `relink_clip`.
+
+The file is JSON: the project's id, its takes' manifests, and every
+timeline that uses its takes with all their edits (clip order, trims,
+splits, angles, crops, the undo history). Paths in it are relative to the file,
+so the folder can be copied or moved anywhere, to another disk or another
+Mac, and it opens with the same edits. A project opened from somewhere new
+has its timelines taken in (under another id if one by that id is already
+here); a take that isn't where its timeline says is shown as offline, and
+`relink` (or the app's "Relink…" when it says takes are offline)
+points it at where it is now. Its name
+follows the project's: renaming the project (or its folder) renames the
+file.
+
+A project file opened outside its project's folder (one mailed alone,
+in Downloads) opens read-only: its timelines are taken in, but nothing is
+written into that folder and it doesn't become a project.
+
+Opening a project makes one of its timelines current (the one named with
+`--timeline`, else the current one if it is the project's, else its
+newest; a project without one gets a timeline of its takes in order), so
+from then on takes are added to it, as with `timeline open`.
+
+The file is written by the engine in the background, a moment after a
+change, never into a folder while a recording writes into it (it is
+brought up to date when the recording stops), and always atomically, so
+a crash leaves the previous version, never half of one. The engine keeps
+its own copy of every timeline (in its timelines folder) as before; the
+project file is what travels with the folder.
+
+## Open the editor after recording
+
+Settings › Output › **Open Editor After Recording** (the setup's
+`recording.open_editor`, off unless set; `isocast project auto-open
+on|off`, or MCP `apply_change` with `{"recording": {"open_editor": true}}`):
+when a recording stops, the editor opens on that take's project and
+timeline in its own window. A split doesn't open it. It never takes the
+keyboard: the app isn't brought forward, and while a stream runs the
+editor opens behind the studio window, which stays in front.
+
 Removing silence comes later.

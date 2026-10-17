@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use isocast_protocol::api::{Event, EventKind, Method, WatchParams};
+use isocast_protocol::timeline::TimelineRelinkParams;
 use isocast_protocol::timeline::{
     Crop, CropPreset, TimelineAngleParams, TimelineCropParams, TimelineRangeParams,
     TimelineRollParams, TimelineSplitParams, TimelineTrimParams,
@@ -184,6 +185,20 @@ pub enum TimelineCommand {
     },
     /// Put back the last edit undone.
     Redo {
+        #[arg(long)]
+        timeline: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Point an offline clip at where its take is now: its manifest
+    /// (`….session.json`), or the folder holding it (then every take that
+    /// was in the clip's old folder is looked for there too). The take's
+    /// files are never touched.
+    Relink {
+        /// The clip, like `c2`.
+        clip: String,
+        /// The take's manifest, or its folder.
+        path: PathBuf,
         #[arg(long)]
         timeline: Option<String>,
         #[arg(long)]
@@ -435,8 +450,30 @@ pub fn run(command: TimelineCommand) -> Result<ExitCode> {
                 client.call(Method::TimelineRedo(Some(TimelineTarget { timeline })))?;
             edited(&info, json)?;
         }
+        TimelineCommand::Relink {
+            clip,
+            path,
+            timeline,
+            json,
+        } => {
+            let info: TimelineInfo = client.call(Method::TimelineRelink(TimelineRelinkParams {
+                clip,
+                path: absolute(path)?,
+                timeline,
+            }))?;
+            edited(&info, json)?;
+        }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `path` made absolute against the working folder (the engine has its
+/// own).
+pub(crate) fn absolute(path: PathBuf) -> Result<PathBuf> {
+    Ok(match path.is_relative() {
+        true => std::env::current_dir()?.join(path),
+        false => path,
+    })
 }
 
 fn print_notes(notes: &[String]) {
@@ -470,7 +507,7 @@ fn print_list(list: &TimelineList) {
     println!("Kept in {}", list.folder.display());
 }
 
-fn print_timeline(info: &TimelineInfo) {
+pub(crate) fn print_timeline(info: &TimelineInfo) {
     println!(
         "Timeline {:?} ({}){}: {} clip{}, {:.2} s",
         info.name,

@@ -44,6 +44,7 @@ use isocast_protocol::timeline::{
 };
 use slint::{ComponentHandle, ModelRc, VecModel};
 
+use super::projects::Raise;
 use super::{Area, Changed};
 use crate::app::App;
 use crate::daemon::Link;
@@ -206,6 +207,36 @@ fn focus(editor: &EditorWindow) {
     editor
         .window()
         .with_winit_window(|window| window.focus_window());
+}
+
+/// After showing the editor: focus it, or leave it, or put it behind the
+/// studio window (which keeps the keyboard), now and once its native
+/// window surely exists.
+fn raised(app: &Rc<App>, editor: &EditorWindow, raise: Raise) {
+    match raise {
+        Raise::Focus => focus(editor),
+        Raise::Show => {}
+        Raise::Behind => {
+            let behind = |app: &Rc<App>| {
+                let editor = app
+                    .create
+                    .editor
+                    .borrow()
+                    .as_ref()
+                    .map(|e| e.clone_strong());
+                if let (Some(editor), Some(studio)) = (editor, app.window()) {
+                    crate::documents::order_behind(editor.window(), studio.window());
+                }
+            };
+            behind(app);
+            let weak = Rc::downgrade(app);
+            slint::Timer::single_shot(Duration::from_millis(100), move || {
+                if let Some(app) = weak.upgrade() {
+                    behind(&app);
+                }
+            });
+        }
+    }
 }
 
 /// The take's length (its program file's, else the clip's out point).
@@ -912,13 +943,19 @@ impl Create {
         let clips = &timeline.as_ref()?.clips;
         let index = clips.iter().position(|c| c.id == id)?;
         let file = program_file(&clips[index]).is_some();
+        // Its take isn't where the timeline says (#88).
+        let offline = clips[index].problem.is_some();
+        let menu = MenuBuilder::new()
+            .item("editor", "Open in Editor")
+            .separator()
+            .item("reveal", "Show in Finder")
+            .disabled(!file);
+        let menu = match offline {
+            true => menu.item("relink", "Relink…"),
+            false => menu,
+        };
         Some(
-            MenuBuilder::new()
-                .item("editor", "Open in Editor")
-                .separator()
-                .item("reveal", "Show in Finder")
-                .disabled(!file)
-                .separator()
+            menu.separator()
                 .item("earlier", "Move Earlier")
                 .disabled(index == 0)
                 .item("later", "Move Later")
@@ -951,6 +988,7 @@ impl Create {
             "earlier" if index > 0 => self.move_clip(app, clip, index - 1),
             "later" if index + 1 < count => self.move_clip(app, clip, index + 1),
             "remove" => self.remove(app, clip),
+            "relink" => app.projects.relink(app, clip),
             "editor" => {
                 if let Err(error) = self.open_editor(app) {
                     eprintln!("editor: {error:#}");
@@ -1475,21 +1513,34 @@ impl Create {
     /// Open the editor window on the current timeline (or bring it
     /// forward).
     fn open_editor(&self, app: &Rc<App>) -> anyhow::Result<()> {
+        self.open_editor_as(app, Raise::Focus)
+    }
+
+    /// Open (or show) the editor window, raised as `raise` says (#88: a
+    /// project opened, or a recording stopped).
+    pub fn open_editor_as(&self, app: &Rc<App>, raise: Raise) -> anyhow::Result<()> {
+        let opened = self.editor.borrow().is_some();
+        if !opened {
+            let editor = EditorWindow::new()?;
+            {
+                let area = editor.global::<CreateArea>();
+                self.wire(app, &area);
+                area.set_active(true);
+            }
+            if app.mode.offscreen {
+                editor.set_native_menu(false);
+            }
+            // Its File menu (#88).
+            app.projects.connect_editor(app, &editor);
+            *self.editor.borrow_mut() = Some(editor);
+        }
         if let Some(editor) = self.editor.borrow().as_ref() {
             editor.show()?;
-            focus(editor);
-            return Ok(());
+            raised(app, editor, raise);
         }
-        let editor = EditorWindow::new()?;
-        {
-            let area = editor.global::<CreateArea>();
-            self.wire(app, &area);
-            area.set_active(true);
+        if !opened {
+            self.load(app);
         }
-        editor.show()?;
-        focus(&editor);
-        *self.editor.borrow_mut() = Some(editor);
-        self.load(app);
         Ok(())
     }
 

@@ -18,6 +18,7 @@ mod fields;
 mod filter;
 pub mod hotkeys;
 pub mod init;
+pub mod isoprj;
 pub mod layout;
 pub mod library;
 pub mod located;
@@ -975,6 +976,13 @@ pub struct Recording {
     /// The replay buffer: how much of the program it keeps.
     #[serde(default, skip_serializing_if = "replay::ReplaySettings::is_default")]
     pub replay: replay::ReplaySettings,
+    /// The app opens the editor, in its own window, on the take's project
+    /// and timeline when a recording stops (a split doesn't). Off unless
+    /// set: a window after every stop gets in the way of a session of many
+    /// takes and of recordings driven from the CLI or MCP. While a stream
+    /// runs it opens behind the studio, never taking the keyboard.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open_editor: bool,
 }
 
 fn default_keep_free_gb() -> f64 {
@@ -1647,6 +1655,7 @@ impl Setup {
                 },
                 keep_free_gb: default_keep_free_gb(),
                 replay: Default::default(),
+                open_editor: false,
             },
             stream: None,
             vertical: None,

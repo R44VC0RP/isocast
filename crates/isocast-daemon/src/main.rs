@@ -92,6 +92,7 @@ mod diagnostics;
 mod edit;
 mod export;
 mod hotkeys;
+mod isoprj;
 mod library;
 mod optimize;
 mod plugins;
@@ -170,6 +171,7 @@ fn main() -> ExitCode {
             daemon.load_projectors();
             diagnostics::start(&daemon);
             daemon.load_timelines();
+            isoprj::start(&daemon);
             start_plugins(&daemon);
             daemon.websocket.load(&daemon);
             let saver = daemon.clone();
@@ -846,6 +848,8 @@ struct Daemon {
     websocket: websocket::Runtime,
     /// Open projectors and where each view was last shown (`projector_*`).
     projectors: projectors::ProjectorState,
+    /// The project files' writer (#88).
+    isoprj: isoprj::Writer,
 }
 
 /// isocastd's processor use, as `status` reports it: the share of all the
@@ -1626,6 +1630,11 @@ impl Daemon {
             Method::DebugSet(params) => debug::set(self, params).and_then(to_json),
             Method::ListProjects(params) => to_json(self.list_projects(params.unwrap_or_default())),
             Method::RenameProject(params) => self.rename_project(params).and_then(to_json),
+            Method::ProjectOpen(params) => self.project_open(params).and_then(to_json),
+            Method::RecentProjects(params) => {
+                to_json(self.recent_projects(params.unwrap_or_default()))
+            }
+            Method::TimelineRelink(params) => self.timeline_relink(params).and_then(to_json),
             Method::EstimateCapacity(params) => self.estimate_capacity(*params).and_then(to_json),
             Method::Stop | Method::Shutdown => match self.stop() {
                 // Shutting down while idle is fine.

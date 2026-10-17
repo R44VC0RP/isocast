@@ -41,6 +41,11 @@ pub struct Timeline {
     pub version: u32,
     /// Lowercase letters, digits and dashes; stays the same when renamed.
     pub id: String,
+    /// Unique across Macs (random), so two Macs' timelines with the same
+    /// id (`untitled`) are never taken for each other when a project file
+    /// is opened (#88). Absent in files from before it; given on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
     pub name: String,
     /// When it was made, local time, RFC 3339.
     pub created_at: String,
@@ -72,6 +77,34 @@ pub struct Timeline {
     /// any new edit clears it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redo: Vec<Revision>,
+}
+
+/// A new [`Timeline::uid`]: 16 random hex digits (the time and process
+/// if the system's random source can't be read).
+pub fn new_uid() -> String {
+    use std::io::Read;
+    let mut bytes = [0u8; 8];
+    let random = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .is_ok();
+    if !random {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        bytes = (nanos ^ (u64::from(std::process::id()) << 40)).to_be_bytes();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether `id` can be a timeline's id (and so a file name): 1 to 120
+/// lowercase letters, digits and dashes, not starting with a dash.
+pub fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 120
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// How many edits `timeline_undo` can take back.
@@ -112,6 +145,11 @@ pub struct Clip {
     /// `timeline_crop`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<Crop>,
+    /// Fields of the clip this version doesn't know (a newer Isocast's),
+    /// kept as they are so a project file read and written again loses
+    /// none of its edits (#88).
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A crop: the part of a picture shown, as fractions of the picture's
@@ -278,6 +316,21 @@ pub struct TimelineMoveParams {
     /// Where it goes, counting from 0 (the first clip) to the number of
     /// clips less one (the last).
     pub index: usize,
+    /// The timeline's id; the current one if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<String>,
+}
+
+/// Parameters of `timeline_relink`: where an offline clip's take is now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TimelineRelinkParams {
+    /// The clip's id, like `c2`.
+    pub clip: String,
+    /// The take's manifest (`….session.json`), or the folder holding a
+    /// manifest of the same name. Given a folder, every take of every
+    /// timeline that was in the clip's old folder is looked for there too.
+    pub path: PathBuf,
     /// The timeline's id; the current one if absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline: Option<String>,
@@ -735,6 +788,10 @@ pub enum TimelineAction {
     Cropped,
     /// The cut between two clips moved (`timeline_roll`).
     Rolled,
+    /// An offline clip was pointed at where its take is now
+    /// (`timeline_relink`), or a project opened from elsewhere was taken
+    /// in (`project_open`).
+    Relinked,
 }
 
 /// A take's length on the timeline, as whole frames at a frame rate: its

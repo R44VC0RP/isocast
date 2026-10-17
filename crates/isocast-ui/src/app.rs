@@ -71,6 +71,8 @@ pub struct App {
     pub wizard: areas::wizard::Wizard,
     /// Projectors and the multiview (G.4): windows of their own.
     pub projectors: areas::projectors::Projectors,
+    /// Project files (#88): File › Open…, Open Recent, the Finder.
+    pub projects: areas::projects::Projects,
     /// `--drag-test`: how long each flush (the areas showing a change) and
     /// each update from the daemon took on the window's thread.
     pub work_log: RefCell<Option<WorkLog>>,
@@ -113,6 +115,7 @@ impl App {
             permissions: areas::permissions::PermissionsStep::default(),
             wizard: areas::wizard::Wizard::default(),
             projectors: areas::projectors::Projectors::default(),
+            projects: areas::projects::Projects::default(),
         });
         window.set_version(env!("CARGO_PKG_VERSION").into());
         if !mode.offscreen {
@@ -155,7 +158,7 @@ impl App {
 
     /// The areas, in the order they update. Create comes first so that in
     /// its view Delete takes off the selected clip, not a scene item.
-    pub fn areas(&self) -> [&dyn Area; 11] {
+    pub fn areas(&self) -> [&dyn Area; 12] {
         [
             &self.create,
             &self.canvas,
@@ -168,6 +171,7 @@ impl App {
             &self.permissions,
             &self.wizard,
             &self.projectors,
+            &self.projects,
         ]
     }
 
@@ -546,6 +550,8 @@ impl App {
             Event::Marker { .. } => {}
             // The Controls area shows its notice.
             Event::EncoderOverload { .. } => {}
+            // The Create area opens the editor on it.
+            Event::ProjectOpened { .. } => {}
         }
         for area in self.areas() {
             area.event(self, &event);

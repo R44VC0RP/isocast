@@ -464,6 +464,14 @@ come later (clips already carry in/out points on their take).
     zoom (⌘+ ⌘− ⇧Z, ⌘-scroll, pinch), edit-point and marker navigation
     (↑ ↓, M ⇧M), Space; motion scenarios for trim, playhead and crop
     drags; EDITED files checked in ffmpeg, AVFoundation, Safari, Chrome.
+- [x] **C.4 Project files and the editor after recording (#88).** A
+  visible `<Project name>.isoprj` in every project folder (versioned JSON:
+  id, takes, timelines with every edit, paths relative to it) that opens
+  in the editor from the Finder (exported UTI `dev.isocast.project`), File
+  › Open… and Open Recent, `isocast project open` and MCP `open_project`;
+  offline takes relinked (`timeline_relink`); "Open Editor After
+  Recording" (`recording.open_editor`). Written in the background,
+  atomically, never into a folder being recorded.
 
 ### S. Stress testing and performance (Ryan, 2026-10-13)
 
@@ -1414,6 +1422,13 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 
 ## Log
 
+- C.4 / #88 (2026-10-16): project files (`.isoprj`) in every project
+  folder open in the editor from the Finder, File › Open/Open Recent, the
+  CLI and MCP; copies open with the same edits; offline takes relink; the
+  editor can open after a recording stops. Verified with isolated engines
+  in the VM (copy opened by a second engine: identical clips; 25 kill -9s
+  during edits: file always valid; kill -9 while recording: playable
+  files), offscreen snapshots, and GUI checks on isocast-m2-a.
 - #96 engine follow-ups (2026-10-16): main-over-vertical encoder priority,
   local vertical failure/on-air cleanup, per-canvas live estimates and measured
   M2 stream cost. Compositor fault injection found/fixed timed failed-file

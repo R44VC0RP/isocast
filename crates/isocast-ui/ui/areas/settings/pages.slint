@@ -781,6 +781,17 @@ export component OutputPage inherits SetPage {
             }
         }
     }
+    // #88: the editor after a recording (src/areas/projects.rs).
+    SetGroup {
+        title: "Editor";
+        hint: "When a recording stops, the editor opens on its project in its own window. While you stream it opens behind the studio, so the keyboard stays where it is. Splitting a take doesn’t open it.";
+        SwitchRow {
+            label: "Open Editor After Recording";
+            place: RowPlace.only;
+            on <=> SettingsArea.open-editor;
+            toggled(on) => { SettingsArea.set-flag("open_editor", on); }
+        }
+    }
     SetGroup {
         title: "Program";
         resettable: true;

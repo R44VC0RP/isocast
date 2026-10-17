@@ -51,7 +51,7 @@ pub(crate) fn project_for(folder: &Path) -> Result<ProjectRef, RpcError> {
 }
 
 /// Rename `from` to `to` unless `to` exists, atomically.
-fn rename_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -249,6 +249,10 @@ impl Daemon {
         }
         notes.extend(rewrite_exports(&target, &folder));
         self.moved_last_report(&folder, &target);
+        // Its project file follows the name (#88).
+        if let Err(message) = self.write_project_file(&target) {
+            notes.push(message);
+        }
         let project = project::describe(&target, &file, false);
         self.publish(Event::ProjectRenamed {
             project: project.clone(),
@@ -282,7 +286,7 @@ impl Daemon {
 }
 
 /// Whether two folders are the same (one may be spelled differently).
-fn same_folder(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
     a == b
         || matches!(
             (std::fs::canonicalize(a), std::fs::canonicalize(b)),

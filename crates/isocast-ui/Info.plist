@@ -32,6 +32,51 @@
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Isocast streams to servers on your local network, such as an RTMP server on another computer.</string>
+	<!-- Project files (#88): Isocast owns .isoprj (dev.isocast.project, a
+	     JSON document), so the Finder opens them in Isocast. The icon is
+	     the system's document page with the app icon as its badge. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Isocast Project</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>dev.isocast.project</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>dev.isocast.project</string>
+			<key>UTTypeDescription</key>
+			<string>Isocast Project</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+			</array>
+			<key>UTTypeIcons</key>
+			<dict>
+				<key>UTTypeIconBadgeName</key>
+				<string>Isocast</string>
+				<key>UTTypeIconText</key>
+				<string>isoprj</string>
+			</dict>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>isoprj</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 	<key>NSHumanReadableCopyright</key>
 	<string>Isocast contributors. MIT OR Apache-2.0.</string>
 </dict>

@@ -69,9 +69,13 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast timeline roll`](#isocast-timeline-roll)
   - [`isocast timeline undo`](#isocast-timeline-undo)
   - [`isocast timeline redo`](#isocast-timeline-redo)
+  - [`isocast timeline relink`](#isocast-timeline-relink)
 - [`isocast project`](#isocast-project)
   - [`isocast project list`](#isocast-project-list)
   - [`isocast project rename`](#isocast-project-rename)
+  - [`isocast project open`](#isocast-project-open)
+  - [`isocast project recent`](#isocast-project-recent)
+  - [`isocast project auto-open`](#isocast-project-auto-open)
 - [`isocast retake`](#isocast-retake)
 - [`isocast devices`](#isocast-devices)
 - [`isocast record`](#isocast-record)
@@ -966,6 +970,7 @@ Commands:
   roll    Move the cut after CLIP by SECONDS (negative: earlier), trimming CLIP's end and the next clip's start together (a roll edit): the timeline keeps its length
   undo    Take back the last edit (trim, split, delete, angle, crop, roll, remove, move)
   redo    Put back the last edit undone
+  relink  Point an offline clip at where its take is now: its manifest (`….session.json`), or the folder holding it (then every take that was in the clip's old folder is looked for there too). The take's files are never touched
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -1221,6 +1226,23 @@ Options:
   -h, --help                 Print help
 ```
 
+## isocast timeline relink
+
+```text
+Point an offline clip at where its take is now: its manifest (`….session.json`), or the folder holding it (then every take that was in the clip's old folder is looked for there too). The take's files are never touched
+
+Usage: isocast timeline relink [OPTIONS] <CLIP> <PATH>
+
+Arguments:
+  <CLIP>  The clip, like `c2`
+  <PATH>  The take's manifest, or its folder
+
+Options:
+      --timeline <TIMELINE>  
+      --json                 
+  -h, --help                 Print help
+```
+
 ## isocast project
 
 ```text
@@ -1229,9 +1251,12 @@ Recording projects: a folder per recording session (`<date> <time> Untitled` in 
 Usage: isocast project <COMMAND>
 
 Commands:
-  list    List the recording projects (a folder per recording session), newest first, with their takes and files
-  rename  Rename a project (by id): its folder becomes `<date> <time> <NAME>`. Refused while a recording or an export writes into it; manifests and timelines keep finding its files
-  help    Print this message or the help of the given subcommand(s)
+  list       List the recording projects (a folder per recording session), newest first, with their takes and files
+  rename     Rename a project (by id): its folder becomes `<date> <time> <NAME>`. Refused while a recording or an export writes into it; manifests and timelines keep finding its files
+  open       Open a project file (`.isoprj`) or project folder: its timelines join the engine's (imported if it was copied from elsewhere), one becomes current, and the app (if it is running) shows the editor on it. Missing takes are listed as offline (`timeline relink`)
+  recent     The projects opened lately (File › Open Recent), newest first
+  auto-open  Whether the app opens the editor when a recording stops (the setup's `recording.open_editor`): `on` or `off` changes it, nothing says it
+  help       Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help  Print help
@@ -1260,6 +1285,51 @@ Usage: isocast project rename [OPTIONS] <PROJECT> <NAME>
 Arguments:
   <PROJECT>  
   <NAME>     
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast project open
+
+```text
+Open a project file (`.isoprj`) or project folder: its timelines join the engine's (imported if it was copied from elsewhere), one becomes current, and the app (if it is running) shows the editor on it. Missing takes are listed as offline (`timeline relink`)
+
+Usage: isocast project open [OPTIONS] <PATH>
+
+Arguments:
+  <PATH>  The `.isoprj` file, or the project's folder
+
+Options:
+      --timeline <TIMELINE>  Which of its timelines (an id); else the current one if it is one of them, else the newest
+      --no-editor            Don't ask the app to show the editor
+      --json                 
+  -h, --help                 Print help
+```
+
+## isocast project recent
+
+```text
+The projects opened lately (File › Open Recent), newest first
+
+Usage: isocast project recent [OPTIONS]
+
+Options:
+      --clear  Forget them
+      --json   
+  -h, --help   Print help
+```
+
+## isocast project auto-open
+
+```text
+Whether the app opens the editor when a recording stops (the setup's `recording.open_editor`): `on` or `off` changes it, nothing says it
+
+Usage: isocast project auto-open [OPTIONS] [STATE]
+
+Arguments:
+  [STATE]  [possible values: on, off]
 
 Options:
       --json  

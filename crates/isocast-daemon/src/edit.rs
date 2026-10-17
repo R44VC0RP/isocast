@@ -774,11 +774,13 @@ mod tests {
                 project: None,
                 angle: None,
                 crop: None,
+                extra: Default::default(),
             });
         }
         let timeline = Timeline {
             version: 1,
             id: "t".into(),
+            uid: None,
             name: "T".into(),
             created_at: String::new(),
             next_clip: clips.len() as u32 + 1,

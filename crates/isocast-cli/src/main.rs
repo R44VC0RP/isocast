@@ -3932,6 +3932,16 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                     }
                 }
             }
+            Event::ProjectOpened {
+                path,
+                timeline,
+                editor,
+                ..
+            } => println!(
+                "project {} opened on timeline {timeline}{}",
+                path.display(),
+                if editor { " (in the editor)" } else { "" }
+            ),
         }
     }
     // Events end only when isocastd hangs up; a watcher must not mistake

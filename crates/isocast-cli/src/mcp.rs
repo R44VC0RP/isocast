@@ -17,6 +17,9 @@ use isocast_protocol::devices::{Devices, PermissionsReport};
 use isocast_protocol::hotkeys::{
     Catalogue, Hotkeys, InputParams as HotkeyInput, SetParams as HotkeysSet,
 };
+use isocast_protocol::isoprj::{
+    ProjectOpenParams, ProjectOpened, RecentProjects, RecentProjectsParams,
+};
 use isocast_protocol::library::{
     Library, LibraryChange, LibraryCreateParams, LibraryDocument, LibraryImportObsParams,
     LibraryImportParams, LibraryRenameParams, LibrarySwitchParams, LibraryTarget,
@@ -33,8 +36,8 @@ use isocast_protocol::stream::StreamService;
 use isocast_protocol::timeline::{
     ExportStarted, RetakeParams, Retaken, TimelineAngleParams, TimelineClosed, TimelineCropParams,
     TimelineExportParams, TimelineInfo, TimelineList, TimelineMoveParams, TimelineNewParams,
-    TimelineOpenParams, TimelineRangeParams, TimelineRemoveParams, TimelineRollParams,
-    TimelineSplitParams, TimelineTarget, TimelineTrimParams,
+    TimelineOpenParams, TimelineRangeParams, TimelineRelinkParams, TimelineRemoveParams,
+    TimelineRollParams, TimelineSplitParams, TimelineTarget, TimelineTrimParams,
 };
 use isocast_protocol::{CanvasId, Setup, Transition};
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -984,6 +987,66 @@ impl Isocast {
         Parameters(Strict(params)): Parameters<Strict<TimelineTarget>>,
     ) -> Result<Json<TimelineInfo>, String> {
         self.call(Method::TimelineRedo(Some(params))).await
+    }
+
+    #[tool(
+        description = "Point an offline clip (its take isn't where the timeline says: the \
+                       project folder was moved or copied) at where its take is now: `path` is \
+                       the take's manifest (….session.json) or the folder holding it; given a \
+                       folder, every take that was in the clip's old folder is looked for there \
+                       too. The take's files are never touched. Returns the timeline.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn relink_clip(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<TimelineRelinkParams>>,
+    ) -> Result<Json<TimelineInfo>, String> {
+        self.call(Method::TimelineRelink(params)).await
+    }
+
+    #[tool(
+        description = "Open a project file (`<name>.isoprj`, in every project folder) or a \
+                       project folder by full `path`: its timelines join the engine's (taken in \
+                       if the folder was copied from elsewhere, paths resolved where it is now), \
+                       one becomes the current timeline (`timeline`, else the current one if it \
+                       is the project's, else its newest; a project with none gets one of its \
+                       takes), and the app shows the editor on it unless `editor` is false. \
+                       Missing takes are listed in `offline` (relink_clip), never an error. \
+                       Allowed while recording. Whether the app opens the editor when a \
+                       recording stops is the setup's `recording.open_editor` (apply_change \
+                       with patch {\"recording\": {\"open_editor\": true}}). Returns the \
+                       project, its timelines and the one opened.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn open_project(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ProjectOpenParams>>,
+    ) -> Result<Json<ProjectOpened>, String> {
+        self.call(Method::ProjectOpen(params)).await
+    }
+
+    #[tool(
+        description = "The project files opened lately (File › Open Recent), newest first, \
+                       each with whether it is still there; `clear` forgets them.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn recent_projects(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<RecentProjectsParams>>,
+    ) -> Result<Json<RecentProjects>, String> {
+        self.call(Method::RecentProjects(Some(params))).await
     }
 
     #[tool(
@@ -2240,7 +2303,9 @@ finishes is added to it; retake records the last one again, remove_clip and move
 it, trim_clip, split_clip, delete_range, roll_cut, set_angle and crop_clip cut it (undo_edit, \
 redo_edit; takes' files are never touched), export_timeline joins it into one file. \
 Each recording session writes into its own project folder; list_projects finds them and \
-rename_project names one once it has stopped. \
+rename_project names one once it has stopped. Each has a `<name>.isoprj` project file that \
+open_project opens in the editor, wherever the folder was copied (recent_projects lists those \
+opened lately; relink_clip finds offline takes). \
 Sources and scenes are addressed by id. Errors name the field and list valid options."
 )]
 impl ServerHandler for Isocast {}
