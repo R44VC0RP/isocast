@@ -258,6 +258,14 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-17 (#104): NLE export checked in DaVinci Resolve only. Final Cut
+  Pro's trial now comes from the App Store (needs an Apple ID) and Premiere
+  Pro needs a paid licence, so neither was opened. To check: on a Mac with
+  them, `isocast timeline export --nle fcpxml` (File › Import › XML in
+  Final Cut) and `isocast timeline export --nle xmeml` (File › Import in
+  Premiere), then compare frames at each cut with the EDITED file. Watch
+  Premiere's Basic Motion scale (written in the picture's own pixels) and
+  stereo audio tracks (one stereo clip per file track).
 - 2026-10-17 (#106): **Refresh 0.0.6's update notes.** After this branch
   is merged and the snapshot published (the workflow and
   `docs/releases/0.0.6.md` must be on the public main), run
@@ -1692,6 +1700,28 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-17 (#105 W.1d): `isocast record` is now a private daemon client,
+  not in-process MacPlatform. IsolatedDaemon overrides only child storage
+  paths, keeps a sole lifetime-pipe writer and reaps the real child. The
+  daemon finishes on EOF (including killed CLI); `parent_owned` status
+  handshake refuses older signed apps that ignore the launch flag. Successful
+  exit cleans its runtime directory; failure/crash retains diagnostics.
+  Private engines do not register global hotkeys. Start/Stop timeouts and
+  lost event streams follow Status until the actual outcome; completed
+  reports print even if later cleanup fails. `setup check` keeps the same
+  capacity JSON through EstimateCapacity on a private engine. Windows still
+  refuses media via StubPlatform; owned-process control/lifetime is verified.
+
+- 2026-10-17 (#105, Ryan): Windows startup/recording performance is a
+  standing design requirement. Keep WGC D3D11 textures on GPU into wgpu
+  interop and native DirectX-resource NVENC; hardware MF fallback, software
+  last. Async low-latency recording-quality presets and per-ISO sessions
+  obey detected driver/session caps and existing priority/shedding. Measure
+  launch-to-preview/ready-to-record before setting targets; parallel device
+  opens, lazy work/pre-warm, no UI-thread blocking. From W.5 every report
+  compares matched 1080p60/4K60+ISO scenes against isolated OBS on exon-desk
+  (install allowed): startup/record-start latency, CPU/GPU/memory and drops.
+
 - 2026-10-17 (#105 #28, W.1b): the daemon selects `NativePlatform` once
   in `platform.rs`; it is a re-export of MacPlatform on Mac (no wrapper or
   dynamic dispatch), and StubPlatform elsewhere. Media/clock/credential,
@@ -1712,6 +1742,85 @@ each section. Delete entries that stop being true.
   propagate; this is compile groundwork, not a claim of qualified Windows
   durability. Security-103 is integrated; no daemon plugin policy changes.
 
+- 2026-10-17 (#104): **NLE export (`timeline_export_nle`) writes stacked
+  tracks, not a multicam clip**: one video track per ISO source with the
+  program on top, every clip's stretch of every file on its track, only
+  the clip's angle switched on (FCPXML: lanes off one gap per clip, audio
+  lanes below with `srcEnable`). Same layout in all three formats, an
+  angle switch stays a visible cut, and Resolve reads it; multicam in
+  FCPXML is a follow-up. A clip's first frame in each file is the one on
+  screen at its in point (`floor((in - start_offset) * fps)`), as the
+  export picks it; whole-number rates only today (the writer handles
+  `num/den` rates like 60000/1001, unit-tested, but recordings tick at
+  whole rates). Media paths are absolute everywhere (Resolve imported no
+  OTIO clip with a relative or `file://` path). The project file is the
+  only file written (atomically: a uniquely named partial made with
+  create_new, then renamed; numbered names are taken by making them with
+  create_new). `--output` must end in the format's extension, so it can't
+  be a take's file, and replaces a file only if it carries the export's
+  marker ("Isocast timeline export": an XML comment after the DOCTYPE,
+  OTIO `metadata.isocast.export`) or with `replace` / `--replace`.
+- 2026-10-17 (#104): **Resolve gets xmeml (`--app resolve`)**, measured on
+  Resolve 21.1.1 free on isocast-m2-b: xmeml renders frame for frame as the
+  EDITED file (pattern decode 0/212 frames off, PSNR >= 46 dB, same level);
+  Resolve ignores FCPXML `srcEnable` (doubled program sound, +6 dB, and the
+  uncropped program around a 1:1 crop), and OTIO has no crops. In xmeml
+  Resolve fits a picture of another size first and counts Basic Motion's
+  scale from that fit (Premiere: from the picture's own pixels), and reads
+  a clip's `trackindex` as one channel (a stereo clip became a mono track
+  of its left channel, -3 dB), so its file has a track per channel, panned.
+  FCPXML `trim-rect` values are all percent of the picture's **height**
+  (Apple's DTD: "a percentage of original frame height"), left and right
+  too; positions are percent of the sequence's height. Resolve 21.1 reads
+  trim-rect that way (fix round 1: the first version wrote left/right in
+  percent of the width, and Resolve's re-export showed them scaled by
+  height/width); the "Resolve units" others reverse-engineered aren't used.
+- 2026-10-17 (#112): **Letterboxed vertical canvas, nested scenes and
+  keyframes.** A nested scene is drawn once per canvas at that canvas's
+  size, so on the vertical canvas a letterboxed scene (`Scene::letterboxed`:
+  no vertical arrangement, no `layout`) is a 1080x1920 picture with the
+  main one in a band. `fit_items` now crops items that show one to that
+  band (`CanvasFit::crop`, rounded like the fitted rects), so they look as
+  on the main canvas, smaller, instead of fitted twice; at `fit = "none"`
+  they are placed like rect items (the engine sizes them from the crop),
+  and inside a fitted `fit = "none"` item they become `stretch` at their
+  main size. A scene with its own vertical arrangement (or layout) nested
+  in a letterboxed one is still its vertical picture squeezed into the
+  item. Keyframes: `for_canvas` gives fitted items fitted copies of their
+  sets (`<id>-vertical-fit-…`, appended to `keyframes`; their problems are
+  the main canvas's): pixel translations, border, radius and shadow scale
+  for rect items, translations (px and %) for `fit = "none"` ones, crops
+  map for nested scenes. Keyframe `scale` multiplies the item's own
+  (fitted) transform (animate.rs `place`), so it never changes. The app's
+  first vertical edit (`route_vertical`) still stores the items with the
+  original sets, so their pixel keyframes are then unscaled.
+  The engine-less `get --resolved --canvas vertical` sizes sources from
+  the main canvas (`layout::resolve_canvas`), as the engine's frames are.
+- 2026-10-17 (#109): **A scene without a vertical arrangement is
+  letterboxed on the vertical canvas**, replacing "re-laid out, not
+  scaled" (#86), which drew a 16:9 scene's rect items at main-canvas
+  pixels at the top of the 9:16 canvas. `isocast_protocol::fit_items`
+  (used by `Setup::for_canvas`, and by the app's `model::vertical_view`,
+  `canvas_items` and `route_vertical`, so the editor's first vertical
+  edit starts from what the canvas shows) scales rect-placed items by
+  min(vw/mw, vh/mh) about the top-left and centres them (OBS's Fit to
+  Screen; 1920x1080 on 1080x1920: y 656, 1080x608), with children,
+  translations, radii, borders and shadows; `fit = "none"` items keep
+  their size and get the factor in `transform.scale`; `layout` items are
+  still laid out again on the vertical size. Not handled: keyframe
+  animations in pixels and nested-scene items (drawn at the vertical
+  canvas's size) are not scaled.
+- 2026-10-17 (#108): **Layout audit fixes.** Narrow docks adapt instead of
+  cutting: Controls says "Replay"/"Virtual Cam" when the dock is under
+  200px or squeezed (read from Ui widths and the Viewport like
+  `room-for-words`; reading the dock's own width loops through the
+  labels); the source toolbar's idle text is "No source" under 160px and
+  only the frame under 96px; the vertical monitor's head drops its size,
+  then the name, then the chevron (menu still on right-click and View);
+  a narrow mixer strip's fader goes down to 72px. Source rows without ISO
+  let the name run into the empty ISO lane (`ListRow.label-room`).
+  Gotcha: Slint `Text` layout info feeds the docks' layout, so any label
+  chosen from its own dock's `width` is a binding loop error.
 - 2026-10-17 (#106): **Release notes live in `docs/releases/X.Y.Z.md`.**
   They are read at the tag (preflight via the contents API, the release
   job from its checkout), embedded in the appcast as markdown and used as
@@ -1730,6 +1839,49 @@ each section. Delete entries that stop being true.
   headings, bold/italic, lists, code, quotes and links; tables lose their
   text, rules are blank and images show alt text. Later option:
   `sparkle:releaseNotesLink` to an HTML page with screenshots/video.
+- 2026-10-17 (#26/#29 fix round 1): **Timeouts must not stop completion
+  polling.** Once a producer's fences age past 1 s it stops submitting; the
+  GPU completion worker now retries Timeout until the work completes. A
+  developer-only `ISOCAST_GPU_FAULT=stall:2:2.5` withholds callbacks for
+  2.5 s: main recovers, reviewed head freezes, fixed head recovers at 60 fps.
+  `lost:2` simulates the device-lost flag: the cache opens a fresh device,
+  and a persistent live compositor rebuilds without resetting the engine's
+  clock/control. The next 4 s take keeps 240/240 frames, and projector plus
+  H.264 preview/scene readbacks work in the same process/live engine.
+  **Split demand is published before the split message**, separately from
+  writer demand so an old writer update cannot erase it. Isolated developer
+  `ISOCAST_DEBUG_SPLIT_STALL_MS=450`, seven shedding ISOs, start/stop/split/
+  pause cycles: 19 takes/152 files, 4,408 shed frames, zero uncounted ticks,
+  all ISO start offsets zero. Two very sparse files fooled the existing
+  inferred-FPS check; direct PTS-grid/full-decode checks pass. Main 603c3ac
+  integrated without committing; gates and strict e2e 18/18 pass. Re-review
+  and completion of the pending merge belong to the coordinator. Details:
+  `/Volumes/IsocastBuild/perf-gpu/scratch/REPORT.md`, section Fix round 1.
+
+- 2026-10-17 (#26/#29, hardware-qualified; review pending): **GPU completion is a
+  hand-off, not a wait on every producer.** Engine `Gpu::new` shares one
+  process-lifetime device. Command-buffer callbacks retain native inputs
+  and outputs until completion; producer-local fences preserve tick order
+  when wgpu dispatches callbacks on different submit threads. Each producer
+  has at most three GPU pictures in flight; one completion thread sleeps on
+  the GPU and drains callbacks at the platform's real-time scheduling class.
+  Program/stream frames remain YUV; native
+  monitors use pooled BGRA canvases, only allocated/drawn while watched.
+  Preview and watched scenes skip YUV conversion entirely. ISO pressure
+  moved to `record/pressure.rs`; skipped ticks still reach file workers for
+  split/stop/audio/commit accounting, without pixels. File workers request
+  every picture through startup and split boundaries; native writers still
+  hold if pressure rose after admission, and drain accepted work on skipped
+  ticks. This does not close #27's aggregate capture/encoder pool isolation.
+  Final remote gates, strict e2e (17/17), cycles/disk/ISO stress and native
+  surface/camera readbacks pass. Final three-pair A/B keeps all protected
+  outputs whole; the populated multiview + two projectors use 71.6→66.2%
+  daemon CPU and 580.7→483.3 GPU ms/s, but live footprint is 305.6→438.1 MiB.
+  One earlier program loss led to restoring real-time QoS on the completion
+  worker; the final 3×64 s pairs lose zero of 11,520 program frames per build.
+  These are not across-the-board CPU/memory wins. Tier-1 review remains:
+  `/Volumes/IsocastBuild/perf-gpu/scratch/REPORT.md`.
+
 - 2026-10-17 (#96 / 0.0.7): **Canvas failures are local, mixer failures shared.**
   A main compositor panic must not end healthy vertical streams; the daemon
   now selects that canvas's stream slots, just as for vertical failures.
@@ -5992,6 +6144,18 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-17 (#105 W.1d): Do not build a baseline source tree into the same
+  Cargo target and then trust unchanged candidate fingerprints: source paths
+  and archive mtimes reused a baseline protocol artifact, which was caught by
+  the new parent_owned field failing to compile. Only the lane's affected
+  workspace packages were cleaned (third-party caches kept), then rebuilt.
+  Separate baseline target dirs avoid this; account for their disk cost.
+  Windows WMI executable paths may start `\\?\`; normalize that prefix before
+  checking that a process belongs to C:\isocast-dev (one probe wrongly counted
+  zero processes). New NLE XML exporters use Unix file URL assumptions;
+  Windows explicitly refuses XML until that seam is ported, not malformed
+  successful exports. OTIO plain-path behavior is unchanged.
+
 - 2026-10-17 (#105 W.1c): Windows `std::process::Command` with redirected
   stdio still inherited other caller handles: detached isocastd kept a
   PowerShell capture pipe open after the CLI exited. Native launcher uses
@@ -6005,6 +6169,18 @@ each section. Delete entries that stop being true.
   probes). Unsupported recording startup briefly creates then asynchronously
   removes its empty project; the root `.isocast.lock` is intentionally kept.
 
+- 2026-10-17 (#104): **Driving DaVinci Resolve (free) on a test Mac**:
+  only Studio takes external scripts, its Scripts menu lists Lua only
+  (no Python found), and its Lua has no `io` (bmd.writestring only
+  serializes), so results leave as Resolve's own files (renders and
+  `Timeline:Export` OTIO/XML). Its windows have no usable AX tree: drive it
+  with cua-driver desktop clicks (`{"scope":"desktop"}`) and `press_key`
+  with pid + window_id; Workspace > Console's input takes a pasted
+  `dofile("…")`. A quit with a modal dialog up leaves it running: `pkill
+  -9`. The harness is in /Volumes/IsocastBuild/nle-export/scratch/resolve
+  (drive.py, nle_test.lua, run.sh; run with `hw-batch.py now cmd --gui
+  --mac m2-b --command 'bash ~/nle-export/resolve/run.sh 420'`). Resolve
+  21.1.1 needed Rosetta (installed on m2-b).
 - 2026-10-17 (#85): **take.sh on isocast-m2-a: a wedged Terminal.** The
   Terminal there had run since 2026-10-12 with one stale window ("Grant
   Isocast permissions.command", its shell gone) and answered neither

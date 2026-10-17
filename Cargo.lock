@@ -3090,7 +3090,6 @@ dependencies = [
  "isocast-client",
  "isocast-diagnostics",
  "isocast-engine",
- "isocast-platform-macos",
  "isocast-protocol",
  "isocast-surfaces",
  "libc",
@@ -3115,6 +3114,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "wgpu",
  "windows-sys 0.61.2",
 ]

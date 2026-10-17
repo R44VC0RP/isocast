@@ -490,6 +490,10 @@ export component ClipBar inherits Rectangle {
 
     // The playhead (at the end, where the next take lands, unless placed).
     property <float> playhead: CreateArea.playhead < 0 ? root.total : min(CreateArea.playhead, root.total);
+    // The playhead's time chip (or the record head's REC) on the ruler, in
+    // the lanes' coordinates; none when neither shows.
+    property <length> head-chip-x: root.rolling ? root.x-of(root.span) - root.sx - 19px : max(0px, root.x-of(root.playhead) - root.sx - 20px);
+    property <length> head-chip-w: root.rolling ? 38px : CreateArea.has-timeline ? 41px : 0px;
     // A clip's end being dragged (C.3): its index, which end, how far.
     property <int> trim-from: -1;
     // A trim or roll let go is shown where it was dropped until the
@@ -1144,11 +1148,15 @@ export component ClipBar inherits Rectangle {
                 height: tick.major ? 7px : 4px;
                 background: Theme.line-strong;
             }
+            // Not drawn where it would be cut at the lanes' right edge or
+            // under the playhead's (or record head's) time (#108).
             if tick.major: TimeText {
                 x: 4px;
                 y: 2px;
                 height: 12px;
                 seconds: tick.n / 4 * root.label-s;
+                visible: tick.x + self.x + self.preferred-width <= root.lane-w
+                    && (tick.x + self.x + self.preferred-width + 2px <= root.head-chip-x || tick.x + self.x >= root.head-chip-x + root.head-chip-w + 2px);
             }
         }
 

@@ -166,7 +166,7 @@ pub(super) fn run<P: Platform>(
     epoch: Time,
     stop: impl Fn() -> bool,
 ) -> anyhow::Result<()> {
-    let gpu = Gpu::new()?;
+    let gpu = Gpu::for_platform(platform)?;
     // Each watched scene's compositor, the scenes version it adopted, and
     // when the scene is next due.
     let mut drawing: HashMap<Arc<str>, (Compositor<P>, u64, Instant)> = HashMap::new();
@@ -221,8 +221,11 @@ pub(super) fn run<P: Platform>(
                 scene: id.clone(),
                 from: None,
             };
-            if let Some((frame, _)) = compositor.draw(Feed::Preview, Some(&scene), tick, tick)? {
-                slot.push(frame, tick);
+            if let Some((frame, _)) =
+                compositor.draw(Feed::Preview, Some(&scene), tick, tick, true)?
+            {
+                let slot = slot.clone();
+                frame.then(move |(rgb, _), _| slot.push(rgb, tick));
                 if !std::mem::replace(&mut drew, true) {
                     feeds.recovered();
                 }

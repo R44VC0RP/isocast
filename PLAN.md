@@ -486,6 +486,14 @@ come later (clips already carry in/out points on their take).
     caches evict old keys; offline clips show "Offline"; deterministic
     editor motion suite in CI.
 
+- [x] **C.5 Export to Final Cut Pro, Premiere Pro and Resolve (#104).**
+  `timeline_export_nle` (CLI `isocast timeline export --nle
+  fcpxml|xmeml|otio [--app final_cut|premiere|resolve] [--output]`, MCP
+  `export_timeline_nle`, the editor's File › Export › For Final Cut Pro /
+  Premiere Pro / DaVinci Resolve… / OpenTimelineIO…): a project pointing
+  at the takes' own files, every ISO on its own track with the program on
+  top, the clip's angle the one on, crops, markers, audio per file.
+
 ### S. Stress testing and performance (Ryan, 2026-10-13)
 
 - [ ] **S.1 Head-to-head with OBS.** A repeatable benchmark that runs the
@@ -552,6 +560,21 @@ come later (clips already carry in/out points on their take).
 - [ ] **S.3 Astra optimization rounds.** GPT-6 Astra (opencode, xhigh)
   sessions with S.1/S.2 as their measuring stick, one hot path at a time,
   until Isocast beats OBS on every measure we can control.
+  - [ ] **S.3 #26/#29 Shared GPU and upstream ISO admission.** One device
+    per process, bounded asynchronous GPU hand-offs, BGRA native monitors,
+    and ISO admission before conversion.
+    - [x] Implementation and remote release/workspace gates.
+    - [x] M2 paired A/B, strict e2e, cycles/disk/ISO stress, native surface
+      and virtual-camera readback. Final program/stream/ISO drops are zero
+      in all three benchmark workloads; memory trade-offs are measured.
+    - [x] Tier-1 first review (3f327f7): merge with follow-ups.
+    - [x] Fix round 1: timeout/lost-device recovery, coordinator-published
+      ISO split demand, H.264 monitor readbacks; main 603c3ac integrated,
+      remote gates and strict e2e 18/18 pass. Overloaded split cycles account
+      all ticks in 152 files; quick A/B plus longer multiwindow confirmation
+      keep every protected output whole, with no material performance change.
+    - [ ] Coordinator re-review and completion of the uncommitted merge.
+      Handoff: `perf-gpu/scratch/REPORT.md`, Fix round 1.
   - [x] **S.3a Recording-stop latency.** Finalize when the last video frame
     and all audio arrive, retaining the late-input allowance. Four paired
     rounds against main and OBS on M4 Max and M2; normal files complete,
@@ -1463,10 +1486,9 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 
 ### W. Windows port (Ryan, 2026-10-17; GitHub #105)
 
-This supersedes Windows being parked under N.4 and section 9. Use GitHub
-Actions' Windows runners only until Windows reaches the macOS alpha bar
-(`docs/alpha-test.md`), with hardware-only checks explicitly outstanding;
-then Ryan supplies a Windows machine. Stop for delegator review/merge after
+This supersedes Windows being parked under N.4 and section 9. Use the native
+exon-desk loop (exclusively assigned to this lane) and GitHub Actions as the
+clean-machine milestone check. Stop for delegator review/merge after
 each milestone. Shared recording changes are Tier 1 and must preserve
 macOS behavior; Windows-only code is Tier 2. Merge current main between
 slices, especially alongside the GPU, vertical-canvas and editor lanes.
@@ -1491,7 +1513,7 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
     non-Unix exclusive manifest creation without changing the Unix path;
     build engine/test binaries on Windows without running them. Preserve
     all durability errors (Windows recording/flush qualification is W.2).
-  - [ ] **W.1b Daemon platform selection.** One concrete platform alias and
+  - [x] **W.1b Daemon platform selection.** One concrete platform alias and
     a fail-closed stub behind `Platform`; replace per-call macOS shims
     mechanically, preserving dispatch and lifecycle on Mac.
   - [x] **W.1c OS services and IPC compile seam.** Platform hooks for
@@ -1500,9 +1522,17 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
     W.6); macOS retains native Unix socket types and plugin sandbox policy.
     Windows process plugins/shared surfaces remain explicitly unsupported.
     Native build/clippy/tests, CLI/MCP and Mac gates/e2e/bench verified;
-    clean-machine Actions daemon/CLI build awaits the coordinator.
-  - [ ] **W.1d CLI as a client.** Isolated-daemon `record`, remove direct
-    platform calls, preserve CLI/API/MCP behavior; Windows build-only gate.
+    clean-machine Actions run 39060641784 passes portable Windows/Ubuntu
+    and the Windows daemon/CLI build.
+  - [x] **W.1d CLI as a client.** Isolated-daemon `record`, no CLI native
+    capture/recording/capacity calls. Parent-death finalization, real child
+    reaping and old-daemon handshake; same API/MCP. Mac lifecycle/edge probes,
+    strict e2e, gates and measured foreground A/B pass; Windows control path
+    and owned-child lifetime pass (recording still refused by the stub).
+    Actions remains build-only; coordinator commit/CI next. Extra process
+    costs about 44 ms warm startup and 45 MiB RSS on M2-a; no memory/timing
+    equivalence claim. W.6 must port Windows XML NLE file URLs (OTIO works
+    through its existing plain-path seam; XML is explicitly refused).
   - [ ] **W.1e UI platform seam.** Keep macOS window/media integration
     behind its native seam; explicit Windows stubs and a Windows UI build.
 - [ ] **W.2 Cross-platform writer.** Prefer extracting the existing
@@ -1519,19 +1549,33 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   extend existing checks first, obtain approval before new test files.
 - [ ] **W.4 Windows synthetic platform.** Add `isocast-platform-windows`:
   clock, bounded BGRA/YUV frames, importer, synthetic sources and W.2 writer.
-  Software Media Foundation H.264/AAC for hosted recording; fail clearly
+  Prefer hardware MF/NVENC when available, software only as last resort for
+  hosted recording; fail clearly
   for unsupported devices/codecs. A synthetic program and ISOs produce
   decodable, aligned files on windows-latest, with honest loss counters.
 - [ ] **W.5 Capture, audio and encoders.** Windows.Graphics.Capture for
   screens/windows, Media Foundation cameras, WASAPI input/loopback/output,
-  MF/NVENC/QSV/AMF capability selection, permissions and reconnects. Exercise
+  NVENC-first, hardware MF (NVENC/QSV/AMF) fallback, software last;
+  permissions and reconnects. WGC D3D11 textures stay GPU-resident through
+  D3D11/DX12 shared-surface interop with wgpu and DirectX-resource NVENC
+  input: no hot-path CPU pixel readback. Async low-latency encode tuned for
+  recording quality; per-ISO sessions within detected RTX 5070/driver limits,
+  retaining program priority and ISO shedding. Exercise
   everything runners expose; list hardware paths unqualified rather than
   treating synthetic or software-encoder success as hardware evidence.
+  From W.5 every milestone reports exon-desk versus OBS on matched scenes
+  at 1080p60 and 4K60 with ISOs: launch-to-first-preview, ready-to-record,
+  start-record latency, CPU/GPU/memory and dropped frames. Install isolated
+  OBS as a permitted test dependency, never use Ryan's OBS profile.
 - [ ] **W.6 App, IPC and shared surfaces.** Slint Windows window and native
   integration, same-user named pipes with isolated engines, D3D11/D3D12
   surface hand-over/fences with adapter identity and bounded per-viewer
   lifetime. Verify CLI/MCP/app use the one API, client death/resize/stalls
   cannot corrupt frames or stop recording, and shutdown cleans resources.
+  Measure first preview and ready-to-record before setting latency targets;
+  lazy initialization, parallel device opens and pre-warm must keep blocking
+  work off the UI thread. Performance is a design requirement, not a later
+  optimization pass.
 - [ ] **W.7 Packaging and updates.** Choose MSIX or installer; reproducible
   install/upgrade/uninstall, correct paths and per-user state, verified
   update authenticity and rollback. Build/test packages on runners; signing
@@ -1559,6 +1603,20 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- W.1d (2026-10-17, #105 #28): `record` now uses a private, parent-owned
+  daemon; the CLI no longer depends on MacPlatform. Same report/exit behavior,
+  killed-owner finalization, concurrent isolated runs and untouched default
+  daemon verified on M2-a. Twenty auto-stop/SIGINT races return 20 reports;
+  a forced cleanup failure still prints the completed report; private
+  engines register no global hotkeys, old daemons are refused before Start.
+  Full remote gates: 232 unit + 1 doctest pass, 1 existing hardware ignore;
+  Windows: 190 unit tests and strict scoped clippy pass; strict e2e18/18.
+  Three interleaved 1080p60 program+2ISO pairs: CPU44.8->44.2%, all18 files
+  whole, no video/audio loss; warm start callback264->308ms, RSS128->173MiB.
+  Startup retry/exit waiting reduced new callback353->308ms and setupcheck
+  155->70ms (base40ms), capacity JSON identical. Main a9b661f merge staged
+  separately; feature unstaged for coordinator. W.1c Actions39060641784 green.
 
 - W.1c (2026-10-17, #105 #28): native Windows loop syncs tracked worktree
   bytes to exon-desk with warm caches and returns exit codes/logs/binaries.
@@ -1597,6 +1655,16 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   tests + 1 doctest pass (1 existing hardware test ignored). Windows engine
   build-only qualification remains the next Actions run.
 
+- #108/#109 (2026-10-17): the first layout audit's 11 issues fixed (narrow
+  Controls/source toolbar/mixer/vertical head adapt, source child names
+  use the empty ISO lane, ruler labels skip the playhead chip and the
+  edge, wider encoder popup, middle-elided paths, multiview outer margin);
+  re-audit of 482 pictures: none of the 11 left except an ellipsised child
+  name at the 900px minimum; visual diff changes only at 900 wide and the
+  encoder row. A scene without a vertical arrangement is now letterboxed
+  (fitted, centred): real M2-a recording, cropdetect 1080:608:0:656 on all
+  three vertical takes; e2e vertical PASS, 0/578 drops.
+
 - 8.2l / #106 (2026-10-17): release notes from docs/releases/X.Y.Z.md
   (0.0.5 and 0.0.6 added; body + Full Changelog reproduces both published
   bodies byte for byte); preflight fails on a missing/empty/Changelog-only
@@ -1605,6 +1673,15 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   signature, notes embedded, only appcast.xml uploaded; tampered feeds,
   drafts, wrong version/key/checksum and extra assets refused.
   actionlint and shellcheck clean.
+- S.3 #26/#29 implementation (2026-10-17): one process GPU, completion
+  hand-offs and pre-conversion ISO admission; final remote gates clean,
+  strict e2e 17/17, cycles/disk/ISO stress and native readbacks pass. Final
+  three-pair multiwindow A/B: daemon 71.6→66.2% CPU, GPU 580.7→483.3 ms/s,
+  0 program/ISO drops in 3×64 s takes; live footprint 305.6→438.1 MiB.
+  Flagship and dual CPU roughly flat/slightly higher, all protected outputs
+  and audio whole. Tier-1 review/commit remain with the coordinator; see
+  `/Volumes/IsocastBuild/perf-gpu/scratch/REPORT.md`.
+
 - #96 / 0.0.7 (2026-10-17): canvas-scoped stream failures, atomic poison
   recovery state, quiet ended-stream Stop, missing-tail frame counts,
   vertical replay and virtual camera. M2-a: fault/poison healthy outputs
@@ -4314,6 +4391,13 @@ One line per finished task, newest last.
   Apple Virtual Sound Device records the same PCM as main; an aggregate
   going 18 -> 2 mid-take keeps the source running (logged), 18 -> 16
   keeps tones 1 and 2 exact.
+- C.5 (2026-10-17, #104): `timeline_export_nle` writes FCPXML 1.10, xmeml 5
+  and OTIO pointing at the takes' files. e2e edit: every track of all five
+  variants matches Isocast's export frame by frame (788 frames each);
+  FCPXML valid against the 1.10 DTD; OTIO's adapters read the xmeml, FCPXML
+  and OTIO alike. DaVinci Resolve 21.1.1 (free, isocast-m2-b) renders the
+  Resolve xmeml frame for frame as the EDITED file (0/212 off, >= 46 dB,
+  same level), angles of other sizes and crops included; markers land.
 - #103 (2026-10-17): a folder a plugin's request gives (`start{folder}`,
   `recording.folder` via `apply`/`start{setup}`/`init_setup`, an imported
   profile's) must already be a recordings folder (or `~/Movies/Isocast`),

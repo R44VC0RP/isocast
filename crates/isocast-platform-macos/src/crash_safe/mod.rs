@@ -39,7 +39,7 @@ use self::mp4::{AAC_PRIMING, FragmentTrack, MOVIE_TIMESCALE, Track, TrackKind};
 use crate::PixelBuffer;
 use crate::stream::AacEncoder;
 use crate::writer::{
-    EncoderPressure, ISO_SHARE, PENDING_ISO, PENDING_VIDEO, PRIORITY_OUTPUTS, PRIORITY_PRESSURE,
+    EncoderPressure, PENDING_ISO, PENDING_VIDEO, PRIORITY_OUTPUTS, PRIORITY_PRESSURE,
     cancel_encoder_start, claim_encoder_start, encoder_start_rank, request_encoder_start,
 };
 
@@ -137,7 +137,6 @@ pub struct CrashSafeWriter {
     /// A native video submission exceeded its frame budget. Keep this
     /// pressure through audio-only drains until the next video submission.
     submission_stalled: bool,
-    iso_credit: u32,
     fragment: Fragment,
     held: Option<Held>,
     format: Option<SampleFormat>,
@@ -226,7 +225,6 @@ impl CrashSafeWriter {
             last_video: None,
             priority: None,
             submission_stalled: false,
-            iso_credit: 0,
             fragment: Fragment::default(),
             held: None,
             format: None,
@@ -265,20 +263,14 @@ impl CrashSafeWriter {
         } else {
             PENDING_VIDEO
         };
+        // The engine admits ISO frames by the ISO share before drawing
+        // them (#29). Pressure that rose since then still pauses them.
         if self.priority.is_none()
             && self.last_video.is_some()
-            && PRIORITY_OUTPUTS.load(Ordering::Relaxed) > 0
+            && PRIORITY_PRESSURE.load(Ordering::Relaxed) > 0
         {
-            if PRIORITY_PRESSURE.load(Ordering::Relaxed) > 0 {
-                self.drain_ready(false)?;
-                return Ok(false);
-            }
-            self.iso_credit += ISO_SHARE.load(Ordering::Relaxed);
-            if self.iso_credit < 1000 {
-                self.drain_ready(false)?;
-                return Ok(false);
-            }
-            self.iso_credit -= 1000;
+            self.drain_ready(false)?;
+            return Ok(false);
         }
         if self.pending_video.len() >= limit {
             self.drain_ready(false)?;
@@ -712,6 +704,10 @@ impl FileWriter for CrashSafeWriter {
 
     fn append_video(&mut self, frame: &PixelBuffer, pts: Time) -> Result<bool> {
         autoreleasepool(|_| self.append_frame(frame, pts))
+    }
+
+    fn skip_video(&mut self) -> Result<()> {
+        autoreleasepool(|_| self.drain_ready(false))
     }
 
     fn queue_depth(&self) -> usize {

@@ -1091,6 +1091,10 @@ Options:
       --folder <FOLDER>      Write the files here (made if missing); else next to the first clip's take
       --vertical             Also write a vertical (9:16) edited file: each clip's picture or crop fitted into the program's size on its side (1080x1920 for 1080p), so a 9:16 crop fills it
       --background           Return once it has started; `isocast watch --kinds export_progress,export_finished` follows it
+      --nle <FORMAT>         Instead, write a project another editor opens, pointing at the takes' own files (nothing is encoded or copied): fcpxml (Final Cut Pro), xmeml (Premiere Pro; DaVinci Resolve with --app resolve) or otio (OpenTimelineIO). Every ISO source on its own track with the program on top, each clip's angle the one on [possible values: fcpxml, xmeml, otio]
+      --app <APP>            With --nle: the editor it is for: final_cut (fcpxml's default), premiere (xmeml's) or resolve (with xmeml: Resolve's picture scale and a track per audio channel) [possible values: final_cut, premiere, resolve]
+      --output <PATH>        With --nle: write exactly this file (ending in .fcpxml, .xml or .otio); one already there is replaced only if it is an earlier Isocast timeline export, or with --replace
+      --replace              With --output: replace whatever file is there
       --json                 
   -h, --help                 Print help
 ```

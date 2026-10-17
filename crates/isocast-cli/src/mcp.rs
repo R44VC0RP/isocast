@@ -34,10 +34,11 @@ use isocast_protocol::project::{
 };
 use isocast_protocol::stream::StreamService;
 use isocast_protocol::timeline::{
-    ExportStarted, RetakeParams, Retaken, TimelineAngleParams, TimelineClosed, TimelineCropParams,
-    TimelineExportParams, TimelineInfo, TimelineList, TimelineMoveParams, TimelineNewParams,
-    TimelineOpenParams, TimelineRangeParams, TimelineRelinkParams, TimelineRemoveParams,
-    TimelineRollParams, TimelineSplitParams, TimelineTarget, TimelineTrimParams,
+    ExportStarted, NleExported, RetakeParams, Retaken, TimelineAngleParams, TimelineClosed,
+    TimelineCropParams, TimelineExportNleParams, TimelineExportParams, TimelineInfo, TimelineList,
+    TimelineMoveParams, TimelineNewParams, TimelineOpenParams, TimelineRangeParams,
+    TimelineRelinkParams, TimelineRemoveParams, TimelineRollParams, TimelineSplitParams,
+    TimelineTarget, TimelineTrimParams,
 };
 use isocast_protocol::{CanvasId, Setup, Transition};
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -1096,6 +1097,34 @@ impl Isocast {
         Parameters(Strict(params)): Parameters<Strict<TimelineExportParams>>,
     ) -> Result<Json<ExportStarted>, String> {
         self.call(Method::TimelineExport(Some(params))).await
+    }
+
+    #[tool(
+        description = "Write a timeline (the current one unless `timeline` is given) as a \
+                       project another editor opens: `format` fcpxml (Final Cut Pro), xmeml \
+                       (Premiere Pro; with `app` resolve, DaVinci Resolve) or otio \
+                       (OpenTimelineIO). Every ISO source \
+                       on its own video track with the program on top, each clip's angle the \
+                       one track on at that clip, crops as crop and transform, markers, and each file's \
+                       audio on its own tracks (the program's on, the ISO files' off), lined up \
+                       from the take manifests. It points at the takes' own files: nothing is \
+                       encoded, copied or changed. Written next to the first take (or in \
+                       `folder`, numbered so nothing is overwritten), or exactly at `path` \
+                       (replacing an earlier Isocast export there, or any file with \
+                       `replace`). \
+                       Returns the file, its tracks and notes on anything not as in Isocast's \
+                       export.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    async fn export_timeline_nle(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<TimelineExportNleParams>>,
+    ) -> Result<Json<NleExported>, String> {
+        self.call(Method::TimelineExportNle(params)).await
     }
 
     #[tool(
@@ -2324,7 +2353,8 @@ Text in scenes can show a data key (`data = \"score.home\"`); set_data changes i
 Timelines line takes up like a clip bar: new_timeline makes one current, and every take that \
 finishes is added to it; retake records the last one again, remove_clip and move_clip edit \
 it, trim_clip, split_clip, delete_range, roll_cut, set_angle and crop_clip cut it (undo_edit, \
-redo_edit; takes' files are never touched), export_timeline joins it into one file. \
+redo_edit; takes' files are never touched), export_timeline joins it into one file, and \
+export_timeline_nle writes it as a Final Cut Pro, Premiere Pro or Resolve project. \
 Each recording session writes into its own project folder; list_projects finds them and \
 rename_project names one once it has stopped. Each has a `<name>.isoprj` project file that \
 open_project opens in the editor, wherever the folder was copied (recent_projects lists those \

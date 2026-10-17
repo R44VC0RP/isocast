@@ -703,6 +703,12 @@ pub trait FileWriter: Send {
     /// `false` if the encoder could not keep up and the frame was dropped.
     fn append_video(&mut self, frame: &Self::Frame, pts: Time) -> anyhow::Result<bool>;
 
+    /// Admission skipped a picture upstream. Make the same progress on
+    /// previously accepted work as a refused append, without new pixels.
+    fn skip_video(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Video frames waiting inside the writer for its encoder, for
     /// developer mode's traces.
     fn queue_depth(&self) -> usize {

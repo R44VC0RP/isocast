@@ -102,6 +102,9 @@ component IsoToggle inherits Rectangle {
 export component SourcesDock inherits Dock {
     // Under this, rows without ISO give the lane's 40px to their names.
     property <bool> narrow: root.width < Theme.narrow-dock;
+    // A narrow dock indents a group's items less, so their names keep the
+    // room (#112).
+    property <length> indent: root.narrow ? 8px : 16px;
     property <int> current: -1;
     property <int> drag-from: -1;
     property <int> drop-at: -1;
@@ -158,10 +161,15 @@ export component SourcesDock inherits Dock {
             row := ListRow {
                 text: item.name;
                 trailing-pad: Theme.space-1;
+                // A row without ISO (a box, text, a group's child): its name
+                // runs on into the empty ISO lane (and its gap, the lane
+                // being 0 wide in a narrow dock) before it elides.
+                label-room: !item.can-iso && item.state != "failed" && item.state != "waiting for permission" && item.state != "opening" ? (root.narrow ? 0px : Theme.lane) + Theme.space-2 : 0px;
                 icon: Icons.named(item.icon);
                 selected: parent.chosen || item.marked;
                 dim: !item.visible;
                 depth: item.depth;
+                indent: root.indent;
                 description: item.state == "failed" || item.state == "waiting for permission" ? item.error : item.visible ? "" : "Hidden";
                 index: i;
                 count: SourcesArea.items.length;
@@ -271,7 +279,7 @@ export component SourcesDock inherits Dock {
 
             // A group's chevron folds it away.
             if item.group: TouchArea {
-                x: Theme.pane-x + item.depth * 16px;
+                x: Theme.pane-x + item.depth * root.indent;
                 width: Theme.icon;
                 mouse-cursor: pointer;
                 clicked => { SourcesArea.toggle-group(item.path); }
@@ -297,7 +305,7 @@ export component SourcesDock inherits Dock {
             }
 
             if SourcesArea.renaming-item == item.path: TextField {
-                x: Theme.pane-x + item.depth * 16px + Theme.icon + Theme.space-2 - 5px;
+                x: Theme.pane-x + item.depth * root.indent + Theme.icon + Theme.space-2 - 5px;
                 y: (parent.height - self.height) / 2;
                 width: parent.width - self.x - Theme.space-1;
                 small: true;

@@ -73,14 +73,16 @@ export component ProjectorWindow inherits Window {
         }
 
         for tile[index] in root.tiles: cell := Rectangle {
-            // A multiview's tiles sit 4px apart and 4px in; each has its
-            // viewer line above the picture.
+            // A multiview's tiles sit 4px apart and 12px in from every
+            // edge (the bottom row no longer touches the window's edge,
+            // #108); each has its viewer line above the picture.
             property <length> gap: root.multiview ? Theme.space-1 : 0px;
+            property <length> pad: root.multiview ? Theme.space-3 : 0px;
             property <length> head: root.multiview ? Theme.statusbar : 0px;
-            property <length> cell-x: tile.x * (root.width - self.gap) + self.gap;
-            property <length> cell-y: tile.y * (root.height - self.gap) + self.gap;
-            property <length> cell-w: tile.w * (root.width - self.gap) - self.gap;
-            property <length> cell-h: tile.h * (root.height - self.gap) - self.gap;
+            property <length> cell-x: self.pad + tile.x * (root.width - 2 * self.pad + self.gap);
+            property <length> cell-y: self.pad + tile.y * (root.height - 2 * self.pad + self.gap);
+            property <length> cell-w: tile.w * (root.width - 2 * self.pad + self.gap) - self.gap;
+            property <length> cell-h: tile.h * (root.height - 2 * self.pad + self.gap) - self.gap;
             // The picture, as large as fits under its viewer line, centred.
             property <length> room-h: max(0px, self.cell-h - self.head);
             property <length> pic-w: min(self.cell-w, self.room-h * root.aspect);

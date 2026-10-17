@@ -29,6 +29,5 @@ toml = "1.1.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 isocast-client = { path = "../isocast-client", features = ["wgpu"] }
-isocast-platform-macos = { path = "../isocast-platform-macos" }
 isocast-surfaces = { path = "../isocast-surfaces" }
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"] }

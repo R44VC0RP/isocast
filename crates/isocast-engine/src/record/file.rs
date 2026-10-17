@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SendError, Sender};
 use std::thread;
 
@@ -110,9 +110,62 @@ pub(super) struct Done {
     pub result: Result<FileReport>,
 }
 
+/// From which frame time an ISO file's frame clock must send every picture,
+/// whatever admission says (see `IsoOutput`): a file starts on a picture,
+/// and so does the next take's at a split. Nanoseconds, the earlier of two
+/// demands, so neither side's update can erase the other's.
+pub(super) struct IsoDemand {
+    /// The writer thread's: every picture until its file starts (`MIN`),
+    /// from a split it has received until the next take's file starts, and
+    /// none otherwise (`MAX`).
+    writer: AtomicI64,
+    /// A split sent to the writer thread whose take hasn't started yet,
+    /// published by the recording before the thread can receive it, so a
+    /// backlogged thread can't leave the split's ticks to admission (#29).
+    /// `MAX` if none.
+    split: AtomicI64,
+}
+
+impl Default for IsoDemand {
+    fn default() -> Self {
+        Self {
+            writer: AtomicI64::new(i64::MIN),
+            split: AtomicI64::new(i64::MAX),
+        }
+    }
+}
+
+impl IsoDemand {
+    pub(super) fn from(&self) -> i64 {
+        self.writer
+            .load(Ordering::Acquire)
+            .min(self.split.load(Ordering::Acquire))
+    }
+
+    /// A split at `at` is about to be sent: call before sending it. A
+    /// later split replaces an earlier one still unstarted, which can only
+    /// be sent once that one's time is a take's length past.
+    pub(super) fn split_sent(&self, at: Time) {
+        self.split.store(at.as_nanos(), Ordering::Release);
+    }
+
+    /// The split at `at` started its take, or never will: stop asking for
+    /// every picture for it, unless a later split has replaced it.
+    pub(super) fn split_settled(&self, at: Time) {
+        let _ = self.split.compare_exchange(
+            at.as_nanos(),
+            i64::MAX,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+    }
+}
+
 /// Write file `index` of each take from the packets its sources send, until
 /// they stop. At a split, the current file ends exactly at the split time
 /// and the next take's file continues from there; the sources never stop.
+/// `wanted` says from which frame time on an ISO file's frame clock must
+/// send every picture, whatever admission says (see `IsoDemand`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn write_files<W: FileWriter>(
     writer: W,
@@ -125,9 +178,23 @@ pub(super) fn write_files<W: FileWriter>(
     clock: Arc<RecordingClock>,
     missed_audio: Arc<AtomicU64>,
     source: Option<Arc<FrameSlot<W::Frame>>>,
+    wanted: Arc<IsoDemand>,
 ) where
     W::Frame: Clone,
 {
+    // Explicit isolated, developer-only fault injection: an ISO file's writer thread stalls this
+    // long as it receives a split, as one backlogged past the split's lead.
+    let split_stall = (!super::is_program(&plan.source)
+        && isocast_diagnostics::developer()
+        && std::env::var_os("ISOCAST_SOCKET").is_some())
+    .then(|| {
+        std::env::var("ISOCAST_DEBUG_SPLIT_STALL_MS")
+            .ok()?
+            .parse::<u64>()
+            .ok()
+    })
+    .flatten()
+    .map(std::time::Duration::from_millis);
     thread::scope(|scope| {
         // Finishing a file can take a while (writing its final movie
         // header), so it happens on its own thread while the next take's
@@ -187,6 +254,9 @@ pub(super) fn write_files<W: FileWriter>(
                     && draining.is_none()
                     && let Some(split) = splits.try_recv()
                 {
+                    if let Some(stall) = split_stall {
+                        thread::sleep(stall);
+                    }
                     next = Some((
                         split.at,
                         split.take,
@@ -203,6 +273,9 @@ pub(super) fn write_files<W: FileWriter>(
                             && at < end
                         {
                             let (at, next_take, new) = next.take().expect("checked");
+                            // This picture starts the take; `from` below
+                            // stops asking for every one.
+                            wanted.split_settled(at);
                             let mut old = std::mem::replace(&mut file, new);
                             // The ending take's pictures are all in: put them
                             // on disk now rather than when its last audio
@@ -235,7 +308,22 @@ pub(super) fn write_files<W: FileWriter>(
                             }
                             take = next_take;
                         }
-                        (file.video(&frame, pts, end), pts)
+                        (file.video(Some(&frame), pts, end), pts)
+                    }
+                    // A tick ISO admission left out before drawing it: kept
+                    // like a frame the encoder refused. A pending take starts
+                    // on a picture, never on a skipped tick (from the split
+                    // on, `wanted` asks for every picture).
+                    Packet::Skipped { pts } => {
+                        let switching = next
+                            .as_ref()
+                            .is_some_and(|(at, ..)| pts >= *at && *at < end);
+                        let result = if switching {
+                            Ok(())
+                        } else {
+                            file.video(None, pts, end)
+                        };
+                        (result, pts)
                     }
                     Packet::Audio {
                         track,
@@ -261,6 +349,15 @@ pub(super) fn write_files<W: FileWriter>(
                         (result, pts)
                     }
                 };
+                // From when ISO admission must hand over every picture: a
+                // file starts on its first one, so any tick while it hasn't,
+                // and from a pending split's time until the next take's has.
+                let from = match &next {
+                    _ if file.start.is_none() => i64::MIN,
+                    Some((at, ..)) => at.as_nanos(),
+                    None => i64::MAX,
+                };
+                wanted.writer.store(from, Ordering::Release);
                 file.plan.audio_dropouts.store(
                     file.lost_packets + file.tracks.iter().map(|t| t.dropouts).sum::<u64>(),
                     Ordering::Relaxed,
@@ -353,16 +450,17 @@ pub(super) fn write_files<W: FileWriter>(
         // Closing refuses further handoffs while the native finalizers are
         // still closing, so none can enter a receiver never read again.
         let never: Vec<_> = next
-            .map(|(_, take, file)| (take, file.writer))
+            .map(|(at, take, file)| (at, take, file.writer))
             .into_iter()
             .chain(
                 splits
                     .close()
                     .into_iter()
-                    .map(|split| (split.take, split.writer)),
+                    .map(|split| (split.at, split.take, split.writer)),
             )
             .collect();
-        for (take, writer) in never {
+        for (at, take, writer) in never {
+            wanted.split_settled(at);
             writer.cancel();
             let _ = done.send(Done {
                 take,
@@ -464,8 +562,9 @@ impl<W: FileWriter> OpenFile<W> {
     }
 
     /// Append a frame; frames at or after `end`, or before the file's start,
-    /// are left out.
-    fn video(&mut self, frame: &W::Frame, pts: Time, end: Time) -> Result<()> {
+    /// are left out. `None`: admission skipped the tick, which counts as a
+    /// refused frame (a file starts only on a picture).
+    fn video(&mut self, frame: Option<&W::Frame>, pts: Time, end: Time) -> Result<()> {
         self.newest_input = Some(pts);
         if crate::trace::on() {
             self.trace_age = crate::trace::OutputTrace::age(pts);
@@ -481,12 +580,15 @@ impl<W: FileWriter> OpenFile<W> {
         self.video_mapped(frame, pts, end)
     }
 
-    fn video_mapped(&mut self, frame: &W::Frame, pts: Time, end: Time) -> Result<()> {
+    fn video_mapped(&mut self, frame: Option<&W::Frame>, pts: Time, end: Time) -> Result<()> {
         self.last_video = Some(pts);
         if pts >= end || self.start.is_some_and(|start| pts < start) {
             return Ok(());
         }
         if self.start.is_none() {
+            if frame.is_none() {
+                return Ok(());
+            }
             self.writer.start(pts)?;
             if crate::trace::on() {
                 self.trace.started(pts);
@@ -499,7 +601,10 @@ impl<W: FileWriter> OpenFile<W> {
             }
         }
         let submit = crate::trace::on().then(std::time::Instant::now);
-        let appended = self.writer.append_video(frame, pts);
+        let appended = match frame {
+            Some(frame) => self.writer.append_video(frame, pts),
+            None => self.writer.skip_video().map(|()| false),
+        };
         if let Some(at) = submit {
             self.trace.frame(
                 self.trace_age.take(),

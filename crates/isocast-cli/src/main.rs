@@ -1,17 +1,16 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use isocast_client::DaemonError;
-use isocast_engine::record::{LiveStatus, RecordOptions, Report};
 use isocast_protocol::api::{
     Applied, ApplyParams, Capacity, CapacityEstimate, CapacityParams, CheckStatus, DoctorParams,
     EngineInfo, EngineState, Event, EventKind, Frame, FrameParams, FramesParams, ImportObsParams,
-    Live, Marked, Method, Plan, Refreshed, RpcError, Snapshot, SnapshotParams, SourceRun,
+    Live, Marked, Method, Plan, Refreshed, Report, RpcError, Snapshot, SnapshotParams, SourceRun,
     StartParams, Started, Status, StreamDestinationParams, StreamDestinations, StreamKey,
     StreamKeyParams, StreamKeyTarget, StreamStartParams, Streaming, Switched, TuneParams, Tuning,
     WatchParams,
@@ -34,6 +33,7 @@ mod optimize;
 mod plugin;
 mod project;
 mod projector;
+mod record;
 mod replay;
 #[cfg(target_os = "macos")]
 mod shared_frames;
@@ -1025,8 +1025,8 @@ fn main() -> ExitCode {
         }
     };
     // `isocast get | head` should end quietly when the reader goes away, as
-    // other tools do, not panic on the closed pipe. Not for an in-process
-    // recording (its files must finish) or the MCP server.
+    // other tools do, not panic on the closed pipe. Not for foreground
+    // recording (wait for its files to finish) or the MCP server.
     #[cfg(unix)]
     if !matches!(cli.command, Command::Record { .. } | Command::Mcp) {
         // SAFETY: setting a signal's disposition before any threads start.
@@ -1819,7 +1819,42 @@ fn check(path: &Path, json: bool) -> Result<ExitCode> {
 /// Whether `setup`'s files fit this Mac's encoders, by per-chip data.
 #[cfg(target_os = "macos")]
 fn capacity_check(setup: &Setup) -> Option<isocast_protocol::api::Check> {
-    isocast_engine::estimate::check(&isocast_platform_macos::MacPlatform, setup, None)
+    let has_video = setup.recording.program.enabled
+        || setup
+            .vertical
+            .as_ref()
+            .and_then(|v| v.recording.as_ref())
+            .is_some_and(|r| r.enabled)
+        || (setup.recording.iso.enabled && !setup.recording.iso.sources.is_empty());
+    if !has_video {
+        return None;
+    }
+    // setup check stays isolated and advisory: an unavailable daemon omits
+    // capacity rather than turning valid syntax into a failed validation.
+    let owner = isocast_client::IsolatedDaemon::launch().ok()?;
+    let checked = (|| {
+        let mut client = owner.connect().ok()?;
+        let params = |stream| {
+            Method::EstimateCapacity(Box::new(CapacityParams {
+                setup: Some(setup.clone()),
+                stream: Some(stream),
+                add_iso: None,
+            }))
+        };
+        let recording: CapacityEstimate = client.call(params(false)).ok()?;
+        let streaming = (setup.stream.is_some()
+            || setup.vertical.as_ref().is_some_and(|v| v.stream.is_some()))
+        .then(|| client.call::<CapacityEstimate>(params(true)).ok())
+        .flatten();
+        Some(isocast_engine::estimate::check_estimates(
+            &recording,
+            streaming.as_ref(),
+        ))
+    })();
+    if let Err(error) = owner.close() {
+        isocast_diagnostics::diagnostic!("warn"; "capacity check cleanup: {error:#}");
+    }
+    checked
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2131,45 +2166,17 @@ fn record(
     json: bool,
 ) -> Result<ExitCode> {
     let setup = resolve_setup(setup, sources)?;
-    let duration = duration(seconds)?;
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let flag = stop.clone();
-    ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
-        .context("could not install the Ctrl-C handler")?;
-    let announce = |paths: &[PathBuf], _manifest: &Path| {
-        if json {
-            return;
-        }
-        match duration {
-            Some(d) => isocast_diagnostics::diagnostic!("Recording for {} s:", d.as_secs_f64()),
-            None => isocast_diagnostics::diagnostic!("Recording, press Ctrl-C to stop:"),
-        }
-        for path in paths {
-            isocast_diagnostics::diagnostic!("  {}", path.display());
-        }
+    duration(seconds)?;
+    let root = std::path::absolute(
+        folder.unwrap_or_else(|| isocast_engine::record::expand_home(&setup.recording.folder)),
+    )?;
+    // Keep the parent's recordings registry, not just the isolated daemon's
+    // temporary one. Project creation and all media I/O now belong to isocastd.
+    let remembered = if isocast_protocol::project::read(&root).is_some() {
+        root.parent().unwrap_or(&root)
+    } else {
+        &root
     };
-    // Warn as soon as a file starts losing frames or audio.
-    let reported = Mutex::new(Vec::<(u64, u64)>::new());
-    let warn = |status: &LiveStatus| {
-        if json {
-            return;
-        }
-        for message in status.new_drops(&mut reported.lock().unwrap()) {
-            isocast_diagnostics::diagnostic!("warn"; "warning: {message}");
-        }
-    };
-    // Into a project folder in the recordings folder, as isocastd records.
-    let root = match folder {
-        Some(folder) => folder,
-        None => isocast_engine::record::expand_home(&setup.recording.folder),
-    };
-    let (project, _, created) = isocast_engine::project::begin(&root)
-        .with_context(|| format!("could not make a project folder in {}", root.display()))?;
-    // The engine lists, recovers and opens to plugins the recordings
-    // folders it remembers: this one too (#56).
-    let absolute = std::path::absolute(&project).unwrap_or_else(|_| project.clone());
-    let remembered = absolute.parent().unwrap_or(&absolute);
     if let Err(err) = isocast_protocol::project::remember_root(remembered) {
         isocast_diagnostics::diagnostic!("warn";
             "warning: could not add {} to the recordings folders isocastd lists ({err}); \
@@ -2177,20 +2184,13 @@ fn record(
             remembered.display()
         );
     }
-    let options = RecordOptions {
-        folder: Some(project.clone()),
-        duration,
-        stop,
-        on_start: Some(&announce),
-        on_status: Some(&warn),
-        on_take: None,
-        control: None,
-    };
-    let report = record_with_platform(&setup, &options);
-    if report.is_err() && created {
-        isocast_protocol::project::discard_if_empty(&project);
+    let (report, cleanup) = record::run(setup, root, seconds, json)?;
+    let code = print_report(&report, json)?;
+    if let Some(error) = cleanup {
+        isocast_diagnostics::diagnostic!("error"; "recording finished, but isolated daemon cleanup failed: {error:#}");
+        return Ok(ExitCode::FAILURE);
     }
-    print_report(&report?, json)
+    Ok(code)
 }
 
 /// Print a session report; failing if the session had errors.
@@ -4338,14 +4338,4 @@ fn parse_monitoring(value: &str) -> Result<isocast_protocol::Monitoring, String>
 /// permissions are the ones that count.
 fn list_devices() -> Result<Devices> {
     Client::connect_or_launch()?.call(Method::Devices)
-}
-
-#[cfg(target_os = "macos")]
-fn record_with_platform(setup: &Setup, options: &RecordOptions) -> Result<Report> {
-    isocast_engine::record::record(&isocast_platform_macos::MacPlatform, setup, options)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn record_with_platform(_setup: &Setup, _options: &RecordOptions) -> Result<Report> {
-    bail!("recording is only supported on macOS so far")
 }

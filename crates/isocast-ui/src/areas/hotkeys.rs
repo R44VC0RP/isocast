@@ -345,11 +345,6 @@ impl HotkeysPage {
         } else {
             format!("Couldn’t read the hotkeys: {problem}").into()
         });
-        let mut warnings: Vec<SharedString> = current.warnings.iter().map(|w| w.into()).collect();
-        if current.pending {
-            warnings.push("macOS is still taking the new keys; they work in a moment.".into());
-        }
-        area.set_bindings_warnings(model(warnings));
         let errors = self.errors.borrow();
         let recording = self.recording.borrow();
         let groups = {
@@ -357,6 +352,30 @@ impl HotkeysPage {
             rows(s.setup.as_deref(), current)
         };
         let labels = self.catalogue.borrow();
+        // The engine's warnings name the binding's field (for agents); the
+        // banner names its row instead (#112).
+        let label_of = |id: &str| {
+            groups
+                .iter()
+                .flat_map(|(_, rows)| rows)
+                .find(|row| row.binding.as_ref().is_some_and(|(b, _)| b == id))
+                .map(|row| {
+                    if row.label.is_empty() {
+                        other_label(labels.as_ref(), &row.action, &row.args)
+                    } else {
+                        row.label.clone()
+                    }
+                })
+        };
+        let mut warnings: Vec<SharedString> = current
+            .warnings
+            .iter()
+            .map(|w| banner_warning(w, &label_of).into())
+            .collect();
+        if current.pending {
+            warnings.push("macOS is still taking the new keys; they work in a moment.".into());
+        }
+        area.set_bindings_warnings(model(warnings));
         area.set_bindings(model(groups.into_iter().map(|(title, rows)| {
             BindingGroup {
                 title: title.into(),
@@ -564,6 +583,28 @@ fn same_args(a: &Value, b: &Value) -> bool {
 }
 
 /// A binding no row shows: the catalogue's label and its arguments.
+/// A warning about binding `hotkeys.ID[.FIELD]: …` as the banner says it:
+/// the binding's row label (`label_of`) in place of its field path, else
+/// just the message.
+fn banner_warning(warning: &str, label_of: &dyn Fn(&str) -> Option<String>) -> String {
+    let Some((path, message)) = warning
+        .strip_prefix("hotkeys.")
+        .and_then(|rest| rest.split_once(": "))
+    else {
+        return warning.to_string();
+    };
+    let id = path.split(['.', ' ']).next().unwrap_or(path);
+    match label_of(id) {
+        Some(label) => format!("{label}: {message}"),
+        None => {
+            let mut chars = message.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(chars).collect()
+            })
+        }
+    }
+}
+
 fn other_label(catalogue: Option<&Catalogue>, action: &str, args: &Value) -> String {
     let label = catalogue
         .and_then(|c| c.actions.iter().find(|a| a.id == action))

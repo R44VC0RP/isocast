@@ -225,6 +225,9 @@ export component Rule inherits Rectangle {
 // `clicked` (the caller shows it, e.g. `Menus.request`).
 export component TextMenuButton inherits Rectangle {
     in property <string> text;
+    // What screen readers call it, if not its text (a menu whose words
+    // make way in a narrow place).
+    in property <string> label;
     in property <string> value;
     in property <bool> enabled: true;
     in property <bool> menu-open;
@@ -242,7 +245,7 @@ export component TextMenuButton inherits Rectangle {
     horizontal-stretch: 0;
     opacity: root.enabled ? 1 : Theme.disabled-opacity;
     accessible-role: button;
-    accessible-label: root.text;
+    accessible-label: root.label != "" ? root.label : root.text;
     accessible-value: root.value;
     accessible-enabled: root.enabled;
     accessible-expandable: true;

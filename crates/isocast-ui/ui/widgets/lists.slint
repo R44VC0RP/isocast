@@ -121,8 +121,9 @@ export component ListRow inherits Rectangle {
     in property <bool> dim;
     // Being dragged to a new place.
     in property <bool> dragging;
-    // Group depth: 16px per level.
+    // Group depth: `indent` (16px) per level.
     in property <int> depth;
+    in property <length> indent: 16px;
     // Kept for callers; Console rows have no marker bar.
     in property <bool> marker: true;
     // The kind icon at rest (`text-2`; the Scenes list's are `text-3`).
@@ -134,6 +135,9 @@ export component ListRow inherits Rectangle {
     in property <int> index;
     in property <int> count;
     in property <length> trailing-pad: Theme.space-1;
+    // Room right of the label its name may run into before it elides: an
+    // empty trailing lane, kept so the controls after it line up (#108).
+    in property <length> label-room;
     // Rows can be dragged to a new place (the list draws where it lands).
     in property <bool> draggable;
     // Draw a state regardless of the pointer (the kit gallery): `hover`.
@@ -220,7 +224,7 @@ export component ListRow inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: Theme.list-inset + Theme.space-2 + root.depth * 16px;
+        padding-left: Theme.list-inset + Theme.space-2 + root.depth * root.indent;
         padding-right: Theme.list-inset + root.trailing-pad;
         spacing: Theme.space-2;
 
@@ -231,16 +235,23 @@ export component ListRow inherits Rectangle {
                 color: root.selected ? Theme.accent-text : root.dim ? Theme.text-disabled : root.icon-color;
             }
         }
-        label := Text {
+        Rectangle {
             horizontal-stretch: 1;
-            text: root.text;
-            color: root.ink;
-            font-size: Theme.fs;
-            font-weight: root.selected ? Theme.weight-medium : Theme.weight-regular;
-            letter-spacing: Theme.tracking;
-            vertical-alignment: center;
-            overflow: elide;
-            accessible-role: none;
+            min-width: 0px;
+            preferred-width: label.preferred-width;
+            label := Text {
+                x: 0px;
+                width: parent.width + root.label-room;
+                height: parent.height;
+                text: root.text;
+                color: root.ink;
+                font-size: Theme.fs;
+                font-weight: root.selected ? Theme.weight-medium : Theme.weight-regular;
+                letter-spacing: Theme.tracking;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
         }
         // Trailing controls (a 40px badge lane, 22px toggles), 8px apart,
         // in the middle of the row (a layout puts a shorter item at the

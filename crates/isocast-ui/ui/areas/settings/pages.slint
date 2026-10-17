@@ -637,7 +637,10 @@ component EncoderRows inherits VerticalLayout {
         label: "Encoder";
         Centred {
             Dropdown {
-                width: Theme.field-choice;
+                // Wide enough for the codec and "Apple VideoToolbox" where
+                // the sheet has room (#108), as narrow as the other choices
+                // where it hasn't.
+                width: max(Theme.field-choice, min(Theme.field-l, root.width - Theme.label-col - Theme.space-3 - Theme.space-1));
                 on-control: true;
                 show-detail: true;
                 options: SettingsArea.codecs;

@@ -24,14 +24,12 @@ use isocast_protocol::ScaleFilter;
 
 use super::frame_stream::{MAX_FPS, Pace, Source, stamp_at};
 use crate::filter::Filters;
-use crate::gpu::{FrameImporter, Gpu};
+use crate::gpu::{FrameImporter, Gpu, InFlight};
 use crate::render::{Layer, Renderer};
 use crate::{Platform, Time};
 
 /// How long to wait for a slot to come back before looking again.
 const WAIT: Duration = Duration::from_millis(50);
-/// How long the GPU may take to draw one frame.
-const DRAW_TIMEOUT: Duration = Duration::from_secs(1);
 /// Surfaces in a ring.
 pub const DEFAULT_SLOTS: u32 = 4;
 pub const MAX_SLOTS: u32 = 8;
@@ -211,7 +209,7 @@ fn run<P: Platform>(
     filters: Option<LiveFilters>,
 ) -> Result<(), String> {
     let failed = |err: anyhow::Error| format!("{err:#}");
-    let gpu = Gpu::new().map_err(failed)?;
+    let gpu = Gpu::for_platform(platform).map_err(failed)?;
     let renderer = Renderer::new(&gpu, wgpu::TextureFormat::Rgba8Unorm);
     let mut importer = platform.frame_importer(&gpu).map_err(failed)?;
     let slots = request.slots.clamp(2, MAX_SLOTS) as usize;
@@ -222,9 +220,14 @@ fn run<P: Platform>(
     // The filters drawn last, and what draws them (made on first use).
     let mut drawn_filters: Vec<Filter> = Vec::new();
     let mut filtering: Option<Filters> = None;
+    let mut in_flight = InFlight::default();
     loop {
         if control.0.closed.load(Ordering::SeqCst) {
             return Ok(());
+        }
+        if !in_flight.available().map_err(failed)? {
+            control.wait(Duration::from_millis(1));
+            continue;
         }
         let pending = control.take();
         if let Some(ring) = &mut ring {
@@ -328,15 +331,16 @@ fn run<P: Platform>(
             ScaleFilter::Bicubic
         };
         let target = &ring.surfaces[index].1;
-        let submission = renderer.render(&gpu, target, &[layer], size);
-        // The viewer's GPU must read a finished picture.
-        gpu.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(DRAW_TIMEOUT),
-            })
-            .map_err(|err| format!("the GPU did not finish drawing a frame: {err}"))?;
-        drop(picture);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        renderer.encode(
+            &gpu,
+            &mut encoder,
+            target,
+            &[layer],
+            size,
+            wgpu::Color::BLACK,
+        );
+        let done = in_flight.submit(&gpu, encoder.finish());
         ring.held[index] = true;
         ring.fresh = false;
         let stamp = drawn.and_then(|drawn| stamp_at(&drawn, at));
@@ -347,9 +351,17 @@ fn run<P: Platform>(
             revision: stamp.map(|stamp| stamp.revision),
             layout_generation: stamp.map(|stamp| stamp.generation),
         };
-        if tx.send(event).is_err() {
-            return Ok(());
-        }
+        let tx = tx.clone();
+        let control = control.clone();
+        let surface = ring.surfaces[index].0.clone();
+        done.then(move |_| {
+            // A resize/close can drop the ring while drawing. Keep its
+            // native surface alive, and never announce unfinished pixels.
+            let _held = (surface, frame, picture);
+            if !control.0.closed.load(Ordering::SeqCst) {
+                let _ = tx.send(event);
+            }
+        });
     }
 }
 

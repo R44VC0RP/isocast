@@ -2505,7 +2505,7 @@ fn quality_stop(quality: &Value) -> i32 {
 
 /// A path with its middle left out when it has more than three parts,
 /// so the folder's own name shows: "/Volumes/…/scratch/rec".
-fn middle_short(path: &str) -> String {
+pub(crate) fn middle_short(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').collect();
     if parts.len() <= 4 {
         return path.to_string();

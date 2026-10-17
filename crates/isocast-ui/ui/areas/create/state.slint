@@ -185,6 +185,9 @@ export global CreateArea {
     callback remove-selected();
     callback retake();
     callback export();
+    // Export › For Final Cut Pro / Premiere Pro / DaVinci Resolve… and
+    // OpenTimelineIO… (#104): "final_cut", "premiere", "resolve", "otio".
+    callback export-nle(string);
     callback reveal-export();
     callback new-timeline();
     // Dragging clip `from` with its middle at `seconds`: the place it

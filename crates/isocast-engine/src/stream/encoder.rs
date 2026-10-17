@@ -470,7 +470,8 @@ fn encode<P: Platform>(
             Ok(Packet::Audio { samples, pts, .. }) => {
                 track.add(&samples, pts, &mut audio, &mut order)?;
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            // Only ISO files get skipped ticks; the program tap never does.
+            Ok(Packet::Skipped { .. }) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(Ended::Program),
         }
         while let Some(mut frame) = video.receive()? {

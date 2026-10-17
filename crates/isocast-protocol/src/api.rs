@@ -540,6 +540,16 @@ pub enum Method {
     /// folder holding it); the take's files are never touched. Returns
     /// [`TimelineInfo`](crate::timeline::TimelineInfo).
     TimelineRelink(crate::timeline::TimelineRelinkParams),
+    /// Write a timeline as a project Final Cut Pro (`fcpxml`), Premiere Pro
+    /// (`xmeml`), DaVinci Resolve (`xmeml` with app `resolve`) or any
+    /// OpenTimelineIO reader (`otio`) opens (#104): every
+    /// ISO source on its own video track with the program on top, each
+    /// clip's angle the one track on there, crops as crop and transform,
+    /// markers, and each file's audio on its own tracks, all lined up from
+    /// the takes' manifests. It points at the takes' own files (nothing is
+    /// encoded, copied or changed). Returns
+    /// [`NleExported`](crate::timeline::NleExported).
+    TimelineExportNle(crate::timeline::TimelineExportNleParams),
 }
 
 /// Every method's name, as requests and plugin grants spell it
@@ -1643,6 +1653,10 @@ pub struct DaemonBuild {
     /// The running executable, as it was when the daemon started.
     pub executable: String,
     pub pid: u32,
+    /// This isolated daemon finishes and exits when its launching client's
+    /// lifetime pipe closes. Older daemons cannot safely own a `record` run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parent_owned: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2388,8 +2402,9 @@ pub struct CompositorInfo {
     /// Reused frames are included; microseconds over the last 600 draws.
     #[serde(default)]
     pub draw_wall_us: Percentiles,
-    /// Wall time in the final GPU submission/completion wait, not GPU
-    /// execution timestamps. Zero for reuse; same window as draw_wall_us.
+    /// Wall time from the final GPU submission to its completion hand-off,
+    /// not GPU execution timestamps or time blocked on the drawing thread.
+    /// Zero for reuse; the last 600 completed program frames.
     #[serde(default)]
     pub gpu_wait_us: Percentiles,
     /// CPU time the program's thread spent on each canvas tick that gave

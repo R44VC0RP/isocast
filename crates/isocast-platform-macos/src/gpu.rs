@@ -382,6 +382,15 @@ impl FrameImporter for MetalImporter {
         autoreleasepool(|_| self.bgra_target(frame))
     }
 
+    fn target_cached(&mut self, frame: &PixelBuffer) -> Result<Option<wgpu::Texture>> {
+        autoreleasepool(|_| {
+            Ok(self
+                .surface(frame, true)?
+                .filter(|surface| surface.key.2 == kCVPixelFormatType_32BGRA)
+                .map(|surface| surface.planes[0].clone()))
+        })
+    }
+
     fn import_cached(&mut self, frame: &PixelBuffer) -> Result<Option<GpuFrame>> {
         autoreleasepool(|_| self.import_kept(frame))
     }

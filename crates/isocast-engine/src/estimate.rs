@@ -1124,7 +1124,6 @@ pub fn check<P: crate::Platform>(
     setup: &Setup,
     memory: Option<(&Memory, &str)>,
 ) -> Option<isocast_protocol::api::Check> {
-    use isocast_protocol::api::{Check, CheckStatus};
     let vertical_program = setup
         .vertical
         .as_ref()
@@ -1156,19 +1155,25 @@ pub fn check<P: crate::Platform>(
     let recording = run(false)?;
     let streams = setup.stream.is_some() || has_vertical_stream(setup);
     let streaming = if streams { run(true) } else { None };
-    let worst = match &streaming {
+    Some(check_estimates(&recording, streaming.as_ref()))
+}
+
+/// The same encoder-capacity check for local estimates and thin API clients.
+pub fn check_estimates(
+    recording: &CapacityEstimate,
+    streaming: Option<&CapacityEstimate>,
+) -> isocast_protocol::api::Check {
+    use isocast_protocol::api::{Check, CheckStatus};
+    let worst = match streaming {
         Some(s) if s.load > recording.load => s,
-        _ => &recording,
+        _ => recording,
     };
     let status = match worst.capacity {
         Capacity::Fits => CheckStatus::Ok,
         _ => CheckStatus::Warning,
     };
     let mut detail = recording.summary.clone();
-    if let Some(s) = streaming
-        .as_ref()
-        .filter(|s| s.capacity != recording.capacity)
-    {
+    if let Some(s) = streaming.filter(|s| s.capacity != recording.capacity) {
         detail.push_str(&format!(
             "; with the stream on, {}",
             s.summary.trim_start_matches("this Mac's encoders ")
@@ -1184,12 +1189,12 @@ pub fn check<P: crate::Platform>(
         Some(change) => format!("{}: isocast plan --patch '{change}'", s.description),
         None => s.description.clone(),
     });
-    Some(Check {
+    Check {
         name: "encoder capacity".into(),
         status,
         detail,
         fix,
-    })
+    }
 }
 
 #[cfg(test)]

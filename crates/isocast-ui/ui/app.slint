@@ -825,6 +825,16 @@ export component EditorWindow inherits Window {
                 if ProjectsArea.recent.length > 0: MenuSeparator { }
                 MenuItem { title: "Clear Menu"; enabled: ProjectsArea.recent.length > 0; activated => { ProjectsArea.clear-recent(); } }
             }
+            MenuSeparator { }
+            // A project another editor opens, pointing at the takes' own
+            // files (#104).
+            Menu {
+                title: "Export";
+                MenuItem { title: "For Final Cut Pro…"; enabled: CreateArea.has-timeline; activated => { CreateArea.export-nle("final_cut"); } }
+                MenuItem { title: "For Premiere Pro…"; enabled: CreateArea.has-timeline; activated => { CreateArea.export-nle("premiere"); } }
+                MenuItem { title: "For DaVinci Resolve…"; enabled: CreateArea.has-timeline; activated => { CreateArea.export-nle("resolve"); } }
+                MenuItem { title: "OpenTimelineIO…"; enabled: CreateArea.has-timeline; activated => { CreateArea.export-nle("otio"); } }
+            }
         }
     }
     preferred-width: 1280px;

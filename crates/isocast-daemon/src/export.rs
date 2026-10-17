@@ -291,7 +291,7 @@ fn plan(takes: &[TakeFiles]) -> (Vec<String>, Vec<ExportSkipped>) {
 }
 
 /// A name for files from a timeline's name: no slashes or colons.
-fn file_stem(name: &str) -> String {
+pub(crate) fn file_stem(name: &str) -> String {
     let stem: String = name
         .chars()
         .map(|c| match c {

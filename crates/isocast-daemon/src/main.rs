@@ -93,6 +93,7 @@ mod export;
 mod hotkeys;
 mod isoprj;
 mod library;
+mod nle;
 mod optimize;
 mod platform;
 mod plugins;
@@ -105,6 +106,8 @@ mod streams;
 mod timeline;
 mod virtual_camera;
 mod websocket;
+
+static PARENT_OWNED: AtomicBool = AtomicBool::new(false);
 
 fn main() -> ExitCode {
     #[cfg(unix)]
@@ -166,6 +169,37 @@ fn main() -> ExitCode {
             isocast_diagnostics::ready();
             isocast_diagnostics::diagnostic!("isocastd listening on {}", socket.display());
             let daemon = Arc::new(Daemon::default());
+            if std::env::args_os().any(|arg| arg == "--exit-on-stdin-close") {
+                let owned = daemon.clone();
+                // stdin is a lifetime pipe, not a second control protocol.
+                // Closing it (also on CLI crash/kill) uses the same durable
+                // shutdown as the API. No PID polling/reuse or forced kill.
+                if let Err(error) =
+                    thread::Builder::new()
+                        .name("record owner".into())
+                        .spawn(move || {
+                            use std::io::Read;
+                            let mut byte = [0];
+                            let mut input = std::io::stdin().lock();
+                            loop {
+                                match input.read(&mut byte) {
+                                    Err(error)
+                                        if error.kind() == std::io::ErrorKind::Interrupted =>
+                                    {
+                                        continue;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            owned.graceful_shutdown();
+                            std::process::exit(0);
+                        })
+                {
+                    isocast_diagnostics::diagnostic!("error"; "isocastd: could not watch record owner: {error}");
+                    return ExitCode::FAILURE;
+                }
+                PARENT_OWNED.store(true, Ordering::SeqCst);
+            }
             daemon.load_setup();
             daemon.recover_recordings();
             daemon.load_data();
@@ -1272,7 +1306,13 @@ fn resolved_vertical(
     Some(Resolved {
         generation: 0,
         revision,
-        scenes: isocast_engine::layout::resolve_setup(&view, data),
+        // Sources make their pictures at the main canvas's size, as in
+        // the engine (#112).
+        scenes: isocast_engine::layout::resolve_canvas(
+            &view,
+            (setup.canvas.width, setup.canvas.height),
+            data,
+        ),
     })
 }
 
@@ -1631,6 +1671,7 @@ impl Daemon {
                 to_json(self.recent_projects(params.unwrap_or_default()))
             }
             Method::TimelineRelink(params) => self.timeline_relink(params).and_then(to_json),
+            Method::TimelineExportNle(params) => self.timeline_export_nle(params).and_then(to_json),
             Method::EstimateCapacity(params) => self.estimate_capacity(*params).and_then(to_json),
             Method::Stop | Method::Shutdown => match self.stop() {
                 // Shutting down while idle is fine.
@@ -3974,6 +4015,7 @@ fn daemon_build() -> isocast_protocol::api::DaemonBuild {
             })
             .clone(),
         pid: std::process::id(),
+        parent_owned: PARENT_OWNED.load(Ordering::SeqCst),
     }
 }
 

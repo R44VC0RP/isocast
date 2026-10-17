@@ -9,17 +9,14 @@
 //! conversion deadlocked every file of the recording (S.2 stress,
 //! 2026-10-13). Converted here, the encoders get what the program's do.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use super::SourceFilters;
 use crate::filter::Filters;
-use crate::gpu::{FrameImporter, Gpu, GpuPixels};
+use crate::gpu::{FrameImporter, Gpu, GpuPixels, InFlight, PendingFrame};
 use crate::render::{Layer, Renderer};
 use crate::ycbcr::ToYCbCr;
 use crate::{FramePool, Platform, Time};
-
-/// How long to wait for the GPU to draw one frame.
-const DRAW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub(super) struct IsoFrames<P: Platform> {
     id: String,
@@ -36,6 +33,13 @@ pub(super) struct IsoFrames<P: Platform> {
     source_filters: Option<SourceFilters>,
     /// What filtered or rescaled frames are drawn with, made on first use.
     drawing: Option<Drawing>,
+    in_flight: InFlight,
+}
+
+impl<P: Platform> Drop for IsoFrames<P> {
+    fn drop(&mut self) {
+        let _ = self.in_flight.drain();
+    }
 }
 
 /// Filters and a picture of the file's size to draw frames on.
@@ -69,13 +73,21 @@ impl<P: Platform> IsoFrames<P> {
             size,
             source_filters,
             drawing: None,
+            in_flight: InFlight::default(),
         })
     }
 
     /// `frame`, taken for `at`, through the source's filters if the file
     /// records them, at the file's size, as 4:2:0 Y'CbCr. `None` if every
     /// frame is still in use downstream.
-    pub(super) fn draw(&mut self, frame: &P::Frame, at: Time) -> Result<Option<P::Frame>> {
+    pub(super) fn draw(
+        &mut self,
+        frame: &P::Frame,
+        at: Time,
+    ) -> Result<Option<PendingFrame<P::Frame>>> {
+        if !self.in_flight.available()? {
+            return Ok(None);
+        }
         let Some(out) = self.pool.take()? else {
             return Ok(None);
         };
@@ -129,15 +141,11 @@ impl<P: Platform> IsoFrames<P> {
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         self.to_ycbcr
             .encode(&mut encoder, &bound, &view(&luma), &view(&chroma));
-        let submission = self.gpu.queue.submit([encoder.finish()]);
-        // The encoder must read a finished frame.
-        self.gpu
-            .device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(DRAW_TIMEOUT),
-            })
-            .context("the GPU did not finish drawing a frame for a file")?;
-        Ok(Some(out))
+        let done = self.in_flight.submit(&self.gpu, encoder.finish());
+        Ok(Some(PendingFrame::new(out, done)))
+    }
+
+    pub(super) fn drain(&mut self) -> Result<()> {
+        self.in_flight.drain()
     }
 }

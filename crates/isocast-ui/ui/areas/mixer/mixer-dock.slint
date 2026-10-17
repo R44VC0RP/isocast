@@ -179,10 +179,11 @@ component MixerStrip inherits Rectangle {
 
         // The fader over its meter (Paper: 6px in, 2px down, 5px apart).
         // Never shorter than Theme.fader-min: a narrow strip's name gives
-        // way first.
+        // way first. In the narrowest dock (228px, a 900px window) it
+        // goes down to 72px so the ⋯ still fits inside the strip (#108).
         VerticalLayout {
             horizontal-stretch: 1;
-            min-width: Theme.fader-min;
+            min-width: root.narrow ? 72px : Theme.fader-min;
             padding-left: 6px;
             padding-top: 2px;
             spacing: 5px;
