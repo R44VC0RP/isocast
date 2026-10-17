@@ -50,7 +50,16 @@ ISO source. Drag a clip's ends to trim; S splits at the playhead; I and O
 mark a span that Delete takes out; 1 shows the program and 2–9 the ISO
 tracks over the span (or the clip); J, K and L play back, stop and play
 forward (press again for 2× and 4×); arrows step a frame (⇧ ten); ⌘Z and
-⇧⌘Z undo and redo. The same edits from the CLI and MCP:
+⇧⌘Z undo and redo. Playing forward, you hear the program's sound (what the
+edited file has) in step with the picture, through the monitoring device
+(Settings › Output, `audio.monitoring_device`); at 2× and 4× it is
+pitch-corrected, backwards it is silent. It is the app's own player, so a
+recording's monitoring carries on unchanged. While a recording, a stream
+or the replay buffer takes in system audio (or an Isocast app's audio), the
+editor plays silently, so they don't pick it up; its sound comes back when
+they stop. The picture follows the display's refresh. A clip whose file is
+missing shows "Offline". **Export** opens a menu: Export, or Export with
+Vertical (9:16) (see below). The same edits from the CLI and MCP:
 
 Every clip covers part of its take, from its in point to its out point on
 the take's own clock (the whole take when it lands). The edits only change
@@ -109,14 +118,27 @@ With `--vertical` (`vertical` on `timeline_export`) it also writes
 `<name> VERTICAL.mov`, the edited picture at 9:16: the program's size on
 its side (1080x1920 for a 1920x1080 program), each clip's angle or crop
 fitted into it, so a 9:16 crop fills the frame and an uncropped clip shows
-with black bars above and below. Every frame of it is encoded again.
+with black bars above and below. Every frame of it is encoded again. A
+program already taller than wide (or square) has nothing to turn on its
+side: the vertical file is skipped (`skipped` says why) and EDITED is the
+one to use. Takes recorded with a vertical canvas also export `<name>
+VERTICAL-PROGRAM.mov`, the vertical program as it was recorded: that is the
+better 9:16 file (composed for 9:16, never scaled or encoded again);
+VERTICAL is derived from the main program's picture. `edited` and
+`vertical` are reserved source ids (the export's labels), as `program` is;
+a setup from before 0.0.7 with a source by either id loads with it renamed
+(`edited-2`, `vertical-2`, …, its scenes, recording lists and hotkeys
+following), saved at once, with a note in `status` (`setup_file.notes`).
 
 Cuts are frame-accurate. Video is copied as recorded, except where a clip
 starts between two keyframes (recordings have one every second): the frame
 on screen at the in point and the frames up to the next keyframe are decoded
 and encoded again with the same codec (`reencoded_frames` in the manifest
-counts them). An angle recorded in another size or frame rate than the
-program is encoded again whole, fitted to the program's size. Audio is cut
+counts them). An angle recorded in another size, frame rate or bit depth
+than the program (a 10-bit ISO file in an 8-bit program's edited file) is
+encoded again whole, fitted to the program's size, in its format; so is a
+take recorded at another HEVC bit depth than the first take's (the setting
+changed between takes) in the program or ISO file it joins. Audio is cut
 to the sample and cross-faded over 10 ms at every join, so joins never
 click, and audio and video stay in sync at every join. You can keep
 recording while an export runs. Each file has one video sample description:

@@ -1944,6 +1944,60 @@ each section. Delete entries that stop being true.
   Failed-source files end at accepted media, not a timed take's future end;
   the manifest retains the finalized duration/counters despite reporting failure.
   Evidence: vertical-followups/scratch/REPORT.md. UI and live linking stay later.
+- 2026-10-17 (#94): **The editor's sound is an AVPlayer of the app's own**
+  over an AVComposition of each clip's program audio (what EDITED has),
+  started with `setRate:time:atHostTime:` against the playhead's clock, on
+  `audio.monitoring_device` (its Core Audio UID; "default" follows the
+  system output). Not the engine's monitoring unit: a recording's monitoring
+  is untouched, and the editor plays silently while a recording takes in
+  system audio (it would record it). 2x/4x play pitch-corrected (spectral),
+  reverse is silent. Picture pacing: a CVDisplayLink asks the editor window
+  for each frame and says when it shows; the picture due then is drawn (the
+  4 ms timer stays for offscreen and the studio's Edit view, and now steps
+  if the editor has no rendering notifier). The window shows a frame ~37 ms
+  after the link's output time at 60 Hz on isocast-m2-b (Metal's queue):
+  `PICTURE_LATENCY` in src/sound.rs, ISOCAST_AV_OFFSET_MS overrides it;
+  measured with editor-007/scratch/rig (`take.py avsync`, `av_analyze.py`):
+  beeps +1.8 ms (1x) and -0.5 ms (2x, median) from their flashes.
+  Rejected: an AudioUnit fed by our own AVAssetReader (resampling, latency
+  and pitch by hand); one constant didn't need it.
+- 2026-10-17 (#94): **An HEVC part of another bit depth is encoded again**
+  in the joined file's (`join.rs matches`): an 8-bit program's EDITED file
+  with a 10-bit ISO angle copied the angle's Main 10 samples (a second
+  sample description, the Chrome failure #94 fixed); VideoToolbox takes
+  10-bit pictures into a Main session without complaint (checked: EDITED,
+  its crop export and VERTICAL all Main, one description, frame-accurate).
+  The same applies to program/ISO joins of takes recorded at different
+  depths (re-encoded into the first take's depth: one description beats a
+  copied but unplayable second one).
+- 2026-10-17 (#94, review B1): **the editor is silent whenever a capture
+  could take its sound in**: a recording (or one starting), a stream not
+  offline/failed on either canvas, or a running replay buffer, with a
+  system_audio source (its `exclude` isn't trusted) or application_audio
+  naming Isocast. Decided again on every status, setup, stream and replay
+  change while playing (the sound stops at once, and comes back from the
+  playhead when they stop). Streams and the main replay buffer are read
+  from their events (`Session.streams`, `.replay`): `status.stream*` lags
+  until the next status read, and with it the sound leaked into a stream
+  and a replay (scratch/cap2). Verified on isocast-m2-b (scratch/cap3): the
+  recording, the received stream and the saved replay hold afplay's 2.5 kHz
+  marker and none of the editor's 1 kHz beeps; BlackHole goes silent for
+  each and sounds again after. The engine excluding the app from its tap
+  would be simpler (follow-up).
+- 2026-10-17 (#94): setups with a source id `edited`/`vertical` are renamed
+  on load (`Setup::rename_reserved_sources`, a JSON rewrite of `source`,
+  `sidechain_source`, `sources`/`audio` lists and `source_audio`/
+  `held_sources` keys), saved at once, with a note; OBS import and the app's
+  new ids avoid every reserved id (`RESERVED_SOURCE_IDS`).
+- 2026-10-17 (#94): `edited` and `vertical` are reserved source ids (the
+  export's labels); an old take with such an ISO source skips that derived
+  file with a reason. VERTICAL is skipped for a program already taller than
+  wide or square.
+- 2026-10-17 (#94): the editor motion suite is deterministic (compare.py
+  identical across two lockstep runs): its takes are trimmed to exactly
+  3 s / 2 s, record only the block's ISO file without sound, and mute the
+  tone (the test pattern and beeps follow the engine's clock). CI runs it
+  after the standard suite (~40 s).
 - 2026-10-16 (#94): **One sample description per export, parameter sets
   in-band.** Frames encoded again keep the joined file's format; every
   keyframe carries its own VPS/SPS/PPS (SPS/PPS) in-band (copied keyframes
@@ -5946,6 +6000,15 @@ each section. Delete entries that stop being true.
   shift). App-side times: ISOCAST_PREVIEW_STATS=1 prints `play:` lines.
   Remaining jitter (16% of pictures held 1 or 3 refreshes) also shows in
   the app's own render times, so not all of it is the capture.
+- 2026-10-17 (#94): the editor window had no MenuHost and its Menus
+  global wasn't wired, so `Menus.request` from it (a clip's context menu)
+  did nothing; `App::connect_editor_menus` wires it (Export's menu needs
+  it). An AVAssetTrack outlives nothing: drop its AVURLAsset and
+  `insertTimeRange:ofTrack:` fails, so keep the asset alive.
+- 2026-10-17 (#94): A/V sync in a real window: isocast-m2-b has BlackHole
+  16ch; a recorder engine (the job's dev app) with a microphone source on
+  BlackHole and a display source records the editor's picture and sound on
+  one clock (mic sources there opened fine on 2026-10-17).
 - 2026-10-16 (#94): a Chrome window launched by running its binary from
   the hw-batch desktop bridge crashed on first start (a "quit
   unexpectedly" dialog then covers later screenshots: kill

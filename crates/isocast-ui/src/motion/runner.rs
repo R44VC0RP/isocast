@@ -98,6 +98,11 @@ pub struct Calls {
     pub by_method: BTreeMap<String, (u64, u64)>,
 }
 
+/// Where the editor suite's clips start in their takes, and how much
+/// longer than its clip each take is recorded (#94).
+const TAKE_IN: f64 = 0.5;
+const TAKE_SPARE: f64 = 1.0;
+
 /// How long lockstep waits on the wall clock for the engine before calling
 /// the run invalid.
 const SYNC_LIMIT: Duration = Duration::from_secs(2);
@@ -398,10 +403,13 @@ pub fn run(run: Run, keep_images: bool, dump: &[usize], dir: &std::path::Path) -
 
 impl Runner {
     /// For `editor-…` targets (#87): two takes of the setup's synthetic
-    /// sources (3 s and 2 s) on a new timeline, recorded as a person
-    /// would, then the editor window opened on them with their frames,
-    /// waveforms and the picture at 1 s.
+    /// sources on a new timeline, recorded as a person would and trimmed
+    /// to exactly 3 s and 2 s (#94: a take's length follows the wall
+    /// clock, its clip's doesn't, so every run draws the same timeline),
+    /// then the editor window opened on them with their frames, waveforms
+    /// and the picture at 1 s.
     fn editor_setup(&mut self) -> Result<()> {
+        self.still_takes()?;
         self.area_state(&format!("create-new:Motion {}", self.run.id()))?;
         self.wait_until(Duration::from_secs(10), "the new timeline", |r| {
             r.hub
@@ -415,7 +423,8 @@ impl Runner {
             self.wait_until(Duration::from_secs(15), "a take to start", |r| {
                 r.recording()
             })?;
-            let until = Instant::now() + Duration::from_secs_f64(seconds);
+            // A second more than the clip, which starts half a second in.
+            let until = Instant::now() + Duration::from_secs_f64(seconds + TAKE_SPARE);
             self.wait_until(Duration::from_secs(20), "the take's length", |_| {
                 Instant::now() >= until
             })?;
@@ -431,6 +440,17 @@ impl Runner {
                 )
             })?;
         }
+        for (index, seconds) in [3.0, 2.0].into_iter().enumerate() {
+            let points = (TAKE_IN, TAKE_IN + seconds);
+            self.hub
+                .create
+                .trim_to(&self.hub, index, points.0, points.1);
+            self.wait_until(Duration::from_secs(10), "the clip trimmed", |r| {
+                r.hub.create.clip_points(index).is_some_and(|(a, b)| {
+                    (a - points.0).abs() < 1e-6 && (b - points.1).abs() < 1e-6
+                })
+            })?;
+        }
         for state in [
             "editor",
             "create-thumbs",
@@ -439,6 +459,59 @@ impl Runner {
             "create-preview",
         ] {
             self.area_state(state)?;
+        }
+        Ok(())
+    }
+
+    /// Takes whose pictures and sound are the same whenever they start
+    /// (#94): only the block's ISO file (the test pattern moves), without
+    /// sound, and the tone muted in the program (it beeps on the engine's
+    /// clock), so the
+    /// editor's frames and waveforms draw the same in every run. The engine
+    /// is fresh for each run (scripts/motion.sh), so nothing carries over.
+    fn still_takes(&mut self) -> Result<()> {
+        use isocast_protocol::api::{ApplyParams, Method};
+        use isocast_protocol::change::Change;
+        let (mut setup, revision) = {
+            let session = self.hub.session.borrow();
+            let setup = session
+                .setup
+                .clone()
+                .context("no setup from the engine yet")?;
+            ((*setup).clone(), session.revision)
+        };
+        setup.recording.iso.sources.retain(|id| id == "block");
+        setup.recording.iso.audio = None;
+        setup.recording.iso.source_audio.clear();
+        for source in &mut setup.sources {
+            if source.id == "tone" {
+                source.audio.muted = true;
+            }
+        }
+        let failed: Rc<RefCell<Option<String>>> = Rc::default();
+        let error = failed.clone();
+        self.hub.call(
+            Method::Apply(Box::new(ApplyParams {
+                revision,
+                change: Change::Setup(Box::new(setup)),
+                live: false,
+            })),
+            move |_, result| {
+                if let Err(e) = result {
+                    *error.borrow_mut() = Some(e.message);
+                }
+            },
+        );
+        self.wait_until(Duration::from_secs(10), "the still takes' setup", |r| {
+            failed.borrow().is_some()
+                || r.hub.session.borrow().setup.as_ref().is_some_and(|s| {
+                    s.recording.iso.sources == ["block"]
+                        && s.recording.iso.audio.is_none()
+                        && s.sources.iter().any(|x| x.id == "tone" && x.audio.muted)
+                })
+        })?;
+        if let Some(message) = failed.borrow().clone() {
+            bail!("the still takes' setup was refused: {message}");
         }
         Ok(())
     }

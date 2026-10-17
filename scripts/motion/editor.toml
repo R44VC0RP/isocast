@@ -1,8 +1,10 @@
 # The editor window's drags (#87; docs/motion-testing.md). Each run first
-# records two takes (3 s and 2 s) of scripts/motion/setup.toml's synthetic
-# sources onto a new timeline and opens the editor on them (the harness
-# does this for every `editor-…` target), then replays the drag into the
-# editor window. Snapping is turned off (N) so the edge follows the
+# records two takes of scripts/motion/setup.toml's synthetic sources onto
+# a new timeline, trimmed to exactly 3 s and 2 s, with only the block's ISO
+# file and the tone muted, so every run draws the same pixels (#94; CI runs
+# this suite in lockstep), and opens the editor on them (the harness does
+# this for every `editor-…` target), then replays the drag into the editor
+# window. Snapping is turned off (N) so the edge follows the
 # pointer exactly; the playhead and trims snapping is checked offscreen.
 
 [defaults]

@@ -897,4 +897,7 @@ export component EditorWindow inherits Window {
             height: parent.height;
         }
     }
+
+    // Its own menus (#94: Export, a clip's), over everything.
+    MenuHost { }
 }

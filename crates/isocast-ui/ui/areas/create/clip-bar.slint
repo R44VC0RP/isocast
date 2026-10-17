@@ -762,13 +762,22 @@ export component ClipBar inherits Rectangle {
                 }
                 VerticalLayout {
                     alignment: center;
-                    PillGroup {
+                    export-pill := PillGroup {
                         PillItem {
                             icon: Icons.download;
                             text: CreateArea.exporting ? "Exporting…" : "Export";
                             enabled: CreateArea.can-export && !CreateArea.exporting;
-                            tooltip: "Join the clips into one file (and one per ISO source)";
-                            clicked => { CreateArea.export(); }
+                            // The editor's Export is a menu: as recorded, or
+                            // with a vertical (9:16) file too (#94).
+                            menu-open: root.editor && Menus.open && Menus.owner == "create:export";
+                            tooltip: root.editor ? "Join the clips into one file (and one per ISO source), or a vertical 9:16 file too" : "Join the clips into one file (and one per ISO source)";
+                            clicked => {
+                                if root.editor {
+                                    Menus.request("create:export", export-pill.absolute-position.x, export-pill.absolute-position.y, export-pill.width, export-pill.height);
+                                } else {
+                                    CreateArea.export();
+                                }
+                            }
                         }
                         if CreateArea.export-path != "": PillDivider { }
                         if CreateArea.export-path != "": PillItem {

@@ -1835,11 +1835,23 @@ impl Daemon {
                     .restore(&setup);
                 state.scene = view.scene;
                 state.preview = view.preview;
-                state.setup = Some(setup);
+                state.setup = Some(setup.clone());
                 state.revision = first_revision();
                 // An unlinked vertical canvas starts from the main canvas's
                 // scene and preview (no engine or watchers yet).
                 let _ = sync_vertical(&mut state, None, true);
+                // Sources renamed off reserved ids (#94): written now, so
+                // it happens once.
+                if state.file.renamed() {
+                    let (_, target) = state.file.prepare();
+                    let revision = state.revision;
+                    drop(state);
+                    if let Some(target) = target {
+                        for note in self.save(revision, &setup, &target) {
+                            isocast_diagnostics::diagnostic!("warn"; "isocastd: {note}");
+                        }
+                    }
+                }
             }
             None => match state.file.load_warning() {
                 Some(warning) => isocast_diagnostics::diagnostic!("warn"; "isocastd: {warning}"),

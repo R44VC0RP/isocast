@@ -478,6 +478,13 @@ come later (clips already carry in/out points on their take).
     `timeline_export --vertical` (a 9:16 edited file); angle changes
     re-snap crops; waveform pictures off the UI thread; caches keyed by
     path, size and time.
+  - [x] C.3g Editor follow-ups 2 (#94): sound while playing (program
+    audio on the monitoring device, in sync, pitch-corrected above 1x);
+    Export menu with Vertical (9:16); playback paced by the display
+    refresh; 10-bit angles encoded again in an 8-bit program's depth;
+    VERTICAL naming edges; e2e `edit` checks VERTICAL frame by frame;
+    caches evict old keys; offline clips show "Offline"; deterministic
+    editor motion suite in CI.
 
 ### S. Stress testing and performance (Ryan, 2026-10-13)
 
@@ -4184,6 +4191,12 @@ One line per finished task, newest last.
   isolated engine with obs-websocket-js (msgpack 80/80, JSON 77/77),
   obsws-python 9/9, local mediamtx; latency unchanged (3 interleaved
   rounds).
+- C.3g (2026-10-17, branch agent/editor-007, #94): editor sound in a real
+  window on isocast-m2-b within 2 ms of the picture at 1x (5 ms at 2x),
+  pictures held exactly 2 refreshes 91% at 1x; e2e edit (hosted) checks
+  VERTICAL's 214 pictures; 8-bit program + 10-bit ISO angle exports one
+  Main description (HEVC, exonbook); editor motion suite identical across
+  two lockstep runs.
 - C.3f (2026-10-16, branch agent/editor-followups, #94): HEVC/H.264/ProRes
   exports have one sample description (Chrome, Safari, QuickTime, ffmpeg
   play them; AVFoundation's decode bit-identical to ffmpeg's); forward

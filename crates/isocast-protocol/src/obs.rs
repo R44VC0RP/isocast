@@ -1492,7 +1492,7 @@ impl<'a, 'v> Importer<'a, 'v> {
             }
         };
         let mut taken: HashSet<String> = self.sources.iter().map(|s| s.id.clone()).collect();
-        taken.insert(PROGRAM.into());
+        taken.extend(crate::RESERVED_SOURCE_IDS.iter().map(|id| id.to_string()));
         let id = unique_id(obs.name, "source", &mut taken);
         let audio = if kind.has_audio() {
             self.audio_settings(obs)

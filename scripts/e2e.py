@@ -816,14 +816,20 @@ def scenario_timeline(e, cfg, evidence):
 BAR_LEVELS = bytes(49 if v >= 96 else 48 for v in range(256))
 
 
-def pattern_frames(path, width, height):
+def pattern_frames(path, width, height, region=None):
     """Per decoded picture of a synthetic test pattern: (pts, bar shift in
     pixels, label cell, flash band). The bars scroll by width / (4 s * fps)
     per source frame, so the shift names the source frame (modulo 4 s); the
     cell is the label's fifth character, lit for "BARS2" and dark for
-    "BARS"; the band is the bottom quarter that flashes on every pulse."""
+    "BARS"; the band is the bottom quarter that flashes on every pulse.
+    `region` (x, y, w, h): the part of each picture the pattern fills (a
+    vertical file's letterboxed picture), scaled to width x height first."""
     s = max(height // 120, 1)
-    graph = (f"[0:v]format=gray,split=3[a][b][c];[a]crop={width}:1:0:{height // 2}[row];"
+    first = "[0:v]format=gray"
+    if region:
+        x, y, w, h = region
+        first = f"[0:v]crop={w}:{h}:{x}:{y},scale={width}:{height}:flags=bicubic,format=gray"
+    graph = (f"{first},split=3[a][b][c];[a]crop={width}:1:0:{height // 2}[row];"
              f"[b]crop={5 * s}:{7 * s}:{30 * s}:{6 * s},scale={width}:1:flags=area[cell];"
              f"[c]crop={width}:{height // 4}:0:{height - height // 4},scale={width}:1:flags=area[band];"
              "[row][cell][band]vstack=3[out]")
@@ -849,6 +855,20 @@ def pattern_frames(path, width, height):
         band = raw[i * size + 2 * width:(i + 1) * size]
         frames.append((t, shift, sum(cell) / width, sum(band) / width))
     return frames
+
+
+def picture_region(path, width, height, shape):
+    """Where a picture of `shape` (w, h) sits in `path`'s letterboxed
+    pictures (width x height): (0, top, width, rows). The pattern's bars
+    start at its top (its bottom quarter is black between flashes)."""
+    raw = ffmpeg("-i", path, "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", "-").stdout
+    require(len(raw) == width * height, f"{path.name}: first picture isn't {width}x{height}")
+    lit = [y for y in range(height) if max(raw[y * width:(y + 1) * width]) > 40]
+    require(lit, f"{path.name}: the first picture is black")
+    rows = round(width * shape[1] / shape[0])
+    require(abs((height - rows) / 2 - lit[0]) <= 2,
+            f"{path.name}: the picture starts at row {lit[0]}, not centred ({(height - rows) / 2})")
+    return (0, lit[0], width, min(rows, height - lit[0]))
 
 
 def beep_onsets(samples):
@@ -950,7 +970,8 @@ def video_descriptions(path):
 
 def scenario_edit(e, cfg, evidence):
     """C.3's edits on two program + 2 ISO takes: trim, split, ripple delete,
-    an angle, undo and redo, export; then crops (#87) and export again. Every
+    an angle, undo and redo, export (with the vertical file, #94); then crops
+    (#87) and export again. Every
     exported picture must be the take picture on screen at its moment (by
     the test pattern; a cropped one the crop of it, scaled up), every pulse
     must flash and beep together at the cuts, joins mustn't click, crops
@@ -1030,14 +1051,15 @@ def scenario_edit(e, cfg, evidence):
     require(all(abs(c["start_seconds"] - s[0]) < 1e-4 for c, s in zip(clips, segments)),
             "clip starts differ from the clips' lengths added up")
 
-    def export_into(folder):
-        export = e.rpc("timeline_export", {"folder": str(e.root / folder)})
+    def export_into(folder, vertical=False):
+        export = e.rpc("timeline_export", {"folder": str(e.root / folder), "vertical": vertical})
         def exported():
             value = read_json(export["manifest"])
             return value if value["status"] != "exporting" else None
         result = until(exported, 90, "timeline export")
         require(result["status"] == "complete" and not result.get("errors"), f"export failed: {result}")
-        require(sorted(f["source"] for f in result["files"]) == ["bars", "bars2", "edited", "program"],
+        want = ["bars", "bars2", "edited", "program"] + (["vertical"] if vertical else [])
+        require(sorted(f["source"] for f in result["files"]) == want,
                 f"exported sources: {[f['source'] for f in result['files']]}, skipped {result.get('skipped')}")
         return result
 
@@ -1065,13 +1087,22 @@ def scenario_edit(e, cfg, evidence):
             if loss_limit(evidence):
                 frames = int(probe(path)["streams"][0]["nb_read_frames"])
                 dropped = round(duration * fps) - frames
-            row = check_file(path, duration, fps, (cfg["canvas"]["width"], cfg["canvas"]["height"]),
-                             dropped=dropped)
+            canvas = (cfg["canvas"]["width"], cfg["canvas"]["height"])
+            upright = f["source"] == "vertical"  # #94: the program's size on its side
+            require((width, height) == (canvas[::-1] if upright else canvas),
+                    f"{path.name}: the manifest says {width}x{height}")
+            row = check_file(path, duration, fps, (width, height), dropped=dropped)
             descriptions = video_descriptions(path)
             require(descriptions == 1, f"{path.name}: {descriptions} video sample descriptions, not one")
             row["video_descriptions"] = descriptions
             # Every picture: the one on screen in its take at that moment.
-            out = pattern_frames(path, width, height)
+            # A vertical file: each (uncropped) picture fitted into its
+            # middle, letterboxed; checked scaled back to the canvas.
+            region = picture_region(path, width, height, canvas) if upright else None
+            if upright:
+                row["picture_region"] = region
+                width, height = canvas
+            out = pattern_frames(path, width, height, region)
             crop_rows = crop_check = None
             if cropped and f["source"] == "edited":
                 crop_check, crop_segments = cropped
@@ -1083,7 +1114,7 @@ def scenario_edit(e, cfg, evidence):
                               if s[0] - 1e-6 <= t < s[0] + s[3] - s[2] - 1e-6), None)
                 require(index is not None, f"{path.name}: a picture at {t:.4f} s, past the timeline")
                 seg = segments[index]
-                source = (seg[4] or "program") if f["source"] == "edited" else f["source"]
+                source = (seg[4] or "program") if f["source"] in ("edited", "vertical") else f["source"]
                 src_path, offset = files[(seg[1], source)]
                 if src_path not in sources:
                     frames = pattern_frames(src_path, width, height)
@@ -1100,7 +1131,10 @@ def scenario_edit(e, cfg, evidence):
                                    f"take): {problem}")
                     continue
                 apart = abs(shift - want[1])
-                if min(apart, width - apart) > 3 or (cell > 50) != (want[2] > 50):
+                # Scaled down and up again: a column of the vertical file is
+                # width / region width of the canvas's.
+                slack = 3 if region is None else 3 * width / region[2] + 1
+                if min(apart, width - apart) > slack or (cell > 50) != (want[2] > 50):
                     bad.append(f"{t:.4f} s: bars at {shift}, label {cell:.0f}; {source} at "
                                f"{seg[2] + t - seg[0]:.4f} s of its take has {want[1]}, {want[2]:.0f}")
             require(not bad, f"{path.name}: {len(bad)} of {len(out)} pictures aren't their take's "
@@ -1145,8 +1179,12 @@ def scenario_edit(e, cfg, evidence):
             rows.append(row)
         return rows
 
-    result = export_into("export")
+    # The first export also writes the vertical (9:16) file (#94).
+    result = export_into("export", vertical=True)
     evidence["exported"] = check_export(result)
+    vertical = next(f for f in result["files"] if f["source"] == "vertical")
+    require(all(p["reencoded_frames"] == p["frames"] for p in vertical["parts"]),
+            f"vertical: not every frame was encoded again: {vertical['parts']}")
 
     # Crop (#87): the edited file shows the lower-right three quarters of a
     # program clip and of the bars2 angle, scaled up to the program's size

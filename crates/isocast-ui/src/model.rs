@@ -294,7 +294,8 @@ pub fn route_vertical(shown: &Value, patch: Value) -> Value {
 }
 
 /// An id made from `name`: lowercase letters, digits and dashes, not one
-/// of `taken` (or "program", which is reserved).
+/// of `taken` (or a reserved id: "program", "vertical-program", "edited",
+/// "vertical").
 pub fn new_id<'a>(name: &str, taken: impl IntoIterator<Item = &'a str>) -> String {
     let mut base = String::new();
     for c in name.to_lowercase().chars() {
@@ -312,7 +313,7 @@ pub fn new_id<'a>(name: &str, taken: impl IntoIterator<Item = &'a str>) -> Strin
     };
     let used: std::collections::HashSet<&str> = taken
         .into_iter()
-        .chain(std::iter::once("program"))
+        .chain(isocast_protocol::RESERVED_SOURCE_IDS)
         .collect();
     if !used.contains(base.as_str()) {
         return base;
