@@ -22,6 +22,7 @@ use isocast_protocol::api::{
     AudioLevel, ChannelLevel, EngineInfo, ScenesInfo, SourceRun, SourceStatus,
 };
 use isocast_protocol::manifest::SessionStatus;
+use isocast_protocol::projector::VERTICAL_SCENE_PREFIX;
 use isocast_protocol::{
     Canvas, CanvasId, Codec, Monitoring, PROGRAM, Setup, SourceKind, Transition, TransitionKind,
     VERTICAL_PROGRAM,
@@ -371,6 +372,9 @@ struct Inner<P: Platform> {
     /// Scenes drawn for monitors on air or not (`scene:ID` targets:
     /// projectors and the multiview), off the program's thread.
     scene_feeds: Arc<SceneFeeds<P::Frame>>,
+    /// The same for the vertical canvas's arrangements of the scenes
+    /// (`vertical-scene:ID`: vertical scene projectors, #96).
+    vertical_scene_feeds: Arc<SceneFeeds<P::Frame>>,
     /// A camera-only source is needed only while that output is running.
     camera_source: Mutex<Option<String>>,
     program_audio: Arc<Routes<P::Frame>>,
@@ -727,6 +731,7 @@ impl<P: Platform> Engine<P> {
             vertical: OnceLock::new(),
             control,
             scene_feeds: Arc::new(SceneFeeds::new(timeline.clone())),
+            vertical_scene_feeds: Arc::new(SceneFeeds::new(timeline.clone())),
             timeline,
             epoch: AtomicI64::new(i64::MIN),
             on_event,
@@ -959,6 +964,7 @@ impl<P: Platform> Engine<P> {
                     program_frames: output.frames_drawn.load(Ordering::Relaxed),
                     missed_frames: output.frames_missed.load(Ordering::Relaxed),
                     fps: f64::from_bits(output.program_fps.load(Ordering::Relaxed)),
+                    stopped: output.program.stopped(),
                     compositor,
                     scenes: ScenesInfo {
                         resolve_us: output.scenes.resolve_us(),
@@ -1152,7 +1158,12 @@ impl<P: Platform> Engine<P> {
         // an idle one has no picture until its next frame.
         Ok(match target {
             PROGRAM | "preview" | VERTICAL_PROGRAM | "vertical-preview" => wait_for_frame(&slot),
-            scene if scene.starts_with(scene_feeds::PREFIX) => wait_for_frame(&slot),
+            scene
+                if scene.starts_with(scene_feeds::PREFIX)
+                    || scene.starts_with(VERTICAL_SCENE_PREFIX) =>
+            {
+                wait_for_frame(&slot)
+            }
             _ => slot.newest_timed(),
         })
     }
@@ -2342,7 +2353,10 @@ fn slot_of<P: Platform>(
     fps: u32,
 ) -> Result<Arc<FrameSlot<P::Frame>>, String> {
     if let Some(id) = target.strip_prefix(scene_feeds::PREFIX) {
-        return scene_slot(inner, id, fps);
+        return scene_slot(inner, CanvasId::Main, id, fps);
+    }
+    if let Some(id) = target.strip_prefix(VERTICAL_SCENE_PREFIX) {
+        return scene_slot(inner, CanvasId::Vertical, id, fps);
     }
     // The program and the preview are drawn while they are asked for.
     inner.want(target, fps);
@@ -2406,15 +2420,20 @@ fn slot_of<P: Platform>(
 /// it isn't running). An error lists the scenes.
 fn scene_slot<P: Platform>(
     inner: &Arc<Inner<P>>,
+    canvas: CanvasId,
     id: &str,
     fps: u32,
 ) -> Result<Arc<FrameSlot<P::Frame>>, String> {
+    let prefix = match canvas {
+        CanvasId::Main => scene_feeds::PREFIX,
+        CanvasId::Vertical => VERTICAL_SCENE_PREFIX,
+    };
     {
         let state = inner.state.lock();
         if !state.setup.scenes.iter().any(|scene| scene.id == id) {
             let ids: Vec<&str> = state.setup.scenes.iter().map(|s| s.id.as_str()).collect();
             return Err(format!(
-                "target: {id:?} is not a scene; give \"scene:\" and one of: {}",
+                "target: {id:?} is not a scene; give \"{prefix}\" and one of: {}",
                 if ids.is_empty() {
                     "(none)".to_string()
                 } else {
@@ -2422,18 +2441,34 @@ fn scene_slot<P: Platform>(
                 }
             ));
         }
+        if canvas == CanvasId::Vertical && state.setup.vertical.is_none() {
+            return Err("vertical: canvas is not enabled".into());
+        }
     }
-    let (slot, start) = inner.scene_feeds.want(id, fps)?;
+    let watched = match canvas {
+        CanvasId::Main => &inner.scene_feeds,
+        CanvasId::Vertical => &inner.vertical_scene_feeds,
+    };
+    let (slot, start) = watched.want(id, fps)?;
     if start {
         let weak = Arc::downgrade(inner);
-        let failed = inner.scene_feeds.clone();
-        let feeds = inner.scene_feeds.clone();
+        let failed = watched.clone();
+        let feeds = watched.clone();
         let platform = inner.platform.clone();
         let epoch = inner.epoch().unwrap_or_else(|| platform.now());
         let spawned = isocast_diagnostics::spawn(
-            "scene feeds",
+            if canvas.is_main() {
+                "scene feeds"
+            } else {
+                "vertical scene feeds"
+            },
             move || {
-                let scenes = || weak.upgrade().and_then(|inner| inner.main.scenes.latest());
+                let scenes = || {
+                    weak.upgrade().and_then(|inner| match canvas {
+                        CanvasId::Main => inner.main.scenes.latest(),
+                        CanvasId::Vertical => inner.output(CanvasId::Vertical)?.scenes.latest(),
+                    })
+                };
                 let stop = || {
                     weak.upgrade()
                         .is_none_or(|inner| inner.stopping.load(Ordering::SeqCst))
@@ -2450,7 +2485,7 @@ fn scene_slot<P: Platform>(
             },
         );
         if let Err(error) = spawned {
-            inner.scene_feeds.failed(format!("{error}"));
+            watched.failed(format!("{error}"));
             return Err(format!("could not start drawing scenes: {error}"));
         }
     }

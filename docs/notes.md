@@ -1656,6 +1656,22 @@ each section. Delete entries that stop being true.
   branch alike, in the VM's resume case).
   Test kit: /Volumes/IsocastBuild/audio-stop-manifest/scratch/vm
   (t101.py, analyse101.py).
+- 2026-10-16 (#96 UI): **Scene linking stays put during a take.** The
+  recording binds the vertical scene timeline to one control (main's while
+  linked, the vertical canvas's own while not) when it starts; switching
+  it mid-take would splice two timelines into the manifest and is tier-1
+  engine work. The engine keeps refusing (`vertical.follow_main`), and
+  Settings › Video now disables Follow Main Scenes while recording, with
+  the reason in the group's caption. **A contained vertical failure needs
+  an engine restart:** the vertical CanvasOutput lives in a OnceLock and its
+  program slot stays stopped, so `engine.vertical.stopped` reports why and
+  the app offers Restart Engine (`shutdown_if_idle`, refused while anything
+  records or streams; the window's link starts it again). **Stream page
+  canvas choice:** a "Canvas" group with a Streams of segmented row (picked
+  over a bar above the page: it matches the grouped rows and carries the
+  explanation). **Multiview from the app shows the vertical program** in
+  its last tile whenever the setup has a vertical canvas (`vertical` on
+  projector_open; the CLI/MCP default stays off).
 
 - 2026-10-16 (#96): **Main > vertical > ISO on shared video encoders.**
   Both canvas programs/streams still protect ISOs; persistent main pressure
@@ -5603,6 +5619,18 @@ each section. Delete entries that stop being true.
   couldn't-restart warning stays until dismissed (OK).
 
 ## Gotchas
+
+- 2026-10-16 (#96 UI): on the test Macs' desktop session, `security
+  find-generic-password … -w` on a stream key isocastd stored opens a
+  Keychain password prompt and blocks; it also eats the keystrokes meant for
+  the app. Compare keys by attributes instead (`security
+  find-generic-password -s SERVICE -a ACCOUNT | grep mdat`, works over SSH,
+  no prompt). A `cmd --gui` job that prints nothing for 10 minutes is
+  marked FAIL ("no answer from the desktop-session bridge") and its lock
+  released while the script keeps running: keep such jobs short or chatty.
+  Slint password fields (the stream key) take no synthetic keystrokes,
+  AXValue or paste from cua-driver; save keys through `stream_key_set`
+  (CLI) when automating.
 
 - 2026-10-16: `scripts/remote-build.sh` syncs the checkout it lives in
   (`dirname $0`), not the current directory: to build another worktree

@@ -159,6 +159,11 @@ export global SettingsArea {
     in-out property <bool> auto-updates;
 
     // ---- Stream
+    // Which canvas's streams the page shows (#96): "main" ([stream]) or
+    // "vertical" ([vertical.stream], its own destinations and keys);
+    // the choice shows only with a vertical canvas.
+    in-out property <string> stream-canvas: "main";
+    in-out property <bool> stream-canvas-choice;
     in-out property <bool> has-stream;
     in-out property <[ServiceChoice]> services;
     // Custom and Kick need a server first: which one is asking ("" for
@@ -278,6 +283,8 @@ export global SettingsArea {
     in-out property <float> vertical-height: 1920;
     in-out property <bool> vertical-follow: true;
     in-out property <bool> vertical-record;
+    // Recording now: scene linking keeps until it stops (#96).
+    in-out property <bool> recording;
 
     // ---- Hotkeys: the profile's bindings by action group (they apply at
     // once, through hotkeys_set), then Isocast's fixed keys.

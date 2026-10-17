@@ -12,7 +12,9 @@
 //! the program, and each scene (`scene:ID`, drawn by the engine's scene
 //! feeds while watched). A click on a scene tile chooses it as the scenes
 //! dock does (Studio Mode stages it, otherwise it goes on air); a double
-//! click cuts to it.
+//! click cuts to it. With a vertical canvas (#96) a projector shows its
+//! program, preview or a scene as it arranges it (`canvas: vertical`),
+//! and a multiview's last tile can show its program (`vertical`).
 //!
 //! A full-screen projector whose display goes away is closed (the daemon
 //! does it on `device_changed`; the window checks too, every second).
@@ -40,7 +42,12 @@ use crate::kit::MenuBuilder;
 use crate::{AppWindow, ProjectorDisplay, ProjectorTile, ProjectorWindow, ProjectorsArea};
 
 /// Snapshot states (`--state NAME[:ARG]`).
-pub const STATES: &[&str] = &["projector:VIEW[:ID|LAYOUT]"];
+pub const STATES: &[&str] = &["projector:[vertical-]VIEW[:ID|LAYOUT]"];
+
+/// The vertical monitor's menu owner (its picture's right-click, #96).
+pub const VERTICAL_MONITOR: &str = "vertical-monitor";
+/// Marks a menu item's view as of the vertical canvas (`program@vertical`).
+const VERTICAL_SUFFIX: &str = "@vertical";
 
 /// How long after a window stops moving its place is reported.
 const REPORT_AFTER: Duration = Duration::from_millis(500);
@@ -63,6 +70,8 @@ enum Role {
     Preview,
     Program,
     Scene(String),
+    /// A multiview's last cell, showing the vertical canvas's program.
+    VerticalProgram,
     /// A multiview cell with no scene to show.
     Empty,
 }
@@ -419,15 +428,21 @@ impl Projectors {
     }
 
     /// Open `view` (of `arg`: a scene or source id) windowed, or full
-    /// screen on display `display`.
+    /// screen on display `display`: of the vertical canvas with
+    /// `vertical` (a multiview: with the vertical program in a tile).
     pub fn open(
         &self,
         app: &Rc<App>,
         view: ProjectorView,
         arg: Option<&str>,
         display: Option<&str>,
+        vertical: bool,
     ) {
+        let multiview = view == ProjectorView::Multiview;
         let params = OpenParams {
+            canvas: (vertical && !multiview)
+                .then(|| isocast_protocol::projector::VERTICAL_CANVAS.to_string()),
+            vertical: multiview.then_some(vertical),
             view,
             scene: (view == ProjectorView::Scene).then(|| arg.unwrap_or_default().to_string()),
             source: (view == ProjectorView::Source).then(|| arg.unwrap_or_default().to_string()),
@@ -486,7 +501,10 @@ impl Projectors {
                         continue;
                     }
                     let moved = *shown.placed.borrow() != projector.placement;
-                    let relaid = shown.projector.borrow().layout != projector.layout;
+                    let relaid = {
+                        let old = shown.projector.borrow();
+                        old.layout != projector.layout || old.vertical != projector.vertical
+                    };
                     *shown.projector.borrow_mut() = projector.clone();
                     if relaid {
                         self.build_tiles(app, &shown);
@@ -624,6 +642,18 @@ impl Projectors {
             });
         }
         self.build_tiles(app, &shown);
+        // A vertical canvas's projector opens upright the first time (the
+        // window's own size is the landscape one).
+        if projector.is_vertical()
+            && projector.view != ProjectorView::Multiview
+            && projector.placement.frame.is_none()
+            && !projector.placement.fullscreen
+        {
+            shown
+                .window
+                .window()
+                .set_size(slint::LogicalSize::new(405.0, 720.0));
+        }
         // Its place and size before it shows (Slint keeps them for the
         // native window).
         self.place(app, &shown);
@@ -785,21 +815,28 @@ impl Projectors {
         let roles: Vec<(Role, [f32; 4])> = match projector.view {
             ProjectorView::Multiview => {
                 let layout = projector.layout.unwrap_or(MultiviewLayout::Top8);
-                let scenes: Vec<String> = app
-                    .session
-                    .borrow()
-                    .setup
-                    .as_ref()
-                    .map(|s| s.scenes.iter().map(|s| s.id.clone()).collect())
-                    .unwrap_or_default();
-                layout
-                    .tiles()
+                let (scenes, has_vertical): (Vec<String>, bool) = {
+                    let s = app.session.borrow();
+                    (
+                        s.setup
+                            .as_ref()
+                            .map(|s| s.scenes.iter().map(|s| s.id.clone()).collect())
+                            .unwrap_or_default(),
+                        s.vertical.is_some(),
+                    )
+                };
+                let tiles = layout.tiles();
+                let last = tiles.len() - 1;
+                tiles
                     .into_iter()
                     .enumerate()
                     .map(|(i, rect)| {
                         let role = match i {
                             0 => Role::Preview,
                             1 => Role::Program,
+                            n if n == last && projector.vertical && has_vertical => {
+                                Role::VerticalProgram
+                            }
                             n => scenes.get(n - 2).cloned().map_or(Role::Empty, Role::Scene),
                         };
                         (role, rect)
@@ -871,18 +908,37 @@ impl Projectors {
                     |source| crate::model::source_name(source).to_string(),
                 )
         };
-        let program = s.scene.clone();
-        let preview = s.preview.clone().filter(|_| s.studio);
+        let vertical = projector.is_vertical();
+        let program = if vertical {
+            s.vertical_scene.clone().or_else(|| s.scene.clone())
+        } else {
+            s.scene.clone()
+        };
+        let preview = if vertical {
+            s.vertical_preview
+                .clone()
+                .or_else(|| s.preview.clone())
+                .filter(|_| s.studio)
+        } else {
+            s.preview.clone().filter(|_| s.studio)
+        };
         if let Some(window) = app.window() {
-            let aspect = window.global::<crate::Ui>().get_canvas_width().max(1) as f32
-                / window.global::<crate::Ui>().get_canvas_height().max(1) as f32;
-            shown.window.set_aspect(aspect);
+            let ui = window.global::<crate::Ui>();
+            let (width, height) = if vertical {
+                (ui.get_vertical_width(), ui.get_vertical_height())
+            } else {
+                (ui.get_canvas_width(), ui.get_canvas_height())
+            };
+            shown
+                .window
+                .set_aspect(width.max(1) as f32 / height.max(1) as f32);
         }
+        let canvas_word = if vertical { "Vertical " } else { "" };
         let heading = match projector.view {
-            ProjectorView::Program => "Program Projector".to_string(),
-            ProjectorView::Preview => "Preview Projector".to_string(),
+            ProjectorView::Program => format!("{canvas_word}Program Projector"),
+            ProjectorView::Preview => format!("{canvas_word}Preview Projector"),
             ProjectorView::Scene => format!(
-                "Scene Projector — {}",
+                "{canvas_word}Scene Projector — {}",
                 name_of(projector.scene.as_deref().unwrap_or(""))
             ),
             ProjectorView::Source => format!(
@@ -904,7 +960,14 @@ impl Projectors {
             };
             let (tag, name, tally, safe, empty) = match &tile.role {
                 Role::Single => {
+                    let stopped = vertical
+                        && s.status
+                            .as_ref()
+                            .and_then(|x| x.engine.as_ref())
+                            .and_then(|e| e.vertical.as_ref())
+                            .is_some_and(|v| v.stopped.is_some());
                     let empty = match projector.view {
+                        _ if stopped => "The vertical canvas stopped: restart the engine",
                         ProjectorView::Preview if preview.is_none() => {
                             "Nothing in preview: turn on Studio Mode"
                         }
@@ -931,6 +994,17 @@ impl Projectors {
                     program.as_deref().map(name_of).unwrap_or_default(),
                     2,
                     true,
+                    String::new(),
+                ),
+                Role::VerticalProgram => (
+                    "VERT".into(),
+                    s.vertical_scene
+                        .as_deref()
+                        .or(s.scene.as_deref())
+                        .map(name_of)
+                        .unwrap_or_default(),
+                    2,
+                    false,
                     String::new(),
                 ),
                 Role::Scene(id) => {
@@ -965,10 +1039,11 @@ impl Projectors {
     /// Start, retarget or stop each tile's feed.
     fn feed(&self, app: &Rc<App>, shown: &Rc<Shown>) {
         let projector = shown.projector.borrow().clone();
-        let (studio, canvas_fps) = {
+        let (studio, vertical_studio, canvas_fps) = {
             let s = app.session.borrow();
             (
                 s.studio && s.preview.is_some(),
+                s.studio && (s.vertical_preview.is_some() || s.preview.is_some()),
                 s.setup.as_ref().map_or(30, |s| s.canvas.fps.clamp(1, 60)),
             )
         };
@@ -976,9 +1051,18 @@ impl Projectors {
         let mut tiles = shown.tiles.borrow_mut();
         for (index, tile) in tiles.iter_mut().enumerate() {
             let target = match &tile.role {
+                // A vertical preview with nothing staged has no feed.
+                Role::Single
+                    if projector.is_vertical()
+                        && projector.view == ProjectorView::Preview
+                        && !vertical_studio =>
+                {
+                    None
+                }
                 Role::Single => projector.target(),
                 Role::Preview => studio.then(|| "preview".to_string()),
                 Role::Program => Some("program".into()),
+                Role::VerticalProgram => Some(isocast_protocol::VERTICAL_PROGRAM.into()),
                 Role::Scene(id) => Some(isocast_protocol::projector::scene_target(id)),
                 Role::Empty => None,
             };
@@ -1246,19 +1330,64 @@ impl Projectors {
     /// The "Open Projector" submenu for the menu of `owner`, if it shows
     /// something a projector can show.
     pub fn extend_menu(&self, app: &Rc<App>, owner: &str, menu: MenuBuilder) -> MenuBuilder {
-        let studio = app.session.borrow().studio;
-        let mut wanted: Vec<(&str, ProjectorView, String)> = Vec::new();
+        let (studio, has_vertical) = {
+            let s = app.session.borrow();
+            (s.studio, s.vertical.is_some())
+        };
+        // A label, the view, its scene or source, and whether it is of the
+        // vertical canvas (a multiview: with the vertical program).
+        let mut wanted: Vec<(&str, ProjectorView, String, bool)> = Vec::new();
         if owner == "canvas" || owner.starts_with("canvas:item:") {
             if studio {
-                wanted.push(("Preview Projector", ProjectorView::Preview, String::new()));
+                wanted.push((
+                    "Preview Projector",
+                    ProjectorView::Preview,
+                    String::new(),
+                    false,
+                ));
             }
-            wanted.push(("Program Projector", ProjectorView::Program, String::new()));
-            wanted.push(("Multiview", ProjectorView::Multiview, String::new()));
+            wanted.push((
+                "Program Projector",
+                ProjectorView::Program,
+                String::new(),
+                false,
+            ));
+            wanted.push(("Multiview", ProjectorView::Multiview, String::new(), false));
+        }
+        // The vertical monitor (#96).
+        if (owner == VERTICAL_MONITOR || owner == "viewer:vertical") && has_vertical {
+            if studio {
+                wanted.push((
+                    "Vertical Preview Projector",
+                    ProjectorView::Preview,
+                    String::new(),
+                    true,
+                ));
+            }
+            wanted.push((
+                "Vertical Program Projector",
+                ProjectorView::Program,
+                String::new(),
+                true,
+            ));
         }
         if let Some(scene) = owner.strip_prefix("scenes:")
             && !scene.is_empty()
         {
-            wanted.push(("Scene Projector", ProjectorView::Scene, scene.to_string()));
+            wanted.push((
+                "Scene Projector",
+                ProjectorView::Scene,
+                scene.to_string(),
+                false,
+            ));
+            if has_vertical {
+                wanted.push((
+                    "Vertical Scene Projector",
+                    ProjectorView::Scene,
+                    scene.to_string(),
+                    true,
+                ));
+            }
         }
         if owner.starts_with("sources:item:") {
             // The sources area selected the item before building its menu.
@@ -1274,7 +1403,7 @@ impl Projectors {
                 })
             };
             if let Some(source) = source {
-                wanted.push(("Source Projector", ProjectorView::Source, source));
+                wanted.push(("Source Projector", ProjectorView::Source, source, false));
             }
         }
         if wanted.is_empty() {
@@ -1282,8 +1411,12 @@ impl Projectors {
         }
         let displays = self.displays.borrow().clone();
         let mut menu = menu.separator();
-        for (label, view, arg) in wanted {
-            let base = format!("projector|{}|{arg}|", view_name(view));
+        for (label, view, arg, vertical) in wanted {
+            let base = format!(
+                "projector|{}{}|{arg}|",
+                view_name(view),
+                if vertical { VERTICAL_SUFFIX } else { "" }
+            );
             let mut items = MenuBuilder::new().item(&format!("{base}window"), "Windowed");
             if !displays.is_empty() {
                 items = items.separator().heading("Full Screen");
@@ -1323,12 +1456,20 @@ impl Projectors {
         else {
             return true;
         };
+        let (view, vertical) = match view.strip_suffix(VERTICAL_SUFFIX) {
+            Some(view) => (view, true),
+            None => (view, false),
+        };
         let Ok(view) = serde_json::from_value::<ProjectorView>(serde_json::json!(view)) else {
             return true;
         };
         let arg = (!arg.is_empty()).then_some(arg);
         let display = (place != "window").then_some(place);
-        self.open(app, view, arg, display);
+        // The app's multiview shows the vertical program whenever there is
+        // a vertical canvas.
+        let vertical = vertical
+            || (view == ProjectorView::Multiview && app.session.borrow().vertical.is_some());
+        self.open(app, view, arg, display, vertical);
         true
     }
 }
@@ -1340,6 +1481,14 @@ impl Area for Projectors {
 
     fn update(&self, app: &Rc<App>, _window: &AppWindow, changed: Changed) {
         if !changed.any(Changed::SETUP | Changed::SCENES | Changed::CONFIRMED) {
+            // A vertical projector says when the vertical canvas stopped.
+            if changed.any(Changed::STATUS) {
+                for shown in self.shown.borrow().values() {
+                    if shown.projector.borrow().is_vertical() {
+                        self.label(app, shown);
+                    }
+                }
+            }
             return;
         }
         let shown: Vec<Rc<Shown>> = self.shown.borrow().values().cloned().collect();
@@ -1381,13 +1530,25 @@ impl Area for Projectors {
             return None;
         }
         let (view, rest) = arg.split_once(':').unwrap_or((arg, ""));
+        // `vertical-program`, `vertical-scene:ID`…: of the vertical canvas;
+        // `vertical-multiview`: with the vertical program in a tile.
+        let (view, vertical) = match view.strip_prefix("vertical-") {
+            Some(view) => (view, true),
+            None => (view, false),
+        };
         let Ok(view) = serde_json::from_value::<ProjectorView>(serde_json::json!(view)) else {
             return Some(Err(anyhow::anyhow!(
-                "projector:VIEW: VIEW is one of {}",
+                "projector:[vertical-]VIEW: VIEW is one of {}",
                 ProjectorView::NAMES.join(", ")
             )));
         };
-        self.open(app, view, (!rest.is_empty()).then_some(rest), None);
+        self.open(
+            app,
+            view,
+            (!rest.is_empty()).then_some(rest),
+            None,
+            vertical,
+        );
         Some(Ok(()))
     }
 }

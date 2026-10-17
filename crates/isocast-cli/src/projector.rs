@@ -33,9 +33,15 @@ pub enum Command {
         /// The multiview's grid: top-8 (the default), 3x3 or 2x2.
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(MultiviewLayout::NAMES))]
         layout: Option<String>,
-        /// The canvas (main).
-        #[arg(long)]
+        /// The canvas: main (the default), or vertical (the setup's
+        /// vertical canvas: its program, preview or a scene as it arranges
+        /// it).
+        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(isocast_protocol::projector::CANVASES))]
         canvas: Option<String>,
+        /// A multiview's last tile shows the vertical canvas's program
+        /// instead of a scene (--vertical=false takes it back out).
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+        vertical: Option<bool>,
         #[arg(long)]
         json: bool,
     },
@@ -82,6 +88,7 @@ pub fn run(command: Command) -> Result<ExitCode> {
             frame,
             layout,
             canvas,
+            vertical,
             json,
         } => {
             let view: ProjectorView = serde_json::from_value(serde_json::json!(view))?;
@@ -108,6 +115,7 @@ pub fn run(command: Command) -> Result<ExitCode> {
                 source,
                 canvas,
                 layout,
+                vertical,
                 fullscreen: match (fullscreen || display.is_some(), window) {
                     (true, _) => Some(true),
                     (false, true) => Some(false),
@@ -182,9 +190,20 @@ pub fn print_one(projector: &Projector) {
         ProjectorView::Source => {
             format!("source {}", projector.source.as_deref().unwrap_or("?"))
         }
-        ProjectorView::Multiview => {
-            format!("multiview {}", projector.layout.unwrap_or_default().name())
-        }
+        ProjectorView::Multiview => format!(
+            "multiview {}{}",
+            projector.layout.unwrap_or_default().name(),
+            if projector.vertical {
+                " with the vertical program"
+            } else {
+                ""
+            }
+        ),
+    };
+    let what = if projector.is_vertical() {
+        format!("vertical {what}")
+    } else {
+        what
     };
     let placement = &projector.placement;
     let place = match (placement.fullscreen, &placement.display, placement.frame) {

@@ -374,6 +374,19 @@ export component Stage inherits Rectangle {
         empty-text: CanvasArea.vertical-empty-text;
         waiting: CanvasArea.vertical-waiting;
     }
+    // Right-click on the vertical picture: its menu, with Open Projector
+    // (#96). Draws nothing.
+    if root.v-shown: TouchArea {
+        x: vertical.x;
+        y: vertical.y;
+        width: vertical.width;
+        height: vertical.height;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.up && event.button == PointerEventButton.right {
+                Menus.request("vertical-monitor", self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, 0, 0);
+            }
+        }
+    }
     if root.v-shown: VerticalHead {
         x: root.main-w;
         y: root.v-head-y;

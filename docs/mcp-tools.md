@@ -421,17 +421,18 @@ Open a project file (`<name>.isoprj`, in every project folder) or a project fold
 
 ## open_projector
 
-Open a projector: the program, studio mode's preview, a scene (`scene` id), a video source (`source` id) or a multiview grid (`layout`: top-8, 3x3 or 2x2; preview, program and scenes with labels and tally), full screen on a display (`fullscreen`, `display`: main, an id or a name from list_projectors) or in a window (`fullscreen` false, optional `frame` in points). The Isocast app shows it, and opens it when it next starts if it isn't running (`shown` says whether a window shows it). Opening a view that is already open moves it. Absent placement: where that view was last.
+Open a projector: the program, studio mode's preview, a scene (`scene` id), a video source (`source` id) or a multiview grid (`layout`: top-8, 3x3 or 2x2; preview, program and scenes with labels and tally; `vertical` true puts the vertical program in its last tile), with `canvas` "vertical" the vertical canvas's program, preview or scene, full screen on a display (`fullscreen`, `display`: main, an id or a name from list_projectors) or in a window (`fullscreen` false, optional `frame` in points). The Isocast app shows it, and opens it when it next starts if it isn't running (`shown` says whether a window shows it). Opening a view that is already open moves it. Absent placement: where that view was last.
 
 | Argument | Type | Description |
 |---|---|---|
-| `canvas` | string (optional) | The canvas (`main`, the default). |
+| `canvas` | string (optional) | The canvas: `main` (the default), or `vertical` (the live setup's vertical canvas; views program, preview and scene). |
 | `display` | string (optional) | `main`, a display's id or its name (`isocast devices`). |
 | `frame` | Frame | The window's place (not full screen). Absent: where the same view was last, else the app picks. |
 | `fullscreen` | boolean (optional) | `true`: full screen on `display` (the main display if absent); `false`: in a window. Absent: where the same view was last (a window the first time), or full screen if `display` is given. |
 | `layout` | MultiviewLayout | The grid, for `view = multiview`: `top-8` (the default), `3x3` or `2x2`. |
 | `scene` | string (optional) | The scene's id, for `view = scene`. |
 | `source` | string (optional) | The video source's id, for `view = source`. |
+| `vertical` | boolean (optional) | For `view = multiview`: show the vertical canvas's program in the grid's last tile, in place of a scene (the live setup needs a vertical canvas). Absent: as the open multiview has it, else no. |
 | `view` (required) | ProjectorView |  |
 
 ## open_timeline

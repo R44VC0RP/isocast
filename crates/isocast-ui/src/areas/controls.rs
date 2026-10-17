@@ -34,6 +34,8 @@ pub const STATES: &[&str] = &[
     "go-live",
     "stop-stream",
     "stream:live|reconnecting|connecting|short|key-problem",
+    "vertical-stream:live|reconnecting|connecting|failed|off",
+    "vertical-stopped[:WHY]",
     "details:rec|live",
     "toasts",
     "toast-drops",
@@ -161,6 +163,9 @@ pub struct Controls {
     pending_fix: RefCell<Option<(String, Value)>>,
     /// Overload notices hidden for good this run (and in the prefs).
     hidden: RefCell<Vec<String>>,
+    /// Why the vertical canvas stopped, once told (#96): its notice shows
+    /// once per failure.
+    vertical_stopped: RefCell<Option<String>>,
 }
 
 impl Area for Controls {
@@ -285,6 +290,9 @@ impl Area for Controls {
         let area = window.global::<ControlsArea>();
         if changed.any(Changed::STATUS | Changed::BUSY | Changed::SETUP) {
             self.show_recording(app, &area);
+        }
+        if changed.any(Changed::STATUS) {
+            self.vertical_came_or_went(app);
         }
         if changed.any(Changed::STREAM | Changed::BUSY) {
             self.show_stream(app, &area);
@@ -444,6 +452,60 @@ impl Area for Controls {
                     .set(s.stream.as_ref().is_some_and(|x| x.is_active()));
                 drop(s);
                 app.changed(Changed::STREAM | Changed::STATUS);
+            }
+            // The vertical canvas's stream (#96), as a status shows it.
+            "vertical-stream" => {
+                let streams = match arg {
+                    "off" => Vec::new(),
+                    which => {
+                        let sample = if which == "failed" {
+                            "connecting"
+                        } else {
+                            which
+                        };
+                        let mut status = match sample_stream(sample) {
+                            Ok(status) => status,
+                            Err(error) => return Some(Err(error)),
+                        };
+                        status.canvas = isocast_protocol::CanvasId::Vertical;
+                        status.service = StreamService::Custom;
+                        status.server = "rtmp://127.0.0.1/vertical".into();
+                        if which == "failed" {
+                            status.state = StreamState::Failed;
+                            status.last_error = Some("the server refused the stream key".into());
+                        }
+                        vec![status]
+                    }
+                };
+                app.session.borrow_mut().vertical_streams = streams;
+                app.changed(Changed::STREAM | Changed::STATUS);
+            }
+            // A failure contained to the vertical canvas (#96), as a
+            // status reports it (a real one: developer mode's
+            // ISOCAST_COMPOSITOR_FAIL_AFTER=vertical=SECONDS).
+            "vertical-stopped" => {
+                let why = if arg.is_empty() {
+                    "vertical compositor panicked: injected compositor failure"
+                } else {
+                    arg
+                };
+                {
+                    let mut s = app.session.borrow_mut();
+                    let Some(vertical) = s
+                        .status
+                        .as_mut()
+                        .and_then(|x| x.engine.as_mut())
+                        .and_then(|e| e.vertical.as_mut())
+                    else {
+                        return Some(Err(anyhow::anyhow!(
+                            "vertical-stopped needs a running engine with a vertical canvas \
+                             (vertical-canvas first, then wait)"
+                        )));
+                    };
+                    vertical.stopped = Some(why.to_string());
+                    vertical.fps = 0.0;
+                }
+                app.changed(Changed::STATUS);
             }
             "details" => {
                 app.flush();
@@ -1170,8 +1232,16 @@ impl Controls {
         } else {
             String::new()
         };
+        // The vertical canvas's own state (#96): its streams, or that it
+        // stopped.
+        let (vertical, vertical_bad) = vertical_words(&s);
+        let line = match (vertical, line.is_empty()) {
+            (Some(words), false) => format!("{line} · {words}"),
+            (Some(words), true) => words,
+            (None, _) => line,
+        };
         area.set_status_line(line.into());
-        area.set_status_warn(streaming && health != "ok");
+        area.set_status_warn((streaming && health != "ok") || vertical_bad);
 
         // The readouts: the take's drops, else the stream's (with its
         // share); the stream's rate, else the disk's while recording.
@@ -1202,6 +1272,37 @@ impl Controls {
             free.map_or(String::new(), crate::model::gigabytes_free)
                 .into(),
         );
+    }
+
+    /// Tell once when the vertical canvas stopped after a contained failure
+    /// (#96), with what brings it back: an engine restart, once nothing
+    /// records or streams.
+    fn vertical_came_or_went(&self, app: &Rc<App>) {
+        let stopped = {
+            let s = app.session.borrow();
+            s.status
+                .as_ref()
+                .and_then(|x| x.engine.as_ref())
+                .and_then(|e| e.vertical.as_ref())
+                .and_then(|v| v.stopped.clone())
+        };
+        if *self.vertical_stopped.borrow() == stopped {
+            return;
+        }
+        self.vertical_stopped.replace(stopped.clone());
+        let Some(why) = stopped else { return };
+        let toast = Toast::new(
+            ToastKind::Error,
+            "The vertical canvas stopped",
+            format!(
+                "{why}. The main canvas, its recording and its streams keep going. The \
+                 vertical canvas comes back when the engine restarts, which it can once \
+                 nothing records or streams."
+            ),
+        )
+        .key("vertical-stopped")
+        .action("Restart Engine", restart_engine);
+        app.show_toast(toast);
     }
 
     /// Tick just after each whole second of whichever timer runs.
@@ -2531,7 +2632,76 @@ pub fn replay_saved(app: &Rc<App>, saved: &ReplaySaved) {
     );
 }
 
+/// The vertical canvas's streams (#96): whether one streams (or tries
+/// to), whether it is set up with a key for its main destination, and why
+/// its key can't be used.
+fn vertical_stream_state(s: &crate::session::Session) -> (bool, bool, Option<&'static str>) {
+    let active = s.vertical_streams.iter().any(StreamStatus::is_active);
+    let configured = s
+        .setup
+        .as_ref()
+        .and_then(|x| x.vertical.as_ref())
+        .is_some_and(|v| v.stream.is_some());
+    let enabled: Vec<&StreamStatus> = s.vertical_streams.iter().filter(|x| x.enabled).collect();
+    let problem = if !configured {
+        None
+    } else if enabled.is_empty() || enabled.iter().any(|x| !x.key_set) {
+        Some(
+            "Add the vertical canvas’s stream key. It’s kept in the Keychain, apart from the main canvas’s.",
+        )
+    } else if enabled.iter().any(|x| x.key_problem.is_some()) {
+        Some(
+            "The vertical canvas’s saved stream key can’t be read. Settings › Stream says how to fix it.",
+        )
+    } else {
+        None
+    };
+    (active, configured && problem.is_none(), problem)
+}
+
+/// Start or stop the vertical canvas's streams alongside the main one's
+/// (Start Streaming starts both once both are set up, #96).
+fn toggle_vertical_alongside(app: &Rc<App>, start: bool) {
+    let params = isocast_protocol::api::StreamStartParams {
+        canvas: isocast_protocol::CanvasId::Vertical,
+        ..Default::default()
+    };
+    app.session.borrow_mut().busy_vertical_stream = true;
+    app.changed(Changed::BUSY);
+    let method = if start {
+        Method::StreamStart(Some(params))
+    } else {
+        Method::StreamStop(Some(params))
+    };
+    app.call_as::<isocast_protocol::api::Streaming>(method, move |app, result| {
+        match result {
+            Ok(status) => {
+                app.session.borrow_mut().vertical_streams = if status.destinations.is_empty() {
+                    vec![status.stream]
+                } else {
+                    status.destinations
+                };
+            }
+            Err(error) => {
+                app.failed(
+                    if start {
+                        "The vertical canvas didn’t go live"
+                    } else {
+                        "Couldn’t stop the vertical stream"
+                    },
+                    &error,
+                );
+                app.refresh_status(true);
+            }
+        }
+        app.session.borrow_mut().busy_vertical_stream = false;
+        app.changed(Changed::BUSY | Changed::STREAM);
+    });
+}
+
 fn toggle_stream(app: &Rc<App>) {
+    let (vertical_on, vertical_ready, vertical_problem) =
+        vertical_stream_state(&app.session.borrow());
     let (on, missing) = {
         let s = app.session.borrow();
         if s.busy_stream {
@@ -2558,6 +2728,25 @@ fn toggle_stream(app: &Rc<App>) {
         // Settings → Stream, saying why.
         app.open_dialog("settings", &format!("stream:{missing}"));
         return;
+    }
+    // The vertical canvas's streams go with the main one's: started when
+    // they are set up (else why not, with a way there), stopped with it.
+    if on && vertical_on {
+        toggle_vertical_alongside(app, false);
+    } else if !on && !vertical_on {
+        if vertical_ready {
+            toggle_vertical_alongside(app, true);
+        } else if let Some(problem) = vertical_problem {
+            let toast = Toast::new(
+                ToastKind::Warning,
+                "Only the main canvas is going live",
+                problem,
+            )
+            .action("Open Settings", |app| {
+                app.open_dialog("settings", "stream-vertical");
+            });
+            app.show_toast(toast);
+        }
     }
     {
         let mut s = app.session.borrow_mut();
@@ -2601,6 +2790,81 @@ fn toggle_stream(app: &Rc<App>) {
         app.session.borrow_mut().busy_stream = false;
         app.changed(Changed::BUSY | Changed::STREAM);
     });
+}
+
+/// Restart the live engine (the vertical canvas's Restart Engine, #96):
+/// isocastd refuses, atomically, while anything records, streams or
+/// exports; the window's link starts it again.
+fn restart_engine(app: &Rc<App>) {
+    app.call(Method::ShutdownIfIdle, |app, result| match result {
+        Ok(_) => {
+            app.toast(
+                ToastKind::Info,
+                "Restarting the engine",
+                "The vertical canvas comes back with it.",
+            );
+        }
+        Err(error) => app.failed(
+            "The engine can’t restart yet: stop recording and streaming first",
+            &error,
+        ),
+    });
+}
+
+/// The status bar's words for the vertical canvas (#96), and whether they
+/// warn: that it stopped, or how its streams are doing while they run.
+fn vertical_words(s: &crate::session::Session) -> (Option<String>, bool) {
+    let stopped = s
+        .status
+        .as_ref()
+        .and_then(|x| x.engine.as_ref())
+        .and_then(|e| e.vertical.as_ref())
+        .is_some_and(|v| v.stopped.is_some());
+    if stopped && s.setup.as_ref().is_some_and(|x| x.vertical.is_some()) {
+        return (
+            Some("vertical canvas stopped: restart the engine to bring it back".into()),
+            true,
+        );
+    }
+    // A failed one is news while the broadcast runs, not after.
+    let broadcasting = s.streams.iter().any(StreamStatus::is_active)
+        || s.vertical_streams.iter().any(StreamStatus::is_active);
+    let shown: Vec<&StreamStatus> = s
+        .vertical_streams
+        .iter()
+        .filter(|x| x.is_active() || (broadcasting && x.state == StreamState::Failed))
+        .collect();
+    if shown.is_empty() {
+        return (None, false);
+    }
+    let live = shown
+        .iter()
+        .filter(|x| x.state == StreamState::Live)
+        .count();
+    let any = |state: StreamState| shown.iter().any(|x| x.state == state);
+    if live == shown.len() {
+        let elapsed = shown
+            .iter()
+            .map(|x| x.elapsed_seconds)
+            .fold(0.0f64, f64::max);
+        let words = if live > 1 {
+            format!("vertical live to {live} for {}", clock(elapsed as u64))
+        } else {
+            format!("vertical live for {}", clock(elapsed as u64))
+        };
+        (Some(words), false)
+    } else if live > 0 {
+        (
+            Some(format!("vertical live to {live} of {}", shown.len())),
+            true,
+        )
+    } else if any(StreamState::Reconnecting) {
+        (Some("vertical reconnecting".into()), true)
+    } else if any(StreamState::Connecting) {
+        (Some("connecting the vertical stream…".into()), false)
+    } else {
+        (Some("vertical stream failed".into()), true)
+    }
 }
 
 /// A stream's status for snapshots, as the web app's snapshots set it:

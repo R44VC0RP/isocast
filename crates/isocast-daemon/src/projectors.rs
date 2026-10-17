@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use super::*;
 use isocast_protocol::devices::Display;
 use isocast_protocol::projector::{
-    CloseParams, MAIN_CANVAS, MultiviewLayout, OpenParams, PlaceParams, Placement, Projector,
-    ProjectorView, Projectors,
+    CANVASES, CloseParams, MAIN_CANVAS, MultiviewLayout, OpenParams, PlaceParams, Placement,
+    Projector, ProjectorView, Projectors, VERTICAL_CANVAS,
 };
 
 /// What is kept on disk.
@@ -174,9 +174,28 @@ impl Daemon {
 
     pub(super) fn projector_open(&self, params: OpenParams) -> Result<Projector, RpcError> {
         let canvas = params.canvas.clone().unwrap_or_else(|| MAIN_CANVAS.into());
-        if canvas != MAIN_CANVAS {
+        if !CANVASES.contains(&canvas.as_str()) {
             return Err(invalid(format!(
-                "canvas: {canvas:?} isn't a canvas; canvases: {MAIN_CANVAS}"
+                "canvas: {canvas:?} isn't a canvas; canvases: {}",
+                CANVASES.join(", ")
+            )));
+        }
+        let vertical = canvas == VERTICAL_CANVAS;
+        if vertical
+            && matches!(
+                params.view,
+                ProjectorView::Source | ProjectorView::Multiview
+            )
+        {
+            return Err(invalid(format!(
+                "canvas: \"vertical\" shows views program, preview and scene; a {} is the \
+                 same on every canvas, so leave canvas out (a multiview shows the vertical \
+                 program with vertical = true)",
+                if params.view == ProjectorView::Source {
+                    "source"
+                } else {
+                    "multiview"
+                }
             )));
         }
         let only = |field: &str, given: bool, view: &str| {
@@ -200,10 +219,20 @@ impl Daemon {
         }
         if params.view != ProjectorView::Multiview {
             only("layout", params.layout.is_some(), "multiview")?;
+            only("vertical", params.vertical.is_some(), "multiview")?;
         }
         {
             let state = self.state.lock();
             let setup = state.setup.as_ref();
+            let has_vertical = setup.is_some_and(|s| s.vertical.is_some());
+            if (vertical || params.vertical == Some(true)) && !has_vertical {
+                let field = if vertical { "canvas" } else { "vertical" };
+                return Err(invalid(format!(
+                    "{field}: the live setup has no vertical canvas; add one first (Settings › \
+                     Video › Vertical Canvas, or apply {{\"vertical\": {{\"width\": 1080, \
+                     \"height\": 1920, \"follow_main\": true}}}})"
+                )));
+            }
             match params.view {
                 ProjectorView::Scene => {
                     let ids: Vec<&str> = setup
@@ -281,6 +310,7 @@ impl Daemon {
             source: params.source.clone(),
             layout: (params.view == ProjectorView::Multiview)
                 .then(|| params.layout.unwrap_or(MultiviewLayout::Top8)),
+            vertical: params.vertical == Some(true),
             placement: Placement::default(),
             shown: false,
         };
@@ -326,6 +356,9 @@ impl Daemon {
                     open.placement = projector.placement.clone();
                     if projector.layout.is_some() {
                         open.layout = projector.layout;
+                    }
+                    if params.vertical.is_some() {
+                        open.vertical = projector.vertical;
                     }
                     open.clone()
                 }

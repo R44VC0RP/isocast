@@ -978,6 +978,12 @@ native app; each verified against OBS's behaviour on a test Mac.
       snapshots; full gates and strict e2e. Main-only decoded pixels and
       normalized manifests match; native byte streams vary even on main.
     - [ ] **#86 Tier-1 review/re-review and coordinator commits.**
+    - [x] **#96 vertical in the app.** Settings › Stream for the vertical
+      canvas's destinations and keys; Start Streaming starts both, per-canvas
+      status bar; vertical projectors (program, preview, scene) and the
+      multiview's vertical tile on the method table; Follow Main Scenes held
+      (and explained) while recording; a contained vertical failure says so
+      and offers Restart Engine.
 - [x] **G.8 WebM and MKV media (#61).** Media sources and stingers play
   Matroska/WebM (sniffed by content): VP9 with alpha (OBS's stinger
   format), AV1 where the Mac decodes it, H.264/HEVC in MKV, Opus and AAC
@@ -1435,6 +1441,16 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   in the VM (copy opened by a second engine: identical clips; 25 kill -9s
   during edits: file always valid; kill -9 while recording: playable
   files), offscreen snapshots, and GUI checks on isocast-m2-a.
+- #96 vertical UI (2026-10-16): Settings › Stream "Streams of: Main Canvas /
+  Vertical Canvas" (keys under `canvas:vertical:…`), Start Streaming starts
+  both with per-canvas status-bar words, vertical projectors (`canvas:
+  vertical`, engine `vertical-scene:ID` feeds) and a multiview VERT tile,
+  vertical monitor right-click Open Projector, Follow Main Scenes disabled
+  with a reason while recording, `engine.vertical.stopped` with a toast,
+  status words and Restart Engine. Offscreen snapshots of each view, visual
+  diff 0 px on all 15 standard views, hosted e2e 17/17; real window on an M2:
+  vertical-ui/scratch/REPORT.md.
+
 - #96 engine follow-ups (2026-10-16): main-over-vertical encoder priority,
   local vertical failure/on-air cleanup, per-canvas live estimates and measured
   M2 stream cost. Compositor fault injection found/fixed timed failed-file

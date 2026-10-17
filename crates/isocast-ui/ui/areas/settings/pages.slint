@@ -185,6 +185,8 @@ component ChooseService inherits VerticalLayout {
         title: SettingsArea.adding-destination ? "Add Destination" : "Service";
         hint: SettingsArea.adding-destination
             ? "The program goes to this service too, at the same time, with its own key."
+            : SettingsArea.stream-canvas == "vertical"
+            ? "The vertical canvas’s program goes out live, with the program mix, as H.264 and AAC over RTMP or RTMPS, to destinations of its own."
             : "The program goes out live: the canvas and the program mix, as H.264 and AAC over RTMP or RTMPS.";
         for service[i] in SettingsArea.services: GroupRow {
             label: service.label;
@@ -307,6 +309,24 @@ component StreamKeyRow inherits GroupRow {
 }
 
 export component StreamPage inherits SetPage {
+    // Which canvas's streams the page shows (#96), with a vertical canvas.
+    if SettingsArea.stream-canvas-choice && SettingsArea.needs-server == "": SetGroup {
+        title: "Canvas";
+        hint: "Each canvas streams its own program, to destinations and keys of its own. Start Streaming starts both once both are set up.";
+        GroupRow {
+            label: "Streams of";
+            place: RowPlace.only;
+            Centred {
+                Segmented {
+                    small: true;
+                    options: [{ value: "main", label: "Main Canvas" }, { value: "vertical", label: "Vertical Canvas" }];
+                    value: SettingsArea.stream-canvas;
+                    label: "Streams of";
+                    selected(value) => { SettingsArea.set-text("stream_canvas", value); }
+                }
+            }
+        }
+    }
     if SettingsArea.notice != "": Callout {
         kind: CalloutKind.info;
         title: SettingsArea.notice;
@@ -326,7 +346,7 @@ export component StreamPage inherits SetPage {
     if !SettingsArea.has-stream || SettingsArea.adding-destination: ChooseService { }
     if SettingsArea.has-stream && !SettingsArea.adding-destination: SetGroup {
         title: "Destinations";
-        hint: "Start Streaming sends the program to every destination that’s on, each with its own key and connection; one failing never stops the others. Those with the same bitrate and size share one encoder. " + SettingsArea.server-hint + " " + (SettingsArea.key-problem != "" ? "Once the old Keychain item is deleted, paste the key from your service’s dashboard and press Save Key." : SettingsArea.key-saved ? "The key is saved in the Keychain; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.");
+        hint: (SettingsArea.stream-canvas == "vertical" ? "The vertical canvas’s destinations and keys are its own. " : "") + "Start Streaming sends the program to every destination that’s on, each with its own key and connection; one failing never stops the others. Those with the same bitrate and size share one encoder. " + SettingsArea.server-hint + " " + (SettingsArea.key-problem != "" ? "Once the old Keychain item is deleted, paste the key from your service’s dashboard and press Save Key." : SettingsArea.key-saved ? "The key is saved in the Keychain; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.");
         for d[i] in SettingsArea.destinations: VerticalLayout {
             spacing: 1px;
             GroupRow {
@@ -1064,7 +1084,7 @@ export component VideoPage inherits SetPage {
     SetGroup {
         title: "Vertical Canvas";
         hint: SettingsArea.vertical-on
-            ? "A second, upright canvas, using the main frame rate unless overridden in the setup. Each scene reuses its main layout until you edit its vertical layout (View › Vertical Canvas › Edit Vertical Canvas)."
+            ? "A second, upright canvas, using the main frame rate unless overridden in the setup. Each scene reuses its main layout until you edit its vertical layout (View › Vertical Canvas › Edit Vertical Canvas)." + (SettingsArea.recording ? " Follow Main Scenes stays as it is while recording: each take keeps one scene timeline per canvas, so change it after you stop." : "")
             : "A second, upright canvas for phones, recorded and streamed beside the main one.";
         SwitchRow {
             label: "Vertical Canvas";
@@ -1105,6 +1125,8 @@ export component VideoPage inherits SetPage {
         if SettingsArea.vertical-on: SwitchRow {
             label: "Follow Main Scenes";
             place: RowPlace.middle;
+            enabled: !SettingsArea.recording;
+            description: SettingsArea.recording ? "Changes once the recording stops" : "";
             on <=> SettingsArea.vertical-follow;
             toggled(on) => { SettingsArea.set-flag("vertical_follow", on); }
         }

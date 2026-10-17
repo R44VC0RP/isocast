@@ -126,6 +126,22 @@ carry the destination's `id`. Settings › Stream lists the destinations
 (on/off, state, service, server, key, own bitrate and size), and the
 status bar's LIVE details show each one's state.
 
+## The vertical canvas's stream
+
+A setup's vertical canvas (`[vertical]`) streams its own program to its
+own `[vertical.stream]` destinations, with keys of its own: their
+Keychain accounts start `canvas:vertical:<id>:` (for example
+`canvas:vertical:main:twitch`), so a vertical key never replaces the main
+canvas's. The CLI and MCP take `--canvas vertical` / `canvas: "vertical"`
+on every stream and key command. In the app, Settings › Stream has a
+**Streams of: Main Canvas / Vertical Canvas** choice (shown once there is
+a vertical canvas) and the same service, server, key and destination
+steps for each. Start Streaming starts the vertical canvas's streams too
+when they are set up with keys (else it says what's missing, with a way
+to Settings), and stops them with the main one's; the vertical monitor's
+menu starts or stops them alone. The status bar adds the vertical
+canvas's state (`vertical live for 00:12:34`, `vertical reconnecting`).
+
 ## Service presets
 
 Each preset fills in the service's documented ingest server, RTMPS where

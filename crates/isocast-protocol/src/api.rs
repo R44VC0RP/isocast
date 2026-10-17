@@ -2278,6 +2278,11 @@ pub struct CanvasEngineInfo {
     pub program_frames: u64,
     pub missed_frames: u64,
     pub fps: f64,
+    /// Why this canvas's program stopped, after a failure contained to it
+    /// (the main canvas and its recording keep going). It stays stopped,
+    /// and won't record or stream, until the live engine restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
     pub compositor: CompositorInfo,
     pub scenes: ScenesInfo,
 }

@@ -798,12 +798,10 @@ impl Canvas {
             )
         };
         if !on && !configured {
-            app.toast(
-                ToastKind::Info,
-                "The vertical canvas has nowhere to stream yet",
-                "Settings can’t set up its destinations and keys yet. Add one with \
-                 `isocast stream destination add --canvas vertical`, then its key with \
-                 `isocast stream key`.",
+            // Settings › Stream, showing the vertical canvas's (#96).
+            app.open_dialog(
+                "settings",
+                "stream-vertical:Choose where the vertical canvas streams first.",
             );
             return;
         }
@@ -857,8 +855,18 @@ impl Canvas {
             .map(|scene| model::scene_name(scene).to_string())
             .unwrap_or_default();
         canvas.set_vertical_name(name.as_str().into());
+        // Stopped after a failure of its own (#96): it says so, not a
+        // frozen picture.
+        let stopped = s
+            .status
+            .as_ref()
+            .and_then(|x| x.engine.as_ref())
+            .and_then(|e| e.vertical.as_ref())
+            .is_some_and(|v| v.stopped.is_some());
         canvas.set_vertical_empty_text(
-            if name.is_empty() {
+            if stopped {
+                "The vertical canvas stopped. Restart the engine to bring it back."
+            } else if name.is_empty() {
                 "Nothing on air."
             } else {
                 ""
@@ -913,7 +921,7 @@ impl Canvas {
                 } else if configured {
                     "Start Vertical Stream"
                 } else {
-                    "Vertical Stream: Set Up with the CLI…"
+                    "Set Up Vertical Stream…"
                 },
             )
             .disabled(!has)
@@ -1741,7 +1749,9 @@ impl Area for Canvas {
                         .checked(canvas),
                 )
             }
-            "viewer:vertical" => Some(self.vertical_menu(app)),
+            "viewer:vertical" | super::projectors::VERTICAL_MONITOR => {
+                Some(self.vertical_menu(app))
+            }
             "viewer:view" => Some(
                 MenuBuilder::new()
                     .item("studio_mode", "Studio Mode")
