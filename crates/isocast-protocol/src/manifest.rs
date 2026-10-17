@@ -123,6 +123,32 @@ pub struct ManifestFile {
     pub repeated_frames: Option<u64>,
     pub dropped_frames: Option<u64>,
     pub audio_dropouts: Option<u64>,
+    /// Audio sources that stopped while this file recorded (a microphone
+    /// unplugged, a picked input gone, an app's audio tap ended): the
+    /// track that carries each is missing its audio from then on. Absent
+    /// when none did, and in manifests written before it existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_stops: Vec<AudioStop>,
+}
+
+/// An audio source that stopped while recording, in one file's track.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AudioStop {
+    /// The id of the audio source that stopped.
+    pub source: String,
+    /// The audio track (from 0, in `audio` order) missing its audio: the
+    /// source's own track, or the program mix it was mixed into.
+    pub track: u32,
+    /// When its audio stopped, on the take's timeline (like markers); 0 if
+    /// it had already stopped when this take began.
+    pub time_seconds: f64,
+    /// When it came back in this track, if the engine opened it again (only
+    /// the program mix picks a reopened source up; an ISO track stays
+    /// silent to the end of the recording).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_seconds: Option<f64>,
+    /// Why it stopped.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

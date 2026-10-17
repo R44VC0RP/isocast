@@ -38,6 +38,7 @@ pub const STATES: &[&str] = &[
     "toasts",
     "toast-drops",
     "toast-overload[:fits|EVENT.json]",
+    "toast-audio-stops:REPORT.json",
     "transition:KIND",
     "vcam[:missing|approval|running|failed|removable]",
     "replay[:running|failed|saved]",
@@ -564,6 +565,17 @@ impl Area for Controls {
                         ("Intro Clip ISO".into(), "4 (0.2%)".into(), ""),
                     ]),
                 );
+            }
+            // Audio sources that stopped while recording (#101), from a
+            // report `isocast stop --json` printed.
+            "toast-audio-stops" => {
+                match std::fs::read_to_string(arg)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|text| Ok(serde_json::from_str(&text)?))
+                {
+                    Ok(report) => app.audio_stops(&report),
+                    Err(error) => return Some(Err(error.context(format!("{arg}: not a report")))),
+                }
             }
             // The encoder overload notice (#66), as the soak's base M2
             // sends it; "fits" when the chip table says it should fit; or

@@ -263,6 +263,37 @@ reason, like a disconnected microphone, and the rest of the take records
 on; a change that keeps the picked inputs records on. In the app: the
 source's Properties (Channels).
 
+## An audio source that stops while recording
+
+A microphone unplugged, a picked input gone or an app's audio tap ending
+stops that source; the take records on, and the tracks that carried it
+lose it from then on. The take's manifest says so in each such file's
+entry, the stop reply (and `status.last`) in the same entry of `files`,
+and both in `errors` (the take's status is then `failed`, like a file
+that stopped early):
+
+```json
+"audio_stops": [
+  {
+    "source": "mic",
+    "track": 0,
+    "time_seconds": 4.9385,
+    "reason": "the device was disconnected"
+  }
+]
+```
+
+`track` is the file's audio track (from 0, in `audio` order): the
+source's own track in an ISO file, or the program mix it was mixed into
+(the program and vertical program files). `time_seconds` is on the take's
+timeline, like markers: the end of the last audio it delivered. A take
+split off after it began holds it from 0, its reason starting "it stopped
+before this take began". The engine opens a failed source again only if
+the recording didn't list it for an ISO file; the program mix then plays
+it again from `resumed_seconds`. The field is absent when nothing
+stopped, so other manifests are unchanged. The app shows a notice when
+the recording stops.
+
 `audio.mono` (the app's Mono, in Advanced Audio Properties and each mixer
 strip's menu) downmixes a stereo source to (left + right) / 2 in the
 program and monitoring; ISO files keep it as captured.

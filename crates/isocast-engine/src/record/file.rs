@@ -684,6 +684,7 @@ impl<W: FileWriter> OpenFile<W> {
             repeated_frames: repeated,
             dropped_frames: expected.saturating_sub(self.frames),
             audio_dropouts: dropouts,
+            audio_stops: Vec::new(),
         };
         if let Err(error) = padded {
             *self.plan.failed_report.lock() = Some(report);

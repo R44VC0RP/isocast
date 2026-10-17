@@ -2640,6 +2640,10 @@ pub struct FileReport {
     /// Times audio was missing and filled with silence, or dropped by the
     /// encoder, across all tracks.
     pub audio_dropouts: u64,
+    /// Audio sources that stopped while this file recorded (as in its
+    /// manifest entry); absent when none did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_stops: Vec<crate::manifest::AudioStop>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

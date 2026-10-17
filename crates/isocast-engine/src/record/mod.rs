@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, SecondsFormat};
 use isocast_protocol::manifest::{
-    MANIFEST_VERSION, ManifestAudio, ManifestFile, Marker, SceneChange, SessionManifest,
+    AudioStop, MANIFEST_VERSION, ManifestAudio, ManifestFile, Marker, SceneChange, SessionManifest,
     SessionStatus,
 };
 use isocast_protocol::{
@@ -944,6 +944,8 @@ struct Take {
     finalized: bool,
     /// The final manifest, once made (for [`OnTake`]).
     manifest: Option<SessionManifest>,
+    /// The audio-stop errors its final manifest was made with.
+    audio_errors: Vec<String>,
 }
 
 /// A take's files and manifest name, before it begins.
@@ -966,6 +968,7 @@ impl Take {
             end: None,
             finalized: false,
             manifest: None,
+            audio_errors: Vec::new(),
         }
     }
 
@@ -1217,12 +1220,14 @@ fn live_status(
 
 /// A take's manifest as it stands: files that haven't finished have no
 /// duration or counts yet.
+#[allow(clippy::too_many_arguments)]
 fn take_manifest<P: Platform>(
     platform: &P,
     setup: &Setup,
     take: &Take,
     status: SessionStatus,
     errors: &[String],
+    stops: &[AudioStopped],
     control: Option<&SessionControl>,
     vertical_control: Option<&SessionControl>,
 ) -> SessionManifest {
@@ -1271,6 +1276,7 @@ fn take_manifest<P: Platform>(
                 repeated_frames: 0,
                 dropped_frames: (end.ticks_since(start, fps).max(0) as u64).saturating_sub(frames),
                 audio_dropouts: plan.audio_dropouts.load(Ordering::Relaxed),
+                audio_stops: Vec::new(),
             }
         })
     };
@@ -1363,11 +1369,143 @@ fn take_manifest<P: Platform>(
                     repeated_frames: result.as_ref().map(|r| r.repeated_frames),
                     dropped_frames: result.as_ref().map(|r| r.dropped_frames),
                     audio_dropouts: result.as_ref().map(|r| r.audio_dropouts),
+                    audio_stops: file_audio_stops(setup, take, plan, stops, mapped),
                 }
             })
             .collect(),
         errors: errors.to_vec(),
     }
+}
+
+/// An audio source that stopped while recording (a microphone unplugged, a
+/// picked input gone, an app's audio tap ended), and when the engine had it
+/// back, if it opened it again.
+#[derive(Debug, Clone)]
+pub(crate) struct AudioStopped {
+    pub source: String,
+    /// The end of the last audio it delivered, on the session clock (where
+    /// the files' tracks lose it).
+    pub at: Time,
+    pub reason: String,
+    /// The start of the first audio it delivered once reopened.
+    pub resumed: Option<Time>,
+}
+
+/// How an audio stop's reason starts in a take that began after it.
+const STOPPED_BEFORE: &str = "it stopped before this take began: ";
+
+/// The stops of `stops` that `plan`'s file (in `take`) carries: one per
+/// track holding the stopped source's audio, its own or the program mix
+/// it was mixed into, timed on the take's timeline. `mapped` takes a time
+/// on the session clock to the saved recording clock (pauses cut out).
+fn file_audio_stops(
+    setup: &Setup,
+    take: &Take,
+    plan: &FilePlan,
+    stops: &[AudioStopped],
+    mapped: impl Fn(Time) -> Time,
+) -> Vec<AudioStop> {
+    let end = take.end.unwrap_or(Time::MAX);
+    let mix = &setup.recording.program.audio;
+    let seconds = |at: Time| {
+        mapped(at)
+            .saturating_since(mapped(take.epoch))
+            .as_secs_f64()
+    };
+    let mut out = Vec::new();
+    for stop in stops.iter().filter(|stop| stop.at < end) {
+        for (track, id) in plan.audio.iter().enumerate() {
+            let program = id == PROGRAM && mix.contains(&stop.source);
+            if !program && *id != stop.source {
+                continue;
+            }
+            // Only the program mix takes a reopened source back: the ISO
+            // files' routes are fixed for the recording.
+            let resumed = stop.resumed.filter(|_| program);
+            if resumed.is_some_and(|at| at <= take.epoch) {
+                continue;
+            }
+            let before = stop.at <= take.epoch;
+            out.push(AudioStop {
+                source: stop.source.clone(),
+                track: track as u32,
+                time_seconds: if before { 0.0 } else { seconds(stop.at) },
+                resumed_seconds: resumed.filter(|at| *at < end).map(seconds),
+                reason: if before {
+                    format!("{STOPPED_BEFORE}{}", stop.reason)
+                } else {
+                    stop.reason.clone()
+                },
+            });
+        }
+    }
+    out
+}
+
+/// A take's errors for the audio sources that stopped in it (or before it
+/// and stayed stopped), naming the files that lost their audio.
+fn audio_stop_errors(
+    setup: &Setup,
+    take: &Take,
+    stops: &[AudioStopped],
+    control: Option<&SessionControl>,
+) -> Vec<String> {
+    let mapped = |at| control.map_or(at, |c| c.recording_time(at));
+    // One line per stop, with every file it is missing from.
+    let mut lines: Vec<(AudioStop, Vec<String>)> = Vec::new();
+    for plan in &take.plans {
+        let name = plan
+            .spec
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for stop in file_audio_stops(setup, take, plan, stops, mapped) {
+            let same = |(line, _): &&mut (AudioStop, Vec<String>)| {
+                (&line.source, line.time_seconds, line.resumed_seconds)
+                    == (&stop.source, stop.time_seconds, stop.resumed_seconds)
+            };
+            match lines.iter_mut().find(same) {
+                Some((_, files)) => {
+                    if !files.contains(&name) {
+                        files.push(name.clone());
+                    }
+                }
+                None => lines.push((stop, vec![name.clone()])),
+            }
+        }
+    }
+    lines
+        .into_iter()
+        .map(|(stop, files)| {
+            let AudioStop {
+                source,
+                time_seconds: time,
+                resumed_seconds: resumed,
+                reason,
+                ..
+            } = stop;
+            let until = match resumed {
+                Some(r) => format!(" until {r:.3} s"),
+                None => String::new(),
+            };
+            let files_are = format!(
+                "{} {}",
+                files.join(", "),
+                if files.len() == 1 { "is" } else { "are" }
+            );
+            match reason.strip_prefix(STOPPED_BEFORE) {
+                Some(reason) => format!(
+                    "{source}: its audio stopped before this take began, so {files_are} \
+                     missing it from the start{until}: {reason}"
+                ),
+                None => format!(
+                    "{source}: its audio stopped at {time:.3} s, so {files_are} missing it \
+                     from there{until}: {reason}"
+                ),
+            }
+        })
+        .collect()
 }
 
 /// Write the manifest so that a reader (or a crash) never sees half of it.

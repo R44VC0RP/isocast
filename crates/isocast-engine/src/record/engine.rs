@@ -47,6 +47,7 @@ use super::{
     interrupted_note, interrupted_sessions, is_program, live_status, plan_take, sidechain_sources,
     take_manifest, wait_for_frame, write_manifest, write_manifest_durable,
 };
+use super::{AudioStopped, audio_stop_errors, file_audio_stops};
 use crate::audio_filter::AudioStage;
 use crate::critical::Critical;
 use crate::gpu::Gpu;
@@ -382,6 +383,12 @@ struct Inner<P: Platform> {
     /// The loudest levels since a recording's status last read them.
     loudest: Critical<BTreeMap<String, (f64, f64)>>,
     recording: AtomicBool,
+    /// Audio sources that stopped (and came back) while a recording runs,
+    /// for its manifests and report; `None` while none runs.
+    audio_stops: Mutex<Option<Vec<AudioStopped>>>,
+    /// Counts changes to `audio_stops`, so the recording rewrites its
+    /// manifest when one comes.
+    audio_stop_changes: AtomicU64,
     /// Measured write speeds by folder, and when.
     speeds: Mutex<HashMap<PathBuf, (Time, f64)>>,
 }
@@ -453,6 +460,9 @@ struct AudioRun<F> {
     routes: Arc<Routes<F>>,
     meter: Arc<Meter>,
     channels: u32,
+    /// The end of the newest audio sent to the outputs (on the session
+    /// clock, sync offset included); `i64::MIN` before any.
+    last_end: Arc<AtomicI64>,
     feed: Arc<AudioFeed>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -547,6 +557,34 @@ impl<P: Platform> CanvasOutput<P> {
 }
 
 impl<P: Platform> Inner<P> {
+    /// Note for the running recording, if any, that audio source `id`
+    /// stopped at `at` (the end of its last audio) because of `reason`.
+    fn audio_stopped(&self, id: &str, at: Time, reason: &str) {
+        if let Some(stops) = self.audio_stops.lock().as_mut() {
+            stops.push(AudioStopped {
+                source: id.to_string(),
+                at,
+                reason: reason.to_string(),
+                resumed: None,
+            });
+            self.audio_stop_changes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Audio source `id` delivered its first audio, at `at`: if the running
+    /// recording noted it as stopped, it is back from there.
+    fn audio_resumed(&self, id: &str, at: Time) {
+        if let Some(stops) = self.audio_stops.lock().as_mut()
+            && let Some(stop) = stops
+                .iter_mut()
+                .rev()
+                .find(|stop| stop.source == id && stop.resumed.is_none())
+        {
+            stop.resumed = Some(at.max(stop.at));
+            self.audio_stop_changes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     fn output(&self, canvas: CanvasId) -> Option<&CanvasOutput<P>> {
         match canvas {
             CanvasId::Main => Some(&self.main),
@@ -714,6 +752,8 @@ impl<P: Platform> Engine<P> {
             levels: Mutex::new(Vec::new()),
             loudest: Critical::new(BTreeMap::new()),
             recording: AtomicBool::new(false),
+            audio_stops: Mutex::new(None),
+            audio_stop_changes: AtomicU64::new(0),
             speeds: Mutex::new(HashMap::new()),
         });
         reconcile(&inner, setup);
@@ -1379,6 +1419,7 @@ impl<P: Platform> Engine<P> {
         if inner.recording.swap(true, Ordering::SeqCst) {
             bail!("already recording; stop the current recording first");
         }
+        *inner.audio_stops.lock() = Some(Vec::new());
         let result = isocast_diagnostics::contain("recording", || record(self, options))
             .map_err(anyhow::Error::msg)
             .and_then(|r| r);
@@ -1392,6 +1433,7 @@ impl<P: Platform> Engine<P> {
             }
         }
         inner.wake.notify_all();
+        *inner.audio_stops.lock() = None;
         inner.recording.store(false, Ordering::SeqCst);
         result
     }
@@ -1881,6 +1923,7 @@ impl<F: Clone + Send + 'static> AudioRun<F> {
         let stop = Arc::new(AtomicBool::new(false));
         let channels = audio.channels;
         let feed = audio.feed.clone();
+        let last_end = Arc::new(AtomicI64::new(i64::MIN));
         let thread = thread::spawn({
             let fault_inner = inner.clone();
             let failure_feed = feed.clone();
@@ -1889,10 +1932,12 @@ impl<F: Clone + Send + 'static> AudioRun<F> {
             let routes = routes.clone();
             let meter = meter.clone();
             let stop = stop.clone();
+            let last_end = last_end.clone();
             let id = id.to_string();
             move || {
                 let failure = fault_inner.worker(&format!("audio source {id}"), || {
                     platform.real_time_thread();
+                    let frame_samples = channels.max(1) as usize;
                     while !stop.load(Ordering::SeqCst) {
                         match audio.chunks.recv_timeout(Duration::from_millis(10)) {
                             Ok((samples, pts)) => {
@@ -1905,6 +1950,16 @@ impl<F: Clone + Send + 'static> AudioRun<F> {
                                 meter.add(&samples);
                                 tap.play(&platform, Some(&control), &samples);
                                 routes.audio(&samples, pts);
+                                // A source a recording noted as stopped is
+                                // back (the engine opened it again).
+                                if last_end.load(Ordering::Relaxed) == i64::MIN {
+                                    fault_inner.audio_resumed(&id, pts);
+                                }
+                                let frames = (samples.len() / frame_samples) as u64;
+                                last_end.store(
+                                    pts.add_ticks(frames, SAMPLE_RATE).as_nanos(),
+                                    Ordering::Relaxed,
+                                );
                             }
                             Err(RecvTimeoutError::Timeout) => {
                                 if audio.feed.stopped.lock().is_some() {
@@ -1924,6 +1979,7 @@ impl<F: Clone + Send + 'static> AudioRun<F> {
             routes,
             meter,
             channels,
+            last_end,
             feed,
             stop,
             thread: Some(thread),
@@ -2683,6 +2739,7 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                     inner.wake.notify_all();
                 }
             }
+            let setup = state.setup.clone();
             for (id, live) in state.sources.iter_mut() {
                 if let Some(audio) = &live.audio {
                     let (peak_db, rms_db) = audio.meter.take();
@@ -2709,6 +2766,18 @@ fn housekeeping<P: Platform>(inner: &Arc<Inner<P>>) {
                 if let Some(reason) = stopped {
                     if let Some(video) = &live.video {
                         video.slot.stop(reason.clone());
+                    }
+                    if let Some(audio) = &live.audio {
+                        let last = audio.last_end.load(Ordering::Relaxed);
+                        // Media and browser audio may be silent for a while
+                        // before it stops: its last sound isn't the stop.
+                        let sparse = super::file::AudioTiming::new(setup.source(id)).sparse;
+                        let at = if last == i64::MIN || sparse {
+                            now
+                        } else {
+                            Time::from_nanos(last)
+                        };
+                        inner.audio_stopped(id, at, &reason);
                     }
                     live.run = SourceRun::Failed;
                     live.error = Some(format!("the capture stopped: {reason}"));
@@ -3410,6 +3479,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     }
     let started_at = Local::now() + epoch.saturating_since(platform.now());
     let mut takes = vec![Take::begin(first, epoch, started_at)];
+    // Audio sources that stopped so far (see `Inner::audio_stops`).
+    let stops = || inner.audio_stops.lock().clone().unwrap_or_default();
     let write = |take: &Take, status, errors: &[String]| {
         write_manifest(
             &take.manifest_path,
@@ -3419,6 +3490,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 take,
                 status,
                 errors,
+                &stops(),
                 Some(control),
                 vertical_control,
             ),
@@ -3476,6 +3548,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
 
         let mut all_started = false;
         let mut handover = false;
+        let mut audio_stops_seen = inner.audio_stop_changes.load(Ordering::SeqCst);
         // A pause's commit barrier under way: its generation, cut and deadline.
         let mut pending_commit: Option<(u64, Time, Time)> = None;
         let disk_probe = DiskProbe::start(platform, &folder);
@@ -3552,6 +3625,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                                 current,
                                 SessionStatus::Recording,
                                 errors,
+                                &stops(),
                                 Some(control),
                                 vertical_control,
                             ),
@@ -3646,6 +3720,13 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 {
                     all_started = true;
                     // Best effort: the final manifest is written at the end.
+                    let _ = write(current, SessionStatus::Recording, &[]);
+                }
+                // An audio source stopped (or came back): say so in the
+                // manifest at once, so a crash keeps it.
+                let changes = inner.audio_stop_changes.load(Ordering::SeqCst);
+                if changes != audio_stops_seen {
+                    audio_stops_seen = changes;
                     let _ = write(current, SessionStatus::Recording, &[]);
                 }
                 // A stop asked for comes before a split asked for at the same
@@ -3789,12 +3870,16 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                         take.finalized = true;
                         let mut errors = take.errors();
                         program_errors(inner, &take.plans, &mut errors);
+                        let stops = stops();
+                        take.audio_errors = audio_stop_errors(setup, take, &stops, Some(control));
+                        errors.extend(take.audio_errors.iter().cloned());
                         let manifest = take_manifest(
                             platform,
                             setup,
                             take,
                             take.status(&errors),
                             &errors,
+                            &stops,
                             Some(control),
                             vertical_control,
                         );
@@ -3936,24 +4021,40 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     let mut files = Vec::new();
     let mut manifests = Vec::new();
     let mut file_errors = Vec::new();
+    let stops = stops();
     for (i, take) in takes.iter_mut().enumerate() {
         let mut take_errors = take.errors();
         if !take.finalized {
             program_errors(inner, &take.plans, &mut take_errors);
         }
+        let audio_errors = audio_stop_errors(setup, take, &stops, Some(control));
+        take_errors.extend(audio_errors.iter().cloned());
         file_errors.extend(take_errors.iter().cloned());
         if i == last {
             take_errors.extend(errors.iter().cloned());
         }
+        // A take finalized before a stop in it was noticed is made again,
+        // with its saved errors and the audio ones as they are now.
+        let restated = take.finalized && audio_errors != take.audio_errors;
+        if restated && let Some(saved) = &take.manifest {
+            take_errors = saved
+                .errors
+                .iter()
+                .filter(|e| !take.audio_errors.contains(e))
+                .cloned()
+                .chain(audio_errors.iter().cloned())
+                .collect();
+        }
         // A manifest that can't be written (the disk is full) doesn't lose
         // the report: the files it would list are finished all the same.
-        if i == last || !take.finalized {
+        if i == last || !take.finalized || restated {
             let manifest = take_manifest(
                 platform,
                 setup,
                 take,
                 take.status(&take_errors),
                 &take_errors,
+                &stops,
                 Some(control),
                 vertical_control,
             );
@@ -3963,7 +4064,14 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             take.manifest = Some(manifest);
         }
         manifests.push(take.manifest_path.clone());
-        files.extend(take.results.iter_mut().filter_map(|r| r.take()?.ok()));
+        let reports: Vec<_> = take.results.iter_mut().map(|r| r.take()?.ok()).collect();
+        let mapped = |at| control.recording_time(at);
+        for (plan, report) in take.plans.iter().zip(reports) {
+            if let Some(mut report) = report {
+                report.audio_stops = file_audio_stops(setup, take, plan, &stops, mapped);
+                files.push(report);
+            }
+        }
     }
     errors.extend(file_errors);
     for file in &files {

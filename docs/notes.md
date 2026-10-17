@@ -1637,6 +1637,26 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-16 (#101): **An audio source that stops while recording is in
+  the manifest per file**: `files[].audio_stops` (source, track,
+  `time_seconds` on the take's clock, optional `resumed_seconds`,
+  reason), the same in the stop reply's `files`, and a line in `errors`
+  (status `failed`, like a video file that ended early). Optional and
+  skipped when empty: other manifests and replies are byte-identical.
+  The time is the end of the last audio the source delivered (sync offset
+  included), not when the stop was noticed: in the VM the 600 Hz tone
+  ended within 10 ms of it in every file. Media and browser audio (sparse)
+  use the time the stop was noticed. The housekeeping thread that marks a
+  source failed notes the stop; the recording rewrites the manifest at
+  once (crash-safe). Only the program mix picks up a reopened source
+  (ISO routes are fixed, and ISO-listed sources are pinned, so never
+  retried), so `resumed_seconds` is on program tracks only. Pre-existing,
+  not changed: when a program-mix input fails and when it reopens, the
+  mixer restarts and the whole program track loses ~0.2 s (main and this
+  branch alike, in the VM's resume case).
+  Test kit: /Volumes/IsocastBuild/audio-stop-manifest/scratch/vm
+  (t101.py, analyse101.py).
+
 - 2026-10-16 (#96): **Main > vertical > ISO on shared video encoders.**
   Both canvas programs/streams still protect ISOs; persistent main pressure
   after the ISO admission share falls to 10% additionally sheds vertical

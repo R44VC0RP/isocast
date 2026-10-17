@@ -526,8 +526,11 @@ impl App {
                     self.changed(Changed::RUNNING);
                 }
             }
-            Event::Stopped { error, .. } => {
+            Event::Stopped { error, report, .. } => {
                 self.refresh_status(true);
+                if let Some(report) = report {
+                    self.audio_stops(report);
+                }
                 // A refused start also says so in its own words: one toast
                 // for the two (the same key), titled by the start.
                 if let Some(error) = error {
@@ -1609,6 +1612,61 @@ pub fn named_paths(message: &str, setup: &isocast_protocol::Setup) -> String {
     }
     out.push_str(rest);
     out
+}
+
+impl App {
+    /// The take's audio sources that stopped while it recorded (the
+    /// files say so too): which, when, and why.
+    pub fn audio_stops(self: &Rc<Self>, report: &isocast_protocol::api::Report) {
+        let mut seen: Vec<(u32, &str, f64)> = Vec::new();
+        let mut rows = Vec::new();
+        let mut reasons: Vec<String> = Vec::new();
+        let takes = report.takes.len() > 1;
+        for file in &report.files {
+            for stop in &file.audio_stops {
+                // A later take only repeats it ("stopped before this take").
+                if stop.reason.starts_with("it stopped before this take began") {
+                    continue;
+                }
+                let key = (file.take, stop.source.as_str(), stop.time_seconds);
+                if seen.contains(&key) {
+                    continue;
+                }
+                seen.push(key);
+                let name = self
+                    .session
+                    .borrow()
+                    .setup
+                    .as_ref()
+                    .and_then(|s| {
+                        s.source(&stop.source)
+                            .map(|s| model::source_name(s).to_string())
+                    })
+                    .unwrap_or_else(|| stop.source.clone());
+                let mut when = format!("from {:.1} s", stop.time_seconds);
+                if takes {
+                    when = format!("take {}, {when}", file.take);
+                }
+                if let Some(back) = stop.resumed_seconds {
+                    when.push_str(&format!(" to {back:.1} s"));
+                }
+                rows.push((name.clone(), when, "warn"));
+                reasons.push(format!("{name}: {}", stop.reason));
+            }
+        }
+        if rows.is_empty() {
+            return;
+        }
+        let message = format!(
+            "Each source's audio is missing from the take's files from the time shown. {}.",
+            reasons.join("; ")
+        );
+        self.show_toast(
+            Toast::new(ToastKind::Warning, "Audio stopped while recording", message)
+                .key("audio-stops")
+                .rows(rows),
+        );
+    }
 }
 
 /// "the stream dropped" → "The stream dropped".

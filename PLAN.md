@@ -4005,3 +4005,14 @@ One line per finished task, newest last.
   list) and stops the source after the drop (600 Hz exact before, other
   source unaffected); 16 <-> 18 changes record input 3 exact throughout;
   default setups byte-identical `setup check --json` and the same mixdown.
+- #101 (2026-10-16, branch agent/audio-stop-manifest): an audio source
+  that stops mid-take (unplugged, a picked input gone, a tap ended) is in
+  the take's manifest per affected file (`audio_stops`: source, track,
+  take time, reason; `resumed_seconds` when the program mix gets it
+  back), in the stop reply and `status.last`, and in `errors`; split takes
+  after it say it stopped before they began; the app shows a notice on
+  stop. Verified in the test VM: an aggregate input dropped and the whole
+  device removed mid-take give entries in the program, vertical and the
+  ISO whose policy includes it (not the other ISO) at the time the tone
+  ends (within 10 ms); files decode; normal take's manifest identical to
+  main's apart from times and counts.
