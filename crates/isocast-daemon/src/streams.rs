@@ -323,6 +323,19 @@ impl Daemon {
         let mut state = self.state.lock();
         state.streams_starting -= 1;
         let engine = engine?;
+        // A canvas whose compositor failed has no picture to send (main's
+        // failure ends the engine's program for everything). Checked under
+        // the lock that adds the streams, so a failure after this check
+        // still ends them (#96).
+        if !canvas.is_main()
+            && let Some(reason) = engine.canvas_stopped(canvas)
+        {
+            return Err(wrong(format!(
+                "the vertical canvas stopped ({reason}), so it can't stream; turn the vertical \
+                 canvas off and on again (Settings › Video, or apply {{\"vertical\": null}} and then \
+                 its settings again), or restart the engine"
+            )));
+        }
         let mut started = Vec::new();
         for (destination, key) in starting.into_iter().zip(keys) {
             let id = destination.id.clone();
@@ -726,6 +739,18 @@ impl Daemon {
     pub(crate) fn fail_streams(&self, why: &str) {
         for (_, output) in &self.state.read().streams {
             if let Output::Running(stream) = output {
+                stream.fail(why.to_string());
+            }
+        }
+    }
+
+    /// End `canvas`'s streams (and only those) with a failure, for
+    /// example when only that canvas's compositor failed (#96).
+    pub(crate) fn fail_canvas_streams(&self, canvas: CanvasId, why: &str) {
+        for (key, output) in &self.state.read().streams {
+            if slot_canvas(key).0 == canvas
+                && let Output::Running(stream) = output
+            {
                 stream.fail(why.to_string());
             }
         }

@@ -2655,7 +2655,10 @@ fn vertical_stream_state(s: &crate::session::Session) -> (bool, bool, Option<&'s
         .and_then(|x| x.vertical.as_ref())
         .is_some_and(|v| v.stream.is_some());
     let enabled: Vec<&StreamStatus> = s.vertical_streams.iter().filter(|x| x.enabled).collect();
-    let problem = if !configured {
+    // Every destination turned off on purpose: the vertical canvas simply
+    // doesn't go live, without a warning.
+    let all_off = enabled.is_empty() && !s.vertical_streams.is_empty();
+    let problem = if !configured || all_off {
         None
     } else if enabled.is_empty() || enabled.iter().any(|x| !x.key_set) {
         Some(
@@ -2668,7 +2671,7 @@ fn vertical_stream_state(s: &crate::session::Session) -> (bool, bool, Option<&'s
     } else {
         None
     };
-    (active, configured && problem.is_none(), problem)
+    (active, configured && !all_off && problem.is_none(), problem)
 }
 
 /// Start or stop the vertical canvas's streams alongside the main one's

@@ -913,6 +913,12 @@ impl<P: Platform> Engine<P> {
         &self.inner.control
     }
 
+    /// Why `canvas`'s program stopped (its compositor failed), while it
+    /// stays stopped.
+    pub fn canvas_stopped(&self, canvas: CanvasId) -> Option<String> {
+        self.inner.output(canvas)?.program.stopped()
+    }
+
     /// Start/resume must not announce working program output after its worker
     /// has failed. Stop remains available to finalize every recording.
     pub fn program_failure(&self) -> Option<String> {
@@ -2284,6 +2290,23 @@ fn ensure_vertical_compositor<P: Platform>(inner: &Arc<Inner<P>>, state: &mut St
             .set_on_air(CanvasId::Vertical, std::iter::empty(), inner.platform.now());
         return;
     };
+    // Broken canvas-local scene state would fail a new compositor at once:
+    // only a new engine recovers from that, so it stays stopped.
+    if output.scenes.broken() {
+        let why = output.program.stopped();
+        if !why
+            .as_deref()
+            .is_some_and(|w| w.contains("scene state is broken"))
+        {
+            let why = why.map(|w| format!(" ({w})")).unwrap_or_default();
+            output.program.resume();
+            output.program.stop(format!(
+                "the vertical canvas's scene state is broken{why}; only restarting the engine \
+                 recovers it"
+            ));
+        }
+        return;
+    }
     let compositor = match Compositor::new(&inner.platform, (canvas.width, canvas.height)) {
         Ok(compositor) => compositor,
         Err(err) => {
@@ -2293,6 +2316,10 @@ fn ensure_vertical_compositor<P: Platform>(inner: &Arc<Inner<P>>, state: &mut St
             return;
         }
     };
+    // A new compositor feeds the program again (the canvas was turned off
+    // and on, or resized, after a contained failure), so it no longer
+    // reports the old one's failure (#96).
+    output.program.resume();
     let stop = Arc::new(AtomicBool::new(false));
     let thread = thread::spawn({
         let inner = inner.clone();
@@ -2492,6 +2519,10 @@ fn scene_slot<P: Platform>(
     Ok(slot)
 }
 
+/// Developer-mode `ISOCAST_COMPOSITOR_FAIL_AFTER` has failed the main
+/// (`[0]`) or the vertical (`[1]`) canvas's compositor.
+static FAULT_FIRED: [AtomicBool; 2] = [const { AtomicBool::new(false) }; 2];
+
 /// The program's frame clock: at each tick, the scene on air drawn from the
 /// frames nearest to it, for the program's outputs; and studio mode's
 /// preview scene while someone wants it. With no outputs (no recording or
@@ -2570,8 +2601,11 @@ fn run_program<P: Platform>(
         if poison_after.is_some_and(|after| tick.saturating_since(epoch) >= after) {
             output.scenes.poison();
         }
+        // Once per canvas per process, so a compositor started again
+        // afterwards (the canvas turned off and on) keeps running.
         assert!(
-            !fail_after.is_some_and(|after| tick.saturating_since(epoch) >= after),
+            !(fail_after.is_some_and(|after| tick.saturating_since(epoch) >= after)
+                && !FAULT_FIRED[usize::from(!canvas.is_main())].swap(true, Ordering::SeqCst)),
             "injected compositor failure"
         );
         assert!(

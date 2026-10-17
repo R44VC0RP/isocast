@@ -993,6 +993,11 @@ native app; each verified against OBS's behaviour on a test Mac.
       multiview's vertical tile on the method table; Follow Main Scenes held
       (and explained) while recording; a contained vertical failure says so
       and offers Restart Engine.
+    - [x] **#96 vertical failure follow-ups.** A vertical compositor
+      failure ends only the vertical streams, with the reason; vertical
+      starts are refused while the canvas is stopped; turning the canvas
+      off and on clears the stop; no "add the key" toast when every
+      vertical destination is turned off.
 - [x] **G.8 WebM and MKV media (#61).** Media sources and stingers play
   Matroska/WebM (sniffed by content): VP9 with alpha (OBS's stinger
   format), AV1 where the Mac decodes it, H.264/HEVC in MKV, Opus and AAC
@@ -1474,6 +1479,17 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   status words and Restart Engine. Offscreen snapshots of each view, visual
   diff 0 px on all 15 standard views, hosted e2e 17/17; real window on an M2:
   vertical-ui/scratch/REPORT.md.
+
+- #96 vertical stop (2026-10-16): a vertical compositor failure fails the
+  `vertical:` stream slots ("the vertical canvas stopped: …") and leaves
+  main's alone; `stream_start --canvas vertical` is refused while
+  `engine.vertical.stopped`; a new vertical compositor (canvas off/on,
+  resize) clears it unless the canvas's scene state is broken; the app
+  stays quiet when every vertical destination is off. Fault hook on
+  isocast-m2-a with two local receivers: vertical receiver ends at the
+  fault, main stream 1088 frames 0 drops/0 audio dropouts, largest gap
+  34 ms; main take 26.0 s 0 drops; off/on → streams 173 frames again;
+  scene-poison stays stopped. vertical-stop/scratch/REPORT.md.
 
 - #96 engine follow-ups (2026-10-16): main-over-vertical encoder priority,
   local vertical failure/on-air cleanup, per-canvas live estimates and measured

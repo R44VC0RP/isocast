@@ -1662,6 +1662,25 @@ each section. Delete entries that stop being true.
   branch alike, in the VM's resume case).
   Test kit: /Volumes/IsocastBuild/audio-stop-manifest/scratch/vm
   (t101.py, analyse101.py).
+- 2026-10-16 (#96): **A contained vertical failure ends the vertical
+  streams and clears on off/on.** The `"vertical compositor"` WorkerFailed
+  fails only `vertical:` stream slots (`fail_canvas_streams`); main's
+  mixer/compositor failure still fails every stream (the vertical ones
+  share the mix; a main compositor failure ending healthy vertical
+  streams is a known follow-up). `stream_start --canvas vertical` checks
+  `canvas_stopped` under the state lock that adds the streams, so a
+  failure after the check still ends them (the worker sets the stop
+  before the event). `ensure_vertical_compositor` clears the program
+  slot's stop (`FrameSlot::resume`) when it spawns a new compositor,
+  except when the canvas's scene state is broken (scene-lock poison):
+  then it stays stopped and says only an engine restart recovers it.
+  Off/on is refused while recording with a vertical canvas, so recovery
+  in place waits for the take to end. The developer hook
+  `ISOCAST_COMPOSITOR_FAIL_AFTER=<main|vertical>=<s>` (seconds since the
+  engine's epoch) now fires once per canvas per process, so the
+  recovered compositor keeps running. Test kit:
+  /Volumes/IsocastBuild/vertical-stop/scratch/vstop.py, vpoison.py (run
+  with `hw-batch.py now cmd`).
 - 2026-10-16 (#96 UI): **Scene linking stays put during a take.** The
   recording binds the vertical scene timeline to one control (main's while
   linked, the vertical canvas's own while not) when it starts; switching
@@ -1669,7 +1688,8 @@ each section. Delete entries that stop being true.
   engine work. The engine keeps refusing (`vertical.follow_main`), and
   Settings › Video now disables Follow Main Scenes while recording, with
   the reason in the group's caption. **A contained vertical failure needs
-  an engine restart:** the vertical CanvasOutput lives in a OnceLock and its
+  an engine restart** (superseded: turning the canvas off and on now
+  recovers it, see the entry above): the vertical CanvasOutput lives in a OnceLock and its
   program slot stays stopped, so `engine.vertical.stopped` reports why and
   the app offers Restart Engine (`shutdown_if_idle`, refused while anything
   records or streams; the window's link starts it again). **Stream page

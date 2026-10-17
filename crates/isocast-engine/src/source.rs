@@ -272,6 +272,12 @@ impl<F: Clone> FrameSlot<F> {
     pub(crate) fn stopped(&self) -> Option<String> {
         self.stopped.lock().clone()
     }
+
+    /// Forget why it stopped: something feeds it again (a new compositor
+    /// for a canvas whose last one failed).
+    pub(crate) fn resume(&self) {
+        self.stopped.lock().take();
+    }
 }
 
 /// State shared between an audio source and its reader.

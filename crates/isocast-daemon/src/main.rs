@@ -1021,6 +1021,7 @@ trait LiveEngine: Send + Sync {
     fn update(&self, setup: &Setup, revision: u64) -> Result<(), String>;
     fn info(&self) -> EngineInfo;
     fn program_failure(&self) -> Option<String>;
+    fn canvas_stopped(&self, canvas: CanvasId) -> Option<String>;
     fn control(&self) -> Arc<SessionControl>;
     fn set_preview(&self, scene: Option<String>);
     fn frame_jpeg(
@@ -1111,6 +1112,10 @@ impl<P: Platform<SharedSurface = Surface>> LiveEngine for LiveEngineOf<P> {
 
     fn program_failure(&self) -> Option<String> {
         LiveEngineOf::program_failure(self)
+    }
+
+    fn canvas_stopped(&self, canvas: CanvasId) -> Option<String> {
+        LiveEngineOf::canvas_stopped(self, canvas)
     }
 
     fn control(&self) -> Arc<SessionControl> {
@@ -3587,6 +3592,17 @@ impl Daemon {
                         thread::spawn(move || {
                             daemon.contain("failed program output", || {
                                 daemon.fail_streams(&why);
+                            })
+                        });
+                    } else if name == "vertical compositor" {
+                        // Only the vertical canvas's picture stopped: its
+                        // streams end (they'd send a frozen picture with
+                        // live audio); main's keep going.
+                        let daemon = daemon.clone();
+                        let why = format!("the vertical canvas stopped: {message}");
+                        thread::spawn(move || {
+                            daemon.contain("failed vertical program output", || {
+                                daemon.fail_canvas_streams(CanvasId::Vertical, &why);
                             })
                         });
                     }
