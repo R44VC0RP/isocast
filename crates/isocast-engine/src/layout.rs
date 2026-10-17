@@ -879,9 +879,22 @@ fn line((start, end): (GridPlace, GridPlace)) -> taffy::Line<GridPlacement<Strin
 /// `resolved` while no engine runs.
 pub fn resolve_setup(setup: &Setup, data: &DataStore) -> Vec<ResolvedScene> {
     let canvas = (setup.canvas.width, setup.canvas.height);
+    resolve_canvas(setup, canvas, data)
+}
+
+/// [`resolve_setup`] for a canvas's view of a setup
+/// ([`Setup::for_canvas`]) whose sources make their pictures at
+/// `sources_canvas`, the main canvas's size: a Color source without a
+/// size fills the main canvas, as it does in a live engine (#112).
+pub fn resolve_canvas(
+    setup: &Setup,
+    sources_canvas: (u32, u32),
+    data: &DataStore,
+) -> Vec<ResolvedScene> {
+    let canvas = (setup.canvas.width, setup.canvas.height);
     let mut ids = NodeIds::default();
     let mut contents = Contents::default();
-    let scenes = laid_out(setup, &mut ids, &mut contents, data);
+    let scenes = laid_out(setup, sources_canvas, &mut ids, &mut contents, data);
     resolved(&compile(
         scenes.into(),
         canvas,
@@ -893,9 +906,10 @@ pub fn resolve_setup(setup: &Setup, data: &DataStore) -> Vec<ResolvedScene> {
 }
 
 /// `setup`'s scenes with every item given a rect, sources' sizes from
-/// their settings.
+/// their settings (`sources_canvas` for what fills the canvas).
 fn laid_out(
     setup: &Setup,
+    sources_canvas: (u32, u32),
     ids: &mut NodeIds,
     contents: &mut Contents,
     data: &DataStore,
@@ -904,7 +918,7 @@ fn laid_out(
     let mut scenes = setup.scenes.clone();
     let size_of = |id: &str| {
         let source = setup.source(id)?;
-        settings_size(&source.kind, canvas).map(|size| output_size(&source.filters, size))
+        settings_size(&source.kind, sources_canvas).map(|size| output_size(&source.filters, size))
     };
     let mut sizer = Sizer::new(contents, data);
     Layouter::default().resolve(
@@ -964,6 +978,7 @@ encoder = {{ codec = "hevc", quality = 70 }}
         }
         laid_out(
             setup,
+            (setup.canvas.width, setup.canvas.height),
             &mut NodeIds::default(),
             &mut Contents::default(),
             &DataStore::default(),
@@ -1143,7 +1158,13 @@ items = [
         );
         let mut ids = NodeIds::default();
         let data = DataStore::default();
-        let scenes = laid_out(&setup, &mut ids, &mut Contents::default(), &data);
+        let scenes = laid_out(
+            &setup,
+            (1920, 1080),
+            &mut ids,
+            &mut Contents::default(),
+            &data,
+        );
         let compiled = compile(
             scenes.into(),
             (1920, 1080),
@@ -1187,6 +1208,7 @@ items = [{ source = "p", rect = { x = 1, y = 2, width = 3, height = 4 } }]
         );
         let scenes = laid_out(
             &setup,
+            (1920, 1080),
             &mut NodeIds::default(),
             &mut Contents::default(),
             &DataStore::default(),

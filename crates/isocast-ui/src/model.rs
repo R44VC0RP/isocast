@@ -264,7 +264,17 @@ fn fitted_items(shown: &Value, items: &Value) -> Value {
     else {
         return items.clone();
     };
-    isocast_protocol::fit_items(&mut typed, from, to);
+    let letterboxed: Vec<String> = shown["scenes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|scene| serde_json::from_value::<isocast_protocol::Scene>(scene.clone()).ok())
+        .filter(|scene| scene.letterboxed())
+        .map(|scene| scene.id)
+        .collect();
+    isocast_protocol::fit_items(&mut typed, from, to, &|id| {
+        letterboxed.iter().any(|scene| scene == id)
+    });
     serde_json::to_value(typed).unwrap_or_else(|_| items.clone())
 }
 

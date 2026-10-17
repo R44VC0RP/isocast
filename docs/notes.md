@@ -1722,6 +1722,27 @@ each section. Delete entries that stop being true.
   trim-rect that way (fix round 1: the first version wrote left/right in
   percent of the width, and Resolve's re-export showed them scaled by
   height/width); the "Resolve units" others reverse-engineered aren't used.
+- 2026-10-17 (#112): **Letterboxed vertical canvas, nested scenes and
+  keyframes.** A nested scene is drawn once per canvas at that canvas's
+  size, so on the vertical canvas a letterboxed scene (`Scene::letterboxed`:
+  no vertical arrangement, no `layout`) is a 1080x1920 picture with the
+  main one in a band. `fit_items` now crops items that show one to that
+  band (`CanvasFit::crop`, rounded like the fitted rects), so they look as
+  on the main canvas, smaller, instead of fitted twice; at `fit = "none"`
+  they are placed like rect items (the engine sizes them from the crop),
+  and inside a fitted `fit = "none"` item they become `stretch` at their
+  main size. A scene with its own vertical arrangement (or layout) nested
+  in a letterboxed one is still its vertical picture squeezed into the
+  item. Keyframes: `for_canvas` gives fitted items fitted copies of their
+  sets (`<id>-vertical-fit-…`, appended to `keyframes`; their problems are
+  the main canvas's): pixel translations, border, radius and shadow scale
+  for rect items, translations (px and %) for `fit = "none"` ones, crops
+  map for nested scenes. Keyframe `scale` multiplies the item's own
+  (fitted) transform (animate.rs `place`), so it never changes. The app's
+  first vertical edit (`route_vertical`) still stores the items with the
+  original sets, so their pixel keyframes are then unscaled.
+  The engine-less `get --resolved --canvas vertical` sizes sources from
+  the main canvas (`layout::resolve_canvas`), as the engine's frames are.
 - 2026-10-17 (#109): **A scene without a vertical arrangement is
   letterboxed on the vertical canvas**, replacing "re-laid out, not
   scaled" (#86), which drew a 16:9 scene's rect items at main-canvas

@@ -13,7 +13,7 @@
 
 import { Theme } from "../../theme.slint";
 import { Ui } from "../../state.slint";
-import { Menus, Tag, TagTone, TextMenuButton } from "../../kit.slint";
+import { Menus, Tag, TagTone, TextMenuButton, Tip } from "../../kit.slint";
 import { CanvasArea } from "state.slint";
 import { Monitor } from "monitor.slint";
 import { StudioColumn } from "../controls/studio.slint";
@@ -183,11 +183,12 @@ component MonitorHead inherits Rectangle {
 // It is as wide as the picture, so in a narrow one the size makes way
 // first (the menu keeps its chevron, and says the size to screen
 // readers), then the scene's name (#108); nothing runs past its edge.
+// What it drops is in its tooltip and accessible label (#112).
 component VerticalHead inherits Rectangle {
     height: Theme.statusbar;
     clip: true;
     accessible-role: groupbox;
-    accessible-label: "Vertical " + CanvasArea.vertical-name;
+    accessible-label: "Vertical canvas " + Format.vertical + ", " + CanvasArea.vertical-name;
 
     // What the size and the name would take (measured off the layout, so
     // choosing what shows can't loop through it).
@@ -209,6 +210,13 @@ component VerticalHead inherits Rectangle {
     // Without room for even the chevron, its menu is on a right-click on
     // the picture and in View › Vertical Canvas.
     property <bool> show-menu: root.fixed <= root.width;
+
+    // The name (and the menu) it had to drop, on hover (#112).
+    if !root.show-name || !root.show-menu || name.preferred-width > name.width + 0.5px: Tooltip {
+        Tip {
+            text: CanvasArea.vertical-name + " · " + Format.vertical + (root.show-menu ? "" : ". Right-click the picture for its menu");
+        }
+    }
 
     HorizontalLayout {
         padding-left: 2px;

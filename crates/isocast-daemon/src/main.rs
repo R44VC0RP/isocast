@@ -1286,7 +1286,13 @@ fn resolved_vertical(
     Some(Resolved {
         generation: 0,
         revision,
-        scenes: isocast_engine::layout::resolve_setup(&view, data),
+        // Sources make their pictures at the main canvas's size, as in
+        // the engine (#112).
+        scenes: isocast_engine::layout::resolve_canvas(
+            &view,
+            (setup.canvas.width, setup.canvas.height),
+            data,
+        ),
     })
 }
 

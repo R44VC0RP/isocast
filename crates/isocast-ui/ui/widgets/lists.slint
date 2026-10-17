@@ -121,8 +121,9 @@ export component ListRow inherits Rectangle {
     in property <bool> dim;
     // Being dragged to a new place.
     in property <bool> dragging;
-    // Group depth: 16px per level.
+    // Group depth: `indent` (16px) per level.
     in property <int> depth;
+    in property <length> indent: 16px;
     // Kept for callers; Console rows have no marker bar.
     in property <bool> marker: true;
     // The kind icon at rest (`text-2`; the Scenes list's are `text-3`).
@@ -223,7 +224,7 @@ export component ListRow inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: Theme.list-inset + Theme.space-2 + root.depth * 16px;
+        padding-left: Theme.list-inset + Theme.space-2 + root.depth * root.indent;
         padding-right: Theme.list-inset + root.trailing-pad;
         spacing: Theme.space-2;
 
