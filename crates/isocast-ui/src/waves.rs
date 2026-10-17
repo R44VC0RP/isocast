@@ -96,7 +96,10 @@ impl Waves {
                 chunk_seconds: done.chunk_seconds,
             };
             self.pending.borrow_mut().remove(&done.key);
-            self.cache.borrow_mut().insert(done.key, wave);
+            let mut cache = self.cache.borrow_mut();
+            // The file changed under its path: its old waveform goes (#94).
+            cache.retain(|key, _| key.path != done.key.path);
+            cache.insert(done.key, wave);
             any = true;
         }
         any

@@ -243,19 +243,26 @@ fn timeline(weak: Weak<Daemon>) {
     let mut sampler = isocast_platform_macos::diagnostics::Sampler::default();
     #[cfg(target_os = "macos")]
     let mut device_changes = isocast_platform_macos::diagnostics::DeviceChanges::default();
+    #[cfg(target_os = "macos")]
     let mut inventory = Value::Null;
+    #[cfg(target_os = "macos")]
     let mut permissions = Value::Null;
+    #[cfg(target_os = "macos")]
     let mut sampler_cpu_us = 0.0;
+    #[cfg(target_os = "macos")]
     let mut count = 0u64;
     let mut next = Instant::now() + Duration::from_secs(1);
     loop {
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
         next += Duration::from_secs(1);
         let Some(daemon) = weak.upgrade() else { return };
+        #[cfg(target_os = "macos")]
         let started = Instant::now();
+        #[cfg(target_os = "macos")]
         let cpu = thread_cpu();
         let status = daemon.status();
         crate::debug::tick(&daemon, &status);
+        #[cfg(target_os = "macos")]
         let folder = {
             let state = daemon.state.read();
             status
@@ -320,8 +327,11 @@ fn timeline(weak: Weak<Daemon>) {
                 }
             }
         }
-        sampler_cpu_us = (thread_cpu() - cpu) * 1e6;
-        count += 1;
+        #[cfg(target_os = "macos")]
+        {
+            sampler_cpu_us = (thread_cpu() - cpu) * 1e6;
+            count += 1;
+        }
         if Instant::now() > next {
             next = Instant::now() + Duration::from_secs(1);
         }
@@ -365,6 +375,7 @@ fn devices_came_or_went(before: &Value, after: &Value) -> Vec<isocast_protocol::
     events
 }
 
+#[cfg(target_os = "macos")]
 fn thread_cpu() -> f64 {
     let mut time = std::mem::MaybeUninit::<libc::timespec>::zeroed();
     if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, time.as_mut_ptr()) } != 0 {
@@ -449,6 +460,7 @@ pub fn bug_report(daemon: &Daemon, params: &BugReportParams) -> Result<BugReport
     }
     folders.sort();
     folders.dedup();
+    #[cfg(target_os = "macos")]
     let folder = folders
         .first()
         .cloned()

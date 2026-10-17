@@ -3109,12 +3109,14 @@ version = "0.0.6"
 dependencies = [
  "anyhow",
  "isocast-diagnostics",
+ "isocast-ipc",
  "isocast-protocol",
  "isocast-surfaces",
  "libc",
  "serde",
  "serde_json",
  "wgpu",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3127,6 +3129,7 @@ dependencies = [
  "ctrlc",
  "isocast-diagnostics",
  "isocast-engine",
+ "isocast-ipc",
  "isocast-obsws",
  "isocast-platform-macos",
  "isocast-platform-stub",
@@ -3174,6 +3177,15 @@ dependencies = [
  "taffy",
  "wasmtime",
  "wgpu",
+]
+
+[[package]]
+name = "isocast-ipc"
+version = "0.0.6"
+dependencies = [
+ "libc",
+ "sha2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3239,6 +3251,7 @@ dependencies = [
  "isocast-protocol",
  "isocast-surfaces",
  "wgpu",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

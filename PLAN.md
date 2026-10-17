@@ -478,6 +478,13 @@ come later (clips already carry in/out points on their take).
     `timeline_export --vertical` (a 9:16 edited file); angle changes
     re-snap crops; waveform pictures off the UI thread; caches keyed by
     path, size and time.
+  - [x] C.3g Editor follow-ups 2 (#94): sound while playing (program
+    audio on the monitoring device, in sync, pitch-corrected above 1x);
+    Export menu with Vertical (9:16); playback paced by the display
+    refresh; 10-bit angles encoded again in an 8-bit program's depth;
+    VERTICAL naming edges; e2e `edit` checks VERTICAL frame by frame;
+    caches evict old keys; offline clips show "Offline"; deterministic
+    editor motion suite in CI.
 
 ### S. Stress testing and performance (Ryan, 2026-10-13)
 
@@ -1487,10 +1494,13 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   - [ ] **W.1b Daemon platform selection.** One concrete platform alias and
     a fail-closed stub behind `Platform`; replace per-call macOS shims
     mechanically, preserving dispatch and lifecycle on Mac.
-  - [ ] **W.1c OS services and IPC compile seam.** Platform hooks for
-    diagnostics, hotkeys, plugins, process lifecycle and shared surfaces;
-    isolate Unix transport until the real named-pipe backend (W.6).
-    Coordinate daemon plugin edits with security-103; no policy changes.
+  - [x] **W.1c OS services and IPC compile seam.** Platform hooks for
+    diagnostics, hotkeys, plugins and process lifecycle. Real same-user
+    named pipes and detached daemon/CLI on exon-desk (brought forward from
+    W.6); macOS retains native Unix socket types and plugin sandbox policy.
+    Windows process plugins/shared surfaces remain explicitly unsupported.
+    Native build/clippy/tests, CLI/MCP and Mac gates/e2e/bench verified;
+    clean-machine Actions daemon/CLI build awaits the coordinator.
   - [ ] **W.1d CLI as a client.** Isolated-daemon `record`, remove direct
     platform calls, preserve CLI/API/MCP behavior; Windows build-only gate.
   - [ ] **W.1e UI platform seam.** Keep macOS window/media integration
@@ -1549,6 +1559,19 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- W.1c (2026-10-17, #105 #28): native Windows loop syncs tracked worktree
+  bytes to exon-desk with warm caches and returns exit codes/logs/binaries.
+  Owner-only local pipes, kernel peer identity, overlapped cancellation and
+  detached handle-allowlisted launch work; daemon/CLI build and clippy pass.
+  Windows: 104 existing unit tests pass (one Unix-root fixture corrected),
+  40 concurrent clients, watch/restart/persistence and MCP's 100 tools/status;
+  recording fails explicitly without media. Mac full gates: 229 unit tests
+  plus 1 doctest, 1 existing hardware test ignored; strict e2e 18/18.
+  Three interleaved M2-a pairs versus W.1b + main f21a4c0: CPU 41.6 -> 41.7%,
+  instructions 488.7 -> 488.9 M/s, 18/18 complete files, no video/audio drops.
+  W.1d isolated-daemon `record` and W.1e UI remain. Coordinator owns pending
+  main merge, feature commit and the next Actions daemon/CLI build.
 
 - W.1a qualification / W.1b (2026-10-17, #105 #28): run 39047095306
   builds the engine on Windows and passes both portable jobs. Next slice
@@ -4223,6 +4246,12 @@ One line per finished task, newest last.
   isolated engine with obs-websocket-js (msgpack 80/80, JSON 77/77),
   obsws-python 9/9, local mediamtx; latency unchanged (3 interleaved
   rounds).
+- C.3g (2026-10-17, branch agent/editor-007, #94): editor sound in a real
+  window on isocast-m2-b within 2 ms of the picture at 1x (5 ms at 2x),
+  pictures held exactly 2 refreshes 91% at 1x; e2e edit (hosted) checks
+  VERTICAL's 214 pictures; 8-bit program + 10-bit ISO angle exports one
+  Main description (HEVC, exonbook); editor motion suite identical across
+  two lockstep runs.
 - C.3f (2026-10-16, branch agent/editor-followups, #94): HEVC/H.264/ProRes
   exports have one sample description (Chrome, Safari, QuickTime, ffmpeg
   play them; AVFoundation's decode bit-identical to ffmpeg's); forward

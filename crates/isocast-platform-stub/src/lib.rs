@@ -8,6 +8,8 @@
 //! - hand out bounded pools of CPU memory 8-bit BGRA frames, so the
 //!   engine's own synthetic generators (test patterns, tones, colors,
 //!   images, slide shows, text) can run.
+//! - on Windows, read this process's CPU time and compare volume identities
+//!   for the daemon's process and disk-protection hooks.
 //!
 //! Everything else fails with an error saying so: screen, camera,
 //! microphone, audio and browser capture, permissions, media files, the
@@ -33,6 +35,9 @@ use isocast_engine::{
 use isocast_protocol::api::Machine;
 use isocast_protocol::devices::{Devices, PermissionKind, PermissionsReport};
 use isocast_protocol::{Canvas, SourceKind};
+
+#[cfg(windows)]
+mod windows;
 
 /// The most frames one pool hands out before it waits for some to come
 /// back.
@@ -346,6 +351,23 @@ impl Platform for StubPlatform {
             "checking free space for {}",
             path.display()
         )))
+    }
+
+    fn same_volume(&self, left: &Path, right: &Path) -> Result<bool> {
+        #[cfg(windows)]
+        return windows::same_volume(left, right).map_err(Into::into);
+        #[cfg(not(windows))]
+        {
+            let _ = (left, right);
+            Err(unsupported("comparing recording volumes"))
+        }
+    }
+
+    fn process_cpu_seconds(&self) -> Option<f64> {
+        #[cfg(windows)]
+        return windows::process_cpu_seconds();
+        #[cfg(not(windows))]
+        None
     }
 
     fn frame_pool(&self, width: u32, height: u32) -> Result<FramePool> {

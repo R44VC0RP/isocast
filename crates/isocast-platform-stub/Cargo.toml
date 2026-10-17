@@ -14,3 +14,6 @@ isocast-surfaces = { path = "../isocast-surfaces" }
 # Pinned like the engine's: only for the `wgpu::Texture` in `Platform`'s
 # signatures (no backend is used here).
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }

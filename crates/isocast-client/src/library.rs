@@ -122,7 +122,7 @@ fn is_obs_collection(path: &Path) -> bool {
 /// A recording folder made absolute from `base` if it is relative (isocastd
 /// runs elsewhere, and refuses one).
 fn absolute_folder(folder: &str, base: &Path) -> String {
-    if folder.is_empty() || folder.starts_with('/') || folder.starts_with('~') {
+    if folder.is_empty() || Path::new(folder).is_absolute() || folder.starts_with('~') {
         folder.to_string()
     } else {
         base.join(folder).display().to_string()

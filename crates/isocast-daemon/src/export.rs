@@ -24,7 +24,6 @@
 //! its unfinished file.
 
 use parking_lot::Mutex;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -505,8 +504,11 @@ impl Daemon {
             .as_ref()
             .map_or(0.0, |setup| setup.recording.keep_free_gb * 1e9);
         drop(state);
-        let device = |path: &Path| std::fs::metadata(path).ok().map(|m| m.dev());
-        if device(folder)? != device(&recording)? {
+        use isocast_engine::Platform;
+        if !crate::platform::NativePlatform
+            .same_volume(folder, &recording)
+            .ok()?
+        {
             return None;
         }
         let floor = keep.max(rate * 10.0).max(RECORDING_FLOOR_BYTES);
@@ -632,8 +634,18 @@ impl Daemon {
                     .into(),
             });
         }
+        // A recording from before `edited` and `vertical` were reserved
+        // source ids could have an ISO file by that name (#94).
+        let taken = |label: &str| {
+            sources.iter().any(|s| s == label).then(|| {
+                format!(
+                    "the takes have an ISO source called {label:?}, which would share the file's \
+                     label; rename that source for new recordings"
+                )
+            })
+        };
         let edited = edited
-            && match edited_problem(&takes) {
+            && match edited_problem(&takes).or_else(|| taken(EDITED)) {
                 None => true,
                 Some(reason) => {
                     skipped.push(ExportSkipped {
@@ -644,9 +656,34 @@ impl Daemon {
                 }
             };
         // The vertical edited file (#94), when asked for: the program's
-        // size on its side.
+        // size on its side. A program already taller than wide (or square)
+        // has nothing to turn on its side: its edited file is the vertical
+        // one.
+        let upright = sources.iter().any(|s| s == PROGRAM)
+            && takes[0]
+                .file(PROGRAM)
+                .is_some_and(|program| program.height >= program.width);
         let vertical = params.vertical
-            && match (sources.iter().any(|s| s == PROGRAM), edited_problem(&takes)) {
+            && match (
+                sources.iter().any(|s| s == PROGRAM),
+                edited_problem(&takes).or_else(|| taken(VERTICAL)),
+            ) {
+                (true, _) if upright => {
+                    let program = takes[0].file(PROGRAM).expect("joined");
+                    let shape = match program.height == program.width {
+                        true => "square",
+                        false => "already vertical",
+                    };
+                    skipped.push(ExportSkipped {
+                        source: VERTICAL.into(),
+                        reason: format!(
+                            "the program is {shape} ({}x{}), so a 9:16 file of it would be the \
+                             edited picture again; the program (and EDITED) file is the one to use",
+                            program.width, program.height
+                        ),
+                    });
+                    false
+                }
                 (false, _) => {
                     skipped.push(ExportSkipped {
                         source: VERTICAL.into(),

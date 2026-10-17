@@ -1941,10 +1941,18 @@ fn unique_paths(
 }
 
 pub fn expand_home(folder: &str) -> PathBuf {
+    #[cfg(windows)]
+    let home =
+        Some(isocast_protocol::api::home_folder()).filter(|home| !home.as_os_str().is_empty());
+    #[cfg(not(windows))]
     let home = std::env::var_os("HOME").map(PathBuf::from);
     match (folder.strip_prefix('~'), home) {
-        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
-            home.join(rest.trim_start_matches('/'))
+        (Some(rest), Some(home))
+            if rest.is_empty()
+                || rest.starts_with('/')
+                || (cfg!(windows) && rest.starts_with('\\')) =>
+        {
+            home.join(rest.trim_start_matches(|c| c == '/' || (cfg!(windows) && c == '\\')))
         }
         _ => PathBuf::from(folder),
     }

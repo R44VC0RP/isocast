@@ -51,8 +51,7 @@ jobs:
         run: cargo fmt --all --check
 
       # W.0 is the OS-independent foundation, not a runnable Windows recorder.
-      # The engine's Unix manifest I/O and the client's UnixStream belong to
-      # W.1/W.2/W.6; add them and Windows e2e only as those slices work.
+      # Native service builds live below; recording qualification needs W.2+.
       - name: Build portable crates
         id: build
         run: cargo build --locked -p isocast-protocol -p isocast-diagnostics -p isocast-obsws
@@ -65,9 +64,9 @@ jobs:
         run: cargo test --locked --no-fail-fast -p isocast-protocol -p isocast-diagnostics -p isocast-obsws
 
   engine:
-    # W.1a/b: compile the shared engine and synthetic platform stub, not a
-    # Windows recording claim. Add daemon/CLI after the Unix IPC/process seam.
-    name: engine + platform build (windows-latest)
+    # W.1c: real local RPC with the stub platform, not a recording claim.
+    # Native runtime checks run on exon-desk; this is the clean-machine build.
+    name: daemon + CLI build (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 40
     defaults:
@@ -92,5 +91,5 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/ci/windows' }}
 
-      - name: Build engine and test binaries (do not run)
-        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub
+      - name: Build native services and test binaries (do not run)
+        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-ipc -p isocast-client -p isocast-daemon -p isocast-cli

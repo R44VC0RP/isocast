@@ -953,6 +953,16 @@ pub const PROGRAM: &str = "program";
 /// and reports; reserved, so no source can use it.
 pub const VERTICAL_PROGRAM: &str = "vertical-program";
 
+/// Source ids no source can have: the program recordings' names, and a
+/// timeline export's derived files' labels ([`timeline::EDITED`],
+/// [`timeline::VERTICAL`]).
+pub const RESERVED_SOURCE_IDS: [&str; 4] = [
+    PROGRAM,
+    VERTICAL_PROGRAM,
+    timeline::EDITED,
+    timeline::VERTICAL,
+];
+
 fn default_true() -> bool {
     true
 }
@@ -1457,6 +1467,54 @@ impl Setup {
         })
     }
 
+    /// Give sources whose ids became reserved (`edited`, `vertical`, #94)
+    /// the first free `<id>-2`, `<id>-3`, …, everywhere the setup names
+    /// them (scene items, recording lists, filters' side-chains, the
+    /// virtual camera, hotkeys). Returns each (old, new) id; a setup
+    /// without such a source is left as it was.
+    pub fn rename_reserved_sources(&mut self) -> Vec<(String, String)> {
+        let reserved = [timeline::EDITED, timeline::VERTICAL];
+        if !self
+            .sources
+            .iter()
+            .any(|s| reserved.contains(&s.id.as_str()))
+        {
+            return Vec::new();
+        }
+        let Ok(mut value) = serde_json::to_value(&*self) else {
+            return Vec::new();
+        };
+        let mut taken: HashSet<String> = self.sources.iter().map(|s| s.id.clone()).collect();
+        taken.extend(RESERVED_SOURCE_IDS.iter().map(|id| id.to_string()));
+        let mut renamed = Vec::new();
+        for old in reserved {
+            if !self.sources.iter().any(|s| s.id == old) {
+                continue;
+            }
+            let new = (2..)
+                .map(|n| format!("{old}-{n}"))
+                .find(|id| !taken.contains(id))
+                .expect("a free id");
+            taken.insert(new.clone());
+            if let Some(sources) = value.get_mut("sources").and_then(|v| v.as_array_mut()) {
+                for source in sources {
+                    if source.get("id").and_then(|v| v.as_str()) == Some(old) {
+                        source["id"] = serde_json::Value::String(new.clone());
+                    }
+                }
+            }
+            rename_refs(&mut value, old, &new);
+            renamed.push((old.to_string(), new));
+        }
+        match Self::from_value(value) {
+            Ok(setup) => {
+                *self = setup;
+                renamed
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// The setup as TOML, as `isocast get` and setup files write it.
     pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
         toml::to_string_pretty(self)
@@ -1798,6 +1856,16 @@ impl Setup {
                     format!("sources[{i}].id"),
                     "\"vertical-program\" is reserved for the vertical program recording; pick \
                      another id",
+                );
+            }
+            // An export's derived files are labelled like sources (#94).
+            if [timeline::EDITED, timeline::VERTICAL].contains(&source.id.as_str()) {
+                issues.add(
+                    format!("sources[{i}].id"),
+                    format!(
+                        "{:?} is reserved for a timeline export's {} file; pick another id",
+                        source.id, source.id
+                    ),
                 );
             }
             source.kind.check(&format!("sources[{i}]"), &mut issues);
@@ -2499,6 +2567,43 @@ fn parse_pattern(arg: &str) -> Option<SourceKind> {
     }))
 }
 
+/// Rename source `old` to `new` wherever a setup's JSON names a source:
+/// `source` and `sidechain_source` values, `sources` and `audio` lists, and
+/// `source_audio` and `held_sources` keys (and lists).
+fn rename_refs(value: &mut serde_json::Value, old: &str, new: &str) {
+    use serde_json::Value;
+    let swap = |v: &mut Value| {
+        if v.as_str() == Some(old) {
+            *v = Value::String(new.to_string());
+        }
+    };
+    match value {
+        Value::Object(map) => {
+            for key in ["source_audio", "held_sources"] {
+                if let Some(Value::Object(inner)) = map.get_mut(key)
+                    && let Some(moved) = inner.remove(old)
+                {
+                    inner.insert(new.to_string(), moved);
+                }
+            }
+            for (key, v) in map.iter_mut() {
+                match (key.as_str(), &mut *v) {
+                    ("source" | "sidechain_source", Value::String(_)) => swap(v),
+                    ("sources" | "audio", Value::Array(items)) => items.iter_mut().for_each(swap),
+                    _ => {}
+                }
+                rename_refs(v, old, new);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rename_refs(item, old, new);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn is_valid_id(id: &str) -> bool {
     !id.is_empty()
         && id
@@ -2509,6 +2614,58 @@ fn is_valid_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_source_ids_are_renamed_with_their_references() {
+        let mut setup = Setup::from_toml(
+            r##"
+version = 1
+name = "Old"
+[canvas]
+width = 1280
+height = 720
+fps = 30
+[recording]
+folder = "/tmp/rec"
+program = { encoder = { codec = "hevc" }, audio = ["edited"] }
+iso = { enabled = true, sources = ["vertical"], audio = ["edited"] }
+[[sources]]
+id = "vertical"
+kind = "test_pattern"
+[[sources]]
+id = "vertical-2"
+kind = "color"
+color = "#000000"
+[[sources]]
+id = "edited"
+kind = "tone"
+[[scenes]]
+id = "main"
+name = "Main"
+[[scenes.items]]
+source = "vertical"
+rect = { x = 0, y = 0, width = 1280, height = 720 }
+"##,
+        )
+        .unwrap();
+        assert!(!setup.validate().is_empty());
+        let renamed = setup.rename_reserved_sources();
+        assert_eq!(
+            renamed,
+            [
+                ("edited".to_string(), "edited-2".to_string()),
+                ("vertical".to_string(), "vertical-3".to_string())
+            ]
+        );
+        assert!(setup.validate().is_empty(), "{:?}", setup.validate());
+        assert_eq!(setup.recording.iso.sources, ["vertical-3"]);
+        assert_eq!(setup.recording.program.audio, ["edited-2"]);
+        assert_eq!(
+            setup.scenes[0].items[0].source.as_deref(),
+            Some("vertical-3")
+        );
+        assert!(setup.rename_reserved_sources().is_empty());
+    }
 
     #[test]
     fn json_errors_name_their_path() {

@@ -97,9 +97,10 @@ impl Thumbs {
         while let Ok(done) = rx.try_recv() {
             let images: Vec<Image> = done.frames.into_iter().map(Image::from_rgba8).collect();
             self.pending.borrow_mut().remove(&done.key);
-            self.cache
-                .borrow_mut()
-                .insert(done.key, ModelRc::new(VecModel::from(images)));
+            let mut cache = self.cache.borrow_mut();
+            // The file changed under its path: its old frames go.
+            cache.retain(|key, _| key.path != done.key.path);
+            cache.insert(done.key, ModelRc::new(VecModel::from(images)));
             any = true;
         }
         any
@@ -202,15 +203,21 @@ const PLAY_AHEAD: usize = 8;
 /// thread of their own (AVAssetReader, scaled to the preview's size by
 /// VideoToolbox), a few frames ahead, instead of an exact seek per step
 /// (about 25 pictures a second before). The window's thread shows the
-/// newest frame due at its clock. Dropping it stops the thread.
+/// newest frame due at its clock. Dropping it stops the thread (and its
+/// sound).
 pub struct Playback {
-    frames: Receiver<(f64, SharedPixelBuffer<Rgba8Pixel>)>,
+    frames: Receiver<Played>,
     /// A frame read and not yet due.
-    next: RefCell<Option<(f64, SharedPixelBuffer<Rgba8Pixel>)>>,
+    next: RefCell<Option<Played>>,
+    _sound: Option<crate::sound::Sound>,
 }
 
+/// A played picture's time on the timeline, and the picture (none: its
+/// file is missing or can't be read, so nothing is shown from then).
+type Played = (f64, Option<SharedPixelBuffer<Rgba8Pixel>>);
+
 impl Playback {
-    pub fn start(segments: Vec<Segment>) -> Self {
+    pub fn start(segments: Vec<Segment>, sound: Option<crate::sound::Sound>) -> Self {
         let (tx, frames) = std::sync::mpsc::sync_channel(PLAY_AHEAD);
         let spawned = std::thread::Builder::new()
             .name("playback".into())
@@ -221,7 +228,9 @@ impl Playback {
                         return;
                     }
                     #[cfg(not(target_os = "macos"))]
-                    let _ = (&segment, &tx);
+                    if tx.send((segment.start, None)).is_err() {
+                        return;
+                    }
                 }
             });
         if let Err(error) = spawned {
@@ -230,12 +239,18 @@ impl Playback {
         Self {
             frames,
             next: RefCell::new(None),
+            _sound: sound,
         }
     }
 
+    /// Replace its sound (none: silent from now on).
+    pub fn set_sound(&mut self, sound: Option<crate::sound::Sound>) {
+        self._sound = sound;
+    }
+
     /// The newest frame due at `at` (timeline seconds) not shown yet, and
-    /// its time.
-    pub fn frame_at(&self, at: f64) -> Option<(f64, Image)> {
+    /// its time (no picture: its file is offline).
+    pub fn frame_at(&self, at: f64) -> Option<(f64, Option<Image>)> {
         let mut due = None;
         let mut next = self.next.borrow_mut();
         loop {
@@ -252,7 +267,7 @@ impl Playback {
             }
             due = Some(frame);
         }
-        due.map(|(t, pixels)| (t, Image::from_rgba8(pixels)))
+        due.map(|(t, pixels)| (t, pixels.map(Image::from_rgba8)))
     }
 }
 
@@ -280,8 +295,12 @@ fn start_preview() -> PreviewChannels {
                 }
                 #[cfg(target_os = "macos")]
                 let frame = objc2::rc::autoreleasepool(|_| {
-                    // A file changed under its path gets a new generator.
+                    // A file changed under its path gets a new generator
+                    // (the old one, and its AVAsset, go).
                     let key = FileKey::of(&job.path)?;
+                    if !generators.contains_key(&key) {
+                        generators.retain(|old, _| old.path != key.path);
+                    }
                     generators
                         .entry(key)
                         .or_insert_with(|| mac::Generator::new(&job.path, PREVIEW_SIZE, true))
@@ -470,14 +489,15 @@ mod mac {
 
     /// Play `segment`'s file in order, each picture (at most `size`
     /// pixels, RGBA) sent with its time on the timeline; false once the
-    /// receiver is gone (playing stopped).
+    /// receiver is gone (playing stopped). A file that is missing or
+    /// can't be read sends "no picture" at the segment's start.
     pub fn play(
         segment: &super::Segment,
         size: (f64, f64),
-        tx: &std::sync::mpsc::SyncSender<(f64, SharedPixelBuffer<Rgba8Pixel>)>,
+        tx: &std::sync::mpsc::SyncSender<super::Played>,
     ) -> bool {
         let Some(path) = &segment.path else {
-            return true;
+            return tx.send((segment.start, None)).is_ok();
         };
         objc2::rc::autoreleasepool(|_| {
             // SAFETY: AVFoundation's documented methods on valid objects;
@@ -487,7 +507,7 @@ mod mac {
             unsafe {
                 let Some(reader) = open(path, segment, size) else {
                     eprintln!("playback: couldn’t read {}", path.display());
-                    return true;
+                    return tx.send((segment.start, None)).is_ok();
                 };
                 let (reader, output) = reader;
                 let mut sent = true;
@@ -505,7 +525,7 @@ mod mac {
                         .flatten();
                     CFRelease(sample);
                     if let Some(frame) = frame
-                        && tx.send((at, frame)).is_err()
+                        && tx.send((at, Some(frame))).is_err()
                     {
                         sent = false;
                         break;

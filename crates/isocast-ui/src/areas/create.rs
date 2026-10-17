@@ -38,9 +38,9 @@ use isocast_protocol::PROGRAM;
 use isocast_protocol::api::{EngineState, Event, Method};
 use isocast_protocol::timeline::{
     ClipFile, ClipInfo, Crop, CropPreset, ExportStarted, Retaken, TimelineAngleParams,
-    TimelineCropParams, TimelineInfo, TimelineList, TimelineMoveParams, TimelineNewParams,
-    TimelineOpenParams, TimelineRangeParams, TimelineRemoveParams, TimelineRollParams,
-    TimelineSplitParams, TimelineTarget, TimelineTrimParams,
+    TimelineCropParams, TimelineExportParams, TimelineInfo, TimelineList, TimelineMoveParams,
+    TimelineNewParams, TimelineOpenParams, TimelineRangeParams, TimelineRemoveParams,
+    TimelineRollParams, TimelineSplitParams, TimelineTarget, TimelineTrimParams,
 };
 use slint::{ComponentHandle, ModelRc, VecModel};
 
@@ -80,7 +80,7 @@ pub const STATES: &[&str] = &[
     "create-retake",
     "create-remove",
     "create-move:INDEX,TO",
-    "create-export",
+    "create-export[:vertical]",
     "create-zoom:0..1",
     "create-scroll:POINTS",
     "create-thumbs (wait for the frames)",
@@ -102,9 +102,10 @@ pub const STATES: &[&str] = &[
     "editor (open the editor window; the snapshot draws it)",
 ];
 
-/// How often the playhead moves while playing (J/K/L, Space): about a
-/// quarter of a 60 Hz display's frame, so each played picture shows within
-/// a few ms of when it is due (#94).
+/// How often the playhead moves while playing (J/K/L, Space) without the
+/// display's refresh to go by (offscreen, or the studio's Edit view):
+/// about a quarter of a 60 Hz display's frame, so each played picture
+/// shows within a few ms of when it is due (#94).
 const PLAY_EVERY: Duration = Duration::from_millis(4);
 
 #[derive(Default)]
@@ -143,6 +144,15 @@ pub struct Create {
     /// put the playhead last (moved elsewhere meanwhile: decode from there).
     playback: RefCell<Option<Playback>>,
     played_to: Cell<f64>,
+    /// Playing in the editor window: its display's refresh, which asks
+    /// for each frame and says when it shows (#94).
+    refresh: RefCell<Option<crate::refresh::Refresh>>,
+    /// Steps the playhead when the display link's frames aren't drawn.
+    stall_timer: slint::Timer,
+    /// Playing silently because a capture would take the sound in (#94).
+    silenced: Cell<bool>,
+    /// The editor window has no rendering notifier: its timer steps.
+    no_notifier: Cell<bool>,
     /// When the preview's newest picture was asked for, for
     /// ISOCAST_PREVIEW_STATS=1 (scrub latency on a test Mac).
     asked_at: Cell<Option<Instant>>,
@@ -204,6 +214,49 @@ fn program_file(clip: &ClipInfo) -> Option<&Path> {
 }
 
 /// The clip's file of `source`, if it is there.
+/// Whether the engine is taking in sound that could include the editor's
+/// playback (#94): a recording (or one starting), a stream that isn't
+/// offline or failed (either canvas) or a running replay buffer, with a
+/// source that hears this Mac's output: system audio (its `exclude` list
+/// isn't trusted to name this app), or an app's audio that could be
+/// Isocast's.
+fn capturing(session: &crate::session::Session) -> bool {
+    use isocast_protocol::SourceKind;
+    use isocast_protocol::replay::ReplayState;
+    use isocast_protocol::stream::StreamState;
+    let status = session.status.as_ref();
+    let live = |s: &isocast_protocol::stream::StreamStatus| {
+        !matches!(s.state, StreamState::Offline | StreamState::Failed)
+    };
+    // Streams and the main replay buffer as their events left them (the
+    // status read lags them); the vertical buffer as last read.
+    let running = status
+        .is_some_and(|s| matches!(s.state, EngineState::Recording | EngineState::Starting))
+        || session.stream.iter().any(live)
+        || session.streams.iter().any(live)
+        || session.vertical_streams.iter().any(live)
+        || [
+            session.replay.as_ref(),
+            status.and_then(|s| s.vertical_replay.as_ref()),
+        ]
+        .iter()
+        .any(|r| r.is_some_and(|r| r.state == ReplayState::Running));
+    if !running {
+        return false;
+    }
+    let isocast = |app: &str| {
+        let app = app.trim().to_lowercase();
+        !app.is_empty() && ("isocast".contains(&app) || app.contains("isocast"))
+    };
+    session.setup.as_ref().is_some_and(|setup| {
+        setup.sources.iter().any(|s| match &s.kind {
+            SourceKind::SystemAudio(_) => true,
+            SourceKind::ApplicationAudio(a) => isocast(&a.app),
+            _ => false,
+        })
+    })
+}
+
 fn file_of<'a>(clip: &'a ClipInfo, source: &str) -> Option<&'a ClipFile> {
     clip.files.iter().find(|f| f.source == source && f.exists)
 }
@@ -480,7 +533,8 @@ impl Create {
         self.show(app);
         if self.playback.borrow().is_some() {
             // Edited while playing: play the timeline as it is now.
-            self.start_playback(app);
+            let origin = self.played.get().unwrap_or_else(Instant::now);
+            self.start_playback(app, origin);
         }
         if self.again.replace(false) {
             self.load(app);
@@ -902,13 +956,18 @@ impl Create {
         );
     }
 
-    fn export(&self, app: &Rc<App>) {
+    /// Export the current timeline; `vertical`: with the 9:16 file too.
+    fn export(&self, app: &Rc<App>, vertical: bool) {
         if self.export.borrow().is_some() {
             return;
         }
         *self.export.borrow_mut() = Some((String::new(), 0.0));
         self.show_header(app);
-        app.call_as::<ExportStarted>(Method::TimelineExport(None), |app, result| {
+        let params = vertical.then(|| TimelineExportParams {
+            vertical: true,
+            ..Default::default()
+        });
+        app.call_as::<ExportStarted>(Method::TimelineExport(params), |app, result| {
             match result {
                 Ok(started) => {
                     let mut export = app.create.export.borrow_mut();
@@ -1151,7 +1210,7 @@ impl Create {
         let weak = Rc::downgrade(app);
         area.on_export(move || {
             if let Some(app) = weak.upgrade() {
-                app.create.export(&app);
+                app.create.export(&app, false);
             }
         });
         let weak = Rc::downgrade(app);
@@ -1285,6 +1344,7 @@ impl Create {
         let at = self.playhead(app);
         let Some(clip) = self.clip_at(at) else {
             area.set_has_preview(false);
+            area.set_preview_offline(false);
             area.set_preview_label("".into());
             self.preview.reset();
             return;
@@ -1293,10 +1353,14 @@ impl Create {
         let into = (at - clip.start_seconds).clamp(0.0, clip.duration_seconds);
         // The frame on screen then: just inside the clip at its end.
         let take = clip.in_seconds + into.min(clip.duration_seconds - 1e-3).max(0.0);
-        let Some(file) = file_of(&clip, &source) else {
+        // Offline: not recorded, or gone since the timeline was read.
+        let Some(file) = file_of(&clip, &source).filter(|f| f.path.exists()) else {
             area.set_has_preview(false);
+            area.set_preview_offline(true);
+            self.preview.reset();
             return;
         };
+        area.set_preview_offline(false);
         let seconds = (take - file.start_offset_seconds.unwrap_or(0.0)).max(0.0);
         if self.preview.request(&file.path, seconds) {
             self.asked_at.set(Some(Instant::now()));
@@ -1557,22 +1621,30 @@ impl Create {
             if app.mode.offscreen {
                 editor.set_native_menu(false);
             }
-            // Its File menu (#88).
+            // Its File menu (#88), and its own menus (#94).
             app.projects.connect_editor(app, &editor);
-            // Playing forward, each drawn frame shows the picture due then, so
-            // pictures change in step with the display (#94): a timer's ticks
-            // drift against it (a 30 fps picture held 1, 2 or 3 refreshes).
+            app.connect_editor_menus(&editor);
+            // Playing, each frame the display's refresh asks for shows the
+            // picture due when it is on screen, so pictures change in step
+            // with the display (#94): a timer's ticks drift against it (a
+            // 30 fps picture held 1, 2 or 3 refreshes).
             let weak = Rc::downgrade(app);
             let notified = editor.window().set_rendering_notifier(move |state, _| {
-                if matches!(state, slint::RenderingState::BeforeRendering)
-                    && let Some(app) = weak.upgrade()
-                    && app.create.playing_forward()
+                if !matches!(state, slint::RenderingState::BeforeRendering) {
+                    return;
+                }
+                let Some(app) = weak.upgrade() else { return };
+                let shown = app.create.refresh.borrow().as_ref().map(|r| r.drawing());
+                if let Some(shown) = shown
+                    && app.create.shuttle.get() != 0.0
                 {
-                    app.create.play_step(&app);
+                    app.create.play_step(&app, shown);
                 }
             });
             if let Err(error) = notified {
+                // Then no display refresh drives it: the timer steps.
                 eprintln!("editor: no rendering notifier ({error:?}); playing follows a timer");
+                self.no_notifier.set(true);
             }
             *self.editor.borrow_mut() = Some(editor);
         }
@@ -1601,6 +1673,38 @@ impl Create {
         self.timeline.borrow().as_ref().map_or(0, |t| t.clips.len())
     }
 
+    /// Clip `index`'s in and out points (the motion harness's fixed-length
+    /// takes).
+    pub fn clip_points(&self, index: usize) -> Option<(f64, f64)> {
+        let timeline = self.timeline.borrow();
+        let clip = timeline.as_ref()?.clips.get(index)?;
+        Some((clip.in_seconds, clip.out_seconds))
+    }
+
+    /// Trim clip `index` to `in_seconds`–`out_seconds` of its take (the
+    /// motion harness: every run's clips the same length, #94).
+    pub fn trim_to(&self, app: &Rc<App>, index: usize, in_seconds: f64, out_seconds: f64) {
+        let Some(id) = self
+            .timeline
+            .borrow()
+            .as_ref()
+            .and_then(|t| t.clips.get(index))
+            .map(|c| c.id.clone())
+        else {
+            return;
+        };
+        self.edit(
+            app,
+            Method::TimelineTrim(TimelineTrimParams {
+                clip: id,
+                in_seconds: Some(in_seconds),
+                out_seconds: Some(out_seconds),
+                timeline: None,
+            }),
+            "Couldn’t trim the clip",
+        );
+    }
+
     /// Whether the editor window is open (offscreen snapshots draw it).
     pub fn editor_open(&self) -> bool {
         self.editor
@@ -1621,45 +1725,92 @@ impl Create {
             _ => 0.0,
         };
         self.shuttle.set(next);
-        self.played.set(Some(Instant::now()));
+        let origin = Instant::now();
+        self.played.set(Some(origin));
         if next > 0.0 {
-            self.start_playback(app);
+            self.start_playback(app, origin);
         } else if self.playback.take().is_some() {
             // The exact picture where it stopped (or J's first).
             self.show_preview(app);
         }
         if next == 0.0 {
-            self.play_timer.stop();
-        } else if !self.play_timer.running() {
-            let weak = Rc::downgrade(app);
-            self.play_timer
-                .start(slint::TimerMode::Repeated, PLAY_EVERY, move || {
-                    let Some(app) = weak.upgrade() else { return };
-                    let editor = app
-                        .create
-                        .editor
-                        .borrow()
-                        .as_ref()
-                        .map(|e| e.clone_strong());
-                    match editor {
-                        // Forward in the editor: its drawn frames step
-                        // (see open_editor); keep them coming.
-                        Some(editor) if app.create.playing_forward() => {
-                            editor.window().request_redraw();
-                        }
-                        _ => app.create.play_step(&app),
-                    }
-                });
+            self.stop_stepping();
+        } else {
+            self.keep_stepping(app);
         }
         self.show_header(app);
     }
 
-    fn play_step(&self, app: &Rc<App>) {
-        let now = Instant::now();
-        let since = self
-            .played
-            .replace(Some(now))
-            .map_or(0.0, |t| now.duration_since(t).as_secs_f64());
+    /// Step the playhead while playing: at the editor window's display
+    /// refresh (#94), else on a timer.
+    fn keep_stepping(&self, app: &Rc<App>) {
+        let editor = self.editor.borrow().as_ref().map(|e| e.clone_strong());
+        if let Some(editor) = editor
+            && !app.mode.offscreen
+            && !self.no_notifier.get()
+            && editor.window().is_visible()
+        {
+            if self.refresh.borrow().is_none() {
+                let weak = editor.as_weak();
+                let refresh = crate::refresh::Refresh::start(move || {
+                    let weak = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(editor) = weak.upgrade() {
+                            editor.window().request_redraw();
+                        }
+                    });
+                });
+                if refresh.is_none() {
+                    eprintln!("editor: no display link; playing follows a timer");
+                }
+                *self.refresh.borrow_mut() = refresh;
+            }
+            if self.refresh.borrow().is_some() {
+                self.play_timer.stop();
+                // A frame asked for and not drawn (minimised, covered):
+                // the playhead moves on anyway, and the link asks again.
+                let weak = Rc::downgrade(app);
+                self.stall_timer.start(
+                    slint::TimerMode::Repeated,
+                    Duration::from_millis(100),
+                    move || {
+                        let Some(app) = weak.upgrade() else { return };
+                        let stalled = app
+                            .create
+                            .refresh
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|r| r.stalled(Duration::from_millis(100)));
+                        if stalled && app.create.shuttle.get() != 0.0 {
+                            app.create.play_step(&app, Instant::now());
+                        }
+                    },
+                );
+                return;
+            }
+        }
+        if !self.play_timer.running() {
+            let weak = Rc::downgrade(app);
+            self.play_timer
+                .start(slint::TimerMode::Repeated, PLAY_EVERY, move || {
+                    if let Some(app) = weak.upgrade() {
+                        app.create.play_step(&app, Instant::now());
+                    }
+                });
+        }
+    }
+
+    fn stop_stepping(&self) {
+        self.play_timer.stop();
+        self.stall_timer.stop();
+        self.refresh.take();
+    }
+
+    /// Move the playhead to where it is at `now` (when the frame being
+    /// drawn shows), and show the picture due then.
+    fn play_step(&self, app: &Rc<App>, now: Instant) {
+        let previous = self.played.replace(Some(now));
+        let since = previous.map_or(0.0, |t| now.saturating_duration_since(t).as_secs_f64());
         let total = self
             .timeline
             .borrow()
@@ -1668,13 +1819,13 @@ impl Create {
         let from = self.playhead(app);
         if self.playback.borrow().is_some() && (from - self.played_to.get()).abs() > 1e-3 {
             // The playhead was moved (a click, a key): play from there.
-            self.start_playback(app);
+            self.start_playback(app, previous.unwrap_or(now));
         }
         let at = from + since * self.shuttle.get();
         let stop = at <= 0.0 || at >= total;
         if stop {
             self.shuttle.set(0.0);
-            self.play_timer.stop();
+            self.stop_stepping();
             self.show_header(app);
         }
         let at = at.clamp(0.0, total);
@@ -1697,7 +1848,12 @@ impl Create {
                         stats_clock().elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                self.shown(app, Some(image));
+                // No picture: the clip's file is offline from here.
+                let offline = image.is_none();
+                self.shown(app, image);
+                if let Some(surface) = self.surface(app) {
+                    surface.area().set_preview_offline(offline);
+                }
             }
             return;
         }
@@ -1705,23 +1861,25 @@ impl Create {
         self.set_playhead(app, at);
     }
 
-    /// Playing forward, from pictures decoded ahead.
-    fn playing_forward(&self) -> bool {
-        self.playback.borrow().is_some()
-    }
-
     /// Decode the timeline ahead from the playhead (forward play, #94):
-    /// each clip's angle's file over the clip.
-    fn start_playback(&self, app: &Rc<App>) {
+    /// each clip's angle's file over the clip; and play its sound (the
+    /// program's, as the edited file has) from `origin`, when the
+    /// playhead was where it is.
+    fn start_playback(&self, app: &Rc<App>, origin: Instant) {
         let from = self.playhead(app);
-        let segments: Vec<Segment> = self
-            .timeline
-            .borrow()
+        let timeline = self.timeline.borrow();
+        let clips: Vec<&ClipInfo> = timeline
             .as_ref()
             .map(|t| t.clips.as_slice())
             .unwrap_or(&[])
             .iter()
             .filter(|clip| clip.start_seconds + clip.duration_seconds > from)
+            .collect();
+        let sound = self.sound_plan(app, &clips, from, origin);
+        self.silenced
+            .set(sound.is_none() && capturing(&app.session.borrow()));
+        let segments: Vec<Segment> = clips
+            .iter()
             .map(|clip| {
                 let source = clip.angle.as_deref().unwrap_or(PROGRAM);
                 let start = clip.start_seconds.max(from);
@@ -1735,8 +1893,91 @@ impl Create {
                 }
             })
             .collect();
-        *self.playback.borrow_mut() = Some(Playback::start(segments));
+        drop(timeline);
+        let sound = sound.and_then(crate::sound::Sound::start);
+        *self.playback.borrow_mut() = Some(Playback::start(segments, sound));
         self.played_to.set(from);
+    }
+
+    /// A recording, stream or replay buffer started or stopped taking in
+    /// sound that would include the editor's (#94): its sound stops at
+    /// once, and comes back (from where the playhead is) once none does.
+    fn follow_capture(&self, app: &Rc<App>) {
+        let capturing = capturing(&app.session.borrow());
+        if self.playback.borrow().is_none() {
+            self.silenced.set(false);
+            return;
+        }
+        if capturing {
+            if let Some(playback) = self.playback.borrow_mut().as_mut() {
+                playback.set_sound(None);
+            }
+            self.silenced.set(true);
+        } else if self.silenced.replace(false) {
+            let origin = self.played.get().unwrap_or_else(Instant::now);
+            let from = self.playhead(app);
+            let plan = {
+                let timeline = self.timeline.borrow();
+                let clips: Vec<&ClipInfo> = timeline
+                    .as_ref()
+                    .map(|t| t.clips.as_slice())
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter(|clip| clip.start_seconds + clip.duration_seconds > from)
+                    .collect();
+                self.sound_plan(app, &clips, from, origin)
+            };
+            let sound = plan.and_then(crate::sound::Sound::start);
+            if let Some(playback) = self.playback.borrow_mut().as_mut() {
+                playback.set_sound(sound);
+            }
+        }
+    }
+
+    /// What the editor plays as it plays forward: each clip's program
+    /// sound through the monitoring device. None offscreen, with
+    /// ISOCAST_MONITOR_SILENT (tests), outside the editor window, or while
+    /// a recording, stream or replay buffer takes in sound that would
+    /// include it ([`capturing`]).
+    fn sound_plan(
+        &self,
+        app: &Rc<App>,
+        clips: &[&ClipInfo],
+        from: f64,
+        origin: Instant,
+    ) -> Option<crate::sound::Plan> {
+        if app.mode.offscreen
+            || std::env::var_os("ISOCAST_MONITOR_SILENT").is_some()
+            || self.editor.borrow().is_none()
+        {
+            return None;
+        }
+        let session = app.session.borrow();
+        let setup = session.setup.clone()?;
+        if capturing(&session) {
+            return None;
+        }
+        let stretches = clips
+            .iter()
+            .map(|clip| {
+                let start = clip.start_seconds.max(from);
+                let file = file_of(clip, PROGRAM);
+                crate::sound::Stretch {
+                    path: file.map(|f| f.path.clone()),
+                    start,
+                    end: clip.start_seconds + clip.duration_seconds,
+                    file_seconds: clip.in_seconds + (start - clip.start_seconds)
+                        - file.and_then(|f| f.start_offset_seconds).unwrap_or(0.0),
+                }
+            })
+            .collect();
+        Some(crate::sound::Plan {
+            stretches,
+            from,
+            origin,
+            speed: self.shuttle.get(),
+            device: setup.audio.monitoring_device.clone(),
+        })
     }
 
     /// Step the playhead by `frames` of the clip there.
@@ -2197,6 +2438,9 @@ impl Area for Create {
                 }
             }
         }
+        if changed.any(Changed::STATUS | Changed::SETUP | Changed::STREAM | Changed::REPLAY) {
+            self.follow_capture(app);
+        }
         if changed.any(Changed::STATUS | Changed::BUSY | Changed::SETUP | Changed::LINK) {
             self.show_header(app);
         }
@@ -2230,11 +2474,21 @@ impl Area for Create {
     fn context_menu(&self, _app: &Rc<App>, owner: &str) -> Option<MenuBuilder> {
         match owner {
             "create:timelines" => Some(self.timelines_menu()),
+            "create:export" => Some(
+                MenuBuilder::new()
+                    .item("export", "Export")
+                    .icon("download")
+                    .item("vertical", "Export with Vertical (9:16)"),
+            ),
             _ => self.clip_menu(owner.strip_prefix("create:clip:")?),
         }
     }
 
     fn menu_chosen(&self, app: &Rc<App>, owner: &str, id: &str) -> bool {
+        if owner == "create:export" {
+            self.export(app, id == "vertical");
+            return true;
+        }
         if owner == "create:timelines" {
             match id {
                 "new" => self.new_timeline(app, None),
@@ -2365,7 +2619,7 @@ impl Area for Create {
                 })
             }
             "create-export" => {
-                self.export(app);
+                self.export(app, arg == "vertical");
                 Ok(())
             }
             "create-zoom" => arg

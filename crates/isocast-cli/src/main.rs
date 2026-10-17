@@ -48,6 +48,10 @@ fn shared_frames(options: shared_frames::Options) -> Result<ExitCode> {
 
 #[cfg(not(target_os = "macos"))]
 mod shared_frames {
+    #[expect(
+        dead_code,
+        reason = "parsed options retained while shared surfaces are unsupported"
+    )]
     pub struct Options {
         pub target: String,
         pub max_width: Option<u32>,
@@ -1023,6 +1027,7 @@ fn main() -> ExitCode {
     // `isocast get | head` should end quietly when the reader goes away, as
     // other tools do, not panic on the closed pipe. Not for an in-process
     // recording (its files must finish) or the MCP server.
+    #[cfg(unix)]
     if !matches!(cli.command, Command::Record { .. } | Command::Mcp) {
         // SAFETY: setting a signal's disposition before any threads start.
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
@@ -1207,7 +1212,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 // The daemon may run in another folder: make a relative
                 // folder absolute here.
                 let folder = match folder {
-                    Some(f) if !f.starts_with('~') && !f.starts_with('/') => {
+                    Some(f) if !f.starts_with('~') && !Path::new(&f).is_absolute() => {
                         Some(std::path::absolute(&f)?.display().to_string())
                     }
                     other => other,
@@ -1715,7 +1720,7 @@ fn load(path: &Path) -> Result<Setup> {
 /// `record` uses it): isocastd runs in another folder, and refuses one.
 fn absolute_recording_folder(setup: &mut Setup) -> Result<()> {
     let folder = &setup.recording.folder;
-    if !folder.is_empty() && !folder.starts_with('/') && !folder.starts_with('~') {
+    if !folder.is_empty() && !Path::new(folder).is_absolute() && !folder.starts_with('~') {
         setup.recording.folder = std::path::absolute(folder)?.display().to_string();
     }
     Ok(())
@@ -2671,14 +2676,14 @@ impl TransitionArgs {
         // A stinger's video, given here, is relative to this folder.
         if let Some(file) = value.get_mut("file")
             && let Some(path) = file.as_str()
-            && !path.starts_with('/')
+            && !Path::new(path).is_absolute()
             && !path.starts_with('~')
         {
             *file = std::env::current_dir()?.join(path).to_string_lossy().into();
         }
         if let Some(image) = value.get_mut("image")
             && let Some(path) = image.as_str()
-            && !path.starts_with('/')
+            && !Path::new(path).is_absolute()
             && !path.starts_with('~')
         {
             *image = std::env::current_dir()?.join(path).to_string_lossy().into();

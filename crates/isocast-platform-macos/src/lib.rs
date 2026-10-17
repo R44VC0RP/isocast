@@ -219,6 +219,22 @@ impl Platform for MacPlatform {
         volume(path)
     }
 
+    fn same_volume(&self, left: &Path, right: &Path) -> anyhow::Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        Ok(std::fs::metadata(left)?.dev() == std::fs::metadata(right)?.dev())
+    }
+
+    fn process_cpu_seconds(&self) -> Option<f64> {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: getrusage fills only the correctly sized output structure.
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let usage = unsafe { usage.assume_init() };
+        let seconds = |t: libc::timeval| t.tv_sec as f64 + f64::from(t.tv_usec) / 1e6;
+        Some(seconds(usage.ru_utime) + seconds(usage.ru_stime))
+    }
+
     fn write_latency(&self, probe: &Path) -> Option<std::time::Duration> {
         write_latency(probe).ok()
     }

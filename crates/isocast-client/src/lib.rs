@@ -5,9 +5,11 @@
 pub mod library;
 #[cfg(feature = "shared")]
 pub mod shared;
+#[cfg(windows)]
+mod windows;
 
+use isocast_ipc::Stream as UnixStream;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -347,7 +349,7 @@ fn spawn_daemon(daemon: &Path, log: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn spawn_daemon(daemon: &Path, log: &Path) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     let log = std::fs::OpenOptions::new()
@@ -361,6 +363,11 @@ fn spawn_daemon(daemon: &Path, log: &Path) -> std::io::Result<()> {
         .process_group(0)
         .spawn()
         .map(|_| ())
+}
+
+#[cfg(windows)]
+fn spawn_daemon(daemon: &Path, log: &Path) -> std::io::Result<()> {
+    windows::spawn_daemon(daemon, log)
 }
 
 /// The daemon to launch: `$ISOCAST_DAEMON`; else this distribution's bundled
@@ -377,23 +384,30 @@ fn daemon_path() -> Result<PathBuf> {
     if let Some(helper) = bundled_helper(&exe) {
         return Ok(helper);
     }
-    let built = exe.with_file_name("isocastd");
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let app = std::env::var_os("ISOCAST_DEV_APP").map_or_else(
-        || home.join("Library/Application Support/Isocast/Isocast Dev.app"),
-        PathBuf::from,
-    );
-    let signed = app.join("Contents/MacOS/isocastd");
-    if signed.exists() {
-        let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        if modified(&built) > modified(&signed) {
-            isocast_diagnostics::diagnostic!("warn";
-                "warning: {} is newer than the signed daemon in {}; run scripts/sign-dev.sh",
-                built.display(),
-                app.display()
-            );
+    let built = exe.with_file_name(if cfg!(windows) {
+        "isocastd.exe"
+    } else {
+        "isocastd"
+    });
+    #[cfg(target_os = "macos")]
+    {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        let app = std::env::var_os("ISOCAST_DEV_APP").map_or_else(
+            || home.join("Library/Application Support/Isocast/Isocast Dev.app"),
+            PathBuf::from,
+        );
+        let signed = app.join("Contents/MacOS/isocastd");
+        if signed.exists() {
+            let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            if modified(&built) > modified(&signed) {
+                isocast_diagnostics::diagnostic!("warn";
+                    "warning: {} is newer than the signed daemon in {}; run scripts/sign-dev.sh",
+                    built.display(),
+                    app.display()
+                );
+            }
+            return Ok(signed);
         }
-        return Ok(signed);
     }
     if !built.exists() {
         bail!(
@@ -407,6 +421,7 @@ fn daemon_path() -> Result<PathBuf> {
 /// The engine a distribution bundles next to `exe` (its
 /// `Contents/MacOS/…`): `Contents/Helpers/Isocast Engine.app`'s
 /// "Isocast Engine" (#83), or its `isocastd` in releases made before that.
+#[cfg(target_os = "macos")]
 fn bundled_helper(exe: &Path) -> Option<PathBuf> {
     use isocast_protocol::api::{ENGINE_EXECUTABLE, OLD_ENGINE_EXECUTABLE};
     let contents = exe.parent().and_then(Path::parent)?;
@@ -418,6 +433,11 @@ fn bundled_helper(exe: &Path) -> Option<PathBuf> {
         .into_iter()
         .map(|name| macos.join(name))
         .find(|helper| helper.is_file())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn bundled_helper(_exe: &Path) -> Option<PathBuf> {
+    None
 }
 
 /// An isocastd older than the one this client would launch: left running

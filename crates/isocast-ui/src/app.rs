@@ -231,26 +231,7 @@ impl App {
             }
         });
         let weak = Rc::downgrade(self);
-        menus.on_activated(move |owner, id| {
-            // On the next turn of the event loop, once the click that chose
-            // it is over and the menu's popup is gone: a dialog opened while
-            // the menu still held the pointer ignored later clicks.
-            let weak = weak.clone();
-            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
-                if let Some(app) = weak.upgrade() {
-                    // Open Projector items come first: they're added to
-                    // other areas' menus.
-                    if app.projectors.chosen(&app, &id) {
-                        return;
-                    }
-                    for area in app.areas() {
-                        if area.menu_chosen(&app, &owner, &id) {
-                            return;
-                        }
-                    }
-                }
-            });
-        });
+        menus.on_activated(move |owner, id| Self::menu_activated(&weak, owner, id));
         ToastList::connect(self, window);
         crate::form::connect(self, window);
     }
@@ -1420,17 +1401,63 @@ impl App {
         }
     }
 
+    /// An item of a menu was chosen.
+    fn menu_activated(weak: &std::rc::Weak<App>, owner: SharedString, id: SharedString) {
+        // On the next turn of the event loop, once the click that chose
+        // it is over and the menu's popup is gone: a dialog opened while
+        // the menu still held the pointer ignored later clicks.
+        let weak = weak.clone();
+        slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+            if let Some(app) = weak.upgrade() {
+                // Open Projector items come first: they're added to
+                // other areas' menus.
+                if app.projectors.chosen(&app, &id) {
+                    return;
+                }
+                for area in app.areas() {
+                    if area.menu_chosen(&app, &owner, &id) {
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    /// The editor window's menus (#94: its Export menu, a clip's menu),
+    /// shown in its own window, chosen as the studio's are.
+    pub fn connect_editor_menus(self: &Rc<Self>, editor: &crate::EditorWindow) {
+        let menus = editor.global::<Menus>();
+        menus.on_step(kit::step);
+        let weak = Rc::downgrade(self);
+        let window = editor.as_weak();
+        menus.on_request(move |owner, x, y, w, h| {
+            if let (Some(app), Some(editor)) = (weak.upgrade(), window.upgrade())
+                && let Some(menu) = app.menu_for(&owner)
+            {
+                let (list, submenus) = menu.build();
+                editor
+                    .global::<Menus>()
+                    .invoke_show(owner, list, submenus, x, y, w, h);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        menus.on_activated(move |owner, id| Self::menu_activated(&weak, owner, id));
+    }
+
+    /// `owner`'s menu, built by the area that knows the owner.
+    fn menu_for(self: &Rc<Self>, owner: &str) -> Option<MenuBuilder> {
+        self.areas()
+            .iter()
+            .find_map(|area| area.context_menu(self, owner))
+            // Open Projector, on the preview's, a scene's and a source's.
+            .map(|menu| self.projectors.extend_menu(self, owner, menu))
+    }
+
     /// A menu asked for by `owner` at `anchor` (window points: x, y,
     /// width, height; a point for a context menu): the area that knows
     /// the owner builds it.
     fn request_menu(self: &Rc<Self>, owner: &str, anchor: [f32; 4]) {
-        let menu = self
-            .areas()
-            .iter()
-            .find_map(|area| area.context_menu(self, owner))
-            // Open Projector, on the preview's, a scene's and a source's.
-            .map(|menu| self.projectors.extend_menu(self, owner, menu));
-        if let Some(menu) = menu {
+        if let Some(menu) = self.menu_for(owner) {
             self.show_menu(owner, menu, anchor);
         }
     }

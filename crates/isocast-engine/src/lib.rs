@@ -153,6 +153,15 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// Free space and kind of the volume holding `path`.
     fn volume(&self, path: &Path) -> anyhow::Result<Volume>;
 
+    /// Whether two existing paths share the volume whose free space they use.
+    /// Exports must preserve the reserve of a recording on that volume.
+    fn same_volume(&self, left: &Path, right: &Path) -> anyhow::Result<bool>;
+
+    /// CPU seconds used by this process, user and kernel time together.
+    fn process_cpu_seconds(&self) -> Option<f64> {
+        None
+    }
+
     /// How long a small write to `probe` (a scratch file beside a
     /// recording) takes to reach the disk: written and synced, without
     /// flushing the drive's own cache. `None` where it can't be measured.

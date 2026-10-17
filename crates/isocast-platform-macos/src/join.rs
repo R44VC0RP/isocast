@@ -295,7 +295,10 @@ fn format_of(track: &AVAssetTrack, path: &Path, fps: u32) -> Result<Format> {
     })
 }
 
-/// Whether `track`'s video can be copied into a file of `format`.
+/// Whether `track`'s video can be copied into a file of `format`: the
+/// same codec, size, frame rate and (HEVC) bit depth. Frames of another
+/// bit depth (a 10-bit ISO angle in an 8-bit program's edited file, #94)
+/// are encoded again in the file's, so it keeps one sample description.
 fn matches(track: &AVAssetTrack, recorded: u32, format: &Format) -> bool {
     let Some(own) = self::format(track) else {
         return false;
@@ -306,6 +309,7 @@ fn matches(track: &AVAssetTrack, recorded: u32, format: &Format) -> bool {
     codec == format.codec
         && (size.width, size.height) == format.size
         && (fps == format.fps || fps == 0 || format.fps == 0)
+        && main10(&own) == format.ten_bit
 }
 
 fn valid(time: CMTime) -> bool {

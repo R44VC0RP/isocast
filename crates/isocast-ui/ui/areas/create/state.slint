@@ -114,6 +114,8 @@ export global CreateArea {
     // and what it is ("Camera · 00:03.25").
     in property <image> preview;
     in property <bool> has-preview;
+    // The shown clip's file is missing (not recorded, moved or deleted).
+    in property <bool> preview-offline;
     in property <string> preview-label;
     // The In and Out marks on the timeline, in seconds (-1: not set).
     in-out property <float> mark-in: -1;

@@ -123,18 +123,21 @@ Targets, and how each is found in a frame:
   frames.
 - `editor-trim`, `editor-playhead`, `editor-crop` (#87,
   `scripts/motion/editor.toml`): the editor window's drags. Before the
-  scenario's `before` steps the harness records two takes (3 s and 2 s)
-  onto a new timeline and opens the editor on them; the run then replays
+  scenario's `before` steps the harness records two takes onto a new
+  timeline, trims them to exactly 3 s and 2 s, and opens the editor on
+  them; the run then replays
   into and draws the editor's own window. State: the first `ClipView`'s
   right edge, the `Playhead`'s line, the crop's right edge (`CropBox` and
   the crop). Pixels: the selected clip's accent ring where it ends (the
   suite selects the clip), the playhead's 1 pt bone line low in the lanes,
   the crop outline's bone column a quarter down the crop. The dragged
   object, the playhead and the viewer's time readout (`ShownAt`) are left
-  out of the flicker check: they move with the drag. The takes' lengths
-  follow the wall clock, so these runs are a pass/fail check, not
-  pixel-deterministic (compare.py differs), and they aren't in the CI
-  suite.
+  out of the flicker check: they move with the drag. The takes record
+  only the block's ISO file (no sound) and the program with the tone
+  muted (#94): the test pattern and the beeps follow the engine's clock,
+  and a take's length the wall clock, so trimmed, still takes are what
+  make two lockstep runs draw the same pixels (compare.py: identical). CI
+  runs this suite in lockstep after the standard one.
 
 The standard suite: the Scenes|Sources splitter, the Mixer|Transitions
 splitter (it resizes the dock after it), the splitter above the docks (it
@@ -273,9 +276,10 @@ builds `isocast`, `isocastd` and `isocast-ui` (release), then
 ```sh
 scripts/motion.sh --suite scripts/motion/controls.toml --no-timing   # the harness's own controls
 scripts/motion.sh --clock lockstep --no-timing                       # the standard suite
+scripts/motion.sh --suite scripts/motion/editor.toml --clock lockstep --no-timing   # the editor's
 ```
 
-and uploads both output folders as `motion-results`. It is a real gate:
+and uploads the output folders as `motion-results`. It is a real gate:
 lockstep draws the same frames on any machine (the virtual clock drives
 the interface, the engine is waited for after each input, a 2 s wait makes
 the run fail as invalid) and frame times aren't checked. The standard suite
@@ -283,6 +287,35 @@ has open issues, recorded in `scripts/motion/suite.toml` as `expect =
 "fail"` with exactly the checks each fails; the job fails if any run's
 failures differ from that (a regression, or a fix whose line wasn't
 updated).
+
+## Layout audit (#107)
+
+`scripts/layout-audit.py` draws every screen offscreen (the main window,
+Studio Mode, the vertical canvas, Multiview and projector windows, the
+editor with crop mode and export, every Settings page, the Properties and
+other dialogs, menus, toasts, first launch, OBS import, Optimize, and
+recording and streaming states; `list` shows them) at eight window sizes
+from 900x600@2 to 3440x1440@1 plus a tall one, and a width sweep (900, the
+window's minimum, to 2700 points) for the main screens, each against an engine of its own with
+the synthetic setup. Then one Claude Haiku 5.5 checker per picture, 12 at
+once, looks at it and answers through a validated `deliver_layout` tool:
+"ok", or issues with a kind, a severity and a pixel box. It runs in the
+same isolation as the visual judge (a fresh copy of
+`scripts/layout-audit/checker`, an empty global config, a read-only folder
+with just that picture). The report (`report.html`, `report.md`,
+`report.json`) groups pictures by screen, draws the boxes, and merges an
+issue seen at several sizes ("at widths <= 1280"). It exits 1 on any
+high-severity issue. Small models make mistakes, so a person (or a
+coordinating agent) triages the flagged pictures before filing anything;
+`calibrate` checks that deliberately broken pictures get flagged.
+
+```sh
+scripts/layout-audit.py run --bin target/release --out /tmp/layout   # ~500 pictures
+scripts/layout-audit.py run --bin target/release --out /tmp/layout \
+    --views 'settings-*' --sizes 900x600@2,1440x900@2 --sweep none
+scripts/layout-audit.py check --out /tmp/layout --only 'editor-*' --recheck
+scripts/layout-audit.py calibrate --bin target/release --out /tmp/layout-cal
+```
 
 ## Prior art, and what was taken
 

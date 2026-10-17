@@ -273,6 +273,14 @@ export component EditorView inherits Rectangle {
                 source-clip-height: CreateArea.crop-h * self.source.height;
                 image-fit: fill;
             }
+            if CreateArea.preview-offline && !CreateArea.has-preview: Text {
+                text: "Offline";
+                color: Theme.text-3;
+                font-size: Theme.fs-sm;
+                font-weight: Theme.weight-medium;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
             if CreateArea.crop-mode && CreateArea.has-preview: CropBox {
                 x: (parent.width - parent.img-w) / 2;
                 y: (parent.height - parent.img-h) / 2;

@@ -52,10 +52,12 @@ mod platform;
 mod prefs;
 mod preview;
 mod quit;
+mod refresh;
 // Settings forms from the setup's schema; the views (Properties,
 // Filters, Transition Properties) move onto it next.
 #[allow(dead_code)]
 mod session;
+mod sound;
 mod thumbs;
 mod toasts;
 mod update;

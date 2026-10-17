@@ -154,6 +154,8 @@ pub struct Store {
     /// What happened at start (setup.toml taken in), for the log and the
     /// first watchers.
     notes: Vec<String>,
+    /// Sources were renamed off reserved ids while loading (#94).
+    renamed: bool,
 }
 
 impl Default for Store {
@@ -174,6 +176,7 @@ impl Store {
             load_error: None,
             save_error: None,
             notes: Vec::new(),
+            renamed: false,
         }
     }
 
@@ -246,6 +249,11 @@ impl Store {
             .map(|failure| failure.error.describe(&failure.path))
     }
 
+    /// Sources were renamed off reserved ids while loading (#94).
+    pub fn renamed(&self) -> bool {
+        self.renamed
+    }
+
     /// What happened at start, like setup.toml being taken in.
     pub fn notes(&self) -> &[String] {
         &self.notes
@@ -307,7 +315,8 @@ impl Store {
                 isocast_protocol::hotkeys::describe(&hotkey_issues)
             ));
         }
-        let setup = Setup::from_parts(collection, profile);
+        let mut setup = Setup::from_parts(collection, profile);
+        self.rename_reserved(&mut setup);
         let issues = setup.validate();
         if !issues.is_empty() {
             // Each file reads, but together they don't make a valid setup;
@@ -466,8 +475,22 @@ impl Store {
         }
     }
 
+    /// Sources whose ids became reserved (`edited`, `vertical`, #94) get
+    /// new ones, with a note (status `setup_file.notes`, logged at start);
+    /// the daemon saves the result at once.
+    fn rename_reserved(&mut self, setup: &mut Setup) {
+        for (old, new) in setup.rename_reserved_sources() {
+            let note = format!(
+                "source {old:?} was renamed {new:?}: {old:?} is now reserved for a timeline \
+                 export's file; scenes, recording lists and hotkeys follow the new id"
+            );
+            self.notes.push(note);
+            self.renamed = true;
+        }
+    }
+
     /// setup.toml's text as a valid setup, or why it isn't one.
-    fn read_legacy(&self, text: &[u8]) -> Result<Setup, SetupLoadError> {
+    fn read_legacy(&mut self, text: &[u8]) -> Result<Setup, SetupLoadError> {
         let failed = |message: String, issues| SetupLoadError { message, issues };
         let text = String::from_utf8_lossy(text);
         let parsed = if is_json(&self.legacy) {
@@ -475,8 +498,9 @@ impl Store {
         } else {
             Setup::from_toml(&text)
         };
-        let setup =
+        let mut setup =
             parsed.map_err(|err| failed(format!("it is not a valid setup: {err}"), Vec::new()))?;
+        self.rename_reserved(&mut setup);
         let issues = setup.validate();
         if !issues.is_empty() {
             return Err(failed(
@@ -1040,6 +1064,7 @@ fn hash(bytes: &[u8]) -> String {
 }
 
 /// The local date and time for file names: `2026-10-13 09-41-05`.
+#[cfg(unix)]
 fn stamp() -> String {
     // SAFETY: time and localtime_r only write the values they are given.
     let tm = unsafe {
@@ -1057,6 +1082,11 @@ fn stamp() -> String {
         tm.tm_min,
         tm.tm_sec
     )
+}
+
+#[cfg(windows)]
+fn stamp() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string()
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ pub(super) struct CameraOutput {
     last: VirtualCameraStatus,
     /// An activation request is waiting for the user to allow the camera
     /// extension in System Settings (macOS release builds).
+    #[cfg(target_os = "macos")]
     approval_pending: bool,
     /// Start the camera when that approval arrives (cleared by Stop).
     start_when_approved: bool,
@@ -31,6 +32,7 @@ pub(super) struct CameraOutput {
     /// `virtual_camera_remove` waits for macOS; Start is refused meanwhile.
     removing: bool,
     /// Counts removals, so an approval wait they ended stays quiet.
+    #[cfg(target_os = "macos")]
     removals: u64,
 }
 
@@ -62,7 +64,12 @@ impl CameraOutput {
             status.fps = setup.virtual_camera.fps(setup);
         }
         if status.transport.is_empty() {
-            status.transport = "cmio-iosurface".into();
+            status.transport = if cfg!(target_os = "macos") {
+                "cmio-iosurface"
+            } else {
+                "unsupported"
+            }
+            .into();
         }
         status.removable = removable();
         status

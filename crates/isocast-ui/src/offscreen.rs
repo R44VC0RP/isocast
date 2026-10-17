@@ -342,8 +342,22 @@ impl Offscreen {
             }
             "menu" => {
                 let (w, h) = (app.get_preview_width(), app.get_preview_height());
-                app.global::<Menus>()
-                    .invoke_request(arg.into(), w / 2.0, h / 2.0, 0.0, 0.0);
+                // The editor's own menus (`menu:create:export`) in its window.
+                match self.hub.create.editor_window() {
+                    Some(editor) if arg.starts_with("create:") && self.hub.create.editor_open() => {
+                        editor.global::<Menus>().invoke_request(
+                            arg.into(),
+                            w / 2.0,
+                            h / 2.0,
+                            0.0,
+                            0.0,
+                        )
+                    }
+                    _ => {
+                        app.global::<Menus>()
+                            .invoke_request(arg.into(), w / 2.0, h / 2.0, 0.0, 0.0)
+                    }
+                }
             }
             "menu-bar" => self.hub.menu(arg),
             "menu-bar-open" => self.open_menu_bar(arg)?,

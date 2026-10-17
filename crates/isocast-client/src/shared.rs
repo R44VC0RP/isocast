@@ -28,8 +28,8 @@
 //! # Ok(()) }
 //! ```
 
+use isocast_ipc::Stream as UnixStream;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
-use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

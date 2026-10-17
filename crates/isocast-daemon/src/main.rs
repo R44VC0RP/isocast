@@ -5,10 +5,10 @@
 //! `isocast_protocol::api`). `isocast start` launches it when it isn't
 //! running.
 
+use isocast_ipc::{Listener as UnixListener, Stream as UnixStream};
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -107,6 +107,7 @@ mod virtual_camera;
 mod websocket;
 
 fn main() -> ExitCode {
+    #[cfg(unix)]
     if isocast_diagnostics::native::requested() {
         return if isocast_diagnostics::native::run().is_ok() {
             ExitCode::SUCCESS
@@ -252,6 +253,7 @@ fn hold_instance_lock() -> Result<std::fs::File> {
 
 /// Bind the socket, replacing a stale one left by a daemon that crashed
 /// (this one holds the instance lock, so no other daemon owns it).
+#[cfg(unix)]
 fn listen(socket: &Path) -> Result<UnixListener> {
     if UnixStream::connect(socket).is_ok() {
         bail!(
@@ -272,6 +274,13 @@ fn listen(socket: &Path) -> Result<UnixListener> {
         libc::umask(mask);
     }
     listener.with_context(|| format!("could not listen on {}", socket.display()))
+}
+
+#[cfg(windows)]
+fn listen(socket: &Path) -> Result<UnixListener> {
+    // The instance lock created the parent. Pipes have no socket file to unlink;
+    // the transport reserves the kernel name and authenticates both peers.
+    UnixListener::bind(socket).with_context(|| format!("could not listen on {}", socket.display()))
 }
 
 /// Keep the main thread serving the main queue, which macOS needs for
@@ -361,7 +370,10 @@ fn handle(
     let _tracked = scope.as_ref().and_then(|scope| scope.track(&connection));
     #[cfg(target_os = "macos")]
     let peer = isocast_platform_macos::diagnostics::peer(&connection);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let peer =
+        serde_json::json!({"transport":"named_pipe","pid":isocast_ipc::peer_pid(&connection).ok()});
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     let peer = serde_json::json!({"transport":"unix"});
     let _closed = diagnostics::PeerClosed(peer.clone());
     let mut focused = None;
@@ -738,23 +750,7 @@ fn watch(
 /// Whether the client at the other end of `stream` has closed it, without
 /// reading anything it sent or waiting.
 fn hung_up(stream: &UnixStream) -> bool {
-    use std::os::fd::AsRawFd;
-    let mut byte = 0u8;
-    // SAFETY: a one-byte peek into a local buffer on an open socket.
-    let read = unsafe {
-        libc::recv(
-            stream.as_raw_fd(),
-            (&raw mut byte).cast(),
-            1,
-            libc::MSG_PEEK | libc::MSG_DONTWAIT,
-        )
-    };
-    read == 0
-        || (read < 0
-            && !matches!(
-                std::io::Error::last_os_error().kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-            ))
+    isocast_ipc::hung_up(stream)
 }
 
 /// A key for a new [`Watcher`], unique in this process.
@@ -891,16 +887,7 @@ impl CpuMeter {
 
 /// The processor time this process has used, user and system, in seconds.
 fn process_cpu_seconds() -> Option<f64> {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: getrusage fills in the struct it is given, which is zeroed
-    // and the right size; on failure it is left alone and not read.
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    // SAFETY: filled in by getrusage above.
-    let usage = unsafe { usage.assume_init() };
-    let seconds = |t: libc::timeval| t.tv_sec as f64 + f64::from(t.tv_usec) / 1e6;
-    Some(seconds(usage.ru_utime) + seconds(usage.ru_stime))
+    NativePlatform.process_cpu_seconds()
 }
 
 #[derive(Default)]
@@ -1332,6 +1319,7 @@ impl Daemon {
         // and a close, not a dropped socket.
         self.websocket.stop();
         self.plugins.stop_all();
+        #[cfg(unix)]
         let _ = std::fs::remove_file(socket_path());
         isocast_diagnostics::clean_exit();
     }
@@ -1825,11 +1813,23 @@ impl Daemon {
                     .restore(&setup);
                 state.scene = view.scene;
                 state.preview = view.preview;
-                state.setup = Some(setup);
+                state.setup = Some(setup.clone());
                 state.revision = first_revision();
                 // An unlinked vertical canvas starts from the main canvas's
                 // scene and preview (no engine or watchers yet).
                 let _ = sync_vertical(&mut state, None, true);
+                // Sources renamed off reserved ids (#94): written now, so
+                // it happens once.
+                if state.file.renamed() {
+                    let (_, target) = state.file.prepare();
+                    let revision = state.revision;
+                    drop(state);
+                    if let Some(target) = target {
+                        for note in self.save(revision, &setup, &target) {
+                            isocast_diagnostics::diagnostic!("warn"; "isocastd: {note}");
+                        }
+                    }
+                }
             }
             None => match state.file.load_warning() {
                 Some(warning) => isocast_diagnostics::diagnostic!("warn"; "isocastd: {warning}"),
@@ -4003,7 +4003,7 @@ fn engine_info(state: &State) -> Option<EngineInfo> {
 /// own folder, not the client's, so a relative folder would land somewhere
 /// unexpected.
 fn relative_folder(folder: &str) -> Option<String> {
-    (!folder.starts_with('/') && !folder.starts_with('~')).then(|| {
+    (!Path::new(folder).is_absolute() && !folder.starts_with('~')).then(|| {
         format!(
             "{folder:?} is relative, but isocastd doesn't run in your folder; give an absolute \
              path (or one starting with ~/)"
