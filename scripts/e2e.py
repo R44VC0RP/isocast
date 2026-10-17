@@ -41,6 +41,7 @@ import platform
 import shutil
 import signal
 import socket
+import stat
 import statistics
 import struct
 import subprocess
@@ -144,6 +145,42 @@ def capabilities():
     result["record_codec"] = ("hevc" if result["hevc"] else
                               "h264" if result["h264"] else "prores422")
     return result
+
+
+def short_root(work):
+    """A run folder short enough for every scenario's sockets: at the top of
+    --work's disk if it can be made there, else in /tmp."""
+    mount = work
+    device = work.stat().st_dev
+    while mount.parent != mount and mount.parent.stat().st_dev == device:
+        mount = mount.parent
+    for base in (mount / ".e2e", Path("/tmp")):
+        try:
+            base.mkdir(exist_ok=True)
+            root = Path(tempfile.mkdtemp(prefix="e2e-", dir=base)).resolve()
+        except OSError:
+            continue
+        if len(os.fsencode(root)) <= SHORT_ROOT:
+            return root
+        root.rmdir()
+    raise Failure("no folder short enough for Unix sockets; give a shorter --work")
+
+
+def keep_under(root, work, report):
+    """Copy a short run folder's kept evidence into --work (sockets left
+    out: they can't be copied), point the report at it, and remove the
+    short folder."""
+    dest = work / root.name
+    def sockets(folder, names):
+        return [n for n in names if stat.S_ISSOCK(os.lstat(os.path.join(folder, n)).st_mode)]
+    shutil.copytree(root, dest, symlinks=True, ignore=sockets)
+    shutil.rmtree(root)
+    report["work"] = str(dest)
+    for result in report["scenarios"]:
+        if result.get("artifacts"):
+            result["artifacts"] = str(dest / Path(result["artifacts"]).relative_to(root))
+    print(f"e2e: kept evidence moved to {dest}", file=sys.stderr)
+    return dest
 
 
 class Engine:
@@ -2083,9 +2120,10 @@ def main():
                 # macOS caps Unix socket paths at 104 bytes, and the deepest
                 # socket (a plugin's, ROOT/plugin_files/plugins/<id>/socket)
                 # needs ~60 of them: a deep --work (hw-batch's, a lane with
-                # a long name) runs under a short folder in /tmp instead.
+                # a long name) runs under a short folder on the same disk
+                # (strict numbers stay that disk's, #100), else in /tmp.
                 root.rmdir()
-                root = Path(tempfile.mkdtemp(prefix="isocast-e2e-", dir="/tmp")).resolve()
+                root = short_root(args.work.resolve())
                 report["work_note"] = f"--work is too deep for Unix sockets; ran in {root}"
                 print(f"e2e: {report['work_note']}", file=sys.stderr)
             write_json(root / "capabilities.json", report["capabilities"])
@@ -2117,6 +2155,10 @@ def main():
         try:
             if root and not args.keep and not any(r.get("artifacts") for r in report["scenarios"]):
                 shutil.rmtree(root)
+            elif root and root.parent != args.work.resolve():
+                # Kept evidence of a run in a short folder goes back under
+                # --work, so nothing is left in /tmp (#100).
+                root = keep_under(root, args.work.resolve(), report)
         except Exception as exc:
             report["cleanup_error"] = str(exc)
         report["totals"] = {status: sum(r["status"] == status for r in report["scenarios"])

@@ -80,6 +80,8 @@ pub struct Tracker {
     stream: StreamState,
     camera: VirtualCameraState,
     replay: ReplayState,
+    /// The last read of the setup failed: what changed isn't sent yet.
+    setup_stale: bool,
 }
 
 impl Tracker {
@@ -95,6 +97,7 @@ impl Tracker {
             stream: StreamState::Offline,
             camera: VirtualCameraState::Stopped,
             replay: ReplayState::Off,
+            setup_stale: false,
         };
         tracker.outputs_from(&status);
         Some(tracker)
@@ -371,11 +374,28 @@ impl Tracker {
         }
     }
 
+    /// Whether the last read of the setup failed (see
+    /// [`Tracker::retry_setup`]).
+    pub fn setup_stale(&self) -> bool {
+        self.setup_stale
+    }
+
+    /// Read the setup again if the last read failed (isocastd was busy),
+    /// so a change isn't lost until the next one (#74).
+    pub fn retry_setup(&mut self, ctx: &Ctx) -> Vec<ObsEvent> {
+        match self.setup_stale {
+            true => self.setup_changed(ctx),
+            false => Vec::new(),
+        }
+    }
+
     /// Compare the live setup with the one the session last saw.
     fn setup_changed(&mut self, ctx: &Ctx) -> Vec<ObsEvent> {
         let Ok(live) = ctx.live() else {
+            self.setup_stale = true;
             return Vec::new();
         };
+        self.setup_stale = false;
         if live.revision == self.world.revision && live.setup == self.world.setup {
             return Vec::new();
         }

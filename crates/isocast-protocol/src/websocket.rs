@@ -135,8 +135,9 @@ impl WebsocketSettings {
         };
         if !self.authentication && !ip.is_loopback() {
             return Some(format!(
-                "no_password: {} reaches other computers, so it needs a password; give \
-                 bind 127.0.0.1 (this Mac only) to go without one, or a password",
+                "bind: {} reaches other computers, so going without a password (no_password) \
+                 isn't allowed there; give bind 127.0.0.1 (this Mac only) to go without one, or \
+                 a password",
                 self.bind
             ));
         }
@@ -183,10 +184,7 @@ mod tests {
                 bind: bind.into(),
                 ..open.clone()
             };
-            assert!(
-                wide.problem().unwrap().starts_with("no_password:"),
-                "{bind}"
-            );
+            assert!(wide.problem().unwrap().starts_with("bind:"), "{bind}");
         }
         let local6 = WebsocketSettings {
             bind: "::1".into(),

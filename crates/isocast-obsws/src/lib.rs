@@ -332,6 +332,13 @@ mod tests {
                 "{refused:?}"
             );
         }
+        // The server logs after it answers: wait until all three were
+        // handled (one line, two counted), not for a fixed time (#74).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while server.shared.origin_log.lock().1 < 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(server.shared.origin_log.lock().1, 2);
         let lines = engine.0.lock().unwrap().clone();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("127.0.0.1:"), "{lines:?}");

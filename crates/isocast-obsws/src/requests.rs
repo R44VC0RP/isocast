@@ -6,7 +6,9 @@ use isocast_protocol::api::{
     ApplyParams, EngineState, Live, Method, RpcError, SnapshotParams, StartParams, Status,
 };
 use isocast_protocol::change::Change;
+use isocast_protocol::devices::Display;
 use isocast_protocol::library::{Library, LibrarySwitchParams};
+use isocast_protocol::projector::{OpenParams, ProjectorView, Projectors};
 use isocast_protocol::replay::ReplayState;
 use isocast_protocol::stream::{StreamState, StreamStatus};
 use isocast_protocol::virtual_camera::VirtualCameraState;
@@ -109,6 +111,9 @@ pub const SUPPORTED: &[&str] = &[
     // UI
     "GetStudioModeEnabled",
     "SetStudioModeEnabled",
+    "GetMonitorList",
+    "OpenVideoMixProjector",
+    "OpenSourceProjector",
 ];
 
 /// obs-websocket's RequestStatus codes this server answers with.
@@ -1506,6 +1511,67 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
             Ok(Value::Null)
         }
 
+        "GetMonitorList" => {
+            let list: Projectors = ctx.call(Method::ProjectorList)?;
+            Ok(json!({ "monitors": monitor_list(&list.displays) }))
+        }
+        "OpenVideoMixProjector" => {
+            let view = match d.need_str("videoMixType")? {
+                "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PREVIEW" => ProjectorView::Preview,
+                "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM" => ProjectorView::Program,
+                "OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW" => ProjectorView::Multiview,
+                other => {
+                    return Err(Fail::new(
+                        code::INVALID_REQUEST_FIELD,
+                        format!(
+                            "videoMixType: `{other}` isn't a video mix type; give \
+                             OBS_WEBSOCKET_VIDEO_MIX_TYPE_PREVIEW, \
+                             OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM or \
+                             OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW."
+                        ),
+                    ));
+                }
+            };
+            open_projector(
+                ctx,
+                &d,
+                OpenParams {
+                    view,
+                    ..OpenParams::default()
+                },
+            )
+        }
+        "OpenSourceProjector" => {
+            let world = World::new(ctx.live()?, None);
+            let name = d.str("sourceName")?;
+            let id = d.str("sourceUuid")?;
+            if name.is_none() && id.is_none() {
+                return Err(missing("sourceName` or `sourceUuid"));
+            }
+            let params = match (world.find_input(name, id), world.find_scene(name, id)) {
+                (Some(source), _) => OpenParams {
+                    view: ProjectorView::Source,
+                    source: Some(source.id.clone()),
+                    ..OpenParams::default()
+                },
+                (None, Some(scene)) => OpenParams {
+                    view: ProjectorView::Scene,
+                    scene: Some(scene.id.clone()),
+                    ..OpenParams::default()
+                },
+                (None, None) => {
+                    return Err(Fail::new(
+                        code::RESOURCE_NOT_FOUND,
+                        format!(
+                            "No source was found by the name of `{}`.",
+                            id.or(name).unwrap_or_default()
+                        ),
+                    ));
+                }
+            };
+            open_projector(ctx, &d, params)
+        }
+
         "" => Err(Fail::new(
             code::MISSING_REQUEST_TYPE,
             "Your request is missing a `requestType`.",
@@ -1608,6 +1674,56 @@ fn output_state(active: bool) -> Fail {
     }
 }
 
+/// `GetMonitorList`'s monitors: the displays a projector can fill, by
+/// their index in Isocast's display list. Isocast doesn't know where each
+/// display sits on the desktop, so positions are 0.
+fn monitor_list(displays: &[Display]) -> Vec<Value> {
+    displays
+        .iter()
+        .enumerate()
+        .map(|(index, display)| {
+            json!({
+                "monitorName": format!("{}({index})", display.name),
+                "monitorIndex": index,
+                "monitorWidth": display.width,
+                "monitorHeight": display.height,
+                "monitorPositionX": 0,
+                "monitorPositionY": 0,
+            })
+        })
+        .collect()
+}
+
+/// Open a projector as `OpenVideoMixProjector` and `OpenSourceProjector`
+/// ask: full screen on monitor `monitorIndex` (`GetMonitorList`), or in a
+/// window if it is -1 or absent. `projectorGeometry` (a Qt window
+/// geometry) is accepted and ignored: the app places the window.
+fn open_projector(ctx: &Ctx, d: &Data, mut params: OpenParams) -> Answer {
+    let index = d.number("monitorIndex", -1.0, 1000.0)?.unwrap_or(-1.0);
+    d.str("projectorGeometry")?;
+    if index >= 0.0 {
+        let list: Projectors = ctx.call(Method::ProjectorList)?;
+        let display = list.displays.get(index as usize).ok_or_else(|| {
+            Fail::new(
+                code::REQUEST_FIELD_OUT_OF_RANGE,
+                format!(
+                    "monitorIndex: there is no monitor {index}; monitors (GetMonitorList): {}",
+                    match list.displays.len() {
+                        0 => "none".to_string(),
+                        n => format!("0 to {}", n - 1),
+                    }
+                ),
+            )
+        })?;
+        params.fullscreen = Some(true);
+        params.display = Some(display.id.clone());
+    } else {
+        params.fullscreen = Some(false);
+    }
+    ctx.act(Method::ProjectorOpen(Box::new(params)))?;
+    Ok(Value::Null)
+}
+
 /// An input's settings: its kind's own fields.
 pub fn settings_of(source: &Source) -> Value {
     let value = serde_json::to_value(source).unwrap_or_default();
@@ -1692,9 +1808,6 @@ const KNOWN: &[&str] = &[
     "OpenInputPropertiesDialog",
     "OpenInputFiltersDialog",
     "OpenInputInteractDialog",
-    "GetMonitorList",
-    "OpenVideoMixProjector",
-    "OpenSourceProjector",
 ];
 
 #[cfg(test)]

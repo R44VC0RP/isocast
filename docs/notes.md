@@ -5,6 +5,29 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-17 (#100): **hw-batch `--mac any` jobs hold `.bench.lock` only
+  while they build and pick a Mac**, then just that Mac's lock (as the
+  docs said); `pick_mac` skips a Mac whose local lock another runner
+  holds. Runners record `scutil --get LocalHostName` (lowercased) as their
+  host, and `reclaim` compares names without domain or case, so entries
+  stay reclaimable when the network renames the Mac. `reclaim` checks that
+  a test Mac pid is the job's (older than its pid file), survives rsync/ssh
+  timeouts, and stops a dead runner's soak relay (`ssh -R`, by pid, only if
+  that pid is still an `ssh -R`) and removes its key on the receiver. A
+  second TERM no longer cuts a runner's cleanup short. **`reap`'s
+  ownership rule** (read before scheduling `reap --kill`): an isocastd on
+  an M2 is "owned" when a running/ job on that Mac started (by its
+  runner's `started`, else the entry's ctime) before the engine did, or
+  its entry is unreadable; the Mac's own Dev.app engine and installed
+  apps are never touched; only engines older than `--hours` (12) are
+  listed. A job that leaks an engine and then finishes leaves it for reap.
+- 2026-10-17 (#100): e2e.py's short run folder (a `--work` too deep for
+  sockets) is now on `--work`'s own disk when it can be
+  (`/Volumes/IsocastBuild/.e2e/e2e-XXXXXXXX`, 39 bytes), else /tmp as
+  before; kept evidence (`--keep`, `--keep-failures`) is copied back under
+  `--work` (sockets left out) and the short folder removed, so nothing
+  piles up in /private/tmp on the test Macs.
+
 - 2026-10-16 (#91, #97, #98): **hw-batch keeps itself tidy.** A runner now
   records its pid and host in its running/ entry, and stops its test Mac
   job and writes its summary on TERM/HUP (a `timeout` around `now` used to
@@ -223,6 +246,16 @@ each section. Delete entries that stop being true.
   Privacy & Security for that app, and ask Ryan to grant it.
 
 ## Waiting on Ryan
+
+- 2026-10-17 (#74): **Touch Portal / Stream Deck pairing check** not done
+  by an agent: Touch Portal is a GUI app whose first launch asks to accept
+  its licence and to pair a phone (or a Stream Deck), answers only Ryan
+  can give. The server side is covered by the e2e and the scratch client
+  in /Volumes/IsocastBuild/followups-007/scratch/obsws.py. To check:
+  `isocast websocket enable` (note the password), install Touch Portal
+  (touch-portal.com) on a test Mac, add its OBS plugin with
+  ws://127.0.0.1:4455 and that password, and press a "Start Recording"
+  and a "Switch Scene" button; `isocast status` should follow.
 
 - 2026-10-16 (#89): isocast-m2-b has BlackHole 16ch installed (`brew
   install --cask blackhole-16ch`, then `sudo killall coreaudiod` instead
@@ -1660,6 +1693,42 @@ each section. Delete entries that stop being true.
   replay settings/no stream: a mid-take start must not disturb protected
   writers (#68). M2-b's default start kept both 8 s/240-frame files loss-free.
   Qualification: vertical-007/scratch/REPORT.md.
+- 2026-10-17 (#64): **HE-AAC in Matroska: AudioToolbox's HE-AAC decoder
+  plays 2112 frames (at the stream's output rate) later than its LC
+  decoder** and reports no PrimeInfo; webm.rs parses the
+  AudioSpecificConfig (explicit SBR/PS object types, or the
+  backward-compatible 0x2b7 sync extension) and drops that much more after
+  CodecDelay. Measured by cross-correlating the decode with the source
+  burst (aac_at files: HE-AAC 48 kHz and 44.1 kHz, HE-AAC v2 48 kHz): lag
+  0, 0, 1 frame (was 2112, 2299, 2112). HE-AAC v2's core is mono, so the
+  decoder's input format takes the ASC's channel count (a stereo input was
+  refused with '!dat': v2 never played). Untagged VP8 stays Rec. 709 (the
+  2026-10-15 choice; OBS 28+ treats untagged video as 709 too). No
+  seeking: media sources only play from the start, so there is nothing to
+  exercise until a seek API exists.
+- 2026-10-17 (#95): **a full-screen projector whose display isn't
+  connected when the engine starts waits for it** (`waiting` in
+  `<setup>.projectors.json`) instead of being dropped: it opens again on
+  `device_changed` (display added) or the next `projector_list` (the app's
+  first call, which covers a display that attached before the first device
+  inventory), with reason "the display NAME was connected". Opening the
+  same view by hand, or closing all, forgets it. A windowed projector last
+  on a gone display opens with no frame (the app places it) rather than
+  off screen. obs-websocket GetMonitorList lists Isocast's displays by
+  index (positions 0: Isocast doesn't know them); OpenVideoMixProjector and
+  OpenSourceProjector map onto `projector_open` (monitorIndex -1 or absent:
+  a window; projectorGeometry is accepted and ignored).
+- 2026-10-17 (#102): the .isoprj writer warns once per folder (until the
+  two agree) when the file's revision of a timeline is higher than the
+  engine's, re-checks the recording gate right before each write
+  (`Written::Busy` re-queues), and `graceful_shutdown` flushes it (an
+  empty path on its channel; waits up to 3 s). The start-up pass probes
+  each folder on a helper thread (2 s) so a sleeping network disk can't
+  hold up the writer. Relink by folder remaps other timelines only for
+  offline takes (an online clip is relinked alone). Two loose copies of a
+  file opened from two folders keep sharing one uid: giving the second a
+  new one would make re-opening it import again (the file isn't
+  rewritten read-only), so the harmless duplicate stays.
 
 - 2026-10-16 (#101): **An audio source that stops while recording is in
   the manifest per file**: `files[].audio_stops` (source, track,
@@ -5717,6 +5786,18 @@ each section. Delete entries that stop being true.
   couldn't-restart warning stays until dismissed (OK).
 
 ## Gotchas
+
+- 2026-10-17 (#85): **take.sh on isocast-m2-a: a wedged Terminal.** The
+  Terminal there had run since 2026-10-12 with one stale window ("Grant
+  Isocast permissions.command", its shell gone) and answered neither
+  `open -a Terminal X.command` nor Accessibility (cua-driver found 0 AX
+  windows), so the CLI window never came. remote.sh now restarts a
+  Terminal that has no child processes (nobody's shell in it) before
+  opening cli.command, waits up to 30 s for the window, and on failure
+  writes out/terminal.txt (Terminal's windows, the last 2 min of its,
+  launchservicesd's and syspolicyd's log). Restarting restores the stale
+  window with a fresh zsh, so later runs leave Terminal alone. Note:
+  inside remote.sh `log` is its own function; use /usr/bin/log.
 
 - 2026-10-16 (#96 UI): on the test Macs' desktop session, `security
   find-generic-password … -w` on a stream key isocastd stored opens a

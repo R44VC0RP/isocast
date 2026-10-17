@@ -1334,6 +1334,9 @@ impl Daemon {
         self.stop_engine();
         self.flush_live_save();
         self.data.flush();
+        // A stop just before the quit: its project file is written now,
+        // not at the next start (#102).
+        self.isoprj.flush();
         // After the recording's end went out: OBS clients hear ExitStarted
         // and a close, not a dropped socket.
         self.websocket.stop();
@@ -1683,9 +1686,20 @@ impl Daemon {
             } => Some((id.clone(), name.clone())),
             _ => None,
         };
+        let display_came = matches!(
+            &event,
+            Event::DeviceChanged {
+                action: isocast_protocol::api::DeviceAction::Added,
+                kind: isocast_protocol::api::DeviceKind::Display,
+                ..
+            }
+        );
         self.send_event(event);
         if let Some((id, name)) = display_gone {
             self.projectors_display_gone(&id, &name);
+        }
+        if display_came {
+            self.projectors_display_came();
         }
     }
 

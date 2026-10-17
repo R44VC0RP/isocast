@@ -1468,6 +1468,19 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   Remote gates 228 pass/1 existing ignored; final warm-up hook has targeted
   engine/daemon clippy/tests and full fmt. Working diff and review handoff:
   /Volumes/IsocastBuild/vertical-007/scratch/REPORT.md; live linking deferred.
+- 0.0.7 follow-ups (2026-10-17, #102 #95 #74 #64 #100 #85): .isoprj
+  writer warns once per folder when the file's edits are newer, re-checks
+  the recording gate right before writing, flushes on graceful shutdown
+  (trim then shutdown at once: file revision 3 = engine 3), probes cold
+  folders at start; relink-by-folder moves only offline takes; mid-
+  recording open says the take joins when it stops. obs-websocket
+  GetMonitorList, OpenVideoMixProjector, OpenSourceProjector (VM: 11
+  requests, errors 400/402/600 as OBS). A full-screen projector whose
+  display is absent at start waits for it and reopens when it attaches; a
+  window on a gone display drops its frame. HE-AAC and HE-AAC v2 in MKV on
+  time (cross-correlated lag 0 at 48 and 44.1 kHz, was 44-48 ms; v2 failed
+  '!dat' before). hw-batch and e2e.py robustness (#100). Full hosted e2e
+  17/17 in the VM.
 
 - A.4 #90 fix round 1 (2026-10-16): removed the early ISO hold and share
   cap after review found lost ISO content without protected-output gain.
