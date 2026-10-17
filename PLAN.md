@@ -1437,6 +1437,14 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
     newest developer segment; the Pacing row and the auto-off switch;
     Settings isn't left disabled by an Apply behind Review…; the stream
     connect's Local Network hint and deadline.
+  - [x] **8.2l Real release notes in the update window (GitHub #106).**
+    Notes are `docs/releases/X.Y.Z.md`, committed before tagging: preflight
+    and release.sh refuse a version without them; the appcast embeds them
+    (markdown) and the GitHub body is them plus the Full Changelog link (no
+    more generated notes). "Refresh appcast notes" (workflow_dispatch,
+    release environment) re-signs only a published release's appcast.xml
+    with its notes, keeping the DMG and its EdDSA signature; 0.0.6's run
+    is Ryan's to approve.
 - [x] **8.3** Docs: getting started, setup reference, MCP tools, plugins.
   (With the user-facing README and its screenshots, licences and
   THIRD_PARTY_NOTICES, and the .github templates.)
@@ -1527,6 +1535,14 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 
 ## Log
 
+- 8.2l / #106 (2026-10-17): release notes from docs/releases/X.Y.Z.md
+  (0.0.5 and 0.0.6 added; body + Full Changelog reproduces both published
+  bodies byte for byte); preflight fails on a missing/empty/Changelog-only
+  file (stubbed gh); Refresh appcast notes proved with a throwaway key
+  against the published 0.0.6 DMG re-keyed: same item, enclosure and
+  signature, notes embedded, only appcast.xml uploaded; tampered feeds,
+  drafts, wrong version/key/checksum and extra assets refused.
+  actionlint and shellcheck clean.
 - #96 / 0.0.7 (2026-10-17): canvas-scoped stream failures, atomic poison
   recovery state, quiet ended-stream Stop, missing-tail frame counts,
   vertical replay and virtual camera. M2-a: fault/poison healthy outputs

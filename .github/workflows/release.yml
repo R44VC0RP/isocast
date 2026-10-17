@@ -77,6 +77,24 @@ jobs:
           if status not in (200, 404):
               sys.exit(f'could not read the release state of {tag} (HTTP {status})')
           proceed = status == 404
+          # The release notes (#106): docs/releases/X.Y.Z.md at the tag is
+          # what the update window and the GitHub release show. Same rules
+          # as release_notes() in scripts/release-finalize.py.
+          if proceed:
+              notes_path = f'docs/releases/{version}.md'
+              status, notes = api(f'contents/{notes_path}?ref=refs/tags/{tag}')
+              if status == 404:
+                  sys.exit(f'{notes_path} is missing at {tag}: write the release notes, commit them and tag again (docs/releasing.md, "Cut a release")')
+              if status != 200:
+                  sys.exit(f'could not read {notes_path} at {tag} (HTTP {status})')
+              try:
+                  text = base64.b64decode(notes['content']).decode().strip()
+              except (KeyError, TypeError, ValueError):
+                  sys.exit(f'{notes_path} at {tag} is not a UTF-8 file')
+              if not text:
+                  sys.exit(f'{notes_path} is empty at {tag}: write the release notes before tagging')
+              if '**Full Changelog**' in text:
+                  sys.exit(f'{notes_path}: leave out the **Full Changelog** line; the GitHub release adds it')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f'tag={tag}\nversion={version}\nproceed={str(proceed).lower()}\n')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
@@ -147,6 +165,7 @@ jobs:
           if status != 404:
               sys.exit(f'could not read the release state of {tag} (HTTP {status})')
           PY
+          python3 scripts/release-finalize.py --check-notes "$VERSION"
           xcrun --find actool
           xcrun --find notarytool
           # The app's Sparkle public key must be the real one (not the placeholder).
@@ -273,7 +292,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           scripts/release.sh --notarize --verify-runtime --hosted \
-            --draft-release --verify-tag --generate-notes --replace-draft \
+            --draft-release --verify-tag --replace-draft \
             --output "$RELEASE_OUTPUT"
           python3 - <<'PY'
           import json, os

@@ -4,8 +4,12 @@ The **Release** workflow builds an existing `vX.Y.Z` tag on GitHub-hosted
 `macos-15` (arm64), signs with Developer ID, notarizes/staples the app and
 DMG, runs the mounted CLI/engine recording checks, and creates **one draft**
 with the DMG, its checksum and Sparkle's `appcast.xml` (the self-update
-feed, EdDSA-signed). Rerunning a version replaces that draft's assets and
-generated notes. Published releases are refused. Only Ryan publishes a
+feed, EdDSA-signed). The release notes are `docs/releases/X.Y.Z.md`,
+committed before tagging: Sparkle's update window shows them (embedded in
+the appcast as markdown) and they are the GitHub release body, followed by
+a **Full Changelog** compare link. Rerunning a version replaces that
+draft's assets and notes. Published releases are refused; a published
+release's update notes are fixed with **Refresh appcast notes** (below). Only Ryan publishes a
 draft, and publishing is what ships the update: installed copies read
 `releases/latest/download/appcast.xml`, which only a published, non-
 prerelease release serves.
@@ -26,9 +30,10 @@ the clients and the extension accept both.
 
 A small **preflight** job runs first, without secrets or approval: it
 checks the version, that the tag exists, that Cargo.toml at the tag matches,
-and whether that version is already published. A published version ends
-the run green with "nothing to build or draft" and never asks for an
-approval; a missing tag or a mismatch fails there with the reason.
+whether that version is already published, and that `docs/releases/X.Y.Z.md`
+exists at the tag and isn't empty. A published version ends the run green
+with "nothing to build or draft" and never asks for an approval; a missing
+tag, a mismatch or missing notes fail there with the reason.
 
 ## One-time setup (Ryan)
 
@@ -316,6 +321,17 @@ an Apple ID app-specific password. Rotate it once the hosted run works:
 
 1. Set `[workspace.package].version` in Cargo.toml (and refresh Cargo.lock)
    in the source repository, verify/commit it, and publish a clean snapshot.
+   **Write the release notes in the same commit or before it:**
+   `docs/releases/X.Y.Z.md`, markdown, for testers (see `docs/releases/0.0.6.md`).
+   Start with one line on who it's for and how to update, then `**Bold**`
+   group headings with `- ` bullets. Sparkle's update window (macOS 12+)
+   renders headings, bold/italic, lists, `code`, block quotes and http(s)
+   links. Don't use tables (their text disappears there), `---` rules
+   (blank space) or images (only the alt text). No **Full Changelog** line
+   (the GitHub release adds it). They are
+   read from the tag, so they can't be added after tagging without
+   re-tagging: `python3 scripts/release-finalize.py --check-notes X.Y.Z`
+   checks them, and preflight refuses a tag without them.
 2. In the **public snapshot checkout**, tag the matching version and push
    only that tag. For example, after updating Cargo.toml to `0.0.2`:
 
@@ -362,6 +378,35 @@ or manual run for it stops in preflight (green, "nothing to build or
 draft"); if it is published while the job waits for approval, the job stops
 before importing secrets, and the finalizer refuses as a last resort.
 
+## Fix a published release's update notes
+
+The appcast is signed (`SURequireSignedFeed`), so its notes can't be edited
+by hand. The **Refresh appcast notes** workflow
+(`.github/workflows/refresh-appcast.yml`) replaces only `appcast.xml` on a
+published release with one that embeds `docs/releases/X.Y.Z.md` from main:
+
+1. Commit and publish the corrected `docs/releases/X.Y.Z.md` on main.
+2. Run it and approve the **release** environment when it waits:
+
+   ```sh
+   gh workflow run refresh-appcast.yml --repo R44VC0RP/isocast --ref main -f version=0.0.6
+   ```
+
+Preflight (no secrets) refuses drafts, unpublished or missing versions,
+missing notes and a release whose assets aren't exactly the DMG, its
+`.sha256` and `appcast.xml`. After approval the job downloads the three,
+checks their GitHub digests and the DMG's `.sha256`, reads the version, build
+and `SUPublicEDKey` from the DMG's app (mounted read-only), verifies the
+published appcast (one item, the DMG's EdDSA signature against that key,
+feed signature), then runs `generate_appcast` on the same DMG with the notes.
+The new feed must have the same item and enclosure (URL, length, EdDSA
+signature; Ed25519 is deterministic, so the same key gives the same
+signature) and pubDate, the notes as markdown and a valid feed signature.
+Only then is `appcast.xml` uploaded with `--clobber`, and every asset digest
+is checked again. The DMG is never rebuilt or re-signed. The job summary
+keeps the old and new feeds; installed apps see the new notes on their next
+check (GitHub may cache the download for a few minutes).
+
 ## Verification and local use
 
 The workflow selects Xcode 26.3 from the hosted image (its default Xcode 16
@@ -403,12 +448,13 @@ unusable recording/graphics backends or other runtime errors block drafting
 rather than quietly passing a skipped check. All runs use private state,
 bounded waits and the common recording lock; owned daemons are shut down.
 
-Local defaults remain the login-keychain identity/profile and short alpha
-notes. CI opts into the extra modes:
+Local defaults remain the login-keychain identity/profile; notes always
+come from `docs/releases/X.Y.Z.md` (a Developer ID build and `--draft-release`
+stop without them). CI opts into the extra modes:
 
 ```sh
 scripts/release.sh --notarize --verify-runtime --hosted \
-  --draft-release --verify-tag --generate-notes --replace-draft \
+  --draft-release --verify-tag --replace-draft \
   --output /path/to/prepared/release
 ```
 

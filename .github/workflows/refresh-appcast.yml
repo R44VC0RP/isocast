@@ -1,0 +1,99 @@
+name: Refresh appcast notes
+
+# Replace a PUBLISHED release's appcast.xml with one that embeds
+# docs/releases/X.Y.Z.md from main (#106). The DMG is downloaded and checked
+# (GitHub digest, .sha256, its EdDSA signature in the published appcast),
+# never rebuilt or re-signed; only appcast.xml is uploaded. See
+# docs/releasing.md, "Fix a published release's update notes".
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published version (X.Y.Z or vX.Y.Z) whose appcast notes to refresh'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# The Release workflow's group: never refresh while a release is drafting.
+concurrency:
+  group: isocast-release
+  cancel-in-progress: false
+
+jobs:
+  # Without secrets or approval: the version, its notes file on main, and a
+  # published (not draft) release with exactly the DMG, checksum and appcast.
+  preflight:
+    if: github.repository == 'R44VC0RP/isocast' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check the version, its notes and the published release
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${INPUT_VERSION#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'version must be X.Y.Z or vX.Y.Z' >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          python3 scripts/release-finalize.py --refresh-appcast "$version" --dry-run \
+            --output "$RUNNER_TEMP/refresh-appcast"
+
+  refresh:
+    needs: preflight
+    runs-on: macos-26
+    timeout-minutes: 30
+    # Ryan approves; the Sparkle key exists only here.
+    environment: release
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Sparkle tools (pinned, hash-verified)
+        run: scripts/sparkle/sparkle.sh path
+      - name: Check the Sparkle update signing key
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import base64, binascii, os, sys
+          try:
+              key = base64.b64decode(os.environ.get('SPARKLE_ED_PRIVATE_KEY', '').strip(), validate=True)
+          except (binascii.Error, ValueError):
+              key = b''
+          if len(key) not in (32, 96):
+              sys.exit('SPARKLE_ED_PRIVATE_KEY is missing or not a Sparkle EdDSA private key (generate_keys -x); its value is not logged')
+          print('Sparkle signing key present')
+          PY
+      - name: Verify the published DMG and appcast, regenerate with the notes, replace appcast.xml
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release-finalize.py --refresh-appcast "$VERSION" --output "$RUNNER_TEMP/refresh-appcast"
+      - name: Summary (both feeds)
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'refresh-appcast'
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write(f"## v{os.environ['VERSION']} appcast.xml\n\n")
+              for label, path in [('Published before (the rollback)', root / 'original' / 'appcast.xml'), ('Regenerated (uploaded only if the step above passed)', root / 'appcast.xml')]:
+                  if path.exists():
+                      out.write(f'### {label}\n\n```xml\n{path.read_text()}\n```\n\n')
+          PY
