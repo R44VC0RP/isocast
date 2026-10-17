@@ -529,7 +529,7 @@ impl Daemon {
         let estimate = match crate::estimate_capacity(
             &candidate,
             state.engine.as_deref(),
-            true,
+            [true; 2],
             state.session.is_some(),
             &memory,
             None,

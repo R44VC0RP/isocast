@@ -1414,6 +1414,13 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 
 ## Log
 
+- #96 engine follow-ups (2026-10-16): main-over-vertical encoder priority,
+  local vertical failure/on-air cleanup, per-canvas live estimates and measured
+  M2 stream cost. Compositor fault injection found/fixed timed failed-file
+  duration; real movies decode with aligned A/V. Three overloads keep main
+  loss-free; vertical cycles/disk and strict e2e pass. Final evidence/review
+  status: vertical-followups/scratch/REPORT.md; remaining #96 UI/linking deferred.
+
 - G.7 / #86 model (2026-10-16): optional vertical canvas and per-scene
   arrangements, shared sources/mix, validation and collection/profile
   round-trip. Remote 77 protocol tests passed; main-integrated engine/protocol

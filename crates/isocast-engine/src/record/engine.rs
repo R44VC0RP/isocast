@@ -486,6 +486,7 @@ struct CompositorRun {
 
 impl<P: Platform> CanvasOutput<P> {
     fn new(
+        canvas: CanvasId,
         platform: &P,
         timeline: &Arc<Timeline>,
         control: Arc<SessionControl>,
@@ -510,9 +511,16 @@ impl<P: Platform> CanvasOutput<P> {
                 Arc::new(move |message, broken| {
                     if let Some(on_event) = &on_event {
                         on_event(EngineEvent::WorkerFailed {
-                            name: "scenes".into(),
+                            name: if canvas.is_main() {
+                                "scenes"
+                            } else {
+                                "vertical scenes"
+                            }
+                            .into(),
                             message,
-                            broken,
+                            // This scene thread belongs only to its canvas;
+                            // the compositor observes poison and closes it.
+                            broken: broken && canvas.is_main(),
                         });
                     }
                 })
@@ -560,11 +568,7 @@ impl<P: Platform> Inner<P> {
                 || self.wanted.is_broken()
                 || self.loudest.is_broken()
                 || self.main.program_video.list.is_broken()
-                || self.program_audio.list.is_broken()
-                || self
-                    .vertical
-                    .get()
-                    .is_some_and(|output| output.program_video.list.is_broken());
+                || self.program_audio.list.is_broken();
             if broken {
                 self.emergency.store(true, Ordering::SeqCst);
             }
@@ -580,6 +584,11 @@ impl<P: Platform> Inner<P> {
                 output
                     .program_fps
                     .store(0.0f64.to_bits(), Ordering::Relaxed);
+                self.timeline.set_on_air(
+                    CanvasId::Vertical,
+                    std::iter::empty(),
+                    self.platform.now(),
+                );
             }
             self.event(EngineEvent::WorkerFailed {
                 name: name.into(),
@@ -670,7 +679,13 @@ impl<P: Platform> Engine<P> {
             emergency: AtomicBool::new(false),
             worker_errors: Mutex::new(Vec::new()),
             platform: platform.clone(),
-            main: CanvasOutput::new(platform, &timeline, control.clone(), &on_event),
+            main: CanvasOutput::new(
+                CanvasId::Main,
+                platform,
+                &timeline,
+                control.clone(),
+                &on_event,
+            ),
             vertical: OnceLock::new(),
             control,
             scene_feeds: Arc::new(SceneFeeds::new(timeline.clone())),
@@ -1941,6 +1956,7 @@ fn publish<P: Platform>(inner: &Arc<Inner<P>>, state: &mut State<P>) {
     if let Some(vertical_setup) = setup.for_canvas(CanvasId::Vertical) {
         let output = inner.vertical.get_or_init(|| {
             CanvasOutput::new(
+                CanvasId::Vertical,
                 &inner.platform,
                 &inner.timeline,
                 Arc::new(SessionControl::with_data(inner.control.data().clone())),
@@ -2407,6 +2423,26 @@ fn run_program<P: Platform>(
     let platform = &inner.platform;
     platform.real_time_thread();
     compositor.set_epoch(epoch);
+    // Isolated developer-mode fault exercise, on the live clock. The poison
+    // variant unwinds with the canvas-local scene lock held, not shared state.
+    let fault = |name| {
+        isocast_diagnostics::developer()
+            .then(|| std::env::var(name).ok())
+            .flatten()
+            .and_then(|value| {
+                let (target, seconds) = value.split_once('=')?;
+                let matches = match canvas {
+                    CanvasId::Main => target == "main",
+                    CanvasId::Vertical => target == "vertical",
+                };
+                matches
+                    .then(|| seconds.parse::<f64>().ok())
+                    .flatten()
+                    .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+            })
+    };
+    let fail_after = fault("ISOCAST_COMPOSITOR_FAIL_AFTER");
+    let poison_after = fault("ISOCAST_SCENES_POISON_AFTER");
     let frame = Duration::from_secs(1) / fps;
     // The version of the compiled scenes the compositor draws.
     let mut clock = inner.timeline.clocks.start(
@@ -2440,6 +2476,17 @@ fn run_program<P: Platform>(
         if stop.load(Ordering::SeqCst) || inner.stopping.load(Ordering::SeqCst) {
             break;
         }
+        if poison_after.is_some_and(|after| tick.saturating_since(epoch) >= after) {
+            output.scenes.poison();
+        }
+        assert!(
+            !fail_after.is_some_and(|after| tick.saturating_since(epoch) >= after),
+            "injected compositor failure"
+        );
+        assert!(
+            !output.scenes.broken(),
+            "the canvas scene worker has broken state"
+        );
         // What this tick costs the thread, if it gives the program a frame.
         let cpu = platform.thread_cpu_time();
         let mut gave = None;
@@ -3444,10 +3491,6 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 if inner.emergency.load(Ordering::SeqCst)
                     || inner.state.is_broken()
                     || inner.main.scenes.broken()
-                    || inner
-                        .vertical
-                        .get()
-                        .is_some_and(|output| output.scenes.broken())
                 {
                     shared.stop_at(now.max(shared.epoch));
                     break;
@@ -3848,10 +3891,6 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         if inner.emergency.load(Ordering::SeqCst)
             || inner.state.is_broken()
             || inner.main.scenes.broken()
-            || inner
-                .vertical
-                .get()
-                .is_some_and(|output| output.scenes.broken())
         {
             errors.push(
                 "recording interrupted: broken shared state; writers finalized by emergency stop"

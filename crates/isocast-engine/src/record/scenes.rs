@@ -119,6 +119,8 @@ struct Waiting<F> {
     sizes: Vec<(Arc<str>, (u32, u32))>,
     /// A data key that content shows changed.
     data: bool,
+    /// Developer-mode fault request, handled on this thread with the lock held.
+    poison: bool,
 }
 
 impl<F: Clone + Send + 'static> SceneThread<F> {
@@ -137,6 +139,7 @@ impl<F: Clone + Send + 'static> SceneThread<F> {
                 next: None,
                 sizes: Vec::new(),
                 data: false,
+                poison: false,
             }),
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
@@ -254,6 +257,12 @@ impl<F: Clone + Send + 'static> SceneThread<F> {
             || self.shared.output.is_broken()
             || self.shared.bound.is_broken()
     }
+
+    /// Called only by the isolated developer-mode compositor fault hook.
+    pub(super) fn poison(&self) {
+        self.shared.input.lock().poison = true;
+        self.shared.wake.notify_all();
+    }
     pub(super) fn failure(&self) -> Option<String> {
         self.shared.failure.lock().clone()
     }
@@ -310,6 +319,7 @@ fn run<F: Clone>(
         let (next, sizes) = {
             let mut input = shared.input.lock();
             loop {
+                assert!(!input.poison, "injected scene-thread lock poison");
                 if shared.stop.load(Ordering::SeqCst) {
                     return;
                 }

@@ -12,7 +12,7 @@ use block2::RcBlock;
 use isocast_engine::{
     FileWriter, Finished, MOVIE_FRAGMENT_SECONDS, SAMPLE_RATE, Time, VideoTrackSpec, WriterSpec,
 };
-use isocast_protocol::{Codec, Container};
+use isocast_protocol::{CanvasId, Codec, Container};
 use objc2::Message;
 use objc2::exception;
 use objc2::rc::{Retained, autoreleasepool};
@@ -68,6 +68,15 @@ pub(crate) static PRIORITY_PRESSURE: AtomicUsize = AtomicUsize::new(0);
 /// Fraction of ISO pictures admitted, in thousandths. Reduce promptly under
 /// pressure, then probe for spare capacity slowly instead of sending bursts.
 pub(crate) static ISO_SHARE: AtomicU32 = AtomicU32::new(1000);
+static MAIN_OUTPUTS: AtomicUsize = AtomicUsize::new(0);
+static MAIN_PRESSURE: AtomicUsize = AtomicUsize::new(0);
+static VERTICAL_SHARE: AtomicU32 = AtomicU32::new(1000);
+
+/// ISOs yield first. Only sustained main pressure, after the ISO share has
+/// fallen to a tenth, may also hold vertical work. Main-only admission is unchanged.
+pub(crate) fn vertical_held() -> bool {
+    MAIN_PRESSURE.load(Ordering::Relaxed) > 0 && ISO_SHARE.load(Ordering::Relaxed) <= 100
+}
 
 /// How far apart hardware sessions get their first pictures, and in what
 /// order. VideoToolbox places a session on one of the chip's video encode
@@ -116,9 +125,13 @@ fn encoder_starts() -> std::sync::MutexGuard<'static, EncoderStarts> {
 
 /// A session's place in the start order: protected outputs first, then
 /// by size, largest first.
-pub(crate) fn encoder_start_rank(protected: bool, width: u32, height: u32) -> (u8, u32) {
+pub(crate) fn encoder_start_rank(canvas: Option<CanvasId>, width: u32, height: u32) -> (u8, u32) {
     (
-        u8::from(!protected),
+        match canvas {
+            Some(CanvasId::Main) => 0,
+            Some(CanvasId::Vertical) => 1,
+            None => 2,
+        },
         u32::MAX - width.saturating_mul(height),
     )
 }
@@ -182,19 +195,45 @@ pub(crate) fn cancel_encoder_start(ticket: u64) {
 /// hardware encoders. Only an output's worker mutates its guard. Capture and
 /// the compositor never wait; low-priority writers return a counted refusal.
 pub(crate) struct EncoderPressure {
+    pub(crate) canvas: CanvasId,
     stalled: bool,
     adjusted: Instant,
+    credit: u32,
 }
 
 impl EncoderPressure {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(canvas: CanvasId) -> Self {
         if PRIORITY_OUTPUTS.fetch_add(1, Ordering::Relaxed) == 0 {
             ISO_SHARE.store(1000, Ordering::Relaxed);
         }
+        if canvas.is_main() && MAIN_OUTPUTS.fetch_add(1, Ordering::Relaxed) == 0 {
+            VERTICAL_SHARE.store(1000, Ordering::Relaxed);
+        }
         Self {
+            canvas,
             stalled: false,
             adjusted: Instant::now(),
+            credit: 0,
         }
+    }
+
+    pub(crate) fn held(&self) -> bool {
+        !self.canvas.is_main() && vertical_held()
+    }
+
+    pub(crate) fn admit(&mut self) -> bool {
+        if self.canvas.is_main() || MAIN_OUTPUTS.load(Ordering::Relaxed) == 0 {
+            return true;
+        }
+        if self.held() {
+            return false;
+        }
+        self.credit += VERTICAL_SHARE.load(Ordering::Relaxed);
+        if self.credit < 1000 {
+            return false;
+        }
+        self.credit -= 1000;
+        true
     }
 
     pub(crate) fn set(&mut self, stalled: bool) {
@@ -202,6 +241,11 @@ impl EncoderPressure {
         if stalled
             && (!self.stalled || now.duration_since(self.adjusted) >= Duration::from_millis(100))
         {
+            if self.canvas.is_main() && ISO_SHARE.load(Ordering::Relaxed) <= 100 {
+                let _ = VERTICAL_SHARE.try_update(Ordering::Relaxed, Ordering::Relaxed, |share| {
+                    Some(share * 3 / 4)
+                });
+            }
             let _ = ISO_SHARE.try_update(Ordering::Relaxed, Ordering::Relaxed, |share| {
                 Some(share * 3 / 4)
             });
@@ -213,13 +257,34 @@ impl EncoderPressure {
             let _ = ISO_SHARE.try_update(Ordering::Relaxed, Ordering::Relaxed, |share| {
                 Some((share + 10).min(1000))
             });
+            if self.canvas.is_main() {
+                let _ = VERTICAL_SHARE.try_update(Ordering::Relaxed, Ordering::Relaxed, |share| {
+                    Some((share + 10).min(1000))
+                });
+            }
+            self.adjusted = now;
+        }
+        if self.canvas.is_main()
+            && !stalled
+            && MAIN_PRESSURE.load(Ordering::Relaxed) == 0
+            && now.duration_since(self.adjusted) >= Duration::from_millis(500)
+        {
+            let _ = VERTICAL_SHARE.try_update(Ordering::Relaxed, Ordering::Relaxed, |share| {
+                Some((share + 10).min(1000))
+            });
             self.adjusted = now;
         }
         if stalled != self.stalled {
             if stalled {
                 PRIORITY_PRESSURE.fetch_add(1, Ordering::Relaxed);
+                if self.canvas.is_main() {
+                    MAIN_PRESSURE.fetch_add(1, Ordering::Relaxed);
+                }
             } else {
                 PRIORITY_PRESSURE.fetch_sub(1, Ordering::Relaxed);
+                if self.canvas.is_main() {
+                    MAIN_PRESSURE.fetch_sub(1, Ordering::Relaxed);
+                }
             }
             self.stalled = stalled;
         }
@@ -230,6 +295,9 @@ impl Drop for EncoderPressure {
     fn drop(&mut self) {
         self.set(false);
         PRIORITY_OUTPUTS.fetch_sub(1, Ordering::Relaxed);
+        if self.canvas.is_main() {
+            MAIN_OUTPUTS.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -430,8 +498,9 @@ impl AssetWriter {
 impl FileWriter for AssetWriter {
     type Frame = PixelBuffer;
 
-    fn prioritize_video(&mut self) {
-        self.priority.get_or_insert_with(EncoderPressure::new);
+    fn prioritize_video(&mut self, canvas: CanvasId) {
+        self.priority
+            .get_or_insert_with(|| EncoderPressure::new(canvas));
     }
 
     fn start(&mut self, at: Time) -> Result<()> {
@@ -483,6 +552,13 @@ impl AssetWriter {
     }
 
     fn append_frame(&mut self, frame: &PixelBuffer, pts: Time) -> Result<bool> {
+        if self.gated
+            && self.last_video.is_some()
+            && self.priority.as_mut().is_some_and(|p| !p.admit())
+        {
+            self.drain_ready()?;
+            return Ok(false);
+        }
         // Pictures waiting for the session's start all fit, and the ISO
         // limit only applies once they have drained: a wait for the start
         // must never turn into refusals.
@@ -549,7 +625,11 @@ impl AssetWriter {
         }
         let ticket = *self.start_ticket.get_or_insert_with(|| {
             let (width, height) = self.pixels;
-            request_encoder_start(encoder_start_rank(self.priority.is_some(), width, height))
+            request_encoder_start(encoder_start_rank(
+                self.priority.as_ref().map(|p| p.canvas),
+                width,
+                height,
+            ))
         });
         claim_encoder_start(ticket)
     }

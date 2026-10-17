@@ -377,6 +377,9 @@ pub struct ParameterSets {
 pub trait VideoEncoder: Send {
     type Frame;
 
+    /// Rank the canvas's live output ahead of ISO encodes; main comes first.
+    fn prioritize_video(&mut self, _canvas: isocast_protocol::CanvasId) {}
+
     /// Submit a frame shown at `pts`; `keyframe` makes it a keyframe.
     fn encode(&mut self, frame: &Self::Frame, pts: Time, keyframe: bool) -> anyhow::Result<()>;
 
@@ -671,7 +674,7 @@ pub trait FileWriter: Send {
 
     /// Protect this program output ahead of optional ISO encodes when the
     /// platform's shared encoder hardware is overloaded.
-    fn prioritize_video(&mut self) {}
+    fn prioritize_video(&mut self, _canvas: isocast_protocol::CanvasId) {}
 
     /// Start the file's timeline at `at`. Called once, before anything is
     /// appended.

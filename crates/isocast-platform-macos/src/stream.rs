@@ -305,7 +305,8 @@ impl H264Encoder {
             fps: spec.fps,
             low_latency: spec.low_latency,
             force_keyframe,
-            priority: (!spec.low_latency).then(EncoderPressure::new),
+            priority: (!spec.low_latency)
+                .then(|| EncoderPressure::new(isocast_protocol::CanvasId::Main)),
             started: false,
             start_ticket: None,
             size: (spec.width, spec.height),
@@ -339,7 +340,21 @@ impl Drop for H264Encoder {
 impl VideoEncoder for H264Encoder {
     type Frame = PixelBuffer;
 
+    fn prioritize_video(&mut self, canvas: isocast_protocol::CanvasId) {
+        if self.priority.as_ref().is_some_and(|p| p.canvas == canvas) {
+            return;
+        }
+        self.priority = Some(EncoderPressure::new(canvas));
+    }
+
     fn encode(&mut self, frame: &PixelBuffer, pts: Time, keyframe: bool) -> Result<()> {
+        if self.started && self.priority.as_mut().is_some_and(|p| !p.admit()) {
+            self.output.dropped.fetch_add(1, Ordering::Relaxed);
+            if let Some(priority) = &mut self.priority {
+                priority.set(false);
+            }
+            return Ok(());
+        }
         // Apple's hardware encoder can expose MaxFrameDelayCount read-only.
         // Bound outstanding submissions ourselves so a stalled callback
         // cannot pin the compositor's entire surface pool.
@@ -375,7 +390,11 @@ impl VideoEncoder for H264Encoder {
             // within a few milliseconds of another session's start.
             let (width, height) = self.size;
             let ticket = *self.start_ticket.get_or_insert_with(|| {
-                request_encoder_start(encoder_start_rank(false, width, height))
+                request_encoder_start(encoder_start_rank(
+                    self.priority.as_ref().map(|p| p.canvas),
+                    width,
+                    height,
+                ))
             });
             while !claim_encoder_start(ticket) {
                 thread::sleep(Duration::from_millis(2));

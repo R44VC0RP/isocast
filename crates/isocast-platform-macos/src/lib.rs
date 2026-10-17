@@ -84,10 +84,10 @@ pub enum MacWriter {
 impl isocast_engine::FileWriter for MacWriter {
     type Frame = PixelBuffer;
 
-    fn prioritize_video(&mut self) {
+    fn prioritize_video(&mut self, canvas: isocast_protocol::CanvasId) {
         match self {
-            Self::Asset(w) => w.prioritize_video(),
-            Self::CrashSafe(w) => w.prioritize_video(),
+            Self::Asset(w) => w.prioritize_video(canvas),
+            Self::CrashSafe(w) => w.prioritize_video(canvas),
         }
     }
 

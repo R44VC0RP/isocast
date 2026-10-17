@@ -1637,6 +1637,22 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-16 (#96): **Main > vertical > ISO on shared video encoders.**
+  Both canvas programs/streams still protect ISOs; persistent main pressure
+  after the ISO admission share falls to 10% additionally sheds vertical
+  video. ProRes files are not shed for pressure on separate H.264/HEVC engines.
+  Three base-M2 full-HEVC dual-stream overloads kept main program/stream and
+  all audio loss-free while vertical and ISOs shed. M2 live H.264 is now 2.4x
+  HEVC, distinct from the 1.9x quality-file cost: dual HD60 6 Mb/s streams fit
+  beside HD30 ISOs but not HD45 ISOs (measured bound 2.25–2.53x). Other chips
+  retain the assumed cost. Live estimates count streaming per canvas.
+  `streams_main()` excluding an explicitly disabled `[stream]` with no enabled
+  destinations is a correction: no encoder starts for that default selection;
+  explicitly starting a disabled destination with `--only` is a separate case.
+  Failed-source files end at accepted media, not a timed take's future end;
+  the manifest retains the finalized duration/counters despite reporting failure.
+  Evidence: vertical-followups/scratch/REPORT.md. UI and live linking stay later.
+
 - 2026-10-16 (#86): **Two program outputs, one capture/mix/ISO set.** Each
   canvas has its own compositor, size-specific bounded output pool and
   stream encoder group; source frame slots, clock and mix are shared. Both

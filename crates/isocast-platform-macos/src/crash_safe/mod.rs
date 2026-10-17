@@ -249,6 +249,13 @@ impl CrashSafeWriter {
     }
 
     fn append_frame(&mut self, frame: &PixelBuffer, pts: Time) -> Result<bool> {
+        if matches!(self.spec.video.encoder.codec, Codec::H264 | Codec::Hevc)
+            && self.last_video.is_some()
+            && self.priority.as_mut().is_some_and(|p| !p.admit())
+        {
+            self.drain_ready(false)?;
+            return Ok(false);
+        }
         let limit = if self.encoding
             && !self.backlog
             && self.priority.is_none()
@@ -304,7 +311,7 @@ impl CrashSafeWriter {
         }
         let ticket = *self.start_ticket.get_or_insert_with(|| {
             request_encoder_start(encoder_start_rank(
-                self.priority.is_some(),
+                self.priority.as_ref().map(|p| p.canvas),
                 self.spec.video.width,
                 self.spec.video.height,
             ))
@@ -325,8 +332,10 @@ impl CrashSafeWriter {
             // that backlog under pressure can block an ISO's audio for >500 ms.
             // Keep the accepted pictures; audio and encoded output still drain.
             && (force_video
-                || self.priority.is_some()
-                || PRIORITY_PRESSURE.load(Ordering::Relaxed) == 0)
+                || self.priority.as_ref().map_or_else(
+                    || PRIORITY_PRESSURE.load(Ordering::Relaxed) == 0,
+                    |p| !matches!(self.spec.video.encoder.codec, Codec::H264 | Codec::Hevc) || !p.held(),
+                ))
             && (self.encoding || self.may_start())
         {
             // The first picture initializes the native session even with
@@ -689,8 +698,9 @@ impl CrashSafeWriter {
 impl FileWriter for CrashSafeWriter {
     type Frame = PixelBuffer;
 
-    fn prioritize_video(&mut self) {
-        self.priority.get_or_insert_with(EncoderPressure::new);
+    fn prioritize_video(&mut self, canvas: isocast_protocol::CanvasId) {
+        self.priority
+            .get_or_insert_with(|| EncoderPressure::new(canvas));
     }
 
     fn start(&mut self, at: Time) -> Result<()> {

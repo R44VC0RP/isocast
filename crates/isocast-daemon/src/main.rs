@@ -3304,7 +3304,13 @@ impl Daemon {
         }
         // Else what the chip's numbers predict, with the stream if it runs
         // (#66): only when it can't keep up, so a fitting setup never nags.
-        let streaming = self.state.lock().streaming();
+        let streaming = {
+            let state = self.state.lock();
+            [
+                state.streaming_on(CanvasId::Main),
+                state.streaming_on(CanvasId::Vertical),
+            ]
+        };
         let estimate =
             estimate_capacity(&setup, Some(engine), streaming, true, &memory, None).ok()?;
         if estimate.capacity != isocast_protocol::api::Capacity::CannotKeepUp {
@@ -3331,11 +3337,19 @@ impl Daemon {
             let Some(setup) = params.setup.or_else(|| state.setup.clone()) else {
                 return Err(state.no_setup("no setup to judge (or give one)"));
             };
-            let streaming = params.stream.unwrap_or(if live {
-                state.streaming()
-            } else {
-                setup.stream.is_some()
-                    || setup.vertical.as_ref().is_some_and(|v| v.stream.is_some())
+            let streaming = [CanvasId::Main, CanvasId::Vertical].map(|canvas| {
+                params.stream.unwrap_or_else(|| {
+                    if live {
+                        state.streaming_on(canvas)
+                    } else {
+                        match canvas {
+                            CanvasId::Main => setup.stream.is_some(),
+                            CanvasId::Vertical => {
+                                setup.vertical.as_ref().is_some_and(|v| v.stream.is_some())
+                            }
+                        }
+                    }
+                })
             });
             let recording = live && state.session.is_some();
             let engine = state.engine.clone().filter(|_| live);
@@ -3452,7 +3466,6 @@ impl Daemon {
 
     fn publish_overload(&self, take: u32, elapsed_seconds: f64, mut dropping: Vec<OverloadedFile>) {
         dropping.sort_by(|a, b| b.percent.total_cmp(&a.percent));
-        // Both program files: the streams' drops may be the network's.
         let protected_dropping = dropping.iter().any(|f| {
             matches!(
                 f.output.as_str(),
@@ -3483,9 +3496,7 @@ impl Daemon {
                 names.join(", ")
             )
         };
-        if !protected_dropping {
-            reason.push_str("; the program and stream are kept whole");
-        }
+        reason.push_str("; ISO encodes yield first, then vertical outputs to protect main; main can still lose frames if its own workload is too high");
         if let Some(fix) = estimate.as_ref().and_then(|e| e.suggestions.first()) {
             reason.push_str(&format!("; to fit, {}", fix.description));
             if fix.after_take {
@@ -4650,7 +4661,7 @@ fn this_machine() -> Option<&'static isocast_protocol::api::Machine> {
 fn estimate_capacity(
     setup: &Setup,
     engine: Option<&dyn LiveEngine>,
-    streaming: bool,
+    streaming: [bool; 2],
     recording: bool,
     memory: &Path,
     add_iso: Option<&str>,

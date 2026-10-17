@@ -604,23 +604,35 @@ impl<W: FileWriter> OpenFile<W> {
                 self.plan.source
             ));
         };
-        // The end is unknown if this file stopped on its own (its writer
-        // failed); it then ends after its last frame.
-        let end = match end {
-            Time::MAX => self
+        // A timed take's planned end is not the end of a failed source.
+        // Keep everything already accepted (including audio ahead of video),
+        // but never stretch its last picture to a future scheduled stop.
+        let end = if failure.is_err() || end == Time::MAX {
+            let video = self
                 .recent
                 .back()
-                .map_or(start, |last| last.add_ticks(1, fps)),
-            end => end,
+                .map_or(start, |last| last.add_ticks(1, fps));
+            let audio = self
+                .tracks
+                .iter()
+                .map(|t| start.add_ticks(t.written, SAMPLE_RATE))
+                .max()
+                .unwrap_or(start);
+            end.min(video.max(audio))
+        } else {
+            end
         };
         let end = file_end(start, end, fps);
         self.frames -= self.recent.iter().filter(|&&pts| pts >= end).count() as u64;
-        let padded = failure.and_then(|()| {
+        // Source failure doesn't mean the writer failed. Finish its short
+        // audio tail too; a broken writer still returns its write error.
+        let padded = (|| {
             for (i, track) in self.tracks.iter_mut().enumerate() {
                 track.pad_to(&mut self.writer, i, start, end)?;
             }
             Ok(())
-        });
+        })()
+        .and(failure);
         let mut dropouts = self.lost_packets + self.tracks.iter().map(|t| t.dropouts).sum::<u64>();
         // A failed file isn't in the report, so its error says what it holds
         // and what it lost: every frame due up to the end that it lacks. A
@@ -656,14 +668,12 @@ impl<W: FileWriter> OpenFile<W> {
         self.plan.frames.store(self.frames, Ordering::SeqCst);
         dropouts += finished.lost_audio_tracks;
         let repeated = finished.repeated;
-        padded.with_context(|| format!("recording {} stopped early", path.display()))?;
-
         let epoch = self
             .clock
             .state
             .read()
             .map(Time::from_nanos(self.plan.epoch.load(Ordering::SeqCst)));
-        Ok(FileReport {
+        let report = FileReport {
             path,
             take: self.plan.take,
             source: self.plan.source.clone(),
@@ -674,7 +684,14 @@ impl<W: FileWriter> OpenFile<W> {
             repeated_frames: repeated,
             dropped_frames: expected.saturating_sub(self.frames),
             audio_dropouts: dropouts,
-        })
+        };
+        if let Err(error) = padded {
+            *self.plan.failed_report.lock() = Some(report);
+            return Err(error).with_context(|| {
+                format!("recording {} stopped early", self.plan.spec.path.display())
+            });
+        }
+        Ok(report)
     }
 
     /// Every audio track has reached `end` (rounded up to a frame

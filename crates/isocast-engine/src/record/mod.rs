@@ -838,6 +838,9 @@ struct FilePlan {
     /// from then on, and that pause promises nothing for it.
     commit_failed: AtomicU64,
     commit_error: Mutex<Option<String>>,
+    /// A finalized movie can be playable even when its source failed. Keep
+    /// its actual duration and tail repeats instead of inferring them later.
+    failed_report: Mutex<Option<FileReport>>,
 }
 
 impl FilePlan {
@@ -1091,6 +1094,7 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
                     commit_done: AtomicU64::new(0),
                     commit_failed: AtomicU64::new(0),
                     commit_error: Mutex::new(None),
+                    failed_report: Mutex::new(None),
                     audio: audio.clone(),
                     audio_timing: audio
                         .iter()
@@ -1141,7 +1145,11 @@ fn create_writers<P: Platform>(platform: &P, plans: &[Arc<FilePlan>]) -> Result<
         match platform.create_writer(&plan.spec) {
             Ok(mut writer) => {
                 if is_program(&plan.source) {
-                    writer.prioritize_video();
+                    writer.prioritize_video(if plan.source == PROGRAM {
+                        isocast_protocol::CanvasId::Main
+                    } else {
+                        isocast_protocol::CanvasId::Vertical
+                    });
                 }
                 writers.push(writer);
             }
@@ -1224,6 +1232,9 @@ fn take_manifest<P: Platform>(
     // A file that failed has no report; its counters say what it holds and
     // what it lost up to the take's end.
     let failed = |plan: &FilePlan| {
+        if let Some(report) = plan.failed_report.lock().clone() {
+            return Some(report);
+        }
         let start = plan.start.load(Ordering::SeqCst);
         let end = take.end?;
         // A failed writer may have closed long before the take ended. Read

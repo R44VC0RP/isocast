@@ -58,6 +58,7 @@ struct ChipRow {
     #[serde(default)]
     frame_overhead_pixels: f64,
     overload_iso_efficiency: Option<f64>,
+    stream_h264_cost: Option<f64>,
     basis: String,
 }
 
@@ -98,6 +99,8 @@ pub struct Chip {
     /// Fraction of the theoretical ISO budget retained under overload:
     /// native pressure pauses and gradual recovery leave some capacity idle.
     pub overload_iso_efficiency: f64,
+    /// Bitrate-limited live H.264 has a different cost from a quality file.
+    pub stream_h264_cost: f64,
     pub basis: String,
 }
 
@@ -113,6 +116,7 @@ pub fn chip(name: &str) -> Chip {
             rate: row.engine_pixels_per_second,
             frame_overhead: row.frame_overhead_pixels,
             overload_iso_efficiency: row.overload_iso_efficiency.unwrap_or(1.0),
+            stream_h264_cost: row.stream_h264_cost.unwrap_or(table.codec_cost.h264),
             basis: row.basis.clone(),
         };
     }
@@ -137,6 +141,7 @@ pub fn chip(name: &str) -> Chip {
             rate: row.engine_pixels_per_second,
             frame_overhead: 0.0,
             overload_iso_efficiency: 1.0,
+            stream_h264_cost: table.codec_cost.h264,
             basis: format!(
                 "assumed: {engines} encode engine(s) as on other {} chips, each as fast as \
                  measured on other {generation} chips; not measured on this chip",
@@ -156,6 +161,7 @@ pub fn chip(name: &str) -> Chip {
                 rate: newest,
                 frame_overhead: 0.0,
                 overload_iso_efficiency: 1.0,
+                stream_h264_cost: table.codec_cost.h264,
                 basis: format!(
                     "assumed: a newer chip than any measured, taken to be as fast as the newest \
                      measured generation, with {engines} encode engine(s)"
@@ -168,6 +174,7 @@ pub fn chip(name: &str) -> Chip {
             rate: table.unknown.engine_pixels_per_second,
             frame_overhead: 0.0,
             overload_iso_efficiency: 1.0,
+            stream_h264_cost: table.codec_cost.h264,
             basis: "assumed: a chip with no measured data, judged cautiously".into(),
         },
     }
@@ -192,7 +199,8 @@ pub struct Inputs<'a> {
     /// Running (or probed) sources' formats; a camera's or test pattern's
     /// own fields in the setup win.
     pub formats: Formats<'a>,
-    pub streaming: bool,
+    /// Streaming on [main, vertical], independently for a live estimate.
+    pub streaming: [bool; 2],
     /// `tune`'s measurements, and this Mac's key in them.
     pub memory: Option<(&'a Memory, &'a str)>,
     /// A recording runs: setup changes wait for the take to end.
@@ -327,6 +335,11 @@ fn judge(
             codec,
             protected: kind != OutputKind::Iso,
             pixels_per_second: codec_cost(codec).map_or(0.0, |cost| {
+                let cost = if kind == OutputKind::Stream {
+                    chip.stream_h264_cost
+                } else {
+                    cost
+                };
                 pixels * cost + f64::from(fps) * chip.frame_overhead
             }),
             assumed,
@@ -485,6 +498,10 @@ fn percent(load: f64) -> String {
 
 fn summary(judgement: &Judgement) -> String {
     let busiest = percent(judgement.load);
+    let vertical = judgement
+        .outputs
+        .iter()
+        .any(|o| o.output.starts_with("vertical-"));
     match judgement.capacity {
         Capacity::Fits => format!(
             "this Mac's encoders keep up with these files (the busiest engine at about {busiest})"
@@ -496,18 +513,27 @@ fn summary(judgement: &Judgement) -> String {
         ),
         Capacity::CannotKeepUp => {
             let iso = judgement.outputs.iter().any(|o| !o.protected);
+            let priority = if vertical {
+                "vertical outputs shed next to protect main, which can still drop if its own workload is too high"
+            } else {
+                "those can also drop if their own workload is too high"
+            };
             if iso {
                 format!(
                     "this Mac's encoders can't keep up with these files (the busiest engine at \
                      about {busiest}): ISO files are shed first (estimated {:.0}% frame loss) \
-                     to prioritize program recordings and streams; those can also drop if \
-                     their own workload is too high",
+                     to prioritize program recordings and streams; {priority}",
                     judgement.iso_drop.max(1.0)
                 )
             } else {
+                let priority = if vertical {
+                    "vertical outputs shed before main; main can still drop if its own workload is too high"
+                } else {
+                    "the program and stream will drop frames"
+                };
                 format!(
                     "this Mac's encoders can't keep up with these files (the busiest engine at \
-                     about {busiest}): the program and stream will drop frames"
+                     about {busiest}): {priority}"
                 )
             }
         }
@@ -590,7 +616,7 @@ fn codec_option(key: &str, what: &str, codec: Codec) -> Option<Option_> {
 }
 
 /// Every single change that asks less of the encoders.
-fn options(setup: &Setup, formats: Formats, streaming: bool) -> Vec<Option_> {
+fn options(setup: &Setup, formats: Formats, streaming: [bool; 2]) -> Vec<Option_> {
     let recording = &setup.recording;
     let mut out = Vec::new();
     let iso_on = recording.iso.enabled && !recording.iso.sources.is_empty();
@@ -636,7 +662,7 @@ fn options(setup: &Setup, formats: Formats, streaming: bool) -> Vec<Option_> {
             });
         }
     }
-    if streaming && streams_main(setup) {
+    if streaming[0] && streams_main(setup) {
         if setup.stream.is_some() {
             let (w, h) = stream_size(setup);
             let short = w.min(h);
@@ -661,7 +687,7 @@ fn options(setup: &Setup, formats: Formats, streaming: bool) -> Vec<Option_> {
             off: true,
         });
     }
-    out.extend(vertical_options(setup, streaming));
+    out.extend(vertical_options(setup, streaming[1]));
     let fps = setup.canvas.fps;
     if fps >= 48 && fps.is_multiple_of(2) {
         out.push(Option_ {
@@ -769,7 +795,7 @@ fn try_options(
     chip: &Chip,
     setup: &Setup,
     formats: Formats,
-    streaming: bool,
+    streaming: [bool; 2],
     options: &[Option_],
     recording: bool,
 ) -> Vec<Tried> {
@@ -813,8 +839,8 @@ fn try_options(
             None => setup.clone(),
         };
         // `stream_stop` stops the main canvas's streams only.
-        let streams = streaming && method != Some("stream_stop");
-        let judgement = judge(chip, &changed, formats, streams, streaming);
+        let streams = streaming[0] && method != Some("stream_stop");
+        let judgement = judge(chip, &changed, formats, streams, streaming[1]);
         if judgement.outputs.iter().all(|o| o.pixels_per_second == 0.0)
             && !judgement.outputs.is_empty()
         {
@@ -827,7 +853,8 @@ fn try_options(
             .and_then(|p| p.get("vertical"))
             .is_some_and(|v| v.get("fps").is_some());
         let after_take = recording && patch.is_some()
-            || (touches("canvas") || vertical_rate) && streaming && method.is_none();
+            || (touches("canvas") && streaming[0] || vertical_rate && streaming[1])
+                && method.is_none();
         tried.push((
             combo.iter().map(|o| o.cost).sum(),
             combo.len(),
@@ -881,7 +908,7 @@ fn admission(
     chip: &Chip,
     setup: &Setup,
     formats: Formats,
-    streaming: bool,
+    streaming: [bool; 2],
     id: &str,
 ) -> Result<IsoAdmission, String> {
     let source = setup.source(id).ok_or_else(|| {
@@ -921,7 +948,7 @@ fn admission(
             "add_iso: turning on {id:?}'s ISO file leaves an invalid setup"
         ));
     };
-    let full = judge(chip, &added, formats, streaming, streaming);
+    let full = judge(chip, &added, formats, streaming[0], streaming[1]);
     if full.capacity != Capacity::CannotKeepUp {
         let (w, h, fps, _) = iso_format(&added, formats, id);
         return Ok(IsoAdmission {
@@ -992,8 +1019,8 @@ pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstima
         &chip,
         setup,
         inputs.formats,
-        inputs.streaming,
-        inputs.streaming,
+        inputs.streaming[0],
+        inputs.streaming[1],
     );
     let mut measured = None;
     if let Some((memory, machine)) = inputs.memory {
@@ -1057,7 +1084,7 @@ pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstima
         workload_key: workload_key(&judgement.outputs),
         load: judgement.load,
         capacity: judgement.capacity,
-        streaming: inputs.streaming,
+        streaming: inputs.streaming.iter().any(|on| *on),
         iso_drop_percent: judgement.iso_drop,
         outputs: judgement.outputs,
         suggestions,
@@ -1118,7 +1145,7 @@ pub fn check<P: crate::Platform>(
                 machine: &machine,
                 setup,
                 formats: &lookup,
-                streaming,
+                streaming: [streaming; 2],
                 memory,
                 recording: false,
             },
@@ -1217,7 +1244,7 @@ mod tests {
                 machine: &m,
                 setup,
                 formats: &none,
-                streaming,
+                streaming: [streaming; 2],
                 memory: None,
                 recording: false,
             },
@@ -1305,7 +1332,7 @@ mod tests {
             machine: &m,
             setup: &setup,
             formats: &none,
-            streaming: false,
+            streaming: [false; 2],
             memory: None,
             recording: false,
         };

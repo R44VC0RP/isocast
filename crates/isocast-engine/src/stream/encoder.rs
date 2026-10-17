@@ -211,9 +211,10 @@ impl Encoders {
             });
         }
         let platform = engine.platform();
-        let video = platform
+        let mut video = platform
             .create_video_encoder(&spec.video)
             .with_context(|| format!("could not start {what}'s H.264 encoder"))?;
+        video.prioritize_video(canvas);
         let audio = platform
             .create_audio_encoder(&spec.audio)
             .with_context(|| format!("could not start {what}'s AAC encoder"))?;
