@@ -862,14 +862,17 @@ impl Canvas {
             .as_ref()
             .and_then(|x| x.engine.as_ref())
             .and_then(|e| e.vertical.as_ref())
-            .is_some_and(|v| v.stopped.is_some());
+            .and_then(|v| v.stopped.as_deref());
         canvas.set_vertical_empty_text(
-            if stopped {
-                "The vertical canvas stopped. Restart the engine to bring it back."
+            if let Some(why) = stopped {
+                format!(
+                    "The vertical canvas stopped. {}",
+                    model::vertical_recovery(why)
+                )
             } else if name.is_empty() {
-                "Nothing on air."
+                "Nothing on air.".into()
             } else {
-                ""
+                String::new()
             }
             .into(),
         );

@@ -1,52 +1,91 @@
 use super::*;
-use isocast_protocol::replay::{ReplaySaved, ReplayState, ReplayStatus};
+use isocast_protocol::replay::{ReplayParams, ReplaySaved, ReplayState, ReplayStatus};
 
 #[derive(clap::Subcommand)]
 pub enum Command {
     /// Start keeping the last `recording.replay.seconds` of the program
     /// (video and the program mix) in memory, starting the live engine if
     /// needed. Recording and streaming start and stop without touching it.
+    /// With --canvas vertical, the vertical canvas's program, in a buffer
+    /// of its own with the same settings.
     Start {
-        #[arg(long)]
+        #[command(flatten)]
+        canvas: CanvasArg,
+        #[arg(long, help = "Print JSON")]
         json: bool,
     },
     /// Stop the replay buffer, discarding what it holds.
     Stop {
-        #[arg(long)]
+        #[command(flatten)]
+        canvas: CanvasArg,
+        #[arg(long, help = "Print JSON")]
         json: bool,
     },
     /// Save what the buffer holds, up to now, to a new file in the
     /// recordings folder (the running recording's project folder, if one
     /// records). Prints the file's path.
     Save {
-        #[arg(long)]
+        #[command(flatten)]
+        canvas: CanvasArg,
+        #[arg(long, help = "Print JSON")]
         json: bool,
     },
     /// Show whether it runs, what it holds, its memory, losses and last save.
     Status {
-        #[arg(long)]
+        #[command(flatten)]
+        canvas: CanvasArg,
+        #[arg(long, help = "Print JSON")]
         json: bool,
     },
 }
 
+#[derive(clap::Args)]
+pub struct CanvasArg {
+    /// Which canvas's buffer: main, or vertical (the setup's [vertical]
+    /// canvas; each canvas has its own buffer).
+    #[arg(long, value_parser = parse_canvas, default_value = "main")]
+    canvas: CanvasId,
+}
+
+impl CanvasArg {
+    fn params(&self) -> Option<ReplayParams> {
+        ReplayParams::of(self.canvas)
+    }
+}
+
+/// How messages name `canvas`'s buffer.
+fn what(canvas: CanvasId) -> &'static str {
+    match canvas {
+        CanvasId::Main => "the replay buffer",
+        CanvasId::Vertical => "the vertical replay buffer",
+    }
+}
+
 pub fn run(command: Command) -> Result<ExitCode> {
     match command {
-        Command::Start { json } => {
-            let status: ReplayStatus = Client::connect_or_launch()?.call(Method::ReplayStart)?;
+        Command::Start { canvas, json } => {
+            let status: ReplayStatus =
+                Client::connect_or_launch()?.call(Method::ReplayStart(canvas.params()))?;
             print_status(&status, json)
         }
-        Command::Stop { json } => {
+        Command::Stop { canvas, json } => {
             let Some(mut client) = Client::connect()? else {
-                bail!("the replay buffer isn't running: isocastd isn't running");
+                bail!(
+                    "{} isn't running: isocastd isn't running",
+                    what(canvas.canvas)
+                );
             };
-            let status: ReplayStatus = client.call(Method::ReplayStop)?;
+            let status: ReplayStatus = client.call(Method::ReplayStop(canvas.params()))?;
             print_status(&status, json)
         }
-        Command::Save { json } => {
+        Command::Save { canvas, json } => {
             let Some(mut client) = Client::connect()? else {
-                bail!("the replay buffer isn't running: isocastd isn't running");
+                bail!(
+                    "{} isn't running: isocastd isn't running",
+                    what(canvas.canvas)
+                );
             };
-            let saved: ReplaySaved = client.call(Method::ReplaySave)?;
+            let saved: ReplaySaved = client.call(Method::ReplaySave(canvas.params()))?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&saved)?);
             } else {
@@ -54,16 +93,19 @@ pub fn run(command: Command) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Status { json } => {
+        Command::Status { canvas, json } => {
             let Some(mut client) = Client::connect()? else {
                 if json {
                     println!("null");
                 } else {
-                    println!("Replay buffer off: isocastd isn't running");
+                    println!(
+                        "{}Replay buffer off: isocastd isn't running",
+                        label(canvas.canvas)
+                    );
                 }
                 return Ok(ExitCode::SUCCESS);
             };
-            let status: ReplayStatus = client.call(Method::ReplayStatus)?;
+            let status: ReplayStatus = client.call(Method::ReplayStatus(canvas.params()))?;
             print_status(&status, json)
         }
     }
@@ -84,7 +126,11 @@ pub fn print(status: &ReplayStatus) {
         ReplayState::Running => "running",
         ReplayState::Failed => "failed",
     };
-    println!("Replay buffer {state}: keeps {} s", status.seconds);
+    println!(
+        "{}Replay buffer {state}: keeps {} s",
+        label(status.canvas),
+        status.seconds
+    );
     if status.state == ReplayState::Running {
         println!(
             "  {}×{} at {} fps, {} kb/s H.264{}: {:.1} s held, {:.0} of {:.0} MB",
@@ -120,6 +166,14 @@ pub fn print(status: &ReplayStatus) {
     }
     if let Some(error) = &status.last_error {
         println!("  {error}");
+    }
+}
+
+/// "Vertical " before the vertical canvas's buffer's lines.
+fn label(canvas: CanvasId) -> &'static str {
+    match canvas {
+        CanvasId::Main => "",
+        CanvasId::Vertical => "Vertical ",
     }
 }
 

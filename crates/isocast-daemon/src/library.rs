@@ -180,7 +180,8 @@ fn switch_refusal(state: &State, what: &str) -> Option<String> {
     if state.replay.active() {
         return Some(format!(
             "can't switch {what} while the replay buffer runs: it keeps the current canvas; \
-             stop it first (`isocast replay stop`, or MCP's stop_replay), then switch"
+             stop it first ({}), then switch",
+            state.replay.stop_hint()
         ));
     }
     if state.streaming() || state.streams_starting > 0 {
@@ -883,6 +884,18 @@ impl Daemon {
                     document.name(),
                     describe(&problems)
                 )));
+            }
+            // A plugin's profile records only into a recordings folder
+            // there is already: switching to it would otherwise widen the
+            // plugins' sandboxes (#103).
+            if let Document::Profile(profile) = document {
+                let roots = self.recording_roots();
+                crate::plugin_folder_refusal(
+                    "profile.recording.folder",
+                    &crate::expand_home(&profile.recording.folder),
+                    &roots,
+                )?;
+                crate::plugin_hotkeys_refusal("profile.hotkeys", &profile.hotkeys, None, &roots)?;
             }
         }
         let (root, _) = self.library_view();

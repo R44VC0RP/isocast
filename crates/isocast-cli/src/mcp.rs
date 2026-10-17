@@ -51,7 +51,7 @@ use crate::client::Client;
 
 mod events;
 
-use isocast_protocol::replay::{ReplaySaved, ReplayStatus};
+use isocast_protocol::replay::{ReplayParams, ReplaySaved, ReplayStatus};
 use isocast_protocol::websocket::{WebsocketEnableParams, WebsocketStatus};
 
 #[derive(Deserialize, JsonSchema)]
@@ -1193,45 +1193,61 @@ impl Isocast {
                        default) of the encoded program, video and program mix, in memory, \
                        starting the live engine if needed; recording and streaming are \
                        independent of it. It shares the stream's encoder when the setup has a \
-                       [stream]. Then save_replay writes the last seconds to a file. Returns \
-                       its status.",
+                       [stream]. Then save_replay writes the last seconds to a file. With \
+                       canvas \"vertical\", the vertical canvas's program in a buffer of its \
+                       own (same settings; sharing a [vertical.stream]'s encoder); each canvas's \
+                       buffer starts, stops and saves independently. Returns its status.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = false
         )
     )]
-    async fn start_replay(&self) -> Result<Json<ReplayStatus>, String> {
-        self.call(Method::ReplayStart).await
+    async fn start_replay(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ReplayParams>>,
+    ) -> Result<Json<ReplayStatus>, String> {
+        self.call(Method::ReplayStart(ReplayParams::of(params.canvas)))
+            .await
     }
 
     #[tool(
         description = "Stop the replay buffer, discarding what it holds (save_replay first to \
-                       keep it). Returns its final status.",
+                       keep it); canvas \"vertical\" stops the vertical canvas's buffer only. \
+                       Returns its final status.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
             idempotent_hint = false
         )
     )]
-    async fn stop_replay(&self) -> Result<Json<ReplayStatus>, String> {
-        self.call(Method::ReplayStop).await
+    async fn stop_replay(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ReplayParams>>,
+    ) -> Result<Json<ReplayStatus>, String> {
+        self.call(Method::ReplayStop(ReplayParams::of(params.canvas)))
+            .await
     }
 
     #[tool(
         description = "Save the replay buffer: write the last recording.replay.seconds of the \
                        program, up to this moment, to a new MOV/MP4 in the recordings folder \
                        (the running recording's project folder, if one records), without \
-                       interrupting recording or streaming. Returns the file's path, length, \
-                       frames and any missed frames.",
+                       interrupting recording or streaming. Canvas \"vertical\" saves the \
+                       vertical canvas's buffer (its file name ends in \"vertical\"). Returns the \
+                       file's path, length, frames and any missed frames.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = false
         )
     )]
-    async fn save_replay(&self) -> Result<Json<ReplaySaved>, String> {
-        self.call(Method::ReplaySave).await
+    async fn save_replay(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ReplayParams>>,
+    ) -> Result<Json<ReplaySaved>, String> {
+        self.call(Method::ReplaySave(ReplayParams::of(params.canvas)))
+            .await
     }
 
     #[tool(
@@ -1292,11 +1308,15 @@ impl Isocast {
     #[tool(
         description = "The replay buffer's state, seconds held, memory used and its limit, \
                        format, whether it shares the stream's encoder, missed frames and the \
-                       last save.",
+                       last save; canvas \"vertical\" for the vertical canvas's buffer.",
         annotations(read_only_hint = true, idempotent_hint = true)
     )]
-    async fn replay_status(&self) -> Result<Json<ReplayStatus>, String> {
-        self.call(Method::ReplayStatus).await
+    async fn replay_status(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<ReplayParams>>,
+    ) -> Result<Json<ReplayStatus>, String> {
+        self.call(Method::ReplayStatus(ReplayParams::of(params.canvas)))
+            .await
     }
 
     #[tool(
@@ -1366,7 +1386,7 @@ impl Isocast {
     }
 
     #[tool(
-        description = "Start Isocast Virtual Camera. Takes no arguments: configure virtual_camera.target/scene/source/width/height through plan_change and apply_change first. Requires its signed/approved extension; never installs it. Recording and streaming stay independent.",
+        description = "Start Isocast Virtual Camera. Takes no arguments: configure virtual_camera.target/scene/source/width/height through plan_change and apply_change first (target \"vertical\" shows the vertical program, 1080x1920 by default; it needs the vertical canvas on). Requires its signed/approved extension; never installs it. Recording and streaming stay independent.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,

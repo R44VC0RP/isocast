@@ -123,9 +123,40 @@ def log(msg):
     print(f"hw-batch {time.strftime('%H:%M:%S')}: {msg}", file=sys.stderr, flush=True)
 
 
+def this_host():
+    """This Mac's name as runners record it: stable across network changes
+    (socket.gethostname() turns into an IP-derived name on some networks,
+    which made entries unreclaimable, #100)."""
+    try:
+        name = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True, text=True,
+                              timeout=10).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        name = ""
+    return host_key(name or socket.gethostname())
+
+
+def host_key(name):
+    """A host name compared without its domain or case (entries from older
+    runners carry socket.gethostname())."""
+    return (name or "").split(".")[0].lower()
+
+
 def mac_lock(mac):
     """One job per test Mac: a job for one Mac waits only for that Mac."""
     return BUILD / f".bench.lock.{mac}"
+
+
+def lock_held(path):
+    """Whether another process holds `path` (a moment's try, never kept)."""
+    try:
+        with open(path, "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(f, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
 
 
 def hold(locks, path, job_id):
@@ -235,6 +266,8 @@ def pick_mac(want):
     hosts = [MACS[want]] if want in MACS else list(MACS.values())
     reachable = []
     for host in hosts:
+        if want not in MACS and lock_held(mac_lock(next(m for m, h in MACS.items() if h == host))):
+            continue  # another runner's job holds it
         try:
             r = ssh(host, "mkdir -p isocast-scratch && lockf -s -k -t 0 isocast-scratch/.bench.lock true "
                           "&& echo free || echo busy",
@@ -487,17 +520,19 @@ def summarize(job, out, status, seconds, host):
 
 
 def run_job(path):
-    job = json.loads(path.read_text())
-    job_id = job["id"]
-    assert ID_RE.match(job_id), job_id
+    # Taken first, then read: a detached runner or `cancel` may take the
+    # file between a read and the rename (#100).
     running = ROOT / "running" / path.name
     try:
         path.rename(running)
     except FileNotFoundError:
-        log(f"{job_id}: no longer queued (another runner took it, or it was cancelled)")
+        log(f"{path.stem}: no longer queued (another runner took it, or it was cancelled)")
         return None
+    job = json.loads(running.read_text())
+    job_id = job["id"]
+    assert ID_RE.match(job_id), job_id
     # Who runs it, so `reclaim` can tell a live runner from a dead one.
-    job["runner"] = {"pid": os.getpid(), "host": socket.gethostname(), "started": time.time()}
+    job["runner"] = {"pid": os.getpid(), "host": this_host(), "started": time.time()}
     running.write_text(json.dumps(job, indent=2) + "\n")
     out = Path(job["out"]) if job.get("out") else ROOT / "results" / time.strftime("%Y-%m-%d") / job_id
     out.mkdir(parents=True, exist_ok=True)
@@ -516,8 +551,13 @@ def run_job(path):
             # locks, so a job on m2-b runs while m2-a soaks. --mac any holds
             # the batch lock while it builds and picks, then the Mac's lock.
             pinned = sorted({m for m in (job.get("mac"), job.get("receiver")) if m in MACS})
-            for mac in pinned or [None]:
-                hold(locks, mac_lock(mac) if mac else LOCK, job_id)
+            batch = None
+            for mac in pinned:
+                hold(locks, mac_lock(mac), job_id)
+            if not pinned:
+                batch = locks.enter_context(open(LOCK, "a"))
+                log(f"{job_id}: waiting for {LOCK}")
+                fcntl.flock(batch, fcntl.LOCK_EX)
             log(f"{job_id}: running")
             # Per job (two Macs can run at once), named as before: testmac.sh
             # names the test Mac's checkout and scratch after this folder.
@@ -539,6 +579,9 @@ def run_job(path):
             job["host"] = host
             if not pinned:
                 hold(locks, mac_lock(next(m for m, h in MACS.items() if h == host)), job_id)
+                # Only while it builds and picks (#100): the Mac's lock
+                # covers the job from here.
+                fcntl.flock(batch, fcntl.LOCK_UN)
             running.write_text(json.dumps(job, indent=2) + "\n")
             # Only the job's own Mac: a soak's stream receiver just copies
             # packets to disk, so builds (nice 15) may share it.
@@ -566,6 +609,9 @@ def run_job(path):
             if job.get("receiver"):
                 relay = Relay(host, MACS[job["receiver"]], job_id, jobdir, logf)
                 relay_config = relay.start()
+                # For `reclaim`, if this runner dies (#100).
+                job["relay"] = {"pid": relay.forward.pid, "receiver": relay.receiver}
+                running.write_text(json.dumps(job, indent=2) + "\n")
             # $R/pid lets a timeout stop the job's whole process tree (in the
             # desktop session too, where the bridge's process group is shared).
             command = (f"mkdir -p {r}/out && echo $$ >{r}/pid && export HW_OUT={r}/out && "
@@ -599,6 +645,8 @@ def run_job(path):
         job["warning"] = f"runner error: {e}"
         log(f"{job_id}: {e}")
     finally:
+        # A second TERM (or HUP) must not cut the cleanup short (#100).
+        handlers = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGTERM, signal.SIGHUP)}
         if proc is not None:
             os.killpg(proc.pid, 15)
             if host:
@@ -618,6 +666,8 @@ def run_job(path):
             shutil.rmtree(jobdir)
         shutil.rmtree(ROOT / "src" / job_id, ignore_errors=True)
         log(f"{headline} -> {out}/summary.md")
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
     return job
 
 
@@ -697,7 +747,7 @@ def runner_alive(job, entry):
     Mac can't tell (another host's runner)."""
     runner = job.get("runner")
     if runner:
-        if runner.get("host") != socket.gethostname():
+        if host_key(runner.get("host")) not in (this_host(), host_key(socket.gethostname())):
             return None
         r = subprocess.run(["ps", "-o", "command=", "-p", str(runner["pid"])], capture_output=True, text=True)
         return r.returncode == 0 and "hw-batch" in r.stdout
@@ -723,14 +773,27 @@ def runner_alive(job, entry):
 def remote_job_alive(host, job_id):
     """True if the job's command still runs on its test Mac, False if not,
     None if the Mac can't be reached."""
+    # The pid file is written by the job's shell once it runs, so a process
+    # younger than the file is another one that got the pid (after a
+    # reboot, #100).
+    f = f'"$HOME/isocast-scratch/{REMOTE_NAME}/{job_id}/pid"'
     try:
-        r = ssh(host, f'p="$(cat "$HOME/isocast-scratch/{REMOTE_NAME}/{job_id}/pid" 2>/dev/null)"; '
-                      '[ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo live || echo gone', timeout=40)
+        r = ssh(host, f'p="$(cat {f} 2>/dev/null)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null || {{ echo gone; exit 0; }}; '
+                      f'echo "live $(ps -o etime= -p "$p" | tr -d " ") $(( $(date +%s) - $(stat -f %m {f}) ))"',
+                timeout=40)
     except subprocess.TimeoutExpired:
         return None
     if r.returncode != 0:
         return None
-    return r.stdout.strip() == "live"
+    words = r.stdout.split()
+    if not words or words[0] != "live":
+        return False
+    if len(words) != 3:
+        return True  # it ended just now, or can't tell: never call a live job dead
+    try:
+        return etime_seconds(words[1]) + 5 >= int(words[2])
+    except (IndexError, ValueError):
+        return True  # can't tell: never call a live job dead
 
 
 def reclaim(dry_run=False):
@@ -777,13 +840,19 @@ def reclaim(dry_run=False):
         out.mkdir(parents=True, exist_ok=True)
         job["out"] = str(out)
         job["status"] = "LOST"
-        job["warning"] = f"reclaimed {time.strftime('%Y-%m-%d %H:%M')}: {why}"
         if host:
             # Whatever the job wrote before its runner died, then its scratch.
-            subprocess.run(["rsync", "-a", "-e", "ssh", f"{host}:isocast-scratch/{REMOTE_NAME}/{job_id}/out/",
-                            f"{out}/"], capture_output=True, timeout=1800)
-            ssh(host, f"rm -rf \"$HOME/isocast-scratch/{REMOTE_NAME}/{job_id}\"")
+            # A Mac that stops answering leaves them there (said in the log).
+            try:
+                subprocess.run(["rsync", "-a", "-e", "ssh", f"{host}:isocast-scratch/{REMOTE_NAME}/{job_id}/out/",
+                                f"{out}/"], capture_output=True, timeout=1800)
+                ssh(host, f"rm -rf \"$HOME/isocast-scratch/{REMOTE_NAME}/{job_id}\"")
+            except subprocess.TimeoutExpired:
+                why += f"; {host} timed out while its results were copied (left there)"
             release_builds([host], job_id)
+        if job.get("relay"):
+            why += drop_relay(job_id, job["relay"])
+        job["warning"] = f"reclaimed {time.strftime('%Y-%m-%d %H:%M')}: {why}"
         with open(out / "log.txt", "a") as f:
             print(f"hw-batch {time.strftime('%H:%M:%S')}: {job_id}: reclaimed as LOST: {why}", file=f)
         started = (job.get("runner") or {}).get("started")
@@ -795,6 +864,32 @@ def reclaim(dry_run=False):
         log(f"reclaimed {job_id} as LOST: {why} -> {out}/summary.md")
         reclaimed.append(job_id)
     return reclaimed
+
+
+def drop_relay(job_id, relay):
+    """A dead runner's soak relay: its `ssh -R` (if it is still that
+    process) and its key on the receiver. Returns what was done, for the
+    summary."""
+    done = ""
+    pid = relay.get("pid")
+    if pid:
+        r = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.startswith("ssh ") and " -R " in r.stdout:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGTERM)
+            done += f"; stopped its relay (ssh pid {pid})"
+    receiver = relay.get("receiver")
+    if receiver:
+        tag = f"isocast-hw-batch-{job_id}"
+        try:
+            r = ssh(receiver, f"cd ~/.ssh && grep -q '{tag}' authorized_keys 2>/dev/null || exit 0; "
+                              f"grep -v '{tag}' authorized_keys >ak.hw-batch && chmod 600 ak.hw-batch && "
+                              "mv ak.hw-batch authorized_keys && echo removed")
+            if "removed" in r.stdout:
+                done += f"; removed its relay key on {receiver}"
+        except subprocess.TimeoutExpired:
+            done += f"; its relay key may remain on {receiver} ({receiver} timed out)"
+    return done
 
 
 def reclaim_cmd(args):

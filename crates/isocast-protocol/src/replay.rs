@@ -1,12 +1,34 @@
 //! The replay buffer (G.2): the last seconds of the encoded program kept in
 //! memory while it runs, saved to a file on request, like OBS's. Its
 //! settings are `recording.replay` in a setup (the profile's), and
-//! `replay_status` reports what it holds.
+//! `replay_status` reports what it holds. Each canvas has a buffer of its
+//! own (`canvas` in the methods' params; the main one by default): the
+//! vertical canvas's keeps its program with the same settings.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::Issues;
+use crate::{CanvasId, Issues};
+
+/// Which canvas's replay buffer `replay_start`, `replay_stop`,
+/// `replay_save` and `replay_status` mean.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayParams {
+    /// `main` (the default: the program) or `vertical` (the setup's
+    /// vertical canvas's program, kept with the same
+    /// `recording.replay` settings, as its own buffer). One canvas's
+    /// buffer starts, stops and saves without touching the other's.
+    #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+    pub canvas: CanvasId,
+}
+
+impl ReplayParams {
+    /// The params for `canvas`: none for the main one, as before canvases.
+    pub fn of(canvas: CanvasId) -> Option<Self> {
+        (!canvas.is_main()).then_some(Self { canvas })
+    }
+}
 
 /// The longest replay the buffer can keep, in seconds.
 pub const MAX_SECONDS: u32 = 300;
@@ -110,6 +132,10 @@ pub enum ReplayState {
 /// What `replay_status` (and the `replay` event) reports.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ReplayStatus {
+    /// Which canvas's buffer: absent for the main one, `vertical` for the
+    /// vertical canvas's.
+    #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+    pub canvas: CanvasId,
     pub state: ReplayState,
     /// The seconds a save covers, as configured.
     pub seconds: u32,
@@ -166,6 +192,9 @@ pub struct ReplayStatus {
 /// A saved replay (`replay_save`'s result, and the `replay_saved` event).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ReplaySaved {
+    /// Which canvas's buffer saved it: absent for the main one.
+    #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+    pub canvas: CanvasId,
     /// The file: a MOV or MP4 (as `recording.program.encoder.container`),
     /// H.264 and AAC, starting on a keyframe.
     pub path: String,

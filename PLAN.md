@@ -998,6 +998,15 @@ native app; each verified against OBS's behaviour on a test Mac.
       starts are refused while the canvas is stopped; turning the canvas
       off and on clears the stop; no "add the key" toast when every
       vertical destination is turned off.
+    - [x] **#96 / 0.0.7 remaining canvas outputs.** Main compositor failure
+      leaves healthy vertical streams alone; atomic poison stop reason;
+      quiet repeated vertical Stop and accurate recovery text; independent
+      vertical replay (API/CLI/MCP/hotkeys), vertical virtual camera target;
+      failed-file drops include the missing tail; approved `vertical` e2e.
+      AWS M2 qualification complete; coordinator Tier-1 review remains.
+    - [ ] **#96 live scene linking.** Keep `follow_main` fixed during a take
+      until main/independent scene histories can be atomically spliced across
+      transitions, pauses and split boundaries (the permitted 0.0.7 deferral).
 - [x] **G.8 WebM and MKV media (#61).** Media sources and stingers play
   Matroska/WebM (sniffed by content): VP9 with alpha (OBS's stinger
   format), AV1 where the Mac decodes it, H.264/HEVC in MKV, Opus and AAC
@@ -1447,7 +1456,7 @@ each milestone. Shared recording changes are Tier 1 and must preserve
 macOS behavior; Windows-only code is Tier 2. Merge current main between
 slices, especially alongside the GPU, vertical-canvas and editor lanes.
 
-- [ ] **W.0 Portable CI.** `windows.yml` on `ci/**`, Windows and Ubuntu,
+- [x] **W.0 Portable CI.** `windows.yml` on `ci/**`, Windows and Ubuntu,
   cached Cargo build, clippy and existing tests, superseded runs cancelled.
   Start with protocol, diagnostics and obs-websocket (the engine still has
   Unix-only manifest I/O; client/daemon use Unix sockets). `windows-ci.sh`
@@ -1463,6 +1472,21 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   its OS I/O is behind a safe seam (Windows durability follows in W.2).
   Verify unchanged macOS API, recording, errors, timing and lifecycle;
   no no-op safety fallbacks merely to compile on Windows.
+  - [ ] **W.1a Engine build boundary.** Target-specific Metal/DX12 features;
+    non-Unix exclusive manifest creation without changing the Unix path;
+    build engine/test binaries on Windows without running them. Preserve
+    all durability errors (Windows recording/flush qualification is W.2).
+  - [ ] **W.1b Daemon platform selection.** One concrete platform alias and
+    a fail-closed stub behind `Platform`; replace per-call macOS shims
+    mechanically, preserving dispatch and lifecycle on Mac.
+  - [ ] **W.1c OS services and IPC compile seam.** Platform hooks for
+    diagnostics, hotkeys, plugins, process lifecycle and shared surfaces;
+    isolate Unix transport until the real named-pipe backend (W.6).
+    Coordinate daemon plugin edits with security-103; no policy changes.
+  - [ ] **W.1d CLI as a client.** Isolated-daemon `record`, remove direct
+    platform calls, preserve CLI/API/MCP behavior; Windows build-only gate.
+  - [ ] **W.1e UI platform seam.** Keep macOS window/media integration
+    behind its native seam; explicit Windows stubs and a Windows UI build.
 - [ ] **W.2 Cross-platform writer.** Prefer extracting the existing
   crash-safe BMFF muxer without changing its bytes; qualify against the
   macOS writer before choosing it over ffmpeg. Windows file ownership,
@@ -1518,6 +1542,42 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 
 ## Log
 
+- W.0 qualification / W.1a start (2026-10-17, #105 #28): delegator run
+  39043755843 passes Windows (4m7s) and Ubuntu (1m32s), all portable tests;
+  W.0 merged by the coordinator in main 603c3ac. Initially integrated
+  a8276a1; fast-forwarded to 603c3ac (including security-103) before handoff.
+  W.1 starts with the shared engine build boundary; daemon/plugin/UI seams
+  follow separately. Five strict smoke scenarios pass; three A/B pairs on
+  M2-a: 18/18 complete files, zero drops, CPU 42.0 -> 41.5%, instructions
+  489.4 -> 488.8 M/s (before the security-103 integration).
+  After integration, remote daemon/CLI/UI build and fmt/clippy/228 unit
+  tests + 1 doctest pass (1 existing hardware test ignored). Windows engine
+  build-only qualification remains the next Actions run.
+
+- #96 / 0.0.7 (2026-10-17): canvas-scoped stream failures, atomic poison
+  recovery state, quiet ended-stream Stop, missing-tail frame counts,
+  vertical replay and virtual camera. M2-a: fault/poison healthy outputs
+  0 loss; 4 replay saves decode/sync; strict e2e 17 existing scenarios pass,
+  then the corrected vertical fixture passes (6 movies/578 frames plus
+  287 stream frames, 0 drops). M2-b: portrait camera IOSurface probe
+  1080×1920/24 fps, correct canvas/color and failure; default replay start
+  mid-take keeps both 8 s/240-frame files and the replay loss-free.
+  Remote gates 228 pass/1 existing ignored; final warm-up hook has targeted
+  engine/daemon clippy/tests and full fmt. Working diff and review handoff:
+  /Volumes/IsocastBuild/vertical-007/scratch/REPORT.md; live linking deferred.
+- 0.0.7 follow-ups (2026-10-17, #102 #95 #74 #64 #100 #85): .isoprj
+  writer warns once per folder when the file's edits are newer, re-checks
+  the recording gate right before writing, flushes on graceful shutdown
+  (trim then shutdown at once: file revision 3 = engine 3), probes cold
+  folders at start; relink-by-folder moves only offline takes; mid-
+  recording open says the take joins when it stops. obs-websocket
+  GetMonitorList, OpenVideoMixProjector, OpenSourceProjector (VM: 11
+  requests, errors 400/402/600 as OBS). A full-screen projector whose
+  display is absent at start waits for it and reopens when it attaches; a
+  window on a gone display drops its frame. HE-AAC and HE-AAC v2 in MKV on
+  time (cross-correlated lag 0 at 48 and 44.1 kHz, was 44-48 ms; v2 failed
+  '!dat' before). hw-batch and e2e.py robustness (#100). Full hosted e2e
+  17/17 in the VM.
 - W.0 CI round 3 (2026-10-17, #105): run 39042460186 passes diagnostics
   and obs-websocket on Windows; protocol 80/81 (test used a Unix-only
   absolute root). Project-file tests now use native roots and exercise the
@@ -4197,3 +4257,15 @@ One line per finished task, newest last.
   Apple Virtual Sound Device records the same PCM as main; an aggregate
   going 18 -> 2 mid-take keeps the source running (logged), 18 -> 16
   keeps tones 1 and 2 exact.
+- #103 (2026-10-17): a folder a plugin's request gives (`start{folder}`,
+  `recording.folder` via `apply`/`start{setup}`/`init_setup`, an imported
+  profile's) must already be a recordings folder (or `~/Movies/Isocast`),
+  otherwise -32002. Also #56 F3 (a 5 s sandbox poll), #56 F4 (export healing
+  rewrites only paths that exist where the export is now) and #77 (a join
+  after the worker ended on its own starts a fresh hub). Verified with a
+  real sandboxed attacker plugin: on main, apply recording.folder=secret
+  then let it read, list and write the secret folder; on head all three
+  attacks are refused and it stays denied. A client `start` into a new
+  folder still works and restarts the plugin. Standalone record reaches a
+  running read plugin in 0.3 s on head and not at all in 20 s on main.
+  Export-only healing is left alone on head and wrongly rewritten on main.

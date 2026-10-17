@@ -436,20 +436,23 @@ pub enum Method {
     /// Start the replay buffer: keep the last `recording.replay.seconds`
     /// of the encoded program (video and the program mix) in memory, apart
     /// from any recording or stream. Shares the stream's encoder when one
-    /// runs with the same format. Returns
+    /// runs with the same format. With `canvas` "vertical", the vertical
+    /// canvas's own buffer (sharing a `[vertical.stream]`'s encoder). Its
+    /// params are optional. Returns
     /// [`ReplayStatus`](crate::replay::ReplayStatus).
-    ReplayStart,
-    /// Stop the replay buffer, discarding what it holds. Returns its final
+    ReplayStart(Option<crate::replay::ReplayParams>),
+    /// Stop a canvas's replay buffer (the main one's unless `canvas`
+    /// says), discarding what it holds. Returns its final
     /// [`ReplayStatus`](crate::replay::ReplayStatus).
-    ReplayStop,
-    /// Save what the replay buffer holds, up to this moment, to a new file
-    /// in the recordings folder (the running recording's project folder,
-    /// if one records). Never interrupts a recording or stream. Returns
-    /// [`ReplaySaved`](crate::replay::ReplaySaved).
-    ReplaySave,
-    /// The replay buffer's state, memory and counters. Returns
+    ReplayStop(Option<crate::replay::ReplayParams>),
+    /// Save what a canvas's replay buffer holds, up to this moment, to a
+    /// new file in the recordings folder (the running recording's project
+    /// folder, if one records). Never interrupts a recording or stream.
+    /// Returns [`ReplaySaved`](crate::replay::ReplaySaved).
+    ReplaySave(Option<crate::replay::ReplayParams>),
+    /// A canvas's replay buffer's state, memory and counters. Returns
     /// [`ReplayStatus`](crate::replay::ReplayStatus).
-    ReplayStatus,
+    ReplayStatus(Option<crate::replay::ReplayParams>),
     /// The obs-websocket v5 compatibility server: whether it is on and
     /// listening, where, whether it asks for a password, and how many
     /// clients are connected. Returns
@@ -1275,9 +1278,10 @@ pub enum Event {
         id: String,
         name: String,
     },
-    /// The replay buffer started, stopped or failed.
+    /// A replay buffer started, stopped or failed (`replay.canvas` says
+    /// whose: absent for the main canvas's).
     Replay { replay: crate::replay::ReplayStatus },
-    /// The replay buffer saved a file.
+    /// A replay buffer saved a file (`saved.canvas` says whose).
     ReplaySaved { saved: crate::replay::ReplaySaved },
     /// The hardware encoders can't keep up: files of the take are dropping
     /// frames (ISO files first; the program and stream are protected), and
@@ -1622,6 +1626,11 @@ pub struct Status {
     /// tell an engine left running from before an app update.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon: Option<DaemonBuild>,
+    /// The vertical canvas's replay buffer (`canvas: vertical`), while the
+    /// setup has a vertical canvas or its buffer ran; kept apart from
+    /// `replay` so clients of the main canvas see only its buffer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical_replay: Option<crate::replay::ReplayStatus>,
 }
 
 /// An isocastd build: `version` is the product version (`0.0.2`), `build`

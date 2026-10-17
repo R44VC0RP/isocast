@@ -6,6 +6,16 @@
 use isocast_protocol::{Rect, Scene, SceneItem, Setup, Source};
 use serde_json::{Value, json};
 
+/// Recovery differs for a contained canvas failure and poisoned scene state.
+pub fn vertical_recovery(reason: &str) -> &'static str {
+    if reason.contains("scene state is broken") || reason.contains("scene worker has broken state")
+    {
+        "Restart the engine once recording and streaming stop."
+    } else {
+        "After recording stops, turn the vertical canvas off and on in Settings › Video, or restart the engine."
+    }
+}
+
 /// A source kind as the interface shows it: OBS's name for it (what new
 /// sources are called, and the Add menu's words) and its icon's name (in
 /// `Icons`; Slint resolves it with `Icons.named`).

@@ -1237,7 +1237,21 @@ fn take_manifest<P: Platform>(
     // A file that failed has no report; its counters say what it holds and
     // what it lost up to the take's end.
     let failed = |plan: &FilePlan| {
-        if let Some(report) = plan.failed_report.lock().clone() {
+        if let Some(mut report) = plan.failed_report.lock().clone() {
+            // Keep the finalized media duration, but account for the frames
+            // missing through this take's actual end, including its tail.
+            let start = plan.start.load(Ordering::SeqCst);
+            if let Some(end) = take.end
+                && start != i64::MIN
+            {
+                let start = Time::from_nanos(start);
+                let fps = plan.spec.video.fps;
+                let end = file::file_end(start, mapped(end).max(start), fps);
+                let expected = end.ticks_since(start, fps).max(0) as u64;
+                report.dropped_frames = report.dropped_frames.max(
+                    expected.saturating_sub(report.frames.saturating_sub(report.repeated_frames)),
+                );
+            }
             return Some(report);
         }
         let start = plan.start.load(Ordering::SeqCst);
@@ -1523,6 +1537,7 @@ fn write_manifest_durable(path: &Path, manifest: &SessionManifest) -> Result<()>
 
 fn write_manifest_with(path: &Path, manifest: &SessionManifest, durable: bool) -> Result<()> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
     let partial = path.with_extension("json.partial");
     let json = serde_json::to_string_pretty(manifest)?;
@@ -1531,10 +1546,19 @@ fn write_manifest_with(path: &Path, manifest: &SessionManifest, durable: bool) -
         let _ = std::fs::remove_file(&partial);
     }
     let write = || -> std::io::Result<()> {
+        #[cfg(unix)]
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .custom_flags(libc::O_NOFOLLOW)
+            .open(&partial)?;
+        // create_new is atomic and refuses existing files, including links.
+        // On Windows std also sets FILE_FLAG_OPEN_REPARSE_POINT. Keep the
+        // Unix open flags and all durability/error handling unchanged.
+        #[cfg(not(unix))]
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
             .open(&partial)?;
         file.write_all((json + "\n").as_bytes())?;
         if durable {

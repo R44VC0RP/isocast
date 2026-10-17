@@ -8,14 +8,16 @@ use crate::{Issue, Setup};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VirtualCameraSettings {
-    /// Program, studio preview, or an explicit scene/source id.
+    /// Program, studio preview, the vertical program, or an explicit
+    /// scene/source id.
     #[serde(default)]
     pub target: Target,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scene: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// Output dimensions; both absent uses the canvas. Other aspect ratios
+    /// Output dimensions; both absent uses the canvas (the vertical
+    /// canvas's for target = vertical). Other aspect ratios
     /// are letterboxed. These are the camera extension's advertised modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
@@ -31,6 +33,8 @@ pub enum Target {
     Preview,
     Scene,
     Source,
+    /// The vertical canvas's program (`[vertical]` must be on).
+    Vertical,
 }
 
 /// Keep in the same order as camera-extension/Camera.swift.
@@ -48,11 +52,27 @@ impl VirtualCameraSettings {
         self == &Self::default()
     }
 
+    /// The canvas the camera's picture comes from: the vertical one for
+    /// target = vertical (the main one while the setup has none, which
+    /// `issues` reports), else the main one.
+    fn canvas(&self, setup: &Setup) -> crate::Canvas {
+        match (&self.target, &setup.vertical) {
+            (Target::Vertical, Some(vertical)) => vertical.canvas(&setup.canvas),
+            _ => setup.canvas.clone(),
+        }
+    }
+
     pub fn size(&self, setup: &Setup) -> (u32, u32) {
+        let canvas = self.canvas(setup);
         (
-            self.width.unwrap_or(setup.canvas.width),
-            self.height.unwrap_or(setup.canvas.height),
+            self.width.unwrap_or(canvas.width),
+            self.height.unwrap_or(canvas.height),
         )
+    }
+
+    /// The output's frame rate: its canvas's.
+    pub fn fps(&self, setup: &Setup) -> u32 {
+        self.canvas(setup).fps
     }
 
     pub fn issues(&self, setup: &Setup) -> Vec<Issue> {
@@ -102,6 +122,14 @@ impl VirtualCameraSettings {
                 ),
             );
         }
+        if self.target == Target::Vertical && setup.vertical.is_none() {
+            add(
+                "target",
+                "vertical needs the vertical canvas; turn it on ([vertical]) or give program, \
+                 preview, scene or source"
+                    .into(),
+            );
+        }
         if self.target != Target::Scene && self.scene.is_some() {
             add(
                 "scene",
@@ -121,7 +149,9 @@ impl VirtualCameraSettings {
                 } else {
                     "height"
                 },
-                "give width and height together, or omit both for the canvas size".into(),
+                "give width and height together, or omit both for the canvas size (the vertical \
+                 canvas's for target = vertical)"
+                    .into(),
             );
         } else if self.width.is_some() && !SIZES.contains(&self.size(setup)) {
             add("width", size_error());

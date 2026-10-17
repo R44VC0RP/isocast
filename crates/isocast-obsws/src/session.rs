@@ -358,15 +358,22 @@ impl Session<'_> {
             // One read of the setup covers every setup_changed queued (a
             // canvas drag sends many a second): it reads the newest
             // setup, so the later ones would find nothing new (#74).
+            // A read that failed is tried again with the next one queued,
+            // or at the next pump.
             let mut compared = false;
             for event in queued {
                 if matches!(event, Event::SetupChanged { .. }) {
                     if compared {
                         continue;
                     }
-                    compared = true;
+                    out.extend(tracker.translate(&ctx, event));
+                    compared = !tracker.setup_stale();
+                    continue;
                 }
                 out.extend(tracker.translate(&ctx, event));
+            }
+            if !compared {
+                out.extend(tracker.retry_setup(&ctx));
             }
         }
         if lost {

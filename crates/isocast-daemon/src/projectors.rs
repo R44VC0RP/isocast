@@ -30,6 +30,13 @@ struct Saved {
     /// The number the next projector's id gets.
     #[serde(default)]
     next: u32,
+    /// Full-screen projectors that were open when the engine stopped
+    /// but whose display wasn't connected when it started again (an
+    /// external display that attaches late): they open again when it
+    /// comes (#95), unless the same view was opened or everything closed
+    /// in between.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    waiting: Vec<Projector>,
 }
 
 #[derive(Default)]
@@ -77,6 +84,17 @@ fn display_missing(placement: &Placement, displays: &[Display]) -> bool {
             .is_some_and(|id| !displays.iter().any(|d| &d.id == id))
 }
 
+/// A window placement on a display that isn't connected (when the
+/// displays could be listed): its frame is somewhere no screen shows.
+fn window_display_missing(placement: &Placement, displays: &[Display]) -> bool {
+    !placement.fullscreen
+        && !displays.is_empty()
+        && placement
+            .display
+            .as_ref()
+            .is_some_and(|id| !displays.iter().any(|d| &d.id == id))
+}
+
 /// The display `query` names: `main`, an id or a name (exact, then
 /// ignoring case). An error lists them.
 fn find_display<'a>(displays: &'a [Display], query: &str) -> Result<&'a Display, RpcError> {
@@ -105,9 +123,9 @@ fn find_display<'a>(displays: &'a [Display], query: &str) -> Result<&'a Display,
 
 impl ProjectorState {
     /// Read the projectors kept on disk (none shown until an app says so).
-    /// A full-screen one whose display isn't connected now stays closed
-    /// (its placement is remembered), as it would have closed when its
-    /// display went.
+    /// A full-screen one whose display isn't connected now waits for it
+    /// (never covering another display): it opens again when the display
+    /// comes (#95).
     fn load(&self) {
         let path = path();
         let saved = match fs::read(&path) {
@@ -123,21 +141,29 @@ impl ProjectorState {
             Err(_) => Saved::default(),
         };
         let mut saved = saved;
-        if saved.open.iter().any(|p| p.placement.fullscreen) {
+        if !saved.open.is_empty() {
             let displays = displays();
+            for projector in &mut saved.open {
+                if window_display_missing(&projector.placement, &displays) {
+                    projector.placement.display = None;
+                    projector.placement.frame = None;
+                }
+            }
             let (gone, open): (Vec<Projector>, Vec<Projector>) = std::mem::take(&mut saved.open)
                 .into_iter()
                 .partition(|p| display_missing(&p.placement, &displays));
             saved.open = open;
             for projector in gone {
                 isocast_diagnostics::diagnostic!("info";
-                    "isocastd: projector {} stays closed: its display {} isn't connected",
+                    "isocastd: projector {} waits for its display {}, which isn't connected",
                     projector.id,
                     projector.placement.display.as_deref().unwrap_or_default()
                 );
                 saved
                     .placements
                     .insert(key(&projector), projector.placement.clone());
+                saved.waiting.retain(|p| !p.same_view(&projector));
+                saved.waiting.push(projector);
             }
         }
         let mut kept = self.saved.lock();
@@ -166,9 +192,60 @@ impl Daemon {
     }
 
     pub(super) fn projector_list(&self) -> Projectors {
+        let displays = displays();
+        // A display that attached after the engine started (before the
+        // first device inventory, which sends no `device_changed`).
+        self.projectors_waiting(&displays);
         Projectors {
             projectors: self.projectors.saved.lock().open.clone(),
-            displays: displays(),
+            displays,
+        }
+    }
+
+    /// Open again the projectors waiting for a display that is connected
+    /// now (see [`Saved::waiting`]).
+    fn projectors_waiting(&self, displays: &[Display]) {
+        let back: Vec<String> = {
+            let mut saved = self.projectors.saved.lock();
+            if saved.waiting.is_empty() || displays.is_empty() {
+                return;
+            }
+            let (back, waiting): (Vec<Projector>, Vec<Projector>) =
+                std::mem::take(&mut saved.waiting)
+                    .into_iter()
+                    .partition(|p| !display_missing(&p.placement, displays));
+            saved.waiting = waiting;
+            let mut names = Vec::new();
+            for mut projector in back {
+                if saved.open.iter().any(|p| p.same_view(&projector)) {
+                    continue;
+                }
+                if saved.open.iter().any(|p| p.id == projector.id) {
+                    saved.next = saved.next.max(1);
+                    projector.id = format!("projector-{}", saved.next);
+                    saved.next += 1;
+                }
+                projector.shown = false;
+                names.push(
+                    projector
+                        .placement
+                        .display
+                        .as_deref()
+                        .and_then(|id| displays.iter().find(|d| d.id == id))
+                        .map(|d| d.name.clone())
+                        .unwrap_or_default(),
+                );
+                saved.open.push(projector);
+            }
+            names
+        };
+        if !back.is_empty() {
+            let mut names = back;
+            names.dedup();
+            self.projectors_changed(Some(format!(
+                "the display {} was connected",
+                names.join(", ")
+            )));
         }
     }
 
@@ -300,8 +377,8 @@ impl Daemon {
             }
             None => None,
         };
-        // To check a remembered full-screen display.
-        let attached = (params.fullscreen.is_none() && display.is_none()).then(displays);
+        // To check a remembered display.
+        let attached = displays();
         let mut projector = Projector {
             id: String::new(),
             view: params.view,
@@ -316,6 +393,8 @@ impl Daemon {
         };
         let opened = {
             let mut saved = self.projectors.saved.lock();
+            // Opened again by hand: no longer waiting for its display.
+            saved.waiting.retain(|p| !p.same_view(&projector));
             let remembered = saved.placements.get(&key(&projector)).cloned();
             projector.placement = match (params.fullscreen, display) {
                 (Some(true), display) => Placement {
@@ -344,13 +423,19 @@ impl Daemon {
                     }
                     // Its display isn't connected: a window, rather than
                     // covering another display.
-                    if display_missing(&placement, attached.as_deref().unwrap_or_default()) {
+                    if display_missing(&placement, &attached) {
                         placement.fullscreen = false;
                         placement.display = None;
                     }
                     placement
                 }
             };
+            // A window last on a display that isn't connected would open
+            // off screen: the app places it afresh (#95).
+            if params.frame.is_none() && window_display_missing(&projector.placement, &attached) {
+                projector.placement.display = None;
+                projector.placement.frame = None;
+            }
             match saved.open.iter_mut().find(|p| p.same_view(&projector)) {
                 Some(open) => {
                     open.placement = projector.placement.clone();
@@ -384,7 +469,10 @@ impl Daemon {
                         "id: leave it out with all = true, or give all = false",
                     ));
                 }
-                (None, true) => std::mem::take(&mut saved.open),
+                (None, true) => {
+                    saved.waiting.clear();
+                    std::mem::take(&mut saved.open)
+                }
                 (Some(id), false) => match saved.open.iter().position(|p| &p.id == id) {
                     Some(index) => vec![saved.open.remove(index)],
                     None => {
@@ -448,6 +536,11 @@ impl Daemon {
             self.projectors_changed(None);
         }
         Ok(projector)
+    }
+
+    /// A display came: projectors waiting for it open again.
+    pub(super) fn projectors_display_came(&self) {
+        self.projectors_waiting(&displays());
     }
 
     /// A display went away: full-screen projectors on it close.

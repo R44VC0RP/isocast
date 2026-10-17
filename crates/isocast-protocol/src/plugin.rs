@@ -28,9 +28,34 @@ pub const API_VERSIONS: &[u32] = &[1];
 /// Unix socket paths are short.
 pub const MAX_ID: usize = 40;
 
-/// Methods a plugin can't be granted: with them it could install or enable
-/// plugins with more than it was granted itself.
-pub const UNGRANTABLE: &[&str] = &["plugin_add", "plugin_set_enabled"];
+/// Methods a plugin can't be granted: with them it could get more than it
+/// was granted itself ([`ungrantable_reason`]).
+pub const UNGRANTABLE: &[&str] = &[
+    "plugin_add",
+    "plugin_set_enabled",
+    "websocket_enable",
+    "websocket_disable",
+];
+
+/// Why a plugin can't be granted `method`, if it can't.
+pub fn ungrantable_reason(method: &str) -> Option<&'static str> {
+    match method {
+        "plugin_add" | "plugin_set_enabled" => {
+            Some("it could install or enable plugins with more than it was granted itself")
+        }
+        // The obs-websocket server answers its clients with every method,
+        // outside any plugin's grant (#103).
+        "websocket_enable" => Some(
+            "the obs-websocket server answers its clients with every method, so a plugin that \
+             could turn it on, or set its address or password, could call anything",
+        ),
+        "websocket_disable" => Some(
+            "the obs-websocket server's settings are the user's: with this a plugin could turn \
+             off the server the user's OBS tools connect to",
+        ),
+        _ => None,
+    }
+}
 
 /// A plugin's `isocast-plugin.toml`. A plugin uses only the sections it
 /// needs.
@@ -848,13 +873,10 @@ fn check_permissions(permissions: &Permissions, add: &mut dyn FnMut(String, Stri
     let methods = crate::api::method_names();
     for (i, method) in permissions.methods.iter().enumerate() {
         let path = format!("permissions.methods[{i}]");
-        if UNGRANTABLE.contains(&method.as_str()) {
+        if let Some(reason) = ungrantable_reason(method) {
             add(
                 path,
-                format!(
-                    "a plugin can't be granted `{method}`: it could install or enable plugins \
-                     with more than it was granted itself"
-                ),
+                format!("a plugin can't be granted `{method}`: {reason}"),
             );
         } else if !methods.iter().any(|name| name == method) {
             add(

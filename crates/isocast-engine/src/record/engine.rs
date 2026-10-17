@@ -1307,11 +1307,14 @@ impl<P: Platform> Engine<P> {
         let settings = setup.virtual_camera.clone();
         settings.check_start(&setup).map_err(anyhow::Error::msg)?;
         let (width, height) = settings.size(&setup);
-        let fps = setup.canvas.fps;
+        let fps = settings.fps(&setup);
         if settings.target == Target::Preview && self.inner.main.preview_scene.lock().is_none() {
             bail!(
                 "virtual_camera.target: preview is empty; stage a scene with isocast preview ID, or choose program, scene or source"
             );
+        }
+        if settings.target == Target::Vertical {
+            vertical_camera_slot(&self.inner, fps).map_err(anyhow::Error::msg)?;
         }
         let status = VirtualCameraStatus {
             settings: settings.clone(),
@@ -1349,9 +1352,16 @@ impl<P: Platform> Engine<P> {
                     Target::Program => PROGRAM,
                     Target::Preview => "preview",
                     Target::Source => settings.source.as_deref().unwrap(),
+                    Target::Vertical => VERTICAL_PROGRAM,
                     Target::Scene => unreachable!(),
                 };
-                let slot = match slot_of(&inner, target, fps) {
+                let slot = match settings.target {
+                    // A contained vertical failure fails the camera, saying
+                    // why, rather than dropping every frame quietly.
+                    Target::Vertical => vertical_camera_slot(&inner, fps),
+                    _ => slot_of(&inner, target, fps),
+                };
+                let slot = match slot {
                     Ok(slot) => slot,
                     Err(_)
                         if settings.target == Target::Source
@@ -1567,7 +1577,7 @@ fn setup_refusal<P: Platform>(
     {
         return Some(isocast_protocol::Issue {
             path: "vertical".into(),
-            message: "the canvas stays at its current size and fps while recording or streaming; change it once they stop".into(),
+            message: "the canvas stays at its current size and fps while recording, streaming or keeping a replay buffer; change it once they stop".into(),
         });
     }
     if inner.recording.load(Ordering::SeqCst)
@@ -2299,8 +2309,7 @@ fn ensure_vertical_compositor<P: Platform>(inner: &Arc<Inner<P>>, state: &mut St
             .is_some_and(|w| w.contains("scene state is broken"))
         {
             let why = why.map(|w| format!(" ({w})")).unwrap_or_default();
-            output.program.resume();
-            output.program.stop(format!(
+            output.program.replace_stop(format!(
                 "the vertical canvas's scene state is broken{why}; only restarting the engine \
                  recovers it"
             ));
@@ -2369,6 +2378,35 @@ fn stream_source<P: Platform>(
     });
     let drawn = canvas.and_then(|canvas| inner.output(canvas).map(|output| output.drawn.clone()));
     Ok(frame_stream::Source { slot, grid, drawn })
+}
+
+/// The vertical program's frames for the virtual camera (target =
+/// vertical), or why it has none: the canvas is off, or its program
+/// stopped (a contained vertical failure: `engine.vertical.stopped` says
+/// how it comes back).
+fn vertical_camera_slot<P: Platform>(
+    inner: &Arc<Inner<P>>,
+    fps: u32,
+) -> Result<Arc<FrameSlot<P::Frame>>, String> {
+    let slot = slot_of(inner, VERTICAL_PROGRAM, fps).map_err(|_| {
+        "virtual_camera.target: vertical needs the vertical canvas; turn it on ([vertical]) \
+         or give program, preview, scene or source"
+            .to_string()
+    })?;
+    if let Some(why) = slot.stopped() {
+        let recovery = if why.contains("scene state is broken")
+            || why.contains("scene worker has broken state")
+        {
+            "restart the engine"
+        } else {
+            "after recording stops, turn the vertical canvas off and on, or restart the engine"
+        };
+        return Err(format!(
+            "virtual_camera: the vertical program stopped ({why}); {recovery}, then start \
+             the camera again, or give program"
+        ));
+    }
+    Ok(slot)
 }
 
 /// Where frames of `target` arrive: the program, `"preview"` (both kept
@@ -3390,6 +3428,32 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     let _warm_destinations =
         crate::stream::warm_destinations(engine, setup, &options.stop, &mut warnings);
     let _warm_vertical = crate::stream::warm_vertical(engine, setup, &options.stop, &mut warnings);
+    // The vertical replay may join later too (#68), including with its
+    // default settings and no stream. Place it before the writers; a
+    // stream of the same format shares this session, not a second encoder.
+    let _warm_vertical_replay = setup.vertical.as_ref().and_then(|vertical| {
+        let result = (|| {
+            let canvas = CanvasId::Vertical;
+            let spec = crate::replay::canvas_encoder_spec(
+                engine,
+                canvas,
+                &setup.recording.replay,
+                vertical.stream.as_ref(),
+            )?;
+            engine
+                .canvas_encoders(canvas)?
+                .warm_canvas(engine, canvas, &spec, &options.stop)
+        })();
+        match result {
+            Ok(subscription) => Some(subscription),
+            Err(error) => {
+                warnings.push(format!(
+                    "could not prepare the vertical replay encoder before recording: {error:#}"
+                ));
+                None
+            }
+        }
+    });
     if options.stop.load(Ordering::SeqCst) {
         bail!("the recording was stopped before it started, so nothing was recorded");
     }

@@ -87,7 +87,7 @@ The live setup accepts:
 
 ```toml
 [virtual_camera]
-target = "program" # program | preview | scene | source
+target = "program" # program | preview | scene | source | vertical
 # scene = "interview" # required only for target = "scene"
 # source = "facecam"  # required only for target = "source"
 # width = 1920       # give both dimensions, or neither for the canvas
@@ -96,6 +96,16 @@ target = "program" # program | preview | scene | source
 
 These settings belong to the **scene collection**, preserving the meaning
 of source/scene ids. The canvas supplies the frame rate (1–240 integer fps).
+`target = "vertical"` shows the vertical canvas's program (#96): with
+neither dimension set the output is the vertical canvas's size (1080×1920
+by default, an advertised mode) at its frame rate. It needs `[vertical]`;
+without it the setup reports `virtual_camera.target` and Start refuses.
+While the camera runs on it, the vertical canvas's size, rate and on/off are
+fixed like the main canvas's; removing the vertical canvas while stopped
+falls back to program, with a note. A contained vertical failure fails the
+camera with the reason; bring the vertical canvas back (off and on, or
+an engine restart), then start again.
+The default (program, main canvas) is unchanged.
 The extension advertises 1920×1080, 1280×720, 2560×1440, 3840×2160,
 1080×1920 and 720×1280. For other canvases, configure an advertised output
 size; mismatched aspect ratios are letterboxed. Invalid settings name the

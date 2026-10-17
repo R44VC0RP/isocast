@@ -75,8 +75,10 @@ pub(crate) struct Hub {
     sink_count: AtomicU64,
     /// Changed under `sinks`, so parking and the first real join cannot race.
     tapped: AtomicBool,
-    /// Acquire fresh typed routes synchronously, then hand them to the worker.
-    retap: Box<dyn Fn() -> Result<()> + Send + Sync>,
+    /// Acquire fresh typed routes synchronously, then hand them to the
+    /// worker; false if its worker has already ended on its own (before
+    /// it set `ended`).
+    retap: Box<dyn Fn() -> Result<bool> + Send + Sync>,
     next_sink: AtomicU64,
     want_keyframe: AtomicBool,
     /// Mix chunks the tap lost, counted even while the encoder stalls.
@@ -184,7 +186,12 @@ impl Encoders {
             if sink.keeps_encoding() && !hub.tapped.load(Ordering::SeqCst) {
                 // Own the canvas before reporting a live output: an immediate
                 // canvas edit must not slip in before the worker wakes.
-                (hub.retap)()?;
+                // Its worker ended on its own just now (the program
+                // stopping, or its encoder failing): a new encoder starts
+                // instead (#77).
+                if !(hub.retap)()? {
+                    continue;
+                }
                 hub.tapped.store(true, Ordering::SeqCst);
             }
             let id = hub.next_sink.fetch_add(1, Ordering::Relaxed);
@@ -233,13 +240,9 @@ impl Encoders {
             sink_count: AtomicU64::new(sink_count),
             tapped: AtomicBool::new(true),
             retap: Box::new(move || {
-                if tap_tx
+                Ok(tap_tx
                     .send(retap_program.tap(TAP_DEPTH, retap_audio.clone())?)
-                    .is_err()
-                {
-                    bail!("the program's encoder stopped before joining");
-                }
-                Ok(())
+                    .is_ok())
             }),
             next_sink: AtomicU64::new(1),
             want_keyframe: AtomicBool::new(false),

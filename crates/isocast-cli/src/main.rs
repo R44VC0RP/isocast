@@ -2373,6 +2373,7 @@ fn status(json: bool) -> Result<ExitCode> {
             recording_free_bytes: None,
             program_bytes_per_second: None,
             daemon: None,
+            vertical_replay: None,
             vertical_scene: None,
             vertical_preview: None,
             vertical_streams: Vec::new(),
@@ -3719,7 +3720,15 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
             }
             Event::VirtualCamera { camera } => virtual_camera::print(&camera),
             Event::Replay { replay } => replay::print(&replay),
-            Event::ReplaySaved { saved } => println!("replay saved: {}", saved.path),
+            Event::ReplaySaved { saved } => println!(
+                "{}replay saved: {}",
+                if saved.canvas.is_main() {
+                    ""
+                } else {
+                    "vertical "
+                },
+                saved.path
+            ),
             Event::SceneChanged {
                 scene,
                 take,

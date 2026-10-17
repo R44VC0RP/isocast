@@ -381,15 +381,17 @@ fn rewrite_export(
 }
 
 /// Rewrite every string in `json` that is a path inside `from` to the
-/// same path inside `to`; true if any changed.
+/// same path inside `to`, where that is there; true if any changed. A path
+/// not found in `to` stays: the export may have been moved without the
+/// project its takes are in (#56).
 fn move_paths(json: &mut serde_json::Value, from: &Path, to: &Path) -> bool {
     match json {
         serde_json::Value::String(text) => match project::moved(Path::new(text), from, to) {
-            Some(new) => {
+            Some(new) if new.symlink_metadata().is_ok() => {
                 *text = new.to_string_lossy().into_owned();
                 true
             }
-            None => false,
+            _ => false,
         },
         // Every item, not stopping at the first that changed.
         serde_json::Value::Array(items) => {

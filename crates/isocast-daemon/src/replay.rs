@@ -1,6 +1,7 @@
 //! The replay buffer's methods (G.2): `replay_start`, `replay_stop`,
 //! `replay_save` and `replay_status`. The buffer itself is in
-//! `isocast_engine::replay`.
+//! `isocast_engine::replay`. Each canvas has its own buffer (#96): the
+//! main one's unless the params say `canvas: vertical`.
 
 use super::*;
 use isocast_engine::replay::{OnChange as OnReplayChange, ReplayBuffer};
@@ -13,10 +14,37 @@ fn wrong(message: impl Into<String>) -> RpcError {
     }
 }
 
-/// The daemon's replay buffer: the running one, or the last (kept for
-/// its final status).
+/// How messages name `canvas`'s buffer.
+fn what(canvas: CanvasId) -> &'static str {
+    match canvas {
+        CanvasId::Main => "the replay buffer",
+        CanvasId::Vertical => "the vertical replay buffer",
+    }
+}
+
+/// The CLI flag that picks `canvas`, and MCP's argument.
+fn flag(canvas: CanvasId) -> &'static str {
+    match canvas {
+        CanvasId::Main => "",
+        CanvasId::Vertical => " --canvas vertical",
+    }
+}
+
+fn mcp_arg(canvas: CanvasId) -> &'static str {
+    match canvas {
+        CanvasId::Main => "",
+        CanvasId::Vertical => " with canvas \"vertical\"",
+    }
+}
+
+const NO_VERTICAL: &str = "canvas: the live setup has no vertical canvas; add one with the patch \
+     {\"vertical\": {}} (`isocast apply --patch`, or MCP's apply_change), then start its replay \
+     buffer";
+
+/// One canvas's replay buffer: the running one, or the last (kept for its
+/// final status).
 #[derive(Default)]
-pub(super) struct ReplayOutput {
+pub(super) struct ReplaySlot {
     pub(super) buffer: Option<Arc<ReplayBuffer>>,
     /// A start is getting the engine ready (outside the state lock).
     pub(super) starting: bool,
@@ -24,16 +52,73 @@ pub(super) struct ReplayOutput {
     pub(super) drops_reported: u64,
 }
 
-impl ReplayOutput {
-    /// It keeps the program now (or is about to), so the engine is needed.
-    pub(super) fn active(&self) -> bool {
+impl ReplaySlot {
+    fn active(&self) -> bool {
         self.starting || self.buffer.as_ref().is_some_and(|b| b.is_running())
     }
+}
 
+/// The daemon's replay buffers, one per canvas.
+#[derive(Default)]
+pub(super) struct ReplayOutput {
+    main: ReplaySlot,
+    vertical: ReplaySlot,
+}
+
+impl ReplayOutput {
+    fn slot(&self, canvas: CanvasId) -> &ReplaySlot {
+        match canvas {
+            CanvasId::Main => &self.main,
+            CanvasId::Vertical => &self.vertical,
+        }
+    }
+
+    fn slot_mut(&mut self, canvas: CanvasId) -> &mut ReplaySlot {
+        match canvas {
+            CanvasId::Main => &mut self.main,
+            CanvasId::Vertical => &mut self.vertical,
+        }
+    }
+
+    /// A buffer (of either canvas) keeps its program now (or is about to),
+    /// so the engine is needed.
+    pub(super) fn active(&self) -> bool {
+        self.main.active() || self.vertical.active()
+    }
+
+    /// `canvas`'s buffer keeps its program now (or is about to).
+    pub(super) fn active_on(&self, canvas: CanvasId) -> bool {
+        self.slot(canvas).active()
+    }
+
+    /// How to stop the running buffers, for messages refusing something
+    /// while they run.
+    pub(super) fn stop_hint(&self) -> String {
+        let running: Vec<_> = [CanvasId::Main, CanvasId::Vertical]
+            .into_iter()
+            .filter(|&canvas| self.active_on(canvas))
+            .collect();
+        let cli: Vec<_> = running
+            .iter()
+            .map(|&canvas| format!("`isocast replay stop{}`", flag(canvas)))
+            .collect();
+        let mcp: Vec<_> = running
+            .iter()
+            .map(|&canvas| format!("MCP's stop_replay{}", mcp_arg(canvas)))
+            .collect();
+        format!("{}, or {}", cli.join(" and "), mcp.join(" and "))
+    }
+
+    /// The main canvas's buffer's status.
     pub(super) fn status_for(&self, setup: Option<&Setup>) -> ReplayStatus {
-        match &self.buffer {
+        self.status_on(CanvasId::Main, setup)
+    }
+
+    pub(super) fn status_on(&self, canvas: CanvasId, setup: Option<&Setup>) -> ReplayStatus {
+        match &self.slot(canvas).buffer {
             Some(buffer) => buffer.status(),
             None => ReplayStatus {
+                canvas,
                 state: ReplayState::Off,
                 seconds: setup.map_or(30, |setup| setup.recording.replay.seconds),
                 max_memory_bytes: setup.map_or(0, |setup| {
@@ -43,39 +128,87 @@ impl ReplayOutput {
             },
         }
     }
+
+    /// The vertical canvas's buffer's status, while the setup has that
+    /// canvas or its buffer ran.
+    pub(super) fn vertical_status(&self, setup: Option<&Setup>) -> Option<ReplayStatus> {
+        let has_vertical = setup.is_some_and(|setup| setup.vertical.is_some());
+        (has_vertical || self.vertical.buffer.is_some())
+            .then(|| self.status_on(CanvasId::Vertical, setup))
+    }
 }
 
 impl Daemon {
-    pub(super) fn replay_status(&self) -> ReplayStatus {
+    pub(super) fn replay_status(&self, canvas: CanvasId) -> ReplayStatus {
         let state = self.state.read();
-        state.replay.status_for(state.setup.as_ref())
+        state.replay.status_on(canvas, state.setup.as_ref())
     }
 
-    pub(super) fn replay_start(self: &Arc<Self>) -> Result<ReplayStatus, RpcError> {
+    pub(super) fn replay_start(
+        self: &Arc<Self>,
+        canvas: CanvasId,
+    ) -> Result<ReplayStatus, RpcError> {
         {
             let mut state = self.state.lock();
-            if state.replay.active() {
-                return Err(wrong(
-                    "the replay buffer is already running; save it (`isocast replay save`, or \
-                     MCP's save_replay) or stop it first",
-                ));
+            if state.replay.active_on(canvas) {
+                return Err(wrong(format!(
+                    "{} is already running; save it (`isocast replay save{}`, or MCP's \
+                     save_replay{}) or stop it first",
+                    what(canvas),
+                    flag(canvas),
+                    mcp_arg(canvas)
+                )));
             }
             if state.setup.is_none() {
                 return Err(state.no_setup("no program to keep"));
+            }
+            if !canvas.is_main()
+                && state
+                    .setup
+                    .as_ref()
+                    .is_some_and(|setup| setup.vertical.is_none())
+            {
+                return Err(wrong(NO_VERTICAL));
             }
             if state.tuning {
                 return Err(wrong("wait for tune to finish"));
             }
             // Until the buffer is in the state, this keeps the engine from
             // idling out and a second start out.
-            state.replay.starting = true;
+            state.replay.slot_mut(canvas).starting = true;
         }
         let engine = self.ensure_engine();
         let mut state = self.state.lock();
-        state.replay.starting = false;
+        state.replay.slot_mut(canvas).starting = false;
         let engine = engine?;
         let Some(setup) = state.setup.clone() else {
             return Err(state.no_setup("no program to keep"));
+        };
+        let stream = match canvas {
+            CanvasId::Main => setup.stream.as_ref(),
+            CanvasId::Vertical => {
+                let Some(vertical) = &setup.vertical else {
+                    return Err(wrong(NO_VERTICAL));
+                };
+                // A canvas whose compositor failed has no picture to keep.
+                // Checked under the lock that adds the buffer, so a
+                // failure after this still ends it (#96).
+                if let Some(reason) = engine.canvas_stopped(canvas) {
+                    let recovery = if reason.contains("scene state is broken")
+                        || reason.contains("scene worker has broken state")
+                    {
+                        "restart the engine once recording and streaming stop"
+                    } else {
+                        "after recording stops, turn the vertical canvas off and on again \
+                         (Settings › Video), or restart the engine"
+                    };
+                    return Err(wrong(format!(
+                        "the vertical canvas stopped ({reason}), so its replay buffer can't \
+                         start; {recovery}"
+                    )));
+                }
+                vertical.stream.as_ref()
+            }
         };
         let daemon = Arc::downgrade(self);
         let on_change: OnReplayChange = Arc::new(move |replay| {
@@ -88,30 +221,31 @@ impl Daemon {
         // Under the lock, as a stream starts: a stream starting meanwhile
         // finds this buffer's encoder (or this the stream's).
         let buffer = engine
-            .replay(&setup.recording.replay, setup.stream.as_ref(), on_change)
+            .replay(canvas, &setup.recording.replay, stream, on_change)
             .map_err(failed)?;
         let buffer = Arc::new(buffer);
-        state.replay.buffer = Some(buffer.clone());
-        state.replay.drops_reported = 0;
+        let slot = state.replay.slot_mut(canvas);
+        slot.buffer = Some(buffer.clone());
+        slot.drops_reported = 0;
         drop(state);
         Ok(buffer.status())
     }
 
-    pub(super) fn replay_stop(&self) -> Result<ReplayStatus, RpcError> {
+    pub(super) fn replay_stop(&self, canvas: CanvasId) -> Result<ReplayStatus, RpcError> {
         let buffer = {
             let state = self.state.read();
-            match &state.replay.buffer {
+            match &state.replay.slot(canvas).buffer {
                 Some(buffer) if buffer.is_running() => buffer.clone(),
                 Some(buffer) => {
                     let status = buffer.status();
                     return Err(wrong(match status.last_error {
                         Some(error) => {
-                            format!("the replay buffer isn't running: it stopped ({error})")
+                            format!("{} isn't running: it stopped ({error})", what(canvas))
                         }
-                        None => "the replay buffer isn't running".into(),
+                        None => format!("{} isn't running", what(canvas)),
                     }));
                 }
-                None => return Err(wrong("the replay buffer isn't running")),
+                None => return Err(wrong(format!("{} isn't running", what(canvas)))),
             }
         };
         // Stopped outside the lock: the last output waits for the encoder.
@@ -122,16 +256,35 @@ impl Daemon {
         Ok(status)
     }
 
-    pub(super) fn replay_save(&self) -> Result<ReplaySaved, RpcError> {
+    /// Stop every canvas's buffer that runs (the engine is stopping).
+    pub(super) fn replay_stop_all(&self) {
+        for canvas in [CanvasId::Main, CanvasId::Vertical] {
+            let _ = self.replay_stop(canvas);
+        }
+    }
+
+    /// End `canvas`'s buffer with a failure, for example when only that
+    /// canvas's compositor failed (#96).
+    pub(super) fn fail_canvas_replay(&self, canvas: CanvasId, why: &str) {
+        let buffer = self.state.read().replay.slot(canvas).buffer.clone();
+        if let Some(buffer) = buffer {
+            buffer.fail(why.to_string());
+        }
+    }
+
+    pub(super) fn replay_save(&self, canvas: CanvasId) -> Result<ReplaySaved, RpcError> {
         let (buffer, folder, container, keep_free) = {
             let state = self.state.read();
-            let buffer = match &state.replay.buffer {
+            let buffer = match &state.replay.slot(canvas).buffer {
                 Some(buffer) if buffer.is_running() => buffer.clone(),
                 _ => {
-                    return Err(wrong(
-                        "the replay buffer isn't running; start it first (`isocast replay \
-                         start`, or MCP's start_replay), then save",
-                    ));
+                    return Err(wrong(format!(
+                        "{} isn't running; start it first (`isocast replay start{}`, or MCP's \
+                         start_replay{}), then save",
+                        what(canvas),
+                        flag(canvas),
+                        mcp_arg(canvas)
+                    )));
                 }
             };
             let setup = state
@@ -156,9 +309,15 @@ impl Daemon {
         if let Some(problem) = relative_folder(&folder.to_string_lossy()) {
             return Err(wrong(format!("recording.folder: {problem}")));
         }
+        // The vertical canvas's replays end in "vertical", as its
+        // recordings do.
         let name = format!(
-            "Replay {}",
-            chrono::Local::now().format("%Y-%m-%d %H-%M-%S")
+            "Replay {}{}",
+            chrono::Local::now().format("%Y-%m-%d %H-%M-%S"),
+            match canvas {
+                CanvasId::Main => "",
+                CanvasId::Vertical => " vertical",
+            }
         );
         let room = |bytes: u64| -> Result<()> {
             if let Some(free) = free_bytes(&folder)
@@ -182,26 +341,33 @@ impl Daemon {
         Ok(saved)
     }
 
-    /// Warn once per new loss, like the stream's.
+    /// Warn once per new loss, like the stream's, for each canvas's buffer.
     pub(super) fn warn_replay_drops(&self) {
-        let mut state = self.state.lock();
-        let Some(status) = state.replay.buffer.as_ref().map(|b| b.status()) else {
-            return;
-        };
-        if status.state != ReplayState::Running
-            || status.dropped_frames <= state.replay.drops_reported
-        {
-            return;
+        for canvas in [CanvasId::Main, CanvasId::Vertical] {
+            let mut state = self.state.lock();
+            let slot = state.replay.slot_mut(canvas);
+            let Some(status) = slot.buffer.as_ref().map(|b| b.status()) else {
+                continue;
+            };
+            if status.state != ReplayState::Running || status.dropped_frames <= slot.drops_reported
+            {
+                continue;
+            }
+            let new = status.dropped_frames - slot.drops_reported;
+            slot.drops_reported = status.dropped_frames;
+            drop(state);
+            let unaffected = match canvas {
+                CanvasId::Main => "The program, recordings and stream are unaffected",
+                CanvasId::Vertical => "The programs, recordings and streams are unaffected",
+            };
+            self.publish(Event::Warning {
+                message: format!(
+                    "{} missed {new} frame(s) ({} so far); saved replays show the picture before \
+                     longer there. {unaffected}",
+                    what(canvas),
+                    status.dropped_frames
+                ),
+            });
         }
-        let new = status.dropped_frames - state.replay.drops_reported;
-        state.replay.drops_reported = status.dropped_frames;
-        drop(state);
-        self.publish(Event::Warning {
-            message: format!(
-                "the replay buffer missed {new} frame(s) ({} so far); saved replays show the \
-                 picture before longer there. The program, recordings and stream are unaffected",
-                status.dropped_frames
-            ),
-        });
     }
 }

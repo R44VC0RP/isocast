@@ -40,10 +40,46 @@ const SETTLE: Duration = Duration::from_millis(300);
 /// How often folders waiting for a recording to stop are looked at again.
 const RECHECK: Duration = Duration::from_millis(500);
 
+/// How long a graceful shutdown waits for the writer to finish.
+const FLUSH_WAIT: Duration = Duration::from_secs(3);
+
+/// How long the start-up pass waits for a folder's disk to answer.
+const PROBE: Duration = Duration::from_secs(2);
+
+/// Whether `folder` exists and its disk answers within `wait`; a stalled
+/// look is left to finish on its own thread.
+fn answers_within(folder: &Path, wait: Duration) -> bool {
+    let (tx, rx) = mpsc::channel();
+    let probe = folder.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .name("isoprj probe".into())
+        .spawn(move || {
+            let _ = tx.send(probe.is_dir());
+        });
+    if spawned.is_err() {
+        return true;
+    }
+    match rx.recv_timeout(wait) {
+        Ok(exists) => exists,
+        Err(_) => {
+            isocast_diagnostics::diagnostic!(
+                "isocastd: {} didn't answer within {}s; its project file is updated when it \
+                 changes next",
+                folder.display(),
+                wait.as_secs()
+            );
+            false
+        }
+    }
+}
+
 /// The writer's end of the channel, once started.
 #[derive(Default)]
 pub(crate) struct Writer {
     tx: Mutex<Option<mpsc::Sender<PathBuf>>>,
+    /// Told when the writer has written everything asked for before a
+    /// [`Writer::flush`] (an empty path on the channel asks for it).
+    flushed: Mutex<Option<mpsc::Sender<()>>>,
 }
 
 impl Writer {
@@ -54,6 +90,42 @@ impl Writer {
             let _ = tx.send(folder.to_path_buf());
         }
     }
+
+    /// Write every project file asked for so far now, without the usual
+    /// moment's wait, and wait (a few seconds at most) until it's done: a
+    /// quit right after a stop leaves no stale `.isoprj` (#102). Folders
+    /// still being recorded into are left alone, as always.
+    pub(crate) fn flush(&self) {
+        let (done, wait) = mpsc::channel();
+        *self.flushed.lock() = Some(done);
+        let sent = self
+            .tx
+            .lock()
+            .as_ref()
+            .is_some_and(|tx| tx.send(PathBuf::new()).is_ok());
+        if sent && wait.recv_timeout(FLUSH_WAIT).is_err() {
+            isocast_diagnostics::diagnostic!(
+                "isocastd: the project file writer didn't finish within {}s of the shutdown",
+                FLUSH_WAIT.as_secs()
+            );
+        }
+        self.flushed.lock().take();
+    }
+}
+
+/// What [`Daemon::write_project_file`] did.
+pub(crate) enum Written {
+    /// The folder isn't a project's: nothing to write.
+    NotAProject,
+    /// A recording started writing into the folder: left for later.
+    Busy,
+    /// The file is up to date; `kept_newer` names the timelines whose
+    /// edits in the file are newer than the engine's (so the engine's
+    /// weren't written).
+    Done {
+        file: PathBuf,
+        kept_newer: Vec<String>,
+    },
 }
 
 /// Start the writer, give the timelines its channel, and (a moment later,
@@ -85,7 +157,11 @@ pub(crate) fn start(daemon: &Arc<Daemon>) {
                     );
                 }
                 for folder in folders {
-                    first.isoprj.dirty(&folder);
+                    // A folder on a sleeping or gone network disk would
+                    // hold up every folder behind it in the writer (#102).
+                    if answers_within(&folder, PROBE) {
+                        first.isoprj.dirty(&folder);
+                    }
                 }
             })
         })
@@ -99,36 +175,62 @@ impl Daemon {
     fn write_loop(self: &Arc<Self>, rx: mpsc::Receiver<PathBuf>) {
         let mut pending: BTreeSet<PathBuf> = BTreeSet::new();
         let mut warned: HashSet<PathBuf> = HashSet::new();
+        let mut kept_warned: HashSet<PathBuf> = HashSet::new();
         loop {
             let next = match pending.is_empty() {
                 true => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
                 false => rx.recv_timeout(RECHECK),
             };
+            // An empty path is a flush: write now, then say so.
+            let mut flush = false;
             match next {
                 Ok(folder) => {
+                    flush = folder.as_os_str().is_empty();
                     pending.insert(folder);
-                    std::thread::sleep(SETTLE);
+                    if !flush {
+                        std::thread::sleep(SETTLE);
+                    }
                     pending.extend(rx.try_iter());
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
-            let recording = self.recording_project().map(|p| p.folder);
+            flush |= pending.remove(Path::new(""));
             let ready: Vec<PathBuf> = pending
                 .iter()
-                .filter(|folder| {
-                    !recording
-                        .as_ref()
-                        .is_some_and(|rec| same_folder(rec, folder))
-                        && !being_recorded(folder)
-                })
+                .filter(|folder| !self.folder_busy(folder))
                 .cloned()
                 .collect();
             for folder in ready {
                 pending.remove(&folder);
                 match self.write_project_file(&folder) {
-                    Ok(_) => {
+                    Ok(Written::Busy) => {
+                        pending.insert(folder);
+                    }
+                    Ok(Written::NotAProject) => {
                         warned.remove(&folder);
+                    }
+                    Ok(Written::Done { file, kept_newer }) => {
+                        warned.remove(&folder);
+                        if kept_newer.is_empty() {
+                            kept_warned.remove(&folder);
+                        } else if kept_warned.insert(folder.clone()) {
+                            // Once per folder until the file and the
+                            // engine agree again (#102).
+                            let message = format!(
+                                "the project file {} has newer edits to timeline{} {} (made \
+                                 elsewhere and copied back) than this Mac's, so this Mac's \
+                                 edits to {} aren't written there; open the project (`isocast \
+                                 project open \"{}\"`) to take the file's edits in",
+                                file.display(),
+                                if kept_newer.len() == 1 { "" } else { "s" },
+                                kept_newer.join(", "),
+                                if kept_newer.len() == 1 { "it" } else { "them" },
+                                file.display()
+                            );
+                            isocast_diagnostics::diagnostic!("isocastd: {message}");
+                            self.publish(Event::Warning { message });
+                        }
                     }
                     Err(message) => {
                         isocast_diagnostics::diagnostic!("isocastd: {message}");
@@ -139,16 +241,28 @@ impl Daemon {
                     }
                 }
             }
+            if flush && let Some(done) = self.isoprj.flushed.lock().take() {
+                let _ = done.send(());
+            }
         }
+    }
+
+    /// Whether a recording writes into `folder` (this engine's, or a
+    /// standalone `isocast record`'s): the writer leaves it alone until it
+    /// stops.
+    fn folder_busy(&self, folder: &Path) -> bool {
+        self.recording_project()
+            .is_some_and(|rec| same_folder(&rec.folder, folder))
+            || being_recorded(folder)
     }
 
     /// Write `folder`'s project file from the timelines that use it and
     /// its takes, keeping timelines in the file the engine doesn't have
     /// (copied from another Mac and not opened yet) and edits there newer
     /// than the engine's. Returns the file, if `folder` is a project.
-    pub(crate) fn write_project_file(&self, folder: &Path) -> Result<Option<PathBuf>, String> {
+    pub(crate) fn write_project_file(&self, folder: &Path) -> Result<Written, String> {
         let Some(identity) = project::read(folder) else {
-            return Ok(None);
+            return Ok(Written::NotAProject);
         };
         remove_stale_partials(folder);
         let name = project::name_of(folder, &identity);
@@ -170,14 +284,21 @@ impl Daemon {
             .as_ref()
             .map(|file| resolved(file, folder))
             .unwrap_or_default();
+        let mut kept_newer = Vec::new();
         for timeline in central {
             match timelines
                 .iter_mut()
                 .find(|kept| isoprj::same_timeline(kept, &timeline))
             {
                 // The file's edits are newer (made elsewhere, then copied
-                // back): keep them for `project_open` to take in.
-                Some(kept) if kept.revision > timeline.revision => {}
+                // back): keep them for `project_open` to take in, and say
+                // so (#102).
+                Some(kept) if kept.revision > timeline.revision => {
+                    kept_newer.push(format!(
+                        "{:?} (revision {} in the file, {} here)",
+                        timeline.name, kept.revision, timeline.revision
+                    ));
+                }
                 Some(kept) => *kept = timeline,
                 None => timelines.push(timeline),
             }
@@ -201,6 +322,11 @@ impl Daemon {
             takes,
             timelines,
         };
+        // A recording may have started writing into the folder since the
+        // writer looked (#102): never write beside it.
+        if self.folder_busy(folder) {
+            return Ok(Written::Busy);
+        }
         // Renamed (by `rename_project`, or in the Finder): the file follows.
         if let Some(old) = existing_path.as_ref().filter(|old| **old != target)
             && !target.exists()
@@ -216,7 +342,10 @@ impl Daemon {
         if let Some(existing) = &existing {
             file.saved_at = existing.saved_at.clone();
             if *existing == file && target.exists() {
-                return Ok(Some(target));
+                return Ok(Written::Done {
+                    file: target,
+                    kept_newer,
+                });
             }
         }
         file.saved_at = now_text();
@@ -226,7 +355,10 @@ impl Daemon {
                 target.display()
             )
         })?;
-        Ok(Some(target))
+        Ok(Written::Done {
+            file: target,
+            kept_newer,
+        })
     }
 
     /// See [`Method::ProjectOpen`](isocast_protocol::api::Method::ProjectOpen).
@@ -392,6 +524,8 @@ impl Daemon {
         });
 
         let mut changed: Vec<(String, TimelineAction)> = Vec::new();
+        // Read before the timelines' lock is taken.
+        let recording = self.recording_project().map(|p| p.folder);
         let chosen = {
             let mut timelines = self.timelines.lock();
             let mut candidates: Vec<String> = Vec::new();
@@ -478,6 +612,7 @@ impl Daemon {
                 }
                 let id = timelines.create(Some(name.clone()))?;
                 let mut skipped = Vec::new();
+                let mut recording_now = Vec::new();
                 timelines.change(&id, |t| {
                     for take in &takes {
                         match timeline::read_manifest(take) {
@@ -487,21 +622,38 @@ impl Daemon {
                             {
                                 timeline::append(t, take, &manifest);
                             }
+                            // Being recorded now (this engine's take): it
+                            // joins the timeline when it stops (#102).
+                            Ok(manifest)
+                                if manifest.status == SessionStatus::Recording
+                                    && recording
+                                        .as_ref()
+                                        .is_some_and(|rec| same_folder(rec, &folder)) =>
+                            {
+                                recording_now.push(take.display().to_string());
+                            }
                             _ => skipped.push(take.display().to_string()),
                         }
                     }
                     Ok(())
                 })?;
+                let skipped_all = skipped.len() + recording_now.len();
                 changed.push((id.clone(), TimelineAction::Created));
                 notes.push(format!(
                     "made timeline {id:?} of the project's {} take{}",
-                    takes.len() - skipped.len(),
-                    if takes.len() - skipped.len() == 1 {
+                    takes.len() - skipped_all,
+                    if takes.len() - skipped_all == 1 {
                         ""
                     } else {
                         "s"
                     }
                 ));
+                if !recording_now.is_empty() {
+                    notes.push(format!(
+                        "the take being recorded now joins the timeline when it stops: {}",
+                        recording_now.join(", ")
+                    ));
+                }
                 if !skipped.is_empty() {
                     notes.push(format!(
                         "takes that never finished aren't on it: {}",
@@ -661,15 +813,21 @@ impl Daemon {
             timeline::read_manifest(&target).map_err(|why| invalid(format!("path: {why}")))?;
             let old = take.parent().unwrap_or(Path::new("/")).to_path_buf();
             let new = target.parent().unwrap_or(Path::new("/")).to_path_buf();
-            let note = if target.file_name() == Some(name.as_os_str()) {
-                // Its folder moved: every take of every timeline that was
-                // in it and is in the new one too is found there.
+            // Relinking an offline clip to its folder: the folder moved, so
+            // every offline take of every timeline that was in it and is in
+            // the new one too is found there. A clip whose take is still
+            // where it was is relinked alone (#102): other timelines' takes
+            // there are fine as they are.
+            let offline = take.symlink_metadata().is_err();
+            let note = if offline && target.file_name() == Some(name.as_os_str()) {
                 let project = project::read(&new).map(|f| f.id);
                 let moved = timelines.remap(
                     |path| {
                         let name = path.file_name()?;
-                        (path.parent() == Some(old.as_path()) && new.join(name).is_file())
-                            .then(|| new.join(name))
+                        (path.parent() == Some(old.as_path())
+                            && path.symlink_metadata().is_err()
+                            && new.join(name).is_file())
+                        .then(|| new.join(name))
                     },
                     project.as_deref(),
                 )?;

@@ -783,6 +783,7 @@ fn on_link(_ip: std::net::Ipv6Addr) -> bool {
 
 /// `a` and `b` agree on the bits `mask` sets (a mask of all zeros, as a
 /// default route's, matches nothing).
+#[cfg(any(unix, test))]
 fn same_prefix(a: &[u8; 16], b: &[u8; 16], mask: &[u8; 16]) -> bool {
     mask.iter().any(|&m| m != 0) && (0..16).all(|i| a[i] & mask[i] == b[i] & mask[i])
 }
@@ -1026,7 +1027,7 @@ mod tests {
             alternate_families(vec![a("10.0.0.5:1"), a("10.0.0.6:1"), a("[::1]:1")]),
             vec![a("10.0.0.5:1"), a("[::1]:1"), a("10.0.0.6:1")]
         );
-        let unreachable = io::Error::from_raw_os_error(libc::EHOSTUNREACH);
+        let unreachable = io::Error::from(io::ErrorKind::HostUnreachable);
         assert!(blocked_locally(&a("10.0.10.165:1935"), &unreachable));
         assert!(blocked_locally(&a("[fe80::1%1]:1935"), &unreachable));
         assert!(!blocked_locally(&a("8.8.8.8:1935"), &unreachable));

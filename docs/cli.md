@@ -1976,7 +1976,7 @@ The replay buffer: keep the last seconds of the program in memory, and save them
 Usage: isocast replay <COMMAND>
 
 Commands:
-  start   Start keeping the last `recording.replay.seconds` of the program (video and the program mix) in memory, starting the live engine if needed. Recording and streaming start and stop without touching it
+  start   Start keeping the last `recording.replay.seconds` of the program (video and the program mix) in memory, starting the live engine if needed. Recording and streaming start and stop without touching it. With --canvas vertical, the vertical canvas's program, in a buffer of its own with the same settings
   stop    Stop the replay buffer, discarding what it holds
   save    Save what the buffer holds, up to now, to a new file in the recordings folder (the running recording's project folder, if one records). Prints the file's path
   status  Show whether it runs, what it holds, its memory, losses and last save
@@ -1989,13 +1989,14 @@ Options:
 ## isocast replay start
 
 ```text
-Start keeping the last `recording.replay.seconds` of the program (video and the program mix) in memory, starting the live engine if needed. Recording and streaming start and stop without touching it
+Start keeping the last `recording.replay.seconds` of the program (video and the program mix) in memory, starting the live engine if needed. Recording and streaming start and stop without touching it. With --canvas vertical, the vertical canvas's program, in a buffer of its own with the same settings
 
 Usage: isocast replay start [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --canvas <CANVAS>  Which canvas's buffer: main, or vertical (the setup's [vertical] canvas; each canvas has its own buffer) [default: main]
+      --json             Print JSON
+  -h, --help             Print help
 ```
 
 ## isocast replay stop
@@ -2006,8 +2007,9 @@ Stop the replay buffer, discarding what it holds
 Usage: isocast replay stop [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --canvas <CANVAS>  Which canvas's buffer: main, or vertical (the setup's [vertical] canvas; each canvas has its own buffer) [default: main]
+      --json             Print JSON
+  -h, --help             Print help
 ```
 
 ## isocast replay save
@@ -2018,8 +2020,9 @@ Save what the buffer holds, up to now, to a new file in the recordings folder (t
 Usage: isocast replay save [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --canvas <CANVAS>  Which canvas's buffer: main, or vertical (the setup's [vertical] canvas; each canvas has its own buffer) [default: main]
+      --json             Print JSON
+  -h, --help             Print help
 ```
 
 ## isocast replay status
@@ -2030,8 +2033,9 @@ Show whether it runs, what it holds, its memory, losses and last save
 Usage: isocast replay status [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --canvas <CANVAS>  Which canvas's buffer: main, or vertical (the setup's [vertical] canvas; each canvas has its own buffer) [default: main]
+      --json             Print JSON
+  -h, --help             Print help
 ```
 
 ## isocast websocket

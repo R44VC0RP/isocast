@@ -41,6 +41,7 @@ import platform
 import shutil
 import signal
 import socket
+import stat
 import statistics
 import struct
 import subprocess
@@ -55,7 +56,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "timeline", "edit",
              "data", "plugin", "hotkeys", "shutdown", "pause", "bug_report", "projects",
-             "plugin_files", "replay")
+             "plugin_files", "replay", "vertical")
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -144,6 +145,42 @@ def capabilities():
     result["record_codec"] = ("hevc" if result["hevc"] else
                               "h264" if result["h264"] else "prores422")
     return result
+
+
+def short_root(work):
+    """A run folder short enough for every scenario's sockets: at the top of
+    --work's disk if it can be made there, else in /tmp."""
+    mount = work
+    device = work.stat().st_dev
+    while mount.parent != mount and mount.parent.stat().st_dev == device:
+        mount = mount.parent
+    for base in (mount / ".e2e", Path("/tmp")):
+        try:
+            base.mkdir(exist_ok=True)
+            root = Path(tempfile.mkdtemp(prefix="e2e-", dir=base)).resolve()
+        except OSError:
+            continue
+        if len(os.fsencode(root)) <= SHORT_ROOT:
+            return root
+        root.rmdir()
+    raise Failure("no folder short enough for Unix sockets; give a shorter --work")
+
+
+def keep_under(root, work, report):
+    """Copy a short run folder's kept evidence into --work (sockets left
+    out: they can't be copied), point the report at it, and remove the
+    short folder."""
+    dest = work / root.name
+    def sockets(folder, names):
+        return [n for n in names if stat.S_ISSOCK(os.lstat(os.path.join(folder, n)).st_mode)]
+    shutil.copytree(root, dest, symlinks=True, ignore=sockets)
+    shutil.rmtree(root)
+    report["work"] = str(dest)
+    for result in report["scenarios"]:
+        if result.get("artifacts"):
+            result["artifacts"] = str(dest / Path(result["artifacts"]).relative_to(root))
+    print(f"e2e: kept evidence moved to {dest}", file=sys.stderr)
+    return dest
 
 
 class Engine:
@@ -646,6 +683,91 @@ def scenario_stream(e, cfg, evidence):
             f"keyframe interval is not two seconds: {keyframes}")
     ffmpeg("-xerror", "-i", output, "-f", "null", "-")
     evidence.update(kbps=rates, keyframes=keyframes, stream=final)
+
+
+def scenario_vertical(e, cfg, evidence):
+    if not evidence["capabilities"]["h264"]:
+        raise Skip("no hardware encoder on this runner (vertical H.264 streaming)")
+    # Two HD programs and one HD stream, at a rate the base M2 can protect.
+    # Keep this scenario strict even when the hosted suite allows ISO loss.
+    cfg["canvas"]["fps"] = min(cfg["canvas"]["fps"], 30)
+    fps = cfg["canvas"]["fps"]
+    width, height = cfg["canvas"]["height"], cfg["canvas"]["width"]
+    for source in cfg["sources"]:
+        if source["kind"] == "test_pattern":
+            source["fps"] = fps
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    cfg["vertical"] = {
+        "width": width, "height": height, "fps": fps, "follow_main": False,
+        "recording": {"encoder": cfg["recording"]["program"]["encoder"]},
+        "stream": {"service": "custom", "server": f"rtmp://127.0.0.1:{port}/live",
+                   "video_bitrate_kbps": 4000, "audio_bitrate_kbps": 160,
+                   "keyframe_interval_seconds": 2}}
+    cfg["scenes"].append({"id": "second", "items": [{"source": "bars2", "rect": {
+        "x": 0, "y": 0, "width": cfg["canvas"]["width"], "height": cfg["canvas"]["height"]}}]})
+    e.apply(cfg)
+    e.rpc("engine", {"running": True})
+    time.sleep(1)
+    output = e.root / "vertical.flv"
+    takes = []
+    with open(e.root / "vertical-listener.log", "wb") as log:
+        listener = subprocess.Popen(["ffmpeg", "-nostdin", "-hide_banner", "-v", "warning",
+                                     "-listen", "1", "-i", f"rtmp://127.0.0.1:{port}/live/e2e",
+                                     "-c", "copy", "-y", str(output)], stdout=log, stderr=log)
+        try:
+            time.sleep(0.5)
+            require(listener.poll() is None, "vertical RTMP listener failed to start")
+            takes.append(e.rpc("start", {}))
+            e.rpc("stream_start", {"canvas": "vertical"})
+            for scene in ("second", "main"):
+                time.sleep(2)
+                e.rpc("switch_scene", {"scene": scene, "canvas": "vertical"})
+                takes.append(e.rpc("split"))
+                begins = datetime.datetime.fromisoformat(takes[-1]["begins_at"]).timestamp()
+                time.sleep(max(0, begins - time.time()) + 0.6)
+            time.sleep(2)
+            final = e.rpc("stream_stop", {"canvas": "vertical"})
+            listener.wait(timeout=10)
+            require(final["frames_sent"] > 0, "vertical stream sent no video")
+            require(final["dropped_frames"] == 0 and final["audio_dropouts"] == 0,
+                    f"vertical stream lost protected media: {final}")
+            # A stale Stop action must be harmless after a failure or normal end.
+            e.rpc("stream_stop", {"canvas": "vertical"})
+            evidence["stream"] = final
+            e.rpc("stop")
+        finally:
+            if listener.poll() is None:
+                listener.kill()
+                listener.wait(timeout=5)
+    evidence["files"] = []
+    require(len({t["manifest"] for t in takes}) == 3, "vertical splits reused a manifest")
+    for index, started in enumerate(takes):
+        path = Path(started["manifest"])
+        manifest = until(lambda: finished(path), description="dual-canvas split finalization")
+        require(all(f["dropped_frames"] == 0 and f["audio_dropouts"] == 0
+                    for f in manifest["files"]), "dual-canvas recording lost protected media")
+        require({s["scene"] for s in manifest["scenes"]} == {"main"},
+                "independent vertical switch changed the main scene timeline")
+        require(manifest["vertical_scenes"][0]["scene"] == ("second" if index == 1 else "main"),
+                "vertical split lost its initial scene")
+        evidence["files"].extend(check_take(path, manifest, expected_sources=["program", "vertical-program"],
+                                            evidence=evidence))
+        main, vertical = (next(f for f in manifest["files"] if f["source"] == source)
+                          for source in ("program", "vertical-program"))
+        require((vertical["width"], vertical["height"]) == (width, height), "vertical file size is wrong")
+        require(abs(main["duration_seconds"] - vertical["duration_seconds"]) <= 1 / fps,
+                "dual-canvas split durations differ")
+    info = probe(output)
+    video = next(s for s in info["streams"] if s["codec_type"] == "video")
+    require((video["width"], video["height"]) == (width, height), "vertical stream size is wrong")
+    packets = json.loads(command(["ffprobe", "-v", "error", "-show_packets", "-of", "json", output]).stdout)["packets"]
+    for kind, gap in (("video", 1 / fps + 0.002), ("audio", 0.023)):
+        times = [float(p["pts_time"]) for p in packets if p["codec_type"] == kind]
+        require(len(times) > 2 and all(0 < b - a <= gap for a, b in zip(times, times[1:])),
+                f"vertical stream has missing or non-monotonic {kind} packets")
+    ffmpeg("-xerror", "-i", output, "-map", "0", "-f", "null", "-")
 
 
 def scenario_timeline(e, cfg, evidence):
@@ -1998,9 +2120,10 @@ def main():
                 # macOS caps Unix socket paths at 104 bytes, and the deepest
                 # socket (a plugin's, ROOT/plugin_files/plugins/<id>/socket)
                 # needs ~60 of them: a deep --work (hw-batch's, a lane with
-                # a long name) runs under a short folder in /tmp instead.
+                # a long name) runs under a short folder on the same disk
+                # (strict numbers stay that disk's, #100), else in /tmp.
                 root.rmdir()
-                root = Path(tempfile.mkdtemp(prefix="isocast-e2e-", dir="/tmp")).resolve()
+                root = short_root(args.work.resolve())
                 report["work_note"] = f"--work is too deep for Unix sockets; ran in {root}"
                 print(f"e2e: {report['work_note']}", file=sys.stderr)
             write_json(root / "capabilities.json", report["capabilities"])
@@ -2032,6 +2155,10 @@ def main():
         try:
             if root and not args.keep and not any(r.get("artifacts") for r in report["scenarios"]):
                 shutil.rmtree(root)
+            elif root and root.parent != args.work.resolve():
+                # Kept evidence of a run in a short folder goes back under
+                # --work, so nothing is left in /tmp (#100).
+                root = keep_under(root, args.work.resolve(), report)
         except Exception as exc:
             report["cleanup_error"] = str(exc)
         report["totals"] = {status: sum(r["status"] == status for r in report["scenarios"])

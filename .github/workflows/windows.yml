@@ -63,3 +63,34 @@ jobs:
       - name: Test portable crates
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --locked --no-fail-fast -p isocast-protocol -p isocast-diagnostics -p isocast-obsws
+
+  engine:
+    # W.1a: compile the shared engine (including its tests), not a Windows
+    # recording claim. Add daemon/CLI and UI as their platform seams land.
+    name: engine build (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version --verbose
+          cargo --version
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-engine
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/ci/windows' }}
+
+      - name: Build engine and test binaries (do not run)
+        run: cargo build --locked --all-targets -p isocast-engine

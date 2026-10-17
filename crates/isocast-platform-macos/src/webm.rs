@@ -317,6 +317,10 @@ struct Bits<'a> {
 }
 
 impl Bits<'_> {
+    fn left(&self) -> usize {
+        (self.data.len() * 8).saturating_sub(self.at)
+    }
+
     fn read(&mut self, count: u32) -> Option<u32> {
         let mut value = 0;
         for _ in 0..count {
@@ -1165,6 +1169,72 @@ fn opus_samples(packet: &[u8]) -> u32 {
     frames * tenths * 48 / 10
 }
 
+/// How much later AudioToolbox's HE-AAC decoder plays than its AAC-LC
+/// one, in frames at the stream's output rate: measured on macOS 27 with
+/// HE-AAC and HE-AAC v2 at 48 and 44.1 kHz (aac_at files, cross-correlated
+/// with the source; LC lands on the sample).
+const HE_AAC_DECODER_DELAY: u64 = 2112;
+
+/// What an AudioSpecificConfig (ISO 14496-3 1.6.2.1) says that decoding
+/// needs: the core's channel configuration, and whether (and at what
+/// output rate) SBR doubles it (HE-AAC).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AacConfig {
+    /// 1 or 2; `None` for other configurations (the track says).
+    channels: Option<u32>,
+    /// The output rate when SBR is signalled, explicitly or by a
+    /// backward-compatible sync extension.
+    sbr_rate: Option<u32>,
+}
+
+impl AacConfig {
+    fn parse(config: &[u8]) -> Option<Self> {
+        const RATES: [u32; 13] = [
+            96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+        ];
+        let mut bits = Bits {
+            data: config,
+            at: 0,
+        };
+        let object_type = |bits: &mut Bits| -> Option<u32> {
+            match bits.read(5)? {
+                31 => Some(32 + bits.read(6)?),
+                aot => Some(aot),
+            }
+        };
+        let rate = |bits: &mut Bits| -> Option<u32> {
+            match bits.read(4)? {
+                15 => bits.read(24),
+                index => RATES.get(index as usize).copied(),
+            }
+        };
+        let mut aot = object_type(&mut bits)?;
+        let core_rate = rate(&mut bits)?;
+        let channel_config = bits.read(4)?;
+        let channels = (1..=2).contains(&channel_config).then_some(channel_config);
+        let mut sbr_rate = None;
+        // Explicit SBR (5) or SBR with PS (29): the output rate, then the
+        // core's object type.
+        if aot == 5 || aot == 29 {
+            sbr_rate = Some(rate(&mut bits)?);
+            aot = object_type(&mut bits)?;
+        }
+        // Backward-compatible signalling: a sync extension after the
+        // core's GASpecificConfig (LC: three flag bits).
+        if sbr_rate.is_none() && aot == 2 && channel_config != 0 {
+            bits.read(3)?;
+            if bits.left() >= 16
+                && bits.read(11) == Some(0x2b7)
+                && bits.read(5) == Some(5)
+                && bits.read(1) == Some(1)
+            {
+                sbr_rate = Some(rate(&mut bits).unwrap_or(core_rate * 2));
+            }
+        }
+        Some(Self { channels, sbr_rate })
+    }
+}
+
 /// The AAC decoder's magic cookie for an AudioSpecificConfig (a Matroska
 /// AAC track's CodecPrivate): an MPEG-4 ES descriptor around it, as in an
 /// MP4's `esds` box.
@@ -1363,6 +1433,7 @@ impl AudioReader {
                 if track.private.is_empty() {
                     return Err(unsupported(" (its track has no AAC configuration)"));
                 }
+                let config = AacConfig::parse(&track.private);
                 let input = AudioStreamBasicDescription {
                     mSampleRate: track.sample_rate,
                     mFormatID: kAudioFormatMPEG4AAC,
@@ -1370,13 +1441,26 @@ impl AudioReader {
                     mBytesPerPacket: 0,
                     mFramesPerPacket: 1024,
                     mBytesPerFrame: 0,
-                    mChannelsPerFrame: channels,
+                    // HE-AAC v2's core is mono (the track says stereo, as
+                    // it plays): AudioToolbox refuses a stereo input with
+                    // '!dat' (#64).
+                    mChannelsPerFrame: config
+                        .and_then(|c| c.channels)
+                        .filter(|c| (1..=channels).contains(c))
+                        .unwrap_or(channels),
                     mBitsPerChannel: 0,
                     mReserved: 0,
                 };
                 // The encoder's priming samples (CodecDelay), dropped so
                 // the first kept sample plays at the first block's time.
-                let priming = track.codec_delay * u64::from(SAMPLE_RATE) / 1_000_000_000;
+                let mut priming = track.codec_delay * u64::from(SAMPLE_RATE) / 1_000_000_000;
+                // AudioToolbox's HE-AAC decoder (SBR, with or without
+                // PS) gives its sound 2112 frames (at the stream's output
+                // rate) later than its LC decoder, which it doesn't report
+                // as PrimeInfo: dropped too (#64; 44 ms at 48 kHz).
+                if let Some(rate) = config.and_then(|c| c.sbr_rate) {
+                    priming += HE_AAC_DECODER_DELAY * u64::from(SAMPLE_RATE) / u64::from(rate);
+                }
                 (input, Some(esds(&track.private)), priming, 0)
             }
             "A_VORBIS" => {

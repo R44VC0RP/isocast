@@ -50,7 +50,10 @@ pub(crate) struct HotkeyRuntime {
 }
 
 enum Input {
-    Key(Edge, InputSource, u64, Instant),
+    /// A key edge, its source, owner, time, and the plugin whose request
+    /// sent it (`hotkeys_input`), if one did: its action is then checked as
+    /// that plugin's request (#103).
+    Key(Edge, InputSource, u64, Instant, Option<String>),
     Disconnect(u64),
 }
 
@@ -225,8 +228,10 @@ impl Daemon {
                     daemon.publish(Event::Warning { message: "hotkey input queue overflowed; pending actions cancelled and push keys released".into() });
                     continue;
                 }
-                let (edge, source, owner, at) = match input {
-                    Input::Key(edge, source, owner, at) => (edge, source, owner, at),
+                let (edge, source, owner, at, plugin) = match input {
+                    Input::Key(edge, source, owner, at, plugin) => {
+                        (edge, source, owner, at, plugin)
+                    }
                     Input::Disconnect(owner) => {
                         let released = pressed.disconnect(owner);
                         let mut state = daemon.state.lock();
@@ -263,7 +268,10 @@ impl Daemon {
                     continue;
                 };
                 let hold_id = format!("press:{stroke}");
-                let result = daemon.fire_hotkey(&hold_id, &binding, edge.phase);
+                let result = {
+                    let _caller = plugin.as_deref().map(crate::PluginCaller::set);
+                    daemon.fire_hotkey(&hold_id, &binding, edge.phase)
+                };
                 let error = result.err().map(|e| {
                     let field = if e.message.starts_with("args") || e.message.starts_with("action:")
                     {
@@ -354,7 +362,13 @@ impl Daemon {
             // The queue fits a whole profile's edges. A full queue is handled
             // below by the same enqueue path for focused input.
             if sender
-                .try_send(Input::Key(edge, InputSource::Global, 0, Instant::now()))
+                .try_send(Input::Key(
+                    edge,
+                    InputSource::Global,
+                    0,
+                    Instant::now(),
+                    None,
+                ))
                 .is_err()
             {
                 overflow.store(true, Ordering::Release);
@@ -515,6 +529,7 @@ impl Daemon {
                 InputSource::Focused,
                 owner,
                 Instant::now(),
+                crate::PluginCaller::current(),
             ))
             .is_err()
         {
@@ -635,16 +650,6 @@ impl Daemon {
                     }
                 }
                 "recording.split" => Method::Split,
-                "replay.start" => Method::ReplayStart,
-                "replay.stop" => Method::ReplayStop,
-                "replay.save" => Method::ReplaySave,
-                "replay.toggle" => {
-                    if self.state.lock().replay.active() {
-                        Method::ReplayStop
-                    } else {
-                        Method::ReplayStart
-                    }
-                }
                 "timeline.close" => Method::TimelineClose,
                 "studio.toggle" => {
                     let mut state = self.state.lock();
@@ -688,6 +693,25 @@ impl Daemon {
                     Method::StreamStop(params(canvas))
                 } else {
                     Method::StreamStart(params(canvas))
+                }
+            }
+            // A canvas's replay buffer; the main one's unless args say
+            // vertical.
+            Arguments::Replay(args) => {
+                let canvas = args.canvas;
+                let params = isocast_protocol::replay::ReplayParams::of(canvas);
+                match action {
+                    "replay.start" => Method::ReplayStart(params),
+                    "replay.stop" => Method::ReplayStop(params),
+                    "replay.save" => Method::ReplaySave(params),
+                    "replay.toggle" => {
+                        if self.state.read().replay.active_on(canvas) {
+                            Method::ReplayStop(params)
+                        } else {
+                            Method::ReplayStart(params)
+                        }
+                    }
+                    _ => return Err(invalid(format!("action: {action} is not available"))),
                 }
             }
             Arguments::Marker(args) => Method::Marker { label: args.label },

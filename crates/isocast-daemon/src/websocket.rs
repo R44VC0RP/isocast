@@ -204,6 +204,12 @@ impl Runtime {
             } else {
                 format!("clients must give {PASSWORD_ENV}'s value (set in isocastd's environment)")
             })
+        } else if !settings.authentication && env_password().is_some() {
+            // Not silently (#74): the environment's password does nothing.
+            Some(format!(
+                "{PASSWORD_ENV} is set in isocastd's environment but the server goes without a \
+                 password (no_password), so it is ignored: clients connect without one"
+            ))
         } else {
             None
         };
@@ -256,6 +262,11 @@ fn restart(inner: &mut Inner, daemon: &Arc<Daemon>) {
         isocast_diagnostics::diagnostic!("warn"; "isocastd: obs-websocket stays off: {problem}");
         inner.last_error = Some(problem);
         return;
+    }
+    if !inner.settings.authentication && env_password().is_some() {
+        isocast_diagnostics::diagnostic!("warn";
+            "isocastd: obs-websocket goes without a password, so {PASSWORD_ENV} is ignored"
+        );
     }
     let password = match password(&inner.settings) {
         Ok(password) => password,
