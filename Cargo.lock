@@ -3180,6 +3180,7 @@ name = "isocast-obsws"
 version = "0.0.6"
 dependencies = [
  "base64 0.22.1",
+ "getrandom 0.4.3",
  "isocast-protocol",
  "parking_lot",
  "rmp-serde",

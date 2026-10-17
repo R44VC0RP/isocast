@@ -1643,6 +1643,15 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-17 (#105, W.0 CI round 2): **obs-websocket randomness on Windows
+  comes from the OS, not `/dev/urandom`.** Hosted run 39042059588 reaches
+  the tests after clippy passes: password generation and both server tests
+  fail opening that Unix path. Non-Unix now uses getrandom 0.4 (already
+  locked for diagnostics), with `std` for `io::Error` conversion; its
+  Windows 10+ backend calls ProcessPrng. Failure propagates, never a
+  predictable fallback. Unix retains its exact random source and error
+  behavior. No test is skipped; protocol tests await the next Windows run.
+
 - 2026-10-17 (#105, W.0 CI round 1): snapshot runner qualified end to end
   by the delegator, Actions run 39041442122. Ubuntu build/clippy/tests pass;
   Windows builds but clippy rejects diagnostics' Unix-only I/O imports and

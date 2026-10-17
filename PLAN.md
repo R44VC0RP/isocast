@@ -1518,6 +1518,15 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 
 ## Log
 
+- W.0 CI round 2 (2026-10-17, #105): hosted run 39042059588 passes
+  Windows build/clippy and diagnostics' test; three obs-websocket tests fail
+  because production password/salt generation opens `/dev/urandom` on
+  Windows. Protocol tests were not reached; Ubuntu passes throughout.
+  Use the existing getrandom crate on non-Unix targets only, retaining the
+  Unix random source and all tests. Remote macOS fmt/clippy and 227 unit
+  tests + 1 doctest pass (1 hardware test ignored); locked Windows dependency
+  graph resolves. Next hosted run still required.
+
 - W.0 CI round 1 (2026-10-17, #105): hosted run 39041442122 builds on
   Windows and Ubuntu; Ubuntu clippy/tests pass. Windows clippy found three
   Unix-only diagnostics declarations compiled without their callers. Gate

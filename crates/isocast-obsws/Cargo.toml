@@ -21,3 +21,8 @@ sha2 = "0.10"
 # A small synchronous WebSocket implementation (handshake and framing);
 # the daemon is thread-based, without an async runtime.
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+
+[target.'cfg(not(unix))'.dependencies]
+# OS randomness for passwords, salts and challenges without /dev/urandom.
+# Already in the lock file through isocast-diagnostics; Unix stays unchanged.
+getrandom = { version = "0.4", features = ["std"] }
