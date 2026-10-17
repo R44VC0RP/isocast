@@ -31,6 +31,10 @@ export struct FormField {
     label: string,
     kind: string,
     text: string,
+    // A path with its middle left out ("/Volumes/…/slides/brb.jpg"), shown
+    // in place of `text` while the field isn't being typed in and the
+    // whole path doesn't fit (#108).
+    rest-text: string,
     number: float,
     // A number left out (it shows `placeholder`, like "Auto").
     empty: bool,
@@ -299,6 +303,7 @@ export component FieldRow inherits GroupRow {
                         mono: true;
                         icon: Icons.folder;
                         text: root.f.text;
+                        rest-text: root.f.rest-text;
                         placeholder: root.f.placeholder;
                         label: root.f.label;
                         committed(text) => { SettingsForms.text(root.form, root.f.key, text); }

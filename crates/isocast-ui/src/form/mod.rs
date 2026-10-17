@@ -898,6 +898,11 @@ fn field(row: &Row) -> FormField {
         label: row.label.as_str().into(),
         kind: row.kind.into(),
         text: row.text.as_str().into(),
+        rest_text: if row.kind == "path" {
+            crate::areas::settings::middle_short(&row.text).into()
+        } else {
+            SharedString::new()
+        },
         number: row.number as f32,
         empty: row.empty,
         on: row.on,

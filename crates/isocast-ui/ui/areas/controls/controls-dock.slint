@@ -258,6 +258,13 @@ export component ControlsDock inherits Dock {
     // Exit beside Settings below this; the rows closer together below 240px.
     property <bool> exit-beside: root.row-height < 272px;
     property <bool> tight: root.row-height < 240px;
+    // A dock squeezed below the width "Replay Buffer" and "Virtual Camera"
+    // need beside their square buttons (a window about 1000px wide or
+    // less): they say "Replay" and "Virtual Cam" instead of eliding, with
+    // the whole words as their tooltip and for screen readers (#108). Read
+    // from the layout settings and the window, as `room-for-words` is (this
+    // dock's own width would loop through its buttons' labels).
+    property <bool> short-words: Ui.controls-width < 200px || Viewport.width < Ui.scenes-width + Ui.sources-width + Ui.transitions-width + Ui.controls-width + 232px;
     changed vcam-serial => { vcam-details.show(); }
 
     title: "Controls";
@@ -326,7 +333,7 @@ export component ControlsDock inherits Dock {
                 shrinks: true;
                 tooltip: root.replay-on ? "Stop Replay Buffer" : "Start Replay Buffer: keep " + ControlsArea.replay-length + " of the program in memory";
                 accessible-name: root.replay-on ? "Stop Replay Buffer" : "Start Replay Buffer";
-                text: ControlsArea.replay-state == "starting" ? "Starting…" : ControlsArea.replay-state == "stopping" ? "Stopping…" : "Replay Buffer";
+                text: ControlsArea.replay-state == "starting" ? "Starting…" : ControlsArea.replay-state == "stopping" ? "Stopping…" : root.short-words ? "Replay" : "Replay Buffer";
                 icon: Icons.history;
                 checked: root.replay-on;
                 toggle: true;
@@ -355,7 +362,9 @@ export component ControlsDock inherits Dock {
                 // screen readers and the tooltip get OBS's words.
                 tooltip: ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed: see how to install it" : ControlsArea.vcam-approval ? "Allow Isocast Virtual Camera in System Settings, then it starts" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
                 accessible-name: ControlsArea.vcam-missing ? "Virtual Camera (not installed)" : ControlsArea.vcam-approval ? "Virtual Camera (waiting for approval)" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
-                text: ControlsArea.vcam-state == "starting" ? "Starting…" : ControlsArea.vcam-state == "stopping" ? "Stopping…" : "Virtual Camera";
+                text: ControlsArea.vcam-state == "starting" ? "Starting…" : ControlsArea.vcam-state == "stopping" ? "Stopping…" : root.short-words ? "Virtual Cam" : "Virtual Camera";
+                // The short words take the end padding too (172px dock).
+                inset-end: root.short-words ? 4px : 10px;
                 icon: Icons.camera;
                 checked: root.vcam-on;
                 toggle: true;

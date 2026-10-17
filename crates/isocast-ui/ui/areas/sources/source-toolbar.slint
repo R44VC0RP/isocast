@@ -59,18 +59,26 @@ export component SelectedSource inherits Rectangle {
         }
         // The name and its line (Paper aligns them on their baselines: the
         // smaller line sits 1px lower).
-        // The name keeps up to 96px when the bar is narrow; the line
-        // after it gives way first.
+        // The line after the name gives way first, then the name elides
+        // (never wider than the slot, so it can't run under the readout
+        // beside it, #108). With nothing selected, a slot too narrow for
+        // "No source selected" (a window about 1000px wide) says "No
+        // source", and only the dashed frame shows in the narrowest
+        // (900px while recording). A name is whole in a tooltip when
+        // shortened.
         name := Words {
-            min-width: min(self.preferred-width, 96px);
+            min-width: 0px;
             max-width: self.preferred-width;
             horizontal-stretch: 0;
-            text: root.selected ? Ui.selected-name : "No source selected";
+            text: root.selected ? Ui.selected-name : root.width < 96px ? "" : root.width < 160px ? "No source" : "No source selected";
             color: root.selected ? Theme.text : Theme.text-3;
             font-size: Theme.fs;
             font-weight: root.selected ? Theme.weight-semibold : Theme.weight-medium;
             accessible-role: AccessibleRole.text;
-            accessible-label: self.text;
+            accessible-label: root.selected ? self.text : "No source selected";
+            if root.selected && name.preferred-width > name.width + 0.5px: Tooltip {
+                Tip { text: Ui.selected-name; }
+            }
         }
         Rectangle {
             min-width: 0px;
@@ -78,6 +86,8 @@ export component SelectedSource inherits Rectangle {
             max-width: meta-text.preferred-width;
             horizontal-stretch: 1;
             meta-text := Words {
+                // Gone rather than a lone "…" when there's no room.
+                visible: parent.width >= 32px;
                 y: 1px;
                 width: parent.width;
                 height: parent.height;

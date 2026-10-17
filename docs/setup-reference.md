@@ -275,7 +275,7 @@ One of: `"low"`, `"medium"`, `"high"`, `"very_high"`, `"incredible"`.
 | `layout` | [Layout](#layout) (optional) | How its items with a `layout` are laid out: the scene is their root container, the size of the canvas (CSS block layout if absent). Only the fields for children apply. |
 | `name` | string (optional) | |
 | `transition` | [Transition](#transition) (optional) | How the program changes to this scene, in place of the setup's transition, unless a switch names its own (OBS's transition override). |
-| `vertical` | [SceneLayout](#scenelayout) (optional) | Its arrangement on the setup's vertical canvas, in place of `layout` and `items`. Absent: the same items and layout, placed again on the vertical canvas's size. |
+| `vertical` | [SceneLayout](#scenelayout) (optional) | Its arrangement on the setup's vertical canvas, in place of `layout` and `items`. Absent: the main picture fitted inside the vertical canvas and centred (letterboxed): items placed by `rect` are scaled and centred with it, items placed by `layout` are laid out again on the vertical canvas's size. |
 
 ## SceneItem
 
@@ -1311,7 +1311,7 @@ Reconnecting after the connection to the server drops.
 
 ## VerticalCanvas
 
-A second canvas, upright by default, that shows the setup's scenes. A scene is laid out on it by its `vertical` arrangement if it has one, else by its own items and layout, placed again on this canvas's size (not scaled from the main canvas). Its program has the same audio mix as the main one (`recording.program.audio`).
+A second canvas, upright by default, that shows the setup's scenes. A scene is laid out on it by its `vertical` arrangement if it has one, else it shows the main picture fitted inside this canvas and centred (letterboxed; items placed by `layout` are laid out again on this canvas's size). Its program has the same audio mix as the main one (`recording.program.audio`).
 
 | Field | Type | Description |
 |---|---|---|

@@ -1557,6 +1557,16 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 
 ## Log
 
+- #108/#109 (2026-10-17): the first layout audit's 11 issues fixed (narrow
+  Controls/source toolbar/mixer/vertical head adapt, source child names
+  use the empty ISO lane, ruler labels skip the playhead chip and the
+  edge, wider encoder popup, middle-elided paths, multiview outer margin);
+  re-audit of 482 pictures: none of the 11 left except an ellipsised child
+  name at the 900px minimum; visual diff changes only at 900 wide and the
+  encoder row. A scene without a vertical arrangement is now letterboxed
+  (fitted, centred): real M2-a recording, cropdetect 1080:608:0:656 on all
+  three vertical takes; e2e vertical PASS, 0/578 drops.
+
 - 8.2l / #106 (2026-10-17): release notes from docs/releases/X.Y.Z.md
   (0.0.5 and 0.0.6 added; body + Full Changelog reproduces both published
   bodies byte for byte); preflight fails on a missing/empty/Changelog-only

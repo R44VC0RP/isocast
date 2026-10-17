@@ -158,6 +158,10 @@ export component SourcesDock inherits Dock {
             row := ListRow {
                 text: item.name;
                 trailing-pad: Theme.space-1;
+                // A row without ISO (a box, text, a group's child): its name
+                // runs on into the empty ISO lane (and its gap, the lane
+                // being 0 wide in a narrow dock) before it elides.
+                label-room: !item.can-iso && item.state != "failed" && item.state != "waiting for permission" && item.state != "opening" ? (root.narrow ? 0px : Theme.lane) + Theme.space-2 : 0px;
                 icon: Icons.named(item.icon);
                 selected: parent.chosen || item.marked;
                 dim: !item.visible;

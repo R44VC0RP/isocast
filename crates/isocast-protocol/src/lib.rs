@@ -213,9 +213,10 @@ impl CanvasId {
 
 /// A second canvas, upright by default, that shows the setup's scenes. A
 /// scene is laid out on it by its `vertical` arrangement if it has one,
-/// else by its own items and layout, placed again on this canvas's size
-/// (not scaled from the main canvas). Its program has the same audio mix
-/// as the main one (`recording.program.audio`).
+/// else it shows the main picture fitted inside this canvas and centred
+/// (letterboxed; items placed by `layout` are laid out again on this
+/// canvas's size). Its program has the same audio mix as the main one
+/// (`recording.program.audio`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VerticalCanvas {
@@ -259,6 +260,76 @@ impl Default for VerticalCanvas {
             recording: None,
             stream: None,
         }
+    }
+}
+
+/// A scene's main items as the vertical canvas shows them when the scene
+/// has no vertical arrangement (#109): the main picture fitted inside the
+/// `to`-sized canvas and centred (letterboxed, like OBS's Fit to Screen).
+/// Items placed by `rect` (in `from`-sized main canvas pixels) are scaled
+/// by the fitting factor about the canvas's top-left and moved by the
+/// centring offset, with their children, translations, radii, borders and
+/// shadows; items shown at their own size (`fit = "none"`) keep it and get
+/// the factor in their transform's scale instead. Items placed by `layout`
+/// are laid out again on the vertical canvas, as before. Nothing changes
+/// when both canvases have the same size.
+pub fn fit_items(items: &mut [SceneItem], from: (u32, u32), to: (u32, u32)) {
+    if from == to || from.0 == 0 || from.1 == 0 {
+        return;
+    }
+    let (fw, fh) = (from.0 as f32, from.1 as f32);
+    let (tw, th) = (to.0 as f32, to.1 as f32);
+    let factor = (tw / fw).min(th / fh);
+    let offset = [(tw - fw * factor) / 2.0, (th - fh * factor) / 2.0];
+    fit_level(items, factor, offset);
+}
+
+fn fit_level(items: &mut [SceneItem], factor: f32, offset: [f32; 2]) {
+    for item in items {
+        if item.layout.is_some() {
+            // Laid out on the canvas it is drawn on; its children are
+            // relative to wherever layout puts it.
+            continue;
+        }
+        let Some(rect) = item.rect.as_mut() else {
+            continue;
+        };
+        let style = &mut item.style;
+        style.transform.translate = style.transform.translate.map(|t| t * factor);
+        if item.fit == Fit::None {
+            // Drawn at its own size (the rect follows the picture), scaled
+            // by its transform about its centre: move the centre, scale the
+            // transform. Its children are in its own pixels, which the
+            // transform scales.
+            let (w, h) = (rect.width as f32, rect.height as f32);
+            let cx = offset[0] + factor * (rect.x as f32 + w / 2.0);
+            let cy = offset[1] + factor * (rect.y as f32 + h / 2.0);
+            rect.x = (cx - w / 2.0).round() as i32;
+            rect.y = (cy - h / 2.0).round() as i32;
+            style.transform.scale *= factor;
+            continue;
+        }
+        let x0 = offset[0] + factor * rect.x as f32;
+        let y0 = offset[1] + factor * rect.y as f32;
+        let x1 = offset[0] + factor * (rect.x as f32 + rect.width as f32);
+        let y1 = offset[1] + factor * (rect.y as f32 + rect.height as f32);
+        rect.x = x0.round() as i32;
+        rect.y = y0.round() as i32;
+        rect.width = ((x1.round() - x0.round()) as u32).max(1);
+        rect.height = ((y1.round() - y0.round()) as u32).max(1);
+        style.radius = match style.radius {
+            Radius::All(r) => Radius::All(r * factor),
+            Radius::Each(r) => Radius::Each(r.map(|r| r * factor)),
+        };
+        if let Some(border) = style.border.as_mut() {
+            border.width *= factor;
+        }
+        if let Some(shadow) = style.shadow.as_mut() {
+            shadow.x *= factor;
+            shadow.y *= factor;
+            shadow.blur *= factor;
+        }
+        fit_level(&mut item.children, factor, [0.0, 0.0]);
     }
 }
 
@@ -461,8 +532,10 @@ pub struct Scene {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<Transition>,
     /// Its arrangement on the setup's vertical canvas, in place of `layout`
-    /// and `items`. Absent: the same items and layout, placed again on the
-    /// vertical canvas's size.
+    /// and `items`. Absent: the main picture fitted inside the vertical
+    /// canvas and centred (letterboxed): items placed by `rect` are scaled
+    /// and centred with it, items placed by `layout` are laid out again on
+    /// the vertical canvas's size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical: Option<SceneLayout>,
 }
@@ -1741,10 +1814,14 @@ impl Setup {
         let mut setup = self.clone();
         setup.vertical = None;
         setup.canvas = vertical.canvas(&self.canvas);
+        let from = (self.canvas.width, self.canvas.height);
+        let to = (setup.canvas.width, setup.canvas.height);
         for scene in &mut setup.scenes {
             if let Some(SceneLayout { layout, items }) = scene.vertical.take() {
                 scene.layout = layout;
                 scene.items = items;
+            } else {
+                fit_items(&mut scene.items, from, to);
             }
         }
         let main = &self.recording.program;
@@ -2695,6 +2772,68 @@ rect = { x = 0, y = 0, width = 1280, height = 720 }
             "sources.test-pattern.width"
         );
         assert!(Setup::from_json(&format!("{setup} x")).is_err());
+    }
+
+    #[test]
+    fn a_scene_without_a_vertical_arrangement_is_letterboxed() {
+        // #109: the main 16:9 picture sits in the middle of the 9:16
+        // canvas, scaled to its width, not at the top at main pixels.
+        let mut setup = Setup::from_toml(
+            r##"
+version = 1
+name = "t"
+canvas = { width = 1920, height = 1080, fps = 30 }
+
+[[sources]]
+id = "cam"
+kind = "test_pattern"
+
+[[scenes]]
+id = "main"
+items = [
+  { source = "cam", rect = { x = 0, y = 0, width = 1920, height = 1080 }, children = [
+    { id = "badge", style = { background = "#fff" }, rect = { x = 100, y = 200, width = 400, height = 80 } },
+  ] },
+  { id = "logo", source = "cam", fit = "none", rect = { x = 1600, y = 40, width = 200, height = 100 } },
+  { id = "flow", source = "cam", layout = { width = 320, height = 180 } },
+]
+
+[[scenes]]
+id = "own"
+items = [{ source = "cam", rect = { x = 0, y = 0, width = 1920, height = 1080 } }]
+vertical = { items = [{ source = "cam", rect = { x = 0, y = 0, width = 1080, height = 1920 } }] }
+
+[recording]
+folder = "."
+program = { encoder = { codec = "hevc", quality = 70 } }
+iso = { enabled = false, encoder = { codec = "hevc", quality = 70 } }
+
+[vertical]
+"##,
+        )
+        .unwrap();
+        let view = setup.for_canvas(CanvasId::Vertical).unwrap();
+        let main = &view.scenes[0].items;
+        let rect = |x, y, width, height| {
+            Some(Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        assert_eq!(main[0].rect, rect(0, 656, 1080, 608));
+        assert_eq!(main[0].children[0].rect, rect(56, 113, 225, 45));
+        // At its own size, scaled about its centre by its transform.
+        assert_eq!(main[1].rect, rect(856, 657, 200, 100));
+        assert_eq!(main[1].style.transform.scale, 0.5625);
+        assert_eq!(main[2].rect, None);
+        assert_eq!(view.scenes[1].items[0].rect, rect(0, 0, 1080, 1920));
+        // A same-sized canvas changes nothing.
+        setup.vertical.as_mut().unwrap().width = 1920;
+        setup.vertical.as_mut().unwrap().height = 1080;
+        let same = setup.for_canvas(CanvasId::Vertical).unwrap();
+        assert_eq!(same.scenes[0].items, setup.scenes[0].items);
     }
 
     #[test]

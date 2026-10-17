@@ -1681,6 +1681,31 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-17 (#109): **A scene without a vertical arrangement is
+  letterboxed on the vertical canvas**, replacing "re-laid out, not
+  scaled" (#86), which drew a 16:9 scene's rect items at main-canvas
+  pixels at the top of the 9:16 canvas. `isocast_protocol::fit_items`
+  (used by `Setup::for_canvas`, and by the app's `model::vertical_view`,
+  `canvas_items` and `route_vertical`, so the editor's first vertical
+  edit starts from what the canvas shows) scales rect-placed items by
+  min(vw/mw, vh/mh) about the top-left and centres them (OBS's Fit to
+  Screen; 1920x1080 on 1080x1920: y 656, 1080x608), with children,
+  translations, radii, borders and shadows; `fit = "none"` items keep
+  their size and get the factor in `transform.scale`; `layout` items are
+  still laid out again on the vertical size. Not handled: keyframe
+  animations in pixels and nested-scene items (drawn at the vertical
+  canvas's size) are not scaled.
+- 2026-10-17 (#108): **Layout audit fixes.** Narrow docks adapt instead of
+  cutting: Controls says "Replay"/"Virtual Cam" when the dock is under
+  200px or squeezed (read from Ui widths and the Viewport like
+  `room-for-words`; reading the dock's own width loops through the
+  labels); the source toolbar's idle text is "No source" under 160px and
+  only the frame under 96px; the vertical monitor's head drops its size,
+  then the name, then the chevron (menu still on right-click and View);
+  a narrow mixer strip's fader goes down to 72px. Source rows without ISO
+  let the name run into the empty ISO lane (`ListRow.label-room`).
+  Gotcha: Slint `Text` layout info feeds the docks' layout, so any label
+  chosen from its own dock's `width` is a binding loop error.
 - 2026-10-17 (#106): **Release notes live in `docs/releases/X.Y.Z.md`.**
   They are read at the tag (preflight via the contents API, the release
   job from its checkout), embedded in the appcast as markdown and used as

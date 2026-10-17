@@ -188,7 +188,8 @@ pub fn item_patch(scene: &str, chain: &[&SceneItem], fields: Value) -> Value {
 
 /// The setup `shown` (JSON) as the vertical canvas edits it (#86): each
 /// scene's own vertical items and layout in place of the main ones (a
-/// scene without them shows the main ones, as `Setup::for_canvas` does),
+/// scene without them shows the main ones fitted and centred, as
+/// `Setup::for_canvas` does),
 /// and the vertical canvas's size and rate as `canvas`.
 pub fn vertical_view(shown: &Value) -> Value {
     let mut out = shown.clone();
@@ -215,6 +216,9 @@ pub fn vertical_view(shown: &Value) -> Value {
                     Some(layout) => object.insert("layout".into(), layout.clone()),
                     None => object.remove("layout"),
                 };
+            } else if let Some(items) = object.get("items") {
+                let fitted = fitted_items(shown, items);
+                object.insert("items".into(), fitted);
             }
         }
     }
@@ -231,18 +235,44 @@ pub fn canvas_items(shown: &Value, scene: &str, vertical: bool) -> Vec<Value> {
         return Vec::new();
     };
     let items = if vertical && scene["vertical"].is_object() {
-        &scene["vertical"]["items"]
+        scene["vertical"]["items"].clone()
+    } else if vertical {
+        fitted_items(shown, &scene["items"])
     } else {
-        &scene["items"]
+        scene["items"].clone()
     };
     items.as_array().cloned().unwrap_or_default()
+}
+
+/// A scene's main `items` (JSON) as the vertical canvas of `shown` shows
+/// them while the scene has no vertical items of its own: fitted inside it
+/// and centred, as `Setup::for_canvas` does (#109). Unchanged if they
+/// don't parse (the daemon says why).
+fn fitted_items(shown: &Value, items: &Value) -> Value {
+    let size = |value: &Value, key: &str, default: u64| {
+        value.get(key).and_then(Value::as_u64).unwrap_or(default) as u32
+    };
+    let from = (
+        size(&shown["canvas"], "width", 1920),
+        size(&shown["canvas"], "height", 1080),
+    );
+    let to = (
+        size(&shown["vertical"], "width", 1080),
+        size(&shown["vertical"], "height", 1920),
+    );
+    let Ok(mut typed) = serde_json::from_value::<Vec<isocast_protocol::SceneItem>>(items.clone())
+    else {
+        return items.clone();
+    };
+    isocast_protocol::fit_items(&mut typed, from, to);
+    serde_json::to_value(typed).unwrap_or_else(|_| items.clone())
 }
 
 /// `patch` sent while editing the vertical canvas (#86): what it changes in
 /// existing scenes' `items` goes to their vertical items instead, so no
 /// edit of the vertical layout can change the main one. A scene without
-/// vertical items of its own yet gets them made from the main ones (what
-/// the vertical canvas shows) with the change in. Everything else (scene
+/// vertical items of its own yet gets them made from the main ones as the
+/// vertical canvas shows them (fitted and centred, #109) with the change in. Everything else (scene
 /// names, transitions, new scenes, sources) is left as it is.
 pub fn route_vertical(shown: &Value, patch: Value) -> Value {
     let Some(entries) = patch["scenes"].as_array() else {
@@ -267,7 +297,7 @@ pub fn route_vertical(shown: &Value, patch: Value) -> Value {
             let vertical = if scene["vertical"].is_object() {
                 json!({ "items": items })
             } else {
-                let base = scene.get("items").cloned().unwrap_or(json!([]));
+                let base = fitted_items(shown, scene.get("items").unwrap_or(&json!([])));
                 let made = isocast_protocol::change::merge_patch(
                     &json!({ "items": base }),
                     &json!({ "items": items }),
