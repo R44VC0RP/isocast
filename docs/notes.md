@@ -247,6 +247,16 @@ each section. Delete entries that stop being true.
 
 ## Waiting on Ryan
 
+- 2026-10-17 (#106): **Refresh 0.0.6's update notes.** After this branch
+  is merged and the snapshot published (the workflow and
+  `docs/releases/0.0.6.md` must be on the public main), run
+  `gh workflow run refresh-appcast.yml --repo R44VC0RP/isocast --ref main -f version=0.0.6`
+  and approve the **release** environment. Check:
+  `curl -sL https://github.com/R44VC0RP/isocast/releases/download/v0.0.6/appcast.xml | grep -c 'Projectors, multiview'`
+  prints 1. Older releases needn't be refreshed: apps only read the
+  latest release's appcast. From 0.0.7 on, write `docs/releases/X.Y.Z.md`
+  before tagging (docs/releasing.md, "Cut a release").
+
 - 2026-10-17 (#74): **Touch Portal / Stream Deck pairing check** not done
   by an agent: Touch Portal is a GUI app whose first launch asks to accept
   its licence and to pair a phone (or a Stream Deck), answers only Ryan
@@ -1671,6 +1681,17 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-17 (#105 #28, W.1b): the daemon selects `NativePlatform` once
+  in `platform.rs`; it is a re-export of MacPlatform on Mac (no wrapper or
+  dynamic dispatch), and StubPlatform elsewhere. Media/clock/credential,
+  snapshot, export and recovery calls use the trait. `app_identifier`
+  gains a trait hook, delegating to the same Keychain bundle-id lookup on
+  Mac. The stub is deliberately CPU-synthetic only, not a working renderer
+  or recorder; unsupported native operations fail rather than pretending
+  to capture, write, flush, protect secrets or measure free disk space.
+  Unix IPC/process hooks and native diagnostics/hotkeys/plugins are still
+  W.1c; their policy is not changed here.
+
 - 2026-10-17 (#105 #28, W.1a): W.0 hosted run 39043755843 is green on
   both OSes, merged in 603c3ac. W.1 is sliced into engine build boundary,
   daemon platform selection, OS services/IPC, CLI and UI. The engine keeps
@@ -1680,6 +1701,24 @@ each section. Delete entries that stop being true.
   propagate; this is compile groundwork, not a claim of qualified Windows
   durability. Security-103 is integrated; no daemon plugin policy changes.
 
+- 2026-10-17 (#106): **Release notes live in `docs/releases/X.Y.Z.md`.**
+  They are read at the tag (preflight via the contents API, the release
+  job from its checkout), embedded in the appcast as markdown and used as
+  the GitHub body with GitHub's `**Full Changelog**: …/compare/vPREV...vX.Y.Z`
+  line appended (PREV = newest published lower semver). GitHub's
+  `--generate-notes` and the old built-in alpha notes are gone: they let
+  0.0.6 ship an update window that said only "Full Changelog". A published
+  release's notes are fixed by **Refresh appcast notes**
+  (refresh-appcast.yml): it re-signs only the feed. Ed25519 is
+  deterministic, so the same key and DMG give the same enclosure
+  signature; the job requires it, and pubDate is kept by moving the
+  downloaded DMG's mtime (and with it the creation date generate_appcast
+  reads) back to the published one. Gotchas: generate_appcast leaves the
+  enclosure **unsigned** (no error) when the key doesn't match the app's
+  SUPublicEDKey, and prints pubDate in local time. Sparkle 2.10 renders
+  headings, bold/italic, lists, code, quotes and links; tables lose their
+  text, rules are blank and images show alt text. Later option:
+  `sparkle:releaseNotesLink` to an HTML page with screenshots/video.
 - 2026-10-17 (#96 / 0.0.7): **Canvas failures are local, mixer failures shared.**
   A main compositor panic must not end healthy vertical streams; the daemon
   now selects that canvas's stream slots, just as for vertical failures.

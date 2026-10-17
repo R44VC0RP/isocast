@@ -3129,6 +3129,7 @@ dependencies = [
  "isocast-engine",
  "isocast-obsws",
  "isocast-platform-macos",
+ "isocast-platform-stub",
  "isocast-protocol",
  "isocast-surfaces",
  "libc",
@@ -3226,6 +3227,17 @@ dependencies = [
  "parking_lot",
  "security-framework",
  "serde_json",
+ "wgpu",
+]
+
+[[package]]
+name = "isocast-platform-stub"
+version = "0.0.6"
+dependencies = [
+ "anyhow",
+ "isocast-engine",
+ "isocast-protocol",
+ "isocast-surfaces",
  "wgpu",
 ]
 

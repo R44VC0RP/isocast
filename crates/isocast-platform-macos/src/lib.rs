@@ -203,6 +203,10 @@ impl Platform for MacPlatform {
         host_time()
     }
 
+    fn app_identifier(&self) -> Option<String> {
+        keychain::app_identifier()
+    }
+
     fn sleep_until(&self, at: Time) {
         pacing::sleep_until(at);
     }

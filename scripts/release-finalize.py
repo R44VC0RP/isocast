@@ -30,15 +30,10 @@ REQUIREMENT = f'=anchor apple generic and certificate leaf[subject.OU] = "{TEAM}
 PROFILE = "isocast-notary"
 KEYCHAIN = os.environ.get("ISOCAST_SIGN_KEYCHAIN", str(Path.home() / "Library/Keychains/login.keychain-db"))
 REPO = "R44VC0RP/isocast"
-DEFAULT_NOTES = ("Isocast's first alpha for Apple-silicon Macs (macOS 14+).\n\n"
-                 "- Native macOS app with scenes, sources and Studio Mode.\n"
-                 "- Program and per-source ISO recording, streaming, and pause/resume.\n"
-                 "- Virtual camera (requires the one-time installation) and customizable hotkeys.\n"
-                 "- Create view for recording, retaking and arranging takes.\n"
-                 "- Report a Bug with diagnostic previews and a shareable report.\n\n"
-                 "Open the DMG and drag Isocast to Applications. The CLI is bundled inside the app. "
-                 "See the [virtual-camera installation guide](https://github.com/R44VC0RP/isocast/blob/main/docs/virtual-camera.md) "
-                 "for its one-time setup.")
+ROOT = Path(__file__).resolve().parent.parent
+RELEASES = "docs/releases"  # X.Y.Z.md: each version's notes, committed before tagging (#106)
+CHANGELOG = "**Full Changelog**"
+SEMVER = r"[0-9]+\.[0-9]+\.[0-9]+"
 
 
 def require(condition, message):
@@ -441,6 +436,7 @@ def sparkle_run(*args):
                              capture_output=True, text=True, timeout=600)
     output = (process.stdout + process.stderr).replace(key.strip(), "<redacted>") if key else process.stdout + process.stderr
     if process.returncode:
+        print(output, end="", file=sys.stderr)  # Redacted above.
         raise subprocess.CalledProcessError(process.returncode, args, output)
     return output
 
@@ -454,19 +450,23 @@ def appcast(final, metadata, dmg, notes, prefix):
     out, state = final / "appcast.xml", final / "appcast.json"
     key = {"dmg_sha256": sha(dmg), "notes_sha256": hashlib.sha256(notes.encode()).hexdigest(), "prefix": prefix}
     if not (out.exists() and state.exists() and json.loads(state.read_text()) == key):
-        work = final / "appcast-work"
-        if work.exists():
-            command("rm", "-rf", work)
-        work.mkdir()
-        os.link(dmg, work / dmg.name)
-        (work / dmg.name).with_suffix(".md").write_text(notes + "\n")
-        sparkle_run(sparkle_tool("generate_appcast"), "--download-url-prefix", prefix,
-                    "--embed-release-notes", "--link", f"https://github.com/{REPO}", work)
-        (work / "appcast.xml").replace(out)
-        command("rm", "-rf", work)
+        write_appcast(final / "appcast-work", dmg, notes, prefix, out)
         save(state, key)
     verify_appcast(out, metadata, dmg, prefix)
     return out
+
+
+def write_appcast(work, dmg, notes, prefix, out):
+    """generate_appcast on a hard link to DMG, notes (markdown) beside it."""
+    if work.exists():
+        command("rm", "-rf", work)
+    work.mkdir()
+    os.link(dmg, work / dmg.name)
+    (work / dmg.name).with_suffix(".md").write_text(notes + "\n", encoding="utf-8")
+    sparkle_run(sparkle_tool("generate_appcast"), "--download-url-prefix", prefix,
+                "--embed-release-notes", "--link", f"https://github.com/{REPO}", work)
+    (work / "appcast.xml").replace(out)
+    command("rm", "-rf", work)
 
 
 def verify_appcast(out, metadata, dmg, prefix):
@@ -490,37 +490,64 @@ def verify_appcast(out, metadata, dmg, prefix):
     print(f"Verified appcast: build {metadata['build_version']}, {dmg.name}, EdDSA signature matches SUPublicEDKey", flush=True)
 
 
-def draft_release(output, metadata, files, replace=False, generated=False, verify_tag=False):
+def release_notes(version, root=ROOT):
+    """The version's release notes (markdown): docs/releases/X.Y.Z.md, written
+    and committed before tagging (#106). Sparkle's update window shows them,
+    and the GitHub release body is them plus the Full Changelog link."""
+    require(re.fullmatch(SEMVER, version), f"version must be X.Y.Z, not {version!r}")
+    name = f"{RELEASES}/{version}.md"
+    path = root / name
+    require(path.is_file(), f"no release notes for {version}: write {name} and commit it before tagging "
+            "(docs/releasing.md, 'Cut a release')")
+    notes = path.read_text(encoding="utf-8").strip()
+    require(notes, f"{name} is empty: write {version}'s release notes before tagging")
+    require(CHANGELOG not in notes, f"{name}: leave out the {CHANGELOG} line; the GitHub release adds it")
+    return notes
+
+
+def release_body(notes, tag, releases):
+    """The GitHub release body: the notes, then GitHub's usual Full Changelog
+    link from the newest published release before this one."""
+    version = tuple(map(int, tag[1:].split(".")))
+    earlier = [r["tag_name"] for r in releases if not r["draft"] and re.fullmatch("v" + SEMVER, r["tag_name"])
+               and tuple(map(int, r["tag_name"][1:].split("."))) < version]
+    previous = max(earlier, key=lambda t: tuple(map(int, t[1:].split("."))), default=None)
+    link = (f"https://github.com/{REPO}/compare/{previous}...{tag}" if previous
+            else f"https://github.com/{REPO}/commits/{tag}")
+    return f"{notes}\n\n{CHANGELOG}: {link}"
+
+
+def all_releases():
+    pages = json.loads(command("gh", "api", "--paginate", "--slurp",
+                               f"repos/{REPO}/releases?per_page=100", capture=True))
+    return [r for page in pages for r in page]
+
+
+def draft_release(output, metadata, files, replace=False, verify_tag=False):
     tag = "v" + metadata["version"]
+    notes = release_notes(metadata["version"])
     if verify_tag:
         command("gh", "api", f"repos/{REPO}/git/ref/tags/{tag}", capture=True)
-    notes = None
-    if generated:
-        notes = json.loads(command("gh", "api", "--method", "POST", f"repos/{REPO}/releases/generate-notes",
-                                   "-f", f"tag_name={tag}", "-f", "target_commitish=main", capture=True))["body"]
 
     def lookup():
-        pages = json.loads(command("gh", "api", "--paginate", "--slurp",
-                                   f"repos/{REPO}/releases?per_page=100", capture=True))
-        found = [r for page in pages for r in page if r["tag_name"] == tag]
+        found = [r for r in releases if r["tag_name"] == tag]
         require(len(found) <= 1, f"multiple releases already use {tag}; inspect them")
         return found[0] if found else None
 
-    release = lookup()  # A failed/auth-denied read aborts; never assume absence.
+    releases = all_releases()  # A failed/auth-denied read aborts; never assume absence.
+    release = lookup()
     existed = release is not None
-    if notes is None:
-        notes = release["body"] if existed and release.get("body") else DEFAULT_NOTES
+    body = release_body(notes, tag, releases)
     # Sparkle's feed beside the DMG: what the published release's
     # releases/latest/download/appcast.xml serves to installed apps.
     files = [*files, appcast(output / "notarized", metadata, files[0], notes,
                              f"https://github.com/{REPO}/releases/download/{tag}/")]
     if release is None:
         flags = ["--verify-tag"] if verify_tag else []
-        if generated:
-            flags += ["--generate-notes"]
         command("gh", "release", "create", tag, *files, "--draft", "--repo", REPO,
                 "--target", "main", "--title", f"Isocast {metadata['version']} Alpha", *flags,
-                *([] if generated else ["--notes", notes]))
+                "--notes", body)
+        releases = all_releases()
         release = lookup()
     require(release is not None and release["draft"], f"{tag} is absent or published; refusing to change it")
     if replace and existed:
@@ -530,8 +557,8 @@ def draft_release(output, metadata, files, replace=False, generated=False, verif
         for asset in release["assets"]:
             if asset["name"] not in {p.name for p in files}:
                 command("gh", "api", "--method", "DELETE", f"repos/{REPO}/releases/assets/{asset['id']}")
-        if notes is not None:
-            command("gh", "release", "edit", tag, "--repo", REPO, "--draft", "--notes", notes)
+        command("gh", "release", "edit", tag, "--repo", REPO, "--draft", "--notes", body)
+        releases = all_releases()
         release = lookup()
         require(release is not None and release["draft"], "release is no longer a draft")
     assets = {a["name"]: a for a in release["assets"]}
@@ -545,21 +572,160 @@ def draft_release(output, metadata, files, replace=False, generated=False, verif
     print("Verified draft:", release["html_url"], flush=True)
 
 
+def published_release(tag, names):
+    """The PUBLISHED release for exactly this tag, with exactly these assets.
+    releases/tags/TAG serves published releases only: a draft is a 404."""
+    try:
+        release = json.loads(command("gh", "api", f"repos/{REPO}/releases/tags/{tag}", capture=True))
+    except subprocess.CalledProcessError:
+        raise ValueError(f"no published release for {tag} (missing, a draft, or the API failed; see above); refusing")
+    require(release.get("tag_name") == tag and release.get("draft") is False,
+            f"{tag} is not a published release; refusing (drafts are refreshed by the Release workflow)")
+    assets = {a["name"]: a for a in release["assets"]}
+    require(set(assets) == names, f"{tag} assets are {sorted(assets)}, expected {sorted(names)}; refusing")
+    return release, assets
+
+
+def appcast_item(path):
+    """The appcast's one item, as the fields that must survive a refresh."""
+    import xml.etree.ElementTree as ET
+    ns = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
+    items = ET.parse(path).getroot().findall("./channel/item")
+    require(len(items) == 1, f"{path.name} should have exactly one item, has {len(items)}")
+    item, fields = items[0], {}
+    for child in item:
+        if child.tag == "enclosure":
+            fields.update({"enclosure." + k.replace(ns, "sparkle:"): v for k, v in child.attrib.items()})
+        elif child.tag == "description":
+            fields["description"] = (child.text or "").strip()
+            fields["description.format"] = child.get(ns + "format")
+        else:
+            fields[child.tag.replace(ns, "sparkle:")] = (child.text or "").strip()
+    return fields
+
+
+def mounted_app_info(dmg):
+    """Isocast.app's Info.plist inside the DMG, mounted read-only."""
+    attached = plistlib.loads(command("hdiutil", "attach", "-readonly", "-nobrowse",
+                                     "-plist", dmg, capture=True).encode())
+    mounts = [Path(e["mount-point"]) for e in attached["system-entities"] if "mount-point" in e]
+    try:
+        require(len(mounts) == 1, "expected one mounted DMG volume")
+        return plistlib.loads((mounts[0] / "Isocast.app/Contents/Info.plist").read_bytes())
+    finally:
+        for mount in mounts:
+            command("hdiutil", "detach", mount)
+
+
+def refresh_appcast(output, version, dry_run=False):
+    """Replace a PUBLISHED release's appcast.xml with one that embeds
+    docs/releases/X.Y.Z.md (#106). The DMG is downloaded and checked, never
+    rebuilt or re-signed: the new feed must carry the same item and the same
+    enclosure (URL, length, EdDSA signature), signed with the same key."""
+    notes = release_notes(version)
+    tag, dmg_name = "v" + version, f"Isocast-{version}-arm64.dmg"
+    names = {dmg_name, dmg_name + ".sha256", "appcast.xml"}
+    prefix = f"https://github.com/{REPO}/releases/download/{tag}/"
+    release, assets = published_release(tag, names)
+    print(f"{tag}: published {release.get('published_at')}, assets {sorted(names)}; "
+          f"notes {RELEASES}/{version}.md ({len(notes)} characters)", flush=True)
+    if dry_run:
+        print("Download the three assets; check their GitHub digests and the DMG's .sha256.")
+        print("Mount the DMG read-only: its app's version, CFBundleVersion and SUPublicEDKey.")
+        print("Verify the published appcast: one item for this DMG, EdDSA signature against SUPublicEDKey, feed signed.")
+        print("generate_appcast on the same DMG with the notes embedded (key: SPARKLE_ED_PRIVATE_KEY on stdin only).")
+        print("Require the same item and enclosure (URL, length, signature), the notes embedded, the feed signed.")
+        print(f"gh release upload {tag} appcast.xml --clobber; re-check every asset digest. The DMG is never rebuilt or re-signed.")
+        return
+    # The release environment's key only: never fall back to a login keychain.
+    require(os.environ.get("SPARKLE_ED_PRIVATE_KEY", "").strip(), "refresh needs SPARKLE_ED_PRIVATE_KEY (the release environment)")
+    require(not output.exists(), f"output exists: {output}; choose a new one")
+    original = output / "original"
+    original.mkdir(parents=True)
+    patterns = [arg for name in sorted(names) for arg in ("--pattern", name)]
+    command("gh", "release", "download", tag, "--repo", REPO, "--dir", original, *patterns, timeout=900)
+    for name, asset in assets.items():
+        require(asset.get("digest") == "sha256:" + sha(original / name) and asset["size"] == (original / name).stat().st_size,
+                f"downloaded {name} differs from the release's digest")
+    dmg = original / dmg_name
+    require((original / (dmg_name + ".sha256")).read_text() == f"{sha(dmg)}  {dmg_name}\n",
+            f"{dmg_name} doesn't match its published .sha256")
+    info = mounted_app_info(dmg)
+    require(info.get("CFBundleShortVersionString") == version,
+            f"the DMG's app is {info.get('CFBundleShortVersionString')}, not {version}")
+    require(info.get("SUPublicEDKey"), "the DMG's app has no SUPublicEDKey")
+    metadata = {"version": version, "build_version": info["CFBundleVersion"],
+                "sparkle": {"public_key": info["SUPublicEDKey"]}}
+    print("Published appcast:", flush=True)
+    verify_appcast(original / "appcast.xml", metadata, dmg, prefix)
+    out = output / "appcast.xml"
+    refresh_feed(output, dmg, notes, prefix, metadata, original / "appcast.xml", out)
+    # Check again right before the upload, and that only appcast.xml changes.
+    again, now = published_release(tag, names)
+    require(again["id"] == release["id"], f"{tag} changed while refreshing; refusing")
+    for name in names - {"appcast.xml"}:
+        require(now[name]["id"] == assets[name]["id"] and now[name].get("digest") == assets[name].get("digest"),
+                f"{name} changed while refreshing; refusing")
+    command("gh", "release", "upload", tag, out, "--repo", REPO, "--clobber")
+    _, after = published_release(tag, names)
+    require(after["appcast.xml"].get("digest") == "sha256:" + sha(out), "uploaded appcast.xml digest differs")
+    for name in names - {"appcast.xml"}:
+        require(after[name].get("digest") == assets[name].get("digest"), f"{name} changed; inspect {tag}")
+    print(f"Refreshed {tag}'s appcast.xml (sha256 {sha(out)}); DMG and checksum unchanged", flush=True)
+
+
+def refresh_feed(output, dmg, notes, prefix, metadata, published, out):
+    """Regenerate PUBLISHED's feed for DMG with NOTES; require everything
+    but the notes (and the feed signature) to stay the same."""
+    from email.utils import parsedate_to_datetime
+    old = appcast_item(published)
+    # generate_appcast dates the item from the archive's creation date. Moving
+    # the mtime back moves the creation date with it (APFS), so the published
+    # pubDate is kept (as the same instant; it prints it in local time).
+    stamp = parsedate_to_datetime(old["pubDate"]).timestamp()
+    os.utime(dmg, (stamp, stamp))
+    write_appcast(output / "appcast-work", dmg, notes, prefix, out)
+    print("Refreshed appcast:", flush=True)
+    verify_appcast(out, metadata, dmg, prefix)
+    new = appcast_item(out)
+    require(new.get("description") == notes and new.get("description.format") == "markdown",
+            "the refreshed appcast doesn't embed the release notes as markdown")
+    for item in (old, new):
+        item["pubDate"] = parsedate_to_datetime(item["pubDate"]).timestamp()
+    changed = sorted(k for k in old.keys() | new.keys() if k not in ("description", "description.format")
+                     and old.get(k) != new.get(k))
+    require(not changed, f"refreshing changed more than the notes: {changed}")
+    print("Same item and enclosure (URL, length, EdDSA signature); notes embedded", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--notarize", action="store_true")
     parser.add_argument("--draft-release", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verify-runtime", action="store_true")
     parser.add_argument("--hosted", action="store_true")
     parser.add_argument("--replace-draft", action="store_true")
-    parser.add_argument("--generate-notes", action="store_true")
     parser.add_argument("--verify-tag", action="store_true")
+    parser.add_argument("--check-notes", metavar="X.Y.Z",
+                        help=f"only check that {RELEASES}/X.Y.Z.md has this version's release notes")
+    parser.add_argument("--refresh-appcast", metavar="X.Y.Z",
+                        help="replace a published release's appcast.xml with one embedding its notes (CI)")
     args = parser.parse_args()
+    if args.check_notes:
+        notes = release_notes(args.check_notes)
+        print(f"{RELEASES}/{args.check_notes}.md: {len(notes.splitlines())} lines of release notes")
+        return
+    require(args.output, "--output is required")
+    if args.refresh_appcast:
+        require(not (args.notarize or args.draft_release or args.verify_runtime or args.hosted
+                     or args.replace_draft or args.verify_tag), "--refresh-appcast takes only --output and --dry-run")
+        refresh_appcast(args.output.resolve(), args.refresh_appcast, args.dry_run)
+        return
     require(re.fullmatch(r"[A-Z0-9]{10}", TEAM), "APPLE_TEAM_ID must be a 10-character Apple team id")
     require(not args.hosted or args.verify_runtime, "--hosted needs --verify-runtime")
-    require(not (args.replace_draft or args.generate_notes or args.verify_tag) or args.draft_release,
+    require(not (args.replace_draft or args.verify_tag) or args.draft_release,
             "draft options need --draft-release")
     output = args.output.resolve()
     metadata = json.loads((output / "release.json").read_text())
@@ -568,6 +734,8 @@ def main():
     require(re.fullmatch(r"\d+\.\d+\.\d+", metadata["version"]), "invalid saved version")
     require(metadata["app_target"] in ("isocast-ui", "isocast-app"), "invalid saved UI target")
     require(args.notarize or args.draft_release or args.verify_runtime, "choose a finalization operation")
+    if args.draft_release:
+        notes = release_notes(metadata["version"])  # Before notarizing: a draft needs them.
     if args.dry_run:
         print(f"Prepared {metadata['app_target']} {metadata['version']}, build {metadata['build_version']}: {output}")
         print("Verify prepared Developer ID signatures and recorded hashes; acquire output operation lock.")
@@ -585,16 +753,14 @@ def main():
         if args.draft_release:
             if args.verify_tag:
                 print("Require the version tag to exist in the remote repository.")
-            if args.generate_notes:
-                print("Generate GitHub release notes for this tag.")
             if args.replace_draft:
                 print("Replace assets/notes on an existing DRAFT; never alter a published release.")
             print(f"gh api repos/{REPO}/releases: find v{metadata['version']}; reuse only a matching draft.")
-            notes_flag = "--generate-notes" if args.generate_notes else "--notes <alpha summary>"
+            print(f"Release notes: {RELEASES}/{metadata['version']}.md ({len(notes.splitlines())} lines).")
             print("Sparkle generate_appcast (key: SPARKLE_ED_PRIVATE_KEY on stdin, else login keychain): one item, "
-                  f"notes embedded, URL https://github.com/{REPO}/releases/download/v{metadata['version']}/<DMG>; feed signed.")
+                  f"those notes embedded (markdown), URL https://github.com/{REPO}/releases/download/v{metadata['version']}/<DMG>; feed signed.")
             print("Verify appcast build/version/URL/length, the DMG's EdDSA signature against the app's SUPublicEDKey, and the feed signature.")
-            print(f"If absent: gh release create v{metadata['version']} <notarized DMG> <checksum> <appcast.xml> --draft --repo {REPO} --target main {notes_flag}")
+            print(f"If absent: gh release create v{metadata['version']} <notarized DMG> <checksum> <appcast.xml> --draft --repo {REPO} --target main --notes <notes + Full Changelog link>")
             print("Verify draft=true and all three uploaded asset SHA-256 digests; save draft.json URL. Never publish.")
         return
     lock = output / ".release-lock"
@@ -604,7 +770,7 @@ def main():
             finalize(output, metadata)
         files = verify_final(output, metadata, args.verify_runtime, args.hosted)
         if args.draft_release:
-            draft_release(output, metadata, files, args.replace_draft, args.generate_notes, args.verify_tag)
+            draft_release(output, metadata, files, args.replace_draft, args.verify_tag)
     finally:
         lock.rmdir()
 

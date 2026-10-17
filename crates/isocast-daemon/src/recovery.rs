@@ -140,15 +140,12 @@ impl Daemon {
             .collect();
         folders.sort();
         folders.dedup();
-        #[cfg(target_os = "macos")]
         let mut recovered = folders
             .iter()
             .flat_map(|p| {
-                isocast_engine::record::recover_interrupted(&isocast_platform_macos::MacPlatform, p)
+                isocast_engine::record::recover_interrupted(&crate::platform::NativePlatform, p)
             })
             .collect::<Vec<_>>();
-        #[cfg(not(target_os = "macos"))]
-        let recovered = Vec::new();
         recovered.sort_by(|a, b| b.recording.started_at.cmp(&a.recording.started_at));
         recovered.truncate(20);
         for take in recovered.iter().filter(|r| r.newly_detected) {

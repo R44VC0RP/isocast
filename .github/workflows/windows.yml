@@ -65,9 +65,9 @@ jobs:
         run: cargo test --locked --no-fail-fast -p isocast-protocol -p isocast-diagnostics -p isocast-obsws
 
   engine:
-    # W.1a: compile the shared engine (including its tests), not a Windows
-    # recording claim. Add daemon/CLI and UI as their platform seams land.
-    name: engine build (windows-latest)
+    # W.1a/b: compile the shared engine and synthetic platform stub, not a
+    # Windows recording claim. Add daemon/CLI after the Unix IPC/process seam.
+    name: engine + platform build (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 40
     defaults:
@@ -93,4 +93,4 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/ci/windows' }}
 
       - name: Build engine and test binaries (do not run)
-        run: cargo build --locked --all-targets -p isocast-engine
+        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub

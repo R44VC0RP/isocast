@@ -1074,27 +1074,17 @@ fn short_file_notes(takes: &[TakeFiles], sources: &[String]) -> Vec<String> {
     notes
 }
 
-#[cfg(target_os = "macos")]
 fn join_files(spec: &JoinSpec, progress: OnJoinProgress) -> anyhow::Result<Joined> {
     use isocast_engine::Platform;
-    isocast_platform_macos::MacPlatform.join_files(spec, progress)
+    crate::platform::NativePlatform.join_files(spec, progress)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn join_files(_spec: &JoinSpec, _progress: OnJoinProgress) -> anyhow::Result<Joined> {
-    anyhow::bail!("exports only run on macOS so far")
-}
-
-#[cfg(target_os = "macos")]
 fn free_bytes(folder: &Path) -> Option<u64> {
-    isocast_platform_macos::volume(folder)
+    use isocast_engine::Platform;
+    crate::platform::NativePlatform
+        .volume(folder)
         .ok()
         .map(|v| v.free_bytes)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn free_bytes(_folder: &Path) -> Option<u64> {
-    None
 }
 
 #[cfg(test)]

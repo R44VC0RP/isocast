@@ -42,11 +42,11 @@ upload. Output must be new; default: $CARGO_TARGET_DIR/dist/VERSION.
                  re-signing. Final artifacts go into OUTPUT/notarized/.
 --draft-release  Upload verified notarized DMG/checksum as ONE GitHub draft;
                  reuse a matching existing draft, refuse mismatched/published ones.
+                 Its notes (GitHub body and appcast) are docs/releases/VERSION.md.
                  Combine with --notarize for the single morning command.
 --output DIR     Build into, or resume from, this directory. Test before drafting.
 --verify-runtime Run the mounted bundled CLI/engine and short synthetic takes.
 --hosted         With --verify-runtime: qualify the existing E2E 720p30 loss policy.
---generate-notes With --draft-release: use GitHub-generated release notes.
 --replace-draft  With --draft-release: replace assets on an existing draft only.
 --verify-tag     With --draft-release: require the version tag to exist remotely.
 --update-test FEED  Local update proofs only: a separate dev.isocast.update-test
@@ -87,7 +87,7 @@ while [ $# -gt 0 ]; do
         --draft-release) draft=1; shift ;;
         --notarize) notarize=1; shift ;;
         --verify-runtime) runtime=1; extra+=(--verify-runtime); shift ;;
-        --hosted|--generate-notes|--replace-draft|--verify-tag) extra+=("$1"); shift ;;
+        --hosted|--replace-draft|--verify-tag) extra+=("$1"); shift ;;
         --output) [ $# -ge 2 ] || die '--output needs a directory'; output="$2"; shift 2 ;;
         --update-test) [ $# -ge 2 ] || die '--update-test needs a feed URL'; update_test="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -203,6 +203,14 @@ elif [ "$ad_hoc" = 0 ]; then
         [ "$dry_run" = 1 ] || { scripts/sparkle/sparkle.sh public-key >/dev/null || true; die 'no Sparkle public key; see docs/releasing.md'; }
         echo "release: dry run: skipping the Sparkle public key check (scripts/sparkle/public-ed-key.txt is still the placeholder; a real build stops here)"
         sparkle_key=DRY-RUN-PLACEHOLDER-KEY
+    fi
+fi
+# The release notes (#106) before anything is built: docs/releases/VERSION.md,
+# committed before tagging, is what the update window and GitHub show.
+if [ "$ad_hoc" = 0 ] && [ -z "$update_test" ]; then
+    if ! python3 scripts/release-finalize.py --check-notes "$version"; then
+        [ "$dry_run" = 1 ] || die "write docs/releases/$version.md first (docs/releasing.md, 'Cut a release')"
+        echo "release: dry run: no release notes for $version yet (a real build stops here)"
     fi
 fi
 if [ -n "$sparkle_key" ]; then

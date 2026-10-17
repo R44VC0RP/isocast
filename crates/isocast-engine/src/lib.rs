@@ -91,6 +91,12 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// The current time on the host clock, the session's master clock.
     fn now(&self) -> Time;
 
+    /// This application's identity in the platform's credential store.
+    /// `None` for an unbundled executable.
+    fn app_identifier(&self) -> Option<String> {
+        None
+    }
+
     /// Critical media deadline used only after a clock detects stretched
     /// ordinary sleeps. Back ends should bound background timer coalescing.
     fn sleep_until(&self, at: Time) {

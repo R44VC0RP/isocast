@@ -83,8 +83,7 @@ const WATCH_HANGUP_CHECK: Duration = Duration::from_secs(1);
 /// any amount of memory. A setup is far smaller.
 const MAX_REQUEST: usize = 16 << 20;
 
-#[cfg(target_os = "macos")]
-use isocast_platform_macos::MacPlatform;
+use platform::NativePlatform;
 
 mod data;
 mod debug;
@@ -95,6 +94,7 @@ mod hotkeys;
 mod isoprj;
 mod library;
 mod optimize;
+mod platform;
 mod plugins;
 mod projectors;
 mod projects;
@@ -1289,27 +1289,17 @@ fn resolved_vertical(
     })
 }
 
-#[cfg(target_os = "macos")]
 fn start_engine(
     setup: &Setup,
     control: Arc<SessionControl>,
     on_event: OnEngineEvent,
 ) -> Result<Arc<dyn LiveEngine>> {
     Ok(Arc::new(LiveEngineOf::start(
-        &MacPlatform,
+        &NativePlatform,
         setup,
         Some(control),
         Some(on_event),
     )?))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn start_engine(
-    _setup: &Setup,
-    _control: Arc<SessionControl>,
-    _on_event: OnEngineEvent,
-) -> Result<Arc<dyn LiveEngine>> {
-    bail!("the live engine only runs on macOS so far")
 }
 
 impl Daemon {
@@ -4686,14 +4676,8 @@ fn redact_value(value: &mut serde_json::Value, key: &str) {
 }
 
 /// The host clock, which markers and scene switches are stamped with.
-#[cfg(target_os = "macos")]
 fn now() -> Time {
-    MacPlatform.now()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn now() -> Time {
-    Time::from_nanos(0)
+    NativePlatform.now()
 }
 
 /// The Keychain service this build keeps stream keys under:
@@ -4709,14 +4693,8 @@ fn key_service() -> &'static str {
     })
 }
 
-#[cfg(target_os = "macos")]
 fn app_identifier() -> Option<String> {
-    isocast_platform_macos::app_identifier()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn app_identifier() -> Option<String> {
-    None
+    NativePlatform.app_identifier()
 }
 
 /// The stream key for `account`: this build's own, or one an older Isocast
@@ -4803,78 +4781,36 @@ fn retire_legacy_key(account: &str) {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn has_secret(service: &str, account: &str) -> Result<bool> {
-    MacPlatform.has_secret(service, account)
+    NativePlatform.has_secret(service, account)
 }
 
-#[cfg(target_os = "macos")]
 fn secret(service: &str, account: &str) -> Result<Option<String>> {
-    let key = MacPlatform.secret(service, account)?;
+    let key = NativePlatform.secret(service, account)?;
     if let Some(key) = &key {
         isocast_diagnostics::redact::remember_secret(service, account, key);
     }
     Ok(key)
 }
 
-#[cfg(target_os = "macos")]
 fn set_secret(service: &str, account: &str, value: &str) -> Result<()> {
-    MacPlatform.set_secret(service, account, value)
+    NativePlatform.set_secret(service, account, value)
 }
 
-#[cfg(target_os = "macos")]
 fn delete_secret(service: &str, account: &str) -> Result<bool> {
-    MacPlatform.delete_secret(service, account)
+    NativePlatform.delete_secret(service, account)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn has_secret(_service: &str, _account: &str) -> Result<bool> {
-    Ok(false)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn secret(_service: &str, _account: &str) -> Result<Option<String>> {
-    bail!("stream keys are only kept on macOS so far")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn set_secret(_service: &str, _account: &str, _value: &str) -> Result<()> {
-    bail!("stream keys are only kept on macOS so far")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn delete_secret(_service: &str, _account: &str) -> Result<bool> {
-    bail!("stream keys are only kept on macOS so far")
-}
-
-#[cfg(target_os = "macos")]
 fn permissions() -> Result<PermissionsReport> {
-    MacPlatform.permissions()
+    NativePlatform.permissions()
 }
 
-#[cfg(not(target_os = "macos"))]
-fn permissions() -> Result<PermissionsReport> {
-    bail!("permissions are only supported on macOS so far")
-}
-
-#[cfg(target_os = "macos")]
 fn request_permissions(only: Option<PermissionKind>) -> Result<PermissionsReport> {
-    MacPlatform.request_permissions(only)
+    NativePlatform.request_permissions(only)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn request_permissions(_only: Option<PermissionKind>) -> Result<PermissionsReport> {
-    bail!("permissions are only supported on macOS so far")
-}
-
-#[cfg(target_os = "macos")]
 fn open_permission_settings(permission: PermissionKind) -> Result<String> {
-    MacPlatform.open_permission_settings(permission)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn open_permission_settings(_permission: PermissionKind) -> Result<String> {
-    bail!("permissions are only supported on macOS so far")
+    NativePlatform.open_permission_settings(permission)
 }
 
 /// A take's drop counts when it began, and whether its overload was said.
@@ -4896,17 +4832,11 @@ fn overloaded(dropped: u64, due: u64) -> bool {
     dropped >= 30 && dropped * 50 >= due
 }
 
-/// This Mac's chip and encoders.
-#[cfg(target_os = "macos")]
+/// This machine's chip and encoders.
 fn this_machine() -> Option<&'static isocast_protocol::api::Machine> {
     static MACHINE: std::sync::OnceLock<isocast_protocol::api::Machine> =
         std::sync::OnceLock::new();
-    Some(MACHINE.get_or_init(|| MacPlatform.machine()))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn this_machine() -> Option<&'static isocast_protocol::api::Machine> {
-    None
+    Some(MACHINE.get_or_init(|| NativePlatform.machine()))
 }
 
 /// Estimate `setup`'s capacity: sources at their live formats in `engine`
@@ -4932,11 +4862,9 @@ fn estimate_capacity(
                 .collect()
         })
         .unwrap_or_default();
-    #[cfg(target_os = "macos")]
-    let probed =
-        isocast_engine::estimate::probed_formats(&MacPlatform, setup, &|id| live.contains_key(id));
-    #[cfg(not(target_os = "macos"))]
-    let probed: HashMap<String, (u32, u32, u32)> = HashMap::new();
+    let probed = isocast_engine::estimate::probed_formats(&NativePlatform, setup, &|id| {
+        live.contains_key(id)
+    });
     let formats = |id: &str| live.get(id).or_else(|| probed.get(id)).copied();
     let kept = capacity::Memory::load(memory);
     let key = machine_key();
@@ -4953,26 +4881,14 @@ fn estimate_capacity(
     )
 }
 
-/// Which Mac (and macOS) `tune`'s measurements here hold for.
-#[cfg(target_os = "macos")]
+/// Which machine and OS `tune`'s measurements here hold for.
 fn machine_key() -> Option<&'static str> {
     static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    Some(KEY.get_or_init(|| capacity::machine_key(&MacPlatform.machine())))
+    Some(KEY.get_or_init(|| capacity::machine_key(&NativePlatform.machine())))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn machine_key() -> Option<&'static str> {
-    None
-}
-
-#[cfg(target_os = "macos")]
 fn tune(setup: &Setup, folder: Option<&Path>, memory: &Path) -> Result<Tuning> {
-    isocast_engine::tune::tune(&MacPlatform, setup, folder, Some(memory))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn tune(_setup: &Setup, _folder: Option<&Path>, _memory: &Path) -> Result<Tuning> {
-    bail!("tuning is only supported on macOS so far")
+    isocast_engine::tune::tune(&NativePlatform, setup, folder, Some(memory))
 }
 
 /// Refuse a scene id the setup (the recording's, while recording) lacks.
@@ -5030,41 +4946,37 @@ fn ids_or_none<'a>(ids: impl Iterator<Item = &'a String>) -> String {
     }
 }
 
-#[cfg(target_os = "macos")]
-type Graphics = isocast_engine::snapshot::Graphics<MacPlatform>;
+type Graphics = isocast_engine::snapshot::Graphics<NativePlatform>;
 
 /// The GPU, set up on first use and kept.
-#[cfg(target_os = "macos")]
 fn with_graphics<T>(draw: impl FnOnce(&mut Graphics) -> Result<T>) -> Result<T> {
     static GRAPHICS: Mutex<Option<Graphics>> = Mutex::new(None);
     let mut graphics = GRAPHICS.lock();
     let graphics = match &mut *graphics {
         Some(graphics) => graphics,
-        none => none.insert(Graphics::new(&MacPlatform)?),
+        none => none.insert(Graphics::new(&NativePlatform)?),
     };
     draw(graphics)
 }
 
 /// Frames of the setup's sources `ids`: the newest the recording captured
 /// where it captures them, else taken by opening them briefly.
-#[cfg(target_os = "macos")]
 fn frames(
     setup: &Setup,
     ids: &[String],
     recording: Option<&SessionControl>,
     data: &Arc<DataStore>,
-) -> Result<Vec<(String, isocast_platform_macos::PixelBuffer)>> {
-    use isocast_platform_macos::PixelBuffer;
+) -> Result<Vec<(String, platform::Frame)>> {
     let mut frames = Vec::new();
     let mut missing = Vec::new();
     for id in ids {
-        match recording.and_then(|control| control.newest_frame::<PixelBuffer>(id)) {
+        match recording.and_then(|control| control.newest_frame::<platform::Frame>(id)) {
             Some(frame) => frames.push((id.clone(), frame)),
             None => missing.push(id.clone()),
         }
     }
     frames.extend(isocast_engine::snapshot::take_frames(
-        &MacPlatform,
+        &NativePlatform,
         setup,
         &missing,
         data,
@@ -5073,7 +4985,6 @@ fn frames(
 }
 
 /// One frame of the setup's source `id` as a PNG.
-#[cfg(target_os = "macos")]
 fn source_png(
     setup: &Setup,
     id: &str,
@@ -5089,7 +5000,6 @@ fn source_png(
 
 /// The setup's scene `id`, drawn from frames of its visible `sources` (and
 /// its content, with `data`'s values), as a PNG.
-#[cfg(target_os = "macos")]
 fn scene_png(
     setup: &Setup,
     id: &str,
@@ -5107,57 +5017,22 @@ fn scene_png(
     with_graphics(|graphics| graphics.scene_png(setup, scene, &frames, width, data))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn source_png(
-    _setup: &Setup,
-    _id: &str,
-    _recording: Option<&SessionControl>,
-    _width: Option<u32>,
-    _data: &Arc<DataStore>,
-) -> Result<(Vec<u8>, u32, u32)> {
-    bail!("snapshots are only supported on macOS so far")
-}
-
-#[cfg(not(target_os = "macos"))]
-fn scene_png(
-    _setup: &Setup,
-    _id: &str,
-    _sources: &[String],
-    _recording: Option<&SessionControl>,
-    _width: Option<u32>,
-    _data: &Arc<DataStore>,
-) -> Result<(Vec<u8>, u32, u32)> {
-    bail!("snapshots are only supported on macOS so far")
-}
-
-#[cfg(target_os = "macos")]
 /// Free space on the disk holding `folder` (or the nearest folder above
 /// it that exists).
-#[cfg(target_os = "macos")]
 fn free_bytes(folder: &Path) -> Option<u64> {
     let existing = folder.ancestors().find(|path| path.exists())?;
-    isocast_platform_macos::volume(existing)
+    NativePlatform
+        .volume(existing)
         .ok()
         .map(|volume| volume.free_bytes)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn free_bytes(_folder: &Path) -> Option<u64> {
-    None
-}
-
 fn doctor(setup: Option<&Setup>, folder: Option<&Path>) -> isocast_protocol::api::Doctor {
-    isocast_engine::doctor::doctor(&MacPlatform, setup, folder)
+    isocast_engine::doctor::doctor(&NativePlatform, setup, folder)
 }
 
-#[cfg(target_os = "macos")]
 fn devices() -> Result<isocast_protocol::devices::Devices> {
-    MacPlatform.devices()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn devices() -> Result<isocast_protocol::devices::Devices> {
-    bail!("listing devices is only supported on macOS so far")
+    NativePlatform.devices()
 }
 
 /// Read an OBS scene collection, matching its devices and sizes against
@@ -5229,7 +5104,7 @@ fn content_size(kind: &SourceKind) -> Option<(u32, u32)> {
     let (tx, rx) = std::sync::mpsc::channel();
     let kind = kind.clone();
     thread::spawn(move || {
-        let _ = tx.send(isocast_engine::content_size(&MacPlatform, &kind));
+        let _ = tx.send(isocast_engine::content_size(&NativePlatform, &kind));
     });
     match rx.recv_timeout(CONTENT_SIZE_TIMEOUT) {
         Ok(size) => size,
