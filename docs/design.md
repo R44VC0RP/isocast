@@ -4,8 +4,9 @@
 > Ryan picked Console (Paper file "C. Console", Final Cut Pro x Logic Pro
 > x Tower): pure neutral blacks in a lighter frame, Mona Sans, Hubot Sans
 > and Martian Mono, and only three colours that light up (yellow for
-> selected/active and the one main button, green for program and live,
-> red for recording). Its values live in
+> selected/active and the one main button, green for the preview and
+> the stream, red for the program and recording: the broadcast tally,
+> Ryan on #95, 2026-10-16). Its values live in
 > `crates/isocast-ui/ui/theme.slint` (named as Paper's tokens) and its
 > pieces in the kit (`ui/kit.slint` lists them; `--state kit` draws them
 > as the Components board). Read values from Paper, never from this file;

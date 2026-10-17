@@ -53,8 +53,8 @@ export component Monitor inherits Rectangle {
     in property <image> picture;
     // The canvas editor goes over this one.
     in property <bool> editor: true;
-    // The program while streaming (live): a 2px green (`onair`) ring.
-    // Recording alone keeps the 1px `line` ring: red is the LCD's.
+    // The program while streaming (live): a 2px red (`danger`) tally ring
+    // (#95). Recording alone keeps the 1px `line` ring.
     in property <bool> program-live;
     // Instead of a picture.
     in property <string> empty-text;
@@ -118,7 +118,7 @@ export component Monitor inherits Rectangle {
     accessible-label: root.label;
     accessible-description: root.has-selection ? "Selected: " + Ui.selected-name : "";
 
-    // The monitor's ring: 1px `line`, or 2px `onair` while the program is
+    // The monitor's ring: 1px `line`, or 2px `danger` while the program is
     // live. A frame only, so a native picture under it shows through.
     // Before there is a setup: the empty monitor instead, no ring (Paper's
     // Welcome board).
@@ -135,7 +135,7 @@ export component Monitor inherits Rectangle {
         width: pic-w + (root.program-live ? 4px : 2px);
         height: pic-h + (root.program-live ? 4px : 2px);
         border-width: root.program-live ? 2px : 1px;
-        border-color: root.program-live ? Theme.onair : Theme.line;
+        border-color: root.program-live ? Theme.danger : Theme.line;
     }
     if !CanvasArea.native-picture && Ui.has-setup: Rectangle {
         x: pic-x;

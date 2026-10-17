@@ -472,12 +472,12 @@ export component KitGallery inherits Rectangle {
                 }
                 SwatchColumn {
                     heading: "Status: on air, live, warning";
-                    Swatch { fill: Theme.onair; name: "--onair"; purpose: "Program ring, dots"; ring: false; }
-                    Swatch { ink: Theme.onair-text; name: "--onair-text"; purpose: "PROGRAM tag, success"; }
+                    Swatch { fill: Theme.onair; name: "--onair"; purpose: "Preview tally, dots"; ring: false; }
+                    Swatch { ink: Theme.onair-text; name: "--onair-text"; purpose: "PREVIEW tag, success"; }
                     Swatch { fill: Theme.onair-fill; name: "--onair-fill"; purpose: "Filled, white text"; ring: false; }
                     Swatch { fill: Theme.onair-soft; name: "--onair-soft"; purpose: "Done step, soft band"; ring: false; }
-                    Swatch { fill: Theme.danger; name: "--danger"; purpose: "REC dot, invalid border"; ring: false; }
-                    Swatch { ink: Theme.danger-text; name: "--danger-text"; purpose: "Remove, dropped counts"; }
+                    Swatch { fill: Theme.danger; name: "--danger"; purpose: "REC dot, program ring"; ring: false; }
+                    Swatch { ink: Theme.danger-text; name: "--danger-text"; purpose: "PROGRAM tag, Remove"; }
                     HorizontalLayout {
                         spacing: Theme.space-3;
                         alignment: start;

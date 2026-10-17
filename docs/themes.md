@@ -690,7 +690,8 @@ theme can't drop one (section 9).
   focus-shown, studio, on-air, live, dragging. Callbacks: clicked,
   double-clicked, context-menu, drag-moved, drag-ended. Renaming stays a
   TextField the dock lays over the row.
-- console: 30px pill row, yellow-tinted selection, a PGM or LIVE capsule.
+- console: 30px pill row, yellow-tinted selection, a red PGM or LIVE
+  capsule, and in Studio Mode a green PVW capsule (the tally, #95).
 - workbench: 26px row, a 3px accent bar, a 6px onair dot.
 - daylight: the program dot on the icon, the item count on the right.
 - blender: a UI-list row in a well, a rounded blue band, an 8px green dot.
@@ -749,7 +750,7 @@ theme can't drop one (section 9).
 **`monitor-head`**
 - In: tag (PREVIEW, PROGRAM or none), tag tone, name, facts, zoom-text,
   live facts. Callbacks: zoom-menu, view-menu.
-- console: Studio Mode only, PREVIEW and PROGRAM tags.
+- console: Studio Mode only, PREVIEW (green) and PROGRAM (red) tags.
 - workbench: always: "Main 1920×1080 30 fps … Fit 50% ⌄" in mono.
 - daylight: Studio Mode tags (facts go under the picture).
 - blender: an area header: editor type, Preview/View/Select/Source/Canvas

@@ -39,12 +39,16 @@ export component Kbd inherits Rectangle {
 export enum BadgeTone {
     // `control` with `text-2`: ISO, 1080p60, Not in mix, READY.
     neutral,
-    // Green tint: LIVE, PGM.
+    // Green tint: the stream's LIVE.
     live,
     // Red tint: REC.
     rec,
     // Orange tint: LIVE while the stream reconnects.
     warning,
+    // Tally (#95, broadcast standard): red for the program (PGM, LIVE),
+    // green for the preview (PVW), as the multiview's.
+    program,
+    preview,
 }
 
 // An 18px capsule badge, 10px semibold caps, 7px in; with a dot before the
@@ -56,14 +60,14 @@ export component Badge inherits Rectangle {
     in property <bool> dot;
     in property <bool> status;
     // The neutral badge's dot (`text-3` in the status bar's READY).
-    in property <color> dot-color: root.tone == BadgeTone.live ? Theme.onair : root.tone == BadgeTone.rec ? Theme.danger : root.tone == BadgeTone.warning ? Theme.warning : Theme.text-3;
+    in property <color> dot-color: root.tone == BadgeTone.live || root.tone == BadgeTone.preview ? Theme.onair : root.tone == BadgeTone.rec || root.tone == BadgeTone.program ? Theme.danger : root.tone == BadgeTone.warning ? Theme.warning : Theme.text-3;
 
     height: Theme.badge-h;
     min-width: row.min-width;
     preferred-width: row.preferred-width;
     horizontal-stretch: 0;
     border-radius: self.height / 2;
-    background: root.tone == BadgeTone.live ? Theme.onair-soft : root.tone == BadgeTone.rec ? Theme.danger-soft : root.tone == BadgeTone.warning ? Theme.warning-soft : Theme.control;
+    background: root.tone == BadgeTone.live || root.tone == BadgeTone.preview ? Theme.onair-soft : root.tone == BadgeTone.rec || root.tone == BadgeTone.program ? Theme.danger-soft : root.tone == BadgeTone.warning ? Theme.warning-soft : Theme.control;
     accessible-role: AccessibleRole.text;
     accessible-label: root.text;
 
@@ -83,7 +87,7 @@ export component Badge inherits Rectangle {
         }
         Text {
             text: root.text;
-            color: root.tone == BadgeTone.live ? Theme.onair-text : root.tone == BadgeTone.rec ? Theme.danger-text : root.tone == BadgeTone.warning ? Theme.warning : Theme.text-2;
+            color: root.tone == BadgeTone.live || root.tone == BadgeTone.preview ? Theme.onair-text : root.tone == BadgeTone.rec || root.tone == BadgeTone.program ? Theme.danger-text : root.tone == BadgeTone.warning ? Theme.warning : Theme.text-2;
             font-size: Theme.fs-micro;
             letter-spacing: Theme.tracking-micro;
             font-weight: Theme.weight-semibold;
@@ -96,10 +100,11 @@ export component Badge inherits Rectangle {
 export enum TagTone { preview, program, neutral }
 
 // A viewer's line tag: Hubot Sans caps, 10px semibold, tracked 0.12em;
-// yellow for PREVIEW, green for PROGRAM. Also the LCD's labels.
+// the broadcast tally (#95, as the multiview's): green for PREVIEW, red
+// for PROGRAM. Also the LCD's labels.
 export component Tag inherits Text {
     in property <TagTone> tone: TagTone.neutral;
-    color: root.tone == TagTone.preview ? Theme.accent-text : root.tone == TagTone.program ? Theme.onair-text : Theme.text-3;
+    color: root.tone == TagTone.preview ? Theme.onair-text : root.tone == TagTone.program ? Theme.danger-text : Theme.text-3;
     font-family: Theme.font-brand;
     font-size: Theme.fs-micro;
     font-weight: Theme.weight-semibold;

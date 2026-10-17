@@ -1672,6 +1672,16 @@ each section. Delete entries that stop being true.
   explanation). **Multiview from the app shows the vertical program** in
   its last tile whenever the setup has a vertical canvas (`vertical` on
   projector_open; the CLI/MCP default stays off).
+- 2026-10-16 (#95, Ryan): **Broadcast tally everywhere: red = program,
+  green = preview**, the multiview's tokens (`danger`/`danger-text`/
+  `danger-soft` for PGM, `onair`/`onair-text`/`onair-soft` for PVW).
+  Studio Mode's PREVIEW tag was yellow (accent) and PROGRAM green; the
+  live program ring and the scenes' PGM/LIVE badge were green. Studio
+  Mode's preview scene gets a green PVW badge (the yellow selection
+  stays: it is the list's selection). Stream state (status bar LIVE,
+  stream button, LCD, Settings "Live") stays green: it is the stream's
+  health, not the tally. Only the Console (dark) theme exists in the
+  native app; the retired web app (isocast-app) wasn't changed.
 
 - 2026-10-16 (#96): **Main > vertical > ISO on shared video encoders.**
   Both canvas programs/streams still protect ISOs; persistent main pressure

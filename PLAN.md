@@ -937,8 +937,9 @@ native app; each verified against OBS's behaviour on a test Mac.
   - [x] G.4 follow-ups (#95): a remembered full-screen projector whose
     display is gone never covers another one; F/double-click full screen
     names its display; scene feeds follow the fastest current viewer and
-    back off a failing draw thread. Tally colours (Ryan) and multiview CPU
-    remain.
+    back off a failing draw thread. Multiview CPU remains.
+  - [x] G.4 tally colours (#95, Ryan): red program, green preview
+    everywhere (Studio Mode tags, program ring, scene badges, editor PGM).
 - [x] **G.5 Custom hotkeys (engine side).** Bindable action catalogue,
   per-profile bindings, CLI/MCP, and global press/release registration where
   macOS allows. Timeline and pause actions are wired; timeline-clear remains
@@ -1520,6 +1521,11 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   1.6 s after its start; e2e split/pause/record, kill matrix 18/18 and
   stress cycles+disk pass on m2-a (38 splits accepted, 62 busy, 0 files
   acknowledged without a file).
+- #95 tally (2026-10-16): Studio Mode's PROGRAM tag, the live program
+  ring, the scenes' PGM/LIVE badge and the editor's PGM are red
+  (`danger`), PREVIEW and a new Studio Mode PVW scene badge green
+  (`onair`), the multiview's tokens; offscreen base/head shots and
+  visual_diff: only those pixels changed.
 - #95 (2026-10-16): virtual display removed before launch, app windows
   polled every 100 ms on m2-a: base covers the main display for 0.9 s on
   app start and on `projector open program`, head never (0/75, 0/56); F

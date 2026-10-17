@@ -9,7 +9,8 @@
 // Console in short: pure neutral blacks inside a lighter frame, white text,
 // and only three colours that light up: yellow (accent) for what is
 // selected or active and for the one main button, green (onair) for the
-// program and live, red (danger) for recording. Mona Sans for text, Hubot
+// preview and the stream, red (danger) for the program and recording
+// (the broadcast tally, #95). Mona Sans for text, Hubot
 // Sans for titles and the caps on tags and the LCD, Martian Mono Light for
 // every live number (each drawn a cut lighter: `weight-*` below).
 //
@@ -94,18 +95,18 @@ export global Theme {
     out property <color> on-accent: #1a1408; // near-black text on the yellow fill
     out property <color> accent-soft: #f2c14e26; // rgb(242 193 78 / 15%): checked toggle, an "on" icon button
 
-    // ---- Status: green on air, red recording, orange warning
-    out property <color> onair: #3dcb63; // program ring, dots, the meters' safe zone
-    out property <color> onair-text: #62d983; // PROGRAM tag, success
+    // ---- Status: red program and recording, green preview and stream, orange warning
+    out property <color> onair: #3dcb63; // preview tally, dots, the meters' safe zone
+    out property <color> onair-text: #62d983; // PREVIEW tag, success
     out property <color> onair-fill: #2eae50; // filled, white text (streaming)
-    out property <color> onair-soft: #3dcb6326; // rgb(61 203 99 / 15%): LIVE/PGM badges
+    out property <color> onair-soft: #3dcb6326; // rgb(61 203 99 / 15%): PVW, stream LIVE badges
     out property <color> on-onair: #ffffff; // the streaming transport's glyph on `onair-fill` (a literal white in Paper)
-    out property <color> danger: #ff4d43; // REC dot, invalid border
-    out property <color> danger-text: #ff6f67; // Remove, dropped counts
+    out property <color> danger: #ff4d43; // REC dot, program ring, invalid border
+    out property <color> danger-text: #ff6f67; // PROGRAM tag, Remove, dropped counts
     out property <color> danger-fill: #cc3028; // Stop Recording at rest
     out property <color> danger-fill-hover: #d3352c;
     out property <color> danger-fill-active: #b72a22;
-    out property <color> danger-soft: #ff4d4326; // rgb(255 77 67 / 15%): error callout, REC badge
+    out property <color> danger-soft: #ff4d4326; // rgb(255 77 67 / 15%): error callout, REC/PGM badges
     out property <color> warning: #ff8f3f; // lagging, reconnecting
     out property <color> on-warning: #1e0f04;
     out property <color> warning-soft: #ff8f3f26; // rgb(255 143 63 / 15%): the LCD cell when frames drop

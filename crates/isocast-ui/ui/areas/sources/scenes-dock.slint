@@ -1,7 +1,8 @@
 // The Scenes dock (Paper "C. Console", Main window board; the web app's
 // scenes.js): the setup's scenes as 30px pill rows with the scene glyph;
 // a click puts one on air (in Studio Mode, into preview), and the one on
-// air wears a green PGM badge (LIVE while streaming); 1–9
+// air wears a red PGM badge (LIVE while streaming), and in Studio Mode the
+// one in preview a green PVW badge (the tally, #95); 1–9
 // switch, double-click or F2 renames inline (Return doesn't: in Studio
 // Mode it takes the preview to air), a drag reorders. The toolbar's
 // capsules add and remove, and move scenes; right-click opens the scene's
@@ -92,11 +93,16 @@ export component ScenesDock inherits Dock {
                     root.drop-at = -1;
                 }
 
-                // On air: PGM, or LIVE while it is streamed (green is
-                // program and live; recording is the LCD's red).
+                // On air: PGM, or LIVE while it is streamed; in Studio
+                // Mode the preview scene: PVW. The broadcast tally (#95, as
+                // the multiview's): red program, green preview.
                 if scene.on-air: Badge {
                     text: Ui.live ? "LIVE" : "PGM";
-                    tone: BadgeTone.live;
+                    tone: BadgeTone.program;
+                }
+                if Ui.studio && scene.in-preview && !scene.on-air: Badge {
+                    text: "PVW";
+                    tone: BadgeTone.preview;
                 }
             }
 
