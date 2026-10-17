@@ -5890,6 +5890,20 @@ each section. Delete entries that stop being true.
 - 2026-10-15 (#49, small-fixes): `isocast mcp` checks for an older engine
   once, on its first tool call, and warns on stderr; the app's
   couldn't-restart warning stays until dismissed (OK).
+- 2026-10-17 (#107, layout-audit): `scripts/layout-audit.py` renders 54
+  screens × 8 sizes + a 900→2700 width sweep (482 pictures, ~2 min, each
+  with its own throwaway engine; no `preview intro`, so "main" isn't
+  Studio Mode) and has one Claude Haiku 5.5 checker per picture (12 at
+  once, ~5 min, ≈ $0.0006 each) answer through a validated
+  `deliver_layout` tool, isolated like the visual judge
+  (scripts/layout-audit/checker). Pictures are downscaled to 1568 px on
+  the long side for the checker; its boxes are in those pixels and the
+  report scales them back. Without OPENCODE_API_KEY it uses this Mac's
+  OpenCode data folder: the console sign-in lives in OpenCode's database,
+  and a fresh data folder answers "Model unavailable". Small models
+  report false positives (content vs. the screen's description, menus
+  over controls, below-minimum sizes): triage before filing. The sweep
+  starts at 900 because the window's minimum width is 900.
 
 ## Gotchas
 

@@ -284,6 +284,35 @@ has open issues, recorded in `scripts/motion/suite.toml` as `expect =
 failures differ from that (a regression, or a fix whose line wasn't
 updated).
 
+## Layout audit (#107)
+
+`scripts/layout-audit.py` draws every screen offscreen (the main window,
+Studio Mode, the vertical canvas, Multiview and projector windows, the
+editor with crop mode and export, every Settings page, the Properties and
+other dialogs, menus, toasts, first launch, OBS import, Optimize, and
+recording and streaming states; `list` shows them) at eight window sizes
+from 900x600@2 to 3440x1440@1 plus a tall one, and a width sweep (900, the
+window's minimum, to 2700 points) for the main screens, each against an engine of its own with
+the synthetic setup. Then one Claude Haiku 5.5 checker per picture, 12 at
+once, looks at it and answers through a validated `deliver_layout` tool:
+"ok", or issues with a kind, a severity and a pixel box. It runs in the
+same isolation as the visual judge (a fresh copy of
+`scripts/layout-audit/checker`, an empty global config, a read-only folder
+with just that picture). The report (`report.html`, `report.md`,
+`report.json`) groups pictures by screen, draws the boxes, and merges an
+issue seen at several sizes ("at widths <= 1280"). It exits 1 on any
+high-severity issue. Small models make mistakes, so a person (or a
+coordinating agent) triages the flagged pictures before filing anything;
+`calibrate` checks that deliberately broken pictures get flagged.
+
+```sh
+scripts/layout-audit.py run --bin target/release --out /tmp/layout   # ~500 pictures
+scripts/layout-audit.py run --bin target/release --out /tmp/layout \
+    --views 'settings-*' --sizes 900x600@2,1440x900@2 --sweep none
+scripts/layout-audit.py check --out /tmp/layout --only 'editor-*' --recheck
+scripts/layout-audit.py calibrate --bin target/release --out /tmp/layout-cal
+```
+
 ## Prior art, and what was taken
 
 - **Slint's testing backend** (`i-slint-backend-testing`): element search by

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/claude-haiku-5-5",
+  "default_agent": "checker",
+  "formatter": false,
+  "lsp": false,
+  "snapshots": false,
+  "share": "disabled",
+  "compaction": { "auto": false },
+  "media": {
+    "image": { "auto_resize": true, "max_width": 1600, "max_height": 1600 }
+  },
+  "tool_output": { "max_lines": 200, "max_bytes": 20000 },
+  "agents": {
+    "build": { "disabled": true },
+    "plan": { "disabled": true },
+    "general": { "disabled": true },
+    "explore": { "disabled": true }
+  },
+  "permissions": [
+    { "action": "*", "resource": "*", "effect": "deny" }
+  ]
+}
