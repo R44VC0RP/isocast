@@ -1643,6 +1643,19 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-17 (#105, W.0 CI round 3): **`.isoprj` relative paths use `/`
+  on disk on both OSes.** Normalize known take paths only at Windows'
+  `write_atomic` boundary (takes, clips, removed/recording, undo/redo).
+  Absolute/drive-relative/UNC/verbatim references keep their native syntax
+  and may need relinking on a different OS; no guesses about drive mappings.
+  Readers/schema/version stay unchanged, unknown fields are untouched, and
+  Unix names with literal backslashes stay as they were. The failing test
+  used `/Users/...` as absolute on Windows (which needs a drive too).
+  HOME audit: native Windows uses USERPROFILE, Isocast state/logs under
+  LOCALAPPDATA/Isocast, OBS under APPDATA/obs-studio; Unix paths unchanged.
+  Named-pipe isolation and Windows ACL/crash-durability qualification remain
+  W.2/W.6/W.7, not promises made by portable-crate CI.
+
 - 2026-10-17 (#105, W.0 CI round 2): **obs-websocket randomness on Windows
   comes from the OS, not `/dev/urandom`.** Hosted run 39042059588 reaches
   the tests after clippy passes: password generation and both server tests

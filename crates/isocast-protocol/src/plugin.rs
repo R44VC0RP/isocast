@@ -766,7 +766,10 @@ impl Manifest {
                 Some(program) if program.trim().is_empty() => {
                     add("process.command[0]".into(), "the program is empty".into());
                 }
-                Some(program) if program.contains('/') => {
+                Some(program)
+                    if program.contains('/')
+                        || (cfg!(windows) && program.contains(['\\', ':'])) =>
+                {
                     if let Some(message) = file_problem(program, folder) {
                         add("process.command[0]".into(), message);
                     }
@@ -826,9 +829,12 @@ fn file_problem(file: &str, folder: Option<&Path>) -> Option<String> {
         return Some("give a file inside the plugin's folder".into());
     }
     if path.is_absolute()
-        || path
-            .components()
-            .any(|part| matches!(part, Component::ParentDir | Component::Prefix(_)))
+        || path.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        })
     {
         return Some(format!(
             "{file:?} must be a path inside the plugin's folder (relative, without `..`)"
@@ -1406,6 +1412,22 @@ autostart = true
             found.iter().any(|m| m.starts_with("filters[0].shader: ")),
             "{found:?}"
         );
+        assert!(file_problem("/outside.wgsl", None).is_some());
+        #[cfg(windows)]
+        for path in [
+            r"\outside.wgsl",
+            r"C:\outside.wgsl",
+            r"C:outside.wgsl",
+            r"..\outside.wgsl",
+        ] {
+            assert!(file_problem(path, None).is_some(), "{path}");
+            let command = format!("command = [{}]", serde_json::to_string(path).unwrap());
+            let found = messages(&FULL.replace("command = [\"python3\", \"bot.py\"]", &command));
+            assert!(
+                found.iter().any(|m| m.starts_with("process.command[0]: ")),
+                "{found:?}"
+            );
+        }
     }
 
     #[test]

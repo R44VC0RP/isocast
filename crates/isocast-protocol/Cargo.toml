@@ -13,3 +13,7 @@ serde_json = "1.0.154"
 serde_path_to_error = "0.1.20"
 thiserror = "2.0.21"
 toml = "1.1.8"
+
+[target.'cfg(not(unix))'.dependencies]
+# Timeline identities use OS randomness on Windows as well (already locked).
+getrandom = "0.4"

@@ -1518,6 +1518,17 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 
 ## Log
 
+- W.0 CI round 3 (2026-10-17, #105): run 39042460186 passes diagnostics
+  and obs-websocket on Windows; protocol 80/81 (test used a Unix-only
+  absolute root). Project-file tests now use native roots and exercise the
+  actual file boundary; Windows writes `/`-separated relative take paths,
+  leaving absolute references and macOS bytes alone. CI keeps going through
+  clippy/tests. Audit also fixes Windows home/data roots, diagnostic path
+  redaction, timeline randomness, plugin rooted paths and OBS wipe paths.
+  Remote fmt/clippy, 228 unit tests + 1 doctest (1 hardware test ignored),
+  diagnostics' separate test and Actionlint pass; Unix project bytes match.
+  Next hosted run required; W.0 remains unchecked.
+
 - W.0 CI round 2 (2026-10-17, #105): hosted run 39042059588 passes
   Windows build/clippy and diagnostics' test; three obs-websocket tests fail
   because production password/salt generation opens `/dev/urandom` on

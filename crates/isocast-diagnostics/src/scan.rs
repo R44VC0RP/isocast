@@ -128,5 +128,30 @@ mod tests {
         ] {
             assert_eq!(find(text), Some(rule), "{text}");
         }
+        #[cfg(windows)]
+        {
+            let mut redactor =
+                crate::redact::Redactor::report(true, &serde_json::Value::Null, vec![]);
+            for path in [
+                r"C:\Users\runner\Private Talk\take.mov",
+                "C:/Users/runner/take.mov",
+                r"\\server\share\Private Talk\take.mov",
+                r"~\Private Talk\take.mov",
+            ] {
+                let redacted = redactor.text(path);
+                assert!(!redacted.contains("take.mov"), "{redacted}");
+                assert!(!redacted.contains("Private Talk"), "{redacted}");
+            }
+            let text = redactor.text(r"failed to open C:\recordings\take.mov");
+            assert!(!text.contains("take.mov"), "{text}");
+            let home = isocast_protocol::api::home_folder()
+                .to_string_lossy()
+                .into_owned();
+            if !home.is_empty() {
+                let mut redactor = crate::redact::Redactor::default();
+                assert_eq!(redactor.text(&home), "~");
+                assert_eq!(redactor.text(&home.replace('\\', "/")), "~");
+            }
+        }
     }
 }

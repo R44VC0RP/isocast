@@ -54,10 +54,12 @@ jobs:
       # The engine's Unix manifest I/O and the client's UnixStream belong to
       # W.1/W.2/W.6; add them and Windows e2e only as those slices work.
       - name: Build portable crates
+        id: build
         run: cargo build --locked -p isocast-protocol -p isocast-diagnostics -p isocast-obsws
 
       - name: Clippy portable crates
-        run: cargo clippy --locked --all-targets -p isocast-protocol -p isocast-diagnostics -p isocast-obsws -- -D warnings
+        run: cargo clippy --locked --keep-going --all-targets -p isocast-protocol -p isocast-diagnostics -p isocast-obsws -- -D warnings
 
       - name: Test portable crates
-        run: cargo test --locked -p isocast-protocol -p isocast-diagnostics -p isocast-obsws
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo test --locked --no-fail-fast -p isocast-protocol -p isocast-diagnostics -p isocast-obsws
