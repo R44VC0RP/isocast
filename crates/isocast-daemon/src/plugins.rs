@@ -26,10 +26,10 @@
 //! it exits on its own it is restarted (1 s, doubling to 60 s, counted from
 //! its last start), and turned off after 5 crashes in 5 minutes.
 
+use isocast_ipc::{Listener as UnixListener, Stream as UnixStream};
 use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -484,7 +484,7 @@ impl Process {
         let mut run = self.state.lock();
         self.changed.notify_all();
         if let Some(pid) = run.pid {
-            signal_group(pid, libc::SIGTERM);
+            signal_group(pid, Signal::Terminate);
         }
         let deadline = Instant::now() + STOP_GRACE;
         while !run.done {
@@ -496,7 +496,7 @@ impl Process {
         }
         if !run.done {
             if let Some(pid) = run.pid {
-                signal_group(pid, libc::SIGKILL);
+                signal_group(pid, Signal::Kill);
             }
             self.changed
                 .wait_while_for(&mut run, |run| !run.done, Duration::from_secs(2));
@@ -505,12 +505,37 @@ impl Process {
     }
 }
 
-fn signal_group(pid: u32, signal: libc::c_int) {
+/// How [`signal_group`] stops a plugin process group.
+#[derive(Clone, Copy)]
+enum Signal {
+    /// SIGTERM: asks it to exit.
+    Terminate,
+    /// SIGKILL: ends it at once.
+    Kill,
+}
+
+#[cfg(unix)]
+fn signal_group(pid: u32, signal: Signal) {
+    let signal = match signal {
+        Signal::Terminate => libc::SIGTERM,
+        Signal::Kill => libc::SIGKILL,
+    };
     // SAFETY: kill has no memory effects; a negative pid names the process
     // group the plugin leads (it was started in a group of its own).
     unsafe {
         libc::kill(-(pid as libc::pid_t), signal);
     }
+}
+
+/// On Windows no plugin process can be started ([`find_program`] and
+/// [`spawn`] refuse before a child exists, and [`process_info`] knows no
+/// leftover), so there is never a pid to signal.
+#[cfg(windows)]
+fn signal_group(pid: u32, _signal: Signal) {
+    unreachable!(
+        "plugin process {pid}: plugin processes can't be started on Windows, so there is none \
+         to stop"
+    );
 }
 
 fn failed(message: impl Into<String>) -> RpcError {
@@ -1312,12 +1337,12 @@ impl Shared {
                 process.id
             );
             process.refresh.store(true, Ordering::SeqCst);
-            signal_group(pid, libc::SIGTERM);
+            signal_group(pid, Signal::Terminate);
             let process = process.clone();
             thread::spawn(move || {
                 thread::sleep(STOP_GRACE);
                 if process.state.lock().pid == Some(pid) {
-                    signal_group(pid, libc::SIGKILL);
+                    signal_group(pid, Signal::Kill);
                 }
             });
         }
@@ -1610,6 +1635,7 @@ impl Launch {
 /// The folders a program's own installation may run programs from: a
 /// framework version (Python re-runs itself from its app bundle), a
 /// Homebrew keg, or for macOS's /usr/bin tool stubs, the developer tools.
+#[cfg(target_os = "macos")]
 fn installation(program: &Path) -> Vec<PathBuf> {
     let mut folders = Vec::new();
     let parts: Vec<_> = program.components().collect();
@@ -1660,8 +1686,22 @@ fn search_path() -> String {
     dirs.join(":")
 }
 
+/// Plugin processes on Windows: refused until they can run sandboxed with
+/// their output passed through the redacting log.
+#[cfg(windows)]
+const WINDOWS_PROCESS_UNSUPPORTED: &str = "plugin processes aren't supported on Windows yet \
+     (they need a sandbox and a redacted log, which aren't built); use a plugin without a process";
+
+/// On Windows: refused (see [`WINDOWS_PROCESS_UNSUPPORTED`]), so no plugin
+/// with a process installs or starts.
+#[cfg(windows)]
+fn find_program(_name: &str, _folder: &Path) -> Result<PathBuf, String> {
+    Err(WINDOWS_PROCESS_UNSUPPORTED.into())
+}
+
 /// The program a command names: a path inside the plugin's folder, or a
 /// program on the plugins' PATH.
+#[cfg(unix)]
 fn find_program(name: &str, folder: &Path) -> Result<PathBuf, String> {
     use std::os::unix::fs::PermissionsExt;
     let runnable = |path: &Path| {
@@ -1860,8 +1900,37 @@ fn copy_tree(from: &Path, to: &Path, budget: &mut (usize, u64)) -> io::Result<()
         budget.0 -= 1;
         let kind = item.file_type()?;
         let (source, target) = (item.path(), to.join(&name));
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            // Refuse every reparse point, including junctions/cloud placeholders,
+            // rather than following something outside the requested source tree.
+            if std::fs::symlink_metadata(&source)?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT
+                != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "copying a Windows reparse point is unsupported: {}",
+                        source.display()
+                    ),
+                ));
+            }
+        }
         if kind.is_symlink() {
+            #[cfg(unix)]
             std::os::unix::fs::symlink(std::fs::read_link(&source)?, &target)?;
+            // Windows links (and junctions) aren't recreated or followed: a
+            // copy must not pull in what they point at.
+            #[cfg(windows)]
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "{} is a link, which isn't copied on Windows; add it with --link instead",
+                    source.display()
+                ),
+            ));
         } else if kind.is_dir() {
             copy_tree(&source, &target, budget)?;
         } else {
@@ -1941,12 +2010,13 @@ fn stop_leftover(dir: &Path) {
         && let Some((_, started)) = process_info(pid as u32)
         && started == (seconds, micros)
     {
-        signal_group(pid as u32, libc::SIGKILL);
+        signal_group(pid as u32, Signal::Kill);
     }
     let _ = std::fs::remove_file(path);
 }
 
 /// Wait for a child to end; how it ended, in words.
+#[cfg(unix)]
 fn wait(pid: u32) -> String {
     let mut status: libc::c_int = 0;
     loop {
@@ -1967,6 +2037,16 @@ fn wait(pid: u32) -> String {
     } else {
         format!("ended (status {status})")
     }
+}
+
+/// On Windows no plugin process can be started (see [`signal_group`]), so
+/// there is never a child to wait for.
+#[cfg(windows)]
+fn wait(pid: u32) -> String {
+    unreachable!(
+        "plugin process {pid}: plugin processes can't be started on Windows, so there is none \
+         to wait for"
+    );
 }
 
 /// The plugin API versions this Isocast runs, for messages: "1".
@@ -2017,8 +2097,8 @@ fn spawn(
     })
 }
 
-/// Elsewhere: unsandboxed, in its own process group.
-#[cfg(not(target_os = "macos"))]
+/// Other Unix systems: unsandboxed, in its own process group.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn spawn(
     program: &Path,
     args: &[String],
@@ -2042,13 +2122,36 @@ fn spawn(
     Ok(child.id())
 }
 
+/// On Windows: refused before any child exists (see
+/// [`WINDOWS_PROCESS_UNSUPPORTED`]); there's no sandbox or redacted log.
+#[cfg(windows)]
+fn spawn(
+    _program: &Path,
+    _args: &[String],
+    _env: &[(String, String)],
+    _cwd: &Path,
+    _log: &Path,
+    _profile: Option<&str>,
+) -> io::Result<u32> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        WINDOWS_PROCESS_UNSUPPORTED,
+    ))
+}
+
 #[cfg(target_os = "macos")]
 fn peer_pid(stream: &UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd;
     isocast_platform_macos::plugin::peer_pid(stream.as_raw_fd())
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The pipe's client process, as the kernel reports it.
+#[cfg(windows)]
+fn peer_pid(stream: &UnixStream) -> Option<u32> {
+    isocast_ipc::peer_pid(stream).ok()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 fn peer_pid(_stream: &UnixStream) -> Option<u32> {
     None
 }
@@ -2072,6 +2175,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn interpreters_may_run_their_own_installation() {
         assert_eq!(
             installation(Path::new(

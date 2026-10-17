@@ -24,7 +24,6 @@
 //! its unfinished file.
 
 use parking_lot::Mutex;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -505,8 +504,11 @@ impl Daemon {
             .as_ref()
             .map_or(0.0, |setup| setup.recording.keep_free_gb * 1e9);
         drop(state);
-        let device = |path: &Path| std::fs::metadata(path).ok().map(|m| m.dev());
-        if device(folder)? != device(&recording)? {
+        use isocast_engine::Platform;
+        if !crate::platform::NativePlatform
+            .same_volume(folder, &recording)
+            .ok()?
+        {
             return None;
         }
         let floor = keep.max(rate * 10.0).max(RECORDING_FLOOR_BYTES);
@@ -1109,27 +1111,17 @@ fn short_file_notes(takes: &[TakeFiles], sources: &[String]) -> Vec<String> {
     notes
 }
 
-#[cfg(target_os = "macos")]
 fn join_files(spec: &JoinSpec, progress: OnJoinProgress) -> anyhow::Result<Joined> {
     use isocast_engine::Platform;
-    isocast_platform_macos::MacPlatform.join_files(spec, progress)
+    crate::platform::NativePlatform.join_files(spec, progress)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn join_files(_spec: &JoinSpec, _progress: OnJoinProgress) -> anyhow::Result<Joined> {
-    anyhow::bail!("exports only run on macOS so far")
-}
-
-#[cfg(target_os = "macos")]
 fn free_bytes(folder: &Path) -> Option<u64> {
-    isocast_platform_macos::volume(folder)
+    use isocast_engine::Platform;
+    crate::platform::NativePlatform
+        .volume(folder)
         .ok()
         .map(|v| v.free_bytes)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn free_bytes(_folder: &Path) -> Option<u64> {
-    None
 }
 
 #[cfg(test)]

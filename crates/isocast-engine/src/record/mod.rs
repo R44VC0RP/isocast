@@ -1544,6 +1544,7 @@ fn write_manifest_durable(path: &Path, manifest: &SessionManifest) -> Result<()>
 
 fn write_manifest_with(path: &Path, manifest: &SessionManifest, durable: bool) -> Result<()> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
     let partial = path.with_extension("json.partial");
     let json = serde_json::to_string_pretty(manifest)?;
@@ -1552,10 +1553,19 @@ fn write_manifest_with(path: &Path, manifest: &SessionManifest, durable: bool) -
         let _ = std::fs::remove_file(&partial);
     }
     let write = || -> std::io::Result<()> {
+        #[cfg(unix)]
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .custom_flags(libc::O_NOFOLLOW)
+            .open(&partial)?;
+        // create_new is atomic and refuses existing files, including links.
+        // On Windows std also sets FILE_FLAG_OPEN_REPARSE_POINT. Keep the
+        // Unix open flags and all durability/error handling unchanged.
+        #[cfg(not(unix))]
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
             .open(&partial)?;
         file.write_all((json + "\n").as_bytes())?;
         if durable {
@@ -1938,10 +1948,18 @@ fn unique_paths(
 }
 
 pub fn expand_home(folder: &str) -> PathBuf {
+    #[cfg(windows)]
+    let home =
+        Some(isocast_protocol::api::home_folder()).filter(|home| !home.as_os_str().is_empty());
+    #[cfg(not(windows))]
     let home = std::env::var_os("HOME").map(PathBuf::from);
     match (folder.strip_prefix('~'), home) {
-        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
-            home.join(rest.trim_start_matches('/'))
+        (Some(rest), Some(home))
+            if rest.is_empty()
+                || rest.starts_with('/')
+                || (cfg!(windows) && rest.starts_with('\\')) =>
+        {
+            home.join(rest.trim_start_matches(|c| c == '/' || (cfg!(windows) && c == '\\')))
         }
         _ => PathBuf::from(folder),
     }

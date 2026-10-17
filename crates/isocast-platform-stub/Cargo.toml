@@ -1,0 +1,19 @@
+[package]
+name = "isocast-platform-stub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fail-closed placeholder back end for Isocast on systems without a real one: CPU synthetic frames only, no capture, encoding or recording."
+
+[dependencies]
+anyhow = "1.0.104"
+isocast-engine = { path = "../isocast-engine" }
+isocast-protocol = { path = "../isocast-protocol" }
+isocast-surfaces = { path = "../isocast-surfaces" }
+# Pinned like the engine's: only for the `wgpu::Texture` in `Platform`'s
+# signatures (no backend is used here).
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }

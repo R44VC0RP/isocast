@@ -378,7 +378,7 @@ impl Daemon {
         let registrations =
             isocast_platform_macos::hotkeys::MacHotkeys.replace(keys, generation, on_key);
         #[cfg(not(target_os = "macos"))]
-        let registrations = {
+        let registrations: Vec<Registration> = {
             let _ = on_key;
             keys.into_iter().map(|key| Registration { binding: key.binding, global: false,
                 warning: Some("global registration is not implemented on this platform; use focused input".into()) }).collect()

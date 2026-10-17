@@ -31,8 +31,7 @@ fn since_file() -> PathBuf {
 /// Once, when isocastd starts: the host clock for traces, and the loaded
 /// profile's setting.
 pub(crate) fn start(daemon: &Daemon) {
-    #[cfg(target_os = "macos")]
-    isocast_engine::trace::set_clock(isocast_platform_macos::host_time);
+    isocast_engine::trace::set_clock(crate::now);
     sync(daemon, "loaded");
 }
 

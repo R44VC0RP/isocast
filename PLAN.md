@@ -1494,7 +1494,7 @@ each milestone. Shared recording changes are Tier 1 and must preserve
 macOS behavior; Windows-only code is Tier 2. Merge current main between
 slices, especially alongside the GPU, vertical-canvas and editor lanes.
 
-- [ ] **W.0 Portable CI.** `windows.yml` on `ci/**`, Windows and Ubuntu,
+- [x] **W.0 Portable CI.** `windows.yml` on `ci/**`, Windows and Ubuntu,
   cached Cargo build, clippy and existing tests, superseded runs cancelled.
   Start with protocol, diagnostics and obs-websocket (the engine still has
   Unix-only manifest I/O; client/daemon use Unix sockets). `windows-ci.sh`
@@ -1510,6 +1510,24 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   its OS I/O is behind a safe seam (Windows durability follows in W.2).
   Verify unchanged macOS API, recording, errors, timing and lifecycle;
   no no-op safety fallbacks merely to compile on Windows.
+  - [x] **W.1a Engine build boundary.** Target-specific Metal/DX12 features;
+    non-Unix exclusive manifest creation without changing the Unix path;
+    build engine/test binaries on Windows without running them. Preserve
+    all durability errors (Windows recording/flush qualification is W.2).
+  - [ ] **W.1b Daemon platform selection.** One concrete platform alias and
+    a fail-closed stub behind `Platform`; replace per-call macOS shims
+    mechanically, preserving dispatch and lifecycle on Mac.
+  - [x] **W.1c OS services and IPC compile seam.** Platform hooks for
+    diagnostics, hotkeys, plugins and process lifecycle. Real same-user
+    named pipes and detached daemon/CLI on exon-desk (brought forward from
+    W.6); macOS retains native Unix socket types and plugin sandbox policy.
+    Windows process plugins/shared surfaces remain explicitly unsupported.
+    Native build/clippy/tests, CLI/MCP and Mac gates/e2e/bench verified;
+    clean-machine Actions daemon/CLI build awaits the coordinator.
+  - [ ] **W.1d CLI as a client.** Isolated-daemon `record`, remove direct
+    platform calls, preserve CLI/API/MCP behavior; Windows build-only gate.
+  - [ ] **W.1e UI platform seam.** Keep macOS window/media integration
+    behind its native seam; explicit Windows stubs and a Windows UI build.
 - [ ] **W.2 Cross-platform writer.** Prefer extracting the existing
   crash-safe BMFF muxer without changing its bytes; qualify against the
   macOS writer before choosing it over ffmpeg. Windows file ownership,
@@ -1574,6 +1592,42 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   encoder row. A scene without a vertical arrangement is now letterboxed
   (fitted, centred): real M2-a recording, cropdetect 1080:608:0:656 on all
   three vertical takes; e2e vertical PASS, 0/578 drops.
+- W.1c (2026-10-17, #105 #28): native Windows loop syncs tracked worktree
+  bytes to exon-desk with warm caches and returns exit codes/logs/binaries.
+  Owner-only local pipes, kernel peer identity, overlapped cancellation and
+  detached handle-allowlisted launch work; daemon/CLI build and clippy pass.
+  Windows: 104 existing unit tests pass (one Unix-root fixture corrected),
+  40 concurrent clients, watch/restart/persistence and MCP's 100 tools/status;
+  recording fails explicitly without media. Mac full gates: 229 unit tests
+  plus 1 doctest, 1 existing hardware test ignored; strict e2e 18/18.
+  Three interleaved M2-a pairs versus W.1b + main f21a4c0: CPU 41.6 -> 41.7%,
+  instructions 488.7 -> 488.9 M/s, 18/18 complete files, no video/audio drops.
+  W.1d isolated-daemon `record` and W.1e UI remain. Coordinator owns pending
+  main merge, feature commit and the next Actions daemon/CLI build.
+
+- W.1a qualification / W.1b (2026-10-17, #105 #28): run 39047095306
+  builds the engine on Windows and passes both portable jobs. Next slice
+  selects the daemon platform once and routes media helpers through the
+  trait; a bounded CPU-synthetic stub explicitly refuses native services.
+  Windows daemon IPC/process hooks remain W.1c; no runnable Windows
+  recorder is claimed. Main c8cf497's release-only changes integrated
+  without a merge commit; coordinator owns the staged merge and slice.
+  Remote gates pass (228 unit tests + 1 doctest, 1 hardware test ignored),
+  stub clippy/build and direct CPU-frame probe pass; strict M2-a e2e 18/18.
+  Three interleaved pairs: CPU 41.5% both, 18/18 complete files and no
+  drops; RSS 153 -> 169 MB, not claimed identical. Actions stub build next.
+
+- W.0 qualification / W.1a start (2026-10-17, #105 #28): delegator run
+  39043755843 passes Windows (4m7s) and Ubuntu (1m32s), all portable tests;
+  W.0 merged by the coordinator in main 603c3ac. Initially integrated
+  a8276a1; fast-forwarded to 603c3ac (including security-103) before handoff.
+  W.1 starts with the shared engine build boundary; daemon/plugin/UI seams
+  follow separately. Five strict smoke scenarios pass; three A/B pairs on
+  M2-a: 18/18 complete files, zero drops, CPU 42.0 -> 41.5%, instructions
+  489.4 -> 488.8 M/s (before the security-103 integration).
+  After integration, remote daemon/CLI/UI build and fmt/clippy/228 unit
+  tests + 1 doctest pass (1 existing hardware test ignored). Windows engine
+  build-only qualification remains the next Actions run.
 
 - 8.2l / #106 (2026-10-17): release notes from docs/releases/X.Y.Z.md
   (0.0.5 and 0.0.6 added; body + Full Changelog reproduces both published

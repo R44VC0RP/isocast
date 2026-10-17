@@ -1064,6 +1064,7 @@ fn hash(bytes: &[u8]) -> String {
 }
 
 /// The local date and time for file names: `2026-10-13 09-41-05`.
+#[cfg(unix)]
 fn stamp() -> String {
     // SAFETY: time and localtime_r only write the values they are given.
     let tm = unsafe {
@@ -1081,6 +1082,11 @@ fn stamp() -> String {
         tm.tm_min,
         tm.tm_sec
     )
+}
+
+#[cfg(windows)]
+fn stamp() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H-%M-%S").to_string()
 }
 
 #[cfg(test)]

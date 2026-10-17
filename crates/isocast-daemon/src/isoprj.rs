@@ -1113,9 +1113,10 @@ mod tests {
 
     #[test]
     fn a_project_file_round_trips_with_relative_paths_and_unknown_fields() {
-        let folder = Path::new("/Users/r/Movies/Isocast/2026-10-16 10-00-00 Talk");
+        let root = std::env::temp_dir();
+        let folder = root.join("Isocast/2026-10-16 10-00-00 Talk");
         let mut t = timeline("talk", &[&folder.join("a.session.json")], 3);
-        isoprj::map_paths(&mut t, |p| isoprj::relative_to(p, folder));
+        isoprj::map_paths(&mut t, |p| isoprj::relative_to(p, &folder));
         assert_eq!(t.clips[0].take, Path::new("a.session.json"));
         let file = IsoprjFile {
             format: isoprj::FORMAT.into(),
@@ -1133,8 +1134,8 @@ mod tests {
         assert!(json.contains("\"future\""), "{json}");
         let back: IsoprjFile = serde_json::from_str(&json).unwrap();
         assert_eq!(back, file);
-        let copy = Path::new("/Volumes/Other/Talk");
-        let opened = resolved(&back, copy);
+        let copy = root.join("Other/Talk");
+        let opened = resolved(&back, &copy);
         assert_eq!(opened[0].clips[0].take, copy.join("a.session.json"));
         assert_eq!(opened[0].clips[0].crop.unwrap().width, 0.5);
         assert_eq!(opened[0].clips[0].angle.as_deref(), Some("camera"));

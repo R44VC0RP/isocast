@@ -5,6 +5,17 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-17 (#105 W.1c): `scripts/windows-remote.sh status|sync|cargo|build|run|fetch`
+  uses exon-desk-lan, the PowerShell wrapper and binary git-archive over SSH.
+  Managed source is `C:\isocast-dev\src`; warm target/cache, isolated home,
+  AppData and scratch stay under that root. Uncommitted tracked bytes are
+  exported via a temporary index; `git add -N` includes new files. Unchanged
+  file mtimes survive sync. Results go to the lane scratch `native/runs/`;
+  release executables to `native/bin/`. Run accepts one PowerShell script;
+  use `$OutputEncoding = [Text.UTF8Encoding]::new($false)` when piping Unicode
+  source to Python/rustc. Process plugins and recording still refuse the stub.
+  Real control-plane CLI/MCP work; W.1d record/UI/writer remain separate.
+
 - 2026-10-17 (#100): **hw-batch `--mac any` jobs hold `.bench.lock` only
   while they build and pick a Mac**, then just that Mac's lock (as the
   docs said); `pick_mac` skips a Mac whose local lock another runner
@@ -1768,6 +1779,26 @@ each section. Delete entries that stop being true.
   let the name run into the empty ISO lane (`ListRow.label-room`).
   Gotcha: Slint `Text` layout info feeds the docks' layout, so any label
   chosen from its own dock's `width` is a binding loop error.
+- 2026-10-17 (#105 #28, W.1b): the daemon selects `NativePlatform` once
+  in `platform.rs`; it is a re-export of MacPlatform on Mac (no wrapper or
+  dynamic dispatch), and StubPlatform elsewhere. Media/clock/credential,
+  snapshot, export and recovery calls use the trait. `app_identifier`
+  gains a trait hook, delegating to the same Keychain bundle-id lookup on
+  Mac. The stub is deliberately CPU-synthetic only, not a working renderer
+  or recorder; unsupported native operations fail rather than pretending
+  to capture, write, flush, protect secrets or measure free disk space.
+  Unix IPC/process hooks and native diagnostics/hotkeys/plugins are still
+  W.1c; their policy is not changed here.
+
+- 2026-10-17 (#105 #28, W.1a): W.0 hosted run 39043755843 is green on
+  both OSes, merged in 603c3ac. W.1 is sliced into engine build boundary,
+  daemon platform selection, OS services/IPC, CLI and UI. The engine keeps
+  exactly its macOS Metal features; Windows selects DX12. Non-Unix manifest
+  creation uses std's atomic `create_new` (Windows also opens the reparse
+  point), not an unchecked create/truncate. File/folder sync failures still
+  propagate; this is compile groundwork, not a claim of qualified Windows
+  durability. Security-103 is integrated; no daemon plugin policy changes.
+
 - 2026-10-17 (#106): **Release notes live in `docs/releases/X.Y.Z.md`.**
   They are read at the tag (preflight via the contents API, the release
   job from its checkout), embedded in the appcast as markdown and used as
@@ -6103,6 +6134,19 @@ each section. Delete entries that stop being true.
   (drive.py, nle_test.lua, run.sh; run with `hw-batch.py now cmd --gui
   --mac m2-b --command 'bash ~/nle-export/resolve/run.sh 420'`). Resolve
   21.1.1 needed Rosetta (installed on m2-b).
+- 2026-10-17 (#105 W.1c): Windows `std::process::Command` with redirected
+  stdio still inherited other caller handles: detached isocastd kept a
+  PowerShell capture pipe open after the CLI exited. Native launcher uses
+  STARTUPINFOEX/HANDLE_LIST (only NUL and its log) and job breakaway, failing
+  explicitly when a containing job forbids breakaway. Runner output is
+  file-backed and follows the requested process, never grandchild-held EOF.
+  Pipes keep a first-instance reservation and same-user kernel identity;
+  mixed elevated/non-elevated launches remain unqualified, not bypassed.
+  `hung_up` stays nonblocking during reads; shutdown wakes both directions
+  and gives the peer EOF even while a Stream clone remains alive (native
+  probes). Unsupported recording startup briefly creates then asynchronously
+  removes its empty project; the root `.isocast.lock` is intentionally kept.
+
 - 2026-10-17 (#85): **take.sh on isocast-m2-a: a wedged Terminal.** The
   Terminal there had run since 2026-10-12 with one stale window ("Grant
   Isocast permissions.command", its shell gone) and answered neither
