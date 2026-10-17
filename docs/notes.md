@@ -1643,6 +1643,22 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-17 (#105, W.0): **Windows starts on Actions, not a local Windows
+  machine.** PLAN W is the ordered lane; Ryan supplies hardware after the
+  hosted alpha checklist. W.0 covers protocol, diagnostics and obs-websocket
+  only, not a runnable recorder. The engine still imports Unix
+  `OpenOptionsExt` in `record/mod.rs::write_manifest_with`; client IPC is
+  `UnixStream`. Those need real seams, not success-shaped Windows stubs.
+  `scripts/windows-ci.sh` exports clean HEAD, scans it with
+  `publish-snapshot.sh --scan-only DIR`, and uses its own public checkout
+  under `/Volumes/IsocastBuild/windows/scratch/public`, never the release
+  snapshot checkout. Its only push ref is `ci/windows`, with an exact lease;
+  results are keyed by the public snapshot SHA under `scratch/runs/`.
+  The first real Actions run is still pending the delegator's commit/push.
+  `docs/architecture.md`, `recording.md` and `alpha-test.md` contain older
+  2 s/AVAssetWriter language: the current implementation and
+  `docs/crash-safe-takes.md` define the 500 ms/default-on durability target.
+
 - 2026-10-16 (#101): **An audio source that stops while recording is in
   the manifest per file**: `files[].audio_stops` (source, track,
   `time_seconds` on the take's clock, optional `resumed_seconds`,
