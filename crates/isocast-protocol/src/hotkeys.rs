@@ -331,6 +331,7 @@ arguments!(ScreenshotArgs {
 pub enum Arguments {
     Empty,
     Stream(StreamArgs),
+    Replay(crate::replay::ReplayParams),
     Scene(SceneArgs),
     Index(IndexArgs),
     Source(SourceArgs),
@@ -379,15 +380,16 @@ impl Binding {
             | "recording.resume"
             | "recording.pause_toggle"
             | "recording.split"
-            | "replay.start"
-            | "replay.stop"
-            | "replay.toggle"
-            | "replay.save"
             | "studio.toggle"
             | "timeline.close"
             | "timeline.clear" => parse::<Empty>(&self.args).map(|_| Arguments::Empty),
             "streaming.start" | "streaming.stop" | "streaming.toggle" => {
                 parse(&self.args).map(Arguments::Stream)
+            }
+            // A canvas's buffer; the main one's unless args say vertical
+            // (as before canvases, with no args).
+            "replay.start" | "replay.stop" | "replay.toggle" | "replay.save" => {
+                parse(&self.args).map(Arguments::Replay)
             }
             "transition.take" => parse(&self.args).map(Arguments::Take),
             "recording.marker" | "timeline.marker" => parse(&self.args).map(Arguments::Marker),
@@ -482,7 +484,7 @@ pub fn catalogue() -> Catalogue {
         ("toggle", "Toggle replay buffer"),
         ("save", "Save replay"),
     ] {
-        actions.push(action::<Empty>(
+        actions.push(action::<crate::replay::ReplayParams>(
             &format!("replay.{id}"),
             label,
             "Replay Buffer",

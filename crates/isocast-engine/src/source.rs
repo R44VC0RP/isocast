@@ -273,6 +273,11 @@ impl<F: Clone> FrameSlot<F> {
         self.stopped.lock().clone()
     }
 
+    /// Update a stopped output's reason without briefly making it healthy.
+    pub(crate) fn replace_stop(&self, reason: String) {
+        *self.stopped.lock() = Some(reason);
+    }
+
     /// Forget why it stopped: something feeds it again (a new compositor
     /// for a canvas whose last one failed).
     pub(crate) fn resume(&self) {

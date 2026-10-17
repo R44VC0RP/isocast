@@ -1287,8 +1287,7 @@ impl Controls {
     }
 
     /// Tell once when the vertical canvas stopped after a contained failure
-    /// (#96), with what brings it back: an engine restart, once nothing
-    /// records or streams.
+    /// (#96), with what brings it back (poison needs an engine restart).
     fn vertical_came_or_went(&self, app: &Rc<App>) {
         let stopped = {
             let s = app.session.borrow();
@@ -1307,9 +1306,8 @@ impl Controls {
             ToastKind::Error,
             "The vertical canvas stopped",
             format!(
-                "{why}. The main canvas, its recording and its streams keep going. The \
-                 vertical canvas comes back when the engine restarts, which it can once \
-                 nothing records or streams."
+                "{why}. The main canvas, its recording and its streams keep going. {}",
+                crate::model::vertical_recovery(&why)
             ),
         )
         .key("vertical-stopped")
@@ -2225,18 +2223,25 @@ fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
     );
     let setup = s.setup.as_deref();
     let settings = setup.map(|x| x.virtual_camera.clone()).unwrap_or_default();
-    area.set_vcam_targets(model(vec![
+    let mut targets = vec![
         kit::option("program", "Program", ""),
         kit::option("preview", "Preview", "Studio Mode"),
         kit::option("scene", "A scene", ""),
         kit::option("source", "A source", ""),
-    ]));
+    ];
+    // Offered with a vertical canvas (and kept while chosen, so the
+    // engine's validation says what's missing).
+    if setup.is_some_and(|x| x.vertical.is_some()) || settings.target == VcamTarget::Vertical {
+        targets.push(kit::option("vertical", "Vertical program", ""));
+    }
+    area.set_vcam_targets(model(targets));
     area.set_vcam_target(
         match settings.target {
             VcamTarget::Program => "program",
             VcamTarget::Preview => "preview",
             VcamTarget::Scene => "scene",
             VcamTarget::Source => "source",
+            VcamTarget::Vertical => "vertical",
         }
         .into(),
     );
@@ -2255,7 +2260,12 @@ fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
             .collect()
     })));
     area.set_vcam_source(settings.source.clone().unwrap_or_default().into());
-    let canvas = setup.map(|x| (x.canvas.width, x.canvas.height));
+    // The size with none set: the canvas the camera shows.
+    let canvas = setup.map(|x| {
+        let mut canvas = settings.clone();
+        (canvas.width, canvas.height) = (None, None);
+        canvas.size(x)
+    });
     let mut sizes = vec![kit::option(
         "",
         "Canvas",
@@ -2279,7 +2289,7 @@ fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
         Some(x) if x.width > 0 => (x.width, x.height, x.fps),
         _ => {
             let (w, h) = setup.map_or((0, 0), |x| settings.size(x));
-            (w, h, setup.map_or(0, |x| x.canvas.fps))
+            (w, h, setup.map_or(0, |x| settings.fps(x)))
         }
     };
     area.set_vcam_format(format!("{w}×{h} at {fps} fps").into());
@@ -2573,9 +2583,9 @@ fn toggle_replay(app: &Rc<App>) {
     };
     app.changed(Changed::BUSY | Changed::REPLAY);
     let method = if on {
-        Method::ReplayStop
+        Method::ReplayStop(None)
     } else {
-        Method::ReplayStart
+        Method::ReplayStart(None)
     };
     app.call_as::<ReplayStatus>(method, move |app, result| {
         app.session.borrow_mut().busy_replay = false;
@@ -2607,7 +2617,7 @@ fn save_replay(app: &Rc<App>) {
         s.saving_replay = true;
     }
     app.changed(Changed::REPLAY);
-    app.call_as::<ReplaySaved>(Method::ReplaySave, |app, result| {
+    app.call_as::<ReplaySaved>(Method::ReplaySave(None), |app, result| {
         app.session.borrow_mut().saving_replay = false;
         match result {
             Ok(saved) => replay_saved(app, &saved),
@@ -2834,10 +2844,15 @@ fn vertical_words(s: &crate::session::Session) -> (Option<String>, bool) {
         .as_ref()
         .and_then(|x| x.engine.as_ref())
         .and_then(|e| e.vertical.as_ref())
-        .is_some_and(|v| v.stopped.is_some());
-    if stopped && s.setup.as_ref().is_some_and(|x| x.vertical.is_some()) {
+        .and_then(|v| v.stopped.as_deref());
+    if let Some(why) = stopped
+        && s.setup.as_ref().is_some_and(|x| x.vertical.is_some())
+    {
         return (
-            Some("vertical canvas stopped: restart the engine to bring it back".into()),
+            Some(format!(
+                "vertical canvas stopped. {}",
+                crate::model::vertical_recovery(why)
+            )),
             true,
         );
     }

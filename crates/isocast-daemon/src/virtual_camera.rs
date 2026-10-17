@@ -59,7 +59,7 @@ impl CameraOutput {
         {
             status.settings = setup.virtual_camera.clone();
             (status.width, status.height) = setup.virtual_camera.size(setup);
-            status.fps = setup.canvas.fps;
+            status.fps = setup.virtual_camera.fps(setup);
         }
         if status.transport.is_empty() {
             status.transport = "cmio-iosurface".into();

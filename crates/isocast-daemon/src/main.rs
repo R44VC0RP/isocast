@@ -1091,9 +1091,10 @@ trait LiveEngine: Send + Sync {
         &self,
         on_change: isocast_engine::record::OnCameraChange,
     ) -> Result<isocast_engine::record::VirtualCamera>;
-    /// Keep the program in a replay buffer.
+    /// Keep `canvas`'s program in a replay buffer.
     fn replay(
         &self,
+        canvas: CanvasId,
         settings: &isocast_protocol::replay::ReplaySettings,
         stream: Option<&StreamSettings>,
         on_change: isocast_engine::replay::OnChange,
@@ -1218,11 +1219,12 @@ impl<P: Platform<SharedSurface = Surface>> LiveEngine for LiveEngineOf<P> {
 
     fn replay(
         &self,
+        canvas: CanvasId,
         settings: &isocast_protocol::replay::ReplaySettings,
         stream: Option<&StreamSettings>,
         on_change: isocast_engine::replay::OnChange,
     ) -> Result<isocast_engine::replay::ReplayBuffer> {
-        isocast_engine::replay::start(self, settings, stream, on_change)
+        isocast_engine::replay::start_canvas(self, canvas, settings, stream, on_change)
     }
 
     fn virtual_camera(
@@ -1386,11 +1388,10 @@ impl Daemon {
             );
         }
         if state.replay.active() {
-            return Some(
-                "keeping a replay buffer; save it if needed, then stop it (`isocast replay stop`, \
-                 or MCP's stop_replay)"
-                    .into(),
-            );
+            return Some(format!(
+                "keeping a replay buffer; save it if needed, then stop it ({})",
+                state.replay.stop_hint()
+            ));
         }
         if state.tuning {
             return Some("benchmarking the encoders (`tune`); wait for it to finish".into());
@@ -1414,7 +1415,7 @@ impl Daemon {
                 | Method::StreamStart(_)
                 | Method::TimelineExport(_)
                 | Method::VirtualCameraStart
-                | Method::ReplayStart
+                | Method::ReplayStart(_)
                 | Method::Resume
                 | Method::Optimize(_)
         )
@@ -1536,10 +1537,18 @@ impl Daemon {
             Method::VirtualCameraStop => to_json(self.virtual_camera_stop()),
             Method::VirtualCameraStatus => to_json(self.virtual_camera_status()),
             Method::VirtualCameraRemove => self.virtual_camera_remove().and_then(to_json),
-            Method::ReplayStart => self.replay_start().and_then(to_json),
-            Method::ReplayStop => self.replay_stop().and_then(to_json),
-            Method::ReplaySave => self.replay_save().and_then(to_json),
-            Method::ReplayStatus => to_json(self.replay_status()),
+            Method::ReplayStart(params) => self
+                .replay_start(params.unwrap_or_default().canvas)
+                .and_then(to_json),
+            Method::ReplayStop(params) => self
+                .replay_stop(params.unwrap_or_default().canvas)
+                .and_then(to_json),
+            Method::ReplaySave(params) => self
+                .replay_save(params.unwrap_or_default().canvas)
+                .and_then(to_json),
+            Method::ReplayStatus(params) => {
+                to_json(self.replay_status(params.unwrap_or_default().canvas))
+            }
             Method::ProjectorOpen(params) => self.projector_open(*params).and_then(to_json),
             Method::ProjectorClose(params) => self.projector_close(params).and_then(to_json),
             Method::ProjectorList => to_json(self.projector_list()),
@@ -2818,6 +2827,7 @@ impl Daemon {
                 .map(|setup| setup.recording.program.bytes_per_second(&setup.canvas))
                 .filter(|rate| *rate > 0.0),
             daemon: Some(daemon_build()),
+            vertical_replay: state.replay.vertical_status(state.setup.as_ref()),
         };
         // Measured without the lock (a slow disk can't hold up the rest).
         drop(state);
@@ -3586,7 +3596,7 @@ impl Daemon {
                 } => {
                     if broken {
                         daemon.emergency_stop(message.clone());
-                    } else if matches!(name.as_str(), "mixer" | "compositor") {
+                    } else if name == "mixer" {
                         let daemon = daemon.clone();
                         let why = message.clone();
                         thread::spawn(move || {
@@ -3594,15 +3604,28 @@ impl Daemon {
                                 daemon.fail_streams(&why);
                             })
                         });
-                    } else if name == "vertical compositor" {
-                        // Only the vertical canvas's picture stopped: its
-                        // streams end (they'd send a frozen picture with
-                        // live audio); main's keep going.
+                    } else if matches!(name.as_str(), "compositor" | "vertical compositor") {
+                        // A compositor owns only its canvas's picture; the
+                        // other canvas still has healthy video and audio.
+                        let canvas = if name == "compositor" {
+                            CanvasId::Main
+                        } else {
+                            CanvasId::Vertical
+                        };
                         let daemon = daemon.clone();
-                        let why = format!("the vertical canvas stopped: {message}");
+                        let why = if canvas.is_main() {
+                            message.clone()
+                        } else {
+                            format!("the vertical canvas stopped: {message}")
+                        };
                         thread::spawn(move || {
-                            daemon.contain("failed vertical program output", || {
-                                daemon.fail_canvas_streams(CanvasId::Vertical, &why);
+                            daemon.contain("failed canvas program output", || {
+                                daemon.fail_canvas_streams(canvas, &why);
+                                // The vertical replay buffer would keep a
+                                // frozen picture; main's keeps going as before.
+                                if !canvas.is_main() {
+                                    daemon.fail_canvas_replay(canvas, &why);
+                                }
                             })
                         });
                     }
@@ -3802,7 +3825,7 @@ impl Daemon {
     /// Stop the live engine (after the recording, if one runs).
     fn stop_engine(&self) {
         self.virtual_camera_stop();
-        let _ = self.replay_stop();
+        self.replay_stop_all();
         let engine = self.state.lock().engine.take();
         if let Some(engine) = engine {
             engine.stop();
@@ -4293,10 +4316,11 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
                                         && !setup.source(id).is_some_and(|s| s.kind.has_video())
                                 })
                         }
+                        Target::Vertical => previous.vertical.is_some() && setup.vertical.is_none(),
                         _ => false,
                     };
                 if removed {
-                    notes.push("virtual_camera: its selected scene/video source was removed while stopped; falling back to program".into());
+                    notes.push("virtual_camera: its selected scene/video source (or the vertical canvas) was removed while stopped; falling back to program".into());
                     setup.virtual_camera.target = Target::Program;
                     setup.virtual_camera.scene = None;
                     setup.virtual_camera.source = None;
@@ -4310,10 +4334,16 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
                     message,
                 });
             }
-            // The camera's negotiated format stays fixed until Stop.
+            // The camera's negotiated format stays fixed until Stop, and so
+            // does the vertical canvas it shows (target = vertical).
             if state.camera.active()
                 && state.setup.as_ref().is_some_and(|current| {
-                    current.canvas != setup.canvas || current.virtual_camera != setup.virtual_camera
+                    let vertical = |s: &Setup| s.vertical.as_ref().map(|v| v.canvas(&s.canvas));
+                    current.canvas != setup.canvas
+                        || current.virtual_camera != setup.virtual_camera
+                        || (current.virtual_camera.target
+                            == isocast_protocol::virtual_camera::Target::Vertical
+                            && vertical(current) != vertical(&setup))
                 })
             {
                 problems.push(Issue { path: "virtual_camera".into(), message: "stop the virtual camera before changing its settings or canvas; scene contents can be edited live".into() });
@@ -4401,7 +4431,7 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
                 .into(),
         );
     }
-    if state.replay.active()
+    if state.replay.active_on(CanvasId::Main)
         && changes.iter().any(|change| {
             change.path.starts_with("recording.replay")
                 || change.path == "stream"
@@ -4412,6 +4442,20 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
             "the replay buffer is running: it keeps its current format and length until it \
              stops; the changes take effect at its next start (`isocast replay stop`, then \
              `isocast replay start`)"
+                .into(),
+        );
+    }
+    if state.replay.active_on(CanvasId::Vertical)
+        && changes.iter().any(|change| {
+            change.path.starts_with("recording.replay")
+                || change.path == "vertical.stream"
+                || change.path.starts_with("vertical.stream.")
+        })
+    {
+        notes.push(
+            "the vertical replay buffer is running: it keeps its current format and length \
+             until it stops; the changes take effect at its next start (`isocast replay stop \
+             --canvas vertical`, then `isocast replay start --canvas vertical`)"
                 .into(),
         );
     }

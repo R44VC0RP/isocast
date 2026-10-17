@@ -998,6 +998,15 @@ native app; each verified against OBS's behaviour on a test Mac.
       starts are refused while the canvas is stopped; turning the canvas
       off and on clears the stop; no "add the key" toast when every
       vertical destination is turned off.
+    - [x] **#96 / 0.0.7 remaining canvas outputs.** Main compositor failure
+      leaves healthy vertical streams alone; atomic poison stop reason;
+      quiet repeated vertical Stop and accurate recovery text; independent
+      vertical replay (API/CLI/MCP/hotkeys), vertical virtual camera target;
+      failed-file drops include the missing tail; approved `vertical` e2e.
+      AWS M2 qualification complete; coordinator Tier-1 review remains.
+    - [ ] **#96 live scene linking.** Keep `follow_main` fixed during a take
+      until main/independent scene histories can be atomically spliced across
+      transitions, pauses and split boundaries (the permitted 0.0.7 deferral).
 - [x] **G.8 WebM and MKV media (#61).** Media sources and stingers play
   Matroska/WebM (sniffed by content): VP9 with alpha (OBS's stinger
   format), AV1 where the Mac decodes it, H.264/HEVC in MKV, Opus and AAC
@@ -1447,6 +1456,18 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- #96 / 0.0.7 (2026-10-17): canvas-scoped stream failures, atomic poison
+  recovery state, quiet ended-stream Stop, missing-tail frame counts,
+  vertical replay and virtual camera. M2-a: fault/poison healthy outputs
+  0 loss; 4 replay saves decode/sync; strict e2e 17 existing scenarios pass,
+  then the corrected vertical fixture passes (6 movies/578 frames plus
+  287 stream frames, 0 drops). M2-b: portrait camera IOSurface probe
+  1080×1920/24 fps, correct canvas/color and failure; default replay start
+  mid-take keeps both 8 s/240-frame files and the replay loss-free.
+  Remote gates 228 pass/1 existing ignored; final warm-up hook has targeted
+  engine/daemon clippy/tests and full fmt. Working diff and review handoff:
+  /Volumes/IsocastBuild/vertical-007/scratch/REPORT.md; live linking deferred.
 
 - A.4 #90 fix round 1 (2026-10-16): removed the early ISO hold and share
   cap after review found lost ISO content without protected-output gain.

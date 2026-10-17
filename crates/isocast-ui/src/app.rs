@@ -424,6 +424,10 @@ impl App {
                 self.session.borrow_mut().vcam = Some(camera.clone());
                 self.changed(Changed::VCAM);
             }
+            // The Controls dock shows the main canvas's buffer; the
+            // vertical one's (`isocast replay --canvas vertical`) isn't
+            // shown here yet.
+            Event::Replay { replay } if !replay.canvas.is_main() => {}
             Event::Replay { replay } => {
                 self.session.borrow_mut().replay = Some(replay.clone());
                 self.changed(Changed::REPLAY);

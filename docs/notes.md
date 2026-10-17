@@ -615,11 +615,6 @@ each section. Delete entries that stop being true.
 
 ## Questions for Ryan
 
-- 2026-10-16 (#86): may the existing e2e suite gain a `vertical` scenario
-  covering two programs, two stream receivers, one shared ISO set, independent
-  scene switching and per-canvas capacity warnings? This lane uses direct
-  runtime checks with the existing e2e helpers; no new test file or harness.
-
 - 2026-10-15 (#18): with a `[stream]` in the profile the replay buffer
   always encodes as the stream does (its size, bitrate, 2 s keyframes),
   even while not streaming, so it can share the stream's encoder: a profile
@@ -1642,6 +1637,29 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-17 (#96 / 0.0.7): **Canvas failures are local, mixer failures shared.**
+  A main compositor panic must not end healthy vertical streams; the daemon
+  now selects that canvas's stream slots, just as for vertical failures.
+  Poison recovery replaces the stop reason atomically (never clears it).
+  Vertical Stop succeeds even when the stream already ended, preserving its
+  failure reason/counters. Ordinary vertical failures recover by off/on after
+  recording stops; poisoned scene state still needs an engine restart.
+  Failed-file durations remain the finalized media duration, but manifest
+  dropped_frames counts through the take's actual, pause-mapped end.
+  **Live follow_main remains guarded:** recording binds one SessionControl
+  for its entire vertical scene history; no atomic link/transition splice
+  exists across its main/independent histories, split boundaries and pauses.
+  Lifting only the refusal would write incorrect vertical_scenes.
+  **Ryan approved feature e2e scenarios:** `vertical` covers dual recordings,
+  splits, independent scenes and a local vertical stream, with strict zero
+  protected loss. Replay has independent per-canvas buffers (shared profile
+  settings, CLI/MCP/hotkeys; OBS stays main-only). The virtual camera's
+  `target = "vertical"` uses the vertical size/fps, including 1080×1920.
+  The vertical replay encoder is placed before recording even with default
+  replay settings/no stream: a mid-take start must not disturb protected
+  writers (#68). M2-b's default start kept both 8 s/240-frame files loss-free.
+  Qualification: vertical-007/scratch/REPORT.md.
 
 - 2026-10-16 (#101): **An audio source that stops while recording is in
   the manifest per file**: `files[].audio_stops` (source, track,

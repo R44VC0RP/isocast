@@ -573,7 +573,11 @@ Rename a recording project (by id, from list_projects): its folder becomes `<dat
 
 ## replay_status
 
-The replay buffer's state, seconds held, memory used and its limit, format, whether it shares the stream's encoder, missed frames and the last save.
+The replay buffer's state, seconds held, memory used and its limit, format, whether it shares the stream's encoder, missed frames and the last save; canvas "vertical" for the vertical canvas's buffer.
+
+| Argument | Type | Description |
+|---|---|---|
+| `canvas` | CanvasId | `main` (the default: the program) or `vertical` (the setup's vertical canvas's program, kept with the same `recording.replay` settings, as its own buffer). One canvas's buffer starts, stops and saves without touching the other's. |
 
 ## request_permissions
 
@@ -612,7 +616,11 @@ Move the cut between `clip` and the clip after it by `by_seconds` (negative: ear
 
 ## save_replay
 
-Save the replay buffer: write the last recording.replay.seconds of the program, up to this moment, to a new MOV/MP4 in the recordings folder (the running recording's project folder, if one records), without interrupting recording or streaming. Returns the file's path, length, frames and any missed frames.
+Save the replay buffer: write the last recording.replay.seconds of the program, up to this moment, to a new MOV/MP4 in the recordings folder (the running recording's project folder, if one records), without interrupting recording or streaming. Canvas "vertical" saves the vertical canvas's buffer (its file name ends in "vertical"). Returns the file's path, length, frames and any missed frames.
+
+| Argument | Type | Description |
+|---|---|---|
+| `canvas` | CanvasId | `main` (the default: the program) or `vertical` (the setup's vertical canvas's program, kept with the same `recording.replay` settings, as its own buffer). One canvas's buffer starts, stops and saves without touching the other's. |
 
 ## set_angle
 
@@ -694,7 +702,11 @@ Start recording the live setup (or the given setup, which then replaces the live
 
 ## start_replay
 
-Start the replay buffer: keep the last recording.replay.seconds (30 by default) of the encoded program, video and program mix, in memory, starting the live engine if needed; recording and streaming are independent of it. It shares the stream's encoder when the setup has a [stream]. Then save_replay writes the last seconds to a file. Returns its status.
+Start the replay buffer: keep the last recording.replay.seconds (30 by default) of the encoded program, video and program mix, in memory, starting the live engine if needed; recording and streaming are independent of it. It shares the stream's encoder when the setup has a [stream]. Then save_replay writes the last seconds to a file. With canvas "vertical", the vertical canvas's program in a buffer of its own (same settings; sharing a [vertical.stream]'s encoder); each canvas's buffer starts, stops and saves independently. Returns its status.
+
+| Argument | Type | Description |
+|---|---|---|
+| `canvas` | CanvasId | `main` (the default: the program) or `vertical` (the setup's vertical canvas's program, kept with the same `recording.replay` settings, as its own buffer). One canvas's buffer starts, stops and saves without touching the other's. |
 
 ## start_stream
 
@@ -711,7 +723,11 @@ Stop recording and finish every file. Returns the report: each file, its frames,
 
 ## stop_replay
 
-Stop the replay buffer, discarding what it holds (save_replay first to keep it). Returns its final status.
+Stop the replay buffer, discarding what it holds (save_replay first to keep it); canvas "vertical" stops the vertical canvas's buffer only. Returns its final status.
+
+| Argument | Type | Description |
+|---|---|---|
+| `canvas` | CanvasId | `main` (the default: the program) or `vertical` (the setup's vertical canvas's program, kept with the same `recording.replay` settings, as its own buffer). One canvas's buffer starts, stops and saves without touching the other's. |
 
 ## stop_stream
 
@@ -835,7 +851,7 @@ Remove Isocast Virtual Camera from macOS (the release app's camera extension), f
 
 ## virtual_camera_start
 
-Start Isocast Virtual Camera. Takes no arguments: configure virtual_camera.target/scene/source/width/height through plan_change and apply_change first. Requires its signed/approved extension; never installs it. Recording and streaming stay independent.
+Start Isocast Virtual Camera. Takes no arguments: configure virtual_camera.target/scene/source/width/height through plan_change and apply_change first (target "vertical" shows the vertical program, 1080x1920 by default; it needs the vertical canvas on). Requires its signed/approved extension; never installs it. Recording and streaming stay independent.
 
 ## virtual_camera_status
 

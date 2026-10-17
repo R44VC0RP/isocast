@@ -9,6 +9,10 @@
 //! size, 1 s keyframes). Recordings encode inside their file writers and
 //! can't share yet.
 //!
+//! Each canvas can have a buffer: the vertical canvas's (#96) takes its
+//! program from that canvas's own encoders, sharing a `[vertical.stream]`'s
+//! the same way, else encoding at the vertical program file's size.
+//!
 //! It keeps whole groups of pictures: from the newest keyframe at least
 //! `seconds` (plus a little slack for a save to wait) before the newest
 //! frame, and the AAC frames alongside. A save waits for the moment it was
@@ -27,9 +31,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::{Local, SecondsFormat};
-use isocast_protocol::Container;
 use isocast_protocol::replay::{ReplaySaved, ReplaySettings, ReplayState, ReplayStatus};
 use isocast_protocol::stream::StreamSettings;
+use isocast_protocol::{CanvasId, Container};
 
 use crate::record::Engine;
 use crate::stream::encoder::{EncoderSpec, Sink, Subscription};
@@ -67,7 +71,33 @@ pub fn encoder_spec<P: Platform>(
     }
     let setup = engine.setup();
     let (width, height) = setup.recording.program.size(&setup.canvas);
-    let fps = setup.canvas.fps;
+    own_spec(settings, width, height, setup.canvas.fps)
+}
+
+/// [`encoder_spec`] for `canvas`'s buffer: `stream` is that canvas's
+/// stream settings (`[vertical.stream]` for the vertical one).
+pub fn canvas_encoder_spec<P: Platform>(
+    engine: &Engine<P>,
+    canvas: CanvasId,
+    settings: &ReplaySettings,
+    stream: Option<&StreamSettings>,
+) -> Result<EncoderSpec> {
+    if canvas.is_main() {
+        return Ok(encoder_spec(engine, settings, stream));
+    }
+    if let Some(stream) = stream {
+        return Ok(StreamSpec::of_canvas(engine, canvas, stream.clone())?.encoder());
+    }
+    let setup = engine
+        .setup()
+        .for_canvas(canvas)
+        .context("vertical: canvas is not enabled")?;
+    let (width, height) = setup.recording.program.size(&setup.canvas);
+    Ok(own_spec(settings, width, height, setup.canvas.fps))
+}
+
+/// The buffer's own encoder for a `width`×`height` picture at `fps`.
+fn own_spec(settings: &ReplaySettings, width: u32, height: u32, fps: u32) -> EncoderSpec {
     EncoderSpec {
         video: LiveVideoSpec {
             width,
@@ -229,6 +259,11 @@ impl Sink for Shared {
 
     fn push(&self, ready: &[Media]) {
         let mut ring = self.ring.lock();
+        // Failed (`ReplayBuffer::fail`) while the encoder still ran: keep
+        // nothing more.
+        if ring.ended {
+            return;
+        }
         for media in ready {
             ring.push(media, self.keep, self.max_bytes);
         }
@@ -271,8 +306,21 @@ pub fn start<P: Platform>(
     stream: Option<&StreamSettings>,
     on_change: OnChange,
 ) -> Result<ReplayBuffer> {
-    let spec = encoder_spec(engine, settings, stream);
+    start_canvas(engine, CanvasId::Main, settings, stream, on_change)
+}
+
+/// [`start`] for `canvas`'s program; `stream` is that canvas's stream
+/// settings (`[vertical.stream]` for the vertical one).
+pub fn start_canvas<P: Platform>(
+    engine: &Engine<P>,
+    canvas: CanvasId,
+    settings: &ReplaySettings,
+    stream: Option<&StreamSettings>,
+    on_change: OnChange,
+) -> Result<ReplayBuffer> {
+    let spec = canvas_encoder_spec(engine, canvas, settings, stream)?;
     let status = ReplayStatus {
+        canvas,
         state: ReplayState::Running,
         seconds: settings.seconds,
         max_memory_bytes: u64::from(settings.max_memory_mb) << 20,
@@ -296,10 +344,19 @@ pub fn start<P: Platform>(
         status: Mutex::new(status),
         on_change,
     });
-    let subscription =
+    let subscription = if canvas.is_main() {
         engine
             .encoders()
-            .subscribe(engine, &spec, "the replay buffer", shared.clone())?;
+            .subscribe(engine, &spec, "the replay buffer", shared.clone())?
+    } else {
+        engine.canvas_encoders(canvas)?.subscribe_canvas(
+            engine,
+            canvas,
+            &spec,
+            "the vertical replay buffer",
+            shared.clone(),
+        )?
+    };
     *shared.subscription.lock() = Some(subscription);
     let platform = engine.platform().clone();
     let replay = ReplayBuffer {
@@ -334,6 +391,19 @@ impl ReplayBuffer {
     /// Whether it still keeps the program (it hasn't failed or stopped).
     pub fn is_running(&self) -> bool {
         self.shared.status.lock().state == ReplayState::Running
+    }
+
+    /// End it with a failure (`message` says why), as if its encoder had
+    /// failed: for example when its canvas's picture stopped (#96). Does
+    /// nothing unless it is running.
+    pub fn fail(&self, message: String) {
+        if !self.is_running() {
+            return;
+        }
+        Sink::ended(self.shared.as_ref(), &Ended::Failed(message));
+        // Leave the encoder (it stops unless another output uses it).
+        let subscription = self.shared.subscription.lock().take();
+        drop(subscription);
     }
 
     /// Stop keeping the program and let go of what it holds. Returns the
@@ -416,6 +486,7 @@ impl ReplayBuffer {
             .sum();
         let start = clip.video[0].0;
         let saved = ReplaySaved {
+            canvas: self.shared.status.lock().canvas,
             path: path.display().to_string(),
             seconds: clip.end.saturating_since(start).as_secs_f64(),
             requested_at,
@@ -446,7 +517,11 @@ impl ReplayBuffer {
         // is known once a later one, or one within a frame, has come.
         loop {
             if shared.subscription.lock().is_none() {
-                bail!("the replay buffer is stopped; start it with `isocast replay start`");
+                let flag = match shared.status.lock().canvas {
+                    CanvasId::Main => "",
+                    CanvasId::Vertical => " --canvas vertical",
+                };
+                bail!("the replay buffer is stopped; start it with `isocast replay start{flag}`");
             }
             let done = ring
                 .newest_video

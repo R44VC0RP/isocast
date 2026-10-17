@@ -635,16 +635,6 @@ impl Daemon {
                     }
                 }
                 "recording.split" => Method::Split,
-                "replay.start" => Method::ReplayStart,
-                "replay.stop" => Method::ReplayStop,
-                "replay.save" => Method::ReplaySave,
-                "replay.toggle" => {
-                    if self.state.lock().replay.active() {
-                        Method::ReplayStop
-                    } else {
-                        Method::ReplayStart
-                    }
-                }
                 "timeline.close" => Method::TimelineClose,
                 "studio.toggle" => {
                     let mut state = self.state.lock();
@@ -688,6 +678,25 @@ impl Daemon {
                     Method::StreamStop(params(canvas))
                 } else {
                     Method::StreamStart(params(canvas))
+                }
+            }
+            // A canvas's replay buffer; the main one's unless args say
+            // vertical.
+            Arguments::Replay(args) => {
+                let canvas = args.canvas;
+                let params = isocast_protocol::replay::ReplayParams::of(canvas);
+                match action {
+                    "replay.start" => Method::ReplayStart(params),
+                    "replay.stop" => Method::ReplayStop(params),
+                    "replay.save" => Method::ReplaySave(params),
+                    "replay.toggle" => {
+                        if self.state.read().replay.active_on(canvas) {
+                            Method::ReplayStop(params)
+                        } else {
+                            Method::ReplayStart(params)
+                        }
+                    }
+                    _ => return Err(invalid(format!("action: {action} is not available"))),
                 }
             }
             Arguments::Marker(args) => Method::Marker { label: args.label },

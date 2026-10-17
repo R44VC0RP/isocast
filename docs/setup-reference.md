@@ -1342,9 +1342,12 @@ How the vertical program is recorded, in `recording.folder` alongside the main p
 | `height` | integer (optional) | |
 | `scene` | string (optional) | |
 | `source` | string (optional) | |
-| `target` | [Target](#target) | Program, studio preview, or an explicit scene/source id. Default `"program"`. |
-| `width` | integer (optional) | Output dimensions; both absent uses the canvas. Other aspect ratios are letterboxed. These are the camera extension's advertised modes. |
+| `target` | [Target](#target) | Program, studio preview, the vertical program, or an explicit scene/source id. Default `"program"`. |
+| `width` | integer (optional) | Output dimensions; both absent uses the canvas (the vertical canvas's for target = vertical). Other aspect ratios are letterboxed. These are the camera extension's advertised modes. |
 
 ## Target
 
-One of: `"program"`, `"preview"`, `"scene"`, `"source"`.
+One of:
+
+- `"program"` \| `"preview"` \| `"scene"` \| `"source"`
+- `"vertical"`: The vertical canvas's program (`[vertical]` must be on).

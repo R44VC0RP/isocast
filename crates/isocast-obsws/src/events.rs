@@ -297,6 +297,10 @@ impl Tracker {
                 }
                 camera_event(camera.state).into_iter().collect()
             }
+            // OBS's replay buffer is the main canvas's; the vertical
+            // canvas's buffer has no obs-websocket counterpart.
+            Event::Replay { replay } if !replay.canvas.is_main() => Vec::new(),
+            Event::ReplaySaved { saved } if !saved.canvas.is_main() => Vec::new(),
             Event::Replay { replay } => {
                 let before = std::mem::replace(&mut self.replay, replay.state);
                 if before == replay.state {

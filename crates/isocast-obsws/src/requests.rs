@@ -1283,10 +1283,11 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
             if start == active && request_type != "ToggleReplayBuffer" {
                 return Err(output_state(active));
             }
+            // The main canvas's buffer (OBS has one replay buffer).
             ctx.act(if start {
-                Method::ReplayStart
+                Method::ReplayStart(None)
             } else {
-                Method::ReplayStop
+                Method::ReplayStop(None)
             })?;
             Ok(if request_type == "ToggleReplayBuffer" {
                 json!({ "outputActive": start })
@@ -1298,7 +1299,7 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
             if !replay_active(&ctx.status()?) {
                 return Err(output_state(false));
             }
-            ctx.act(Method::ReplaySave)?;
+            ctx.act(Method::ReplaySave(None))?;
             Ok(Value::Null)
         }
         "GetLastReplayBufferReplay" => {

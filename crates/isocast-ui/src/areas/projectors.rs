@@ -960,20 +960,24 @@ impl Projectors {
             };
             let (tag, name, tally, safe, empty) = match &tile.role {
                 Role::Single => {
-                    let stopped = vertical
-                        && s.status
-                            .as_ref()
-                            .and_then(|x| x.engine.as_ref())
-                            .and_then(|e| e.vertical.as_ref())
-                            .is_some_and(|v| v.stopped.is_some());
-                    let empty = match projector.view {
-                        _ if stopped => "The vertical canvas stopped: restart the engine",
-                        ProjectorView::Preview if preview.is_none() => {
-                            "Nothing in preview: turn on Studio Mode"
-                        }
-                        _ => "",
+                    let stopped = s
+                        .status
+                        .as_ref()
+                        .and_then(|x| x.engine.as_ref())
+                        .and_then(|e| e.vertical.as_ref())
+                        .and_then(|v| v.stopped.as_deref())
+                        .filter(|_| vertical);
+                    let empty = if let Some(why) = stopped {
+                        format!(
+                            "The vertical canvas stopped. {}",
+                            crate::model::vertical_recovery(why)
+                        )
+                    } else if projector.view == ProjectorView::Preview && preview.is_none() {
+                        "Nothing in preview: turn on Studio Mode".into()
+                    } else {
+                        String::new()
                     };
-                    (String::new(), String::new(), 0, false, empty.to_string())
+                    (String::new(), String::new(), 0, false, empty)
                 }
                 Role::Preview => (
                     "PVW".into(),

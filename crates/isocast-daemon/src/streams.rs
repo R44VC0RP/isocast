@@ -323,17 +323,22 @@ impl Daemon {
         let mut state = self.state.lock();
         state.streams_starting -= 1;
         let engine = engine?;
-        // A canvas whose compositor failed has no picture to send (main's
-        // failure ends the engine's program for everything). Checked under
+        // A vertical canvas whose compositor failed has no picture to send. Checked under
         // the lock that adds the streams, so a failure after this check
         // still ends them (#96).
         if !canvas.is_main()
             && let Some(reason) = engine.canvas_stopped(canvas)
         {
+            let recovery = if reason.contains("scene state is broken")
+                || reason.contains("scene worker has broken state")
+            {
+                "restart the engine once recording and streaming stop"
+            } else {
+                "after recording stops, turn the vertical canvas off and on again (Settings › Video, \
+                 or apply {\"vertical\": null} and then its settings again), or restart the engine"
+            };
             return Err(wrong(format!(
-                "the vertical canvas stopped ({reason}), so it can't stream; turn the vertical \
-                 canvas off and on again (Settings › Video, or apply {{\"vertical\": null}} and then \
-                 its settings again), or restart the engine"
+                "the vertical canvas stopped ({reason}), so it can't stream; {recovery}"
             )));
         }
         let mut started = Vec::new();
@@ -638,6 +643,22 @@ impl Daemon {
             .map(|(key, _)| key.clone())
             .collect();
         if active.is_empty() {
+            // A contained canvas failure may have ended the stream since
+            // the app's last status poll. Stop is already satisfied; keep
+            // its failed status/reason visible rather than toasting an error.
+            if canvas == CanvasId::Vertical {
+                let destinations = canvas_statuses(&state, canvas);
+                if let Some(stream) = destinations
+                    .iter()
+                    .find(|s| params.only.is_empty() || params.only.contains(&s.id))
+                    .cloned()
+                {
+                    return Ok(Streaming {
+                        stream,
+                        destinations,
+                    });
+                }
+            }
             // A stream that failed stays in the status until the next
             // start; say so rather than only "not streaming".
             let several = state

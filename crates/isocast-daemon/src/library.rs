@@ -180,7 +180,8 @@ fn switch_refusal(state: &State, what: &str) -> Option<String> {
     if state.replay.active() {
         return Some(format!(
             "can't switch {what} while the replay buffer runs: it keeps the current canvas; \
-             stop it first (`isocast replay stop`, or MCP's stop_replay), then switch"
+             stop it first ({}), then switch",
+            state.replay.stop_hint()
         ));
     }
     if state.streaming() || state.streams_starting > 0 {
