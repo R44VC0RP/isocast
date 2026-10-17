@@ -3965,3 +3965,15 @@ One line per finished task, newest last.
   monitoring (levels within 0.001 dB of the source, other tones below
   -64 dB, ISO vs program 0.00 ms, 0 audio dropouts); default setups match
   main (setup JSON, manifest and stream structure, the same mixdown).
+- #99 (2026-10-16, branch agent/audio-followups): picked microphone
+  `channels` are checked against the device's current input count (Core
+  Audio), not the most any AVFoundation format lists, and a picked input
+  that disappears while recording stops that source with the reason (like
+  a disconnect) while the take records on; a count change that keeps the
+  picked inputs records on. Verified in the test VM with an aggregate
+  device switched between 2, 16 and 18 inputs: main accepted input 5 on a
+  2-input device and recorded silence, and recorded silence without an
+  error after a drop; this branch refuses the first (field path, valid
+  list) and stops the source after the drop (600 Hz exact before, other
+  source unaffected); 16 <-> 18 changes record input 3 exact throughout;
+  default setups byte-identical `setup check --json` and the same mixdown.

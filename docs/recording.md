@@ -255,8 +255,13 @@ track. The device is read whole (AVFoundation mixes when asked for fewer
 channels than a device has) and only the picked channels go on: the ISO
 track holds exactly those, before gain, mute,
 balance and Mono (which apply to the program and monitoring). `isocast
-doctor` and opening the source check that the device has the channels and
-list the valid ones. In the app: the source's Properties (Channels).
+doctor` and opening the source check that the device has the channels in
+the format it runs now (an ADAT interface at 88.2 or 96 kHz has fewer
+inputs) and list the valid ones. If the device loses a picked input while
+recording (its sample rate or format changes), that source stops with the
+reason, like a disconnected microphone, and the rest of the take records
+on; a change that keeps the picked inputs records on. In the app: the
+source's Properties (Channels).
 
 `audio.mono` (the app's Mono, in Advanced Audio Properties and each mixer
 strip's menu) downmixes a stereo source to (left + right) / 2 in the

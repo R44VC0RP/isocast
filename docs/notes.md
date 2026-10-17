@@ -1764,6 +1764,26 @@ each section. Delete entries that stop being true.
   odd-even pair as stereo, with Core Audio channel names) over a
   two-dropdown Left/Right design: one choice covers the common cases,
   can't pick a channel twice, and says mono or stereo.
+- 2026-10-16 (#99): picked `channels` are checked against the device's
+  **current** input count (Core Audio's input stream configuration), and
+  AVFoundation is asked for that many; `isocast devices` lists the same
+  count. AVFoundation's `formats` are cached per process: after an
+  aggregate device went 2 → 18 inputs, main's engine still refused input
+  5, and after 18 → 2 it accepted input 5 and recorded silence with no
+  error. While recording, a Core Audio listener (stream configuration,
+  nominal sample rate) and the delegate (delivered channel count) stop the
+  source, like a disconnect, once a picked input is gone; the take records
+  on. **A change that keeps the picked inputs records on**: in the VM an
+  aggregate going 16 → 18 and 18 → 16 inputs kept BlackHole input 3 exact
+  on main (−15.0 dB, no other tone), so stopping there would lose good
+  audio. It can't see a reorder that keeps the count (an aggregate's
+  sub-devices swapped); it logs every count change. Without `channels`
+  nothing is watched (main's behaviour). An audio source that stops while
+  recording (this or a disconnect) shows in status and events, but not in
+  the manifest or the stop reply: its track goes on silent (pre-existing).
+  Test kit: /Volumes/IsocastBuild/audio-followups/scratch/vm (agg.swift
+  makes "Isocast Test Agg" and changes its sub-devices without a prompt;
+  t99.py records the cases; hw/analyse99.py and hw/summarise99.sh).
 
 - 2026-10-16 (engine hardening, #27/#30/#31/#35): engine and daemon locks
   use parking_lot. Only selected control state uses `Critical` transactions:

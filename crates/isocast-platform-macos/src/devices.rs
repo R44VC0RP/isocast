@@ -652,6 +652,15 @@ fn microphones() -> Result<Vec<Microphone>> {
             sample_rates.sort_by(f64::total_cmp);
             let (id, name, model, manufacturer) = identity(device);
             let channel_names = crate::output::input_channel_names(&id);
+            // The inputs it has now (what `channels` is checked against),
+            // not the most any of its formats has: an ADAT interface at
+            // 96 kHz has fewer, and AVFoundation's formats can be stale.
+            if let Some(now) = crate::output::device_with_uid(&id)
+                .map(crate::output::input_channels)
+                .filter(|now| *now > 0)
+            {
+                channels = now;
+            }
             Microphone {
                 default: default_id.as_deref() == Some(id.as_str()),
                 id,

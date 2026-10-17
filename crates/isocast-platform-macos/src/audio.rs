@@ -2,10 +2,12 @@
 //! or an app plays through Core Audio process taps (`tap.rs`, macOS 14.2+)
 //! or, before 14.2, ScreenCaptureKit.
 
+use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::slice;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -22,6 +24,12 @@ use objc2_av_foundation::{
 use objc2_avf_audio::{
     AVFormatIDKey, AVLinearPCMBitDepthKey, AVLinearPCMIsFloatKey, AVLinearPCMIsNonInterleaved,
     AVNumberOfChannelsKey, AVSampleRateKey,
+};
+use objc2_core_audio::{
+    AudioObjectAddPropertyListener, AudioObjectID, AudioObjectPropertyAddress,
+    AudioObjectRemovePropertyListener, kAudioDevicePropertyNominalSampleRate,
+    kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyScopeInput,
 };
 use objc2_core_audio_types::{
     AudioBufferList, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved,
@@ -56,6 +64,7 @@ const STREAM_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct MicrophoneCapture {
     session: Retained<AVCaptureSession>,
     observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
+    _watch: Option<ChannelWatch>,
     _delegate: Retained<AudioDelegate>,
     _queue: DispatchRetained<DispatchQueue>,
 }
@@ -93,7 +102,7 @@ pub fn capture_microphone(
         })?;
     let session = unsafe { AVCaptureSession::new() };
     let output = unsafe { AVCaptureAudioDataOutput::new() };
-    let delegate = AudioDelegate::new(sink, format.request, format.pick);
+    let delegate = AudioDelegate::new(sink, format.request, format.pick, &name);
     let queue = DispatchQueue::new("isocast.microphone-capture", None);
     // Ask AVFoundation for the engine's format, resampled if needed.
     let settings = pcm_settings(format.request);
@@ -120,6 +129,10 @@ pub fn capture_microphone(
     *delegate.ivars().clock.lock().unwrap() = unsafe { session.synchronizationClock() };
     let stopped = delegate.ivars().stopped.clone();
     let observers = watch(&session, &device, move |reason| stopped(reason));
+    let channel_watch = format
+        .core_audio
+        .zip(delegate.ivars().check.as_ref())
+        .map(|(device, check)| ChannelWatch::new(device, check));
     unsafe { session.startRunning() };
     if !unsafe { session.isRunning() } {
         bail!("{name:?} did not start");
@@ -128,6 +141,7 @@ pub fn capture_microphone(
         MicrophoneCapture {
             session,
             observers,
+            _watch: channel_watch,
             _delegate: delegate,
             _queue: queue,
         },
@@ -142,6 +156,9 @@ pub(crate) struct MicrophoneFormat {
     /// Which of those are delivered (from 0), in order; `None` delivers
     /// all of them.
     pick: Option<Vec<usize>>,
+    /// The Core Audio device, watched for format changes while picked
+    /// channels are recorded.
+    core_audio: Option<AudioObjectID>,
 }
 
 impl MicrophoneFormat {
@@ -159,17 +176,26 @@ pub(crate) fn microphone_format(
     device: &AVCaptureDevice,
     channels: Option<&[u32]>,
 ) -> Result<MicrophoneFormat> {
-    let available = device_channels(device);
-    let default = available.clamp(1, MAX_CHANNELS);
+    let most = device_channels(device);
+    let default = most.clamp(1, MAX_CHANNELS);
     let Some(channels) = channels else {
         return Ok(MicrophoneFormat {
             request: default,
             pick: None,
+            core_audio: None,
         });
     };
     if channels.is_empty() || channels.len() > 2 {
         bail!("channels: give one channel (mono) or two (stereo)");
     }
+    // Picked inputs are checked against the format the device runs now:
+    // an ADAT interface at 96 kHz has fewer inputs than its formats list,
+    // and a channel it lacks would be AVFoundation's upmix of the others.
+    let core_audio = crate::output::device_with_uid(&unsafe { device.uniqueID() }.to_string());
+    let available = core_audio
+        .map(crate::output::input_channels)
+        .filter(|channels| *channels > 0)
+        .unwrap_or(most);
     if let Some((i, channel)) = channels
         .iter()
         .enumerate()
@@ -177,6 +203,11 @@ pub(crate) fn microphone_format(
     {
         let uid = unsafe { device.uniqueID() }.to_string();
         let names = crate::output::input_channel_names(&uid);
+        let now = if available < most {
+            format!(" in its current format (up to {most} in others)")
+        } else {
+            String::new()
+        };
         let valid: Vec<String> = (1..=available)
             .map(
                 |c| match names.get(c as usize - 1).filter(|n| !n.is_empty()) {
@@ -186,7 +217,7 @@ pub(crate) fn microphone_format(
             )
             .collect();
         bail!(
-            "channels[{i}]: {:?} has no input channel {channel}; valid: {}",
+            "channels[{i}]: {:?} has no input channel {channel}{now}; valid: {}",
             unsafe { device.localizedName() }.to_string(),
             valid.join(", ")
         );
@@ -198,6 +229,7 @@ pub(crate) fn microphone_format(
     Ok(MicrophoneFormat {
         request: available,
         pick: Some(channels.iter().map(|c| *c as usize - 1).collect()),
+        core_audio,
     })
 }
 
@@ -253,6 +285,8 @@ pub struct AudioIvars {
     channels: u32,
     /// The channels delivered (from 0) of `channels`; all if `None`.
     pick: Option<Vec<usize>>,
+    /// Stops a capture of picked channels once one of them is gone.
+    check: Option<Arc<ChannelCheck>>,
     /// The session's clock, which sample times are on; none for
     /// ScreenCaptureKit, which uses the host clock.
     clock: Mutex<Option<Retained<CMClock>>>,
@@ -303,12 +337,25 @@ define_class!(
 );
 
 impl AudioDelegate {
-    fn new(sink: AudioSink, channels: u32, pick: Option<Vec<usize>>) -> Retained<Self> {
+    /// `name` names the device in errors.
+    fn new(sink: AudioSink, channels: u32, pick: Option<Vec<usize>>, name: &str) -> Retained<Self> {
+        let stopped: Arc<dyn Fn(String) + Send + Sync> = Arc::from(sink.stopped);
+        let check = pick.as_ref().map(|pick| {
+            Arc::new(ChannelCheck {
+                name: name.to_string(),
+                opened: channels,
+                seen: AtomicU32::new(channels),
+                picked: pick.iter().map(|c| *c as u32 + 1).collect(),
+                stopped: stopped.clone(),
+                failed: AtomicBool::new(false),
+            })
+        });
         let this = Self::alloc().set_ivars(AudioIvars {
             samples: sink.samples,
-            stopped: Arc::from(sink.stopped),
+            stopped,
             channels,
             pick,
+            check,
             clock: Mutex::new(None),
         });
         unsafe { msg_send![super(this), init] }
@@ -316,6 +363,12 @@ impl AudioDelegate {
 
     fn deliver(&self, sample: &CMSampleBuffer) {
         let ivars = self.ivars();
+        if let Some(check) = &ivars.check {
+            let delivered = delivered_channels(sample).unwrap_or(ivars.channels);
+            if !check.check(delivered, "delivers") {
+                return;
+            }
+        }
         match interleaved_f32(sample, ivars.channels) {
             Ok(Some(samples)) => {
                 let samples = match &ivars.pick {
@@ -330,6 +383,154 @@ impl AudioDelegate {
             Err(err) => (ivars.stopped)(format!("{err:#}")),
         }
     }
+}
+
+/// The channels a sample buffer holds, if it says.
+fn delivered_channels(sample: &CMSampleBuffer) -> Option<u32> {
+    let description = unsafe { sample.format_description() }?;
+    let asbd = unsafe { CMAudioFormatDescriptionGetStreamBasicDescription(&description).as_ref() }?;
+    Some(asbd.mChannelsPerFrame)
+}
+
+/// Picked channels are read from a device opened with `opened` inputs.
+/// If it then has (or delivers) fewer than a picked channel needs (a format
+/// change, an ADAT interface switched to 96 kHz), the capture stops with
+/// the reason, like a disconnected device, instead of recording silence or
+/// another input. A change that keeps every picked input records on:
+/// AVFoundation keeps delivering them (BlackHole in an aggregate going
+/// 16 -> 18 or 18 -> 16 inputs kept its input 3 exact).
+struct ChannelCheck {
+    name: String,
+    opened: u32,
+    /// The count last seen, for the log.
+    seen: AtomicU32,
+    /// From 1.
+    picked: Vec<u32>,
+    stopped: Arc<dyn Fn(String) + Send + Sync>,
+    failed: AtomicBool,
+}
+
+impl ChannelCheck {
+    /// Whether the device, which `what` (has or delivers) `now` channels,
+    /// still gives the picked ones; stops the capture (once) if not.
+    fn check(&self, now: u32, what: &str) -> bool {
+        if self.failed.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some((i, channel)) = self.picked.iter().enumerate().find(|(_, c)| **c > now) else {
+            return true;
+        };
+        let reason = format!(
+            "channels[{i}]: {:?} now {what} {now} input channels instead of {}, so input \
+             channel {channel} is gone (its format changed while recording)",
+            self.name, self.opened
+        );
+        if !self.failed.swap(true, Ordering::AcqRel) {
+            isocast_diagnostics::diagnostic!("warn"; "microphone: {reason}");
+            (self.stopped)(reason);
+        }
+        false
+    }
+
+    /// The device has `now` input channels: stop if a picked one is gone,
+    /// and log any other change.
+    fn changed(&self, now: u32) {
+        // 0 is what Core Audio reports mid-reconfiguration (and when the
+        // property can't be read): unknown, as validation treats it, never
+        // a reason to stop the source.
+        if now == 0 {
+            return;
+        }
+        let was = self.seen.swap(now, Ordering::AcqRel);
+        if self.check(now, "has") && was != now {
+            isocast_diagnostics::diagnostic!("info";
+                "microphone: {:?} now has {now} input channels instead of {was}; the picked \
+                 inputs {:?} are still there, so it records on", self.name, self.picked);
+        }
+    }
+}
+
+/// Core Audio listeners that run a [`ChannelCheck`] when the device's
+/// input format changes. Removed on drop; the context they were given (a
+/// weak reference) is never freed, as a call may still be under way.
+struct ChannelWatch {
+    device: AudioObjectID,
+    context: *mut Weak<ChannelCheck>,
+}
+
+// SAFETY: the context is a Weak (Send + Sync) that is never freed.
+unsafe impl Send for ChannelWatch {}
+
+/// What a [`ChannelWatch`] listens for: the input streams' layout, and the
+/// sample rate (ADAT inputs halve at 88.2/96 kHz).
+const CHANNEL_EVENTS: [(u32, u32); 2] = [
+    (
+        kAudioDevicePropertyStreamConfiguration,
+        kAudioObjectPropertyScopeInput,
+    ),
+    (
+        kAudioDevicePropertyNominalSampleRate,
+        kAudioObjectPropertyScopeGlobal,
+    ),
+];
+
+impl ChannelWatch {
+    fn new(device: AudioObjectID, check: &Arc<ChannelCheck>) -> Self {
+        let this = ChannelWatch {
+            device,
+            context: Box::into_raw(Box::new(Arc::downgrade(check))),
+        };
+        for (selector, scope) in CHANNEL_EVENTS {
+            let address = crate::output::address(selector, scope);
+            // SAFETY: the context is never freed.
+            let status = unsafe {
+                AudioObjectAddPropertyListener(
+                    device,
+                    NonNull::from(&address),
+                    Some(channels_changed),
+                    this.context.cast(),
+                )
+            };
+            if status != 0 {
+                isocast_diagnostics::diagnostic!("warn";
+                    "microphone: couldn't watch {:?} for input format changes (Core Audio \
+                     status {status}); a lost input is still caught by the capture", check.name);
+            }
+        }
+        // A change between opening and listening counts too.
+        check.changed(crate::output::input_channels(device));
+        this
+    }
+}
+
+impl Drop for ChannelWatch {
+    fn drop(&mut self) {
+        for (selector, scope) in CHANNEL_EVENTS {
+            let address = crate::output::address(selector, scope);
+            unsafe {
+                AudioObjectRemovePropertyListener(
+                    self.device,
+                    NonNull::from(&address),
+                    Some(channels_changed),
+                    self.context.cast(),
+                )
+            };
+        }
+    }
+}
+
+unsafe extern "C-unwind" fn channels_changed(
+    device: AudioObjectID,
+    _count: u32,
+    _addresses: NonNull<AudioObjectPropertyAddress>,
+    context: *mut c_void,
+) -> i32 {
+    // SAFETY: the context is a ChannelWatch's Weak, never freed.
+    let check = unsafe { &*context.cast::<Weak<ChannelCheck>>() };
+    if let Some(check) = check.upgrade() {
+        check.changed(crate::output::input_channels(device));
+    }
+    0
 }
 
 /// A sample buffer's PCM audio as interleaved f32 with `channels`
@@ -587,7 +788,7 @@ fn capture_played_audio(
         config.setHeight(2);
         config.setMinimumFrameInterval(CMTime::new(1, 1));
     }
-    let delegate = AudioDelegate::new(sink, CHANNELS, None);
+    let delegate = AudioDelegate::new(sink, CHANNELS, None, "");
     let stream = unsafe {
         SCStream::initWithFilter_configuration_delegate(
             SCStream::alloc(),
@@ -649,6 +850,38 @@ mod tests {
         assert_eq!(
             pick_channels(&samples, 4, &[3, 0]),
             [3.0, 0.0, 13.0, 10.0, 23.0, 20.0]
+        );
+    }
+
+    #[test]
+    fn stops_once_when_a_picked_channel_is_gone() {
+        let reasons = Arc::new(Mutex::new(Vec::new()));
+        let check = ChannelCheck {
+            name: "Interface".into(),
+            opened: 18,
+            seen: AtomicU32::new(18),
+            picked: vec![3, 9],
+            stopped: Arc::new({
+                let reasons = reasons.clone();
+                move |reason| reasons.lock().unwrap().push(reason)
+            }),
+            failed: AtomicBool::new(false),
+        };
+        // Fewer or more inputs, the picked ones still there: records on.
+        check.changed(16);
+        check.changed(18);
+        assert!(check.check(9, "delivers"));
+        assert!(reasons.lock().unwrap().is_empty());
+        // Input 9 gone: stops, once, naming the field and the count.
+        check.changed(8);
+        assert!(!check.check(18, "delivers"));
+        check.changed(2);
+        assert_eq!(
+            *reasons.lock().unwrap(),
+            [
+                "channels[1]: \"Interface\" now has 8 input channels instead of 18, so input \
+                 channel 9 is gone (its format changed while recording)"
+            ]
         );
     }
 }

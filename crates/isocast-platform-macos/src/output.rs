@@ -102,18 +102,14 @@ fn scope_channels(device: AudioObjectID, scope: u32) -> u32 {
     }
 }
 
-/// The names the device with Core Audio UID `uid` gives its input
-/// channels, one per channel from channel 1 ("" where it names none), or
-/// none when it names none (most single microphones).
-pub(crate) fn input_channel_names(uid: &str) -> Vec<String> {
-    let Some(bytes) = property_bytes(
+/// The Core Audio device with UID `uid` (an AVCaptureDevice's uniqueID).
+pub(crate) fn device_with_uid(uid: &str) -> Option<AudioObjectID> {
+    let bytes = property_bytes(
         kAudioObjectSystemObject as AudioObjectID,
         kAudioHardwarePropertyDevices,
         kAudioObjectPropertyScopeGlobal,
-    ) else {
-        return Vec::new();
-    };
-    let Some(device) = bytes
+    )?;
+    bytes
         .as_chunks::<4>()
         .0
         .iter()
@@ -121,10 +117,21 @@ pub(crate) fn input_channel_names(uid: &str) -> Vec<String> {
         .find(|device| {
             string_property(*device, kAudioDevicePropertyDeviceUID).as_deref() == Some(uid)
         })
-    else {
+}
+
+/// The input channels `device` has in its current (active) format.
+pub(crate) fn input_channels(device: AudioObjectID) -> u32 {
+    scope_channels(device, kAudioObjectPropertyScopeInput)
+}
+
+/// The names the device with Core Audio UID `uid` gives its input
+/// channels, one per channel from channel 1 ("" where it names none), or
+/// none when it names none (most single microphones).
+pub(crate) fn input_channel_names(uid: &str) -> Vec<String> {
+    let Some(device) = device_with_uid(uid) else {
         return Vec::new();
     };
-    let channels = scope_channels(device, kAudioObjectPropertyScopeInput);
+    let channels = input_channels(device);
     let names: Vec<String> = (1..=channels)
         .map(|channel| {
             let address = AudioObjectPropertyAddress {
