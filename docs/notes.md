@@ -1730,6 +1730,84 @@ each section. Delete entries that stop being true.
   new one would make re-opening it import again (the file isn't
   rewritten read-only), so the harmless duplicate stays.
 
+- 2026-10-17 (#103): **A plugin can't make a new recordings folder.**
+  Recordings folders become sandbox rules for every plugin with a
+  `recordings` grant. Before this, a plugin granted `start` (or `apply`)
+  could name any folder and then read it, or write it with a `write`
+  grant. Now a folder a plugin's request gives must already be one, or
+  the default `~/Movies/Isocast`, or else the request is refused with
+  -32002 and the error lists the folders it may use. This covers `start`'s
+  `folder` (its `projects::root_of`, checked before the setup applies and
+  again when it is remembered), a `recording.folder` that `apply`
+  changes (which also covers `start{setup}` and `init_setup`), and
+  imported profiles (`add_documents`). Paths are compared as written, not
+  resolved: otherwise a plugin could pass a link in its data folder that
+  points to a recordings folder, then point it somewhere else.
+  `library_switch` to a profile the user made stays allowed (the user
+  chose that folder). How a request is known to be a plugin's: `handle`
+  sets the thread-local `PluginCaller` for each request it answers on a
+  plugin connection, and those calls run on that thread. Rejected: keeping
+  plugin-added folders but leaving them out of the sandboxes, because it
+  would mean tracking where each folder came from through the registry
+  and the setup files. Plugin-added folders remembered before this fix
+  stay in the registry. Verified with a real attacker plugin, base against
+  head (security-103 scratch t103-*.json).
+- 2026-10-17 (#56 F3/F4, #77): plugin sandboxes are also refreshed by a
+  5 s poll (`SANDBOX_POLL`, started with the first plugin process), so a
+  standalone `isocast record` or a project-named folder made while idle
+  reaches them without waiting for an engine request. A sandbox is also
+  remade when a folder it denies as "named like a project" has since
+  become a project (the poll can see a recording's folder between its
+  `mkdir` and its project file). Export healing now rewrites only the
+  paths that exist in the folder the export is in now, so takes of a
+  project that moved somewhere else keep their paths. The stream
+  encoder's `retap` returns false when the parked worker has already
+  ended, and the join then starts a new hub instead of failing.
+- 2026-10-17 (#105, W.0 CI round 3): **`.isoprj` relative paths use `/`
+  on disk on both OSes.** Normalize known take paths only at Windows'
+  `write_atomic` boundary (takes, clips, removed/recording, undo/redo).
+  Absolute/drive-relative/UNC/verbatim references keep their native syntax
+  and may need relinking on a different OS; no guesses about drive mappings.
+  Readers/schema/version stay unchanged, unknown fields are untouched, and
+  Unix names with literal backslashes stay as they were. The failing test
+  used `/Users/...` as absolute on Windows (which needs a drive too).
+  HOME audit: native Windows uses USERPROFILE, Isocast state/logs under
+  LOCALAPPDATA/Isocast, OBS under APPDATA/obs-studio; Unix paths unchanged.
+  Named-pipe isolation and Windows ACL/crash-durability qualification remain
+  W.2/W.6/W.7, not promises made by portable-crate CI.
+
+- 2026-10-17 (#105, W.0 CI round 2): **obs-websocket randomness on Windows
+  comes from the OS, not `/dev/urandom`.** Hosted run 39042059588 reaches
+  the tests after clippy passes: password generation and both server tests
+  fail opening that Unix path. Non-Unix now uses getrandom 0.4 (already
+  locked for diagnostics), with `std` for `io::Error` conversion; its
+  Windows 10+ backend calls ProcessPrng. Failure propagates, never a
+  predictable fallback. Unix retains its exact random source and error
+  behavior. No test is skipped; protocol tests await the next Windows run.
+
+- 2026-10-17 (#105, W.0 CI round 1): snapshot runner qualified end to end
+  by the delegator, Actions run 39041442122. Ubuntu build/clippy/tests pass;
+  Windows builds but clippy rejects diagnostics' Unix-only I/O imports and
+  native-relay seed snapshot helpers. Their consumers already have
+  `cfg(unix)`; matching that gate changes no macOS/Linux behavior and does
+  not disable the portable redactor. Windows tests have not run yet.
+
+- 2026-10-17 (#105, W.0): **Windows starts on Actions, not a local Windows
+  machine.** PLAN W is the ordered lane; Ryan supplies hardware after the
+  hosted alpha checklist. W.0 covers protocol, diagnostics and obs-websocket
+  only, not a runnable recorder. The engine still imports Unix
+  `OpenOptionsExt` in `record/mod.rs::write_manifest_with`; client IPC is
+  `UnixStream`. Those need real seams, not success-shaped Windows stubs.
+  `scripts/windows-ci.sh` exports clean HEAD, scans it with
+  `publish-snapshot.sh --scan-only DIR`, and uses its own public checkout
+  under `/Volumes/IsocastBuild/windows/scratch/public`, never the release
+  snapshot checkout. Its only push ref is `ci/windows`, with an exact lease;
+  results are keyed by the public snapshot SHA under `scratch/runs/`.
+  The first real Actions run is still pending the delegator's commit/push.
+  `docs/architecture.md`, `recording.md` and `alpha-test.md` contain older
+  2 s/AVAssetWriter language: the current implementation and
+  `docs/crash-safe-takes.md` define the 500 ms/default-on durability target.
+
 - 2026-10-16 (#101): **An audio source that stops while recording is in
   the manifest per file**: `files[].audio_stops` (source, track,
   `time_seconds` on the take's clock, optional `resumed_seconds`,

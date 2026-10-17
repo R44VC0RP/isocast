@@ -413,6 +413,7 @@ fn handle(
             audit.response(&refused);
             continue;
         }
+        let _caller = scope.as_ref().map(|scope| PluginCaller::set(&scope.id));
         let response = match request {
             Ok(Request {
                 id,
@@ -1926,6 +1927,26 @@ impl Daemon {
                 notes: plan.notes,
             });
         }
+        // A plugin may only move `recording.folder` to a recordings folder
+        // there is already, nor plant a hotkey that records elsewhere
+        // (#103).
+        if PluginCaller::current().is_some()
+            && let Some(setup) = &plan.setup
+        {
+            let folder_of = |setup: &Setup| expand_home(&setup.recording.folder);
+            let mut roots = self.remembered_recording_folders();
+            roots.extend(state.setup.as_ref().map(folder_of));
+            let new = folder_of(setup);
+            if state.setup.as_ref().map(folder_of).as_ref() != Some(&new) {
+                plugin_folder_refusal("recording.folder", &new, &roots)?;
+            }
+            plugin_hotkeys_refusal(
+                "hotkeys",
+                &setup.hotkeys,
+                state.setup.as_ref().map(|s| &s.hotkeys),
+                &roots,
+            )?;
+        }
         // Whether the vertical canvas was there, and linked, before.
         let vertical_before = vertical_link(&state);
         // The live engine runs it from the next frame (or refuses, like a
@@ -2997,6 +3018,13 @@ impl Daemon {
         cause: TakeCause,
     ) -> Result<Started, RpcError> {
         check_folder(params.folder.as_deref())?;
+        if let Some(folder) = &params.folder {
+            plugin_folder_refusal(
+                "params.folder",
+                &projects::root_of(folder),
+                &self.recording_roots(),
+            )?;
+        }
         let duration = match params.seconds {
             None => None,
             Some(s) if s > 0.0 && s <= 30.0 * 24.0 * 3600.0 => Some(Duration::from_secs_f64(s)),
@@ -3074,6 +3102,11 @@ impl Daemon {
         // It records into a project folder in the recordings folder
         // (`folder` itself, if it is a project's).
         let root = projects::root_of(&folder);
+        // Checked again as it is remembered (the folder's project file is
+        // read again): a plugin's folder must be a recordings folder (#103).
+        if params.folder.is_some() {
+            plugin_folder_refusal("params.folder", &root, &self.recording_roots())?;
+        }
         // Recordings there that never finished (isocastd was killed or
         // crashed): the engine marks them as failed; say so now.
         self.remember_recording_folder(&root);
@@ -4002,6 +4035,139 @@ fn check_folder(folder: Option<&Path>) -> Result<(), RpcError> {
         }),
         None => Ok(()),
     }
+}
+
+thread_local! {
+    /// The plugin whose request this thread is answering (`handle`), if
+    /// any.
+    static PLUGIN_CALLER: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Marks the thread as answering a plugin's request until dropped. Each
+/// connection is answered on its own thread, and the calls that take a
+/// folder from the request run on it.
+struct PluginCaller;
+
+impl PluginCaller {
+    fn set(id: &str) -> Self {
+        PLUGIN_CALLER.with(|caller| *caller.borrow_mut() = Some(id.to_string()));
+        Self
+    }
+
+    /// The plugin whose request this thread is answering, if any.
+    fn current() -> Option<String> {
+        PLUGIN_CALLER.with(|caller| caller.borrow().clone())
+    }
+}
+
+impl Drop for PluginCaller {
+    fn drop(&mut self) {
+        PLUGIN_CALLER.with(|caller| *caller.borrow_mut() = None);
+    }
+}
+
+/// Refuse a recordings folder a plugin gives (`field`) unless it is one
+/// already (`roots`, or the default `~/Movies/Isocast`), compared as
+/// written: a plugin's sandbox may read (or write) the recordings folders,
+/// so one it named would widen its own sandbox and every other plugin's
+/// (#103). Requests that aren't a plugin's are never refused here.
+fn plugin_folder_refusal(field: &str, root: &Path, roots: &[PathBuf]) -> Result<(), RpcError> {
+    let Some(plugin) = PluginCaller::current() else {
+        return Ok(());
+    };
+    let default = expand_home(isocast_protocol::init::DEFAULT_FOLDER);
+    let mut allowed: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    allowed.push(&default);
+    allowed.sort();
+    allowed.dedup();
+    if allowed.contains(&root) {
+        return Ok(());
+    }
+    Err(RpcError {
+        code: RpcError::NOT_PERMITTED,
+        message: format!(
+            "{field}: {:?} isn't a recordings folder, and plugin {plugin} may only use the \
+             recordings folders there are (or a project folder in one), because its sandbox \
+             is given them: {}",
+            root.display().to_string(),
+            allowed
+                .iter()
+                .map(|root| format!("{:?}", root.display().to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+/// Hotkey actions that write into a folder their arguments name, the
+/// argument, and whether it names a file (in the folder) rather than the
+/// folder: `timeline.retake` records there (and remembers it as a
+/// recordings folder), `timeline.export` and `program.screenshot` write
+/// their files there.
+const PATH_ACTIONS: &[(&str, &str, bool)] = &[
+    ("timeline.retake", "folder", false),
+    ("timeline.export", "folder", false),
+    ("program.screenshot", "path", true),
+];
+
+/// Refuse, for a plugin's request, a hotkey binding in `new` (new, or
+/// changed since `old`) whose [`PATH_ACTIONS`] path isn't in a recordings
+/// folder (the folder itself or a project folder in one): it fires later
+/// on the hotkeys thread, maybe when the user presses its keys, as no
+/// plugin's request, so nothing checks it then (#103). The stored bindings
+/// are read as they are, including ones that don't parse or conflict now.
+fn plugin_hotkeys_refusal(
+    field: &str,
+    new: &isocast_protocol::hotkeys::Config,
+    old: Option<&isocast_protocol::hotkeys::Config>,
+    roots: &[PathBuf],
+) -> Result<(), RpcError> {
+    if PluginCaller::current().is_none() {
+        return Ok(());
+    }
+    let path_of = |binding: &serde_json::Value| {
+        let action = binding.get("action").and_then(serde_json::Value::as_str)?;
+        let &(_, arg, file) = PATH_ACTIONS.iter().find(|(id, ..)| *id == action)?;
+        let value = binding.get("args")?.get(arg)?;
+        (!value.is_null()).then(|| (action.to_string(), arg, file, value.clone()))
+    };
+    let Some(new) = new.value.as_ref().and_then(serde_json::Value::as_object) else {
+        return Ok(());
+    };
+    let old = old
+        .and_then(|old| old.value.as_ref())
+        .and_then(serde_json::Value::as_object);
+    for (id, binding) in new {
+        let Some((action, arg, file, path)) = path_of(binding) else {
+            continue;
+        };
+        // Kept as it was (the user's, or checked when planted).
+        if old
+            .and_then(|old| old.get(id))
+            .and_then(path_of)
+            .is_some_and(|(a, _, _, p)| a == action && p == path)
+        {
+            continue;
+        }
+        let field = format!(
+            "{field}.{}.args.{arg}",
+            isocast_protocol::hotkeys::bounded(id, 64)
+        );
+        let Some(path) = path.as_str().map(Path::new) else {
+            return Err(RpcError {
+                code: RpcError::NOT_PERMITTED,
+                message: format!("{field}: give a path in a recordings folder (a string)"),
+            });
+        };
+        let folder = if file {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+        plugin_folder_refusal(&field, &projects::root_of(folder), roots)?;
+    }
+    Ok(())
 }
 
 /// The revision of a setup loaded at start: the time in milliseconds, so

@@ -63,6 +63,11 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A folder bigger than this isn't copied (use `--link`).
 const MAX_COPY_FILES: usize = 20_000;
 const MAX_COPY_BYTES: u64 = 1 << 30;
+/// How often the recordings folders are looked at again for the sandboxes
+/// of running plugins, for changes no request makes: a standalone
+/// `isocast record` into a new folder, or a folder named like a project
+/// made while idle (#56).
+const SANDBOX_POLL: Duration = Duration::from_secs(5);
 
 /// What isocastd gives the registry: a way to tell watchers, and to serve
 /// a plugin's connection with its scope.
@@ -84,6 +89,7 @@ impl Default for Registry {
             pids: Mutex::default(),
             hooks: OnceLock::new(),
             admin: Mutex::new(()),
+            polling: std::sync::Once::new(),
         }))
     }
 }
@@ -97,6 +103,8 @@ struct Shared {
     hooks: OnceLock<Hooks>,
     /// Held through each add, remove, enable and disable.
     admin: Mutex<()>,
+    /// The sandbox poll (`SANDBOX_POLL`) runs, from the first process on.
+    polling: std::sync::Once,
 }
 
 /// One installed plugin.
@@ -252,6 +260,14 @@ impl Scope {
             .and_then(|value| value.get("method"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("?");
+        // Never, even if granted before it became ungrantable (an
+        // install.toml from an earlier version).
+        if let Some(reason) = isocast_protocol::plugin::ungrantable_reason(name) {
+            return Some(format!(
+                "methods.{name}: {} can't call {name}: {reason}",
+                self.id
+            ));
+        }
         let methods = self.methods.read();
         if methods.iter().any(|m| *m == name) {
             return self.data_refusal(method);
@@ -428,6 +444,18 @@ impl RecordingFolders {
                 .not_projects
                 .iter()
                 .any(|p| !earlier.not_projects.contains(p))
+    }
+
+    /// Whether a sandbox made with `earlier` misses something there is
+    /// now: a folder (`adds_to`), or a project in a folder it denies
+    /// because it wasn't one yet (a recording's project folder seen
+    /// between being made and getting its project file).
+    fn outdates(&self, earlier: &Self) -> bool {
+        self.adds_to(earlier)
+            || earlier.not_projects.iter().any(|folder| {
+                !self.not_projects.contains(folder)
+                    && isocast_protocol::project::read(folder).is_some()
+            })
     }
 }
 
@@ -1125,6 +1153,17 @@ impl Shared {
             .name(format!("plugin {id}"))
             .spawn(move || shared.supervise(&supervised, &launch))
             .map_err(|err| failed(format!("{id}'s process couldn't start: {err}")))?;
+        self.polling.call_once(|| {
+            let shared = self.clone();
+            let _ = thread::Builder::new()
+                .name("plugin sandbox poll".into())
+                .spawn(move || {
+                    loop {
+                        thread::sleep(SANDBOX_POLL);
+                        shared.refresh_sandboxes();
+                    }
+                });
+        });
         // Replies say how the first start went.
         let mut run = process.state.lock();
         let _ = process.changed.wait_while_for(
@@ -1263,7 +1302,7 @@ impl Shared {
             let pid = {
                 let run = process.state.lock();
                 match (&run.recordings, run.pid) {
-                    (Some(earlier), Some(pid)) if now.adds_to(earlier) => pid,
+                    (Some(earlier), Some(pid)) if now.outdates(earlier) => pid,
                     _ => continue,
                 }
             };

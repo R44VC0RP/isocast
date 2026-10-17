@@ -1753,11 +1753,30 @@ pub fn timelines_path() -> PathBuf {
     support_folder().join("timelines")
 }
 
-/// `~/Library/Application Support/Isocast` on macOS, `~/.isocast` elsewhere.
-fn support_folder() -> PathBuf {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+/// The user's home folder. Windows does not normally set `HOME` outside a
+/// Unix-like shell; its native applications use `USERPROFILE`.
+pub fn home_folder() -> PathBuf {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE")
+        .filter(|home| !home.is_empty())
+        .or_else(|| std::env::var_os("HOME"));
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+    PathBuf::from(home.unwrap_or_default())
+}
+
+/// `~/Library/Application Support/Isocast` on macOS, `%LOCALAPPDATA%/Isocast`
+/// on Windows, `~/.isocast` elsewhere.
+pub fn support_folder() -> PathBuf {
+    let home = home_folder();
     if cfg!(target_os = "macos") {
         home.join("Library/Application Support/Isocast")
+    } else if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Local"))
+            .join("Isocast")
     } else {
         home.join(".isocast")
     }
@@ -3099,6 +3118,45 @@ pub struct Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_home_and_support_folders() {
+        #[cfg(windows)]
+        {
+            let profile = std::env::var_os("USERPROFILE")
+                .filter(|p| !p.is_empty())
+                .or_else(|| std::env::var_os("HOME"))
+                .unwrap_or_default();
+            assert_eq!(home_folder(), PathBuf::from(profile));
+            let local = std::env::var_os("LOCALAPPDATA")
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home_folder().join("AppData/Local"));
+            assert_eq!(support_folder(), local.join("Isocast"));
+            let roaming = std::env::var_os("APPDATA")
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home_folder().join("AppData/Roaming"));
+            let obs = std::env::var_os(crate::obs::FOLDER_ENV)
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| roaming.join("obs-studio"));
+            assert_eq!(crate::obs::obs_folder(&home_folder()), obs);
+        }
+        #[cfg(not(windows))]
+        {
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+            assert_eq!(home_folder(), home);
+            assert_eq!(
+                support_folder(),
+                home.join(if cfg!(target_os = "macos") {
+                    "Library/Application Support/Isocast"
+                } else {
+                    ".isocast"
+                })
+            );
+        }
+    }
 
     #[test]
     fn get_takes_resolved_or_no_params() {

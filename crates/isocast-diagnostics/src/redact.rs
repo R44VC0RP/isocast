@@ -97,7 +97,9 @@ pub fn pinned_count() -> usize {
         .len()
 }
 
+#[cfg(unix)]
 pub(crate) type KnownSecret = (String, Option<(String, String)>);
+#[cfg(unix)]
 pub(crate) fn known_secrets() -> Vec<KnownSecret> {
     let state = registry().lock().unwrap_or_else(|p| p.into_inner());
     state
@@ -394,12 +396,28 @@ impl Redactor {
                 })
                 .into_owned();
         }
-        if let Some(home) = HOME.get_or_init(|| std::env::var("HOME").ok())
-            && !home.is_empty()
+        if let Some(home) = HOME.get_or_init(|| {
+            isocast_protocol::api::home_folder()
+                .into_os_string()
+                .into_string()
+                .ok()
+        }) && !home.is_empty()
             && text.contains(home)
         {
             text = text.replace(home, "~");
             self.removed("home directory");
+        }
+        #[cfg(windows)]
+        if let Some(home) = HOME
+            .get()
+            .and_then(Option::as_ref)
+            .filter(|home| !home.is_empty())
+        {
+            let forward = home.replace('\\', "/");
+            if text.contains(&forward) {
+                text = text.replace(&forward, "~");
+                self.removed("home directory");
+            }
         }
         // Device IDs can contain a USB serial without a serial-number key.
         if text.starts_with("AppleUSBAudioEngine:") {
@@ -414,12 +432,23 @@ impl Redactor {
                     self.removed("device names and IDs");
                 }
             }
-            if text.starts_with('/') || text.starts_with("~/") {
+            if text.starts_with('/')
+                || text.starts_with("~/")
+                || (cfg!(windows)
+                    && (std::path::Path::new(&text).is_absolute() || text.starts_with(r"~\")))
+            {
                 self.removed("private paths");
                 return self.fingerprint(&text);
             }
             text = PATH
-                .get_or_init(|| Regex::new(r#"(?:~/|/)[^\s\"'<>]+"#).unwrap())
+                .get_or_init(|| {
+                    let pattern = if cfg!(windows) {
+                        r#"(?:[a-zA-Z]:[\\/]|\\\\|~[\\/]|/)[^\s\"'<>]+"#
+                    } else {
+                        r#"(?:~/|/)[^\s\"'<>]+"#
+                    };
+                    Regex::new(pattern).unwrap()
+                })
                 .replace_all(&text, |c: &regex::Captures<'_>| {
                     self.removed("private paths");
                     self.fingerprint(&c[0])
@@ -442,7 +471,9 @@ pub fn panic_value(value: &Value) -> Value {
         r.scrub(value)
     } else {
         let trace = value["backtrace"].as_str().unwrap_or("");
-        let trace = std::env::var("HOME")
+        let trace = isocast_protocol::api::home_folder()
+            .into_os_string()
+            .into_string()
             .ok()
             .filter(|s| !s.is_empty())
             .map_or_else(|| trace.into(), |home| trace.replace(&home, "~"));

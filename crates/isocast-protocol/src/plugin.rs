@@ -28,9 +28,34 @@ pub const API_VERSIONS: &[u32] = &[1];
 /// Unix socket paths are short.
 pub const MAX_ID: usize = 40;
 
-/// Methods a plugin can't be granted: with them it could install or enable
-/// plugins with more than it was granted itself.
-pub const UNGRANTABLE: &[&str] = &["plugin_add", "plugin_set_enabled"];
+/// Methods a plugin can't be granted: with them it could get more than it
+/// was granted itself ([`ungrantable_reason`]).
+pub const UNGRANTABLE: &[&str] = &[
+    "plugin_add",
+    "plugin_set_enabled",
+    "websocket_enable",
+    "websocket_disable",
+];
+
+/// Why a plugin can't be granted `method`, if it can't.
+pub fn ungrantable_reason(method: &str) -> Option<&'static str> {
+    match method {
+        "plugin_add" | "plugin_set_enabled" => {
+            Some("it could install or enable plugins with more than it was granted itself")
+        }
+        // The obs-websocket server answers its clients with every method,
+        // outside any plugin's grant (#103).
+        "websocket_enable" => Some(
+            "the obs-websocket server answers its clients with every method, so a plugin that \
+             could turn it on, or set its address or password, could call anything",
+        ),
+        "websocket_disable" => Some(
+            "the obs-websocket server's settings are the user's: with this a plugin could turn \
+             off the server the user's OBS tools connect to",
+        ),
+        _ => None,
+    }
+}
 
 /// A plugin's `isocast-plugin.toml`. A plugin uses only the sections it
 /// needs.
@@ -766,7 +791,10 @@ impl Manifest {
                 Some(program) if program.trim().is_empty() => {
                     add("process.command[0]".into(), "the program is empty".into());
                 }
-                Some(program) if program.contains('/') => {
+                Some(program)
+                    if program.contains('/')
+                        || (cfg!(windows) && program.contains(['\\', ':'])) =>
+                {
                     if let Some(message) = file_problem(program, folder) {
                         add("process.command[0]".into(), message);
                     }
@@ -826,9 +854,12 @@ fn file_problem(file: &str, folder: Option<&Path>) -> Option<String> {
         return Some("give a file inside the plugin's folder".into());
     }
     if path.is_absolute()
-        || path
-            .components()
-            .any(|part| matches!(part, Component::ParentDir | Component::Prefix(_)))
+        || path.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        })
     {
         return Some(format!(
             "{file:?} must be a path inside the plugin's folder (relative, without `..`)"
@@ -842,13 +873,10 @@ fn check_permissions(permissions: &Permissions, add: &mut dyn FnMut(String, Stri
     let methods = crate::api::method_names();
     for (i, method) in permissions.methods.iter().enumerate() {
         let path = format!("permissions.methods[{i}]");
-        if UNGRANTABLE.contains(&method.as_str()) {
+        if let Some(reason) = ungrantable_reason(method) {
             add(
                 path,
-                format!(
-                    "a plugin can't be granted `{method}`: it could install or enable plugins \
-                     with more than it was granted itself"
-                ),
+                format!("a plugin can't be granted `{method}`: {reason}"),
             );
         } else if !methods.iter().any(|name| name == method) {
             add(
@@ -1406,6 +1434,22 @@ autostart = true
             found.iter().any(|m| m.starts_with("filters[0].shader: ")),
             "{found:?}"
         );
+        assert!(file_problem("/outside.wgsl", None).is_some());
+        #[cfg(windows)]
+        for path in [
+            r"\outside.wgsl",
+            r"C:\outside.wgsl",
+            r"C:outside.wgsl",
+            r"..\outside.wgsl",
+        ] {
+            assert!(file_problem(path, None).is_some(), "{path}");
+            let command = format!("command = [{}]", serde_json::to_string(path).unwrap());
+            let found = messages(&FULL.replace("command = [\"python3\", \"bot.py\"]", &command));
+            assert!(
+                found.iter().any(|m| m.starts_with("process.command[0]: ")),
+                "{found:?}"
+            );
+        }
     }
 
     #[test]

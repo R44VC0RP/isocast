@@ -1,0 +1,65 @@
+name: Windows
+
+on:
+  push:
+    # This lane publishes snapshots only here. Add main after qualification.
+    branches: ['ci/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  portable:
+    name: portable (${{ matrix.os }})
+    strategy:
+      # Keep both platforms' diagnostics when one fails.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version --verbose
+          cargo --version
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-portable
+          save-if: ${{ github.ref == 'refs/heads/ci/windows' }}
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # W.0 is the OS-independent foundation, not a runnable Windows recorder.
+      # The engine's Unix manifest I/O and the client's UnixStream belong to
+      # W.1/W.2/W.6; add them and Windows e2e only as those slices work.
+      - name: Build portable crates
+        id: build
+        run: cargo build --locked -p isocast-protocol -p isocast-diagnostics -p isocast-obsws
+
+      - name: Clippy portable crates
+        run: cargo clippy --locked --keep-going --all-targets -p isocast-protocol -p isocast-diagnostics -p isocast-obsws -- -D warnings
+
+      - name: Test portable crates
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo test --locked --no-fail-fast -p isocast-protocol -p isocast-diagnostics -p isocast-obsws

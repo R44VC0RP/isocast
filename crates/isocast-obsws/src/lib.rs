@@ -196,9 +196,13 @@ pub(crate) fn random_base64(bytes: usize) -> io::Result<String> {
 }
 
 pub(crate) fn random_bytes(count: usize) -> io::Result<Vec<u8>> {
+    #[cfg(unix)]
     use std::io::Read;
     let mut out = vec![0u8; count];
+    #[cfg(unix)]
     std::fs::File::open("/dev/urandom")?.read_exact(&mut out)?;
+    #[cfg(not(unix))]
+    getrandom::fill(&mut out)?;
     Ok(out)
 }
 

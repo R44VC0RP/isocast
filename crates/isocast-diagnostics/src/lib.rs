@@ -75,9 +75,11 @@ pub fn logs_folder() -> PathBuf {
     if let Some(socket) = std::env::var_os("ISOCAST_SOCKET") {
         return PathBuf::from(socket).with_extension("logs");
     }
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let home = isocast_protocol::api::home_folder();
     if cfg!(target_os = "macos") {
         home.join("Library/Logs/Isocast")
+    } else if cfg!(windows) {
+        isocast_protocol::api::support_folder().join("logs")
     } else {
         home.join(".isocast/logs")
     }

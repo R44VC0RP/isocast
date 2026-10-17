@@ -885,6 +885,18 @@ impl Daemon {
                     describe(&problems)
                 )));
             }
+            // A plugin's profile records only into a recordings folder
+            // there is already: switching to it would otherwise widen the
+            // plugins' sandboxes (#103).
+            if let Document::Profile(profile) = document {
+                let roots = self.recording_roots();
+                crate::plugin_folder_refusal(
+                    "profile.recording.folder",
+                    &crate::expand_home(&profile.recording.folder),
+                    &roots,
+                )?;
+                crate::plugin_hotkeys_refusal("profile.hotkeys", &profile.hotkeys, None, &roots)?;
+            }
         }
         let (root, _) = self.library_view();
         let mut added = Vec::new();

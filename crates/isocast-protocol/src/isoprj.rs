@@ -7,8 +7,10 @@
 //! order, trims, splits, angles, crops (#87), undo history, and any
 //! per-clip fields a newer Isocast adds, kept as they are). Paths in it are relative to the
 //! file's folder (`../` for takes in a sibling project), so the folder can
-//! be copied or moved anywhere, to another disk or another Mac, and still
+//! be copied or moved anywhere, to another disk, Mac or Windows PC, and still
 //! open with the same edits. A take that isn't there shows as offline.
+//! Relative paths are written with `/` on every OS. Absolute references to
+//! other disks keep their native syntax and may need relinking after a move.
 //!
 //! The engine keeps its working copy of timelines in the timelines folder
 //! (written by the recording's own callbacks, with crash recovery); the
@@ -135,6 +137,24 @@ pub fn read(path: &Path) -> Result<IsoprjFile, String> {
 /// untouched and the temporary file removed.
 pub fn write_atomic(path: &Path, file: &IsoprjFile) -> std::io::Result<()> {
     use std::io::Write;
+    // PathBuf joins use backslashes on Windows. Convert only the known
+    // relative take paths at the file boundary, including edit history.
+    // Mac files (where a backslash can be part of a name) stay byte-identical.
+    #[cfg(windows)]
+    let portable = {
+        let mut portable = file.clone();
+        portable.takes = portable
+            .takes
+            .iter()
+            .map(|path| portable_path(path))
+            .collect();
+        for timeline in &mut portable.timelines {
+            map_paths(timeline, portable_path);
+        }
+        portable
+    };
+    #[cfg(windows)]
+    let file = &portable;
     let folder = path.parent().unwrap_or(Path::new("."));
     let name = path
         .file_name()
@@ -166,6 +186,19 @@ pub fn write_atomic(path: &Path, file: &IsoprjFile) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&partial);
     }
     written
+}
+
+#[cfg(windows)]
+fn portable_path(path: &Path) -> PathBuf {
+    if !path.has_root()
+        && !matches!(path.components().next(), Some(Component::Prefix(_)))
+        && let Some(text) = path.to_str()
+    {
+        return text.replace('\\', "/").into();
+    }
+    // Keep drive-relative, UNC and verbatim paths intact. Non-Unicode names
+    // still fail serialization instead of being replaced with a different name.
+    path.to_path_buf()
 }
 
 /// Whether `name` is a temporary file [`write_atomic`] left (killed while
@@ -361,23 +394,117 @@ mod tests {
 
     #[test]
     fn paths_are_made_relative_and_back() {
-        let base = Path::new("/Users/r/Movies/Isocast/2026-10-16 10-00-00 Talk");
+        // A Windows absolute path needs a drive as well as a root.
+        let root = if cfg!(windows) { "C:/" } else { "/" };
+        let base = Path::new(root).join("Users/r/Movies/Isocast/2026-10-16 10-00-00 Talk");
+        let base = base.as_path();
+        assert!(base.is_absolute());
         let inside = base.join("a.session.json");
         assert_eq!(relative_to(&inside, base), Path::new("a.session.json"));
-        let sibling = Path::new("/Users/r/Movies/Isocast/2026-10-16 11-00-00 B/b.session.json");
-        let rel = relative_to(sibling, base);
+        let sibling =
+            Path::new(root).join("Users/r/Movies/Isocast/2026-10-16 11-00-00 B/b.session.json");
+        let rel = relative_to(&sibling, base);
         assert_eq!(rel, Path::new("../2026-10-16 11-00-00 B/b.session.json"));
         assert_eq!(resolve(&rel, base), sibling);
         // Another disk stays absolute.
-        let other = Path::new("/Volumes/X/t.session.json");
+        let other = Path::new(if cfg!(windows) {
+            "D:/t.session.json"
+        } else {
+            "/Volumes/X/t.session.json"
+        });
         assert_eq!(relative_to(other, base), other);
         assert_eq!(resolve(other, base), other);
         // A copied folder resolves against where it is now.
-        let copy = Path::new("/Volumes/Backup/Talk");
+        let copy = Path::new(if cfg!(windows) {
+            "D:/Backup/Talk"
+        } else {
+            "/Volumes/Backup/Talk"
+        });
         assert_eq!(
             resolve(Path::new("a.session.json"), copy),
             copy.join("a.session.json")
         );
+
+        // Exercise the actual project-file write/read boundary, not just
+        // Path equality (which treats both separators alike on Windows).
+        let nested = Path::new("nested").join("a.session.json");
+        let clip = serde_json::json!({"id":"c1", "take":nested, "in_seconds":0.0,
+            "out_seconds":1.0, "future":"keep\\this"});
+        let removed = serde_json::json!({"take":nested, "reason":"removed", "at":""});
+        let revision = serde_json::json!({"action":"trimmed", "clips":[clip], "removed":[removed]});
+        let file: IsoprjFile = serde_json::from_value(serde_json::json!({
+            "format":FORMAT, "version":1, "project":"p", "name":"Talk", "prefix":"",
+            "created_at":"", "saved_at":"", "takes":[nested, rel, other],
+            "timelines":[{"version":1, "id":"talk", "name":"Talk", "created_at":"",
+                "clips":[clip], "removed":[removed], "recording":[nested], "next_clip":2,
+                "undo":[revision], "redo":[revision]}]
+        }))
+        .unwrap();
+        #[cfg(windows)]
+        let file = {
+            let mut file = file;
+            file.takes.extend(
+                [
+                    r"\\server\share\take.session.json",
+                    r"\\?\D:\take.session.json",
+                    r"D:take.session.json",
+                ]
+                .map(PathBuf::from),
+            );
+            file
+        };
+        let dir = std::env::temp_dir().join(format!("isoprj-paths-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("Talk.isoprj");
+        // Previously stored native paths and CRLF JSON still read unchanged.
+        let legacy = serde_json::to_string_pretty(&file)
+            .unwrap()
+            .replace('\n', "\r\n");
+        std::fs::write(&path, legacy).unwrap();
+        assert_eq!(read(&path).unwrap(), file);
+        // Replacing the file, not just creating it, must work on Windows too.
+        for _ in 0..2 {
+            write_atomic(&path, &file).unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["takes"][0], "nested/a.session.json");
+        assert_eq!(json["takes"][1], "../2026-10-16 11-00-00 B/b.session.json");
+        for (i, take) in file.takes.iter().enumerate().skip(2) {
+            assert_eq!(json["takes"][i], serde_json::to_value(take).unwrap());
+        }
+        let timeline = &json["timelines"][0];
+        for take in [
+            &timeline["clips"][0]["take"],
+            &timeline["removed"][0]["take"],
+            &timeline["recording"][0],
+            &timeline["undo"][0]["clips"][0]["take"],
+            &timeline["undo"][0]["removed"][0]["take"],
+            &timeline["redo"][0]["clips"][0]["take"],
+            &timeline["redo"][0]["removed"][0]["take"],
+        ] {
+            assert_eq!(take, "nested/a.session.json");
+        }
+        assert_eq!(timeline["clips"][0]["future"], "keep\\this");
+        let back = read(&path).unwrap();
+        assert_eq!(back, file);
+        assert_eq!(
+            resolve(&back.takes[0], copy),
+            copy.join("nested/a.session.json")
+        );
+        #[cfg(unix)]
+        {
+            let mut expected = serde_json::to_vec_pretty(&file).unwrap();
+            expected.push(b'\n');
+            assert_eq!(bytes, expected);
+            let mut literal = file.clone();
+            literal.takes.push(r"literal\name.session.json".into());
+            write_atomic(&path, &literal).unwrap();
+            assert_eq!(read(&path).unwrap(), literal);
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]
@@ -413,6 +540,11 @@ mod tests {
         for bad in ["", "../x", "a/b", "A", "-x", "a.b"] {
             assert!(!crate::timeline::valid_id(bad), "{bad}");
         }
+        let a = crate::timeline::new_uid();
+        let b = crate::timeline::new_uid();
+        assert_eq!(a.len(), 16);
+        assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(a, b);
     }
 
     #[test]

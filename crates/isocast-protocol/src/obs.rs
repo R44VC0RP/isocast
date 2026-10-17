@@ -658,6 +658,11 @@ pub const FOLDER_ENV: &str = "ISOCAST_OBS_FOLDER";
 pub fn obs_folder(home: &Path) -> PathBuf {
     match std::env::var_os(FOLDER_ENV) {
         Some(folder) if !folder.is_empty() => PathBuf::from(folder),
+        _ if cfg!(windows) => std::env::var_os("APPDATA")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Roaming"))
+            .join("obs-studio"),
         _ => home.join("Library/Application Support/obs-studio"),
     }
 }
@@ -3093,7 +3098,7 @@ impl<'a, 'v> Importer<'a, 'v> {
                 // OBS names its built-in wipes after their image files.
                 let image = text(settings, "luma_image").unwrap_or("linear-h.png");
                 let name = image
-                    .rsplit('/')
+                    .rsplit(|c| c == '/' || (cfg!(windows) && c == '\\'))
                     .next()
                     .unwrap_or(image)
                     .to_ascii_lowercase();
@@ -4109,6 +4114,17 @@ mod tests {
         let stinger = with("Stinger", 900);
         assert_eq!(stinger.setup.transition, Transition::fade(900));
         assert!(stinger.unsupported[1].reason.contains("900 ms fade"));
+        let mut json = collection(json!([]));
+        json["current_transition"] = json!("Wipe");
+        json["transitions"] = json!([{"name":"Wipe", "id":"wipe_transition",
+            "settings":{"luma_image": if cfg!(windows) {
+                r"C:\Program Files\obs-studio\linear-v.png"
+            } else { "/Applications/OBS.app/linear-v.png" }}}]);
+        let wipe = run(json);
+        assert_eq!(
+            serde_json::to_value(wipe.setup.transition).unwrap()["pattern"],
+            "vertical"
+        );
     }
 
     #[test]

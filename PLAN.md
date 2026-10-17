@@ -1446,12 +1446,82 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   commit status `isocast/visual-check`. First real run: see "Waiting on
   Ryan" in docs/notes.md.
 
+### W. Windows port (Ryan, 2026-10-17; GitHub #105)
+
+This supersedes Windows being parked under N.4 and section 9. Use GitHub
+Actions' Windows runners only until Windows reaches the macOS alpha bar
+(`docs/alpha-test.md`), with hardware-only checks explicitly outstanding;
+then Ryan supplies a Windows machine. Stop for delegator review/merge after
+each milestone. Shared recording changes are Tier 1 and must preserve
+macOS behavior; Windows-only code is Tier 2. Merge current main between
+slices, especially alongside the GPU, vertical-canvas and editor lanes.
+
+- [ ] **W.0 Portable CI.** `windows.yml` on `ci/**`, Windows and Ubuntu,
+  cached Cargo build, clippy and existing tests, superseded runs cancelled.
+  Start with protocol, diagnostics and obs-websocket (the engine still has
+  Unix-only manifest I/O; client/daemon use Unix sockets). `windows-ci.sh`
+  exports committed HEAD, uses the publishing secret/attribution scan,
+  commits into its own public checkout, lease-force-pushes **ci/windows
+  only**, waits for the exact snapshot's run and saves results/failed logs.
+  Done when both real hosted jobs pass and their URLs are in the report;
+  no main/tag/release writes. Add main to the workflow after qualification.
+- [ ] **W.1 Platform seams (#28).** Mechanical daemon generic over
+  `Platform`; plugin, hotkey and diagnostics hooks through the trait;
+  `isocast record` drives an isolated daemon; UI platform seam and
+  target-specific wgpu backends. Extend portable CI to the engine once
+  its OS I/O is behind a safe seam (Windows durability follows in W.2).
+  Verify unchanged macOS API, recording, errors, timing and lifecycle;
+  no no-op safety fallbacks merely to compile on Windows.
+- [ ] **W.2 Cross-platform writer.** Prefer extracting the existing
+  crash-safe BMFF muxer without changing its bytes; qualify against the
+  macOS writer before choosing it over ffmpeg. Windows file ownership,
+  no-link/reparse-point checks, atomic manifests, flush and repair must
+  preserve 500 ms fragments, actual commit watermarks, every complete
+  track, true timestamp gaps, drop accounting and torn-finalize recovery.
+  macOS encoders, admission/pressure and startup order stay unchanged.
+- [ ] **W.3 Platform contract tests.** Shared executable contracts for
+  clock/timestamp mapping, bounded frame pools and retention, GPU completion,
+  capture teardown, encoder pressure/loss, A/V timing, commit/finalize,
+  interrupted recovery and ownership. Every implemented platform must pass;
+  extend existing checks first, obtain approval before new test files.
+- [ ] **W.4 Windows synthetic platform.** Add `isocast-platform-windows`:
+  clock, bounded BGRA/YUV frames, importer, synthetic sources and W.2 writer.
+  Software Media Foundation H.264/AAC for hosted recording; fail clearly
+  for unsupported devices/codecs. A synthetic program and ISOs produce
+  decodable, aligned files on windows-latest, with honest loss counters.
+- [ ] **W.5 Capture, audio and encoders.** Windows.Graphics.Capture for
+  screens/windows, Media Foundation cameras, WASAPI input/loopback/output,
+  MF/NVENC/QSV/AMF capability selection, permissions and reconnects. Exercise
+  everything runners expose; list hardware paths unqualified rather than
+  treating synthetic or software-encoder success as hardware evidence.
+- [ ] **W.6 App, IPC and shared surfaces.** Slint Windows window and native
+  integration, same-user named pipes with isolated engines, D3D11/D3D12
+  surface hand-over/fences with adapter identity and bounded per-viewer
+  lifetime. Verify CLI/MCP/app use the one API, client death/resize/stalls
+  cannot corrupt frames or stop recording, and shutdown cleans resources.
+- [ ] **W.7 Packaging and updates.** Choose MSIX or installer; reproducible
+  install/upgrade/uninstall, correct paths and per-user state, verified
+  update authenticity and rollback. Build/test packages on runners; signing
+  credentials, releases and publication require the delegator/Ryan.
+- [ ] **W.8 Windows e2e and stress.** Port existing synthetic e2e/stress
+  checks: recording/ISOs/streaming, pause/split/retake/export, killed writers,
+  ownership, rapid controls, overload and stalled clients. Run short gates
+  on pushes; bounded explicit long soaks, not two hours for every push.
+  Preserve integrity/audio/sync gates and record any runner limits honestly.
+- [ ] **W.9 Windows alpha readiness.** Map every `docs/alpha-test.md`
+  item to Windows evidence, using the newer crash-safe contract where that
+  run sheet is stale: install, doctor/tune, two-hour program+ISO+local-stream
+  soak, UI workflows, exact crash recovery and private report preview.
+  Record loss and full-decode/A/V results; distinguish hosted qualification
+  from the real camera/mic/display/GPU/permissions/signing checks still
+  needed. Hand Ryan the checklist and one install command for his machine.
+
 ### 9. Later (pull into the queue once the above is done)
 
 - Streaming: RTMP and SRT through FFmpeg or GStreamer, WHIP through `str0m`.
 - Syphon client source; Audio Unit plugins as audio filters.
 - A second canvas (vertical video) and a replay buffer.
-- Windows and Linux backends.
+- Linux backend (Windows now tracked in W).
 - NDI input and output.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
@@ -1481,6 +1551,41 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
   time (cross-correlated lag 0 at 48 and 44.1 kHz, was 44-48 ms; v2 failed
   '!dat' before). hw-batch and e2e.py robustness (#100). Full hosted e2e
   17/17 in the VM.
+- W.0 CI round 3 (2026-10-17, #105): run 39042460186 passes diagnostics
+  and obs-websocket on Windows; protocol 80/81 (test used a Unix-only
+  absolute root). Project-file tests now use native roots and exercise the
+  actual file boundary; Windows writes `/`-separated relative take paths,
+  leaving absolute references and macOS bytes alone. CI keeps going through
+  clippy/tests. Audit also fixes Windows home/data roots, diagnostic path
+  redaction, timeline randomness, plugin rooted paths and OBS wipe paths.
+  Remote fmt/clippy, 228 unit tests + 1 doctest (1 hardware test ignored),
+  diagnostics' separate test and Actionlint pass; Unix project bytes match.
+  Next hosted run required; W.0 remains unchecked.
+
+- W.0 CI round 2 (2026-10-17, #105): hosted run 39042059588 passes
+  Windows build/clippy and diagnostics' test; three obs-websocket tests fail
+  because production password/salt generation opens `/dev/urandom` on
+  Windows. Protocol tests were not reached; Ubuntu passes throughout.
+  Use the existing getrandom crate on non-Unix targets only, retaining the
+  Unix random source and all tests. Remote macOS fmt/clippy and 227 unit
+  tests + 1 doctest pass (1 hardware test ignored); locked Windows dependency
+  graph resolves. Next hosted run still required.
+
+- W.0 CI round 1 (2026-10-17, #105): hosted run 39041442122 builds on
+  Windows and Ubuntu; Ubuntu clippy/tests pass. Windows clippy found three
+  Unix-only diagnostics declarations compiled without their callers. Gate
+  those imports/helpers with `cfg(unix)`, leaving macOS code unchanged.
+  Remote fmt/clippy and 228 unit tests + 1 doctest pass (1 hardware test
+  ignored; diagnostics' test run separately).
+  Windows tests were skipped; W.0 remains open pending the next hosted run.
+
+- W.0 preparation (2026-10-17, #105): added the Windows/Ubuntu portable
+  workflow and branch-restricted snapshot runner; shared Rust code is
+  unchanged. Remote Bash/ShellCheck/Actionlint, snapshot scan and argument
+  refusals pass; remote gates pass (227 unit tests + 1 doctest, 1 hardware
+  test ignored), plus diagnostics' 1 test. Real Actions qualification remains
+  pending the delegator's commit/push (this implementer cannot commit or
+  push). W.0 stays unchecked.
 
 - A.4 #90 fix round 1 (2026-10-16): removed the early ISO hold and share
   cap after review found lost ISO content without protected-output gain.
@@ -4125,3 +4230,15 @@ One line per finished task, newest last.
   Apple Virtual Sound Device records the same PCM as main; an aggregate
   going 18 -> 2 mid-take keeps the source running (logged), 18 -> 16
   keeps tones 1 and 2 exact.
+- #103 (2026-10-17): a folder a plugin's request gives (`start{folder}`,
+  `recording.folder` via `apply`/`start{setup}`/`init_setup`, an imported
+  profile's) must already be a recordings folder (or `~/Movies/Isocast`),
+  otherwise -32002. Also #56 F3 (a 5 s sandbox poll), #56 F4 (export healing
+  rewrites only paths that exist where the export is now) and #77 (a join
+  after the worker ended on its own starts a fresh hub). Verified with a
+  real sandboxed attacker plugin: on main, apply recording.folder=secret
+  then let it read, list and write the secret folder; on head all three
+  attacks are refused and it stays denied. A client `start` into a new
+  folder still works and restarts the plugin. Standalone record reaches a
+  running read plugin in 0.3 s on head and not at all in 20 s on main.
+  Export-only healing is left alone on head and wrongly rewritten on main.

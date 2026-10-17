@@ -1,5 +1,6 @@
 //! Bounded, redacted plugin output and a nonblocking callback log queue.
 use serde_json::Value;
+#[cfg(unix)]
 use std::io::{Read, Write};
 use std::sync::{
     OnceLock,

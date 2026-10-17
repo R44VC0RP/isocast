@@ -82,11 +82,15 @@ pub struct Timeline {
 /// A new [`Timeline::uid`]: 16 random hex digits (the time and process
 /// if the system's random source can't be read).
 pub fn new_uid() -> String {
+    #[cfg(unix)]
     use std::io::Read;
     let mut bytes = [0u8; 8];
+    #[cfg(unix)]
     let random = std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))
         .is_ok();
+    #[cfg(not(unix))]
+    let random = getrandom::fill(&mut bytes).is_ok();
     if !random {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

@@ -261,8 +261,7 @@ pub fn generate(
                             .or_else(|| value["fields"]["report"]["folder"].as_str());
                         if let Some(folder) = folder {
                             let folder = if let Some(rest) = folder.strip_prefix("~/") {
-                                PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-                                    .join(rest)
+                                isocast_protocol::api::home_folder().join(rest)
                             } else {
                                 PathBuf::from(folder)
                             };
@@ -282,7 +281,7 @@ pub fn generate(
             );
         }
     }
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let home = isocast_protocol::api::home_folder();
     let bootstrap = isocast_protocol::api::socket_path().with_extension("log");
     if bootstrap.exists() {
         collect(
@@ -564,7 +563,7 @@ fn build(
         report.preview_id = Some(crate::preview::save(contents)?);
         return Ok(report);
     }
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let home = isocast_protocol::api::home_folder();
     let out = params.out.clone().unwrap_or_else(|| {
         if std::env::var_os("ISOCAST_SOCKET").is_some() {
             logs_folder().with_extension("reports")
