@@ -761,6 +761,16 @@ def remove_job(job):
     shutil.rmtree(job, ignore_errors=True)
 
 
+def forget_sessions(args, stdout, run_dir, env):
+    """Delete the checker's OpenCode session(s), so a run of hundreds of
+    checks doesn't fill the user's session list (without OPENCODE_API_KEY
+    the checks share the user's OpenCode data)."""
+    ids = set(re.findall(r'"sessionI[Dd]"\s*:\s*"(ses_[A-Za-z0-9]+)"', stdout))
+    for sid in ids:
+        subprocess.run([args.opencode, "session", "delete", sid], cwd=run_dir, env=env,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+
+
 def check_one(args, entry, work):
     iid = entry["id"]
     job = os.path.join(work, re.sub(r"[^A-Za-z0-9._-]", "_", iid))
@@ -817,6 +827,8 @@ def check_one(args, entry, work):
             CHILDREN.discard(proc)
         with open(os.path.join(job, f"run-{attempt}.jsonl"), "w") as f:
             f.write(stdout or "")
+        if not args.keep_sessions:
+            forget_sessions(args, stdout or "", run_dir, env)
         with open(os.path.join(job, f"run-{attempt}.err"), "w") as f:
             f.write(stderr or "")
         usage, tools = usage_of(stdout or "")
@@ -1216,6 +1228,7 @@ def main():
     p.add_argument("--render-timeout", type=int, default=120)
     p.add_argument("--check-timeout", type=int, default=180)
     p.add_argument("--keep-work", action="store_true", help="keep each checker's run folder (debugging)")
+    p.add_argument("--keep-sessions", action="store_true", help="keep each checker's OpenCode session (deleted by default)")
     args = p.parse_args()
 
     if args.command == "list":

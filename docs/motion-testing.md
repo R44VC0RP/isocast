@@ -299,7 +299,9 @@ from 900x600@2 to 3440x1440@1 plus a tall one, and a width sweep (900, the
 window's minimum, to 2700 points) for the main screens, each against an engine of its own with
 the synthetic setup. Then one Claude Haiku 5.5 checker per picture, 12 at
 once, looks at it and answers through a validated `deliver_layout` tool:
-"ok", or issues with a kind, a severity and a pixel box. It runs in the
+"ok", or issues with a kind, a severity and a pixel box. Each checker's
+OpenCode session is deleted after it answers (`--keep-sessions` keeps
+them), so a run doesn't fill your session list. It runs in the
 same isolation as the visual judge (a fresh copy of
 `scripts/layout-audit/checker`, an empty global config, a read-only folder
 with just that picture). The report (`report.html`, `report.md`,
