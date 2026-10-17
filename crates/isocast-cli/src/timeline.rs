@@ -89,6 +89,11 @@ pub enum TimelineCommand {
         /// clip's take.
         #[arg(long)]
         folder: Option<PathBuf>,
+        /// Also write a vertical (9:16) edited file: each clip's picture or
+        /// crop fitted into the program's size on its side (1080x1920 for
+        /// 1080p), so a 9:16 crop fills it.
+        #[arg(long)]
+        vertical: bool,
         /// Return once it has started; `isocast watch --kinds
         /// export_progress,export_finished` follows it.
         #[arg(long)]
@@ -354,9 +359,10 @@ pub fn run(command: TimelineCommand) -> Result<ExitCode> {
         TimelineCommand::Export {
             timeline,
             folder,
+            vertical,
             background,
             json,
-        } => return export(client, timeline, folder, background, json),
+        } => return export(client, timeline, folder, vertical, background, json),
         TimelineCommand::Trim {
             clip,
             in_seconds,
@@ -599,6 +605,7 @@ fn export(
     client: Client,
     timeline: Option<String>,
     folder: Option<PathBuf>,
+    vertical: bool,
     background: bool,
     json: bool,
 ) -> Result<ExitCode> {
@@ -621,6 +628,7 @@ fn export(
         client.call(Method::TimelineExport(Some(TimelineExportParams {
             timeline,
             folder,
+            vertical,
         })))?;
     if !json {
         println!(

@@ -464,6 +464,12 @@ pub struct TimelineExportParams {
     /// of the first clip's take.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<PathBuf>,
+    /// Also write a vertical (9:16) edited file, `<name> VERTICAL.<ext>`:
+    /// each clip's angle (or its crop) fitted into the program's size
+    /// turned on its side (1920x1080 → 1080x1920), so a 9:16 crop fills
+    /// the frame; the program's sound. Every frame is encoded again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vertical: bool,
 }
 
 /// A timeline with what each clip holds, as `timeline_get` and the
@@ -746,6 +752,10 @@ pub struct ExportClip {
 /// The source label of an export's edited file: the program's sound with
 /// each clip's angle (see [`Clip::angle`]) as its picture.
 pub const EDITED: &str = "edited";
+
+/// The source label of an export's vertical (9:16) edited file
+/// ([`TimelineExportParams::vertical`]).
+pub const VERTICAL: &str = "vertical";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

@@ -1652,6 +1652,29 @@ each section. Delete entries that stop being true.
   Failed-source files end at accepted media, not a timed take's future end;
   the manifest retains the finalized duration/counters despite reporting failure.
   Evidence: vertical-followups/scratch/REPORT.md. UI and live linking stay later.
+- 2026-10-16 (#94): **One sample description per export, parameter sets
+  in-band.** Frames encoded again keep the joined file's format; every
+  keyframe carries its own VPS/SPS/PPS (SPS/PPS) in-band (copied keyframes
+  the recording's) when the export has any re-encoded or differently
+  described frame, so any keyframe decodes after a seek. Rejected: hev1
+  (AVFoundation reports "Cannot Decode"); making VideoToolbox emit the
+  recording's parameter sets (it can't be told, and the PPS differ);
+  renumbering the re-encode's parameter set ids (needs a slice header
+  rewriter). The hvcC still says array_completeness=1, which strictly
+  forbids in-band sets; Chrome, Safari, AVFoundation and ffmpeg all accept
+  it (checked). A sample of another profile (bit depth) keeps its own
+  description; HEVC re-encodes now use the joined file's bit depth.
+- 2026-10-16 (#94): **Vertical export size = the program's size on its
+  side** (1920x1080 -> 1080x1920, 1280x720 -> 720x1280): standard platform
+  sizes, predictable, no new setting; a separate VERTICAL file, so EDITED
+  stays as it was.
+- 2026-10-16 (#94): **Forward playback decodes ahead** (AVAssetReader per
+  clip, 8 frames, scaled by VideoToolbox) instead of an AVPlayer over an
+  AVComposition: the picture must land in a Slint image anyway, and the
+  reader keeps the exact angle/clip mapping the exact-seek path uses. The
+  editor's rendering notifier picks the picture due at each drawn frame;
+  a timer only asks for redraws. Reverse play keeps exact seeks. No audio
+  in playback (as before).
 
 - 2026-10-16 (#86): **Two program outputs, one capture/mix/ISO set.** Each
   canvas has its own compositor, size-specific bounded output pool and
@@ -5568,6 +5591,19 @@ each section. Delete entries that stop being true.
   job fails ("could not create image from display"); cua-driver's
   `get_desktop_state` works (~3 pictures a second). `isocast shutdown`
   there left the isolated daemon running in 3 of 3 tries; kill it by pid.
+- 2026-10-16 (#94): measuring the editor's playback in a window: the
+  video006 capture rig (a virtual display recorded at 60 fps by a second
+  engine) with a test-pattern studio, scratch/rig/director on the
+  editor-followups lane (`take.py playback`, then `analyze.py OUT`: picture
+  changes in the viewer row, intervals, source frames advanced by bar
+  shift). App-side times: ISOCAST_PREVIEW_STATS=1 prints `play:` lines.
+  Remaining jitter (16% of pictures held 1 or 3 refreshes) also shows in
+  the app's own render times, so not all of it is the capture.
+- 2026-10-16 (#94): a Chrome window launched by running its binary from
+  the hw-batch desktop bridge crashed on first start (a "quit
+  unexpectedly" dialog then covers later screenshots: kill
+  UserNotificationCenter); `open -na` works. isocast-m2-a has Chrome 155
+  in ~/Applications (installed for this check).
 
 - 2026-10-16 (#87): headless Chrome (154) refused (MEDIA_ERR_DECODE, a
   third of a second in) both HEVC files of the check export, program and

@@ -173,12 +173,13 @@ Predict instantly, without benchmarking, whether a setup's files (the live setup
 
 ## export_timeline
 
-Join a timeline's clips (the current one unless `timeline` is given), in order, into one program file and one file per ISO source every clip has, each cut frame-accurately to the clips' in and out points (video copied as recorded except from a cut to the next keyframe; audio re-encoded once and cross-faded so it stays in sync at every join), an EDITED file when clips show other angles (set_angle) or crops (crop_clip), plus an .export.json manifest, next to the first take (or in `folder`). Sources some clips lack are skipped, saying why. It runs in the background: returns at once with the files it will write; get_events shows export_progress and export_finished.
+Join a timeline's clips (the current one unless `timeline` is given), in order, into one program file and one file per ISO source every clip has, each cut frame-accurately to the clips' in and out points (video copied as recorded except from a cut to the next keyframe; audio re-encoded once and cross-faded so it stays in sync at every join), an EDITED file when clips show other angles (set_angle) or crops (crop_clip), a VERTICAL (9:16) edited file with `vertical` (a 9:16 crop fills it), plus an .export.json manifest, next to the first take (or in `folder`). Sources some clips lack are skipped, saying why. It runs in the background: returns at once with the files it will write; get_events shows export_progress and export_finished.
 
 | Argument | Type | Description |
 |---|---|---|
 | `folder` | string (optional) | Where to write the joined files (made if missing); else the folder of the first clip's take. |
 | `timeline` | string (optional) | The timeline's id; the current one if absent. |
+| `vertical` | boolean | Also write a vertical (9:16) edited file, `<name> VERTICAL.<ext>`: each clip's angle (or its crop) fitted into the program's size turned on its side (1920x1080 → 1080x1920), so a 9:16 crop fills the frame; the program's sound. Every frame is encoded again. |
 
 ## get_collection_or_profile
 

@@ -42,6 +42,7 @@ import shutil
 import signal
 import socket
 import statistics
+import struct
 import subprocess
 import sys
 import tempfile
@@ -792,6 +793,39 @@ def video_packets(path):
     return [line.rsplit(",", 1)[-1].strip() for line in lines.splitlines() if line and not line.startswith("#")]
 
 
+def video_descriptions(path):
+    """How many sample descriptions the file's video track has (#94: one,
+    or Chrome can't decode HEVC exports)."""
+    data = Path(path).read_bytes()
+
+    def boxes(start, end):
+        while start + 8 <= end:
+            size, kind = struct.unpack(">I4s", data[start:start + 8])
+            head = 8
+            if size == 1:
+                size, head = struct.unpack(">Q", data[start + 8:start + 16])[0], 16
+            yield kind, start + head, start + (size or end - start)
+            start += size or end - start
+
+    def walk(start, end):
+        for kind, s, e in boxes(start, end):
+            if kind in (b"moov", b"trak", b"mdia", b"minf", b"stbl"):
+                yield from walk(s, e)
+            elif kind == b"hdlr" and data[s + 8:s + 12] == b"vide":
+                yield "video"
+            elif kind == b"stsd":
+                yield struct.unpack(">I", data[s + 4:s + 8])[0]
+
+    counts, video = [], False
+    for item in walk(0, len(data)):
+        if item == "video":
+            video = True
+        elif video:
+            counts.append(item)
+            video = False
+    return counts[0] if len(counts) == 1 else counts
+
+
 def scenario_edit(e, cfg, evidence):
     """C.3's edits on two program + 2 ISO takes: trim, split, ripple delete,
     an angle, undo and redo, export; then crops (#87) and export again. Every
@@ -911,6 +945,9 @@ def scenario_edit(e, cfg, evidence):
                 dropped = round(duration * fps) - frames
             row = check_file(path, duration, fps, (cfg["canvas"]["width"], cfg["canvas"]["height"]),
                              dropped=dropped)
+            descriptions = video_descriptions(path)
+            require(descriptions == 1, f"{path.name}: {descriptions} video sample descriptions, not one")
+            row["video_descriptions"] = descriptions
             # Every picture: the one on screen in its take at that moment.
             out = pattern_frames(path, width, height)
             crop_rows = crop_check = None

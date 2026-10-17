@@ -479,6 +479,10 @@ pub struct JoinSpec {
     /// The joined video takes this file's codec, size and frame rate (the
     /// program's, for an edited file); the first part's if absent.
     pub format: Option<PathBuf>,
+    /// The joined video's picture size, if not that file's (a vertical
+    /// edited file, #94): every part is encoded again, its picture (or
+    /// crop) fitted into it.
+    pub size: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone)]

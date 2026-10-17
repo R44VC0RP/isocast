@@ -28,6 +28,7 @@ pub mod diagnostics;
 mod frames;
 mod gpu;
 pub mod hotkeys;
+mod inband;
 mod join;
 mod jpeg;
 mod keychain;

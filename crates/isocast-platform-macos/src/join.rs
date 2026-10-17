@@ -14,7 +14,9 @@
 //! again whole, on the joined file's frame grid; so is a cropped part
 //! (#87), its crop scaled to fit the joined file's size. A part ends with its last
 //! frame that starts before its end (recordings have no reordered frames,
-//! so cutting there needs nothing encoded again).
+//! so cutting there needs nothing encoded again). Frames encoded again
+//! keep the joined file's one sample description, their parameter sets
+//! in-band (#94, `inband`).
 //!
 //! Each audio track is decoded and encoded again (AAC, as recordings are)
 //! as one continuous track, each part's from its in point, cut or padded
@@ -52,13 +54,14 @@ use objc2_core_foundation::{CFRetained, Type};
 use objc2_core_media::{
     CMAudioFormatDescriptionGetStreamBasicDescription, CMFormatDescription, CMSampleBuffer,
     CMSampleTimingInfo, CMTime, CMTimeFlags, CMTimeRange, CMTimeRoundingMethod,
-    CMVideoFormatDescriptionGetDimensions, kCMTimePositiveInfinity,
+    CMVideoFormatDescriptionGetDimensions, kCMTimePositiveInfinity, kCMVideoCodecType_HEVC,
 };
 use objc2_core_video::CVPixelBuffer;
 use objc2_foundation::{NSArray, NSString, NSURL};
 
 use crate::audio::{interleaved_f32, pcm_settings};
-use crate::recode::{Decoder, Encoder, fourcc, is_sync, ten_bit};
+use crate::inband::{OneFormat, main10};
+use crate::recode::{Decoder, Encoder, encoded_format, fourcc, is_sync, ten_bit};
 use crate::writer::{
     aac_settings, add_input, audio_sample_buffer, catch, float_format, ns_error, writer_error,
 };
@@ -82,6 +85,8 @@ struct Format {
     /// Its frame rate, rounded to whole frames per second (0: unknown).
     fps: i32,
     timescale: i32,
+    /// HEVC Main 10: frames encoded again are too.
+    ten_bit: bool,
     hint: CFRetained<CMFormatDescription>,
 }
 
@@ -285,6 +290,7 @@ fn format_of(track: &AVAssetTrack, path: &Path, fps: u32) -> Result<Format> {
         size: (size.width, size.height),
         fps: rate(track, fps),
         timescale: unsafe { track.naturalTimeScale() }.max(1),
+        ten_bit: main10(&hint),
         hint,
     })
 }
@@ -324,6 +330,11 @@ fn cmp(a: CMTime, b: CMTime) -> i32 {
 
 fn max(a: CMTime, b: CMTime) -> CMTime {
     if cmp(a, b) >= 0 { a } else { b }
+}
+
+/// Whether `own` is the joined file's format exactly.
+fn one_format_same(format: &Format, own: &CMFormatDescription) -> bool {
+    unsafe { CMFormatDescription::equal(Some(own), Some(&format.hint)) }
 }
 
 /// A track's first format description.
@@ -720,7 +731,12 @@ impl VideoStream<'_> {
         keyframe: bool,
     ) -> Result<()> {
         let crop = self.parts[self.index.expect("open")].crop;
-        let ten = ten_bit(picture);
+        // HEVC in the joined file's bit depth, so its frames encoded again
+        // share its one sample description (#94).
+        let ten = match self.format.codec == kCMVideoCodecType_HEVC {
+            true => self.format.ten_bit,
+            false => ten_bit(picture),
+        };
         if self
             .encoder
             .as_ref()
@@ -1078,6 +1094,26 @@ fn write(spec: &JoinSpec, path: &Path, progress: OnJoinProgress) -> Result<Joine
             format_of(&video, first, spec.parts[0].fps)?
         }
     };
+    let format = match spec.size {
+        Some((width, height)) if (width as i32, height as i32) != format.size => {
+            if format.fps == 0 {
+                bail!("a joined file of another size needs a known frame rate");
+            }
+            // Every frame is encoded again at this size: the file's format
+            // is the encoder's (#94).
+            Format {
+                hint: encoded_format(
+                    format.codec,
+                    (width, height),
+                    f64::from(format.fps),
+                    format.ten_bit,
+                )?,
+                size: (width as i32, height as i32),
+                ..format
+            }
+        }
+        _ => format,
+    };
     let parts = spec
         .parts
         .iter()
@@ -1121,6 +1157,19 @@ fn write(spec: &JoinSpec, path: &Path, progress: OnJoinProgress) -> Result<Joine
             format.fps
         );
     }
+    // Keyframes carry their parameter sets in-band if any frame is (or may
+    // be) encoded again or comes in another format: a part that starts
+    // after its file's first frame (a cut, usually between keyframes), or
+    // isn't copied (#94).
+    let one_format = OneFormat::new(
+        &format.hint,
+        parts.iter().any(|part| {
+            let file_in = seconds(sub(part.in_point, part.offset));
+            !part.copy
+                || file_in > 0.5 / f64::from(format.fps.max(1))
+                || self::format(&part.video).is_none_or(|own| !one_format_same(&format, &own))
+        }),
+    );
     // Where each part starts in the joined file: the parts' lengths added
     // up, exactly.
     let timescale = format.timescale;
@@ -1238,6 +1287,7 @@ fn write(spec: &JoinSpec, path: &Path, progress: OnJoinProgress) -> Result<Joine
                 if !video_done && unsafe { video_input.isReadyForMoreMediaData() } {
                     match video.next()? {
                         Some(sample) => {
+                            let sample = one_format.adapt(sample)?;
                             appended = unsafe { sample.presentation_time_stamp() };
                             if !unsafe { video_input.appendSampleBuffer(&sample) } {
                                 return Err(

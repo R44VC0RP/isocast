@@ -1078,7 +1078,8 @@ impl Isocast {
                        each cut frame-accurately to the clips' in and out points (video copied \
                        as recorded except from a cut to the next keyframe; audio re-encoded once \
                        and cross-faded so it stays in sync at every join), an EDITED file when \
-                       clips show other angles (set_angle) or crops (crop_clip), plus an \
+                       clips show other angles (set_angle) or crops (crop_clip), a VERTICAL \
+                       (9:16) edited file with `vertical` (a 9:16 crop fills it), plus an \
                        .export.json manifest, next \
                        to the first take (or in \
                        `folder`). Sources some clips lack are skipped, saying why. It runs in \

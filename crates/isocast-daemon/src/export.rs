@@ -3,7 +3,9 @@
 //! out points, plus (when clips show other angles, C.3, or are cropped,
 //! #87) an edited file with each clip's angle as its picture (cropped and
 //! scaled to the program's size where the clip has a crop) and the
-//! program's sound, in the
+//! program's sound, and with `vertical` (#94) the same edited picture at
+//! 9:16 (`<name> VERTICAL.mov`, the program's size on its side, every frame
+//! encoded again), in the
 //! background, reporting `export_progress` and `export_finished` events.
 //! The video is copied as recorded, except the frames from a cut that
 //! isn't on a keyframe to the next keyframe, angles in another format
@@ -34,7 +36,7 @@ use isocast_protocol::api::{Event, RpcError};
 use isocast_protocol::manifest::{ManifestFile, SessionManifest};
 use isocast_protocol::timeline::{
     Crop, EDITED, ExportClip, ExportFile, ExportManifest, ExportPart, ExportRunning, ExportSkipped,
-    ExportStarted, ExportStatus, TimelineExportParams, take_length,
+    ExportStarted, ExportStatus, TimelineExportParams, VERTICAL, take_length,
 };
 use isocast_protocol::{Container, PROGRAM};
 
@@ -91,6 +93,10 @@ impl Drop for Slot<'_> {
         }
     }
 }
+
+/// What one joined file is made of: its parts, the file whose format it
+/// takes, and its picture size if not that file's.
+type FileParts = (Vec<JoinPart>, Option<PathBuf>, Option<(u32, u32)>);
 
 /// One clip, read from its take's manifest.
 struct TakeFiles {
@@ -637,6 +643,33 @@ impl Daemon {
                     false
                 }
             };
+        // The vertical edited file (#94), when asked for: the program's
+        // size on its side.
+        let vertical = params.vertical
+            && match (sources.iter().any(|s| s == PROGRAM), edited_problem(&takes)) {
+                (false, _) => {
+                    skipped.push(ExportSkipped {
+                        source: VERTICAL.into(),
+                        reason: "the program can't be joined, and the vertical file has the \
+                                 program's sound and format"
+                            .into(),
+                    });
+                    false
+                }
+                (true, Some(reason)) => {
+                    skipped.push(ExportSkipped {
+                        source: VERTICAL.into(),
+                        reason,
+                    });
+                    false
+                }
+                (true, None) => true,
+            };
+        let vertical_size = vertical.then(|| {
+            let program = takes[0].file(PROGRAM).expect("joined");
+            // Each side even, as encoders take.
+            (program.height / 2 * 2, program.width / 2 * 2)
+        });
         if sources.is_empty() {
             let reasons: Vec<String> = skipped
                 .iter()
@@ -670,6 +703,13 @@ impl Daemon {
             .iter()
             .flat_map(|source| takes.iter().map(move |take| share(take, source)))
             .sum();
+        if vertical {
+            // Every frame encoded again, scaled up: as an angle, allow 5.
+            needed += takes
+                .iter()
+                .map(|take| share(take, &take.angle).max(share(take, PROGRAM)) * 5)
+                .sum::<u64>();
+        }
         if edited {
             // Angles encoded again (scaled up, at a higher quality) came
             // out up to 4.2 times the program's stretch: allow 5.
@@ -720,11 +760,17 @@ impl Daemon {
         if edited {
             labels.push((EDITED.to_uppercase(), extension_of(PROGRAM)));
         }
+        if vertical {
+            labels.push((VERTICAL.to_uppercase(), extension_of(PROGRAM)));
+        }
         let stem = fit_stem(&file_stem(&timeline.name), &labels);
         let (paths, manifest_path) = unique_paths(&folder, &stem, &labels);
         let mut outputs: Vec<String> = sources.clone();
         if edited {
             outputs.push(EDITED.into());
+        }
+        if vertical {
+            outputs.push(VERTICAL.into());
         }
         let files: Vec<ExportFile> = outputs
             .iter()
@@ -732,19 +778,23 @@ impl Daemon {
             .map(|(source, path)| {
                 // The edited file is in the program's format, with its sound.
                 let shown = |take: &TakeFiles| match source.as_str() {
-                    EDITED => take.angle.clone(),
+                    EDITED | VERTICAL => take.angle.clone(),
                     source => source.to_string(),
                 };
                 let format = match source.as_str() {
-                    EDITED => PROGRAM,
+                    EDITED | VERTICAL => PROGRAM,
                     source => source,
                 };
                 let first = takes[0].file(format).expect("planned");
+                let (width, height) = match (source.as_str(), vertical_size) {
+                    (VERTICAL, Some(size)) => size,
+                    _ => (first.width, first.height),
+                };
                 ExportFile {
                     path: path.clone(),
                     source: source.clone(),
-                    width: first.width,
-                    height: first.height,
+                    width,
+                    height,
                     fps: first.fps,
                     audio: first.audio.iter().map(|a| a.source.clone()).collect(),
                     parts: takes
@@ -806,18 +856,27 @@ impl Daemon {
         slot.started = true;
         let duration_seconds: f64 = takes.iter().map(TakeFiles::seconds).sum();
         let manifest_notes = manifest.notes.clone();
-        let mut parts: Vec<(Vec<JoinPart>, Option<PathBuf>)> = sources
+        let mut parts: Vec<FileParts> = sources
             .iter()
-            .map(|source| (takes.iter().map(|take| take.part(source)).collect(), None))
+            .map(|source| {
+                (
+                    takes.iter().map(|take| take.part(source)).collect(),
+                    None,
+                    None,
+                )
+            })
             .collect();
-        if edited {
+        if edited || vertical {
             let program = takes[0]
                 .folder
                 .join(&takes[0].file(PROGRAM).expect("planned").path);
-            parts.push((
-                takes.iter().map(TakeFiles::edited_part).collect(),
-                Some(program),
-            ));
+            let edited_parts: Vec<JoinPart> = takes.iter().map(TakeFiles::edited_part).collect();
+            if edited {
+                parts.push((edited_parts.clone(), Some(program.clone()), None));
+            }
+            if vertical {
+                parts.push((edited_parts, Some(program), vertical_size));
+            }
         }
         let daemon = self.clone();
         let path = manifest_path.clone();
@@ -858,7 +917,7 @@ impl Daemon {
     fn run_export(
         &self,
         manifest: &mut ExportManifest,
-        parts: &[(Vec<JoinPart>, Option<PathBuf>)],
+        parts: &[FileParts],
         path: &Path,
         folder: &Path,
     ) {
@@ -867,7 +926,7 @@ impl Daemon {
         let mut checked = Instant::now();
         let mut stopped: Option<String> = None;
         let mut error = None;
-        for (index, (parts, format)) in parts.iter().enumerate() {
+        for (index, (parts, format, size)) in parts.iter().enumerate() {
             let file = &manifest.files[index];
             let spec = JoinSpec {
                 parts: parts.clone(),
@@ -877,6 +936,7 @@ impl Daemon {
                     _ => Container::Mov,
                 },
                 format: format.clone(),
+                size: *size,
             };
             let output = file.path.clone();
             let mut progress = |fraction: f64| {

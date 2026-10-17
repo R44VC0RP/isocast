@@ -325,7 +325,21 @@ pub fn angle(
     let (first, last) = range(timeline, grids, params.start_seconds, params.end_seconds)?;
     let mut changed = Vec::new();
     for clip in &mut timeline.clips[first..last] {
+        let was = clip.angle.clone().unwrap_or_else(|| PROGRAM.to_string());
         clip.angle = (source != PROGRAM).then(|| source.to_string());
+        // A crop stays on the new angle's 2-pixel grid (#94).
+        let sizes = (grid(grids, clip).size(&was), grid(grids, clip).size(source));
+        if let Some(crop) = clip.crop
+            && sizes.0 != sizes.1
+        {
+            clip.crop = snap_crop(crop, sizes.1).map_err(|err| {
+                format!(
+                    "clip {}: its crop on {source:?}'s {}×{} picture: {err}; clear or enlarge the \
+                     crop first",
+                    clip.id, sizes.1.0, sizes.1.1
+                )
+            })?;
+        }
         changed.push(clip.id.clone());
     }
     Ok(changed)
@@ -1045,6 +1059,41 @@ mod tests {
         crop(&mut t, &grids, &params(Some(r), None, false)).unwrap();
         let c = t.clips[1].crop.unwrap();
         assert_eq!((c.x * 1920.0).round() % 2.0, 0.0);
+        // Another angle's picture size: the crop lands on its grid (#94),
+        // and a crop too small for it refuses the angle, naming the clip.
+        let mut moved = t.clone();
+        moved.clips[1].crop = Some(Crop {
+            x: 0.1003,
+            y: 0.2,
+            width: 0.5,
+            height: 0.5,
+        });
+        let angle_params = TimelineAngleParams {
+            start_seconds: 1.0,
+            end_seconds: 3.0,
+            source: "camera".into(),
+            timeline: None,
+        };
+        angle(&mut moved, &grids, &angle_params).unwrap();
+        let c = moved.clips[1].crop.unwrap();
+        for v in [
+            c.x * 1280.0,
+            c.width * 1280.0,
+            c.y * 720.0,
+            c.height * 720.0,
+        ] {
+            assert!((v / 2.0 - (v / 2.0).round()).abs() < 1e-6, "{c:?}");
+        }
+        let mut tiny = t.clone();
+        tiny.clips[1].crop = Some(Crop {
+            width: 34.0 / 1920.0,
+            ..r
+        });
+        let err = angle(&mut tiny, &grids, &angle_params).unwrap_err();
+        assert!(
+            err.starts_with(&format!("clip {}:", tiny.clips[1].id)) && err.contains("too small"),
+            "{err}"
+        );
         // Errors name the field.
         let bad = Crop { x: 0.8, ..r };
         let err = crop(&mut t.clone(), &grids, &params(Some(bad), None, false)).unwrap_err();

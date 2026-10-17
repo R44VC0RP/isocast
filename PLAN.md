@@ -472,6 +472,12 @@ come later (clips already carry in/out points on their take).
   offline takes relinked (`timeline_relink`); "Open Editor After
   Recording" (`recording.open_editor`). Written in the background,
   atomically, never into a folder being recorded.
+  - [x] C.3f Editor follow-ups (#94): exports keep one video sample
+    description (parameter sets in-band), so HEVC exports play in Chrome;
+    full-rate forward playback (decoded ahead, stepped by drawn frames);
+    `timeline_export --vertical` (a 9:16 edited file); angle changes
+    re-snap crops; waveform pictures off the UI thread; caches keyed by
+    path, size and time.
 
 ### S. Stress testing and performance (Ryan, 2026-10-13)
 
@@ -3962,6 +3968,13 @@ One line per finished task, newest last.
   isolated engine with obs-websocket-js (msgpack 80/80, JSON 77/77),
   obsws-python 9/9, local mediamtx; latency unchanged (3 interleaved
   rounds).
+- C.3f (2026-10-16, branch agent/editor-followups, #94): HEVC/H.264/ProRes
+  exports have one sample description (Chrome, Safari, QuickTime, ffmpeg
+  play them; AVFoundation's decode bit-identical to ffmpeg's); forward
+  playback 29.6 pictures/s, 84% held exactly 2 refreshes (main 24.0, 52%)
+  in a real window on isocast-m2; VERTICAL 9:16 export; angle re-snaps
+  crops. e2e edit (HEVC on exonbook, H.264 hosted) and the full hosted
+  suite pass; take files unchanged.
 - C.3e (2026-10-16, branch agent/editor-round2, #87): crops, rolls,
   waveforms, snapping, zoom and editor keys; e2e edit scenario crops a
   program clip and an angle and checks every cropped picture (bar edges

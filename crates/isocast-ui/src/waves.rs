@@ -19,6 +19,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use slint::{Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
+use crate::thumbs::FileKey;
+
 /// Peaks a second.
 pub const RATE: usize = 100;
 /// Each picture's width, and height, in pixels.
@@ -29,12 +31,15 @@ const HEIGHT: usize = 32;
 const MOST_PIXELS: usize = 60_000;
 
 struct Job {
-    path: PathBuf,
+    key: FileKey,
 }
 
+/// A file's waveform pictures, made on the waveforms' thread (#94: not on
+/// the window's), and the share of the file each covers.
 struct Done {
-    path: PathBuf,
-    peaks: Vec<u8>,
+    key: FileKey,
+    buffers: Vec<SharedPixelBuffer<Rgba8Pixel>>,
+    chunk_seconds: f64,
 }
 
 /// A file's waveform, ready to draw: its pictures and the share of the
@@ -49,31 +54,30 @@ pub struct Wave {
 #[derive(Default)]
 pub struct Waves {
     jobs: RefCell<Option<(Sender<Job>, Receiver<Done>)>>,
-    cache: RefCell<HashMap<PathBuf, Wave>>,
-    pending: RefCell<HashSet<PathBuf>>,
+    cache: RefCell<HashMap<FileKey, Wave>>,
+    pending: RefCell<HashSet<FileKey>>,
 }
 
 impl Waves {
     /// The waveform of `path`, once made (no pictures if it has no sound).
     pub fn get(&self, path: &Path) -> Option<Wave> {
-        self.cache.borrow().get(path).cloned()
+        self.cache.borrow().get(&FileKey::of(path)?).cloned()
     }
 
     /// Make the waveform of `path` unless it is made or being made. True
     /// if a new job was sent.
     pub fn request(&self, path: &Path) -> bool {
-        if self.cache.borrow().contains_key(path) || self.pending.borrow().contains(path) {
+        let Some(key) = FileKey::of(path) else {
+            return false;
+        };
+        if self.cache.borrow().contains_key(&key) || self.pending.borrow().contains(&key) {
             return false;
         }
         let mut jobs = self.jobs.borrow_mut();
         let (tx, _) = jobs.get_or_insert_with(start);
-        let sent = tx
-            .send(Job {
-                path: path.to_path_buf(),
-            })
-            .is_ok();
+        let sent = tx.send(Job { key: key.clone() }).is_ok();
         if sent {
-            self.pending.borrow_mut().insert(path.to_path_buf());
+            self.pending.borrow_mut().insert(key);
         }
         sent
     }
@@ -86,9 +90,13 @@ impl Waves {
         };
         let mut any = false;
         while let Ok(done) = rx.try_recv() {
-            let wave = pictures(&done.peaks);
-            self.pending.borrow_mut().remove(&done.path);
-            self.cache.borrow_mut().insert(done.path, wave);
+            let images: Vec<Image> = done.buffers.into_iter().map(Image::from_rgba8).collect();
+            let wave = Wave {
+                images: ModelRc::new(VecModel::from(images)),
+                chunk_seconds: done.chunk_seconds,
+            };
+            self.pending.borrow_mut().remove(&done.key);
+            self.cache.borrow_mut().insert(done.key, wave);
             any = true;
         }
         any
@@ -109,15 +117,18 @@ fn start() -> (Sender<Job>, Receiver<Done>) {
         .name("waveforms".into())
         .spawn(move || {
             while let Ok(job) = inbox.recv() {
-                let peaks = cached(&job.path).unwrap_or_else(|| {
-                    let peaks = read(&job.path);
-                    store(&job.path, &peaks);
+                let path = &job.key.path;
+                let peaks = cached(path).unwrap_or_else(|| {
+                    let peaks = read(path);
+                    store(path, &peaks);
                     peaks
                 });
+                let (buffers, chunk_seconds) = pictures(&peaks);
                 if outbox
                     .send(Done {
-                        path: job.path,
-                        peaks,
+                        key: job.key,
+                        buffers,
+                        chunk_seconds,
                     })
                     .is_err()
                 {
@@ -177,8 +188,9 @@ fn pixels_per_second(seconds: f64) -> f64 {
     (MOST_PIXELS as f64 / seconds.max(1.0)).min(RATE as f64)
 }
 
-/// The peaks as pictures (see the module docs).
-fn pictures(peaks: &[u8]) -> Wave {
+/// The peaks as pictures (see the module docs), and the seconds of the
+/// file each covers.
+fn pictures(peaks: &[u8]) -> (Vec<SharedPixelBuffer<Rgba8Pixel>>, f64) {
     let seconds = peaks.len() as f64 / RATE as f64;
     let rate = pixels_per_second(seconds);
     let width = (seconds * rate).ceil() as usize;
@@ -223,12 +235,9 @@ fn pictures(peaks: &[u8]) -> Wave {
                 }
             }
         }
-        images.push(Image::from_rgba8(buffer));
+        images.push(buffer);
     }
-    Wave {
-        images: ModelRc::new(VecModel::from(images)),
-        chunk_seconds: CHUNK as f64 / rate,
-    }
+    (images, CHUNK as f64 / rate)
 }
 
 #[cfg(not(target_os = "macos"))]

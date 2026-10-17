@@ -318,6 +318,9 @@ pub struct TimelineExportArgs {
     #[serde(alias = "id")]
     pub timeline: Option<String>,
     pub folder: Option<std::path::PathBuf>,
+    /// Also the vertical (9:16) edited file, as timeline_export's.
+    #[serde(default)]
+    pub vertical: bool,
 }
 arguments!(ScreenshotArgs {
     path: std::path::PathBuf

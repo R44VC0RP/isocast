@@ -90,6 +90,7 @@ moves the cut between two clips and keeps the timeline's length.
 ```sh
 isocast timeline export                     # waits until it is done
 isocast timeline export --background        # returns at once
+isocast timeline export --vertical          # plus a 9:16 edited file
 isocast watch --kinds export_progress,export_finished
 ```
 
@@ -104,6 +105,12 @@ encoded again with the program's codec, while uncropped clips are copied as
 always. The program and ISO files are never cropped: they stay whole, so a
 crop never loses a picture.
 
+With `--vertical` (`vertical` on `timeline_export`) it also writes
+`<name> VERTICAL.mov`, the edited picture at 9:16: the program's size on
+its side (1080x1920 for a 1920x1080 program), each clip's angle or crop
+fitted into it, so a 9:16 crop fills the frame and an uncropped clip shows
+with black bars above and below. Every frame of it is encoded again.
+
 Cuts are frame-accurate. Video is copied as recorded, except where a clip
 starts between two keyframes (recordings have one every second): the frame
 on screen at the in point and the frames up to the next keyframe are decoded
@@ -112,7 +119,9 @@ counts them). An angle recorded in another size or frame rate than the
 program is encoded again whole, fitted to the program's size. Audio is cut
 to the sample and cross-faded over 10 ms at every join, so joins never
 click, and audio and video stay in sync at every join. You can keep
-recording while an export runs.
+recording while an export runs. Each file has one video sample description:
+frames encoded again carry their parameter sets in-band at every keyframe,
+so HEVC exports play in Chrome as well as Safari, QuickTime and ffmpeg.
 
 Timelines are kept across restarts. Over MCP the same steps are
 `new_timeline`, `retake`, `get_timeline`, `remove_clip`, `move_clip`,

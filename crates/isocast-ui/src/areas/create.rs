@@ -49,7 +49,7 @@ use super::{Area, Changed};
 use crate::app::App;
 use crate::daemon::Link;
 use crate::kit::{self, MenuBuilder};
-use crate::thumbs::{Preview, Thumbs};
+use crate::thumbs::{Playback, Preview, Segment, Thumbs};
 use crate::toasts::Toast;
 use crate::waves::Waves;
 use crate::{AppWindow, ClipRow, CreateArea, EditorWindow, SegmentRow, ToastKind, TrackRow};
@@ -102,8 +102,10 @@ pub const STATES: &[&str] = &[
     "editor (open the editor window; the snapshot draws it)",
 ];
 
-/// How often the preview plays forward (J/K/L).
-const PLAY_EVERY: Duration = Duration::from_millis(33);
+/// How often the playhead moves while playing (J/K/L, Space): about a
+/// quarter of a 60 Hz display's frame, so each played picture shows within
+/// a few ms of when it is due (#94).
+const PLAY_EVERY: Duration = Duration::from_millis(4);
 
 #[derive(Default)]
 pub struct Create {
@@ -137,6 +139,10 @@ pub struct Create {
     shuttle: Cell<f64>,
     played: Cell<Option<Instant>>,
     play_timer: slint::Timer,
+    /// Playing forward: the pictures decoded ahead (#94), and where it
+    /// put the playhead last (moved elsewhere meanwhile: decode from there).
+    playback: RefCell<Option<Playback>>,
+    played_to: Cell<f64>,
     /// When the preview's newest picture was asked for, for
     /// ISOCAST_PREVIEW_STATS=1 (scrub latency on a test Mac).
     asked_at: Cell<Option<Instant>>,
@@ -169,6 +175,12 @@ fn take_numbers(clips: &[ClipInfo]) -> (Vec<usize>, usize) {
         })
         .collect();
     (numbers, takes.len())
+}
+
+/// The clock ISOCAST_PREVIEW_STATS times played pictures by.
+fn stats_clock() -> Instant {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(Instant::now)
 }
 
 /// 125.4 → "02:05".
@@ -466,6 +478,10 @@ impl Create {
         self.loading.set(false);
         self.bump_version(app);
         self.show(app);
+        if self.playback.borrow().is_some() {
+            // Edited while playing: play the timeline as it is now.
+            self.start_playback(app);
+        }
         if self.again.replace(false) {
             self.load(app);
         }
@@ -1007,6 +1023,7 @@ impl Create {
             // Leaving the view stops playing.
             self.shuttle.set(0.0);
             self.play_timer.stop();
+            self.playback.take();
         }
         if !app.mode.offscreen {
             crate::prefs::save(&window);
@@ -1272,20 +1289,10 @@ impl Create {
             self.preview.reset();
             return;
         };
-        let source = clip.angle.clone().unwrap_or_else(|| PROGRAM.to_string());
-        self.show_crop(&area, &clip, &source);
+        let source = self.show_label(app, at).unwrap_or_default();
         let into = (at - clip.start_seconds).clamp(0.0, clip.duration_seconds);
         // The frame on screen then: just inside the clip at its end.
         let take = clip.in_seconds + into.min(clip.duration_seconds - 1e-3).max(0.0);
-        let name = match source.as_str() {
-            PROGRAM => "Program".to_string(),
-            other => source_name(app, other),
-        };
-        let cropped = match clip.crop {
-            Some(_) => " · cropped",
-            None => "",
-        };
-        area.set_preview_label(format!("{name} · {}{cropped}", mm_ss_cc(at)).into());
         let Some(file) = file_of(&clip, &source) else {
             area.set_has_preview(false);
             return;
@@ -1295,6 +1302,26 @@ impl Create {
             self.asked_at.set(Some(Instant::now()));
             self.collect_preview(app);
         }
+    }
+
+    /// The viewer's label and crop for the playhead at `at`; the source
+    /// shown there.
+    fn show_label(&self, app: &Rc<App>, at: f64) -> Option<String> {
+        let surface = self.surface(app)?;
+        let area = surface.area();
+        let clip = self.clip_at(at)?;
+        let source = clip.angle.clone().unwrap_or_else(|| PROGRAM.to_string());
+        self.show_crop(&area, &clip, &source);
+        let name = match source.as_str() {
+            PROGRAM => "Program".to_string(),
+            other => source_name(app, other),
+        };
+        let cropped = match clip.crop {
+            Some(_) => " · cropped",
+            None => "",
+        };
+        area.set_preview_label(format!("{name} · {}{cropped}", mm_ss_cc(at)).into());
+        Some(source)
     }
 
     /// Take in the preview's picture once made (every 8 ms until then).
@@ -1532,6 +1559,21 @@ impl Create {
             }
             // Its File menu (#88).
             app.projects.connect_editor(app, &editor);
+            // Playing forward, each drawn frame shows the picture due then, so
+            // pictures change in step with the display (#94): a timer's ticks
+            // drift against it (a 30 fps picture held 1, 2 or 3 refreshes).
+            let weak = Rc::downgrade(app);
+            let notified = editor.window().set_rendering_notifier(move |state, _| {
+                if matches!(state, slint::RenderingState::BeforeRendering)
+                    && let Some(app) = weak.upgrade()
+                    && app.create.playing_forward()
+                {
+                    app.create.play_step(&app);
+                }
+            });
+            if let Err(error) = notified {
+                eprintln!("editor: no rendering notifier ({error:?}); playing follows a timer");
+            }
             *self.editor.borrow_mut() = Some(editor);
         }
         if let Some(editor) = self.editor.borrow().as_ref() {
@@ -1580,14 +1622,32 @@ impl Create {
         };
         self.shuttle.set(next);
         self.played.set(Some(Instant::now()));
+        if next > 0.0 {
+            self.start_playback(app);
+        } else if self.playback.take().is_some() {
+            // The exact picture where it stopped (or J's first).
+            self.show_preview(app);
+        }
         if next == 0.0 {
             self.play_timer.stop();
         } else if !self.play_timer.running() {
             let weak = Rc::downgrade(app);
             self.play_timer
                 .start(slint::TimerMode::Repeated, PLAY_EVERY, move || {
-                    if let Some(app) = weak.upgrade() {
-                        app.create.play_step(&app);
+                    let Some(app) = weak.upgrade() else { return };
+                    let editor = app
+                        .create
+                        .editor
+                        .borrow()
+                        .as_ref()
+                        .map(|e| e.clone_strong());
+                    match editor {
+                        // Forward in the editor: its drawn frames step
+                        // (see open_editor); keep them coming.
+                        Some(editor) if app.create.playing_forward() => {
+                            editor.window().request_redraw();
+                        }
+                        _ => app.create.play_step(&app),
                     }
                 });
         }
@@ -1605,13 +1665,78 @@ impl Create {
             .borrow()
             .as_ref()
             .map_or(0.0, |t| t.duration_seconds);
-        let at = self.playhead(app) + since * self.shuttle.get();
-        if at <= 0.0 || at >= total {
+        let from = self.playhead(app);
+        if self.playback.borrow().is_some() && (from - self.played_to.get()).abs() > 1e-3 {
+            // The playhead was moved (a click, a key): play from there.
+            self.start_playback(app);
+        }
+        let at = from + since * self.shuttle.get();
+        let stop = at <= 0.0 || at >= total;
+        if stop {
             self.shuttle.set(0.0);
             self.play_timer.stop();
             self.show_header(app);
         }
-        self.set_playhead(app, at.clamp(0.0, total));
+        let at = at.clamp(0.0, total);
+        if !stop && self.playback.borrow().is_some() {
+            // Forward: the playhead, and the decoded picture due now.
+            if let Some(surface) = self.surface(app) {
+                surface.area().set_playhead(at as f32);
+            }
+            self.played_to.set(self.playhead(app));
+            let frame = self
+                .playback
+                .borrow()
+                .as_ref()
+                .and_then(|playback| playback.frame_at(at));
+            if let Some((shown, image)) = frame {
+                self.show_label(app, at);
+                if std::env::var_os("ISOCAST_PREVIEW_STATS").is_some() {
+                    eprintln!(
+                        "play: {:.3} ms picture {shown:.4} at {at:.4}",
+                        stats_clock().elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                self.shown(app, Some(image));
+            }
+            return;
+        }
+        self.playback.take();
+        self.set_playhead(app, at);
+    }
+
+    /// Playing forward, from pictures decoded ahead.
+    fn playing_forward(&self) -> bool {
+        self.playback.borrow().is_some()
+    }
+
+    /// Decode the timeline ahead from the playhead (forward play, #94):
+    /// each clip's angle's file over the clip.
+    fn start_playback(&self, app: &Rc<App>) {
+        let from = self.playhead(app);
+        let segments: Vec<Segment> = self
+            .timeline
+            .borrow()
+            .as_ref()
+            .map(|t| t.clips.as_slice())
+            .unwrap_or(&[])
+            .iter()
+            .filter(|clip| clip.start_seconds + clip.duration_seconds > from)
+            .map(|clip| {
+                let source = clip.angle.as_deref().unwrap_or(PROGRAM);
+                let start = clip.start_seconds.max(from);
+                let file = file_of(clip, source);
+                Segment {
+                    path: file.map(|f| f.path.clone()),
+                    start,
+                    end: clip.start_seconds + clip.duration_seconds,
+                    file_seconds: clip.in_seconds + (start - clip.start_seconds)
+                        - file.and_then(|f| f.start_offset_seconds).unwrap_or(0.0),
+                }
+            })
+            .collect();
+        *self.playback.borrow_mut() = Some(Playback::start(segments));
+        self.played_to.set(from);
     }
 
     /// Step the playhead by `frames` of the clip there.

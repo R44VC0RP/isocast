@@ -1089,6 +1089,7 @@ Usage: isocast timeline export [OPTIONS]
 Options:
       --timeline <TIMELINE>  The timeline's id; the current one if absent
       --folder <FOLDER>      Write the files here (made if missing); else next to the first clip's take
+      --vertical             Also write a vertical (9:16) edited file: each clip's picture or crop fitted into the program's size on its side (1080x1920 for 1080p), so a 9:16 crop fills it
       --background           Return once it has started; `isocast watch --kinds export_progress,export_finished` follows it
       --json                 
   -h, --help                 Print help

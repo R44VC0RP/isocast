@@ -20,45 +20,69 @@ pub const FRAMES: usize = 24;
 /// Their largest size in pixels (a 39x22 tile at 2x is 78x44).
 const MAX_SIZE: (f64, f64) = (160.0, 90.0);
 
+/// A file as it is now: its path, size and modification time, so pictures
+/// made of it are made again if it changes under the same path (#94).
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct FileKey {
+    pub path: PathBuf,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl FileKey {
+    /// `path`'s key, if it is there.
+    pub fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            size: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+}
+
 struct Job {
-    path: PathBuf,
+    key: FileKey,
     seconds: f64,
 }
 
 struct Done {
-    path: PathBuf,
+    key: FileKey,
     frames: Vec<SharedPixelBuffer<Rgba8Pixel>>,
 }
 
 #[derive(Default)]
 pub struct Thumbs {
     jobs: RefCell<Option<(Sender<Job>, Receiver<Done>)>>,
-    cache: RefCell<HashMap<PathBuf, ModelRc<Image>>>,
-    pending: RefCell<HashSet<PathBuf>>,
+    cache: RefCell<HashMap<FileKey, ModelRc<Image>>>,
+    pending: RefCell<HashSet<FileKey>>,
 }
 
 impl Thumbs {
     /// The frames of `path`, once made (an empty list if they couldn't be).
     pub fn get(&self, path: &Path) -> Option<ModelRc<Image>> {
-        self.cache.borrow().get(path).cloned()
+        self.cache.borrow().get(&FileKey::of(path)?).cloned()
     }
 
     /// Make the frames of `path` (`seconds` long) unless they are made or
     /// being made. True if a new job was sent.
     pub fn request(&self, path: &Path, seconds: f64) -> bool {
-        if self.cache.borrow().contains_key(path) || self.pending.borrow().contains(path) {
+        let Some(key) = FileKey::of(path) else {
+            return false;
+        };
+        if self.cache.borrow().contains_key(&key) || self.pending.borrow().contains(&key) {
             return false;
         }
         let mut jobs = self.jobs.borrow_mut();
         let (tx, _) = jobs.get_or_insert_with(start);
         let sent = tx
             .send(Job {
-                path: path.to_path_buf(),
+                key: key.clone(),
                 seconds,
             })
             .is_ok();
         if sent {
-            self.pending.borrow_mut().insert(path.to_path_buf());
+            self.pending.borrow_mut().insert(key);
         }
         sent
     }
@@ -72,10 +96,10 @@ impl Thumbs {
         let mut any = false;
         while let Ok(done) = rx.try_recv() {
             let images: Vec<Image> = done.frames.into_iter().map(Image::from_rgba8).collect();
-            self.pending.borrow_mut().remove(&done.path);
+            self.pending.borrow_mut().remove(&done.key);
             self.cache
                 .borrow_mut()
-                .insert(done.path, ModelRc::new(VecModel::from(images)));
+                .insert(done.key, ModelRc::new(VecModel::from(images)));
             any = true;
         }
         any
@@ -161,6 +185,77 @@ impl Preview {
     }
 }
 
+/// A stretch of the timeline played from one file (#94): from `start` to
+/// `end` on the timeline, `file_seconds` into the file at `start` (none:
+/// its file is missing, nothing is shown there).
+pub struct Segment {
+    pub path: Option<PathBuf>,
+    pub start: f64,
+    pub end: f64,
+    pub file_seconds: f64,
+}
+
+/// Frames played ahead of the clock (each is ~2 MB at 960x540).
+const PLAY_AHEAD: usize = 8;
+
+/// Playing forward (#94): the timeline's pictures decoded in order on a
+/// thread of their own (AVAssetReader, scaled to the preview's size by
+/// VideoToolbox), a few frames ahead, instead of an exact seek per step
+/// (about 25 pictures a second before). The window's thread shows the
+/// newest frame due at its clock. Dropping it stops the thread.
+pub struct Playback {
+    frames: Receiver<(f64, SharedPixelBuffer<Rgba8Pixel>)>,
+    /// A frame read and not yet due.
+    next: RefCell<Option<(f64, SharedPixelBuffer<Rgba8Pixel>)>>,
+}
+
+impl Playback {
+    pub fn start(segments: Vec<Segment>) -> Self {
+        let (tx, frames) = std::sync::mpsc::sync_channel(PLAY_AHEAD);
+        let spawned = std::thread::Builder::new()
+            .name("playback".into())
+            .spawn(move || {
+                for segment in segments {
+                    #[cfg(target_os = "macos")]
+                    if !mac::play(&segment, PREVIEW_SIZE, &tx) {
+                        return;
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = (&segment, &tx);
+                }
+            });
+        if let Err(error) = spawned {
+            eprintln!("playback: couldn’t start its thread: {error}");
+        }
+        Self {
+            frames,
+            next: RefCell::new(None),
+        }
+    }
+
+    /// The newest frame due at `at` (timeline seconds) not shown yet, and
+    /// its time.
+    pub fn frame_at(&self, at: f64) -> Option<(f64, Image)> {
+        let mut due = None;
+        let mut next = self.next.borrow_mut();
+        loop {
+            let frame = match next.take() {
+                Some(frame) => frame,
+                None => match self.frames.try_recv() {
+                    Ok(frame) => frame,
+                    Err(_) => break,
+                },
+            };
+            if frame.0 > at {
+                *next = Some(frame);
+                break;
+            }
+            due = Some(frame);
+        }
+        due.map(|(t, pixels)| (t, Image::from_rgba8(pixels)))
+    }
+}
+
 /// The preview's thread: it keeps a generator per file and always makes
 /// the newest request, skipping those overtaken while it worked.
 type PreviewChannels = (
@@ -176,7 +271,7 @@ fn start_preview() -> PreviewChannels {
         .spawn(move || {
             #[cfg(target_os = "macos")]
             let mut generators: std::collections::HashMap<
-                PathBuf,
+                FileKey,
                 Option<mac::Generator>,
             > = std::collections::HashMap::new();
             while let Ok(mut job) = inbox.recv() {
@@ -185,8 +280,10 @@ fn start_preview() -> PreviewChannels {
                 }
                 #[cfg(target_os = "macos")]
                 let frame = objc2::rc::autoreleasepool(|_| {
+                    // A file changed under its path gets a new generator.
+                    let key = FileKey::of(&job.path)?;
                     generators
-                        .entry(job.path.clone())
+                        .entry(key)
                         .or_insert_with(|| mac::Generator::new(&job.path, PREVIEW_SIZE, true))
                         .as_ref()
                         .and_then(|g| g.frame(job.seconds))
@@ -216,10 +313,10 @@ fn start() -> (Sender<Job>, Receiver<Done>) {
         .name("thumbnails".into())
         .spawn(move || {
             while let Ok(job) = inbox.recv() {
-                let frames = frames(&job.path, job.seconds);
+                let frames = frames(&job.key.path, job.seconds);
                 if outbox
                     .send(Done {
-                        path: job.path,
+                        key: job.key,
                         frames,
                     })
                     .is_err()
@@ -313,6 +410,219 @@ mod mac {
 
     /// kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big: RGBA bytes.
     const RGBA: u32 = 1 | (4 << 12);
+
+    /// A CMSampleBuffer, as the messages that return one type it.
+    #[repr(C)]
+    struct Sample {
+        _opaque: [u8; 0],
+    }
+
+    // SAFETY: CMSampleBufferRef's encoding.
+    unsafe impl RefEncode for Sample {
+        const ENCODING_REF: Encoding =
+            Encoding::Pointer(&Encoding::Struct("opaqueCMSampleBuffer", &[]));
+    }
+
+    /// CoreMedia's CMTimeRange.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CMTimeRange {
+        start: CMTime,
+        duration: CMTime,
+    }
+
+    // SAFETY: the layout above ("{?={?=qiIq}{?=qiIq}}").
+    unsafe impl Encode for CMTimeRange {
+        const ENCODING: Encoding = Encoding::Struct("?", &[CMTime::ENCODING, CMTime::ENCODING]);
+    }
+
+    #[link(name = "CoreMedia", kind = "framework")]
+    unsafe extern "C" {
+        fn CMSampleBufferGetPresentationTimeStamp(sample: *mut c_void) -> CMTime;
+        fn CMSampleBufferGetImageBuffer(sample: *mut c_void) -> *mut c_void;
+        fn CMTimeGetSeconds(time: CMTime) -> f64;
+    }
+
+    #[link(name = "CoreVideo", kind = "framework")]
+    unsafe extern "C" {
+        fn CVPixelBufferLockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
+        fn CVPixelBufferUnlockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
+        fn CVPixelBufferGetBaseAddress(buffer: *mut c_void) -> *const u8;
+        fn CVPixelBufferGetBytesPerRow(buffer: *mut c_void) -> usize;
+        fn CVPixelBufferGetWidth(buffer: *mut c_void) -> usize;
+        fn CVPixelBufferGetHeight(buffer: *mut c_void) -> usize;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(object: *const c_void);
+    }
+
+    /// kCVPixelFormatType_32BGRA, and kCVPixelBufferLock_ReadOnly.
+    const BGRA: u32 = u32::from_be_bytes(*b"BGRA");
+    const READ_ONLY: u64 = 1;
+
+    fn ns_string(text: &str) -> Option<Retained<AnyObject>> {
+        let text = CString::new(text).ok()?;
+        // SAFETY: a documented class method with a valid C string.
+        unsafe { msg_send![class!(NSString), stringWithUTF8String: text.as_ptr()] }
+    }
+
+    /// Play `segment`'s file in order, each picture (at most `size`
+    /// pixels, RGBA) sent with its time on the timeline; false once the
+    /// receiver is gone (playing stopped).
+    pub fn play(
+        segment: &super::Segment,
+        size: (f64, f64),
+        tx: &std::sync::mpsc::SyncSender<(f64, SharedPixelBuffer<Rgba8Pixel>)>,
+    ) -> bool {
+        let Some(path) = &segment.path else {
+            return true;
+        };
+        objc2::rc::autoreleasepool(|_| {
+            // SAFETY: AVFoundation's documented methods on valid objects;
+            // copyNextSampleBuffer returns a +1 CMSampleBuffer (released
+            // below) or NULL at the end; its pixel buffer is locked while
+            // read.
+            unsafe {
+                let Some(reader) = open(path, segment, size) else {
+                    eprintln!("playback: couldn’t read {}", path.display());
+                    return true;
+                };
+                let (reader, output) = reader;
+                let mut sent = true;
+                loop {
+                    let sample: *mut Sample = msg_send![&*output, copyNextSampleBuffer];
+                    if sample.is_null() {
+                        break;
+                    }
+                    let sample = sample.cast::<c_void>();
+                    let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample));
+                    let at = (segment.start + pts - segment.file_seconds).max(segment.start);
+                    let image = CMSampleBufferGetImageBuffer(sample);
+                    let frame = (at < segment.end && !image.is_null())
+                        .then(|| rgba(image))
+                        .flatten();
+                    CFRelease(sample);
+                    if let Some(frame) = frame
+                        && tx.send((at, frame)).is_err()
+                    {
+                        sent = false;
+                        break;
+                    }
+                    if at >= segment.end {
+                        break;
+                    }
+                }
+                let _: () = msg_send![&*reader, cancelReading];
+                sent
+            }
+        })
+    }
+
+    /// A reader of `path`'s video over the segment, scaled to fit `size`.
+    unsafe fn open(
+        path: &Path,
+        segment: &super::Segment,
+        size: (f64, f64),
+    ) -> Option<(Retained<AnyObject>, Retained<AnyObject>)> {
+        // SAFETY: as in `play`.
+        unsafe {
+            let path = ns_string(path.to_str()?)?;
+            let url: Option<Retained<AnyObject>> =
+                msg_send![class!(NSURL), fileURLWithPath: &*path];
+            let asset: Option<Retained<AnyObject>> = msg_send![
+                class!(AVURLAsset),
+                URLAssetWithURL: &*url?,
+                options: std::ptr::null::<AnyObject>()
+            ];
+            let asset = asset?;
+            let video = ns_string("vide")?;
+            let tracks: Option<Retained<AnyObject>> =
+                msg_send![&*asset, tracksWithMediaType: &*video];
+            let track: Option<Retained<AnyObject>> = msg_send![&*tracks?, firstObject];
+            let track = track?;
+            let natural: CGSize = msg_send![&*track, naturalSize];
+            let fit = (size.0 / natural.width.max(1.0))
+                .min(size.1 / natural.height.max(1.0))
+                .min(1.0);
+            // Even sizes, as VideoToolbox scales to.
+            let even = |v: f64| ((v * fit / 2.0).round() * 2.0).max(2.0) as i64;
+            let keys = [
+                ns_string("PixelFormatType")?,
+                ns_string("Width")?,
+                ns_string("Height")?,
+            ];
+            let values: [Retained<AnyObject>; 3] = [
+                msg_send![class!(NSNumber), numberWithUnsignedInt: BGRA],
+                msg_send![class!(NSNumber), numberWithLongLong: even(natural.width)],
+                msg_send![class!(NSNumber), numberWithLongLong: even(natural.height)],
+            ];
+            let key_ptrs: Vec<*const AnyObject> = keys.iter().map(|k| &**k as *const _).collect();
+            let value_ptrs: Vec<*const AnyObject> =
+                values.iter().map(|v| &**v as *const _).collect();
+            let settings: Option<Retained<AnyObject>> = msg_send![
+                class!(NSDictionary),
+                dictionaryWithObjects: value_ptrs.as_ptr(),
+                forKeys: key_ptrs.as_ptr(),
+                count: 3usize
+            ];
+            let output: Option<Retained<AnyObject>> = msg_send![
+                class!(AVAssetReaderTrackOutput),
+                assetReaderTrackOutputWithTrack: &*track,
+                outputSettings: &*settings?
+            ];
+            let output = output?;
+            let _: () = msg_send![&*output, setAlwaysCopiesSampleData: Bool::NO];
+            let mut error: *mut AnyObject = std::ptr::null_mut();
+            let reader: Option<Retained<AnyObject>> = msg_send![
+                class!(AVAssetReader),
+                assetReaderWithAsset: &*asset,
+                error: &mut error
+            ];
+            let reader = reader?;
+            let length = (segment.end - segment.start).max(0.0);
+            let range = CMTimeRange {
+                start: CMTimeMakeWithSeconds(segment.file_seconds.max(0.0), 600),
+                duration: CMTimeMakeWithSeconds(length + 0.1, 600),
+            };
+            let _: () = msg_send![&*reader, setTimeRange: range];
+            let can: Bool = msg_send![&*reader, canAddOutput: &*output];
+            if !can.as_bool() {
+                return None;
+            }
+            let _: () = msg_send![&*reader, addOutput: &*output];
+            let started: Bool = msg_send![&*reader, startReading];
+            started.as_bool().then_some((reader, output))
+        }
+    }
+
+    /// A locked BGRA pixel buffer's picture as RGBA.
+    unsafe fn rgba(image: *mut c_void) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+        // SAFETY: `image` is a valid CVPixelBuffer, read while locked.
+        unsafe {
+            if CVPixelBufferLockBaseAddress(image, READ_ONLY) != 0 {
+                return None;
+            }
+            let (w, h) = (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image));
+            let stride = CVPixelBufferGetBytesPerRow(image);
+            let base = CVPixelBufferGetBaseAddress(image);
+            let frame = (!base.is_null() && w > 0 && h > 0 && stride >= w * 4).then(|| {
+                let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(w as u32, h as u32);
+                let out = buffer.make_mut_bytes();
+                for y in 0..h {
+                    let row = std::slice::from_raw_parts(base.add(y * stride), w * 4);
+                    let to = out[y * w * 4..(y + 1) * w * 4].as_chunks_mut::<4>().0;
+                    for (to, from) in to.iter_mut().zip(row.as_chunks::<4>().0) {
+                        *to = [from[2], from[1], from[0], 255];
+                    }
+                }
+                buffer
+            });
+            CVPixelBufferUnlockBaseAddress(image, READ_ONLY);
+            frame
+        }
+    }
 
     pub struct Generator {
         generator: Retained<AnyObject>,

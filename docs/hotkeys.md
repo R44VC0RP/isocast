@@ -119,7 +119,7 @@ These dispatch the existing timeline methods, with the same safety checks:
 | `timeline.marker` | `{"label":"Intro"}`; alias of `recording.marker` on the current recording take, not a standalone timeline marker |
 | `timeline.remove` | `{"clip":"c2"}`; optional `timeline`, else current |
 | `timeline.move` | `{"clip":"c3","index":0}`; optional `timeline` |
-| `timeline.export` | `{}` or `{"timeline":"timeline-id","folder":"/absolute/output"}` |
+| `timeline.export` | `{}` or `{"timeline":"timeline-id","folder":"/absolute/output","vertical":true}` |
 
 Move positions are **zero-based**, matching `timeline_move` (the separate
 `isocast timeline move` command presents one-based positions). Original

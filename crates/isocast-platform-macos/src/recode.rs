@@ -461,6 +461,38 @@ impl Drop for Encoder {
     }
 }
 
+/// The format of frames `Encoder::new(codec, size, fps, ten_bit)` makes,
+/// from one frame encoded: a joined file of another size than its parts
+/// is described by it (#94).
+pub(crate) fn encoded_format(
+    codec: CMVideoCodecType,
+    size: (u32, u32),
+    fps: f64,
+    ten_bit: bool,
+) -> Result<CFRetained<CMFormatDescription>> {
+    let mut encoder = Encoder::new(codec, size, fps, ten_bit)?;
+    let mut pool = FramePool::ycbcr(size.0, size.1)?;
+    let frame = pool
+        .take()?
+        .ok_or_else(|| anyhow!("no frame to encode a format from"))?;
+    let rate = fps.round().max(1.0) as i32;
+    encoder.encode(
+        &frame.0,
+        unsafe { CMTime::new(0, rate) },
+        unsafe { CMTime::new(1, rate) },
+        true,
+        None,
+    )?;
+    encoder.flush()?;
+    let sample = encoder
+        .take()
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("the encoder made no frame to take a format from"))?;
+    unsafe { sample.format_description() }
+        .ok_or_else(|| anyhow!("an encoded frame without a format"))
+}
+
 /// Mark the part of `picture` (`size` pixels) that `crop` covers as its
 /// clean aperture, the part the pixel transfer (letterbox mode) scales to
 /// fit the frame it fills.

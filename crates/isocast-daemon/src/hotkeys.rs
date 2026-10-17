@@ -819,6 +819,7 @@ impl Daemon {
                 Method::TimelineExport(Some(TimelineExportParams {
                     timeline: params.timeline,
                     folder: params.folder,
+                    vertical: params.vertical,
                 }))
             }
         };
