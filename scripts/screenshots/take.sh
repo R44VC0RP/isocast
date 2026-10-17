@@ -1,6 +1,6 @@
 #!/bin/sh
-# Retakes the README screenshots (docs/images/{app,studio,settings,
-# recordings,cli}.png) on a test Mac, from the checkout this runs in.
+# Retakes the README screenshots (docs/images/{app,studio,multiview,
+# settings,vertical,recordings,cli}.png) on a test Mac, from the checkout this runs in.
 #
 #   export ISOCAST_TESTMAC=<test Mac>         # an SSH host, as for testmac.sh
 #   scripts/testmac.sh build                  # build and sign it there first
@@ -23,8 +23,8 @@ export ISOCAST_TESTMAC="$host"
 shots="$here/scripts/screenshots"
 keep=0
 [ "${1:-}" = "--keep" ] && keep=1
-# Which images to write to docs/images (all five by default).
-only="${SHOTS:-app studio settings recordings cli}"
+# Which images to write to docs/images (all of them by default).
+only="${SHOTS:-app studio multiview settings vertical recordings cli}"
 
 ssh "$host" 'mkdir -p "$HOME/isocast-scratch/docs-shots" && rm -rf "$HOME/isocast-scratch/docs-shots/out"'
 scp -q "$shots/remote.sh" "$shots/shoot.sh" "$shots/setup.toml" "$shots/cli.command" \

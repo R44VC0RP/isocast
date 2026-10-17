@@ -7810,6 +7810,19 @@ each section. Delete entries that stop being true.
   scripts/snapshot.sh: `ISOCAST_OBS_FOLDER=… --state wizard-first-launch`,
   and `--state wizard:goal --state wizard-sample:OPTIMIZED.json` (the
   sample needs the wizard open first).
+- 2026-10-17 (README 0.0.6): shoot.sh now also takes multiview.png (top-8
+  projector window over the app, Studio Mode on, so it has both tallies)
+  and vertical.png (a [vertical] canvas patched in with the Screen scene
+  arranged for 9:16, removed again). The vertical canvas is added only
+  after the take stops: apply refuses it while recording
+  (`vertical.follow_main: change scene linking once the recording stops`).
+  Taken through `hw-batch.py now cmd --gui --mac m2-b --bin-dir …` after
+  copying scripts/screenshots/* to m2-b's ~/isocast-scratch/docs-shots, with
+  a no-op `cargo` first on PATH so ui-dev.sh bundles the pushed isocast-ui
+  instead of building on the test Mac; then take.sh's trim and quantize
+  step by hand. The Terminal window opened fine on m2-b (#85 was m2-a).
+  editor.png stays offscreen (snapshot.sh: three takes, `editor`,
+  `create-angle:slides`, `create-crop:9:16`, `create-crop-mode:on`, 1000x625@2).
 
 ## Verification recipes
 

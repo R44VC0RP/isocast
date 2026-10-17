@@ -26,8 +26,10 @@ in Rust, MIT or Apache 2.0.
   where OBS used 58–71%, and 88–356 MiB of memory where OBS used
   619–1344 MiB ([how it was measured](docs/benchmarks.md)).
 - **Edit what you recorded.** The editor window lays every ISO file out
-  on one timeline: trim, split and switch angles, then export
-  frame-accurately without re-encoding what you didn't cut.
+  on one timeline: trim, split, switch angles and crop (9:16 too), then
+  export frame-accurately without re-encoding what you didn't change.
+  Each project folder carries an `.isoprj` that reopens your edits
+  anywhere.
 - **Bring your OBS setup.** On first launch Isocast finds your OBS scene
   collections and profiles and imports them; anything that can't come
   over is listed with the reason. Tools that speak obs-websocket (Touch
@@ -46,20 +48,21 @@ in Rust, MIT or Apache 2.0.
 | Each source as its own file (ISO), on one clock | Built in | Not built in (third-party Source Record plugin) |
 | CPU for the same recording ([benchmarks](docs/benchmarks.md)) | About half of OBS's | Baseline |
 | Memory, 1080p60 on a base M2 | 88 MiB | 630 MiB |
-| Edit the ISO files after recording | Built-in editor: trim, split, angles | No, use another editor |
+| Edit the ISO files after recording | Built-in editor: trim, split, angles, crop | No, use another editor |
 | Control | App, `isocast` CLI, MCP, and obs-websocket v5 (off by default) | App, obs-websocket and scripts |
 | Stream Deck | Through obs-websocket (community plugins, Touch Portal); not Elgato's official OBS actions | Official Elgato plugin |
 | Replay buffer | Yes | Yes |
-| Virtual camera | Yes, new in 0.0.5 | Yes, mature |
+| Virtual camera | Yes | Yes, mature |
 | Several stream destinations at once | Built in (RTMP/RTMPS) | Third-party plugin |
 | Per-app audio | Yes (macOS 14.2+) | Yes |
 | Plugins | Early ([process plugins, WebAssembly audio filters](docs/plugins.md)); no OBS plugins | Large ecosystem |
-| Projectors, multiview, second canvas | Not yet | Yes |
+| Projectors and multiview | Yes, new in 0.0.6 | Yes |
+| Vertical (9:16) canvas alongside the main one | Built in, new in 0.0.6 | Third-party plugin (Aitum Vertical) |
 | Track record | New, in alpha | Years of polish |
 
 OBS is the better choice today if you need Windows or Linux, a specific
-OBS plugin, projectors or multiview, Elgato's official Stream Deck
-actions, or years of proven polish. Isocast is for Mac users who want
+OBS plugin, Elgato's official Stream Deck actions, or years of proven
+polish. Isocast is for Mac users who want
 separate files per source, a lighter app, or a recorder they can script.
 
 ![Isocast compared with OBS 32.2.2: less CPU, less memory, faster stop and launch, and no skipped frames on a base M2](docs/images/benchmark.png)
@@ -72,7 +75,7 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 
 ## Features
 
-**In Isocast 0.0.5 (the current download):**
+**In Isocast 0.0.6 (the current download):**
 
 - Scenes and sources: screens, windows, cameras, microphones, desktop
   audio, one app's audio or everything but some apps (macOS 14.2+),
@@ -90,8 +93,23 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
   loses about 0.5 s, and they are repaired on the next launch. Pause and
   resume in the same file, and markers.
 - The editor window (**Window › Editor**, ⌘E): every ISO track of your
-  takes on one timeline, with trim, split, ripple delete, per-span
-  angles, undo and frame-accurate export. The takes are never changed.
+  takes on one timeline, with trim, split, ripple delete, rolls, per-span
+  angles, crops (free, 16:9, 9:16, 1:1, 4:5), waveforms, snapping, zoom,
+  undo and frame-accurate export (a 9:16 file too). The takes are never
+  changed. **Open Editor After Recording** in Settings › Output opens it
+  when you stop.
+- Project files: every project folder has a `<name>.isoprj` with its takes
+  and edits. Copy the folder anywhere and double-click the file to reopen
+  it in the editor; File › Open and Open Recent.
+- **Projectors and multiview:** the program, preview, any scene or any
+  source full screen on another display or in a window, and an OBS-style
+  multiview with tally (red program, green preview).
+- **Vertical canvas:** a second 9:16 canvas with its own layouts of the
+  same sources, recorded and streamed alongside the main one, following
+  the main canvas's scenes or switching on its own.
+- Audio interfaces: pick a microphone source's inputs (one input records
+  as centred mono at full level) and a Mono switch per source. Interfaces
+  with more than two inputs record inputs 1 + 2 by default.
 - **Replay buffer:** keep the last 5–300 seconds of the program in memory
   and save them with a click or a hotkey.
 - **Virtual camera:** the program as a camera for Zoom, Meet, FaceTime
@@ -109,18 +127,18 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 - Profiles and scene collections, as in OBS, global hotkeys, timelines
   (record takes in order, export one video), the `isocast` CLI and MCP
   tools for agents.
+- A warning when another app or a busy or hot Mac threatens the
+  recording, before frames drop.
 - Automatic updates. macOS prompts name the engine "Isocast Engine".
 
 **Coming next** (not in a release yet; see [coming soon](docs/coming.md)):
 
-- Steadier under heavy load: an engine hardening pass, one GPU device per
-  app, a stream that starts cleanly on a busy Mac, and more performance
-  work against OBS.
-- Fixes from the 0.0.5 follow-ups: plugins, streaming, the virtual camera,
-  developer mode and updates.
+- More performance work against OBS: one GPU device per app, a lighter
+  multiview, and tighter memory budgets.
+- Fixes from the 0.0.6 follow-ups: the vertical canvas (replay, virtual
+  camera), the editor (audio while playing, NLE checks) and project files.
 - Later ideas: running real OBS plugins in a helper process, Elgato
-  Stream Deck's own protocol, projectors and multiview, a second
-  (vertical) canvas, shader filters and WebAssembly sources.
+  Stream Deck's own protocol, shader filters and WebAssembly sources.
 
 ## A closer look
 
@@ -132,13 +150,23 @@ per source and the session file that lines them up.
 **Studio Mode.** Line up the next scene in the preview while the program
 stays on air, then take it live with a cut, a fade or a stinger.
 
-![Studio Mode while recording: the Starting soon intro in preview on the left, the live Screen scene in the program on the right, and the Transition button with Cut, Fade and Fade to Black between them](docs/images/studio.png)
+![Studio Mode while recording: the Starting soon intro in preview on the left, the live Screen scene in the program on the right, the Transition button with Cut, Fade and Fade to Black between them, and in the scene list a red PGM tag on Screen and a green PVW tag on Intro](docs/images/studio.png)
+
+**Multiview.** The preview, the program and every scene in one window,
+with a red tally on what's on air and green on what's next.
+
+![The Multiview window: the Intro scene in preview with a green border and the live Screen scene in the program with a red border across the top, and below them tiles for the Screen, Intro and Be Right Back scenes, Screen outlined in red and Intro in green](docs/images/multiview.png)
+
+**A vertical canvas beside the main one.** The same sources laid out for
+9:16, recorded and streamed alongside the main canvas.
+
+![The main window with the Screen scene in its 16:9 monitor and, to its right, the Vertical monitor showing the same scene arranged at 1080×1920: the terminal on top, the landscape photo below it and the lower-third title over the photo](docs/images/vertical.png)
 
 **Edit every angle.** The editor window shows a track per ISO source
-under the program; trim, split, pick the angle for each stretch and
-export.
+under the program; trim, split, pick the angle for each stretch, crop it
+(9:16 too) and export.
 
-![The Isocast Editor window: a viewer showing the chosen angle at the playhead above a timeline with the Program track and one track per ISO source, the Split, Delete, Undo, Redo and Export buttons, and highlighted spans where another angle is used](docs/images/editor.png)
+![The Isocast Editor in crop mode: the Slides angle at the playhead with a 9:16 crop frame and its handles over the landscape photo, the Free, 16:9, 9:16, 1:1 and 4:5 presets, Reset and Done above it, and below a timeline with three takes on the Program track over the Camera and Slides tracks, the cropped Slides stretch outlined](docs/images/editor.png)
 
 **Choose what gets its own file** in Settings › Output.
 
