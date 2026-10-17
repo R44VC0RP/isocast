@@ -10,6 +10,7 @@ use std::time::Duration;
 use super::program::{Compositor, Feed};
 use super::scenes::ProgramScenes;
 use crate::gpu::{FrameImporter, Gpu, InFlight, PendingFrame};
+use crate::pacing::Wake;
 use crate::render::{Layer, Renderer};
 use crate::{FramePool, Platform, Time};
 use anyhow::Result;
@@ -218,7 +219,7 @@ enum Ready<F> {
 
 fn run<P: Platform>(
     platform: &P,
-    _clocks: &crate::pacing::Clocks,
+    clocks: &crate::pacing::Clocks,
     status: &Arc<Mutex<VirtualCameraStatus>>,
     stop: &AtomicBool,
     input: &impl Fn(Time) -> Result<Option<Input<P::Frame>>>,
@@ -227,6 +228,7 @@ fn run<P: Platform>(
     let initial = status.lock().clone();
     let fps = initial.fps;
     let period = Duration::from_secs(1) / fps;
+    let mut clock = clocks.start("virtual_camera".into(), period);
     let mut scene: Option<(Compositor<P>, u64, (u32, u32))> = None;
     // Prepare a named scene's extra compositor before its frame clock starts.
     if initial.settings.target == isocast_protocol::virtual_camera::Target::Scene
@@ -247,14 +249,20 @@ fn run<P: Platform>(
         while let Ok(ready) = output.ready.try_recv() {
             receive(platform, status, output, ready, &mut latencies, fps)?;
         }
-        while platform.now() < tick && !stop.load(Ordering::Acquire) {
-            let wait = tick
-                .saturating_since(platform.now())
-                .min(Duration::from_millis(10));
-            if let Ok(ready) = output.ready.recv_timeout(wait) {
-                receive(platform, status, output, ready, &mut latencies, fps)?;
+        // GPU completions hand frames over while this waits for the tick;
+        // the clock still records one truthful wake per tick.
+        clock.wait_until(platform, tick, |limit| -> Result<Wake> {
+            if stop.load(Ordering::Acquire) {
+                return Ok(Wake::Stop);
             }
-        }
+            match output.ready.recv_timeout(limit) {
+                Ok(ready) => {
+                    receive(platform, status, output, ready, &mut latencies, fps)?;
+                    Ok(Wake::HandOff)
+                }
+                Err(_) => Ok(Wake::Timeout),
+            }
+        })?;
         if stop.load(Ordering::Acquire) {
             return Ok(());
         }

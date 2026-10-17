@@ -134,7 +134,11 @@ fn coverage(d: f32) -> f32 {
 
 // How much of the target pixel at `p` the draw's clips leave (1 with
 // none): inside each clipping item's rounded rect, antialiased.
-fn clipped(p: vec2<f32>) -> f32 {
+fn clipped(local: vec2<f32>) -> f32 {
+    // Layout pixels, not framebuffer pixels: scene monitors may rasterize
+    // the same records into a smaller target.
+    let point = vec3<f32>(local, 1.0);
+    let p = vec2<f32>(dot(draw.row0.xyz, point), dot(draw.row1.xyz, point));
     var next = u32(draw.sampling.w + 0.5);
     var covered = 1.0;
     for (var depth = 0; depth < 16 && next > 0u; depth++) {
@@ -298,7 +302,7 @@ fn fs_picture(in: Varyings) -> @location(0) vec4<f32> {
     }
     var shaded = shade(color + premultiply(draw.background) * (1.0 - color.a), p);
     if (draw.sampling.w > 0.5) {
-        shaded *= clipped(in.position.xy);
+        shaded *= clipped(in.local);
     }
     return blended(shaded);
 }
@@ -308,7 +312,7 @@ fn fs_fill(in: Varyings) -> @location(0) vec4<f32> {
     draw = draws[in.record];
     var shaded = shade(premultiply(draw.background), in.local);
     if (draw.sampling.w > 0.5) {
-        shaded *= clipped(in.position.xy);
+        shaded *= clipped(in.local);
     }
     return blended(shaded);
 }
@@ -326,7 +330,7 @@ fn fs_shadow(in: Varyings) -> @location(0) vec4<f32> {
     let under = coverage(rounded_box(in.local - half, half, draw.radius));
     var a = draw.shadow_color.a * alpha * (1.0 - under) * draw.style.x;
     if (draw.sampling.w > 0.5) {
-        a *= clipped(in.position.xy);
+        a *= clipped(in.local);
     }
     return blended(vec4<f32>(draw.shadow_color.rgb * a, a));
 }

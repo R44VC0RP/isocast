@@ -51,6 +51,12 @@ impl<P: Platform> Graphics<P> {
         })
     }
 
+    /// Whether its GPU device was lost: a cached `Graphics` cannot recover,
+    /// so open a new one (which shares a fresh device).
+    pub fn is_lost(&self) -> bool {
+        self.gpu.is_lost()
+    }
+
     /// Draw `frame` of source `id` as a PNG, through its `filters`, scaled
     /// down to at most `max_width` pixels wide. Returns the PNG and its
     /// size.

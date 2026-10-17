@@ -1700,6 +1700,33 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-17 (#111 F1–F4): **A recent publication isn't evidence that a
+  scene is still on air.** Keeping tile compositors avoided pipeline churn
+  but left the 100 ms reuse lease's cut hitch. Track program and preview
+  publishers separately; a cut replaces that publisher's scene at completed
+  hand-off, transitions/idle clear it. Reuse is time-only, pixel publication
+  still rejects old versions/timestamps. Keep pools across reuse and rate-
+  limit raster rebuilds to one/second. One-off scene JPEGs skip stale small
+  rasters. Repeated ISO GPU losses also back off one/second, preserving
+  expected-minus-written drop accounting; developer `lost:2:6` exercises
+  six losses without resetting hardware. Main 215db9e integrated; fix-only
+  re-review evidence in `/Volumes/IsocastBuild/perf-2/scratch/REPORT.md`.
+
+- 2026-10-17 (perf-2 split): **Ship multiview/#111; park #27** (delegator).
+  `perf-2/scratch/issue27-draft.patch` preserves the full frame-permit,
+  native retention, capture-copy and diagnostics draft, removed from the
+  source tree. It counted shared recording/live buffers twice and refused
+  protected frames in overload; future work needs distinct-buffer accounting
+  or independent output pools, not further cap tuning. Main a9b661ff is
+  integrated. Tile-size composition, unmixed completed-scene reuse, GPU
+  poll containment, snapshot/ISO loss recovery and camera pacing remain.
+  Reduced-tree full ISO stress (18 files) has zero program/stream/audio
+  losses; strict e2e 18/18, recovery/camera checks and workspace gates pass.
+  An initial stress loss also reproduced on baseline in an unchanged-code
+  paired control; retain both results, not just the pass. Multiview A/B
+  confirms GPU/memory savings, with a smaller one-pair CPU improvement.
+  Evidence: `/Volumes/IsocastBuild/perf-2/scratch/REPORT.md`.
+
 - 2026-10-17 (#104): **NLE export (`timeline_export_nle`) writes stacked
   tracks, not a multicam clip**: one video track per ISO source with the
   program on top, every clip's stretch of every file on its track, only

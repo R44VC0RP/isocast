@@ -1171,7 +1171,26 @@ impl<P: Platform> Engine<P> {
                 if scene.starts_with(scene_feeds::PREFIX)
                     || scene.starts_with(VERTICAL_SCENE_PREFIX) =>
             {
-                wait_for_frame(&slot)
+                let deadline = std::time::Instant::now() + super::FRESH_FRAME_WAIT;
+                let mut from = Time::from_nanos(i64::MIN);
+                loop {
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    let Some((frame, at)) = slot.wait_from(from, left) else {
+                        break None;
+                    };
+                    if scene_frame_size(&self.inner, target, None).is_none_or(|wanted| {
+                        let size = self.inner.platform.frame_size(&frame);
+                        size.0 >= wanted.0 && size.1 >= wanted.1
+                    }) {
+                        break Some((frame, at));
+                    }
+                    // A tile may already be in the slot when full size is
+                    // requested. Never return it as the one-off picture.
+                    if std::time::Instant::now() >= deadline {
+                        break None;
+                    }
+                    from = Time::from_nanos(at.as_nanos().saturating_add(1));
+                }
             }
             _ => slot.newest_timed(),
         })
@@ -1192,16 +1211,26 @@ impl<P: Platform> Engine<P> {
     ) -> Result<Option<JpegFrame>, String> {
         let fps = fps.unwrap_or(MONITOR_FPS);
         let platform = &self.inner.platform;
-        let from = after.map_or(Time::from_nanos(i64::MIN), |after| {
+        let mut from = after.map_or(Time::from_nanos(i64::MIN), |after| {
             Time::from_nanos(after.min(i64::MAX as u64 - 1) as i64 + 1)
         });
         let until = platform.now() + timeout;
         loop {
             // The slot is looked up again now and then: a source that
             // reopens gets a new one, and the preview must stay wanted.
-            let slot = slot_of(&self.inner, target, fps)?;
+            let slot = slot_of_sized(&self.inner, target, fps, (max_width, None))?;
             let left = until.saturating_since(platform.now());
             if let Some((frame, at)) = slot.wait_from(from, left.min(SLOT_RECHECK)) {
+                if scene_frame_size(&self.inner, target, max_width).is_some_and(|wanted| {
+                    let size = platform.frame_size(&frame);
+                    size.0 < wanted.0 || size.1 < wanted.1
+                }) {
+                    if platform.now() >= until || self.inner.stopping.load(Ordering::SeqCst) {
+                        return Ok(None);
+                    }
+                    from = Time::from_nanos(at.as_nanos().saturating_add(1));
+                    continue;
+                }
                 let (jpeg, width, height) = platform
                     .encode_jpeg(&frame, max_width, quality)
                     .map_err(|err| format!("{err:#}"))?;
@@ -1236,7 +1265,7 @@ impl<P: Platform> Engine<P> {
         fps: u32,
     ) -> Result<FrameFeed, String> {
         let fps = fps.clamp(1, 60);
-        slot_of(&self.inner, target, fps)?;
+        slot_of_sized(&self.inner, target, fps, (max_width, None))?;
         let key = frame_stream::Key {
             target: target.to_string(),
             max_width,
@@ -1250,7 +1279,7 @@ impl<P: Platform> Engine<P> {
             fps,
             // Called with the stream's rate now (the highest any of its
             // viewers wants), which the program is drawn at least at.
-            move |fps| stream_source(&inner, &target, fps, false),
+            move |fps| stream_source(&inner, &target, fps, false, (max_width, None)),
         ))
     }
 
@@ -1270,7 +1299,7 @@ impl<P: Platform> Engine<P> {
         filtered: bool,
     ) -> Result<SharedFeed<P::SharedSurface>, String> {
         let fps = fps.clamp(1, 60);
-        slot_of(&self.inner, target, fps)?;
+        slot_of_sized(&self.inner, target, fps, max_size)?;
         let filters = (filtered && target_canvas(target).is_none()).then(|| {
             let (inner, id) = (self.inner.clone(), target.to_string());
             Box::new(move || {
@@ -1291,7 +1320,7 @@ impl<P: Platform> Engine<P> {
         Ok(shared_frames::watch(
             &self.inner.platform,
             request,
-            move |fps| stream_source(&inner, &target, fps, true),
+            move |fps, size| stream_source(&inner, &target, fps, true, size),
             filters,
         ))
     }
@@ -2359,6 +2388,27 @@ fn target_canvas(target: &str) -> Option<CanvasId> {
     }
 }
 
+/// Minimum raster for a one-off scene picture. Live tiles may have left a
+/// smaller frame in the shared slot before this request raised its demand.
+fn scene_frame_size<P: Platform>(
+    inner: &Inner<P>,
+    target: &str,
+    max_width: Option<u32>,
+) -> Option<(u32, u32)> {
+    let canvas = if target.starts_with(scene_feeds::PREFIX) {
+        CanvasId::Main
+    } else if target.starts_with(VERTICAL_SCENE_PREFIX) {
+        CanvasId::Vertical
+    } else {
+        return None;
+    };
+    let scenes = inner.output(canvas)?.scenes.latest()?;
+    Some(shared_frames::fitted(
+        scenes.compiled.canvas,
+        (max_width, None),
+    ))
+}
+
 /// Where a monitor stream finds `target`'s frames, asked for at `fps` (the
 /// program and the preview are drawn at least that often, on the canvas's
 /// frame grid, and say which setup revision each frame shows).
@@ -2367,11 +2417,12 @@ fn stream_source<P: Platform>(
     target: &str,
     fps: u32,
     rgb: bool,
+    max_size: (Option<u32>, Option<u32>),
 ) -> Result<frame_stream::Source<P::Frame>, String> {
     if inner.stopping.load(Ordering::SeqCst) {
         return Err("the live engine stopped".into());
     }
-    let mut slot = slot_of(inner, target, fps)?;
+    let mut slot = slot_of_sized(inner, target, fps, max_size)?;
     let canvas = target_canvas(target);
     if rgb
         && matches!(target, PROGRAM | VERTICAL_PROGRAM)
@@ -2428,11 +2479,20 @@ fn slot_of<P: Platform>(
     target: &str,
     fps: u32,
 ) -> Result<Arc<FrameSlot<P::Frame>>, String> {
+    slot_of_sized(inner, target, fps, (None, None))
+}
+
+fn slot_of_sized<P: Platform>(
+    inner: &Arc<Inner<P>>,
+    target: &str,
+    fps: u32,
+    max_size: (Option<u32>, Option<u32>),
+) -> Result<Arc<FrameSlot<P::Frame>>, String> {
     if let Some(id) = target.strip_prefix(scene_feeds::PREFIX) {
-        return scene_slot(inner, CanvasId::Main, id, fps);
+        return scene_slot(inner, CanvasId::Main, id, fps, max_size);
     }
     if let Some(id) = target.strip_prefix(VERTICAL_SCENE_PREFIX) {
-        return scene_slot(inner, CanvasId::Vertical, id, fps);
+        return scene_slot(inner, CanvasId::Vertical, id, fps, max_size);
     }
     // The program and the preview are drawn while they are asked for.
     inner.want(target, fps);
@@ -2499,6 +2559,7 @@ fn scene_slot<P: Platform>(
     canvas: CanvasId,
     id: &str,
     fps: u32,
+    max_size: (Option<u32>, Option<u32>),
 ) -> Result<Arc<FrameSlot<P::Frame>>, String> {
     let prefix = match canvas {
         CanvasId::Main => scene_feeds::PREFIX,
@@ -2525,7 +2586,7 @@ fn scene_slot<P: Platform>(
         CanvasId::Main => &inner.scene_feeds,
         CanvasId::Vertical => &inner.vertical_scene_feeds,
     };
-    let (slot, start) = watched.want(id, fps)?;
+    let (slot, start) = watched.want(id, fps, max_size)?;
     if start {
         let weak = Arc::downgrade(inner);
         let failed = watched.clone();
@@ -2754,6 +2815,10 @@ fn run_program<P: Platform>(
                 Ok(Some((image, reused))) => {
                     gave = Some((reused, compositor.draws(), compositor.animated()));
                     let inner = inner.clone();
+                    let scene = on_air
+                        .as_ref()
+                        .filter(|on_air| on_air.from.is_none())
+                        .map(|on_air| on_air.scene.clone());
                     image.then(move |(image, rgb), gpu_wait| {
                         let Some(output) = inner.output(canvas) else {
                             return;
@@ -2761,6 +2826,22 @@ fn run_program<P: Platform>(
                         // Publish the stamp and pixels together, only after
                         // the GPU has finished with this tick's inputs.
                         frame_stream::drawn(&output.drawn, tick, stamp);
+                        let feeds = if canvas.is_main() {
+                            &inner.scene_feeds
+                        } else {
+                            &inner.vertical_scene_feeds
+                        };
+                        if let Some(scene) = scene {
+                            feeds.publish(
+                                &scene,
+                                version,
+                                rgb.as_ref().unwrap_or(&image).clone(),
+                                tick,
+                                Some(Feed::Program),
+                            );
+                        } else {
+                            feeds.clear_reuse(Feed::Program);
+                        }
                         if let Some(rgb) = rgb {
                             output.program_rgb.push(rgb, tick);
                         }
@@ -2790,6 +2871,12 @@ fn run_program<P: Platform>(
             // Nothing wants the program: let its canvas go back to the pool.
             output.program.clear();
             output.program_rgb.clear();
+            let feeds = if canvas.is_main() {
+                &inner.scene_feeds
+            } else {
+                &inner.vertical_scene_feeds
+            };
+            feeds.clear_reuse(Feed::Program);
             compositor.forget(Feed::Program);
         }
         let scene = preview_wanted
@@ -2802,12 +2889,33 @@ fn run_program<P: Platform>(
                     compositor.draw(Feed::Preview, Some(&staged), tick, tick + frame / 2, true)
                 {
                     let slot = output.preview.clone();
-                    image.then(move |(rgb, _), _| slot.push(rgb, tick));
+                    let inner = inner.clone();
+                    image.then(move |(rgb, _), _| {
+                        let feeds = if canvas.is_main() {
+                            &inner.scene_feeds
+                        } else {
+                            &inner.vertical_scene_feeds
+                        };
+                        feeds.publish(
+                            &staged.scene,
+                            version,
+                            rgb.clone(),
+                            tick,
+                            Some(Feed::Preview),
+                        );
+                        slot.push(rgb, tick);
+                    });
                 }
             }
             Some(_) => {}
             None => {
                 output.preview.clear();
+                let feeds = if canvas.is_main() {
+                    &inner.scene_feeds
+                } else {
+                    &inner.vertical_scene_feeds
+                };
+                feeds.clear_reuse(Feed::Preview);
                 compositor.forget(Feed::Preview);
             }
         }
@@ -3035,6 +3143,9 @@ impl<P: Platform> IsoRunner<P> {
         if self.stage.is_none() {
             let gpu = {
                 let mut gpu = gpu.lock();
+                if gpu.as_ref().is_some_and(Gpu::is_lost) {
+                    *gpu = None;
+                }
                 match &*gpu {
                     Some(gpu) => gpu.clone(),
                     None => gpu.insert(Gpu::for_platform(platform)?).clone(),
@@ -3045,6 +3156,7 @@ impl<P: Platform> IsoRunner<P> {
                     format!("could not prepare {:?}'s frames for its file", self.id)
                 })?;
             self.stage = Some(Box::new(stage));
+            isocast_diagnostics::diagnostic!("debug"; "{}: opened ISO GPU stage", self.id);
         }
         Ok(self.stage.as_mut().expect("made above"))
     }
@@ -3124,6 +3236,7 @@ fn run_iso<P: Platform>(
     let fps = runner.fps;
     let frame = Duration::from_secs(1) / fps;
     let mut last_gpu: Option<Completion> = None;
+    let mut retry_gpu = std::time::Instant::now();
     for n in 0.. {
         let tick = epoch.add_ticks(n, fps);
         // Frames up to half a frame after the tick are nearest to it; wait
@@ -3131,6 +3244,19 @@ fn run_iso<P: Platform>(
         runner.clock.sleep_until(platform, tick + frame);
         if tick >= shared.end() {
             break;
+        }
+        if runner
+            .stage
+            .as_ref()
+            .is_some_and(|stage| stage.device_lost())
+        {
+            // The old device suppresses its hand-offs. Start a new chain:
+            // linking new pictures behind its fence would suppress those
+            // too. Missing ticks remain visible in file drop accounting.
+            runner.stage = None;
+            last_gpu = None;
+            isocast_diagnostics::diagnostic!("warn";
+                "{}: GPU device lost; recreating its ISO stage", runner.id);
         }
         // Its file ends here, after the frames it captured before it
         // stopped (one newer than the last tick's pick is still due); the
@@ -3159,8 +3285,27 @@ fn run_iso<P: Platform>(
             admitted |= output.admitted;
         }
         let image = if admitted {
+            if runner.stage.is_none() && runner.needs_stage(platform, &image) {
+                let now = std::time::Instant::now();
+                if now < retry_gpu {
+                    // Missing pictures still count as drops against the
+                    // file's frame grid. A failing replacement must not
+                    // rebuild shaders and pools at the ISO frame rate.
+                    continue;
+                }
+                retry_gpu = now + Duration::from_secs(1);
+            }
             // None: its frames are all still being written.
-            let Some(image) = runner.prepare(platform, gpu, image, tick)? else {
+            let prepared = runner.prepare(platform, gpu, image, tick);
+            if prepared.is_err()
+                && runner
+                    .stage
+                    .as_ref()
+                    .is_some_and(|stage| stage.device_lost())
+            {
+                continue;
+            }
+            let Some(image) = prepared? else {
                 continue;
             };
             Some(image)
@@ -3196,7 +3341,16 @@ fn run_iso<P: Platform>(
             }
             None => match &last_gpu {
                 Some(done) => {
-                    done.ready()?;
+                    if let Err(error) = done.ready() {
+                        if runner
+                            .stage
+                            .as_ref()
+                            .is_some_and(|stage| stage.device_lost())
+                        {
+                            continue;
+                        }
+                        return Err(error);
+                    }
                     done.then(move |_| send(None));
                 }
                 None => send(None),

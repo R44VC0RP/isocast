@@ -4956,15 +4956,23 @@ fn ids_or_none<'a>(ids: impl Iterator<Item = &'a String>) -> String {
 
 type Graphics = isocast_engine::snapshot::Graphics<NativePlatform>;
 
-/// The GPU, set up on first use and kept.
+/// The GPU, set up on first use and kept until its device is lost.
 fn with_graphics<T>(draw: impl FnOnce(&mut Graphics) -> Result<T>) -> Result<T> {
     static GRAPHICS: Mutex<Option<Graphics>> = Mutex::new(None);
-    let mut graphics = GRAPHICS.lock();
-    let graphics = match &mut *graphics {
+    let mut cached = GRAPHICS.lock();
+    if cached.as_ref().is_some_and(Graphics::is_lost) {
+        *cached = None;
+    }
+    let graphics = match &mut *cached {
         Some(graphics) => graphics,
         none => none.insert(Graphics::new(&NativePlatform)?),
     };
-    draw(graphics)
+    let result = draw(graphics);
+    // Lost while drawing: this answer may fail, the next opens a new one.
+    if graphics.is_lost() {
+        *cached = None;
+    }
+    result
 }
 
 /// Frames of the setup's sources `ids`: the newest the recording captured

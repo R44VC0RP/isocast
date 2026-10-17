@@ -156,7 +156,9 @@ pub(crate) type LiveFilters = Box<dyn Fn() -> Vec<Filter> + Send>;
 pub(crate) fn watch<P: Platform>(
     platform: &P,
     request: Request,
-    source: impl Fn(u32) -> Result<Source<P::Frame>, String> + Send + 'static,
+    source: impl Fn(u32, (Option<u32>, Option<u32>)) -> Result<Source<P::Frame>, String>
+    + Send
+    + 'static,
     filters: Option<LiveFilters>,
 ) -> SharedFeed<P::SharedSurface> {
     let (tx, events) = channel();
@@ -205,7 +207,7 @@ fn run<P: Platform>(
     control: &SharedControl,
     tx: &Sender<SharedEvent<P::SharedSurface>>,
     request: &Request,
-    source: impl Fn(u32) -> Result<Source<P::Frame>, String>,
+    source: impl Fn(u32, (Option<u32>, Option<u32>)) -> Result<Source<P::Frame>, String>,
     filters: Option<LiveFilters>,
 ) -> Result<(), String> {
     let failed = |err: anyhow::Error| format!("{err:#}");
@@ -268,12 +270,17 @@ fn run<P: Platform>(
             }
         }
         let fps = control.0.fps.load(Ordering::Relaxed);
-        let Source { slot, grid, drawn } = source(fps)?;
+        let Source { slot, grid, drawn } = source(fps, max_size)?;
         let again = || ring.as_ref().is_none_or(|ring| ring.fresh);
         let Some((frame, at)) = pace.next(platform, &slot, grid, fps, again) else {
             continue;
         };
-        let mut picture = importer.import(&frame).map_err(failed)?;
+        // The completion below retains `frame` through the GPU read, so
+        // pooled surfaces can reuse their texture wrappers between ticks.
+        let mut picture = match importer.import_cached(&frame).map_err(failed)? {
+            Some(picture) => picture,
+            None => importer.import(&frame).map_err(failed)?,
+        };
         if drawn_filters.iter().any(|filter| filter.enabled) {
             let filtering =
                 filtering.get_or_insert_with(|| Filters::new(&gpu, renderer.format(), true));
@@ -367,7 +374,10 @@ fn run<P: Platform>(
 
 /// `input` scaled down to fit in `max_size` (either side unbounded if
 /// absent), keeping its shape; never larger than it is.
-fn fitted((width, height): (u32, u32), max_size: (Option<u32>, Option<u32>)) -> (u32, u32) {
+pub(super) fn fitted(
+    (width, height): (u32, u32),
+    max_size: (Option<u32>, Option<u32>),
+) -> (u32, u32) {
     let (width, height) = (width.max(1), height.max(1));
     let across = max_size
         .0

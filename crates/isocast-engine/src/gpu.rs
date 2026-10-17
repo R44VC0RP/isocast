@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::task::{Context as TaskContext, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -80,29 +80,47 @@ impl Gpu {
         let poll_fault = fault.clone();
         let (poll, submissions) = mpsc::sync_channel(1);
         let polling = device.clone();
+        let poll_lost = lost.clone();
         std::thread::Builder::new()
             .name("GPU completion".into())
             .spawn(move || {
                 start();
-                while submissions.recv().is_ok() {
-                    // Coalesce notifications. One thread services callbacks;
-                    // drawing threads never wait for the driver to finish.
-                    loop {
-                        let kind = wgpu::PollType::Wait {
-                            submission_index: None,
-                            timeout: Some(Duration::from_secs(1)),
-                        };
-                        let result = match &poll_fault {
-                            Some(fault) => fault.poll(&polling, kind),
-                            None => polling.poll(kind),
-                        };
-                        // A producer stops submitting after its fence gets
-                        // old. Keep servicing that fence even with no more
-                        // notifications, or a transient stall freezes it.
-                        if !matches!(result, Err(wgpu::PollError::Timeout)) {
-                            break;
+                let polled = isocast_diagnostics::contain("GPU completion", || {
+                    while submissions.recv().is_ok() {
+                        // Coalesce notifications. One thread services
+                        // callbacks; drawing threads never wait for the
+                        // driver to finish.
+                        loop {
+                            let kind = wgpu::PollType::Wait {
+                                submission_index: None,
+                                timeout: Some(Duration::from_secs(1)),
+                            };
+                            let result = match &poll_fault {
+                                Some(fault) => fault.poll(&polling, kind),
+                                None => polling.poll(kind),
+                            };
+                            // A producer stops submitting after its fence
+                            // gets old. Keep servicing that fence even with
+                            // no more notifications, or a transient stall
+                            // freezes it. Not a lost device's: its owners
+                            // fail and recreate, and nothing will finish.
+                            if !matches!(result, Err(wgpu::PollError::Timeout))
+                                || poll_lost.load(Ordering::Acquire)
+                            {
+                                break;
+                            }
                         }
                     }
+                });
+                // The HAL can panic once its device is gone (or a callback
+                // panicked mid-batch, so later fences never finish). Either
+                // way this device is no longer trustworthy: its owners see
+                // it lost and recreate, new outputs open a fresh device,
+                // and this thread stops polling instead of taking the
+                // process down.
+                if let Err(message) = polled {
+                    poll_lost.store(true, Ordering::Release);
+                    isocast_diagnostics::diagnostic!("error"; "{message}; the shared GPU is marked lost");
                 }
             })
             .context("could not start GPU completion thread")?;
@@ -152,12 +170,22 @@ impl Gpu {
 /// GPU: `ISOCAST_GPU_FAULT=stall:AFTER_SECONDS:DURATION_SECONDS` withholds
 /// completion callbacks and returns real wait-time-sized timeouts until the
 /// interval ends. Only a later poll releases them, just as wgpu requires.
-/// `lost:AFTER_SECONDS` sets the same flag as the device-lost callback. Once
-/// per process, so a replacement device is not immediately lost again.
+/// `lost:AFTER_SECONDS` sets the same flag as the device-lost callback.
+/// `lost:AFTER_SECONDS:COUNT` also loses the next COUNT-1 devices on their
+/// first submission, to exercise recovery back-off without resetting hardware.
+/// `panic:AFTER_SECONDS` panics in the completion thread's next poll, as a
+/// HAL can after losing its device. Without COUNT these fire once per
+/// process, so a replacement device is not immediately lost again.
 struct Fault {
     after: Duration,
-    stall: Option<Duration>,
+    kind: FaultKind,
     state: Mutex<FaultState>,
+}
+
+enum FaultKind {
+    Stall(Duration),
+    Lost(u32),
+    PollPanic,
 }
 
 #[derive(Default)]
@@ -165,6 +193,8 @@ struct FaultState {
     began: Option<Instant>,
     until: Option<Instant>,
     held: Vec<Box<dyn FnOnce() + Send>>,
+    panic: bool,
+    fired: bool,
 }
 
 impl Fault {
@@ -175,36 +205,54 @@ impl Fault {
         let value = std::env::var("ISOCAST_GPU_FAULT").ok()?;
         let parts: Vec<_> = value.split(':').collect();
         let seconds = |text: &str| Duration::try_from_secs_f64(text.parse().ok()?).ok();
-        let (after, stall) = match &parts[..] {
-            ["stall", after, duration] => (seconds(after)?, Some(seconds(duration)?)),
-            ["lost", after] => (seconds(after)?, None),
+        let (after, kind) = match &parts[..] {
+            ["stall", after, duration] => (seconds(after)?, FaultKind::Stall(seconds(duration)?)),
+            ["lost", after] => (seconds(after)?, FaultKind::Lost(1)),
+            ["lost", after, count] => (
+                seconds(after)?,
+                FaultKind::Lost(count.parse::<u32>().ok()?.clamp(1, 100)),
+            ),
+            ["panic", after] => (seconds(after)?, FaultKind::PollPanic),
             _ => return None,
         };
         Some(Self {
             after,
-            stall,
+            kind,
             state: Mutex::default(),
         })
     }
 
     fn arm(&self, lost: &AtomicBool) {
-        static FIRED: AtomicBool = AtomicBool::new(false);
-        if FIRED.load(Ordering::Relaxed) {
+        static FIRED: AtomicU32 = AtomicU32::new(0);
+        let limit = match self.kind {
+            FaultKind::Lost(count) => count,
+            _ => 1,
+        };
+        let fired = FIRED.load(Ordering::Relaxed);
+        if fired >= limit {
             return;
         }
         let mut state = self.state.lock();
         let began = *state.began.get_or_insert_with(Instant::now);
-        if began.elapsed() < self.after || FIRED.swap(true, Ordering::SeqCst) {
+        if state.fired || (fired == 0 && began.elapsed() < self.after) {
             return;
         }
-        match self.stall {
-            Some(duration) => {
+        state.fired = true;
+        if FIRED.fetch_add(1, Ordering::SeqCst) >= limit {
+            return;
+        }
+        match self.kind {
+            FaultKind::Stall(duration) => {
                 state.until = Some(Instant::now() + duration);
                 isocast_diagnostics::diagnostic!("warn"; "injected GPU completion stall for {} ms", duration.as_millis());
             }
-            None => {
+            FaultKind::Lost(_) => {
                 lost.store(true, Ordering::Release);
                 isocast_diagnostics::diagnostic!("warn"; "injected GPU device loss");
+            }
+            FaultKind::PollPanic => {
+                state.panic = true;
+                isocast_diagnostics::diagnostic!("warn"; "injected GPU completion poll panic");
             }
         }
     }
@@ -226,6 +274,10 @@ impl Fault {
     ) -> Result<wgpu::PollStatus, wgpu::PollError> {
         let (remaining, held) = {
             let mut state = self.state.lock();
+            if std::mem::take(&mut state.panic) {
+                drop(state);
+                panic!("injected GPU completion poll panic");
+            }
             match state.until {
                 Some(until) if Instant::now() < until => (
                     Some(until.saturating_duration_since(Instant::now())),

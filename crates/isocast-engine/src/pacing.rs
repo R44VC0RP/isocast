@@ -137,15 +137,28 @@ pub(crate) struct MediaClock {
     stats: Arc<Stats>,
 }
 
+/// What woke a [`MediaClock::wait_until`] wait.
+pub(crate) enum Wake {
+    /// The wait's limit passed.
+    Timeout,
+    /// Another source (a hand-off) woke it early; not a timer sample.
+    HandOff,
+    /// The worker is stopping: return without a sample.
+    Stop,
+}
+
+/// How long a critical wait blocks on the platform's uninterruptible timer
+/// at the end, after taking hand-offs until then.
+const CRITICAL_APPROACH: Duration = Duration::from_millis(2);
+/// The longest single wait of [`MediaClock::wait_until`], so its worker
+/// notices a stop.
+const WAIT_CHUNK: Duration = Duration::from_millis(10);
+
 impl MediaClock {
     pub(crate) fn sleep_until<P: Platform>(&mut self, platform: &P, at: Time) {
         let mut now = platform.now();
         while now < at {
-            if !self.critical && PROCESS_STRETCHED.load(Ordering::Acquire) {
-                self.critical = true;
-                self.stats.inherited_critical.store(true, Ordering::Relaxed);
-                self.stats.critical.store(true, Ordering::Release);
-            }
+            self.adopt_process_evidence();
             let deadline = if self.probes > 0 && !self.critical {
                 at.min(now + Duration::from_millis(20))
             } else {
@@ -157,26 +170,82 @@ impl MediaClock {
                 std::thread::sleep(deadline.saturating_since(now));
             }
             now = platform.now();
-            let late = now.saturating_since(deadline);
-            if !self.critical {
-                // Two-frame slack is too permissive at 30 fps: launchd can
-                // stretch each wait by 50–65 ms without crossing it. Ignore
-                // normal 10–15 ms jitter, but learn within the pre-roll.
-                let stretched = late > (self.period / 2).max(Duration::from_millis(20));
-                self.late_streak = if stretched { self.late_streak + 1 } else { 0 };
-                // A severe *startup* wake also suffices. Later, isolated
-                // blackouts/CPU stalls don't change policy: two real sleeps
-                // must stretch. Already-overdue catch-up ticks never vote.
-                if self.late_streak >= 2
-                    || (self.probes > 0 && late > (self.period * 4).max(Duration::from_millis(40)))
-                {
-                    PROCESS_STRETCHED.store(true, Ordering::Release);
-                    self.critical = true;
-                    self.stats.critical.store(true, Ordering::Release);
-                }
-                self.probes = self.probes.saturating_sub(1);
+            self.learn(now.saturating_since(deadline));
+        }
+        self.record(now, at);
+    }
+
+    /// [`Self::sleep_until`] for a worker that also takes hand-offs while it
+    /// waits (GPU completions). `wait(limit)` blocks for at most `limit` and
+    /// says what woke it. Only timed-out waits teach stretching; one wake
+    /// lateness is recorded per call, measured against `at`. A critical
+    /// clock takes hand-offs until shortly before `at`, then uses the
+    /// critical timer for the rest.
+    pub(crate) fn wait_until<P: Platform, E>(
+        &mut self,
+        platform: &P,
+        at: Time,
+        mut wait: impl FnMut(Duration) -> Result<Wake, E>,
+    ) -> Result<(), E> {
+        let mut now = platform.now();
+        while now < at {
+            self.adopt_process_evidence();
+            let approach = if self.critical {
+                at - CRITICAL_APPROACH
+            } else {
+                at
+            };
+            if now >= approach {
+                platform.sleep_until(at);
+                now = platform.now();
+                continue;
+            }
+            let deadline = approach.min(now + WAIT_CHUNK);
+            let woke = wait(deadline.saturating_since(now))?;
+            now = platform.now();
+            match woke {
+                Wake::Stop => return Ok(()),
+                Wake::HandOff => {}
+                Wake::Timeout if self.critical => {}
+                Wake::Timeout => self.learn(now.saturating_since(deadline)),
             }
         }
+        self.record(now, at);
+        Ok(())
+    }
+
+    fn adopt_process_evidence(&mut self) {
+        if !self.critical && PROCESS_STRETCHED.load(Ordering::Acquire) {
+            self.critical = true;
+            self.stats.inherited_critical.store(true, Ordering::Relaxed);
+            self.stats.critical.store(true, Ordering::Release);
+        }
+    }
+
+    /// Learn from an ordinary timed wait that woke `late` after its deadline.
+    fn learn(&mut self, late: Duration) {
+        if self.critical {
+            return;
+        }
+        // Two-frame slack is too permissive at 30 fps: launchd can stretch
+        // each wait by 50–65 ms without crossing it. Ignore normal 10–15 ms
+        // jitter, but learn within the pre-roll.
+        let stretched = late > (self.period / 2).max(Duration::from_millis(20));
+        self.late_streak = if stretched { self.late_streak + 1 } else { 0 };
+        // A severe *startup* wake also suffices. Later, isolated
+        // blackouts/CPU stalls don't change policy: two real sleeps must
+        // stretch. Already-overdue catch-up ticks never vote.
+        if self.late_streak >= 2
+            || (self.probes > 0 && late > (self.period * 4).max(Duration::from_millis(40)))
+        {
+            PROCESS_STRETCHED.store(true, Ordering::Release);
+            self.critical = true;
+            self.stats.critical.store(true, Ordering::Release);
+        }
+        self.probes = self.probes.saturating_sub(1);
+    }
+
+    fn record(&mut self, now: Time, at: Time) {
         self.stats.record(now.saturating_since(at), self.next);
         self.next = (self.next + 1) % WINDOW;
     }

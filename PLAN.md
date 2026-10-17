@@ -560,6 +560,14 @@ come later (clips already carry in/out points on their take).
 - [ ] **S.3 Astra optimization rounds.** GPT-6 Astra (opencode, xhigh)
   sessions with S.1/S.2 as their measuring stick, one hot path at a time,
   until Isocast beats OBS on every measure we can control.
+  - [x] **S.3 #111 multiview and GPU follow-ups (perf-2), implementation.** Tile-sized
+    scene rasters and completed program/preview reuse; contained GPU poll
+    panics, snapshot/ISO loss recovery, virtual-camera pacing. #27's frame
+    permit draft is removed and parked outside the tree (it double-counted
+    shared deliveries). Reduced-tree ISO stress has zero protected losses;
+    e2e 18/18, GPU/camera recovery checks and workspace gates pass. Tier-1
+    review/merge remains the coordinator's; handoff
+    `/Volumes/IsocastBuild/perf-2/scratch/REPORT.md`, "Split for merge".
   - [ ] **S.3 #26/#29 Shared GPU and upstream ISO admission.** One device
     per process, bounded asynchronous GPU hand-offs, BGRA native monitors,
     and ISO admission before conversion.
@@ -1582,6 +1590,25 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- S.3 #111 fix round 1 (2026-10-17): keep scene compositors across reuse,
+  clear an old scene's reuse when its publisher switches, debounce raster
+  rebuilds, skip undersized one-off scene pictures, and back off lost ISO
+  replacements. Reviewer's cut probe max/p99: 176/149 ms → 65/61 ms (main
+  67/63); on-air edits 41/40 ms (main 66/60). Six injected device losses:
+  ISO stage opens spaced 1.001–1.015 s, every tick counted, next take whole.
+  Main 215db9e merged without committing; strict e2e 18/18 and full gates
+  pass. One-pair multiview GPU 545→262 ms/s, footprint 363→217 MiB, zero
+  losses. Fix-only re-review: perf-2/scratch/REPORT.md, "Fix round 1".
+
+- S.3 #111 split (2026-10-17): removed and preserved #27's entire draft;
+  integrated main a9b661ff. Reduced-tree full ISO stress passes with zero
+  program/stream/audio losses (18 files), strict e2e 18/18 and workspace
+  gates pass. GPU loss/poll panic, cached snapshots, ISO recovery and camera
+  pacing rechecked. One M2-a multiview A/B pair: GPU 536.3→302.9 ms/s,
+  footprint 416.3→204.1 MiB, CPU 65.8→64.8%, zero recording losses.
+  Initial stress noise also reproduced on baseline; both preserved.
+  Uncommitted for coordinator Tier-1 review: perf-2/scratch/REPORT.md.
 
 - #108/#109 (2026-10-17): the first layout audit's 11 issues fixed (narrow
   Controls/source toolbar/mixer/vertical head adapt, source child names

@@ -52,6 +52,10 @@ struct Drawing {
 }
 
 impl<P: Platform> IsoFrames<P> {
+    pub(super) fn device_lost(&self) -> bool {
+        self.gpu.is_lost()
+    }
+
     /// Frames of source `id` drawn at `size` with `gpu`, through its
     /// filters if `source_filters` is given.
     pub(super) fn new(

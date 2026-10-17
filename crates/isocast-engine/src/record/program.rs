@@ -58,6 +58,9 @@ pub(super) struct Compositor<P: Platform> {
     rgb_pool: P::FramePool,
     pictures: Vec<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup, u64)>,
     canvas: (u32, u32),
+    /// Raster size; scene monitors keep the layout's coordinates but draw
+    /// directly into the viewer's smaller picture.
+    size: (u32, u32),
     /// The scenes it draws, as last adopted.
     inputs: Option<Arc<ProgramScenes<P::Frame>>>,
     list: Option<DrawList>,
@@ -194,13 +197,22 @@ impl<P: Platform> Compositor<P> {
     /// A compositor drawing on `gpu`, shared with others (the scene feeds'
     /// compositors, one per watched scene, share one device).
     pub(super) fn with_gpu(platform: &P, canvas: (u32, u32), gpu: Gpu) -> Result<Self> {
+        Self::with_size(platform, canvas, canvas, gpu)
+    }
+
+    pub(super) fn with_size(
+        platform: &P,
+        canvas: (u32, u32),
+        size: (u32, u32),
+        gpu: Gpu,
+    ) -> Result<Self> {
         let renderer = Renderer::new(&gpu, wgpu::TextureFormat::Bgra8Unorm);
         let filters = Filters::new(&gpu, renderer.format(), true);
         let transitions = Transitions::new(&gpu, renderer.format());
         let importer = platform.frame_importer(&gpu)?;
-        let pool = platform.ycbcr_frame_pool(canvas.0, canvas.1)?;
-        let rgb_pool = platform.frame_pool(canvas.0, canvas.1)?;
-        let picture = crate::scene::canvas_texture(&gpu, renderer.format(), canvas);
+        let pool = platform.ycbcr_frame_pool(size.0, size.1)?;
+        let rgb_pool = platform.frame_pool(size.0, size.1)?;
+        let picture = crate::scene::canvas_texture(&gpu, renderer.format(), size);
         let picture_view = picture.create_view(&Default::default());
         let to_ycbcr = ToYCbCr::new(&gpu);
         let picture_bound = to_ycbcr.bind(&gpu, &picture);
@@ -217,6 +229,7 @@ impl<P: Platform> Compositor<P> {
             rgb_pool,
             pictures: Vec::new(),
             canvas,
+            size,
             inputs: None,
             list: None,
             frames: Vec::new(),
@@ -246,6 +259,10 @@ impl<P: Platform> Compositor<P> {
     /// The canvas size it draws.
     pub(super) fn canvas(&self) -> (u32, u32) {
         self.canvas
+    }
+
+    pub(super) fn size(&self) -> (u32, u32) {
+        self.size
     }
 
     pub(super) fn device_lost(&self) -> bool {
@@ -297,6 +314,11 @@ impl<P: Platform> Compositor<P> {
                     at,
                 ));
             }
+        }
+        if self.size != self.canvas
+            && let Some(list) = &mut self.list
+        {
+            list.set_raster_size(self.size);
         }
         // Sources that keep running keep their last frame (and its
         // filters' picture is made again from it).
