@@ -53,9 +53,9 @@ use crate::devices::{find_display, find_microphone, shareable_content};
 use crate::tap::{self, Backend, TapCapture, Target};
 use crate::writer::catch;
 
-/// Channels recorded from a microphone by default at most: what
-/// AVFoundation makes of a device as two channels (a larger interface's
-/// inputs mixed down), unless the source's `channels` picks inputs.
+/// Channels recorded from a microphone by default at most: a 1- or
+/// 2-input device's own signal, or a larger interface's inputs 1 + 2
+/// (unless the source's `channels` picks inputs).
 const MAX_CHANNELS: u32 = 2;
 /// How long starting or stopping a stream may take.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(10);
@@ -81,7 +81,7 @@ impl Drop for MicrophoneCapture {
 
 /// Start capturing the microphone `query` names ("default" for the system
 /// default input): the input channels `channels` picks (from 1), or by
-/// default its first two. Returns the capture and the channels delivered.
+/// default its inputs 1 + 2. Returns the capture and the channels delivered.
 pub fn capture_microphone(
     query: &str,
     channels: Option<&[u32]>,
@@ -102,7 +102,7 @@ pub fn capture_microphone(
         })?;
     let session = unsafe { AVCaptureSession::new() };
     let output = unsafe { AVCaptureAudioDataOutput::new() };
-    let delegate = AudioDelegate::new(sink, format.request, format.pick, &name);
+    let delegate = AudioDelegate::new(sink, format.request, format.pick, format.default, &name);
     let queue = DispatchQueue::new("isocast.microphone-capture", None);
     // Ask AVFoundation for the engine's format, resampled if needed.
     let settings = pcm_settings(format.request);
@@ -159,6 +159,9 @@ pub(crate) struct MicrophoneFormat {
     /// The Core Audio device, watched for format changes while picked
     /// channels are recorded.
     core_audio: Option<AudioObjectID>,
+    /// No `channels` given: a larger interface's inputs 1 + 2, which fall
+    /// back to input 1 instead of stopping if the device shrinks.
+    default: bool,
 }
 
 impl MicrophoneFormat {
@@ -170,32 +173,47 @@ impl MicrophoneFormat {
     }
 }
 
-/// How to capture `channels` (from 1; by default the first two) of a
-/// microphone. The error names the channel and lists the device's.
+/// How to capture `channels` (from 1; by default a 1- or 2-input
+/// device's own signal, a larger one's inputs 1 + 2) of a microphone. The
+/// error names the channel and lists the device's.
 pub(crate) fn microphone_format(
     device: &AVCaptureDevice,
     channels: Option<&[u32]>,
 ) -> Result<MicrophoneFormat> {
     let most = device_channels(device);
-    let default = most.clamp(1, MAX_CHANNELS);
-    let Some(channels) = channels else {
-        return Ok(MicrophoneFormat {
-            request: default,
-            pick: None,
-            core_audio: None,
-        });
-    };
-    if channels.is_empty() || channels.len() > 2 {
-        bail!("channels: give one channel (mono) or two (stereo)");
-    }
-    // Picked inputs are checked against the format the device runs now:
-    // an ADAT interface at 96 kHz has fewer inputs than its formats list,
-    // and a channel it lacks would be AVFoundation's upmix of the others.
+    // Inputs are counted in the format the device runs now: an ADAT
+    // interface at 96 kHz has fewer inputs than its formats list, and
+    // AVFoundation's formats are cached per process (#99).
     let core_audio = crate::output::device_with_uid(&unsafe { device.uniqueID() }.to_string());
     let available = core_audio
         .map(crate::output::input_channels)
         .filter(|channels| *channels > 0)
         .unwrap_or(most);
+    let Some(channels) = channels else {
+        if available <= MAX_CHANNELS {
+            // One or two inputs: the device's own signal, as before.
+            return Ok(MicrophoneFormat {
+                request: most.clamp(1, MAX_CHANNELS),
+                pick: None,
+                core_audio: None,
+                default: false,
+            });
+        }
+        // More: inputs 1 + 2 as stereo, read like picked inputs, since
+        // AVFoundation asked for two mixes every input down (#99, Ryan's
+        // call: an interface's first pair, not a mix of all of them).
+        return Ok(MicrophoneFormat {
+            request: available,
+            pick: Some(vec![0, 1]),
+            core_audio,
+            default: true,
+        });
+    };
+    if channels.is_empty() || channels.len() > 2 {
+        bail!("channels: give one channel (mono) or two (stereo)");
+    }
+    // Picked inputs are checked against the current format: a channel the
+    // device lacks would be AVFoundation's upmix of the others.
     if let Some((i, channel)) = channels
         .iter()
         .enumerate()
@@ -230,6 +248,7 @@ pub(crate) fn microphone_format(
         request: available,
         pick: Some(channels.iter().map(|c| *c as usize - 1).collect()),
         core_audio,
+        default: false,
     })
 }
 
@@ -338,7 +357,14 @@ define_class!(
 
 impl AudioDelegate {
     /// `name` names the device in errors.
-    fn new(sink: AudioSink, channels: u32, pick: Option<Vec<usize>>, name: &str) -> Retained<Self> {
+    /// `default`: `pick` is a larger interface's default inputs 1 + 2.
+    fn new(
+        sink: AudioSink,
+        channels: u32,
+        pick: Option<Vec<usize>>,
+        default: bool,
+        name: &str,
+    ) -> Retained<Self> {
         let stopped: Arc<dyn Fn(String) + Send + Sync> = Arc::from(sink.stopped);
         let check = pick.as_ref().map(|pick| {
             Arc::new(ChannelCheck {
@@ -346,6 +372,8 @@ impl AudioDelegate {
                 opened: channels,
                 seen: AtomicU32::new(channels),
                 picked: pick.iter().map(|c| *c as u32 + 1).collect(),
+                default,
+                mono: AtomicBool::new(false),
                 stopped: stopped.clone(),
                 failed: AtomicBool::new(false),
             })
@@ -363,15 +391,20 @@ impl AudioDelegate {
 
     fn deliver(&self, sample: &CMSampleBuffer) {
         let ivars = self.ivars();
+        let mut mono = false;
         if let Some(check) = &ivars.check {
             let delivered = delivered_channels(sample).unwrap_or(ivars.channels);
-            if !check.check(delivered, "delivers") {
+            if check.default {
+                mono = check.default_mono(delivered);
+            } else if !check.check(delivered, "delivers") {
                 return;
             }
         }
         match interleaved_f32(sample, ivars.channels) {
             Ok(Some(samples)) => {
                 let samples = match &ivars.pick {
+                    // The default's input 2 is gone: input 1 in both.
+                    Some(_) if mono => pick_channels(&samples, ivars.channels as usize, &[0, 0]),
                     Some(pick) => pick_channels(&samples, ivars.channels as usize, pick),
                     None => samples,
                 };
@@ -399,13 +432,21 @@ fn delivered_channels(sample: &CMSampleBuffer) -> Option<u32> {
 /// another input. A change that keeps every picked input records on:
 /// AVFoundation keeps delivering them (BlackHole in an aggregate going
 /// 16 -> 18 or 18 -> 16 inputs kept its input 3 exact).
+///
+/// A larger interface's default inputs 1 + 2 (`default`) never stop: with
+/// fewer than two inputs left, input 1 is recorded in both channels until
+/// input 2 is back, and the diagnostics say so.
 struct ChannelCheck {
     name: String,
     opened: u32,
-    /// The count last seen, for the log.
+    /// The count Core Audio last reported (for the log, and the default's
+    /// fallback).
     seen: AtomicU32,
     /// From 1.
     picked: Vec<u32>,
+    default: bool,
+    /// The default records input 1 in both channels.
+    mono: AtomicBool,
     stopped: Arc<dyn Fn(String) + Send + Sync>,
     failed: AtomicBool,
 }
@@ -432,6 +473,27 @@ impl ChannelCheck {
         false
     }
 
+    /// Whether the default inputs 1 + 2 must fall back to input 1 alone,
+    /// with the device delivering `delivered` channels and having the
+    /// count last seen; says so when that changes.
+    fn default_mono(&self, delivered: u32) -> bool {
+        let now = delivered.min(self.seen.load(Ordering::Acquire));
+        let mono = now < 2;
+        if self.mono.swap(mono, Ordering::AcqRel) != mono {
+            if mono {
+                isocast_diagnostics::diagnostic!("warn";
+                    "microphone: {:?} now has {now} input channel(s) instead of {}, so the \
+                     default inputs 1 + 2 record input 1 in both channels until input 2 is \
+                     back", self.name, self.opened);
+            } else {
+                isocast_diagnostics::diagnostic!("info";
+                    "microphone: {:?} has input 2 again ({now} input channels); the default \
+                     records inputs 1 + 2", self.name);
+            }
+        }
+        mono
+    }
+
     /// The device has `now` input channels: stop if a picked one is gone,
     /// and log any other change.
     fn changed(&self, now: u32) {
@@ -442,6 +504,16 @@ impl ChannelCheck {
             return;
         }
         let was = self.seen.swap(now, Ordering::AcqRel);
+        if self.default {
+            // Never stops; the next buffer falls back if input 2 is gone.
+            if was != now {
+                isocast_diagnostics::diagnostic!("info";
+                    "microphone: {:?} now has {now} input channels instead of {was}; the \
+                     default records inputs 1 + 2 (input 1 alone in both channels with fewer \
+                     than two)", self.name);
+            }
+            return;
+        }
         if self.check(now, "has") && was != now {
             isocast_diagnostics::diagnostic!("info";
                 "microphone: {:?} now has {now} input channels instead of {was}; the picked \
@@ -788,7 +860,7 @@ fn capture_played_audio(
         config.setHeight(2);
         config.setMinimumFrameInterval(CMTime::new(1, 1));
     }
-    let delegate = AudioDelegate::new(sink, CHANNELS, None, "");
+    let delegate = AudioDelegate::new(sink, CHANNELS, None, false, "");
     let stream = unsafe {
         SCStream::initWithFilter_configuration_delegate(
             SCStream::alloc(),
@@ -861,6 +933,8 @@ mod tests {
             opened: 18,
             seen: AtomicU32::new(18),
             picked: vec![3, 9],
+            default: false,
+            mono: AtomicBool::new(false),
             stopped: Arc::new({
                 let reasons = reasons.clone();
                 move |reason| reasons.lock().unwrap().push(reason)
@@ -883,5 +957,34 @@ mod tests {
                  channel 9 is gone (its format changed while recording)"
             ]
         );
+    }
+
+    #[test]
+    fn default_inputs_fall_back_instead_of_stopping() {
+        let reasons = Arc::new(Mutex::new(Vec::new()));
+        let check = ChannelCheck {
+            name: "Interface".into(),
+            opened: 18,
+            seen: AtomicU32::new(18),
+            picked: vec![1, 2],
+            default: true,
+            mono: AtomicBool::new(false),
+            stopped: Arc::new({
+                let reasons = reasons.clone();
+                move |reason| reasons.lock().unwrap().push(reason)
+            }),
+            failed: AtomicBool::new(false),
+        };
+        assert!(!check.default_mono(18));
+        // Down to two inputs: still inputs 1 + 2.
+        check.changed(2);
+        assert!(!check.default_mono(18));
+        // One input (or one delivered): input 1 in both, never stopped.
+        check.changed(1);
+        assert!(check.default_mono(18));
+        check.changed(18);
+        assert!(check.default_mono(1));
+        assert!(!check.default_mono(18));
+        assert!(reasons.lock().unwrap().is_empty());
     }
 }

@@ -2348,6 +2348,7 @@ fn status(json: bool) -> Result<ExitCode> {
         }
         None => Status {
             state: EngineState::Idle,
+            load_warning: None,
             scene: None,
             preview: None,
             live: None,
@@ -2380,6 +2381,9 @@ fn status(json: bool) -> Result<ExitCode> {
     if json {
         println!("{}", serde_json::to_string_pretty(&status)?);
         return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(warning) = &status.load_warning {
+        eprintln!("warning: {}", warning.message);
     }
     if let (Some(collection), Some(profile)) = (&status.collection, &status.profile) {
         println!(
@@ -4251,6 +4255,10 @@ fn devices(json: bool) -> Result<ExitCode> {
                 })
                 .collect();
             println!("    channels: {}", names.join(", "));
+        }
+        // What a source without `channels` records.
+        if m.channels > 2 {
+            println!("    default: inputs 1 + 2 (stereo); `channels` picks others");
         }
     }
     println!("Audio outputs (for monitoring)");

@@ -719,6 +719,14 @@ layout editing, Windows, release prep).
   comes once per take, the app shows one notice with a fix (after the take
   while recording) and "don't show again for this setup", and turning an
   ISO file on picks a fitting size or leaves it off.
+- [x] **A.4 Outside-load warnings (GitHub #90):** read-only detection,
+  status/CLI/app visibility, and at most one warning event per cause per
+  three minutes. Fix round 1 removes the unsuccessful early ISO hold:
+  admission is main's, CPU-burner ISO fps matches main within run variation,
+  protected outputs stay whole, and external-encoder warnings still precede
+  stream drops. Recording/pause/connection text stays visible; the API names
+  the five-second baseline window. Tier-1 re-review pending; no claim to
+  prevent losses caused by uncooperative external encoders.
 - [x] **A.5 Timeline MVP (C.1, C.2):** takes append, retake, remove,
   reorder, export one joined file; a simple Create view in the app.
 - [x] **A.6 Log everything, report bugs in one click.**
@@ -1434,6 +1442,21 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- A.4 #90 fix round 1 (2026-10-16): removed the early ISO hold and share
+  cap after review found lost ISO content without protected-output gain.
+  Three CPU pairs: ISO medians 30.54 -> 31.57 fps (base range 30.39–35.36),
+  all protected video/audio drops zero. Three foreign-encoder pairs warn
+  210–428 ms before sampled stream loss. Four CPU episodes produce four
+  status episodes but only two events 186 s apart; real app recording,
+  paused and reconnecting lines retain their state and warning. Full strict
+  e2e 17/17 and remote fmt/clippy/227 tests pass on main 12c6bad integration.
+
+- A.4 #90 (2026-10-16, partial): early external-pressure warnings verified
+  on both AWS Macs, one event per episode, real status/CLI/app visibility;
+  30 min without a headroom warning, 17/17 strict e2e, 221 workspace tests.
+  Protected-loss reduction is not established; normal soak loses one frame
+  on program and stream. Tier-1 review and stronger protection remain open.
 
 - C.4 / #88 (2026-10-16): project files (`.isoprj`) in every project
   folder open in the editor from the Finder, File › Open/Open Recent, the
@@ -4038,3 +4061,17 @@ One line per finished task, newest last.
   ISO whose policy includes it (not the other ISO) at the time the tone
   ends (within 10 ms); files decode; normal take's manifest identical to
   main's apart from times and counts.
+- #99 default (2026-10-16, branch agent/audio-default, Ryan's call): a
+  microphone source without `channels` on a device with more than two
+  inputs records inputs 1 + 2 (stereo) instead of macOS's mix of every
+  input; 1- and 2-input devices unchanged; the default never stops when
+  the device shrinks (fewer than two inputs: input 1 in both channels,
+  with a diagnostic). Release notes for 0.0.6: "changes recorded audio for
+  interfaces with more than two inputs". Verified in the test VM:
+  BlackHole 16ch with a tone per channel records 200 Hz left / 400 Hz
+  right at -15.05 dB (the source level), every other tone below -100 dB
+  (main: the 16-tone mix, -7.65 dB RMS); `setup check --json` and
+  `devices --json` identical to main for all six setups; the 2-input
+  Apple Virtual Sound Device records the same PCM as main; an aggregate
+  going 18 -> 2 mid-take keeps the source running (logged), 18 -> 16
+  keeps tones 1 and 2 exact.

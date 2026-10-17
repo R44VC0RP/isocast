@@ -228,9 +228,12 @@ take before budgeting a long recording.
 
 ## Audio interface inputs
 
-A microphone source records its device's own signal as two channels (or
-one): a 2-input interface's inputs 1 and 2, but macOS mixes a larger
-interface's inputs down to two. `channels` picks inputs instead, numbered
+A microphone source records its device's inputs 1 and 2 as left and
+right (a 1-input device's one input as one channel). On an interface
+with more than two inputs that is its first pair too, not macOS's mix of
+every input (since 0.0.6); if such an interface later drops to one input
+while recording, the source records input 1 in both channels instead of
+stopping, and says so in the diagnostics. `channels` picks inputs instead, numbered
 from 1 as `isocast devices` lists them (with the names the device gives
 them):
 
@@ -260,7 +263,8 @@ the format it runs now (an ADAT interface at 88.2 or 96 kHz has fewer
 inputs) and list the valid ones. If the device loses a picked input while
 recording (its sample rate or format changes), that source stops with the
 reason, like a disconnected microphone, and the rest of the take records
-on; a change that keeps the picked inputs records on. In the app: the
+on; a change that keeps the picked inputs records on. (Without `channels`
+nothing stops: see above.) In the app: the
 source's Properties (Channels).
 
 ## An audio source that stops while recording

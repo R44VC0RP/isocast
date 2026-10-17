@@ -699,6 +699,7 @@ impl FileWriter for CrashSafeWriter {
     type Frame = PixelBuffer;
 
     fn prioritize_video(&mut self, canvas: isocast_protocol::CanvasId) {
+        self.video.protect(canvas.is_main());
         self.priority
             .get_or_insert_with(|| EncoderPressure::new(canvas));
     }

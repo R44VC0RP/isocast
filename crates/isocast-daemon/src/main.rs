@@ -2775,6 +2775,10 @@ impl Daemon {
         ));
         let mut status = Status {
             state: engine,
+            #[cfg(target_os = "macos")]
+            load_warning: isocast_platform_macos::pressure::warning(),
+            #[cfg(not(target_os = "macos"))]
+            load_warning: None,
             scene: state.scene.clone(),
             preview: state.preview.clone(),
             live,

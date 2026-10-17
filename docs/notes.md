@@ -399,6 +399,12 @@ each section. Delete entries that stop being true.
 
 ## Ready for Ryan
 
+- 2026-10-16 (#99 default): **release notes line for 0.0.6:** "Changes
+  recorded audio for interfaces with more than two inputs: a microphone
+  source without `channels` now records inputs 1 + 2 as stereo instead of
+  macOS's mix of every input. Pick other inputs with `channels` (or the
+  source's Channels menu). Devices with one or two inputs are unchanged."
+
 - 2026-10-15 (#71): **OBS tools can drive Isocast.** `isocast websocket
   enable` prints ws://127.0.0.1:4455 and a password once; enter both in the
   tool's OBS WebSocket settings (Touch Portal, Streamer.bot, Companion,
@@ -1682,6 +1688,33 @@ each section. Delete entries that stop being true.
   stream button, LCD, Settings "Live") stays green: it is the stream's
   health, not the tally. Only the Console (dark) theme exists in the
   native app; the retired web app (isocast-app) wasn't changed.
+- 2026-10-16 (#90, fix round 1): **Outside-load warnings never change ISO
+  admission.** Review rejected the initial CPU/thermal hold: it reduced ISOs
+  to ~2.4 fps for the entire episode without a protected-output gain. All
+  three hold hooks, the 25% share cap and their shared flag are removed.
+  Three counterbalanced CPU pairs against 12c6bad keep ISO medians at
+  30.54 -> 31.57 fps (within baseline variation) with zero protected losses.
+  Encoder-contention warnings still lead sampled stream losses by 210–428 ms;
+  severe overload remains lossy (program/stream medians 242/257 -> 241/257,
+  program audio 272 -> 276). No protection improvement is claimed.
+  The 100 ms detector infers contention; public APIs cannot identify another
+  app's sessions. It allows eight native in-flight pictures plus 150 ms of
+  sustained excess over its baseline. Latency/CPU detection is blind for
+  five seconds after session changes (including splits), documented on
+  `Status.load_warning`; thermal/allocation failures bypass that baseline.
+  Status follows each episode and clears after five quiet seconds, but
+  warning events are limited to one per cause per three minutes across
+  takes/splits. Four injected episodes produce four status episodes and two
+  events 186 s apart. Recording, pause and connection text precede the
+  appended warning (real app screenshots verified). Replay's shared main
+  encoder remains warning-eligible: replay is a recorded output too; this
+  has no admission effect. Thermal/allocation failures were not forced on
+  hardware. Full strict e2e 17/17 and remote fmt/clippy/227 tests pass.
+  Review attributed the earlier control's single compositor miss to host
+  activity, not this branch; that run had no headroom warning or active hold.
+  Its scratch wrapper ignored `soak.main()`'s FAIL return: do not reuse it
+  without propagating the exit status. Tier-1 re-review remains; evidence:
+  `/Volumes/IsocastBuild/outside-load/scratch/REPORT.md` (Fix round 1).
 
 - 2026-10-16 (#96): **Main > vertical > ISO on shared video encoders.**
   Both canvas programs/streams still protect ISOs; persistent main pressure
@@ -1875,10 +1908,10 @@ each section. Delete entries that stop being true.
   dropping (BlackHole 16ch asked for 2: each channel a mix of all 16 tones,
   +7.4 dB; asked for 3 or 4: silence; asked for 16: channel 16 alone at
   +0.001 dB). Reading 16 floats a frame costs nothing next to the encode.
-  Without `channels` the request is exactly main's (two, no pick), so on
-  a >2-input interface the default is that mixdown, not "the first two
-  inputs" as the 2026-10-11 note says; verified equal `setup check --json`
-  and manifest/stream structure against main.
+  Without `channels` the request was exactly main's at the time (two, no
+  pick), so on a >2-input interface the default was that mixdown, not
+  "the first two inputs" as the 2026-10-11 note said; since the 2026-10-16
+  #99 default entry below it is inputs 1 + 2.
   App picker: one Channels dropdown (Default, each input as mono, each
   odd-even pair as stereo, with Core Audio channel names) over a
   two-dropdown Left/Right design: one choice covers the common cases,
@@ -1903,6 +1936,22 @@ each section. Delete entries that stop being true.
   Test kit: /Volumes/IsocastBuild/audio-followups/scratch/vm (agg.swift
   makes "Isocast Test Agg" and changes its sub-devices without a prompt;
   t99.py records the cases; hw/analyse99.py and hw/summarise99.sh).
+- 2026-10-16 (#99 default, Ryan's call on the issue): a microphone source
+  **without `channels` on a device with more than two inputs records
+  inputs 1 + 2** (stereo), through the pick path (`[1, 2]`: the whole
+  device read, counted in its current format, watched), instead of
+  macOS's mix of every input. One- and two-input devices take main's
+  exact path (same request, nothing watched). Unlike a picked source, the
+  default never stops: if the device later has fewer than two inputs
+  (Core Audio's count or the delivered count), input 1 is recorded in
+  both channels until input 2 is back, with a warn diagnostic; every
+  count change is logged. The source's channel count (2) is unchanged, so
+  `setup check --json` and `devices --json` are identical to main's; the
+  text `isocast devices` adds "default: inputs 1 + 2" under >2-input
+  devices and the app's Channels "Default" says "inputs 1 + 2, stereo".
+  Release notes must say it changes recorded audio for such interfaces.
+  VM kit: /Volumes/IsocastBuild/audio-default/scratch/vm (tdef.py,
+  tones.py).
 
 - 2026-10-16 (engine hardening, #27/#30/#31/#35): engine and daemon locks
   use parking_lot. Only selected control state uses `Critical` transactions:
@@ -5533,7 +5582,8 @@ each section. Delete entries that stop being true.
   `failed`), so a crash leaves a usable manifest.
 - 2026-10-11: Audio capture. Microphones use an AVCaptureSession audio data
   output asked for 48 kHz interleaved f32 (AVFoundation resamples), up to 2
-  channels (multi-channel interfaces: first two inputs for now), matched like
+  channels (multi-channel interfaces: first two inputs for now; until the
+  #99 default entry this was in fact macOS's mix of every input), matched like
   cameras, with "default" meaning the system default input. System audio is
   a ScreenCaptureKit stream on the main display with `capturesAudio` and a
   2×2, 1 fps video stream that is ignored; 48 kHz stereo planar float. Each

@@ -1182,7 +1182,8 @@ impl Controls {
             _ => "connection stable",
         };
         let link = s.link_error.as_str();
-        let line = if !link.is_empty() && s.status.is_none() {
+        let load_warning = s.status.as_ref().and_then(|s| s.load_warning.as_ref());
+        let mut line = if !link.is_empty() && s.status.is_none() {
             link.to_string()
         } else if recording && live.is_some_and(|l| l.paused) {
             format!(
@@ -1232,16 +1233,27 @@ impl Controls {
         } else {
             String::new()
         };
+        // Keep the recording/pause and connection state ahead of a load
+        // warning, including when a narrow status bar has to elide its tail.
+        if recording && streaming && health != "ok" {
+            line = format!("{connection} · {line}");
+        }
         // The vertical canvas's own state (#96): its streams, or that it
         // stopped.
         let (vertical, vertical_bad) = vertical_words(&s);
-        let line = match (vertical, line.is_empty()) {
+        let mut line = match (vertical, line.is_empty()) {
             (Some(words), false) => format!("{line} · {words}"),
             (Some(words), true) => words,
             (None, _) => line,
         };
+        if let Some(warning) = load_warning {
+            line.push_str(" · ");
+            line.push_str(&warning.message);
+        }
         area.set_status_line(line.into());
-        area.set_status_warn((streaming && health != "ok") || vertical_bad);
+        area.set_status_warn(
+            load_warning.is_some() || (streaming && health != "ok") || vertical_bad,
+        );
 
         // The readouts: the take's drops, else the stream's (with its
         // share); the stream's rate, else the disk's while recording.

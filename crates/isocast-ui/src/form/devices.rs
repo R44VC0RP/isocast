@@ -198,7 +198,7 @@ pub fn channels_value(channels: &serde_json::Value) -> String {
 }
 
 /// A microphone's channel choices: the default (its own stereo, a larger
-/// interface's inputs mixed down by macOS), each
+/// interface's inputs 1 + 2), each
 /// input alone as mono, then each odd-even pair as stereo, with the names
 /// the device gives them. `value` (as [`channels_value`] writes it) stays
 /// an option even if the device doesn't have it.
@@ -213,8 +213,7 @@ pub fn channel_options(devices: Option<&Devices>, device: &str, value: &str) -> 
     let default_detail = match count {
         0 => String::new(),
         1 => "input 1".to_string(),
-        2 => "inputs 1 + 2, stereo".to_string(),
-        _ => "every input mixed to stereo".to_string(),
+        _ => "inputs 1 + 2, stereo".to_string(),
     };
     let mut options = vec![choice("", "Default", default_detail)];
     for c in 1..=count {

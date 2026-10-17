@@ -56,8 +56,8 @@ pub struct Encoded {
     pub format: CFRetained<CMFormatDescription>,
 }
 
-#[derive(Default)]
 struct Output {
+    health: Arc<crate::pressure::EncodeHealth>,
     frames: Mutex<VecDeque<Result<Encoded>>>,
     ready: Condvar,
     in_flight: AtomicU64,
@@ -77,7 +77,13 @@ unsafe impl Send for VideoSession {}
 
 impl VideoSession {
     pub fn new(spec: &VideoTrackSpec, timescale: i32) -> Result<Self> {
-        let output = Arc::new(Output::default());
+        let output = Arc::new(Output {
+            health: crate::pressure::EncodeHealth::new(spec.fps, false),
+            frames: Mutex::new(VecDeque::new()),
+            ready: Condvar::new(),
+            in_flight: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+        });
         let hardware_only = matches!(spec.encoder.codec, Codec::H264 | Codec::Hevc);
         let mut keys = Vec::new();
         if hardware_only {
@@ -111,6 +117,7 @@ impl VideoSession {
             if let Some(out) = isocast_diagnostics::fds::exhausted() {
                 bail!("{out} (VideoToolbox error {status})");
             }
+            crate::pressure::session_failed(status);
             if status == -12908 {
                 bail!(
                     "no hardware {:?} encoder is free: this Mac's video encoders are busy with \
@@ -212,6 +219,10 @@ impl VideoSession {
         self.output.in_flight.load(Ordering::Relaxed)
     }
 
+    pub fn protect(&self, protected: bool) {
+        self.output.health.protect(protected);
+    }
+
     /// Frames the encoder itself discarded (a null or FrameDropped
     /// callback): accepted by `encode`, never delivered.
     pub fn dropped(&self) -> u64 {
@@ -222,17 +233,19 @@ impl VideoSession {
     pub fn encode(&mut self, frame: &PixelBuffer, ticks: i64) -> Result<()> {
         let time = unsafe { CMTime::new(ticks, self.timescale) };
         self.output.in_flight.fetch_add(1, Ordering::Relaxed);
+        let submitted = self.output.health.submit();
         let status = unsafe {
             self.session.encode_frame(
                 &frame.0,
                 time,
                 self.frame_duration,
                 None,
-                ptr::null_mut(),
+                submitted as usize as *mut c_void,
                 ptr::null_mut(),
             )
         };
         if status != 0 {
+            self.output.health.complete(submitted);
             self.output.in_flight.fetch_sub(1, Ordering::Relaxed);
             bail!("the recording encoder refused a frame (error {status})");
         }
@@ -302,7 +315,7 @@ fn codec_type(codec: Codec) -> CMVideoCodecType {
 /// The session's output callback, on a VideoToolbox thread.
 unsafe extern "C-unwind" fn encoded(
     refcon: *mut c_void,
-    _frame: *mut c_void,
+    frame: *mut c_void,
     status: i32,
     flags: VTEncodeInfoFlags,
     sample: *mut CMSampleBuffer,
@@ -310,6 +323,7 @@ unsafe extern "C-unwind" fn encoded(
     // SAFETY: the refcon is the session's `Output`, alive until the session
     // is invalidated.
     let output = unsafe { &*(refcon as *const Output) };
+    output.health.complete(frame as usize as u64);
     let result = match unsafe { sample.as_ref() } {
         _ if status != 0 => Err(anyhow!("the recording encoder failed (error {status})")),
         None => {

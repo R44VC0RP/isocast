@@ -99,8 +99,8 @@ pub struct H264Encoder {
 // used by one thread at a time.
 unsafe impl Send for H264Encoder {}
 
-#[derive(Default)]
 struct Output {
+    health: Arc<crate::pressure::EncodeHealth>,
     session_id: u64,
     purpose: &'static str,
     size: [u32; 2],
@@ -127,19 +127,10 @@ pub(crate) fn diagnostics() -> serde_json::Value {
     })).collect::<Vec<_>>(),"asset_writer_internal_queue":null,"asset_writer_queue_reason":"AVAssetWriter has no public queue-depth or encode-latency counter; per-file drops and disk latency are in recording"})
 }
 
-fn monotonic_ns() -> u64 {
-    // A scalar cookie, never dereferenced. No allocation or lock per frame.
-    let mut time = std::mem::MaybeUninit::<libc::timespec>::zeroed();
-    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, time.as_mut_ptr()) } != 0 {
-        return 0;
-    }
-    let time = unsafe { time.assume_init() };
-    time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
-}
-
 impl H264Encoder {
     pub fn new(spec: &LiveVideoSpec) -> Result<Self> {
         let output = Arc::new(Output {
+            health: crate::pressure::EncodeHealth::new(spec.fps, !spec.low_latency),
             session_id: NEXT_ENCODER.fetch_add(1, Ordering::Relaxed),
             purpose: if spec.low_latency {
                 "monitor"
@@ -147,7 +138,13 @@ impl H264Encoder {
                 "stream"
             },
             size: [spec.width, spec.height],
-            ..Default::default()
+            frames: Mutex::new(VecDeque::new()),
+            ready: Condvar::new(),
+            dropped: AtomicU64::new(0),
+            in_flight: AtomicU64::new(0),
+            latency_ns: AtomicU64::new(0),
+            callbacks: AtomicU64::new(0),
+            last_os_status: std::sync::atomic::AtomicI32::new(0),
         });
         ENCODERS.lock().unwrap().push(Arc::downgrade(&output));
         // Monitors want each frame decoded as soon as it arrives: VideoToolbox's
@@ -175,6 +172,7 @@ impl H264Encoder {
             if let Some(out) = isocast_diagnostics::fds::exhausted() {
                 bail!("{out} (VideoToolbox error {status})");
             }
+            crate::pressure::session_failed(status);
             // kVTCouldNotFindVideoEncoderErr: no hardware encoder is free.
             if status == -12908 {
                 bail!(
@@ -341,6 +339,7 @@ impl VideoEncoder for H264Encoder {
     type Frame = PixelBuffer;
 
     fn prioritize_video(&mut self, canvas: isocast_protocol::CanvasId) {
+        self.output.health.protect(canvas.is_main());
         if self.priority.as_ref().is_some_and(|p| p.canvas == canvas) {
             return;
         }
@@ -403,13 +402,14 @@ impl VideoEncoder for H264Encoder {
         }
         self.output.in_flight.fetch_add(1, Ordering::Relaxed);
         let submitted = Instant::now();
+        let cookie = self.output.health.submit();
         let status = unsafe {
             self.session.encode_frame(
                 &frame.0,
                 time,
                 duration,
                 options,
-                monotonic_ns() as usize as *mut c_void,
+                cookie as usize as *mut c_void,
                 ptr::null_mut(),
             )
         };
@@ -423,6 +423,7 @@ impl VideoEncoder for H264Encoder {
             priority.set(!first && submitted.elapsed() >= Duration::from_secs(1) / self.fps);
         }
         if status != 0 {
+            self.output.health.complete(cookie);
             self.output.in_flight.fetch_sub(1, Ordering::Relaxed);
             self.output.last_os_status.store(status, Ordering::Relaxed);
             bail!("the H.264 encoder refused a frame (error {status})");
@@ -520,8 +521,9 @@ unsafe extern "C-unwind" fn encoded(
     // SAFETY: the refcon is the encoder's `Output`, alive until the session
     // is invalidated.
     let output = unsafe { &*(refcon as *const Output) };
+    output.health.complete(frame as usize as u64);
     output.latency_ns.store(
-        monotonic_ns().saturating_sub(frame as usize as u64),
+        crate::pressure::monotonic_ns().saturating_sub(frame as usize as u64),
         Ordering::Relaxed,
     );
     output.callbacks.fetch_add(1, Ordering::Relaxed);

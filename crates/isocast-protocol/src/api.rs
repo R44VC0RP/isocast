@@ -1500,9 +1500,30 @@ pub struct Started {
     pub notes: Vec<String>,
 }
 
+/// A warning about current headroom, not the setup's estimated capacity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LoadWarning {
+    /// `encoder_contention` is inferred: macOS does not identify the other app.
+    pub cause: String,
+    pub message: String,
+    pub encode_latency_ms: f64,
+    pub pending_frames: u64,
+    pub system_cpu_percent: Option<f64>,
+    /// macOS ProcessInfo: 0 nominal, 1 fair, 2 serious, 3 critical.
+    pub thermal_state: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Status {
     pub state: EngineState,
+    /// A current episode of reduced system/encoder headroom; clears after
+    /// recovery, not on a new take. Events are limited to one `warning` per
+    /// cause every three minutes; status still shows suppressed episodes.
+    /// Latency and CPU detection are blind for five seconds after our encoder
+    /// sessions change (including a split), while a new baseline is learned.
+    /// Thermal and encoder-allocation failure warnings do not need that baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_warning: Option<LoadWarning>,
     /// The scene on air (an id), if the setup has scenes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scene: Option<String>,
