@@ -1643,6 +1643,13 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-17 (#105, W.0 CI round 1): snapshot runner qualified end to end
+  by the delegator, Actions run 39041442122. Ubuntu build/clippy/tests pass;
+  Windows builds but clippy rejects diagnostics' Unix-only I/O imports and
+  native-relay seed snapshot helpers. Their consumers already have
+  `cfg(unix)`; matching that gate changes no macOS/Linux behavior and does
+  not disable the portable redactor. Windows tests have not run yet.
+
 - 2026-10-17 (#105, W.0): **Windows starts on Actions, not a local Windows
   machine.** PLAN W is the ordered lane; Ryan supplies hardware after the
   hosted alpha checklist. W.0 covers protocol, diagnostics and obs-websocket

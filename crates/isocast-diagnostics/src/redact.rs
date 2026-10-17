@@ -97,7 +97,9 @@ pub fn pinned_count() -> usize {
         .len()
 }
 
+#[cfg(unix)]
 pub(crate) type KnownSecret = (String, Option<(String, String)>);
+#[cfg(unix)]
 pub(crate) fn known_secrets() -> Vec<KnownSecret> {
     let state = registry().lock().unwrap_or_else(|p| p.into_inner());
     state

@@ -1518,6 +1518,14 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 
 ## Log
 
+- W.0 CI round 1 (2026-10-17, #105): hosted run 39041442122 builds on
+  Windows and Ubuntu; Ubuntu clippy/tests pass. Windows clippy found three
+  Unix-only diagnostics declarations compiled without their callers. Gate
+  those imports/helpers with `cfg(unix)`, leaving macOS code unchanged.
+  Remote fmt/clippy and 228 unit tests + 1 doctest pass (1 hardware test
+  ignored; diagnostics' test run separately).
+  Windows tests were skipped; W.0 remains open pending the next hosted run.
+
 - W.0 preparation (2026-10-17, #105): added the Windows/Ubuntu portable
   workflow and branch-restricted snapshot runner; shared Rust code is
   unchanged. Remote Bash/ShellCheck/Actionlint, snapshot scan and argument
