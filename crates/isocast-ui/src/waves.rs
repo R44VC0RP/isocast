@@ -105,6 +105,13 @@ impl Waves {
         any
     }
 
+    /// Forget the waveforms of files not in `paths`.
+    pub fn keep(&self, paths: &HashSet<&Path>) {
+        self.cache
+            .borrow_mut()
+            .retain(|key, _| paths.contains(key.path.as_path()));
+    }
+
     /// Nothing is being made.
     pub fn idle(&self) -> bool {
         self.pending.borrow().is_empty()
@@ -121,10 +128,15 @@ fn start() -> (Sender<Job>, Receiver<Done>) {
         .spawn(move || {
             while let Ok(job) = inbox.recv() {
                 let path = &job.key.path;
-                let peaks = cached(path).unwrap_or_else(|| {
-                    let peaks = read(path);
-                    store(path, &peaks);
-                    peaks
+                // A failed read shows no sound now but isn't kept on disk,
+                // so the app's next run tries again (only a file's real
+                // peaks, or none for a file without sound, are kept).
+                let peaks = cached(path).unwrap_or_else(|| match read(path) {
+                    Some(peaks) => {
+                        store(path, &peaks);
+                        peaks
+                    }
+                    None => Vec::new(),
                 });
                 let (buffers, chunk_seconds) = pictures(&peaks);
                 if outbox
@@ -244,15 +256,15 @@ fn pictures(peaks: &[u8]) -> (Vec<SharedPixelBuffer<Rgba8Pixel>>, f64) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn read(_path: &Path) -> Vec<u8> {
-    Vec::new()
+fn read(_path: &Path) -> Option<Vec<u8>> {
+    None
 }
 
-/// `path`'s first audio track as peaks, [`RATE`] a second (none if it has
-/// no sound or can't be read).
+/// `path`'s first audio track as peaks, [`RATE`] a second (empty if it
+/// has no sound; `None` if it can't be read).
 #[cfg(target_os = "macos")]
-fn read(path: &Path) -> Vec<u8> {
-    objc2::rc::autoreleasepool(|_| mac::peaks(path)).unwrap_or_default()
+fn read(path: &Path) -> Option<Vec<u8>> {
+    objc2::rc::autoreleasepool(|_| mac::peaks(path))
 }
 
 #[cfg(target_os = "macos")]
@@ -348,7 +360,10 @@ mod mac {
             let tracks: Option<Retained<AnyObject>> =
                 msg_send![&*asset, tracksWithMediaType: &*string("soun")?];
             let track: Option<Retained<AnyObject>> = msg_send![&*tracks?, firstObject];
-            let track = track?;
+            // No audio track: no sound, which is an answer (kept).
+            let Some(track) = track else {
+                return Some(Vec::new());
+            };
             // Interleaved 32-bit float, the track's own rate and channels.
             let keys = [
                 string("AVFormatIDKey")?,

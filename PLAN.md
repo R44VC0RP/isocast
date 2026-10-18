@@ -1824,6 +1824,18 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 
 ## Log
 
+- 0.0.8 follow-ups (2026-10-18, #94 #102 #64): HEVC exports with cuts,
+  the .isoprj shutdown flush/"file wins" warning and Vorbis were already on
+  main and were re-checked (headless Chrome 154 plays EDITED/VERTICAL/crop
+  to the end, pre-fix file fails at 0.33 s; trim+shutdown file revision 3 =
+  engine 3, one warning; Vorbis lag 0). New: HE-AAC with implicit SBR in
+  MKV on time (probe lag 2112 -> 0 samples; engine bursts 145-156 ms ->
+  104-111 ms), reserved source ids renamed on collection switch (was
+  refused), system audio always leaves out the Isocast app, editor caches
+  drop off-timeline files and don't store failed waveform reads, editor
+  kept in front when it has the keyboard. Evidence:
+  /Volumes/IsocastBuild/followups-008/scratch/REPORT.md.
+
 - T.1b.2/T.2b/T.3b/T.4b (#110, 2026-10-18): main6d6d58fd fast-forwarded;
   hybrid mixed H26x model/coverage fixes, independent hub failures and named
   secondary pins implemented. Real mixed file/live boundaries, refused hub

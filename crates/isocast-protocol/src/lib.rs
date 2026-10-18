@@ -3481,8 +3481,10 @@ fn parse_pattern(arg: &str) -> Option<SourceKind> {
 }
 
 /// Rename source `old` to `new` wherever a setup's JSON names a source:
-/// `source` and `sidechain_source` values, `sources` and `audio` lists, and
-/// `source_audio` and `held_sources` keys (and lists).
+/// `source`, `sidechain_source` (filters' and plugins' side-chains) and
+/// `mask_source` values, `sources` and `audio` lists, `source_audio`
+/// keys and every id in its lists, and `held_sources` keys. These are all
+/// the places `Setup::validate` checks a source id (#94).
 fn rename_refs(value: &mut serde_json::Value, old: &str, new: &str) {
     use serde_json::Value;
     let swap = |v: &mut Value| {
@@ -3499,9 +3501,17 @@ fn rename_refs(value: &mut serde_json::Value, old: &str, new: &str) {
                     inner.insert(new.to_string(), moved);
                 }
             }
+            // An ISO file's audio list names audio sources by id.
+            if let Some(Value::Object(inner)) = map.get_mut("source_audio") {
+                for list in inner.values_mut() {
+                    if let Value::Array(items) = list {
+                        items.iter_mut().for_each(swap);
+                    }
+                }
+            }
             for (key, v) in map.iter_mut() {
                 match (key.as_str(), &mut *v) {
-                    ("source" | "sidechain_source", Value::String(_)) => swap(v),
+                    ("source" | "sidechain_source" | "mask_source", Value::String(_)) => swap(v),
                     ("sources" | "audio", Value::Array(items)) => items.iter_mut().for_each(swap),
                     _ => {}
                 }
@@ -3541,7 +3551,7 @@ fps = 30
 [recording]
 folder = "/tmp/rec"
 program = { encoder = { codec = "hevc" }, audio = ["edited"] }
-iso = { enabled = true, sources = ["vertical"], audio = ["edited"] }
+iso = { enabled = true, sources = ["vertical", "vertical-2"], audio = ["edited"], source_audio = { vertical = ["edited", "mic"], vertical-2 = ["edited"] } }
 [[sources]]
 id = "vertical"
 kind = "test_pattern"
@@ -3549,9 +3559,14 @@ kind = "test_pattern"
 id = "vertical-2"
 kind = "color"
 color = "#000000"
+filters = [ { kind = "source_mask", mask_source = "vertical" } ]
 [[sources]]
 id = "edited"
 kind = "tone"
+[[sources]]
+id = "mic"
+kind = "tone"
+audio_filters = [ { kind = "compressor", sidechain_source = "edited" } ]
 [[scenes]]
 id = "main"
 name = "Main"
@@ -3571,7 +3586,24 @@ rect = { x = 0, y = 0, width = 1280, height = 720 }
             ]
         );
         assert!(setup.validate().is_empty(), "{:?}", setup.validate());
-        assert_eq!(setup.recording.iso.sources, ["vertical-3"]);
+        assert_eq!(setup.recording.iso.sources, ["vertical-3", "vertical-2"]);
+        let source_audio: Vec<(&str, Vec<&str>)> = setup
+            .recording
+            .iso
+            .source_audio
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.iter().map(String::as_str).collect()))
+            .collect();
+        assert_eq!(
+            source_audio,
+            [
+                ("vertical-2", vec!["edited-2"]),
+                ("vertical-3", vec!["edited-2", "mic"])
+            ]
+        );
+        let json = serde_json::to_string(&setup).unwrap();
+        assert!(json.contains(r#""mask_source":"vertical-3""#), "{json}");
+        assert!(json.contains(r#""sidechain_source":"edited-2""#), "{json}");
         assert_eq!(setup.recording.program.audio, ["edited-2"]);
         assert_eq!(
             setup.scenes[0].items[0].source.as_deref(),

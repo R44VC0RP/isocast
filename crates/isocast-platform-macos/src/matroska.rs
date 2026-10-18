@@ -53,6 +53,7 @@ const TRANSFER_CHARACTERISTICS: u32 = 0x55ba;
 const PRIMARIES: u32 = 0x55bb;
 const AUDIO: u32 = 0xe1;
 const SAMPLING_FREQUENCY: u32 = 0xb5;
+const OUTPUT_SAMPLING_FREQUENCY: u32 = 0x78b5;
 const CHANNELS: u32 = 0x9f;
 const CLUSTER_TIMESTAMP: u32 = 0xe7;
 const SIMPLE_BLOCK: u32 = 0xa3;
@@ -119,6 +120,9 @@ pub struct Track {
     pub alpha: bool,
     pub colour: Colour,
     pub sample_rate: f64,
+    /// OutputSamplingFrequency, if the file says (an HE-AAC track's rate
+    /// after SBR, twice `sample_rate`).
+    pub output_sample_rate: Option<f64>,
     pub channels: u32,
 }
 
@@ -138,6 +142,7 @@ impl Track {
             alpha: false,
             colour: Colour::default(),
             sample_rate: 8000.0,
+            output_sample_rate: None,
             channels: 1,
         }
     }
@@ -429,6 +434,9 @@ impl Demuxer {
                             let (id, size) = self.child_header()?;
                             match id {
                                 SAMPLING_FREQUENCY => track.sample_rate = self.float(size)?,
+                                OUTPUT_SAMPLING_FREQUENCY => {
+                                    track.output_sample_rate = Some(self.float(size)?)
+                                }
                                 CHANNELS => track.channels = self.uint(size)? as u32,
                                 _ => self.skip(size)?,
                             }

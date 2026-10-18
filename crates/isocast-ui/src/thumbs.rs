@@ -106,6 +106,13 @@ impl Thumbs {
         any
     }
 
+    /// Forget the frames of files not in `paths`.
+    pub fn keep(&self, paths: &HashSet<&Path>) {
+        self.cache
+            .borrow_mut()
+            .retain(|key, _| paths.contains(key.path.as_path()));
+    }
+
     /// Nothing is being made.
     pub fn idle(&self) -> bool {
         self.pending.borrow().is_empty()

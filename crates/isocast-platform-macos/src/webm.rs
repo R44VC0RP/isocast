@@ -1196,9 +1196,6 @@ struct AacConfig {
 
 impl AacConfig {
     fn parse(config: &[u8]) -> Option<Self> {
-        const RATES: [u32; 13] = [
-            96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
-        ];
         let mut bits = Bits {
             data: config,
             at: 0,
@@ -1212,7 +1209,7 @@ impl AacConfig {
         let rate = |bits: &mut Bits| -> Option<u32> {
             match bits.read(4)? {
                 15 => bits.read(24),
-                index => RATES.get(index as usize).copied(),
+                index => AAC_RATES.get(index as usize).copied(),
             }
         };
         let mut aot = object_type(&mut bits)?;
@@ -1239,6 +1236,88 @@ impl AacConfig {
             }
         }
         Some(Self { channels, sbr_rate })
+    }
+
+    /// An AudioSpecificConfig that says SBR explicitly, for an AAC-LC one
+    /// whose track says an output rate twice its own: HE-AAC with implicit
+    /// signalling (mkvmerge and others write the LC core's two bytes plus
+    /// OutputSamplingFrequency). AudioToolbox finds the SBR data on its own
+    /// then, but its sound comes 2112 frames late (#64), so say it.
+    /// `None` if the config isn't plain LC, already says SBR, or the rates
+    /// don't fit.
+    fn implicit_sbr(config: &[u8], output_rate: f64) -> Option<Vec<u8>> {
+        // Only the plain two-byte config (object type, rate, channels and
+        // three GASpecificConfig flags) is rewritten: longer ones carry
+        // more (a core coder delay, extensions) that this doesn't keep.
+        if config.len() != 2 || Self::parse(config)?.sbr_rate.is_some() {
+            return None;
+        }
+        let mut bits = Bits {
+            data: config,
+            at: 0,
+        };
+        // Plain LC (2) with a rate from the table and 1 or 2 channels
+        // (a program config element would follow channel config 0).
+        if bits.read(5)? != 2 {
+            return None;
+        }
+        let core_index = bits.read(4)?;
+        let core_rate = *AAC_RATES.get(core_index as usize)?;
+        let channel_config = bits.read(4)?;
+        if !(1..=2).contains(&channel_config) {
+            return None;
+        }
+        // frameLengthFlag may be set; dependsOnCoreCoder and
+        // extensionFlag would need fields a two-byte config can't hold.
+        let ga_flags = bits.read(3)?;
+        if ga_flags & 0b011 != 0 {
+            return None;
+        }
+        let output_rate = output_rate.round() as u32;
+        if output_rate != core_rate * 2 {
+            return None;
+        }
+        let output_index = AAC_RATES.iter().position(|&r| r == output_rate)? as u32;
+        // Explicit (hierarchical) signalling: SBR, the core's rate and
+        // channels, the output rate, then the core's object type and its
+        // GASpecificConfig flags.
+        let mut out = BitWriter::default();
+        out.write(5, 5);
+        out.write(core_index, 4);
+        out.write(channel_config, 4);
+        out.write(output_index, 4);
+        out.write(2, 5);
+        out.write(ga_flags, 3);
+        Some(out.finish())
+    }
+}
+
+/// The sampling frequencies an AudioSpecificConfig indexes (ISO 14496-3).
+const AAC_RATES: [u32; 13] = [
+    96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+];
+
+/// Write bits most significant first.
+#[derive(Default)]
+struct BitWriter {
+    bytes: Vec<u8>,
+    at: usize,
+}
+
+impl BitWriter {
+    fn write(&mut self, value: u32, count: u32) {
+        for i in (0..count).rev() {
+            if self.at.is_multiple_of(8) {
+                self.bytes.push(0);
+            }
+            let bit = ((value >> i) & 1) as u8;
+            *self.bytes.last_mut().expect("pushed") |= bit << (7 - self.at % 8);
+            self.at += 1;
+        }
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
     }
 }
 
@@ -1440,7 +1519,11 @@ impl AudioReader {
                 if track.private.is_empty() {
                     return Err(unsupported(" (its track has no AAC configuration)"));
                 }
-                let config = AacConfig::parse(&track.private);
+                let private = track
+                    .output_sample_rate
+                    .and_then(|rate| AacConfig::implicit_sbr(&track.private, rate))
+                    .unwrap_or_else(|| track.private.clone());
+                let config = AacConfig::parse(&private);
                 let input = AudioStreamBasicDescription {
                     mSampleRate: track.sample_rate,
                     mFormatID: kAudioFormatMPEG4AAC,
@@ -1468,7 +1551,7 @@ impl AudioReader {
                 if let Some(rate) = config.and_then(|c| c.sbr_rate) {
                     priming += HE_AAC_DECODER_DELAY * u64::from(SAMPLE_RATE) / u64::from(rate);
                 }
-                (input, Some(esds(&track.private)), priming, 0)
+                (input, Some(esds(&private)), priming, 0)
             }
             "A_VORBIS" => {
                 let decoder =

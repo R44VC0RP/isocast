@@ -670,7 +670,10 @@ impl Daemon {
             unreachable!()
         };
         let names = (collection.name.clone(), profile.name.clone());
-        let setup = Setup::from_parts(collection, profile);
+        let mut setup = Setup::from_parts(collection, profile);
+        // Sources whose ids became reserved (#94) get new ones, as at start;
+        // the collection is saved with them once the switch is made.
+        let renamed = setup.rename_reserved_sources();
         let mut problems = setup.validate();
         if let Some(message) = relative_folder(&setup.recording.folder) {
             problems.push(Issue {
@@ -718,7 +721,15 @@ impl Daemon {
                 })
             })
             .flatten();
-        let mut notes = Vec::new();
+        let mut notes: Vec<String> = renamed
+            .iter()
+            .map(|(old, new)| {
+                format!(
+                    "source {old:?} was renamed {new:?}: {old:?} is now reserved for a timeline \
+                     export's file; scenes, recording lists and hotkeys follow the new id"
+                )
+            })
+            .collect();
         let view = if collection_changed {
             let file = store::document_path(&root, LibraryKind::Collection, &collection_id);
             match store::read_view(&file) {
@@ -745,6 +756,7 @@ impl Daemon {
                 .update(&setup, state.revision + 1)
                 .map_err(wrong_state)?;
         }
+        let save_renamed = (!renamed.is_empty()).then(|| setup.clone());
         state.setup = Some(setup);
         state.hotkey_holds.clear();
         state.revision += 1;
@@ -752,6 +764,14 @@ impl Daemon {
         let written = state
             .file
             .set_current((&collection_id, &profile_id), (&names.0, &names.1));
+        // The renamed setup's files are chosen now, with it, under the same
+        // lock: another switch may change the pair in use before the save
+        // below, and must not get this collection written over its own.
+        let save_renamed = save_renamed.and_then(|setup| {
+            let (prepared, target) = state.file.prepare();
+            notes.extend(prepared);
+            target.map(|target| (setup, target))
+        });
         // Each collection remembers its own on-air and Studio preview ids.
         let mut on_air = None;
         if collection_changed || state.scene != view.scene {
@@ -787,6 +807,9 @@ impl Daemon {
                      would start with the ones before"
                 ));
             }
+        }
+        if let Some((setup, target)) = save_renamed {
+            notes.extend(self.save(revision, &setup, &target));
         }
         // Kept data keys belong to the collection: the one before's are
         // saved with it, and this one's come back.

@@ -1997,6 +1997,56 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-18 (#64): **HE-AAC with implicit SBR signalling in Matroska**
+  (the LC core's two-byte AudioSpecificConfig plus OutputSamplingFrequency
+  = 2 x SamplingFrequency, as mkvmerge writes it) played 44 ms late:
+  AudioToolbox finds the SBR data by itself but adds its 2112-frame HE
+  delay, and our ASC parse saw plain LC so nothing was dropped. matroska.rs
+  now reads OutputSamplingFrequency; webm.rs rewrites such a config into
+  explicit (hierarchical, AOT 5) signalling before the decoder sees it, so
+  the existing HE path (cookie + delay) applies. Only plain LC with 1-2
+  channels, a table rate and an output rate exactly twice it is rewritten.
+  Legacy codec ids (`A_AAC/MPEG4/LC/SBR` with no CodecPrivate) are still
+  refused with a message: ffmpeg can't write them, so nothing to test with.
+  Not done: an ASC-driven `kAudioFormatProperty_FormatInfo` setup instead of
+  our own parse (works as is; follow-up).
+- 2026-10-18 (#94): `collection switch` / `library_switch` renames sources
+  whose ids became reserved (`edited`, `vertical`) the same way loading at
+  start does (notes in the reply), and saves the renamed collection at once;
+  before, the switch was refused with a validation error naming the id.
+- 2026-10-18 (#94): system audio always leaves out the Isocast app by its
+  bundle id `dev.isocast.app` exactly, kept apart from the user's fuzzy
+  `exclude` names (review R3: a look-alike named "dev.isocast.app Player"
+  was left out too). Process tap: a process whose own Core Audio bundle id
+  is that, or that is the app itself (not helpers or tools it launched,
+  never isocastd); the set is logged ("audio tap: leaves out …") whenever
+  it changes, and follows processes as they come. ScreenCaptureKit: apps
+  with that bundle id when the capture starts (its list is a snapshot, so
+  an Isocast started later isn't left out there). VM check with real
+  recordings: committed head dropped the look-alike's tone, the fix keeps
+  it and drops only the dev.isocast.app process (followups-008
+  t94excl-tap.log). The app's own silencing while
+  capturing stays as a backstop until this is checked on hardware with
+  BlackHole (rig: editor-007/scratch/rig) with the real editor; a
+  development binary run from a terminal has no bundle id and isn't
+  covered by the engine rule.
+- 2026-10-18 (#94 review R1): `library_switch` chooses the files a renamed
+  collection is saved to under the same state lock as the switch (as
+  `apply` does): two switches at once wrote the renamed collection over
+  the other one 198 times in 200 (t94race.py), 0 after.
+- 2026-10-18 (#94 review R2): renaming a reserved source id also renames
+  it inside every `recording.iso.source_audio` list and in source masks'
+  `mask_source` (`rename_refs` now covers every source reference
+  `validate` checks).
+- 2026-10-18 (#94): the editor forgets thumbnails and waveforms of files no
+  longer on the timeline (each `show_rows`); a waveform read that fails is
+  no longer stored on disk as "no sound" (a file without an audio track
+  still is).
+- 2026-10-18 (#102 FU10): a recording stopping while a stream runs no
+  longer pushes the editor behind the studio when the editor has the
+  keyboard (Behind becomes Show then). Checked in code only: proving it
+  needs a real window plus a live stream on a test Mac.
+
 - 2026-10-18 (#110 remaining): a failed retune belongs to its native hub,
   not its canvas. Destinations sharing that hub/replay/warm owner retain the
   same failure latch; independent siblings continue. Destroying/recreating
@@ -6793,6 +6843,15 @@ each section. Delete entries that stop being true.
   starts at 900 because the window's minimum width is 900.
 
 ## Gotchas
+
+- 2026-10-18 (#64): the media-source A/V check (two burst tracks mixed in
+  one program, burst length ~100 ms in step, ~144 ms if one is 44 ms late)
+  is only valid when both sources open together: changing one source's
+  `files` with `apply` restarts only that source, its loop phase moves, and
+  the bursts stop overlapping (peak -6.9 dB instead of ~-1 dB), which reads
+  as "in step" whatever the decoder does. followups-007's t64.sh second pair
+  was measured that way. Start a fresh engine per pair and check the peak
+  (followups-008/scratch/t64.sh).
 
 - 2026-10-18 (#110 pins): live file counters can lag pin time by a full
   status interval. A post-pin RPC comparison counted six old square skips as

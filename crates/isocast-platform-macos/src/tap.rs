@@ -254,10 +254,12 @@ pub fn supported() -> bool {
 /// What a tap captures.
 #[derive(Debug, Clone)]
 pub enum Target {
-    /// Everything played, except these apps (and this process when
-    /// `exclude_own`).
+    /// Everything played, except these apps (matched as apps are
+    /// elsewhere, by name too), the processes of apps with these bundle
+    /// ids (exactly), and this process when `exclude_own`.
     System {
         exclude: Vec<String>,
+        exclude_bundles: Vec<String>,
         exclude_own: bool,
     },
     /// What one app plays.
@@ -274,6 +276,16 @@ struct Process {
     playing: bool,
 }
 
+impl Process {
+    /// The process itself has one of these bundle ids, exactly: its own
+    /// (Core Audio's), or it is the app it belongs to. Not helpers or tools
+    /// an app launched, and no name matching.
+    fn bundle_listed(&self, bundles: &[String]) -> bool {
+        bundle_listed(&self.app.process_bundle_id, bundles)
+            || (self.app.pid == self.pid && bundle_listed(&self.app.bundle_id, bundles))
+    }
+}
+
 /// An app, or a command-line tool without a bundle (like `afplay`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Owner {
@@ -284,6 +296,12 @@ struct Owner {
     executable: String,
     /// The process's own bundle id, when it differs from the app's.
     process_bundle_id: String,
+}
+
+/// Whether `bundle_id` is one of `bundles`, exactly (bundle ids ignore
+/// case); an empty id never is.
+pub(crate) fn bundle_listed(bundle_id: &str, bundles: &[String]) -> bool {
+    !bundle_id.is_empty() && bundles.iter().any(|b| b.eq_ignore_ascii_case(bundle_id))
 }
 
 impl Owner {
@@ -442,13 +460,45 @@ fn chosen(target: &Target, processes: &[Process]) -> Vec<AudioObjectID> {
             Target::App(query) => p.pid != own && p.app.matches(query),
             Target::System {
                 exclude,
+                exclude_bundles,
                 exclude_own,
-            } => (*exclude_own && p.pid == own) || exclude.iter().any(|q| p.app.matches(q)),
+            } => {
+                (*exclude_own && p.pid == own)
+                    || exclude.iter().any(|q| p.app.matches(q))
+                    || (p.pid != own && p.bundle_listed(exclude_bundles))
+            }
         })
         .map(|p| p.object)
         .collect();
     objects.sort_unstable();
     objects
+}
+
+/// Log which processes a system tap leaves out (or an app tap takes),
+/// by pid, bundle id and name, each time that changes.
+fn log_chosen(target: &Target, all: &[Process], objects: &[AudioObjectID]) {
+    let named: Vec<String> = all
+        .iter()
+        .filter(|p| objects.contains(&p.object))
+        .map(|p| {
+            format!(
+                "{} ({}, {})",
+                p.pid,
+                if p.app.process_bundle_id.is_empty() {
+                    "no bundle id"
+                } else {
+                    &p.app.process_bundle_id
+                },
+                p.app.executable
+            )
+        })
+        .collect();
+    let what = match target {
+        Target::System { .. } => "leaves out",
+        Target::App(_) => "takes",
+    };
+    isocast_diagnostics::diagnostic!("info";
+        "audio tap: {what} {} process(es): {}", named.len(), named.join(", "));
 }
 
 /// Check that `query` names a running app (or a tool playing audio); the
@@ -777,7 +827,9 @@ unsafe impl Send for Tap {}
 impl Tap {
     fn start(target: &Target, delivery: Arc<Delivery>) -> Result<Self> {
         let functions = functions().context("Core Audio process taps need macOS 14.2")?;
-        let processes = chosen(target, &processes());
+        let all = processes();
+        let processes = chosen(target, &all);
+        log_chosen(target, &all, &processes);
         let description = describe(target, &processes);
         let mut tap: AudioObjectID = 0;
         let status = unsafe { (functions.create)(Retained::as_ptr(&description), &mut tap) };
@@ -850,10 +902,12 @@ impl Tap {
 
     /// Point the tap at the processes `target` names now, if they changed.
     fn update(&mut self, target: &Target) -> Result<()> {
-        let processes = chosen(target, &processes());
+        let all = processes();
+        let processes = chosen(target, &all);
         if processes == self.processes {
             return Ok(());
         }
+        log_chosen(target, &all, &processes);
         let description = describe(target, &processes);
         // The tap keeps its UUID, so the aggregate device stays attached.
         unsafe { description.setUUID(&self.description.UUID()) };

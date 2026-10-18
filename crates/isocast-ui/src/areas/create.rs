@@ -30,6 +30,7 @@
 //! (↑ ↓, M ⇧M), Space to play, and zoom (⌘+ ⌘−, ⇧Z, ⌘-scroll, pinch).
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -273,6 +274,15 @@ fn focus(editor: &EditorWindow) {
     editor
         .window()
         .with_winit_window(|window| window.focus_window());
+}
+
+/// Whether the editor window is the key window (offscreen: never).
+fn has_keyboard(editor: &EditorWindow) -> bool {
+    use slint::winit_030::WinitWindowAccessor;
+    editor
+        .window()
+        .with_winit_window(|window| window.has_focus())
+        .unwrap_or(false)
 }
 
 /// After showing the editor: focus it, or leave it, or put it behind the
@@ -556,6 +566,14 @@ impl Create {
         let empty: ModelRc<slint::Image> = ModelRc::default();
         let mut asked = false;
         let (numbers, _) = take_numbers(clips);
+        // Pictures of files no longer on the timeline go (#94: a long
+        // session kept every take's waveform, ~8 MB each).
+        let on_timeline: HashSet<&Path> = clips
+            .iter()
+            .flat_map(|c| c.files.iter().map(|f| f.path.as_path()))
+            .collect();
+        self.thumbs.keep(&on_timeline);
+        self.waves.keep(&on_timeline);
         let rows: Vec<ClipRow> = clips
             .iter()
             .enumerate()
@@ -1756,6 +1774,13 @@ impl Create {
             *self.editor.borrow_mut() = Some(editor);
         }
         if let Some(editor) = self.editor.borrow().as_ref() {
+            // Someone looking at the editor (it has the keyboard) keeps it
+            // in front: a recording stopping while a stream runs doesn't
+            // push it behind the studio (#102 FU10).
+            let raise = match raise {
+                Raise::Behind if opened && has_keyboard(editor) => Raise::Show,
+                raise => raise,
+            };
             editor.show()?;
             raised(app, editor, raise);
         }

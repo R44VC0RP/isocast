@@ -753,6 +753,9 @@ impl Drop for StreamAudio {
     }
 }
 
+/// The Isocast app's bundle id (crates/isocast-ui/Info.plist).
+const ISOCAST_APP: &str = "dev.isocast.app";
+
 /// Start capturing what the computer plays, as stereo, leaving out the
 /// apps `exclude` names. `exclude_own` leaves out what this process plays
 /// (monitoring).
@@ -761,6 +764,11 @@ pub fn capture_system_audio(
     sink: AudioSink,
     exclude_own: bool,
 ) -> Result<(SystemAudioCapture, u32)> {
+    // The Isocast app is always left out (#94), by its bundle id exactly
+    // (never the fuzzy name matching of `exclude`): its editor plays takes
+    // aloud, which must not land in a recording, stream or replay before
+    // the app learns that one started (the app also goes silent then).
+    let exclude_bundles = vec![ISOCAST_APP.to_string()];
     let backend = tap::backend();
     isocast_diagnostics::diagnostic!("info";
         "system audio: capturing through {}", backend.label());
@@ -768,13 +776,15 @@ pub fn capture_system_audio(
         Backend::ProcessTap => {
             let target = Target::System {
                 exclude: exclude.to_vec(),
+                exclude_bundles,
                 exclude_own,
             };
             let (tap, channels) = tap::capture(target, sink)?;
             Ok((SystemAudioCapture::tap(tap), channels))
         }
         Backend::ScreenCaptureKit => {
-            let (stream, channels) = capture_played_audio(None, exclude, sink, exclude_own)?;
+            let (stream, channels) =
+                capture_played_audio(None, exclude, &exclude_bundles, sink, exclude_own)?;
             Ok((SystemAudioCapture::stream(stream), channels))
         }
     }
@@ -791,17 +801,19 @@ pub fn capture_application_audio(app: &str, sink: AudioSink) -> Result<(SystemAu
             Ok((SystemAudioCapture::tap(tap), channels))
         }
         Backend::ScreenCaptureKit => {
-            let (stream, channels) = capture_played_audio(Some(app), &[], sink, false)?;
+            let (stream, channels) = capture_played_audio(Some(app), &[], &[], sink, false)?;
             Ok((SystemAudioCapture::stream(stream), channels))
         }
     }
 }
 
 /// What the computer (or only `app`) plays, through ScreenCaptureKit,
-/// leaving out the running apps `exclude` names.
+/// leaving out the running apps `exclude` names and those whose bundle id
+/// is one of `exclude_bundles` (exactly).
 fn capture_played_audio(
     app: Option<&str>,
     exclude: &[String],
+    exclude_bundles: &[String],
     sink: AudioSink,
     exclude_own: bool,
 ) -> Result<(StreamAudio, u32)> {
@@ -822,8 +834,27 @@ fn capture_played_audio(
             // Apps that aren't running have nothing to leave out.
             let excluded: Vec<_> = unsafe { content.applications() }
                 .iter()
-                .filter(|a| exclude.iter().any(|q| crate::capture::app_matches(a, q)))
+                .filter(|a| {
+                    exclude.iter().any(|q| crate::capture::app_matches(a, q))
+                        || tap::bundle_listed(
+                            &unsafe { a.bundleIdentifier() }.to_string(),
+                            exclude_bundles,
+                        )
+                })
                 .collect();
+            isocast_diagnostics::diagnostic!("info";
+                "system audio: ScreenCaptureKit leaves out {} app(s): {}",
+                excluded.len(),
+                excluded
+                    .iter()
+                    .map(|a| format!(
+                        "{} ({}, {})",
+                        unsafe { a.processID() },
+                        unsafe { a.bundleIdentifier() },
+                        unsafe { a.applicationName() }
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", "));
             unsafe {
                 SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
                     SCContentFilter::alloc(),
