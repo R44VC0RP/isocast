@@ -38,9 +38,55 @@ fn main() {
     }
 }
 
+/// `ISOCAST_UI_NO_GALLERY=1` builds the interface without the kit gallery
+/// (`--state kit`, a design board of 1832 lines): rustc then needs about
+/// 3 GiB less of the roughly 13.5 GiB the one generated module takes, so
+/// GitHub's 16 GB Windows runner can compile it (.github/workflows/
+/// windows.yml). Only that workflow sets it; every other build, and every
+/// shipped one, has the board.
+const NO_GALLERY: &str = "ISOCAST_UI_NO_GALLERY";
+
+/// The interface to compile: ui/app.slint, or with `NO_GALLERY` a copy of
+/// ui/ in OUT_DIR whose kit-gallery.slint is an empty `KitGallery` with the
+/// same properties (Slint resolves imports next to the importing file, so
+/// a copy is the only way to swap it without touching the sources).
+fn interface_root() -> std::path::PathBuf {
+    println!("cargo:rerun-if-env-changed={NO_GALLERY}");
+    if std::env::var_os(NO_GALLERY).is_none() {
+        return "ui/app.slint".into();
+    }
+    // Slint reports the copy's files as inputs; the sources are what change.
+    println!("cargo:rerun-if-changed=ui");
+    let out = std::path::Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("ui-no-gallery");
+    // A file the sources no longer have must not survive in the copy.
+    let _ = std::fs::remove_dir_all(&out);
+    copy_dir("ui".as_ref(), &out);
+    std::fs::write(
+        out.join("kit-gallery.slint"),
+        "export component KitGallery inherits Rectangle {\n    \
+         in property <bool> show-dialog;\n    \
+         in-out property <int> open-dropdown;\n}\n",
+    )
+    .expect("the stub gallery is writable");
+    out.join("app.slint")
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("the interface copy is writable");
+    for entry in std::fs::read_dir(from).expect("ui/ is readable") {
+        let entry = entry.expect("ui/ is readable");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("ui/ is readable").is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("the interface copy is writable");
+        }
+    }
+}
+
 fn compile_interface() {
     slint_build::compile_with_config(
-        "ui/app.slint",
+        interface_root(),
         slint_build::CompilerConfiguration::new()
             .with_style("fluent-dark".into())
             // Element names and types, which `--a11y` (Slint's element

@@ -244,6 +244,29 @@ each section. Delete entries that stop being true.
   are still stubs; W.6 owns real-window/DPI/font parity. Snapshot evidence:
   windows/scratch/w1e/windows-main.png. Isolated smoke daemon was stopped.
 
+- 2026-10-18 (#105 hosted Windows CI memory): run 39135916369 died with
+  `rustc-LLVM ERROR: out of memory` compiling `isocast-ui (bin "isocast-ui"
+  test)` on GitHub's 16 GB runner (bin and test rustc side by side). Slint
+  puts the whole interface into ONE generated Rust module (65 MB of source)
+  and every rustc phase scales with it, so cargo's codegen-units and jobs
+  can't split it: measured on exon-desk, dev profile, debug=0, `-j 1`, rustc
+  peak working set / commit for the bin: **13.60 / 15.13 GiB** (`-Z
+  time-passes` rss: expand 3.0, typeck 5.4, borrowck 8.4, mono 10.6, LLVM
+  11.9). Not worth chasing: `with_debug_info(false)` saves 2% of the source;
+  Slint 1.18's only real split is the experimental multi-crate
+  `as_library` mode, which would mean new crates and rewiring every global.
+  What worked: the kit gallery (ui/kit-gallery.slint, `--state kit`, a design
+  board) is 24% of the generated code (65.3 -> 49.4 MB). build.rs
+  `ISOCAST_UI_NO_GALLERY=1` compiles a copy of ui/ with an empty `KitGallery`
+  (same two properties); peak becomes **10.62 / 12.04 GiB** for the bin and
+  10.31 / 11.76 for the test binary. windows.yml builds the UI in its own
+  step with that variable, `-j 1` and `CARGO_PROFILE_DEV_DEBUG=0`; the rest
+  of the workspace builds first at normal parallelism. **Coverage gap:** the
+  hosted Windows build doesn't compile the gallery's .slint (the macOS CI,
+  every normal build and the exon-desk qualification do, the variable is
+  unset there); nothing else differs, and `--state kit` on that binary draws
+  nothing. Measure again after the UI grows: at 13 GiB commit the hosted
+  runner has less than 3 GiB of headroom.
 - 2026-10-17 (#105 W.1c): `scripts/windows-remote.sh status|sync|cargo|build|run|fetch`
   uses exon-desk-lan, the PowerShell wrapper and binary git-archive over SSH.
   Managed source is `C:\isocast-dev\src`; warm target/cache, isolated home,

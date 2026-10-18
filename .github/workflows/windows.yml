@@ -69,7 +69,13 @@ jobs:
     # Native runtime checks run on exon-desk; this is the clean-machine build.
     name: daemon + CLI + UI build (windows-latest)
     runs-on: windows-latest
-    timeout-minutes: 60
+    # Cold cache: the services, then the UI's dependencies at -j 1, then two
+    # rustc runs of ~8 minutes each (measured on a fast desktop CPU).
+    timeout-minutes: 90
+    env:
+      # Debug info isn't needed to prove the build; smaller objects, cache
+      # and link steps (the UI memory figures below are measured with it off).
+      CARGO_PROFILE_DEV_DEBUG: '0'
     defaults:
       run:
         shell: bash
@@ -93,7 +99,21 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/ci/windows' }}
 
       - name: Build native services and test binaries (do not run)
-        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-ipc -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-ui -p isocast-platform-contracts
+        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-ipc -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts
+
+      # Slint compiles the whole interface into one generated Rust module;
+      # rustc needs 13.6 GiB for it (15.1 GiB committed), measured on
+      # exon-desk, and run 39135916369 died with `rustc-LLVM ERROR: out of
+      # memory` on this 16 GB runner with the bin and its test binary side by
+      # side. So the UI builds in its own step: one rustc at a time (-j 1),
+      # and without the kit gallery (build.rs ISOCAST_UI_NO_GALLERY: the
+      # `--state kit` design board, a quarter of the module), which brings
+      # each rustc to 10.8 GiB (12.2 committed). The gallery's .slint is not
+      # compiled here; macOS CI and the exon-desk qualification build it.
+      - name: Build UI and its test binary (do not run)
+        env:
+          ISOCAST_UI_NO_GALLERY: '1'
+        run: cargo build --locked --all-targets -j 1 -p isocast-ui
 
       - name: Check Platform contract harness
         run: |
