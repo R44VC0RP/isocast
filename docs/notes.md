@@ -6937,6 +6937,106 @@ each section. Delete entries that stop being true.
   must raise KeyboardInterrupt in the weak wrapper: InterruptedError is an
   OSError, which a best-effort ps reader can swallow and incorrectly PASS.
 
+- 2026-10-18 (#124, frame oracle): **e2e.py checks every picture against
+  an independent model.** Fixtures are generated per run (never checked
+  in): 640x360 clips whose frame n carries (tag, n) as a 16x9 block code,
+  a 32-bit word (16-bit frame, 4-bit tag, CRC-12 over the word and its
+  corner) in each corner, so any corner survives scaling, cropping into a
+  corner, being covered, 4:2:0, HEVC/H.264/ProRes and masks; a decode needs
+  two corners to agree where two should show. Sound: a 40 ms burst at
+  every whole second, pitch = second mod 8. The model: a media source
+  playing from the engine's start (restart_on_activate = false) shows
+  media frame T0 + n at the take's slot n (speed s: floor(s(T0+n+0.5)));
+  T0 is fitted once per take and predicts every other output (ISOs,
+  vertical, extra canvases), the split take (T0 + the first take's slots),
+  pauses (their slots skipped), scene switches (a switch at take time t
+  takes effect at slot ceil(t*fps); a restart-on-activate source shows its
+  frame 0 at its first slot on air: both measured on main and then made
+  the spec), edits/exports (slot -> clip in point + offset on the take's
+  grid) and NLE projects (each item's file frame -> media frame, compared
+  without decoding). Why not the test pattern: its bars repeat every 4 s
+  and blur below 3 px per frame; the block code is unique for 120 s and
+  exact. The pattern model stays for Windows' contract takes
+  (`--pattern-oracle`).
+- 2026-10-18 (#124 review fixes): **The oracle is strict; #126 is a
+  named, temporary allowance.** Under load (strict 1080p60 on M2-b) a
+  live picture now and then shows every media source's previous frame
+  (#126: media sources pace on an ordinary thread; test patterns got
+  `real_time_thread` in #78). By default such a failure is reported
+  "KNOWN ISSUE #126 ..." and fails. `e2e.py --tolerate-issue-126` accepts
+  exactly that pattern and counts it: only in live recording outputs (not
+  exports, transitions or self-tests), only at isolated pictures (never two
+  in a row), only where EVERY region of the picture equals what the oracle
+  expects at the previous frame slot (so speed, pauses and cuts are the
+  model's), at most 1% of the output's pictures (none under 100). The
+  merge commands pass the flag until #126 lands; then remove the flag and
+  `issue_126`. Re-review (B1): the previous frame is the oracle's at the
+  previous capture tick, and only where that tick was presented just
+  before: at a pause's resume (or any cut in the file) nothing is excused.
+  #126 also shows in shapes the flag never excuses (two or three pictures
+  in a row; only some sources late): seen on M2-a/M2-b strict runs of main
+  on 2026-10-18; such a failure on a merge check is rerun once and, if it
+  repeats, checked on its contact sheet before blaming #126. `--selftest` proves the rule rejects one lagging source, a
+  two-frame lag, two pictures in a row, >1%, exports and short outputs.
+- 2026-10-18 (#124 review fixes): **Expectations come from the oracle,
+  never from the engine's output.** The edit scenario keeps its own
+  timeline (EditModel: the takes whole, then each requested trim, split,
+  ripple delete, angle and crop as the API documents them); after each
+  edit the engine's timeline must equal it, and exports and NLE projects
+  are checked against the model (export inventory a, b, edited, program,
+  vertical; one picture per slot; NLE tracks a, b, program tiling the
+  sequence, one item per clip at the clip's slots, crops, angles; the
+  enabled sound exactly one item per channel per program clip, counted as
+  written (FCPXML and OTIO: one item per clip; xmeml: Premiere one stereo
+  item, sourcetrack 1; Resolve one item per channel, 1..channels), the
+  rest disabled; and the program sound
+  as the project plays it, cut from the take files at the items' in
+  points, has the oracle's second bursts where the oracle says).
+  Transitions are modelled from the docs: a fade is the next scene over the
+  current one, its share rising linearly (measured: share = (k + 0.75) / n
+  at slot k, inside the model's [k/n, (k+1)/n] +- 0.08); a slide (left)
+  pushes the current scene off to the left as the next comes in from the
+  right, linearly. Each mid-transition picture is fitted as a blend of the
+  two expected frames (residual < 14 grey levels, contrast > 75%) or
+  matched at the model's offsets (95% of cells): a cut, black, the wrong
+  frame or a stalled slide fails. The only fitted numbers are one T0 per
+  take (and per replay save).
+- 2026-10-18 (#124): **A/B gate rule (bench.py --gate, hw-batch bench):**
+  a heuristic screen for material regressions, not a confidence test.
+  First validity: >= 3 pairs; every run of both builds produced exactly
+  the outputs the scenario asks for (setup_toml's own rules:
+  expected_outputs), finished, with every loss counter the gate reads
+  (stream audio_dropouts included; a missing counter is never zero), else
+  INCONCLUSIVE, exit 2; when the base lost no video
+  or audio, the new build must lose none (else FAIL). One discarded
+  warm-up per build, then interleaved pairs in alternating order (ABBA...).
+  Per metric (CPU %, compositor us p50/p99 required; GPU ms/s optional,
+  "not measured" when neither build reports it) the median paired
+  difference must stay under max(2.5 x noise, 3-10% of the base, an
+  absolute floor), noise = the largest of 1.4826 x MAD of the base runs,
+  of the new runs and of the differences / sqrt 2, and it fails only when
+  two thirds of the pairs agree. A required metric missing from any run is
+  INCONCLUSIVE. hw-batch adds --gate only where the job's own bench.py has
+  it (older queued jobs run and say NOT GATED). Calibrated A/A (the same
+  main build against itself, default settings, 2026-10-18): 12 batches on
+  M2-a and M2-b, 0 non-PASS (exact 95% upper bound 22%); resampling
+  their 72 runs into 4,000 random 3-pair batches per Mac (no same-time
+  pairing, so pessimistic): 0.00% on M2-a, 1.65% on M2-b, after the
+  relative floors were raised to 2.5 x the measured run spread (with the
+  first floors: 5.8% on M2-b). A regression must be about 8% CPU or
+  compositor p50 (15% p99) to fail by the floors alone.
+- 2026-10-18 (#124): `scripts/vm.sh e2e` runs in its own folder per
+  invocation, `~/isocast-e2e/<lane>/run-<time>-<pid>` (removed after),
+  in the VM: two runs at once replaced each other's sources and deleted
+  each other's work in the shared `~/isocast-e2e` (seen today). e2e.py's
+  lock still runs them one at a time. It also copies the CLI (scene feeds)
+  and brings the kept `work/` (contact sheets) back.
+- 2026-10-18 (#124): merge checks run the MERGED scripts: `hw-batch
+  --scripts worktree` (with --bin-dir) snapshots the worktree, uncommitted
+  merge included, as a commit no branch points at; e2e reports carry
+  `harness.e2e_sha256` and the scenario list. `scripts/oracle-windows.sh`
+  stages each run in its own folder and exits 0 only when selftest,
+  contracts and pattern all passed (1 failed, 2 couldn't run).
 - 2026-10-17 (#105 W.1e): NPFS refuses WAIT→NOWAIT with ERROR_PIPE_BUSY
   while this endpoint has buffered outgoing bytes (even an 8-byte release),
   or a blocking operation is pending. Stream keeps its previous mode and
@@ -9147,6 +9247,19 @@ each section. Delete entries that stop being true.
   step by hand. The Terminal window opened fine on m2-b (#85 was m2-a).
   editor.png stays offscreen (snapshot.sh: three takes, `editor`,
   `create-angle:slides`, `create-crop:9:16`, `create-crop-mode:on`, 1000x625@2).
+
+- 2026-10-18 (#124): hw-batch takes scripts from a commit: for
+  uncommitted harness changes use `--scripts worktree --bin-dir BIN`.
+- 2026-10-18 (#124): the VM's VideoToolbox can wedge after ~15 h up and
+  many engine runs (even a 128x128 ffmpeg *_videotoolbox encode hangs;
+  e2e then fails with -12903 or "did not open within 8 s"). Killing
+  VTEncoderXPCService didn't help; `scripts/vm.sh down && scripts/vm.sh up`
+  did.
+- 2026-10-18 (#124): PowerShell 5 on exon-desk writes `>` redirects as
+  UTF-16 (oracle-windows.sh converts them); an f-string argument to
+  `require(cond, f"...{xs[0]}")` is evaluated even when cond holds, so a
+  message that indexes a list raises IndexError on success: build it only
+  when failing.
 
 ## Verification recipes
 

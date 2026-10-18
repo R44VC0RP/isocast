@@ -24,6 +24,23 @@ Otherwise only accounted video losses up to 25% per output are allowed; all
 integrity, duration, audio, sync, picture and API checks still apply. Ordinary
 local/test-Mac runs remain 1080p60 and require zero drops. --summary REPORT
 renders the same hardware, qualification and loss tables used by Actions.
+
+The frame oracle (#124): the oracle_* scenarios record generated fixture
+clips whose every frame carries its frame number as a block code (and whose
+sound marks every second), and check every picture of every output (program,
+ISOs, canvases, splits, pauses, scene switches, masks, replay saves, edited
+exports and NLE project files) against an independent model; a failure
+names the first wrong picture, expected vs actual, with a contact sheet.
+  --quick      the lanes' suite while they work (about 2-3 min on the VM)
+  --full       every scenario (the default), before a merge
+  --selftest   the fixture and decoder alone, through every encoder ffmpeg
+               has here; runs on any OS (Windows: scripts/oracle-windows.sh)
+  --pattern-oracle MOVIE --fps N
+               a file of the engine's test pattern, frame by frame (any OS)
+It is strict. Until #126 lands (media sources pacing on an ordinary thread,
+so a live picture now and then shows its sources' previous frames),
+--tolerate-issue-126 accepts exactly that pattern and counts it; without the
+flag such a failure is marked "KNOWN ISSUE #126". Remove the flag with #126.
 """
 
 import argparse
@@ -32,12 +49,16 @@ import base64
 import bisect
 import copy
 import datetime
-import fcntl
+try:
+    import fcntl  # not on Windows, where only --selftest and --pattern-oracle run
+except ImportError:
+    fcntl = None
 import hashlib
 import json
 import math
 import os
 import platform
+import re
 import shutil
 import signal
 import socket
@@ -59,7 +80,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "timeline", "edit",
              "data", "plugin", "hotkeys", "shutdown", "pause", "bug_report", "projects",
-             "plugin_files", "replay", "vertical")
+             "plugin_files", "replay", "vertical",
+             # The frame oracle (#124), defined below.
+             "oracle_record", "oracle_scenes", "oracle_takes", "oracle_edit", "oracle_masks",
+             "oracle_canvases", "oracle_replay", "oracle_governor")
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -186,6 +210,9 @@ def keep_under(root, work, report):
     return dest
 
 
+ENGINE_ENV = {}  # --engine-env
+
+
 class Engine:
     def __init__(self, root, daemon):
         self.root = root
@@ -201,6 +228,7 @@ class Engine:
         command(["codesign", "--verify", self.app])
         # Drop inherited Isocast overrides (including any user's stream key).
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("ISOCAST_")}
+        self.env.update(ENGINE_ENV)
         self.env.update(ISOCAST_CALIBRATION="off", ISOCAST_SOCKET=str(self.sock), ISOCAST_SETUP=str(root / "setup.toml"),
                         ISOCAST_DEV_APP=str(self.app), ISOCAST_PLUGINS=str(root / "plugins"),
                         ISOCAST_TIMELINES=str(root / "timelines"), ISOCAST_MONITOR_SILENT="1",
@@ -2226,6 +2254,1523 @@ def scenario_capacity(e, cfg, evidence):
             evidence["rounds"].append({"files": measured.get("files", []), "stream": measured.get("stream")})
 
 
+# ---------------------------------------------------------------------------
+# The frame oracle (#124).
+#
+# Fixtures: media clips the harness makes (never checked in) whose every
+# frame carries its frame number and a source tag as a 16x9 grid of black and
+# white blocks: a 32-bit word (16-bit frame, 4-bit tag, CRC-12) written in
+# each corner (8x4 blocks), so it survives scaling, cropping into a corner,
+# other items covering part of it, 4:2:0, HEVC/H.264/ProRes and masks. Their
+# sound has a 40 ms burst starting exactly on the sample of every whole
+# second, whose pitch names the second (mod 8).
+#
+# The oracle is a model of the documented behaviour, not of the engine's
+# code: a source playing from the engine's start shows, at the take's frame
+# slot n, media frame T0 + n (at speed s: the newest frame due by half a
+# frame after the tick). T0, one number per recording, is fitted once; every
+# output of the take, the split after it, its pauses, scene switches, edits,
+# exports and project files are then predicted from it. A check decodes the
+# output, compares every picture, and reports the first mismatch with the
+# expected and actual ids and a contact sheet of the pictures around it.
+
+ORACLE_GRID = (16, 9)
+ORACLE_SIZE = (640, 360)
+ORACLE_SECONDS = 120
+ORACLE_QUADS = {"tl": (0, 0), "tr": (8, 0), "bl": (0, 5), "br": (8, 5)}
+ORACLE_LEVELS = (24, 232)
+ORACLE_TAGS = {"a": 1, "b": 2, "c": 3, "m": 4}
+ORACLE_MARKERS = [600 + 200 * k for k in range(8)]
+ORACLE_SCENARIOS = ("oracle_record", "oracle_scenes", "oracle_takes", "oracle_edit", "oracle_masks",
+                    "oracle_canvases", "oracle_replay", "oracle_governor")
+# The lanes' suite while they work (about 3 minutes on the VM, --hosted).
+QUICK = ("oracle_record", "oracle_scenes", "oracle_takes", "oracle_edit", "oracle_masks")
+# #126 (media sources pacing on an ordinary thread) makes an occasional
+# live picture show its sources' previous frames. Strict by default; the
+# flag accepts exactly that pattern. Remove it when #126 lands.
+TOLERATE_ISSUE_126 = os.environ.get("ISOCAST_TOLERATE_ISSUE_126") == "1"
+# Measured on main (2026-10-18): a media source restarting on activation
+# shows its first frame at the first picture its scene is on air.
+RESTART_FIRST_FRAME = 0
+
+
+def crc12(value, bits=20):
+    crc = 0
+    for i in reversed(range(bits)):
+        top = (crc >> 11) & 1
+        crc = (crc << 1) & 0xFFF
+        if ((value >> i) & 1) ^ top:
+            crc ^= 0x80F
+    return crc
+
+
+def oracle_word(tag, frame, quad):
+    # The CRC also covers which corner the copy is in (not stored): a
+    # picture moved by a slide or a wrong crop, read at a corner's place,
+    # doesn't pass for another corner's copy.
+    data = (frame & 0xFFFF) | (tag & 0xF) << 16
+    return data | crc12(data | quad << 20, 22) << 20
+
+
+def oracle_unword(word, quad):
+    data = word & 0xFFFFF
+    if word >> 20 != crc12(data | quad << 20, 22) or (data >> 16) not in ORACLE_TAGS.values():
+        return None
+    return data >> 16, data & 0xFFFF
+
+
+def oracle_cells(tag, frame):
+    """The fixture frame's 16x9 blocks, row by row, 0 or 1."""
+    cols, rows = ORACLE_GRID
+    cells = bytearray(cols * rows)
+    for quad, (qx, qy) in enumerate(ORACLE_QUADS.values()):
+        word = oracle_word(tag, frame, quad)
+        for bit in range(32):
+            cells[(qy + bit // 8) * cols + qx + bit % 8] = (word >> bit) & 1
+    for x in range(cols):  # the middle row: a fixed alternation
+        cells[4 * cols + x] = x % 2
+    return cells
+
+
+def oracle_fixture(folder, tag, fps, seconds=ORACLE_SECONDS):
+    """A clip of `seconds` whose frame n carries (tag, n), with a marker
+    burst at each whole second. Made once per run and folder."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"oracle-v2-{tag}-{fps}-{seconds}.mov"
+    if path.exists():
+        return path
+    cols, rows = ORACLE_GRID
+    stem = folder / f".oracle-v2-{tag}-{fps}-{seconds}"
+    raw, sound, partial = (Path(f"{stem}.gray"), Path(f"{stem}.wav"), Path(f"{stem}.partial.mov"))
+    lo, hi = ORACLE_LEVELS
+    with open(raw, "wb") as out:
+        for n in range(seconds * fps):
+            out.write(bytes(hi if c else lo for c in oracle_cells(tag, n)))
+    with wave.open(str(sound), "wb") as out:
+        out.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
+        samples = array.array("h", bytes(2 * seconds * RATE))
+        for s in range(seconds):
+            f = ORACLE_MARKERS[s % 8]
+            for i in range(int(0.04 * RATE)):
+                samples[s * RATE + i] = int(14000 * math.sin(2 * math.pi * f * i / RATE))
+        if sys.byteorder != "little":
+            samples.byteswap()
+        out.writeframes(samples.tobytes())
+    width, height = ORACLE_SIZE
+    for codec in (["-c:v", "libx264", "-preset", "ultrafast", "-crf", "8", "-pix_fmt", "yuv420p"],
+                  ["-c:v", "prores_ks", "-profile:v", "0", "-pix_fmt", "yuv422p10le"]):
+        out = ffmpeg("-f", "rawvideo", "-pixel_format", "gray", "-video_size", f"{cols}x{rows}",
+                     "-framerate", fps, "-i", raw, "-i", sound, "-vf", f"scale={width}:{height}:flags=neighbor",
+                     *codec, "-g", fps, "-c:a", "pcm_s16le", "-y", partial, timeout=900, check=False)
+        if out.returncode == 0:
+            break
+    else:
+        raise Failure(f"could not make the oracle fixture: {out.stderr.decode(errors='replace')[-800:]}")
+    raw.unlink()
+    sound.unlink()
+    partial.rename(path)
+    return path
+
+
+def oracle_base(root, cfg, sources, fps):
+    """`cfg` with fixture media sources {id: (tag name, restart, speed)}
+    in place of the synthetic ones; returns (cfg, the clips' frame count)."""
+    folder = root.parent / "fixtures"
+    cfg["sources"] = []
+    for sid, (tag, restart, speed) in sources.items():
+        source = {"id": sid, "kind": "media", "files": [str(oracle_fixture(folder, ORACLE_TAGS[tag], fps))],
+                  "loop": True, "restart_on_activate": restart}
+        if speed != 1:
+            source["speed"] = speed
+        cfg["sources"].append(source)
+    cfg["recording"]["program"]["audio"] = []
+    cfg["recording"]["iso"].update(sources=[], audio=[])
+    return cfg, ORACLE_SECONDS * fps
+
+
+def item(source, rect, canvas, **extra):
+    w, h = canvas
+    value = {"fit": "stretch", "rect": {"x": round(rect[0] * w), "y": round(rect[1] * h),
+                                        "width": round(rect[2] * w), "height": round(rect[3] * h)}}
+    if source:
+        value["source"] = source
+    value.update(extra)
+    return value
+
+
+def fit_rect(inner, outer):
+    """Where a picture of aspect `inner` (w, h) sits fitted and centred in
+    `outer` (w, h), as fractions of `outer`."""
+    scale = min(outer[0] / inner[0], outer[1] / inner[1])
+    w, h = inner[0] * scale / outer[0], inner[1] * scale / outer[1]
+    return ((1 - w) / 2, (1 - h) / 2, w, h)
+
+
+def oracle_regions(layout, crop=(0, 0, 1, 1), place=(0, 0, 1, 1)):
+    """The decode regions of a picture made of `layout` (items back to
+    front: (source, rect as fractions of the canvas); the source's id is
+    its fixture's tag name), with the canvas's `crop` (x, y, w, h) shown at
+    `place` in the output. A corner's code counts only where it is wholly
+    inside the crop and no later item covers it."""
+    cx, cy, cw, ch = crop
+    px, py, pw, ph = place
+    regions = []
+    for i, (name, rect) in enumerate(layout):
+        x, y, w, h = rect
+        quads = []
+        for quad, (qx, qy) in ORACLE_QUADS.items():
+            q = (x + qx / 16 * w, y + qy / 9 * h, x + (qx + 8) / 16 * w, y + (qy + 4) / 9 * h)
+            inside = (cx - 1e-9 <= q[0] and q[2] <= cx + cw + 1e-9 and
+                      cy - 1e-9 <= q[1] and q[3] <= cy + ch + 1e-9)
+            covered = any(q[0] < r[0] + r[2] and r[0] < q[2] and q[1] < r[1] + r[3] and r[1] < q[3]
+                          for _, r in layout[i + 1:])
+            if inside and not covered:
+                quads.append(quad)
+        if quads:
+            ox, oy = px + (x - cx) / cw * pw, py + (y - cy) / ch * ph
+            regions.append({"name": name, "tag": ORACLE_TAGS[name], "quads": quads,
+                            "rect": (ox, oy, w / cw * pw, h / ch * ph)})
+    return regions
+
+
+def video_times(path):
+    # A raw elementary stream (a scene feed's .h264) has no timestamps: its
+    # pictures count at 30 a second, the rate it was asked for.
+    return [float(f.get("best_effort_timestamp_time", i / 30)) for i, f in enumerate(json.loads(command(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames", "-show_entries",
+         "frame=best_effort_timestamp_time", "-of", "json", path], timeout=300).stdout)["frames"])]
+
+
+def gray_frames(path, side=480):
+    """Every decoded picture, scaled so its longer side is `side`, in gray:
+    (width, height, [(pts, bytes)])."""
+    info = json.loads(command(["ffprobe", "-v", "error", "-show_streams", "-of", "json", path]).stdout)
+    video = next(s for s in info["streams"] if s["codec_type"] == "video")
+    scale = side / max(video["width"], video["height"])
+    w, h = max(2, round(video["width"] * scale / 2) * 2), max(2, round(video["height"] * scale / 2) * 2)
+    raw = ffmpeg("-i", path, "-map", "0:v:0", "-an", "-vf", f"scale={w}:{h}:flags=area,format=gray",
+                 "-fps_mode", "passthrough", "-f", "rawvideo", "-", timeout=300).stdout
+    times = video_times(path)
+    require(len(raw) == len(times) * w * h, f"{Path(path).name}: decoded pictures and timestamps disagree")
+    return w, h, [(t, raw[i * w * h:(i + 1) * w * h]) for i, t in enumerate(times)]
+
+
+def oracle_read(pixels, w, h, region):
+    """Decode one region of one picture: ("id", tag, frame), ("blank",
+    level), ("garbled",) or ("conflict", [...])."""
+    ox, oy, ow, oh = region["rect"]
+    rx, ry = max(0.5, 0.22 * ow / 16 * w), max(0.5, 0.22 * oh / 9 * h)
+
+    def level(u, v):
+        x, y = (ox + u * ow) * w, (oy + v * oh) * h
+        x0, x1 = max(0, int(x - rx)), min(w - 1, int(x + rx))
+        y0, y1 = max(0, int(y - ry)), min(h - 1, int(y + ry))
+        return sum(sum(pixels[yy * w + x0:yy * w + x1 + 1]) for yy in range(y0, y1 + 1)) / \
+            ((x1 - x0 + 1) * (y1 - y0 + 1))
+
+    found, flat, levels = [], 0, []
+    for quad in region["quads"]:
+        qx, qy = ORACLE_QUADS[quad]
+        values = [level((qx + bit % 8 + 0.5) / 16, (qy + bit // 8 + 0.5) / 9) for bit in range(32)]
+        levels.extend(values)
+        lo, hi = min(values), max(values)
+        if hi - lo < 64:
+            flat += 1
+            continue
+        threshold, margin = (lo + hi) / 2, 0.18 * (hi - lo)
+        if any(abs(v - threshold) < margin for v in values):
+            continue  # mid-grey blocks: a blend, not a picture
+        decoded = oracle_unword(sum(1 << bit for bit, v in enumerate(values) if v > threshold),
+                                list(ORACLE_QUADS).index(quad))
+        if decoded:
+            found.append(decoded)
+    # Two corners must agree where two or more should show (one where the
+    # layout leaves only one): a chance CRC match is never an id.
+    if len(set(found)) > 1:
+        return ("conflict", sorted(set(found)))
+    if len(found) >= min(2, len(region["quads"])):
+        return ("id", *found[0])
+    if flat == len(region["quads"]):
+        return ("blank", round(sum(levels) / len(levels)))
+    return ("garbled",)
+
+
+def region_level(pixels, w, h, rect):
+    """The mean grey level of `rect` (fractions), inset by a tenth."""
+    x, y, rw, rh = rect
+    x0, x1 = int((x + rw * 0.1) * w), int((x + rw * 0.9) * w)
+    y0, y1 = int((y + rh * 0.1) * h), int((y + rh * 0.9) * h)
+    return sum(sum(pixels[yy * w + x0:yy * w + x1]) for yy in range(y0, y1)) / max(1, (x1 - x0) * (y1 - y0))
+
+
+def describe(value):
+    if isinstance(value, tuple) and value and value[0] == "id":
+        tag = next((k for k, v in ORACLE_TAGS.items() if v == value[1]), value[1])
+        return f"{tag}:{value[2]}"
+    if isinstance(value, tuple):
+        return value[0] if len(value) == 1 else f"{value[0]} {value[1]}"
+    return str(value)
+
+
+def contact_sheet(path, index, out):
+    """Five pictures around picture `index` of `path`, side by side."""
+    start = max(0, index - 2)
+    ffmpeg("-i", path, "-vf", f"select='between(n\\,{start}\\,{start + 4})',scale=384:-2,tile=5x1",
+           "-frames:v", "1", "-fps_mode", "passthrough", "-y", out, timeout=120, check=False)
+    return out if out.exists() else None
+
+
+def issue_126(oracle):
+    """Whether every mismatch of `oracle` is exactly the engine defect
+    #126 (media sources pacing on an ordinary thread, so under load a
+    picture shows frames that arrived late): only in a live recording
+    output (or an export copying such a picture of its take), at isolated
+    pictures (no two in a row), each showing for EVERY one of its regions
+    an older frame than expected but none older than the oracle expects at
+    the previous frame slot (for a 1x source: exactly that frame; for a
+    faster one, any frame in between), at most 1% of the output's pictures
+    (none in an output of fewer than 100). Returns the pictures, or None."""
+    bad = sorted({m[0] for m in oracle.mismatches})
+    if not bad or len(bad) > len(oracle.pictures) // 100 or any(b2 - b1 < 2 for b1, b2 in zip(bad, bad[1:])):
+        return None
+    for index in bad:
+        previous = oracle.previous.get(index)
+        wants, gots = oracle.wants.get(index, {}), oracle.gots.get(index, {})
+        if not previous or set(previous) != set(wants) or not all(late_by_126(wants[r], gots[r], previous[r])
+                                                                  for r in wants):
+            return None
+    return bad
+
+
+def late_by_126(want, got, previous):
+    """`got` is a frame of the same source no newer than the one before
+    `want` and no older than `previous` (what the previous slot shows)."""
+    if not all(isinstance(x, tuple) and x[0] == "id" for x in (want, got, previous)):
+        return False
+    if not want[1] == got[1] == previous[1]:
+        return False
+    span, behind = (want[2] - previous[2]) % 65536, (want[2] - got[2]) % 65536
+    return 1 <= behind <= span
+
+
+class Oracle:
+    """Expected-vs-actual checks of one output; `verdict` fails with the
+    first mismatch and a contact sheet."""
+
+    def __init__(self, label, path, root, evidence):
+        self.label, self.path, self.root, self.evidence = label, Path(path), root, evidence
+        self.checked, self.mismatches, self.pictures = 0, [], set()
+        self.wants, self.gots, self.previous = {}, {}, {}
+
+    def expect(self, index, t, region, want, got, allowed=()):
+        self.checked += 1
+        self.pictures.add(index)
+        self.wants.setdefault(index, {})[region] = want
+        self.gots.setdefault(index, {})[region] = got
+        if got == want or got in allowed:
+            return
+        self.mismatches.append((index, t, region, want, got))
+
+    def verdict(self):
+        row = {"output": self.path.name, "checks": self.checked, "mismatches": len(self.mismatches)}
+        self.evidence.setdefault("oracle", []).append(row)
+        require(self.checked > 0, f"{self.label}: the oracle checked nothing")
+        if not self.mismatches:
+            return row
+        known = issue_126(self)
+        if known is not None:
+            row["issue_126_pictures"] = known
+            self.evidence.setdefault("issue_126", []).append({"output": self.path.name, "pictures": known})
+            if TOLERATE_ISSUE_126:
+                return row
+        index, t, region, want, got = self.mismatches[0]
+        (self.root / "sheets").mkdir(exist_ok=True)
+        sheet = contact_sheet(self.path, index, self.root / "sheets" / f"{self.path.stem}-{index}.png")
+        if sheet:  # what each of its five pictures should have been
+            rows = {i: (t2, r2, w2, g2) for i, t2, r2, w2, g2 in self.mismatches}
+            sheet.with_suffix(".txt").write_text("".join(
+                f"picture {i}: " + (f"{rows[i][0]:.4f} s {rows[i][1]}: expected {describe(rows[i][2])}, "
+                                    f"got {describe(rows[i][3])}\n" if i in rows else "as expected\n")
+                for i in range(max(0, index - 2), max(0, index - 2) + 5)))
+        row.update(first={"picture": index, "time": round(t, 4), "region": region,
+                          "expected": describe(want), "actual": describe(got)}, sheet=sheet and str(sheet))
+        later = "; ".join(f"{t2:.3f} s {r2}: expected {describe(w2)}, got {describe(g2)}"
+                          for _, t2, r2, w2, g2 in self.mismatches[1:3])
+        mark = (f"KNOWN ISSUE #126 (each of {len(known)} isolated picture(s) shows every source's previous "
+                f"frame; --tolerate-issue-126 accepts exactly this until #126 lands): " if known else "")
+        raise Failure(f"{mark}{self.label} ({self.path.name}): first mismatch at picture {index} ({t:.4f} s), "
+                      f"{region}: expected {describe(want)}, got {describe(got)}; {len(self.mismatches)} of "
+                      f"{self.checked} checks differ{' (then ' + later + ')' if later else ''}; "
+                      f"contact sheet sheets/{sheet.name if sheet else None} in the scenario's folder")
+
+
+def oracle_decode(path, regions, fps):
+    """[(slot, pts, {region: decoded})] for every picture of `path`."""
+    w, h, frames = gray_frames(path)
+    rows = []
+    for index, (t, pixels) in enumerate(frames):
+        slot = round(t * fps)
+        require(abs(t * fps - slot) < 0.02, f"{Path(path).name}: picture {index} at {t:.5f} s is off the frame grid")
+        rows.append((slot, t, {r["name"]: oracle_read(pixels, w, h, r) for r in regions}))
+    return rows
+
+
+def oracle_compare(label, path, regions, expected, fps, root, evidence, live=None):
+    """Every picture's decoded regions against `expected(slot, region
+    name)` (None: no check); see oracle_check_rows."""
+    return oracle_check_rows(label, path, oracle_decode(path, regions, fps), expected, root, evidence, live)
+
+
+def oracle_check_rows(label, path, rows, expected, root, evidence, live=None):
+    """`rows` [(slot, pts, {region: decoded})] against `expected`. `live`
+    (a live recording's output) is `adjacent(slot)`: whether the file's
+    previous slot was presented one capture tick before this one, with
+    nothing cut out between (a pause, a split). Only there does the oracle
+    say what the previous presented slot showed, so #126 can be recognised;
+    at a pause's resume it can't, and nothing is excused."""
+    oracle = Oracle(label, path, root, evidence)
+    for index, (slot, t, row) in enumerate(rows):
+        for name, got in row.items():
+            want = expected(slot, name)
+            if want is not None:
+                oracle.expect(index, t, name, want, got)
+        if live and slot > 0 and live(slot):
+            oracle.previous[index] = {name: expected(slot - 1, name) for name in row
+                                      if expected(slot, name) is not None}
+    return oracle.verdict()
+
+
+def fit_anchor(decoded, region, count):
+    """T0: the most common (frame - slot) of `region`'s decoded ids."""
+    votes = {}
+    for slot, _, row in decoded:
+        got = row.get(region)
+        if got and got[0] == "id" and got[1] == ORACLE_TAGS[region]:
+            key = (got[2] - slot) % count
+            votes[key] = votes.get(key, 0) + 1
+    require(votes, f"no picture of {region} decoded: nothing to anchor the take on")
+    return max(votes, key=votes.get)
+
+
+def media_frame(t0, slot, speed, count):
+    """The media frame a source playing from the engine's start at `speed`
+    shows at the take's slot: the newest due by half a frame after it."""
+    return math.floor(speed * (t0 + slot + 0.5) + 1e-9) % count if speed != 1 else (t0 + slot) % count
+
+
+def burst_pitch(samples, at):
+    """Which marker pitch the burst starting at `at` seconds has."""
+    start = int(at * RATE) + 48
+    window = samples[start:start + int(0.03 * RATE)]
+    best, which = 0, None
+    for k, f in enumerate(ORACLE_MARKERS):
+        c = 2 * math.cos(2 * math.pi * f / RATE)
+        s1 = s2 = 0.0
+        for x in window:
+            s1, s2 = x + c * s1 - s2, s1
+        power = s1 * s1 + s2 * s2 - c * s1 * s2
+        if power > best:
+            best, which = power, k
+    return which
+
+
+def oracle_markers(label, path, frame_at, fps, evidence, cuts=(), samples=None):
+    """The sound against the oracle: a burst (its pitch naming media second
+    s mod 8) exactly where the picture shows media frame s * fps, at each
+    slot `frame_at(slot)` says so, and nowhere else (except a burst cut in
+    at an edit in `cuts`, a slot list). `samples`: the sound itself (mono,
+    RATE) in place of `path`'s."""
+    samples = pcm(path) if samples is None else samples
+    end = len(samples) / RATE
+    onsets = [o for o in beep_onsets(samples) if 0.15 < o < end - 0.15]
+    every = [(j, frame_at(j)) for j in range(0, int(end * fps) + 1)]
+    every = [(j, f // fps) for j, f in every if f is not None and f % fps == 0]
+    want = [(j, second) for j, second in every if 0.2 < j / fps < end - 0.2]
+    problems = []
+    for j, second in want:
+        near = [o for o in onsets if abs(o - j / fps) <= 1 / fps + 0.002]
+        if not near:
+            problems.append(f"no burst at {j / fps:.4f} s, where the picture shows media second {second}")
+        elif burst_pitch(samples, near[0]) != second % 8:
+            problems.append(f"the burst at {near[0]:.4f} s names second {burst_pitch(samples, near[0])} "
+                            f"(mod 8), the picture shows {second % 8}")
+    for o in onsets:
+        if not any(abs(o - j / fps) <= 1 / fps + 0.002 for j, _ in every) and \
+                not any(0 <= o - c / fps <= 0.045 for c in cuts):
+            problems.append(f"a burst at {o:.4f} s where the picture shows media frame {frame_at(round(o * fps))}, "
+                            f"not a whole second")
+    evidence.setdefault("markers", []).append({"output": Path(path).name, "bursts": len(onsets),
+                                               "expected": len(want)})
+    if problems:
+        raise Failure(f"{label} ({Path(path).name}) sound: {problems[0]}"
+                      f"{f' (+{len(problems) - 1} more)' if len(problems) > 1 else ''}")
+
+
+def manifest_file(path, manifest, source):
+    f = next((f for f in manifest["files"] if f["source"] == source), None)
+    require(f is not None, f"no {source} file in the take: {[x['source'] for x in manifest['files']]}")
+    return path.parent / f["path"], f
+
+
+RECORD_LAYOUT = [("a", (0, 0, 1, 1)), ("b", (0.5, 0.5, 0.5, 0.5)), ("c", (0.75, 0, 0.25, 0.25))]
+RECORD_SOURCES = {"a": ("a", False, 1), "b": ("b", False, 1), "c": ("c", False, 1.5)}
+
+
+def oracle_scene(cfg, layout):
+    w, h = cfg["canvas"]["width"], cfg["canvas"]["height"]
+    cfg["scenes"] = [{"id": "main", "name": "Main", "items": [item(s, r, (w, h)) for s, r in layout]}]
+
+
+def oracle_canvases_cfg(cfg, record=True):
+    """The vertical canvas (its own arrangement: b on top, a below) and a
+    square canvas that letterboxes the main picture; returns the vertical
+    layout."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    vw, vh = h, w
+    enc = {"encoder": dict(cfg["recording"]["program"]["encoder"], container="mov")}
+    cfg["vertical"] = {"width": vw, "height": vh, "fps": fps, "follow_main": True}
+    cfg["canvases"] = [{"id": "square", "width": h, "height": h, "fps": fps, "follow_main": True}]
+    if record:
+        cfg["vertical"]["recording"] = copy.deepcopy(enc)
+        cfg["canvases"][0]["recording"] = copy.deepcopy(enc)
+    band = vw * 9 / 16 / vh
+    vertical = [("b", (0, 0, 1, band)), ("a", (0, band, 1, band))]
+    for scene in cfg["scenes"]:
+        scene["vertical"] = {"items": [item(s, r, (vw, vh)) for s, r in vertical]}
+    return vertical
+
+
+def check_record_take(e, path, manifest, cfg, layout, count, evidence, vertical=None, isos=("a", "b"),
+                      t0=None, label="take"):
+    """Every output of one take against the oracle; returns its T0."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    speeds = {s["id"]: s.get("speed", 1) for s in cfg["sources"]}
+    program, pf = manifest_file(path, manifest, "program")
+    if t0 is None:
+        t0 = fit_anchor(oracle_decode(program, oracle_regions(layout), fps), "a", count)
+    pauses = [(round(p["time_seconds"] * fps), round((p["end_seconds"] - p["start_seconds"]) * fps))
+              for p in manifest.get("pauses", []) if p.get("end_seconds") is not None]
+
+    def take_slot(file_slot, offset):
+        # A file's frame slot on the take's uncut clock: its start offset,
+        # plus the frames every pause before it cut out.
+        slot = file_slot + offset
+        return slot + sum(n for at, n in pauses if slot >= at)
+
+    def expected(offset):
+        return lambda slot, name: ("id", ORACLE_TAGS[name], media_frame(t0, take_slot(slot, offset),
+                                                                         speeds[name], count))
+    outputs = [("program", oracle_regions(layout))]
+    outputs += [(s, oracle_regions([(s, (0, 0, 1, 1))])) for s in isos]
+    for f in manifest["files"]:
+        if f["source"] == "vertical-program" and vertical:
+            outputs.append((f["source"], oracle_regions(vertical)))
+        elif f.get("kind") == "program" and f["source"] not in ("program", "vertical-program"):
+            outputs.append((f["source"], oracle_regions(layout, place=fit_rect((w, h), (f["width"], f["height"])))))
+    for source, regions in outputs:
+        file, f = manifest_file(path, manifest, source)
+        offset = round((f.get("start_offset_seconds") or 0) * fps)
+        oracle_compare(f"{label} {source}", file, regions, expected(offset), fps, e.root, evidence,
+                       live=lambda slot, o=offset: take_slot(slot, o) - take_slot(slot - 1, o) == 1)
+        if source in ("program", "a") and (f.get("audio") or []):
+            oracle_markers(f"{label} {source}", file,
+                           lambda j, o=offset: media_frame(t0, take_slot(j, o), 1, count), fps, evidence)
+    return t0
+
+
+def oracle_seconds(evidence, quick, full):
+    return quick if evidence["capabilities"].get("quick") else full
+
+
+def scenario_oracle_record(e, cfg, evidence):
+    """Program, two ISOs, the vertical canvas's own arrangement and a
+    square canvas's letterboxed picture, a source at 1.5x speed, and the
+    sound's markers: every picture of every file is the oracle's."""
+    fps = cfg["canvas"]["fps"]
+    cfg, count = oracle_base(e.root, cfg, RECORD_SOURCES, fps)
+    oracle_scene(cfg, RECORD_LAYOUT)
+    cfg["recording"]["program"]["audio"] = ["a"]
+    cfg["recording"]["iso"].update(enabled=True, sources=["a", "b"], audio=["a"])
+    vertical = oracle_canvases_cfg(cfg)
+    e.apply(cfg)
+    path, manifest = take(e, oracle_seconds(evidence, 3, 5))
+    evidence["files"] = check_take(path, manifest, evidence=evidence)
+    require({f["source"] for f in manifest["files"]} >= {"program", "a", "b", "vertical-program"}
+            and len(manifest["files"]) == 5, f"files: {[f['source'] for f in manifest['files']]}")
+    evidence["t0"] = check_record_take(e, path, manifest, cfg, RECORD_LAYOUT, count, evidence, vertical=vertical)
+
+
+def cell_profiles(pixels, w, h):
+    """Per row of fixture cells (the whole picture is one fixture): the
+    prefix sums of its centre band's mean level across the picture."""
+    out = []
+    for r in range(ORACLE_GRID[1]):
+        y0, y1 = int((r + 0.28) / 9 * h), int((r + 0.72) / 9 * h)
+        cols = [0] * w
+        for yy in range(y0, y1 + 1):
+            cols = [c + v for c, v in zip(cols, pixels[yy * w:(yy + 1) * w])]
+        prefix, total, n = [0.0], 0.0, y1 - y0 + 1
+        for c in cols:
+            total += c / n
+            prefix.append(total)
+        out.append(prefix)
+    return out
+
+
+def cells_at(profiles, w, dx):
+    """The 144 cell levels of a fixture picture moved right by `dx` of the
+    picture's width (None where a cell is off the picture)."""
+    out = []
+    for prefix in profiles:
+        for c in range(ORACLE_GRID[0]):
+            x = (c + 0.5) / 16 + dx
+            x0, x1 = int((x - 0.22 / 16) * w), int((x + 0.22 / 16) * w) + 1
+            out.append((prefix[x1] - prefix[x0]) / (x1 - x0) if 0 <= x0 and x1 <= w else None)
+    return out
+
+
+def fit_blend(levels, a_bits, b_bits):
+    """Least squares level = k + u*a + v*b over the cells: (u, v, rms)."""
+    rows = [(1.0, float(x), float(y), z) for x, y, z in zip(a_bits, b_bits, levels) if z is not None]
+    m = [[sum(r[i] * r[j] for r in rows) for j in range(3)] for i in range(3)]
+    rhs = [sum(r[i] * r[3] for r in rows) for i in range(3)]
+    for i in range(3):  # Gauss-Jordan on the 3x3 normal equations
+        pivot = max(range(i, 3), key=lambda k: abs(m[k][i]))
+        m[i], m[pivot], rhs[i], rhs[pivot] = m[pivot], m[i], rhs[pivot], rhs[i]
+        if abs(m[i][i]) < 1e-9:
+            return None
+        for k in range(3):
+            if k != i:
+                f = m[k][i] / m[i][i]
+                m[k] = [x - f * y for x, y in zip(m[k], m[i])]
+                rhs[k] -= f * rhs[i]
+    k, u, v = (rhs[i] / m[i][i] for i in range(3))
+    rms = math.sqrt(sum((r[3] - k - u * r[1] - v * r[2]) ** 2 for r in rows) / len(rows))
+    return u, v, rms
+
+
+def match_score(levels, bits, mid):
+    """The share of visible cells whose level is on the side of `mid` its
+    bit says, and how many were visible."""
+    pairs = [(z > mid, bool(b)) for z, b in zip(levels, bits) if z is not None]
+    return (sum(x == y for x, y in pairs) / len(pairs) if pairs else 0.0), len(pairs)
+
+
+def scenario_oracle_scenes(e, cfg, evidence):
+    """Cut, fade and slide between a scene of a (playing all along) and one
+    of b (restarting each time it comes on air), against the documented
+    transitions: a cut changes at once; a fade is the next scene over the
+    current one, its share rising linearly over the duration; a slide (left)
+    pushes the current scene off to the left while the next comes in from
+    the right, linearly. Every picture, mid-transition included, must show
+    the right frames of the right sources in the right proportion or place."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    cfg, count = oracle_base(e.root, cfg, {"a": ("a", False, 1), "b": ("b", True, 1)}, fps)
+    cfg["scenes"] = [{"id": s, "name": s, "items": [item(s, (0, 0, 1, 1), (w, h))]} for s in ("a", "b")]
+    cfg["recording"]["program"]["audio"] = ["a"]
+    e.apply(cfg)
+    plan = (("b", {"kind": "cut"}), ("a", {"kind": "fade", "duration_ms": 500}),
+            ("b", {"kind": "slide", "duration_ms": 500, "easing": "linear"}), ("a", {"kind": "cut"}))
+    switches = []
+    start = e.rpc("start", {})
+    for scene, transition in plan:
+        time.sleep(1)
+        switches.append((e.rpc("switch_scene", {"scene": scene, "transition": transition}), transition))
+    time.sleep(1)
+    e.rpc("stop")
+    path = Path(start["manifest"])
+    manifest = until(lambda: finished(path), description="scenes take")
+    evidence["files"] = check_take(path, manifest, evidence=evidence)
+    require([s["scene"] for s, _ in switches] == [p[0] for p, _ in zip(plan, switches)],
+            f"switch_scene answered other scenes: {[s['scene'] for s, _ in switches]}")
+    program, _ = manifest_file(path, manifest, "program")
+    full = [dict(r, name="picture") for r in oracle_regions([("a", (0, 0, 1, 1))])]
+    decoded = oracle_decode(program, full, fps)
+    first_switch = switches[0][0]["time_seconds"]
+    t0 = fit_anchor([(s, t, {"a": r["picture"]}) for s, t, r in decoded if t < first_switch - 0.1], "a", count)
+    # A switch at take time s takes effect at the first slot at or after s
+    # (the requested plan's scenes, kinds and durations, the engine's times).
+    spans = [(math.ceil(s["time_seconds"] * fps - 1e-6), scene, tr["kind"], round(tr.get("duration_ms", 0) * fps / 1000))
+             for (s, _), (scene, tr) in zip(switches, plan)]
+
+    def state(slot):
+        scene, mixing, b_since = "a", None, None
+        for first, to, kind, length in spans:
+            if slot < first:
+                break
+            if to == "b":
+                b_since = first
+            mixing = (scene, first, kind, length) if kind != "cut" and slot < first + length else None
+            scene = to
+        return scene, mixing, b_since
+
+    def frame(source, slot, b_since):
+        if source == "a":
+            return ("id", 1, (t0 + slot) % count)
+        return ("id", 2, (slot - b_since + RESTART_FIRST_FRAME) % count)
+
+    w2, h2, frames = gray_frames(program)
+    steady = [oracle_read(p, w2, h2, full[0]) for _, p in frames[:3]]
+    lo, hi = ORACLE_LEVELS
+    mid = (lo + hi) / 2
+    oracle = Oracle("scenes program", program, e.root, evidence)
+    seen = {}
+    for index, ((slot, t, row), (_, pixels)) in enumerate(zip(decoded, frames)):
+        scene, mixing, b_since = state(slot)
+        if not mixing:
+            oracle.expect(index, t, f"scene {scene}", frame(scene, slot, b_since), row["picture"])
+            before = state(slot - 1)
+            if slot > 0 and before[0] == scene and not before[1] and (scene == "a" or slot - 1 >= b_since):
+                # A steady live picture: what its previous slot shows (#126).
+                oracle.previous[index] = {f"scene {scene}": frame(scene, slot - 1, b_since)}
+            continue
+        old, first, kind, length = mixing
+        k = slot - first
+        new_bits = oracle_cells(ORACLE_TAGS[scene], frame(scene, slot, b_since)[2])
+        old_bits = oracle_cells(ORACLE_TAGS[old], frame(old, slot, b_since)[2])
+        profiles = cell_profiles(pixels, w2, h2)
+        lows, highs = (k / length, (k + 1) / length)  # the share the model allows at this slot
+        if kind == "fade":
+            fit = fit_blend(cells_at(profiles, w2, 0), old_bits, new_bits)
+            contrast = fit[0] + fit[1] if fit else 0
+            share = fit[1] / contrast if fit and contrast > 0 else None
+            ok = (share is not None and fit[2] < 14 and contrast > 0.75 * (hi - lo)
+                  and lows - 0.08 <= share <= highs + 0.08)
+            seen.setdefault("fade", []).append((k, share and round(share, 3), fit and round(fit[2], 1)))
+            got = ("blend", None if share is None else f"{share:.2f} of {describe(frame(scene, slot, b_since))} "
+                   f"over {describe(frame(old, slot, b_since))}, rms {fit[2]:.0f}, contrast {contrast:.0f}"
+                   if fit else "no fit")
+            want = ("blend", f"{lows:.2f}-{highs:.2f} of {describe(frame(scene, slot, b_since))} over "
+                    f"{describe(frame(old, slot, b_since))}")
+        else:  # slide left: the next scene enters from the right
+            best = None
+            for share in [lows + (highs - lows) * i / 8 for i in range(9)]:
+                new_score, new_n = match_score(cells_at(profiles, w2, 1 - share), new_bits, mid)
+                old_score, old_n = match_score(cells_at(profiles, w2, -share), old_bits, mid)
+                score = min(new_score if new_n >= 16 else 1.0, old_score if old_n >= 16 else 1.0)
+                if best is None or score > best[0]:
+                    best = (score, share, new_n, old_n)
+            ok = best[0] >= 0.95
+            seen.setdefault("slide", []).append((k, round(best[1], 3), round(best[0], 3)))
+            got = ("slide", f"best match {best[0]:.0%} of cells at {best[1]:.2f}")
+            want = ("slide", f"{describe(frame(scene, slot, b_since))} from the right, {describe(frame(old, slot, b_since))} "
+                    f"pushed left, {lows:.2f}-{highs:.2f} of the way")
+        oracle.expect(index, t, f"{kind} {old}->{scene}, slot {k + 1} of {length}", want, want if ok else got)
+    for first, scene, kind, length in spans:  # each transition was seen whole
+        if kind != "cut":
+            require(len([x for x in seen.get(kind, []) if x]) >= length,
+                    f"scenes: the {kind} into {scene} has {len(seen.get(kind, []))} pictures, {length} expected")
+    oracle.verdict()
+    evidence.update(switches=[s for s, _ in switches], t0=t0, switch_slots=spans, transitions=seen,
+                    steady=[describe(x) for x in steady])
+
+
+def scenario_oracle_takes(e, cfg, evidence):
+    """A split and a pause: the split's second take starts with the frame
+    after the first take's last (none lost, none twice), and a pause cuts
+    out exactly its own frames, in the program, an ISO and the sound."""
+    fps = cfg["canvas"]["fps"]
+    cfg, count = oracle_base(e.root, cfg, RECORD_SOURCES, fps)
+    oracle_scene(cfg, RECORD_LAYOUT)
+    cfg["recording"]["program"]["audio"] = ["a"]
+    cfg["recording"]["iso"].update(enabled=True, sources=["b"], audio=["a"])
+    e.apply(cfg)
+    first = e.rpc("start", {})
+    time.sleep(1.2)
+    second = e.rpc("split")
+    begins = datetime.datetime.fromisoformat(second["begins_at"]).timestamp()
+    time.sleep(max(0, begins - time.time()) + 0.8)
+    e.rpc("pause")
+    time.sleep(0.7)
+    e.rpc("resume")
+    time.sleep(1.0)
+    e.rpc("stop")
+    takes = []
+    for started in (first, second):
+        path = Path(started["manifest"])
+        manifest = until(lambda: finished(path), description="split take")
+        evidence.setdefault("files", []).extend(check_take(path, manifest, evidence=evidence))
+        takes.append((path, manifest))
+    require(takes[1][1].get("pauses"), "the pause is missing from the second take's manifest")
+    t0 = check_record_take(e, *takes[0], cfg, RECORD_LAYOUT, count, evidence, isos=("b",), label="take 1")
+    program = next(f for f in takes[0][1]["files"] if f["source"] == "program")
+    slots = program["frames"] + program["dropped_frames"] - (program.get("repeated_frames") or 0)
+    # The second take begins where the first ended, on the same engine clock.
+    check_record_take(e, *takes[1], cfg, RECORD_LAYOUT, count, evidence, isos=("b",), t0=t0 + slots,
+                      label="take 2 (split)")
+    evidence.update(t0=t0, first_take_slots=slots, pauses=takes[1][1]["pauses"])
+
+
+class EditModel:
+    """The oracle's own timeline: the takes appended whole, then each
+    requested edit applied as the API documents it (trim a clip's in/out
+    points; split at a time; delete a range, closing the gap; an angle or a
+    crop over a range, splitting clips at its ends). Times are frame slots.
+    The engine's timeline is compared with it, never used in its place."""
+
+    def __init__(self, takes, frames):
+        self.segs = [{"take": str(t), "in": 0, "out": frames, "angle": None, "crop": None} for t in takes]
+
+    def starts(self):
+        out, at = [], 0
+        for seg in self.segs:
+            out.append(at)
+            at += seg["out"] - seg["in"]
+        return out, at
+
+    def split(self, at):
+        starts, _ = self.starts()
+        for i, (seg, start) in enumerate(zip(self.segs, starts)):
+            if start < at < start + seg["out"] - seg["in"]:
+                cut = seg["in"] + at - start
+                self.segs[i:i + 1] = [dict(seg, out=cut), dict(seg, **{"in": cut})]
+                return
+
+    def trim(self, index, cut_in=None, cut_out=None):
+        seg = self.segs[index]
+        seg["in"] = seg["in"] if cut_in is None else cut_in
+        seg["out"] = seg["out"] if cut_out is None else cut_out
+
+    def over(self, lo, hi):
+        self.split(lo)
+        self.split(hi)
+        starts, _ = self.starts()
+        return [i for i, start in enumerate(starts) if lo <= start and start + self.segs[i]["out"] - self.segs[i]["in"] <= hi]
+
+    def delete(self, lo, hi):
+        for i in reversed(self.over(lo, hi)):
+            del self.segs[i]
+
+    def set(self, lo, hi, key, value):
+        for i in self.over(lo, hi):
+            self.segs[i][key] = value
+
+    def compare(self, clips, fps):
+        """Why the engine's clips aren't this timeline, if they aren't."""
+        if len(clips) != len(self.segs):
+            return f"{len(clips)} clips, the requested edits make {len(self.segs)}"
+        for i, (c, seg) in enumerate(zip(clips, self.segs)):
+            got = (str(Path(c["take"]).resolve()), round(c["in_seconds"] * fps, 3), round(c["out_seconds"] * fps, 3),
+                   c.get("angle"), c.get("crop"))
+            want = (str(Path(seg["take"]).resolve()), seg["in"], seg["out"], seg["angle"], seg["crop"])
+            if got[0] != want[0] or abs(got[1] - want[1]) > 0.01 or abs(got[2] - want[2]) > 0.01 \
+                    or got[3] != want[3] or (got[4] is None) != (want[4] is None) \
+                    or (got[4] and any(abs(got[4][k] - want[4][k]) > 1e-4 for k in want[4])):
+                return (f"clip {i} is {Path(got[0]).stem} slots {got[1]}-{got[2]} angle {got[3]} crop {got[4]}; "
+                        f"the edits make {Path(want[0]).stem} slots {want[1]}-{want[2]} angle {want[3]} crop {want[4]}")
+        return None
+
+
+def scenario_oracle_edit(e, cfg, evidence):
+    """Two takes edited (trim, split, ripple delete, an angle, crops),
+    exported (an MP4 program where the codec allows, MOV ISOs, the edited
+    file and its 9:16 copy) and as FCPXML (Final Cut, Resolve), xmeml
+    (Premiere, Resolve) and OTIO. The expected timeline comes from the
+    requested edits (EditModel), never from the engine; the engine's
+    timeline must equal it; every exported picture and burst and every
+    project file's tracks, in and out points, crops and sound are checked
+    against it."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    cfg, count = oracle_base(e.root, cfg, {"a": ("a", False, 1), "b": ("b", False, 1)}, fps)
+    layout = [("a", (0, 0, 1, 1)), ("b", (0.5, 0.5, 0.5, 0.5))]
+    oracle_scene(cfg, layout)
+    cfg["recording"]["program"]["audio"] = ["a"]
+    if cfg["recording"]["program"]["encoder"]["codec"] in ("h264", "hevc"):
+        cfg["recording"]["program"]["encoder"]["container"] = "mp4"
+    cfg["recording"]["iso"].update(enabled=True, sources=["a", "b"], audio=["a"])
+    e.apply(cfg)
+    e.rpc("timeline_new", {"name": "Oracle edit"})
+    seconds = oracle_seconds(evidence, 3, 4)
+    takes = [take(e, seconds) for _ in range(2)]
+    evidence["files"] = [r for p, m in takes for r in check_take(p, m, seconds, evidence=evidence)]
+    anchors = {str(Path(p).resolve()): fit_anchor(oracle_decode(manifest_file(p, m, "program")[0],
+                                                                oracle_regions(layout), fps), "a", count)
+               for p, m in takes}
+    # The take slots where a take file has #126's pattern: an export copying
+    # such a picture may show it too (and nothing else is excused there).
+    late_in_take = {}
+    for p, m in takes:
+        key = str(Path(p).resolve())
+        for source, regions in (("program", oracle_regions(layout)), ("a", oracle_regions([("a", (0, 0, 1, 1))])),
+                                ("b", oracle_regions([("b", (0, 0, 1, 1))]))):
+            file, f_ = manifest_file(p, m, source)
+            offset = round((f_.get("start_offset_seconds") or 0) * fps)
+            late = set()
+            for slot, _, row in oracle_decode(file, regions, fps):
+                u = slot + offset
+                if u > 0 and all(late_by_126(("id", ORACLE_TAGS[r], (anchors[key] + u) % count), got,
+                                             ("id", ORACLE_TAGS[r], (anchors[key] + u - 1) % count))
+                                 for r, got in row.items()):
+                    late.add(u)
+            late_in_take[(key, source)] = late
+    model = EditModel([Path(p).resolve() for p, _ in takes], seconds * fps)
+    problem = model.compare(e.rpc("timeline_get")["clips"], fps)
+    require(problem is None, f"edit: the two takes didn't append whole: {problem}")
+    ids = [c["id"] for c in e.rpc("timeline_get")["clips"]]  # names only
+    crop = {"x": 0.25, "y": 0.25, "width": 0.75, "height": 0.75}
+    f = lambda x: round(x * fps)  # noqa: E731
+    edits = [("timeline_trim", {"clip": ids[0], "in_seconds": 0.5, "out_seconds": seconds - 0.5},
+              lambda: model.trim(0, f(0.5), f(seconds - 0.5))),
+             ("timeline_trim", {"clip": ids[1], "in_seconds": 0.3}, lambda: model.trim(1, f(0.3))),
+             ("timeline_split", {"at_seconds": 1.0}, lambda: model.split(f(1.0))),
+             ("timeline_delete_range", {"start_seconds": 1.4, "end_seconds": 1.7},
+              lambda: model.delete(f(1.4), f(1.7))),
+             ("timeline_angle", {"start_seconds": seconds - 0.7, "end_seconds": seconds - 0.2, "source": "b"},
+              lambda: model.set(f(seconds - 0.7), f(seconds - 0.2), "angle", "b"))]
+    for method, params, apply in edits:
+        e.rpc(method, params)
+        apply()
+        problem = model.compare(e.rpc("timeline_get")["clips"], fps)
+        require(problem is None, f"edit: after {method} {params}: {problem}")
+    # Crops on a program clip and on the angle's clip, chosen in the model.
+    starts, _ = model.starts()
+    for i in (1, len(model.segs) - 2):
+        lo, hi = starts[i], starts[i] + model.segs[i]["out"] - model.segs[i]["in"]
+        e.rpc("timeline_crop", {"start_seconds": lo / fps, "end_seconds": hi / fps, "crop": crop})
+        model.set(lo, hi, "crop", dict(crop))
+        problem = model.compare(e.rpc("timeline_get")["clips"], fps)
+        require(problem is None, f"edit: after timeline_crop of slots {lo}-{hi}: {problem}")
+    require(sum(1 for s in model.segs if s["crop"]) == 2 and any(s["angle"] == "b" for s in model.segs),
+            "edit: the model lost its crops or angle")
+    segments = model.segs
+    starts, total = model.starts()
+    evidence["segments"] = [dict(s, start=st) for s, st in zip(segments, starts)]
+    export = e.rpc("timeline_export", {"folder": str(e.root / "export"), "vertical": True})
+    result = until(lambda: (lambda v: v if v["status"] != "exporting" else None)(read_json(export["manifest"])),
+                   180, "timeline export")
+    require(result["status"] == "complete" and not result.get("errors"), f"export failed: {result}")
+    kinds = sorted(f["source"] for f in result["files"])
+    require(kinds == ["a", "b", "edited", "program", "vertical"],
+            f"export: files for {kinds}, expected a, b, edited, program and vertical")
+
+    def segment(slot):
+        i = max(k for k, st in enumerate(starts) if st <= slot)
+        return i, segments[i]
+
+    def take_frame(i, slot):
+        # An export slot -> its take's slot: the clip's in point plus the
+        # slots since the clip started, on the take's own frame grid.
+        return (anchors[segments[i]["take"]] + segments[i]["in"] + slot - starts[i]) % count
+
+    for f_ in result["files"]:
+        path, kind = Path(f_["path"]), f_["source"]
+        frames_at = video_times(path)
+        require(len(frames_at) == total and [round(t * fps) for t in frames_at] == list(range(total)),
+                f"{path.name}: {len(frames_at)} pictures, the edits make {total} (one per slot)")
+        regions_of = []
+        for seg in segments:
+            if kind in ("a", "b"):
+                items, c = [(kind, (0, 0, 1, 1))], None
+            elif kind == "program":
+                items, c = layout, None
+            else:  # edited, vertical: the clip's angle and crop
+                items = [(seg["angle"], (0, 0, 1, 1))] if seg["angle"] else layout
+                c = seg["crop"]
+            rect = (c["x"], c["y"], c["width"], c["height"]) if c else (0, 0, 1, 1)
+            place = fit_rect((rect[2] * w, rect[3] * h), (f_["width"], f_["height"])) if kind == "vertical" \
+                else (0, 0, 1, 1)
+            regions = oracle_regions(items, crop=rect, place=place)
+            require(regions, f"{path.name}: the oracle has nothing to read in a clip of it")
+            regions_of.append(regions)
+        w2, h2, frames = gray_frames(path)
+        oracle = Oracle(f"export {kind}", path, e.root, evidence)
+        for index, (t, pixels) in enumerate(frames):
+            slot = round(t * fps)
+            i, seg = segment(slot)
+            names = {}
+            for region in regions_of[i]:
+                name = (f"{region['name']} (clip {i}: take {Path(seg['take']).stem} "
+                        f"slot {seg['in'] + slot - starts[i]})")
+                names[name] = region
+                oracle.expect(index, t, name, ("id", region["tag"], take_frame(i, slot)),
+                              oracle_read(pixels, w2, h2, region))
+            u = seg["in"] + slot - starts[i]
+            source = kind if kind in ("a", "b") else "program" if kind == "program" else (seg["angle"] or "program")
+            if slot > starts[i] and u in late_in_take[(seg["take"], source)]:
+                oracle.previous[index] = {n: ("id", r["tag"], (take_frame(i, slot) - 1) % count) for n, r in names.items()}
+        evidence.setdefault("exports", []).append(oracle.verdict())
+        if kind in ("program", "a", "edited"):
+            oracle_markers(f"export {kind}", path, lambda j: take_frame(segment(j)[0], j), fps, evidence,
+                           cuts=starts[1:])
+    evidence["nle"] = oracle_nle(e, segments, starts, total, anchors, fps, count, evidence)
+
+
+def xmeml_sound_channels(path):
+    """An xmeml project's sound items with the channel each plays (its
+    sourcetrack's trackindex): {(start, end, file, first frame, enabled):
+    [channels]}, one entry per item, duplicates kept."""
+    seq = ET.parse(path).getroot().find("sequence")
+    files = {f.get("id"): urllib.parse.unquote(f.find("pathurl").text.removeprefix("file://localhost"))
+             for f in seq.iter("file") if f.find("pathurl") is not None}
+    out = {}
+    for track in seq.findall("media/audio/track"):
+        for c in track.findall("clipitem"):
+            key = (int(c.find("start").text), int(c.find("end").text), files[c.find("file").get("id")],
+                   int(c.find("in").text), c.find("enabled").text == "TRUE")
+            out.setdefault(key, []).append(int(c.findtext("sourcetrack/trackindex") or 0))
+    return out
+
+
+def oracle_nle(e, segments, starts, total, anchors, fps, count, evidence):
+    """Each project format against the oracle's timeline: video tracks for
+    a, b and the program, each tiling the whole sequence with one item per
+    clip at the clip's slots; every sequence frame showing the media frame
+    the oracle expects (from the item's file, first frame and start); the
+    clip's crop on every track; only the clip's angle enabled; sound with
+    its picture, on for the program only."""
+    files = {}
+    for take_path in {s["take"] for s in segments}:
+        for f in read_json(take_path)["files"]:
+            files[str((Path(take_path).parent / f["path"]).resolve())] = (
+                str(Path(take_path).resolve()), round((f.get("start_offset_seconds") or 0) * fps), f["source"])
+    rows = []
+    for fmt, app in (("fcpxml", "final_cut"), ("fcpxml", "resolve"), ("xmeml", "premiere"),
+                     ("xmeml", "resolve"), ("otio", None)):
+        params = {"format": fmt, "folder": str(e.root / "nle")}
+        if app:
+            params["app"] = app
+        path = Path(e.rpc("timeline_export_nle", params)["path"])
+        name = f"{path.name} ({app or fmt})"
+        tracks, rate, audio = nle_tracks(fmt, path)
+        require(rate == fps, f"{name}: sequence at {rate} fps, the takes at {fps}")
+        sources = []
+        for track in tracks:
+            known = {files.get(str(Path(i[2]).resolve()), (None, None, None))[2] for i in track}
+            require(len(known) == 1 and None not in known, f"{name}: a track mixes or misses sources: {known}")
+            sources.append(known.pop())
+        require(sources == ["a", "b", "program"], f"{name}: video tracks {sources}, expected a, b, program")
+        bad, compared = [], 0
+        for source, track in zip(sources, tracks):
+            items = sorted(track, key=lambda i: i[0])
+            bounds = [(i[0], i[1]) for i in items]
+            want_bounds = [(st, st + s["out"] - s["in"]) for st, s in zip(starts, segments)]
+            require(bounds == want_bounds, f"{name}: the {source} track's items are at {bounds}, the clips at "
+                                           f"{want_bounds} (all {total} sequence frames, no gaps or overlaps)")
+            for (start, end, file, first, enabled, crop), seg in zip(items, segments):
+                take_path, offset, _ = files[str(Path(file).resolve())]
+                want_crop = seg["crop"] and (seg["crop"]["x"], seg["crop"]["y"], seg["crop"]["width"],
+                                             seg["crop"]["height"])
+                if (crop is None) != (want_crop is None) or (crop and any(abs(x - y) > 1e-3
+                                                                          for x, y in zip(crop, want_crop))):
+                    bad.append(f"{source} item at {start}: crop {crop}, the clip's is {want_crop}")
+                if enabled != ((seg["angle"] or "program") == source):
+                    bad.append(f"{source} item at {start}: enabled {enabled}, the clip's angle is "
+                               f"{seg['angle'] or 'program'}")
+                for j in range(start, end):
+                    compared += 1
+                    shows = (anchors[take_path] + offset + first + j - start) % count
+                    want = (anchors[seg["take"]] + seg["in"] + j - start) % count
+                    if take_path != seg["take"] or shows != want:
+                        bad.append(f"{source} track, sequence frame {j}: {Path(file).name} frame {first + j - start} "
+                                   f"shows media frame {shows}, the oracle expects {want} from "
+                                   f"{Path(seg['take']).stem}")
+        require(compared == 3 * total, f"{name}: compared {compared} frames, expected {3 * total}")
+        # Sound (#124 re-review B3): exactly one enabled item per clip, the
+        # program's sound with the program track's picture (same file, start,
+        # end and first frame), tiling the sequence; any other item disabled
+        # and with its own picture. Then the program sound as the project
+        # plays it (the referenced stretches of the take files laid end to
+        # end) must have the oracle's bursts where the oracle says.
+        video = {(i[2], i[0]): i for t in tracks for i in t}
+        program_items = sorted(tracks[2], key=lambda i: i[0])
+        # Exactly one enabled item per channel per program item, counted as
+        # written (never deduplicated first): one item per clip in FCPXML and
+        # OTIO, whose clips carry all their channels; in xmeml, Premiere's
+        # one stereo item (channel 1) per clip, Resolve's one item per
+        # channel (1..channels of the program's sound) per clip.
+        program_keys = [(i[0], i[1], i[2], i[3]) for i in program_items]
+        channels = {take: next((a["channels"] for f in read_json(take)["files"] if f["source"] == "program"
+                                for a in f.get("audio", [])), 2) for take in {s["take"] for s in segments}}
+        if fmt == "xmeml":
+            got = {k[:4]: sorted(v) for k, v in xmeml_sound_channels(path).items() if k[4]}
+            want = {k: (list(range(1, channels[files[str(Path(k[2]).resolve())][0]] + 1)) if app == "resolve"
+                        else [1]) for k in program_keys}
+        else:
+            got = {}
+            for i in audio:
+                if i[4]:
+                    got.setdefault((i[0], i[1], i[2], i[3]), []).append(None)
+            want = {k: [None] for k in program_keys}
+        if got != want:
+            show = lambda m: [(k[0], k[1], Path(k[2]).name, k[3], v) for k, v in sorted(m.items())]  # noqa: E731
+            bad.append(f"the enabled sound items (span: channels) are {show(got)}; the oracle expects {show(want)}: "
+                       f"exactly one per channel per program clip")
+        enabled = sorted({(i[0], i[1], i[2], i[3]): i for i in audio if i[4]}.values(), key=lambda i: i[0])
+        for start, end, file, first, on, _ in audio:
+            v = video.get((file, start))
+            if not on and (v is None or v[3] != first or v[1] != end or file in {i[2] for i in program_items}):
+                bad.append(f"disabled sound of {Path(file).name} at {start} isn't an angle's with its picture")
+        if not bad:
+            sound, cache = array.array("f", bytes(4 * round(total / fps * RATE))), {}
+            for start, end, file, first, _, _ in enabled:
+                if file not in cache:
+                    cache[file] = pcm(Path(file))
+                a, n = round(first / fps * RATE), round((end - start) / fps * RATE)
+                piece = cache[file][a:a + n]
+                require(len(piece) == n, f"{name}: {Path(file).name} has no sound at frames {first}-{first + end - start}")
+                sound[round(start / fps * RATE):round(start / fps * RATE) + n] = piece
+            seg_at = lambda j: max(k for k, st in enumerate(starts) if st <= j)  # noqa: E731
+            try:
+                oracle_markers(name, path, lambda j: (anchors[segments[seg_at(j)]["take"]] + segments[seg_at(j)]["in"]
+                                                      + j - starts[seg_at(j)]) % count,
+                               fps, evidence, cuts=starts[1:], samples=sound)
+            except Failure as exc:
+                bad.append(str(exc))
+        if bad:
+            raise Failure(f"{name}: {len(bad)} problems against the oracle; first: {bad[0]}")
+        rows.append({"format": fmt, "app": app, "frames_compared": compared, "tracks": sources,
+                     "sound_items": len(audio), "program_sound_items": len(enabled)})
+    return rows
+
+
+def bar_center(pixels, w, h, rect):
+    """Where the bright vertical bar is across `rect`: its centre as a
+    fraction of the rect's width, or None."""
+    x, y, rw, rh = rect
+    row = int((y + rh / 2) * h) * w
+    x0, x1 = int(x * w) + 1, int((x + rw) * w) - 1
+    lit = [i for i, v in enumerate(pixels[row + x0:row + x1]) if v > 128]
+    if not lit or lit[-1] - lit[0] + 1 != len(lit):
+        return None
+    return (x0 - x * w + (lit[0] + lit[-1] + 1) / 2) / (rw * w)
+
+
+def lit_fraction(pixels, w, h, rect):
+    x, y, rw, rh = rect
+    row = int((y + rh / 2) * h) * w
+    values = pixels[row + int(x * w) + 1:row + int((x + rw) * w) - 1]
+    return sum(v > 128 for v in values) / max(1, len(values))
+
+
+def scenario_oracle_masks(e, cfg, evidence):
+    """The masks' fixed bugs (#115 review B1-B5), each named when it
+    fails: a mask-only media source plays (B1), a missing mask hides what
+    it masks (B2), a clock-started mask animation is the same in the
+    program and a filtered ISO (B3), a scene mask is where the same scene is
+    drawn, not half a frame ahead (B4), and a fit = none scene mask keeps
+    its size in a reduced scene feed (B5)."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    cfg, count = oracle_base(e.root, cfg, {"m": ("m", True, 1)}, fps)
+    fw, fh = ORACLE_SIZE
+    cfg["sources"] += [{"id": i, "kind": "color", "color": "#ffffff", "width": fw, "height": fh}
+                       for i in ("fill1", "fill2", "fill3", "fill4", "fill5")]
+    cfg["sources"] += [{"id": "bar", "kind": "color", "color": "#ffffff", "width": 16, "height": 16},
+                       {"id": "white", "kind": "color", "color": "#ffffff", "width": w, "height": h},
+                       {"id": "gone", "kind": "media", "files": [str(e.root / "missing.mov")], "loop": True}]
+    rects = {"b1": (0, 0, 1 / 3, 0.5), "b2": (1 / 3, 0, 1 / 3, 0.5), "b3": (2 / 3, 0, 1 / 3, 0.5),
+             "b4mask": (0, 0.5, 0.5, 0.5), "b4scene": (0.5, 0.5, 0.5, 0.5)}
+    travel, speed = 0.7 * w, 48 * fps  # half a frame of its motion: 24 canvas pixels
+    cfg["keyframes"] = [{"id": "sweep", "frames": [{"at": 0, "translate": [0, 0]},
+                                                    {"at": 1, "translate": [travel, 0]}]}]
+    filters = {
+        "fill1": [{"kind": "source_mask", "mask_source": "m"}],
+        "fill2": [{"kind": "source_mask", "mask_source": "gone", "invert": True}],
+        "fill3": [{"kind": "source_mask", "mask_scene": "barscene"}],
+        "fill4": [{"kind": "shape_mask", "shape": "rectangle", "width": 0.2, "height": 1.0,
+                   "animations": [{"duration_ms": 60000, "easing": "linear", "start": "clock",
+                                   "frames": [{"at": 0, "width": 0.2}, {"at": 1, "width": 0.8}]}]}],
+        "fill5": [{"kind": "source_mask", "mask_scene": "whitescene", "fit": "none", "scale": 1.0}]}
+    for s in cfg["sources"]:
+        if s["id"] in filters:
+            s["filters"] = filters[s["id"]]
+    cfg["scenes"] = [
+        {"id": "main", "name": "Main", "items": [
+            item("fill1", rects["b1"], (w, h)), item("fill2", rects["b2"], (w, h)),
+            item("fill4", rects["b3"], (w, h)), item("fill3", rects["b4mask"], (w, h)),
+            item(None, rects["b4scene"], (w, h), scene="barscene")]},
+        {"id": "barscene", "name": "bar", "items": [item("bar", (0.1, 0, 0.05, 1), (w, h), animations=[
+            {"keyframes": "sweep", "duration_ms": round(travel / speed * 1000), "iterations": "infinite",
+             "easing": "linear", "start": "clock"}])]},
+        {"id": "whitescene", "name": "white", "items": [item("white", (0, 0, 1, 1), (w, h))]},
+        {"id": "b5scene", "name": "b5", "items": [item("fill5", (0.25, 0.25, 0.5, 0.5), (w, h))]}]
+    cfg["recording"]["program"]["audio"] = ["m"]
+    cfg["recording"]["iso"].update(enabled=True, sources=["fill4"], audio=["m"], filtered=True)
+    e.apply(cfg)
+    problems, feed = {}, None
+    cli = os.environ.get("ISOCAST_E2E_CLI")
+    if cli and Path(cli).is_file():
+        feed = subprocess.Popen([cli, "frames", "scene:b5scene", "--width", "384", "--fps", "30",
+                                 "--seconds", "4", "--output", str(e.root / "b5.h264"), "--json"],
+                                env=e.env, stdout=open(e.root / "b5.json", "w"), stderr=open(e.root / "b5.err", "w"))
+    path, manifest = take(e, oracle_seconds(evidence, 3, 4))
+    evidence["files"] = check_take(path, manifest, evidence=evidence)
+    program, _ = manifest_file(path, manifest, "program")
+    w2, h2, frames = gray_frames(program, side=960)
+    # B1: the mask-only clip plays a frame a slot, so its code shows through.
+    b1 = {"name": "b1", "tag": 4, "rect": rects["b1"], "quads": list(ORACLE_QUADS)}
+    decoded = [(round(t * fps), t, oracle_read(p, w2, h2, b1)) for t, p in frames]
+    ids = [(s, g[2]) for s, _, g in decoded if g[0] == "id"]
+    if not ids:
+        problems["B1"] = f"no mask frame shows through fill1 (first picture: {describe(decoded[0][2])})"
+    else:
+        votes = {}
+        for slot, frame in ids:
+            votes[(frame - slot) % count] = votes.get((frame - slot) % count, 0) + 1
+        m0 = max(votes, key=votes.get)
+        oracle = Oracle("mask-only media (B1)", program, e.root, evidence)
+        for index, (slot, t, got) in enumerate(decoded):
+            oracle.expect(index, t, "b1", ("id", 4, (m0 + slot) % count), got)
+            if slot > 0:
+                oracle.previous[index] = {"b1": ("id", 4, (m0 + slot - 1) % count)}
+        try:
+            oracle.verdict()
+        except Failure as exc:
+            problems["B1"] = str(exc)
+    # B2: a mask with no picture hides what it masks, inverted or not.
+    level = max(region_level(p, w2, h2, rects["b2"]) for _, p in frames)
+    if level > 48:
+        problems["B2"] = f"a missing, inverted mask shows its picture (grey level {level:.0f}, expected black)"
+    # B4: the scene mask's bar is where the same scene draws it.
+    gaps = []
+    for _, p in frames:
+        a, b = bar_center(p, w2, h2, rects["b4mask"]), bar_center(p, w2, h2, rects["b4scene"])
+        # Not where the sweep starts again (one bar at each end).
+        if a is not None and b is not None and 0.15 < b < 0.85 and abs(a - b) < 0.25:
+            gaps.append((a - b) * w)
+    if len(gaps) < len(frames) // 4:
+        problems["B4"] = f"the bars were found in only {len(gaps)} of {len(frames)} pictures"
+    elif max(abs(g) for g in gaps) > 8:
+        problems["B4"] = (f"the scene mask is {statistics.median(gaps):+.1f} canvas pixels from the scene "
+                          f"(worst {max(gaps, key=abs):+.1f}; half a frame of its motion is {speed / fps / 2:.0f})")
+    # B3: the same clock-started mask in the program and the filtered ISO.
+    iso, iso_f = manifest_file(path, manifest, "fill4")
+    wi, hi, iso_frames = gray_frames(iso)
+    offset = round((iso_f.get("start_offset_seconds") or 0) * fps)
+    program_widths = {round(t * fps): lit_fraction(p, w2, h2, rects["b3"]) for t, p in frames}
+    diffs = [lit_fraction(p, wi, hi, (0, 0, 1, 1)) - program_widths[round(t * fps) + offset]
+             for t, p in iso_frames if round(t * fps) + offset in program_widths]
+    if not diffs:
+        problems["B3"] = "no ISO picture lines up with the program"
+    elif max(abs(d) for d in diffs) > 0.02:
+        problems["B3"] = (f"the filtered ISO's clock-started mask is {statistics.median(diffs):+.3f} of the "
+                          f"picture wider than the program's at the same moment (program "
+                          f"{statistics.median(program_widths.values()):.3f})")
+    # B5: in a reduced scene feed the fit = none mask still shows all of it.
+    if feed:
+        try:
+            feed.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            feed.kill()
+            feed.wait()
+        stream = e.root / "b5.h264"
+        if not stream.exists() or stream.stat().st_size == 0:
+            problems["B5"] = f"the scene feed wrote nothing: {(e.root / 'b5.err').read_text()[-300:]}"
+        else:
+            fw2, fh2, feed_frames = gray_frames(stream)
+            visible = min(region_level(p, fw2, fh2, (0.25, 0.25, 0.5, 0.5)) for _, p in feed_frames[-10:])
+            if visible < 200:
+                problems["B5"] = (f"a fit = none scene mask in a {fw2}-wide scene feed shows only part of the "
+                                  f"picture (grey level {visible:.0f}, expected white)")
+    else:
+        evidence["b5"] = "skipped: no isocast CLI (ISOCAST_E2E_CLI)"
+    evidence["mask_checks"] = {k: problems.get(k, "PASS" if k != "B5" or feed else "SKIP")
+                               for k in ("B1", "B2", "B3", "B4", "B5")}
+    evidence["b4_gaps_px"] = gaps[:10]
+    require(not problems, "masks: " + "; ".join(f"{k}: {v}" for k, v in sorted(problems.items())))
+
+
+def scenario_oracle_canvases(e, cfg, evidence):
+    """Per-destination canvases (#84): each canvas's recording is the
+    oracle's, and each live encoder is warmed once as a recording starts
+    (a68b6f3f warmed every one twice)."""
+    if not evidence["capabilities"]["h264"]:
+        raise Skip("no hardware encoder on this runner (stream encoders)")
+    fps = cfg["canvas"]["fps"]
+    cfg, count = oracle_base(e.root, cfg, RECORD_SOURCES, fps)
+    oracle_scene(cfg, RECORD_LAYOUT)
+    cfg["recording"]["program"]["audio"] = ["a"]
+    vertical = oracle_canvases_cfg(cfg)
+    # Configured, never started: a recording warms their encoders anyway.
+    cfg["stream"] = {"service": "custom", "server": "rtmp://127.0.0.1:9/live", "video_bitrate_kbps": 4000,
+                     "audio_bitrate_kbps": 128, "keyframe_interval_seconds": 2}
+    cfg["vertical"]["stream"] = dict(cfg["stream"], video_bitrate_kbps=3000)
+    cfg["canvases"][0]["stream"] = dict(cfg["stream"], video_bitrate_kbps=2500)
+    cfg["developer"] = {"enabled": True, "auto_off_hours": 0}
+    e.apply(cfg)
+    e.rpc("engine", {"running": True})
+    time.sleep(1)
+    watch = Watch(e, ["stopped"])
+    path, manifest = take(e, oracle_seconds(evidence, 3, 4))
+    until(lambda: watch.of("stopped"), 15, "stopped event")
+    watch.close()
+    evidence["files"] = check_take(path, manifest, evidence=evidence)
+    check_record_take(e, path, manifest, cfg, RECORD_LAYOUT, count, evidence, vertical=vertical, isos=())
+    # The daemon logs beside its socket (`<socket>.logs`).
+    folder = e.sock.with_suffix(".logs")
+    logs = list(folder.glob("*developer*"))
+    require(logs, f"developer mode wrote no log: {sorted(p.name for p in folder.glob('*'))}")
+    text = "".join(p.read_text(errors="replace") for p in logs)
+    # One H.264 session per canvas (each canvas's stream), each warmed once:
+    # on the main canvas the stream and replay share one warm-up; on each
+    # other canvas its replay's warm-up joins its stream's session (by
+    # design, #84 M5), and nothing else may join.
+    sessions = re.findall(r"h264 stream session \d+ (\d+x\d+) at (\d+) kb/s", text)
+    joins = re.findall(r"the recording's warm encoder shares the program encoder \((\d+x\d+) at (\d+) kb/s\)", text)
+    warnings = (watch.of("stopped")[0].get("report") or {}).get("warnings", [])
+    main = (f"{cfg['canvas']['width']}x{cfg['canvas']['height']}", str(cfg["stream"]["video_bitrate_kbps"]))
+    extra = {spec for spec in sessions if spec != main}
+    evidence.update(sessions=sessions, warm_joins=joins, warnings=warnings)
+    require(len(sessions) == 3 and len(set(sessions)) == 3, f"canvases: {len(sessions)} H.264 sessions for "
+                                                             f"three canvases' streams: {sessions}")
+    twice = [f"{spec[0]} at {spec[1]} kb/s joined {joins.count(spec)} times"
+             for spec in set(sessions) if joins.count(spec) > (0 if spec == main else 1)]
+    require(not twice, f"canvases: encoders warmed twice as the recording started: {'; '.join(sorted(twice))} "
+                       f"(expected the main canvas's 0, each other canvas's 1: its replay)")
+    require(extra <= set(joins), f"canvases: a canvas's replay was not warmed with its stream: {joins}")
+    require(len(warnings) == len(set(warnings)), f"canvases: a warning given twice: {warnings}")
+
+
+def scenario_oracle_replay(e, cfg, evidence):
+    """The replay buffer: a save is consecutive frames of the program, the
+    same ones a recording beside it has, ending at the save."""
+    if not evidence["capabilities"]["h264"]:
+        raise Skip("no hardware encoder on this runner (replay buffer)")
+    fps = cfg["canvas"]["fps"]
+    cfg, count = oracle_base(e.root, cfg, RECORD_SOURCES, fps)
+    oracle_scene(cfg, RECORD_LAYOUT)
+    cfg["recording"]["program"]["audio"] = ["a"]
+    cfg["recording"]["replay"] = {"seconds": 5}
+    e.apply(cfg)
+    e.rpc("engine", {"running": True})
+    require(e.rpc("replay_start")["state"] == "running", "replay buffer didn't start")
+    started = e.rpc("start", {"seconds": 9})
+    began = time.monotonic()
+    time.sleep(7)
+    asked = time.monotonic() - began
+    saved = e.rpc("replay_save")
+    manifest = until(lambda: finished(started["manifest"]), 45, "take")
+    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
+    e.rpc("replay_stop")
+    path = Path(started["manifest"])
+    evidence["files"] = check_take(path, manifest, evidence=evidence)
+    t0 = check_record_take(e, path, manifest, cfg, RECORD_LAYOUT, count, evidence, isos=())
+    replay = Path(saved["path"])
+    r0 = fit_anchor(oracle_decode(replay, oracle_regions(RECORD_LAYOUT), fps), "a", count)
+    speeds = {"a": 1, "b": 1, "c": 1.5}
+    oracle_compare("replay", replay, oracle_regions(RECORD_LAYOUT),
+                   lambda slot, name: ("id", ORACLE_TAGS[name], media_frame(r0, slot, speeds[name], count)),
+                   fps, e.root, evidence, live=lambda slot: True)
+    oracle_markers("replay", replay, lambda j: media_frame(r0, j, 1, count), fps, evidence)
+    last = round(video_times(replay)[-1] * fps)
+    ends = (r0 + last - t0) % count  # the replay's last frame, as a slot of the take
+    evidence.update(replay_first_slot=(r0 - t0) % count, replay_last_slot=ends, save_asked_slot=round(asked * fps))
+    require(abs(ends - asked * fps) <= fps // 2,
+            f"replay: ends at the take's slot {ends}, the save was asked at about slot {asked * fps:.0f}")
+
+
+def scenario_oracle_governor(e, cfg, evidence):
+    """The governor's vertical restore (#110 review B1): pinning the
+    vertical canvas back to full rate after the governor limited it must
+    not count its earlier, intentional drops as new protected loss (an ISO
+    hold with no new program drops). Needs real encoder pressure: a test
+    Mac, never a VM or hosted runner."""
+    caps = evidence["capabilities"]
+    if caps.get("virtual_machine") or caps.get("hosted") or not caps["hevc"]:
+        raise Skip("needs a test Mac's encoders under real pressure (not a VM or hosted runner)")
+    cfg = setup(e.root, "hevc", iso=True, fps=30)
+    cfg["governor"] = {"enabled": True, "allow_iso_thinning": True}
+    cfg["vertical"] = {"width": 360, "height": 640, "fps": 30, "recording": {"encoder": {"codec": "hevc"}}}
+    try:
+        e.apply(cfg)
+    except RpcError as exc:  # builds before 7c08ca3d thin ISOs without being asked
+        require("allow_iso_thinning" in str(exc), f"governor setup refused: {exc}")
+        cfg["governor"].pop("allow_iso_thinning")
+        e.apply(cfg)
+    foreign = Engine(e.root / "foreign", e.app / "Contents/MacOS/isocastd")
+    samples = []
+    try:
+        load = setup(e.root / "foreign", "hevc", iso=True, width=3840, height=2160)
+        load["governor"] = {"enabled": False}
+        load["sources"] = [{"id": f"load{i}", "kind": "test_pattern", "width": 3840, "height": 2160, "fps": 60}
+                           for i in range(4)]
+        load["scenes"][0]["items"][0]["source"] = "load0"
+        load["recording"]["program"].update(enabled=False, audio=[])
+        load["recording"]["iso"].update(sources=[f"load{i}" for i in range(4)], audio=[])
+        foreign.apply(load)
+        started = e.rpc("start", {})
+
+        def sample(seconds, phase):
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                s = e.rpc("status")
+                files = (s.get("live") or {}).get("files") or []
+                protected = sum(f.get("dropped_frames") or 0 for f in files if f.get("source") == "program")
+                samples.append({"phase": phase, "governor": s["governor"], "program_dropped": protected})
+                time.sleep(0.1)
+        sample(5, "normal")
+        foreign.rpc("start", {})
+        sample(30, "load")
+        foreign.rpc("stop", timeout=60)
+        sample(8, "settle")
+        if not any(x["governor"]["vertical_percent"] < 100 for x in samples):
+            e.rpc("stop", timeout=60)
+            raise Skip("the governor never limited the vertical canvas here: nothing to restore")
+        current = e.rpc("get")["setup"]
+        current["governor"] = dict(current.get("governor") or {}, pins=["vertical.fps"])
+        e.apply(current)
+        sample(8, "pinned")
+        e.rpc("stop", timeout=60)
+    finally:
+        foreign.close()
+        evidence["governor_samples"] = samples[::5]
+    manifest = until(lambda: finished(started["manifest"]), 60, "governor take")
+    pinned = [x for x in samples if x["phase"] == "pinned"]
+    holds = [x for x in pinned if x["governor"]["iso_percent"] == 0 and "protected" in x["governor"]["reason"]
+             and x["program_dropped"] == pinned[0]["program_dropped"]]
+    if holds:
+        raise Failure(f"governor: restoring the vertical canvas held the ISOs for protected loss with no new "
+                      f"program drops ({len(holds)} samples: {holds[0]['governor']['reason']})")
+    # The governor and native admission shed ISO and vertical pictures here
+    # by design: every file must still account for each lost one.
+    path = Path(started["manifest"])
+    for f in manifest["files"]:
+        check_file(path.parent / f["path"], f["duration_seconds"], f["fps"], (f["width"], f["height"]),
+                   dropped=f["dropped_frames"], repeated=f.get("repeated_frames") or 0)
+    evidence["accounted"] = drop_metrics(manifest)
+
+
+def pattern_oracle(path, fps):
+    """The engine's test pattern names its frame by how far its bars have
+    scrolled: frame n is shifted floor(n * width / (4 s * fps)) pixels. A
+    file of such frames (Windows' Platform contract takes, #105) against
+    that model, at its own size: the first picture that isn't the frame its
+    timestamp says, or none."""
+    info = json.loads(command(["ffprobe", "-v", "error", "-show_streams", "-of", "json", path]).stdout)
+    video = next(s for s in info["streams"] if s["codec_type"] == "video")
+    width, height = video["width"], video["height"]
+    frames = pattern_frames(Path(path), width, height)
+    bad = []
+    for index, (t, shift, _, _) in enumerate(frames):
+        n = round(t * fps)
+        want = n * width // (4 * fps) % width
+        apart = abs(shift - want)
+        if min(apart, width - apart) > 1:
+            bad.append((index, t, n, want, shift))
+    if bad:
+        index, t, n, want, shift = bad[0]
+        later = round((shift - want) / (width / (4 * fps)))
+        raise Failure(f"{Path(path).name}: first mismatch at picture {index} ({t:.4f} s): expected frame {n} "
+                      f"(bars at {want}), got bars at {shift} (about frame {n + later}); "
+                      f"{len(bad)} of {len(frames)} pictures differ")
+    return {"file": str(path), "pictures": len(frames), "mismatches": 0}
+
+
+def oracle_rules_selftest(work):
+    """The oracle's own rules on made-up pictures: the #126 allowance takes
+    exactly its pattern and nothing near it, and the edit model catches an
+    engine timeline that ignored or misplaced an edit."""
+    def run(changes, pictures=300, live=True, tolerate=False):
+        global TOLERATE_ISSUE_126
+        saved, TOLERATE_ISSUE_126 = TOLERATE_ISSUE_126, tolerate
+        try:
+            oracle = Oracle("rules", work / "none.mov", work, {})
+            for i in range(pictures):
+                want = {r: ("id", ORACLE_TAGS[r], 1000 + i) for r in ("a", "b", "c")}
+                got = dict(want)
+                got.update(changes.get(i, {}))
+                for r in want:
+                    oracle.expect(i, i / 30, r, want[r], got[r])
+                if live and i:
+                    oracle.previous[i] = {r: ("id", ORACLE_TAGS[r], 999 + i) for r in want}
+            oracle.verdict()
+            return "pass"
+        except Failure as exc:
+            return "known #126" if str(exc).startswith("KNOWN ISSUE #126") else "fail"
+        finally:
+            TOLERATE_ISSUE_126 = saved
+    late = {r: ("id", ORACLE_TAGS[r], 999 + 100) for r in ("a", "b", "c")}
+    cases = {
+        "the #126 pattern, strict": (run({100: late}), "known #126"),
+        "the #126 pattern, --tolerate-issue-126": (run({100: late}, tolerate=True), "pass"),
+        "one source one frame behind": (run({100: {"a": ("id", 1, 1099)}}, tolerate=True), "fail"),
+        "all sources two frames behind at 1x": (run({100: {r: ("id", ORACLE_TAGS[r], 1098) for r in "abc"}},
+                                                     tolerate=True), "fail"),
+        "two pictures in a row": (run({100: late, 101: {r: ("id", ORACLE_TAGS[r], 1100) for r in "abc"}},
+                                      tolerate=True), "fail"),
+        "more than 1% of pictures": (run({i: {r: ("id", ORACLE_TAGS[r], 999 + i) for r in "abc"}
+                                          for i in (10, 50, 100, 150)}, tolerate=True), "fail"),
+        "an export (no live previous frame)": (run({100: late}, live=False, tolerate=True), "fail"),
+        "a short output (under 100 pictures)": (run({40: {r: ("id", ORACLE_TAGS[r], 1039) for r in "abc"}},
+                                                     pictures=60, tolerate=True), "fail"),
+    }
+    # A stale picture at a pause's resume (#124 re-review B1): 43 frames cut
+    # out after slot 99; picture 100 shows a frame 20 behind for every
+    # source, within the span the pause opened. Never #126.
+    def resumed(tolerate):
+        global TOLERATE_ISSUE_126
+        saved, TOLERATE_ISSUE_126 = TOLERATE_ISSUE_126, tolerate
+        want = lambda slot, r: ("id", ORACLE_TAGS[r], 1000 + slot + (43 if slot >= 100 else 0))  # noqa: E731
+        rows = [(slot, slot / 30, {r: (("id", ORACLE_TAGS[r], 1123) if slot == 100 else want(slot, r))
+                                   for r in ("a", "b", "c")}) for slot in range(300)]
+        try:
+            oracle_check_rows("rules", work / "none.mov", rows, want, work, {}, live=lambda slot: slot != 100)
+            return "pass"
+        except Failure as exc:
+            return "known #126" if str(exc).startswith("KNOWN ISSUE #126") else "fail"
+        finally:
+            TOLERATE_ISSUE_126 = saved
+    cases["a stale picture at a pause's resume, --tolerate-issue-126"] = (resumed(True), "fail")
+    model = EditModel(["/t/1", "/t/2"], 90)
+    model.set(30, 60, "crop", {"x": 0.25, "y": 0.25, "width": 0.75, "height": 0.75})
+    engine = [{"take": "/t/1", "in_seconds": 0, "out_seconds": 1, "angle": None},
+              {"take": "/t/1", "in_seconds": 1, "out_seconds": 2, "angle": None},
+              {"take": "/t/1", "in_seconds": 2, "out_seconds": 3, "angle": None},
+              {"take": "/t/2", "in_seconds": 0, "out_seconds": 3, "angle": None}]
+    cases["an ignored crop"] = ("fail" if model.compare(engine, 30) else "pass", "fail")
+    engine[1]["crop"] = {"x": 0.25, "y": 0.25, "width": 0.75, "height": 0.75}
+    cases["the crop as asked"] = ("fail" if model.compare(engine, 30) else "pass", "pass")
+    engine[2]["in_seconds"] = 2 + 1 / 30
+    cases["a cut one frame late"] = ("fail" if model.compare(engine, 30) else "pass", "fail")
+    wrong = {k: v for k, v in cases.items() if v[0] != v[1]}
+    require(not wrong, f"oracle rules: {wrong}")
+    return {k: v[0] for k, v in cases.items()}
+
+
+def oracle_selftest(work):
+    """The fixture, decoder and oracle alone, on any machine with ffmpeg
+    (Windows too): every frame of a clip survives scaling, a corner, a crop,
+    a letterbox and a mask through every encoder ffmpeg has here, and a
+    copy one frame late is caught with a clear message."""
+    work = Path(tempfile.mkdtemp(prefix="oracle-selftest-", dir=work))
+    fps, count = 30, 4 * 30
+    clip = oracle_fixture(work, ORACLE_TAGS["a"], fps, seconds=4)
+    encoders = [c for c in ("libx264", "libx265", "prores_ks", "h264_videotoolbox", "hevc_videotoolbox",
+                            "h264_nvenc", "hevc_nvenc")
+                if ffmpeg("-f", "lavfi", "-i", "color=size=320x180:rate=30", "-frames:v", "2", "-c:v", c,
+                          "-f", "null", "-", check=False, timeout=60).returncode == 0]
+    full = [("a", (0, 0, 1, 1))]
+    cases = [("1080p", "scale=1920:1080", oracle_regions(full)),
+             ("corner", "pad=1280:720:640:360", oracle_regions([("a", (0.5, 0.5, 0.5, 0.5))])),
+             ("crop", "crop=480:270:160:90,scale=1280:720", oracle_regions(full, crop=(0.25, 0.25, 0.75, 0.75))),
+             ("letterbox", "scale=1080:608,pad=1080:1920:0:656",
+              oracle_regions(full, place=fit_rect((16, 9), (1080, 1920)))),
+             # A mask hiding the left half: two of the four copies are gone.
+             ("mask", "geq=lum='if(lt(X\\,W/2)\\,16\\,p(X\\,Y))':cb=128:cr=128", oracle_regions(full))]
+    results = []
+    for encoder in encoders:
+        for name, graph, regions in cases:
+            out = work / f"{encoder}-{name}.mov"
+            pix = [] if "prores" in encoder else ["-pix_fmt", "yuv420p"]
+            ffmpeg("-i", clip, "-vf", graph, "-c:v", encoder, *pix, "-b:v", "4M", "-an", "-y", out, timeout=300)
+            evidence = {}
+            oracle_compare(f"selftest {encoder} {name}", out, regions, lambda slot, n: ("id", 1, slot % count),
+                           fps, work, evidence)
+            results.append(dict(evidence["oracle"][0], encoder=encoder, case=name))
+    late = work / "late.mov"
+    ffmpeg("-i", clip, "-vf", "trim=start_frame=1,setpts=PTS-STARTPTS", "-an", "-c:v", "libx264",
+           "-preset", "ultrafast", "-crf", "12", "-y", late, timeout=120)
+    try:
+        oracle_compare("selftest one frame late", late, oracle_regions(full),
+                       lambda slot, n: ("id", 1, slot % count), fps, work, {})
+        raise Failure("the oracle passed a copy one frame late")
+    except Failure as exc:
+        caught = str(exc)
+        require("expected a:0, got a:1" in caught, f"the late copy failed for another reason: {caught}")
+    rules = oracle_rules_selftest(work)
+    shutil.rmtree(work)
+    return {"encoders": encoders, "cases": results, "caught": caught, "rules": rules}
+
+
 def worker(args):
     root = args.worker_root
     evidence = {"capabilities": read_json(root.parent / "capabilities.json")}
@@ -2233,6 +3778,11 @@ def worker(args):
     started = time.monotonic()
     status, reason = "PASS", "verified"
     try:
+        if args.cli and args.cli.is_file():
+            os.environ["ISOCAST_E2E_CLI"] = str(args.cli)
+        for kv in args.engine_env:
+            key, _, value = kv.partition("=")
+            ENGINE_ENV[key] = value
         engine = Engine(root, args.daemon)
         codec = evidence["capabilities"]["record_codec"]
         cfg = setup(root, codec, **evidence["capabilities"].get("profile", {}))
@@ -2293,7 +3843,9 @@ def run_case(args, root, name):
     case.mkdir()
     with open(case / "worker.log", "wb") as log:
         process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", name,
-                                    "--worker-root", str(case), "--daemon", str(args.daemon.resolve())],
+                                    "--worker-root", str(case), "--daemon", str(args.daemon.resolve()),
+                                    *(["--cli", str(args.cli.resolve())] if args.cli else []),
+                                    *(x for kv in args.engine_env for x in ("--engine-env", kv))],
                                    stdout=log, stderr=log, start_new_session=True)
         try:
             process.wait(timeout=args.timeout)
@@ -2312,6 +3864,10 @@ def run_case(args, root, name):
     if losses:
         dropped, slots = (sum(row[k] for row in losses) for k in ("dropped", "slots"))
         detail = f"; video drops {dropped}/{slots} ({dropped / slots:.1%})" if slots else "; no frame slots"
+    known = sum(len(x["pictures"]) for x in result.get("evidence", {}).get("issue_126", []))
+    if known:
+        detail += (f"; {known} picture(s) of known issue #126 "
+                   f"({'tolerated by --tolerate-issue-126' if TOLERATE_ISSUE_126 else 'not tolerated'})")
     print(f"{result['status']:4} {name}: {result['reason']}{detail}",
           file=sys.stderr if args.json else sys.stdout, flush=True)
     if not keep:
@@ -2385,6 +3941,24 @@ def main():
     parser.add_argument("--codec", choices=("hevc", "h264", "prores422"),
                         help="exercise a specific recording path (default: available hardware, else ProRes)")
     parser.add_argument("--capabilities", action="store_true", help="probe hardware and exit (JSON)")
+    parser.add_argument("--quick", action="store_true",
+                        help="the frame-oracle suite lanes run while they work (about 3 min on the VM "
+                             "with --hosted): " + ", ".join(QUICK))
+    parser.add_argument("--full", action="store_true",
+                        help="every scenario, the oracle's included (the default; run before a merge)")
+    parser.add_argument("--selftest", action="store_true",
+                        help="check the oracle's fixture and decoder through every encoder ffmpeg has here, "
+                             "on any OS (no engine); prints JSON")
+    parser.add_argument("--engine-env", action="append", default=[], metavar="KEY=VALUE",
+                        help="environment for the isolated engines (repeatable), e.g. a scratch build's fault switch")
+    parser.add_argument("--tolerate-issue-126", action="store_true",
+                        help="accept exactly the pattern of known engine issue #126 (a live picture showing every "
+                             "source's previous frame, isolated, <= 1%%), counted; remove when #126 lands")
+    parser.add_argument("--pattern-oracle", type=Path, metavar="MOVIE", action="append",
+                        help="check a file of the engine's test pattern frame by frame (any OS); with --fps")
+    parser.add_argument("--fps", type=int, default=30, help="--pattern-oracle's frame rate")
+    parser.add_argument("--cli", type=Path, default=None,
+                        help="the isocast CLI, for scene feeds (default: beside --daemon, if there)")
     parser.add_argument("--worker", choices=SCENARIOS + ("capacity",), help=argparse.SUPPRESS)
     parser.add_argument("--worker-root", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -2394,11 +3968,39 @@ def main():
     if args.list:
         print(json.dumps(list(SCENARIOS)) if args.json else "\n".join(SCENARIOS))
         return 0
+    if args.tolerate_issue_126:
+        global TOLERATE_ISSUE_126
+        os.environ["ISOCAST_TOLERATE_ISSUE_126"] = "1"  # the workers too
+        TOLERATE_ISSUE_126 = True
     if args.worker:
         return worker(args)
+    if args.pattern_oracle:
+        results, failed = [], False
+        for movie in args.pattern_oracle:
+            try:
+                results.append(pattern_oracle(movie, args.fps))
+            except Failure as exc:
+                results.append({"file": str(movie), "error": str(exc)})
+                failed = True
+        print(json.dumps(results, indent=2))
+        return 1 if failed else 0
+    if args.selftest:
+        args.work.mkdir(parents=True, exist_ok=True)
+        print(json.dumps(oracle_selftest(args.work), indent=2))
+        return 0
+    if args.cli is None and (args.daemon.parent / "isocast").is_file():
+        args.cli = args.daemon.parent / "isocast"
+    if args.quick:
+        if args.only or args.full:
+            parser.error("--quick runs its own scenarios; not with --only or --full")
+        args.only = list(QUICK)
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
-    report = {"version": 1, "scenarios": [], "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    report = {"version": 1, "scenarios": [], "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              # Which harness ran which scenarios (a merge check must run the merged one).
+              "harness": {"e2e_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                          "scenarios": list(args.only or SCENARIOS),
+                          "tolerate_issue_126": TOLERATE_ISSUE_126}}
     root = None
     try:
         require(sys.platform == "darwin", "macOS is required")
@@ -2431,6 +4033,7 @@ def main():
                 elif args.hosted and caps["h264"]:
                     caps["record_codec"] = "h264"
                 caps["max_drop_ratio"] = HOSTED_DROP_LIMIT if args.hosted else 0
+            caps["quick"] = bool(args.quick)
             report["capabilities"] = caps
             if args.capabilities and not args.hosted:
                 print(json.dumps(report["capabilities"], indent=2))

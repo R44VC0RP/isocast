@@ -90,6 +90,7 @@ import ctypes
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -718,6 +719,7 @@ def measure(args, daemon, label, index, cleanup):
                 "frames": f.get("frames"), "dropped": f.get("dropped_frames"),
                 "audio_dropouts": f.get("audio_dropouts"),
                 "complete": bool(want) and (f.get("frames") or 0) >= 0.98 * want,
+                "take_status": session.get("status"),
                 "mb_per_min": round(size / 1e6 / duration * 60) if duration else None,
             })
     for canvas, status in streams.items():
@@ -833,6 +835,158 @@ def summary(results):
               f"{f['audio_dropouts']} audio dropouts, {f['mb_per_min']} MB/min")
 
 
+GATE_METRICS = (
+    # name, value of a run, relative floor, absolute floor (worse = higher), required.
+    # The relative floors are about 2.5 x the run-to-run spread measured in
+    # A/A runs on the test Macs (2026-10-18, 72 runs: CPU 3.4%, GPU 1.6%,
+    # compositor p50 3.3%, p99 6.9% on M2-b; 2.5 x is 8.5/4/8.25/17.25%,
+    # rounded to 8/5/8/15), since three pairs alone can underestimate the
+    # noise. A screen for material regressions: a steady change below a
+    # floor (40 -> 43% CPU) passes.
+    ("isocastd CPU %", lambda r: r.get("isocastd_cpu"), 0.08, 0.5, True),
+    ("isocastd GPU ms/s", lambda r: r.get("isocastd_gpu_ms_per_s"), 0.05, 0.5, False),
+    ("compositor µs/frame p50", lambda r: ((r.get("compositor") or {}).get("cpu_us") or {}).get("p50"), 0.08, 15, True),
+    ("compositor µs/frame p99", lambda r: ((r.get("compositor") or {}).get("cpu_us") or {}).get("p99"), 0.15, 40, True),
+)
+GATE_MIN_RUNS = 3
+
+
+def expected_outputs(scenario):
+    """What setup_toml asks this scenario to produce, from the same rules:
+    (sorted recorded sources, the streams)."""
+    files = []
+    if scenario in RECORDING:
+        files.append("program")
+        if not scenario.startswith("program-"):
+            files += ["camera"] if scenario in ("camera-1080", "dual") else ["desktop", "camera"]
+        if scenario == "dual":
+            files.append("vertical-program")
+    streams = (["stream"] if scenario in STREAMING else []) + (["vertical_stream"] if scenario == "dual" else [])
+    return sorted(files), streams
+
+
+def run_problems(r, scenario):
+    """Why a run's outputs can't be compared (missing, unfinished or
+    uncounted), if they can't: functional validity, apart from statistics.
+    A run that did less than the scenario asks (an output missing, a
+    counter absent) is never comparable: less work looks cheaper."""
+    problems = []
+    want_files, want_streams = expected_outputs(scenario)
+    have = sorted(f["source"] for f in r["files"])
+    if have != want_files:
+        problems.append(f"recorded {have}, the scenario asks for {want_files}")
+    for f in r["files"]:
+        if not f["complete"] or f.get("take_status") != "complete":
+            problems.append(f"{f['source']} unfinished ({f.get('take_status')}, {f['frames']} frames)")
+        if f.get("dropped") is None or f.get("audio_dropouts") is None:
+            problems.append(f"{f['source']} has no loss counters")
+    for key in ("stream", "vertical_stream"):
+        stream = r.get(key)
+        if key in want_streams and not stream:
+            problems.append(f"no {key} measured")
+        if key not in want_streams and stream:
+            problems.append(f"a {key} the scenario doesn't ask for")
+        if stream and (not stream.get("frames_sent") or stream.get("dropped_frames") is None
+                       or stream.get("audio_dropouts") is None):
+            problems.append(f"{key} sent nothing or lacks a loss counter: {stream}")
+    return problems
+
+
+def run_drops(r):
+    """Every loss counter the gate uses; only for runs run_problems passed
+    (a missing counter is never read as zero)."""
+    dropped = sum(f["dropped"] + f["audio_dropouts"] for f in r["files"])
+    for key in ("stream", "vertical_stream"):
+        if key in r:
+            dropped += r[key]["dropped_frames"] + r[key]["audio_dropouts"]
+    return dropped
+
+
+def gate(results, work, scenario):
+    """The A/B screen (#124), a heuristic for material regressions, not a
+    confidence test (its false-fail rate at these settings is measured in
+    docs/notes.md). First functional validity: every run of both builds
+    must have finished, counted outputs; and when the base lost no video or
+    audio, the new build must lose none either. Then per metric the median
+    of the paired (new - base) differences of interleaved runs (pairs in
+    alternating order) against noise, the largest of three scale estimates
+    (1.4826 x median absolute deviation of the base runs, of the new runs,
+    and of the differences / sqrt 2): a metric regresses when the new build
+    is worse by more than max(2.5 x noise, its relative and absolute floor)
+    in at least two thirds of the pairs. A required metric missing from any
+    run is INCONCLUSIVE (not a pass); GPU time missing from both builds is
+    reported as not measured. Writes gate.json; returns PASS, FAIL or
+    INCONCLUSIVE."""
+    base = [r for r in results if r["label"] == "base"]
+    new = [r for r in results if r["label"] == "new"]
+    rows, verdict = [], "PASS"
+
+    def worst(a, b):
+        order = ("PASS", "INCONCLUSIVE", "FAIL")
+        return max(a, b, key=order.index)
+
+    def mad(values):
+        m = statistics.median(values)
+        return 1.4826 * statistics.median(abs(v - m) for v in values)
+
+    invalid = [f"{r['label']} run {i + 1}: {p}" for i, r in enumerate(results) for p in run_problems(r, scenario)]
+    if len(base) < GATE_MIN_RUNS or len(base) != len(new):
+        invalid.append(f"{len(base)} base and {len(new)} new runs; the gate needs {GATE_MIN_RUNS} pairs or more")
+    if invalid:
+        rows.append({"metric": "validity", "verdict": "INCONCLUSIVE", "why": invalid[:5]})
+        verdict = "INCONCLUSIVE"
+    else:
+        bs, ns = [run_drops(r) for r in base], [run_drops(r) for r in new]
+        if sum(bs) == 0:
+            worse = sum(ns) > 0
+            threshold = 0
+        else:
+            threshold = max(2, 2 * (max(bs) - min(bs)))
+            worse = sum(ns) - sum(bs) > threshold
+        rows.append({"metric": "dropped frames + audio dropouts (all runs)", "base_median": sum(bs),
+                     "new_median": sum(ns), "change": sum(ns) - sum(bs), "noise": None, "threshold": threshold,
+                     "pairs": len(bs), "verdict": "REGRESSION" if worse else "ok"})
+        if worse:
+            verdict = "FAIL"
+    for name, value, rel, floor, required in GATE_METRICS:
+        pairs = [(value(b), value(n)) for b, n in zip(base, new)]
+        valid = [(b, n) for b, n in pairs if b is not None and n is not None]
+        if len(valid) != len(pairs) or len(valid) < GATE_MIN_RUNS:
+            if not required and all(b is None and n is None for b, n in pairs):
+                rows.append({"metric": name, "verdict": "not measured", "pairs": 0})
+                continue
+            rows.append({"metric": name, "verdict": "INCONCLUSIVE", "pairs": len(valid),
+                         "why": f"{len(pairs) - len(valid)} of {len(pairs)} pairs lack it"})
+            verdict = worst(verdict, "INCONCLUSIVE")
+            continue
+        bs, ns = [b for b, _ in valid], [n for _, n in valid]
+        deltas = [n - b for b, n in valid]
+        noise = max(mad(bs), mad(ns), mad(deltas) / math.sqrt(2))
+        base_median = statistics.median(bs)
+        threshold = max(2.5 * noise, rel * abs(base_median), floor)
+        change = statistics.median(deltas)
+        worse = change > threshold and sum(d > 0 for d in deltas) * 3 >= 2 * len(deltas)
+        if worse:
+            verdict = worst(verdict, "FAIL")
+        rows.append({"metric": name, "base_median": round(base_median, 2), "new_median": round(statistics.median(ns), 2),
+                     "change": round(change, 2), "noise": round(noise, 2), "threshold": round(threshold, 2),
+                     "pairs": len(valid), "verdict": "REGRESSION" if worse else "ok"})
+    print("\n| metric | base | new | change | noise (1.48 MAD) | fails above | pairs | verdict |")
+    print("|---|---:|---:|---:|---:|---:|---:|---|")
+    for r in rows:
+        if "change" not in r:
+            print(f"| {r['metric']} | | | | | | {r.get('pairs', '')} | {r['verdict']} {r.get('why', '')} |")
+        else:
+            print(f"| {r['metric']} | {r['base_median']} | {r['new_median']} | {r['change']:+} | {r['noise']} | "
+                  f"{r['threshold']} | {r['pairs']} | {r['verdict']} |")
+    (work / "gate.json").write_text(json.dumps({"verdict": verdict, "metrics": rows}, indent=2) + "\n")
+    print(f"\nbench gate: {verdict}: " + {
+        "PASS": "every output complete and counted, and the new build is not worse than the base beyond noise",
+        "FAIL": "the new build is worse than the base beyond noise, or lost media the base didn't",
+        "INCONCLUSIVE": "outputs or measurements are missing or unfinished: nothing was compared"}[verdict])
+    return verdict
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--work", type=Path, required=True, help="a folder of your own on the APFS build volume")
@@ -864,9 +1018,18 @@ def main():
                    help="environment for --daemon's runs (repeatable), e.g. ISOCAST_CRASH_SAFE=1")
     p.add_argument("--compare-env", action="append", metavar="KEY=VALUE",
                    help="the same for --compare's runs")
+    p.add_argument("--warmup", type=int, default=None,
+                   help="discarded runs of each build first (alternating; default 1 with --compare, else 0)")
+    p.add_argument("--gate", action="store_true",
+                   help="with --compare: exit 1 when the new build is worse than the baseline beyond noise "
+                        "(CPU, GPU, compositor time, drops; gate.json in --work)")
     p.add_argument("--keep-media", action="store_true",
                    help="retain recordings for integrity checks after measurements (default: delete media)")
     args = p.parse_args()
+    if args.gate and not args.compare:
+        sys.exit("bench: --gate compares two builds; give --compare")
+    if args.gate and args.runs < GATE_MIN_RUNS:
+        sys.exit(f"bench: --gate needs --runs {GATE_MIN_RUNS} or more")
     args.work = args.work.resolve()
     if not str(args.work).startswith(str(SCRATCH) + "/"):
         sys.exit(f"bench: --work must be under {SCRATCH}/ (ISOCAST_SCRATCH)")
@@ -890,9 +1053,16 @@ def main():
         app = args.work / "bin/isocast-ui"
         shutil.copy2(args.app, app)
         args.app = app
+    warmup = args.warmup if args.warmup is not None else (1 if args.compare else 0)
+    for i in range(warmup):
+        for label, daemon in builds:
+            r = one_run(args, daemon, label, -1 - i)
+            print(f"bench: {label} warm-up {i + 1}: isocastd {r['isocastd_cpu']}% (not counted)", file=sys.stderr)
     results = []
     for i in range(args.runs):
-        for label, daemon in builds:
+        # Alternate which build goes first (ABBA...), so a steady order or
+        # carry-over effect doesn't land on one build.
+        for label, daemon in (builds if i % 2 == 0 else builds[::-1]):
             r = one_run(args, daemon, label, i)
             files = ", ".join(f"{f['source']} {f['frames']}f/{f['dropped']}d" for f in r["files"])
             print(f"bench: {label} run {i + 1}: isocastd {r['isocastd_cpu']}%, VT {r['vt_services_cpu']}%, "
@@ -900,6 +1070,10 @@ def main():
                   file=sys.stderr)
             results.append(r)
     summary(results)
+    if args.compare:
+        verdict = gate(results, args.work, args.scenario)
+        if args.gate and verdict != "PASS":
+            sys.exit(1 if verdict == "FAIL" else 2)
 
 
 if __name__ == "__main__":

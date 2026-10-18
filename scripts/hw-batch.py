@@ -41,7 +41,9 @@ m2-a soaks; --mac any holds .bench.lock while it builds and picks.
 
 Kinds (all strict: the test Macs' zero-drop bar):
   e2e       scripts/e2e.py, all scenarios or --only NAME (repeatable)
-  bench     scripts/bench.py A/B, head against the base build
+  bench     scripts/bench.py A/B, head against the base build, warmed up and
+            interleaved on one test Mac; --gate fails the job when head is
+            worse beyond noise (#124; --args '--warmup 2' adds bench options)
             (--scenario flagship-1080, --runs 3, --seconds 20)
   smoke     the tier-1 merge smoke (about 15 min): e2e --only record, iso,
             split, pause, shutdown, then bench flagship-1080 3 x 20 s A/B
@@ -94,6 +96,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -188,6 +191,20 @@ def clone_bins(src, dest, names):
             subprocess.run(["cp", "-c", "-p", str(src / name), str(dest / name)], check=True)
 
 
+def worktree_snapshot(repo):
+    """This checkout's files as they are (tracked and untracked, not
+    ignored; uncommitted edits and an unfinished merge included) as a commit
+    no branch points at, so a job's scripts are the ones in the worktree."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
+        run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True,  # noqa: E731
+                                        text=True, env=env).stdout.strip()
+        run("read-tree", "HEAD")
+        run("add", "-A")
+        tree = run("write-tree")
+        return run("commit-tree", tree, "-p", "HEAD", "-m", "hw-batch: worktree snapshot for a job's scripts")
+
+
 def submit(args):
     dirs()
     repo = Path(git(Path.cwd(), "rev-parse", "--show-toplevel"))
@@ -197,7 +214,12 @@ def submit(args):
     while (ROOT / "queue" / f"{job_id}.json").exists() or (ROOT / "jobs" / job_id).exists():
         time.sleep(1)
         job_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{lane}-{args.kind}"
-    commit = git(repo, "rev-parse", args.commit or "HEAD")
+    if args.scripts == "worktree":
+        if args.commit or not args.bin_dir:
+            sys.exit("hw-batch: --scripts worktree takes the binaries from --bin-dir (not --commit)")
+        commit = worktree_snapshot(repo)
+    else:
+        commit = git(repo, "rev-parse", args.commit or "HEAD")
     job = {
         "id": job_id, "kind": args.kind, "lane": lane, "repo": str(repo),
         "branch": git(repo, "rev-parse", "--abbrev-ref", "HEAD"), "commit": commit,
@@ -208,6 +230,8 @@ def submit(args):
         "only": args.only or [], "scenario": args.scenario, "variant": args.variant,
         "runs": args.runs, "seconds": args.seconds, "hours": args.hours, "scale": args.scale,
         "args": args.args or "", "command": args.command or "", "gui": args.gui,
+        "scripts": (f"worktree snapshot {commit[:12]} of {git(repo, 'rev-parse', 'HEAD')[:12]} + uncommitted files"
+                    if args.scripts == "worktree" else f"commit {commit[:12]}"),
     }
     if args.kind == "soak":
         hours = args.hours or 1.0
@@ -350,13 +374,18 @@ def job_command(job, r, relay=None):
     out = f"{r}/out"
     e2e = (f"python3 scripts/e2e.py --daemon target/release/isocastd --work {r} "
            f"--report {out}/e2e-report.json")
-    bench = (f"python3 scripts/bench.py --work {r}/bench --daemon target/release/isocastd "
+    # The gate (#124) only where the job's own bench.py has it: a job queued
+    # on an older commit measures as before and says it wasn't gated.
+    bench = (f"G=; grep -q -- '\"--gate\"' scripts/bench.py && G=--gate; "
+             f"python3 scripts/bench.py --work {r}/bench --daemon target/release/isocastd "
              f"--cli target/release/isocast --compare target/base/isocastd "
              f"--scenario {job.get('scenario') or 'flagship-1080'} --runs {job.get('runs') or 3} "
-             f"--seconds {job.get('seconds') or 20} >{out}/bench.txt 2>&1; s=$?; cat {out}/bench.txt; "
-             f"cp {r}/bench/results.jsonl {out}/ 2>/dev/null; exit $s")
+             f"--seconds {job.get('seconds') or 20} $G{' ' + job['args'] if job.get('args') and kind == 'bench' else ''}"
+             f" >{out}/bench.txt 2>&1; s=$?; "
+             f"[ -z \"$G\" ] && echo 'bench: NOT GATED: the bench.py of this job predates --gate (#124)' >>{out}/bench.txt; "
+             f"cat {out}/bench.txt; cp {r}/bench/results.jsonl {r}/bench/gate.json {out}/ 2>/dev/null; exit $s")
     if kind == "e2e":
-        return e2e + "".join(f" --only {o}" for o in job["only"])
+        return e2e + "".join(f" --only {o}" for o in job["only"]) + (f" {job['args']}" if job.get("args") else "")
     if kind == "bench":
         return f"({bench})"
     if kind == "smoke":
@@ -483,7 +512,7 @@ class Relay:
 def summarize(job, out, status, seconds, host):
     lines = [f"# {job['id']}: {status}", "",
              f"- kind: {job['kind']}  lane: {job['lane']}  branch: {job['branch']}",
-             f"- commit: {job['commit'][:12]}" + (f"  base: {job['base_commit'][:12]}" if job.get("base_commit") else ""),
+             f"- commit: {job['commit'][:12]}" + (f"  scripts: {job['scripts']}" if job.get("scripts") else "") + (f"  base: {job['base_commit'][:12]}" if job.get("base_commit") else ""),
              f"- binaries: {('copied from ' + job['bin_from']) if job.get('bin_from') else 'built from the commit (scripts/remote-build.sh)'}",
              f"- host: {host or '-'}  took: {seconds / 60:.1f} min  exit: {job.get('exit')}  "
              f"finished: {time.strftime('%Y-%m-%d %H:%M')}"]
@@ -1005,6 +1034,9 @@ def main():
         s.add_argument("kind", choices=KINDS)
         s.add_argument("--bin-dir")
         s.add_argument("--commit")
+        s.add_argument("--scripts", choices=("commit", "worktree"), default="commit",
+                       help="where the job's scripts (e2e.py, bench.py...) come from: --commit (or HEAD), or "
+                            "this worktree as it is, uncommitted merge included (with --bin-dir)")
         s.add_argument("--base-bin-dir")
         s.add_argument("--base-commit")
         s.add_argument("--mac", choices=("any", *MACS), default="any")
@@ -1021,7 +1053,7 @@ def main():
         s.add_argument("--scale", type=float)
         s.add_argument("--profile", choices=("hosted", "hardware"), help="soak: scripts/soak.py --profile")
         s.add_argument("--receiver", choices=("local", *MACS), help="soak: stream to a receiver on this Mac")
-        s.add_argument("--args", help="extra arguments for drag-lag.py or soak.py")
+        s.add_argument("--args", help="extra arguments for drag-lag.py, soak.py, stress.py, bench.py or e2e.py")
         s.add_argument("--command", help="cmd: a shell command")
         s.add_argument("--gui", action="store_true", help="cmd: run in the desktop session")
         if name == "now":

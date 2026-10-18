@@ -4875,3 +4875,24 @@ One line per finished task, newest last.
   recorded extra canvases), Aitum vendor requests in the plugin's shapes,
   extra-canvas replay warm, engine canvas cap refused at apply. Gates, VM
   e2e 19/19, strict e2e 18/18. canvases/scratch/REPORT.md.
+- #124 frame-oracle harness (2026-10-18): e2e.py's oracle_* scenarios
+  check every picture and second marker of program, ISOs, vertical and
+  extra canvases, splits, pauses, scene switches, masks, replay saves,
+  edited MP4/MOV exports and FCPXML/xmeml/OTIO projects against an
+  independent model; --quick (VM 1.5 min) and --full; --selftest and
+  --pattern-oracle on Windows (exon-desk: NVENC + contract takes);
+  bench.py --gate A/B. Verified: quick and full pass on main (VM hosted
+  26 pass + the governor's hardware skip, strict M2-b 26/26); caught masks B1-B5 on a79c147c,
+  double warm on a68b6f3f, the governor restore on 7705e90c and an
+  injected off-by-one cut; A/B no-op PASS, 1.5 ms/frame slower FAIL.
+- #124 review fixes (2026-10-18): the oracle is strict (#126's pattern
+  only with --tolerate-issue-126, exact and isolated); edits, exports and
+  NLE projects checked against the oracle's own timeline model; export and
+  track inventories required; transitions modelled (fade share, slide
+  offsets); Windows runner exits on any failed stage; bench gate
+  INCONCLUSIVE on missing or unfinished measurements, zero-loss when the
+  base lost nothing, alternating order; old queued bench jobs run ungated;
+  merge checks use the merged scripts (`hw-batch --scripts worktree`).
+  Verified: each blocker's case fails in a real run or the rules
+  self-test; pre-fix commits and the injected cut still fail; quick and
+  full pass on main; A/A false-fail rate measured (REPORT).

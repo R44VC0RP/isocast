@@ -151,23 +151,34 @@ e2e)
   [ -f "$bin/isocastd" ] || { echo "vm: no $bin/isocastd (cargo build --release -p isocast-daemon)" >&2; exit 2; }
   running || { echo "vm: $VM isn't running; scripts/vm.sh up" >&2; exit 1; }
   mkdir -p "$out"
-  ssh_vm 'export PATH=/opt/homebrew/bin:$PATH; command -v ffprobe >/dev/null ||
-    HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg >/dev/null; mkdir -p ~/isocast-e2e/src/target/release'
+  # Each invocation its own folder in the VM: two runs at once (of two lanes
+  # or one) must not replace each other's sources, binaries or CLI, or
+  # delete each other's work (e2e.py's lock then runs them one after the
+  # other). Removed after its report and kept work come back.
+  lane="$(basename "$(pwd)")"; [ "$lane" = isocast ] && lane=main
+  dir="isocast-e2e/$lane/run-$(date +%Y%m%d-%H%M%S)-$$"
+  ssh_vm "export PATH=/opt/homebrew/bin:\$PATH; command -v ffprobe >/dev/null ||
+    HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg >/dev/null; mkdir -p ~/$dir/src/target/release"
   # Tracked files (e2e.py reads the daemon's Info.plist and the example
   # plugin) and the binary under test.
   git ls-files -z | perl -0 -ne 'chomp; print "$_\0" if -f $_' |
     rsync -a --from0 --files-from=- -e "ssh -i $KEY -o BatchMode=yes -o UserKnownHostsFile=$HOME_DIR/known_hosts" \
-      ./ "$VM_USER@$(ip):isocast-e2e/src/"
+      ./ "$VM_USER@$(ip):$dir/src/"
+  # The CLI too when it was built: the frame oracle reads scene feeds with it.
+  cli=; [ -f "$bin/isocast" ] && cli="$bin/isocast"
   rsync -a -e "ssh -i $KEY -o BatchMode=yes -o UserKnownHostsFile=$HOME_DIR/known_hosts" \
-    "$bin/isocastd" "$VM_USER@$(ip):isocast-e2e/src/target/release/"
+    "$bin/isocastd" $cli "$VM_USER@$(ip):$dir/src/target/release/"
   set +e
-  ssh_vm "export PATH=/opt/homebrew/bin:/usr/local/bin:\$PATH; cd ~/isocast-e2e/src && rm -rf ~/isocast-e2e/work &&
-    mkdir -p ~/isocast-e2e/work && python3 scripts/e2e.py --daemon target/release/isocastd \
-      --work ~/isocast-e2e/work --report ~/isocast-e2e/e2e-report.json $*"
+  ssh_vm "export PATH=/opt/homebrew/bin:/usr/local/bin:\$PATH; cd ~/$dir/src && mkdir -p ~/$dir/work && python3 scripts/e2e.py --daemon target/release/isocastd \
+      --work ~/$dir/work --report ~/$dir/e2e-report.json $*"
   status=$?
   set -e
   rsync -a -e "ssh -i $KEY -o BatchMode=yes -o UserKnownHostsFile=$HOME_DIR/known_hosts" \
-    "$VM_USER@$(ip):isocast-e2e/e2e-report.json" "$out/" || true
+    "$VM_USER@$(ip):$dir/e2e-report.json" "$out/" || true
+  # Kept evidence (--keep, --keep-failures: the oracle's contact sheets).
+  rsync -a -e "ssh -i $KEY -o BatchMode=yes -o UserKnownHostsFile=$HOME_DIR/known_hosts" \
+    "$VM_USER@$(ip):$dir/work/" "$out/work/" 2>/dev/null || true
+  ssh_vm "rm -rf ~/$dir" || true
   echo "vm: e2e exit $status; report $out/e2e-report.json"
   exit "$status"
   ;;
