@@ -2158,6 +2158,25 @@ impl Daemon {
             code: RpcError::FAILED,
             message,
         })?;
+        if params.options.fps.is_none()
+            && this_machine().is_some_and(|machine| init::starting_fps(machine) == 30)
+            && made.setup.canvas.fps > 30
+        {
+            made = init::init(
+                &devices,
+                &init::InitOptions {
+                    fps: Some(30),
+                    ..params.options.clone()
+                },
+            )
+            .map_err(|message| RpcError {
+                code: RpcError::FAILED,
+                message,
+            })?;
+            made.notes.push(
+                "Starts at 30 fps on machines with at most 8 CPU cores or 8 GB memory, leaving room for ISO files and streaming. An explicit fps choice is kept; this is a starting point, not a guarantee for every source or outside workload".into(),
+            );
+        }
         if !params.apply {
             return Ok(made);
         }

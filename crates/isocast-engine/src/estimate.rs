@@ -101,6 +101,8 @@ pub struct Chip {
     pub overload_iso_efficiency: f64,
     /// Bitrate-limited live H.264 has a different cost from a quality file.
     pub stream_h264_cost: f64,
+    /// Live H.264's per-picture cost must not inherit a recording-only fit.
+    pub stream_frame_overhead: f64,
     pub basis: String,
 }
 
@@ -117,6 +119,7 @@ pub fn chip(name: &str) -> Chip {
             frame_overhead: row.frame_overhead_pixels,
             overload_iso_efficiency: row.overload_iso_efficiency.unwrap_or(1.0),
             stream_h264_cost: row.stream_h264_cost.unwrap_or(table.codec_cost.h264),
+            stream_frame_overhead: row.frame_overhead_pixels,
             basis: row.basis.clone(),
         };
     }
@@ -142,6 +145,7 @@ pub fn chip(name: &str) -> Chip {
             frame_overhead: 0.0,
             overload_iso_efficiency: 1.0,
             stream_h264_cost: table.codec_cost.h264,
+            stream_frame_overhead: 0.0,
             basis: format!(
                 "assumed: {engines} encode engine(s) as on other {} chips, each as fast as \
                  measured on other {generation} chips; not measured on this chip",
@@ -162,6 +166,7 @@ pub fn chip(name: &str) -> Chip {
                 frame_overhead: 0.0,
                 overload_iso_efficiency: 1.0,
                 stream_h264_cost: table.codec_cost.h264,
+                stream_frame_overhead: 0.0,
                 basis: format!(
                     "assumed: a newer chip than any measured, taken to be as fast as the newest \
                      measured generation, with {engines} encode engine(s)"
@@ -175,6 +180,7 @@ pub fn chip(name: &str) -> Chip {
             frame_overhead: 0.0,
             overload_iso_efficiency: 1.0,
             stream_h264_cost: table.codec_cost.h264,
+            stream_frame_overhead: 0.0,
             basis: "assumed: a chip with no measured data, judged cautiously".into(),
         },
     }
@@ -227,17 +233,29 @@ fn calibrated_chip(inputs: &Inputs) -> Chip {
                     .value()
     };
     let recording = &inputs.setup.recording;
-    if recording.program.enabled && !covered(&recording.program.encoder)
+    let format_covered = |w: u32, h: u32, fps: u32| {
+        w.max(h) <= 3840 && u64::from(w) * u64::from(h) <= 3840 * 2160 && fps <= 60
+    };
+    let program_covered = |setup: &Setup| {
+        let program = &setup.recording.program;
+        let (w, h) = program.size(&setup.canvas);
+        !program.enabled || covered(&program.encoder) && format_covered(w, h, setup.canvas.fps)
+    };
+    if !program_covered(inputs.setup)
         || recording.iso.enabled
             && !recording.iso.sources.is_empty()
             && !covered(&recording.iso.encoder)
-        || inputs.setup.canvas.fps > 60
-        || inputs.setup.canvas.width.max(inputs.setup.canvas.height) > 3840
-        || !inputs.setup.extra_canvas_ids().is_empty()
-        || recording.iso.sources.iter().any(|id| {
-            let (w, h, fps, _) = iso_format(inputs.setup, inputs.formats, id);
-            w.max(h) > 3840 || fps > 60
-        })
+        || inputs
+            .setup
+            .extra_canvas_ids()
+            .into_iter()
+            .filter_map(|canvas| inputs.setup.for_canvas(canvas))
+            .any(|setup| !program_covered(&setup))
+        || recording.iso.enabled
+            && recording.iso.sources.iter().any(|id| {
+                let (w, h, fps, _) = iso_format(inputs.setup, inputs.formats, id);
+                !format_covered(w, h, fps)
+            })
     {
         return chip;
     }
@@ -251,8 +269,8 @@ fn calibrated_chip(inputs: &Inputs) -> Chip {
                     && e.width == width
                     && e.fps == fps
                     && e.sessions == sessions
-                    && e.frames >= 8 * u64::from(sessions)
-                    && e.seconds >= 0.5
+                    && e.certifies_fit()
+                    && e.backend == "videotoolbox"
             })
             .map(|e| e.frames_per_second)
             .min_by(f64::total_cmp)
@@ -284,6 +302,7 @@ fn calibrated_chip(inputs: &Inputs) -> Chip {
     // A recording-codec test is not a live H.264 test. Keep the latter's
     // existing normalized cost rather than pretending it was measured.
     chip.stream_h264_cost *= rate / chip.rate;
+    chip.stream_frame_overhead *= rate / chip.rate;
     chip.rate = rate;
     chip.frame_overhead = overhead;
     chip.basis = format!(
@@ -440,12 +459,12 @@ fn judge(
             codec,
             protected: kind != OutputKind::Iso,
             pixels_per_second: codec_cost(codec).map_or(0.0, |cost| {
-                let cost = if kind == OutputKind::Stream {
-                    chip.stream_h264_cost
+                let (cost, overhead) = if kind == OutputKind::Stream {
+                    (chip.stream_h264_cost, chip.stream_frame_overhead)
                 } else {
-                    cost
+                    (cost, chip.frame_overhead)
                 };
-                pixels * cost + f64::from(fps) * chip.frame_overhead
+                pixels * cost + f64::from(fps) * overhead
             }),
             assumed,
         });
@@ -1475,5 +1494,93 @@ mod tests {
         };
         let admitted = estimate(&inputs, Some("cam2")).unwrap().admission.unwrap();
         assert!(admitted.on && !admitted.as_is, "{admitted:?}");
+    }
+
+    #[test]
+    fn calibration_covers_canvas_files_without_changing_assumed_stream_cost() {
+        use isocast_protocol::machine::{MEASUREMENT_VERSION, MachineProfile, PROFILE_SCHEMA};
+        let m = machine("Apple M2");
+        let cells = [
+            (1920, 1080, 60, 2, 200),
+            (1920, 1080, 60, 4, 240),
+            (3840, 2160, 30, 4, 100),
+        ]
+        .into_iter()
+        .map(|(width, height, fps, sessions, frames)| {
+            json!({ "resource": "recording_writer", "backend": "videotoolbox",
+                    "evidence": "fit", "rate_control": "constant_quality", "quality": 70,
+                    "codec": "hevc", "bit_depth": 8, "width": width, "height": height,
+                    "fps": fps, "sessions": sessions, "frames": frames, "seconds": 1.0,
+                    "frames_per_second": frames })
+        })
+        .collect::<Vec<_>>();
+        let profile: MachineProfile = serde_json::from_value(json!({
+            "schema_version": PROFILE_SCHEMA, "measurement_version": MEASUREMENT_VERSION,
+            "app_version": env!("CARGO_PKG_VERSION"), "app_build": "test", "measured_at": "test",
+            "machine": m, "seconds": 3.0, "encoders": cells, "graphics": [], "notes": [],
+            "skipped": [], "complete": true
+        }))
+        .unwrap();
+        let setup = soak(&[("screen", 1920, 1080)], true);
+        let mut value = serde_json::to_value(&setup).unwrap();
+        value["canvases"] = json!([{ "id": "shorts", "width": 1080, "height": 1920,
+            "fps": 30, "recording": { "encoder": { "codec": "hevc" } } }]);
+        let setup = Setup::from_value(value.clone()).unwrap();
+        let none = |_: &str| None;
+        let inputs = Inputs {
+            machine: &m,
+            setup: &setup,
+            formats: &none,
+            streaming: [true; 2],
+            memory: None,
+            recording: false,
+            profile: Some(&profile),
+        };
+        let measured = estimate(&inputs, None).unwrap();
+        let fallback = estimate(
+            &Inputs {
+                profile: None,
+                ..inputs
+            },
+            None,
+        )
+        .unwrap();
+        assert!(measured.basis.starts_with("measured:"));
+        let shorts = measured
+            .outputs
+            .iter()
+            .find(|o| o.output == "shorts-program")
+            .unwrap();
+        assert_eq!((shorts.width, shorts.height, shorts.fps), (1080, 1920, 30));
+        let stream_cost = |e: &CapacityEstimate| {
+            e.outputs
+                .iter()
+                .find(|o| o.output == "stream")
+                .unwrap()
+                .pixels_per_second
+                / e.engine_pixels_per_second
+        };
+        assert!((stream_cost(&measured) - stream_cost(&fallback)).abs() < 1e-10);
+        // An uncovered file on any canvas retains the table, even though
+        // the main canvas itself is covered. Oversized file overrides count.
+        for encoder in [
+            json!({ "codec": "h264" }),
+            json!({ "codec": "hevc", "bit_depth": 10 }),
+        ] {
+            value["canvases"][0]["recording"]["encoder"] = encoder;
+            let setup = Setup::from_value(value.clone()).unwrap();
+            assert!(
+                !estimate(
+                    &Inputs {
+                        setup: &setup,
+                        ..inputs
+                    },
+                    None
+                )
+                .unwrap()
+                .basis
+                .starts_with("measured:")
+            );
+        }
     }
 }

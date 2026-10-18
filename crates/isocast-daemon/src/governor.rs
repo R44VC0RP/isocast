@@ -127,7 +127,9 @@ pub(super) fn start(daemon: &Arc<Daemon>) {
                         }
                         pressure |= crate::platform::NativePlatform
                             .governor_headroom()
-                            .is_some_and(|sample| sample.encoder_threatened);
+                            .is_some_and(|sample| {
+                                sample.encoder_threatened || sample.memory_pressed()
+                            });
                     }
                 } else if last_activity.is_some_and(Activity::active) {
                     // Clear stale native warning/health once, not on idle ticks.

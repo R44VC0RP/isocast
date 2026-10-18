@@ -5,6 +5,29 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-18 (#110 self-tuning-2 handoff): uncommitted on063a21a5. Gates242
+  pass; the full strict suite ran once under CPU4+Metal+2GiB resident memory,
+  18/18 zero-loss. M2-b's three interleaved flagship1080 A/B pairs lose no
+  frames/audio (daemon CPU median9.8% both); a288 s strict30fps soak has21
+  decoded files,8436 frames per role, zero losses/repeats,8601 stream frames
+  and both crash checks pass. These M2s have24GB, not8GB. Actual kernel
+  memory-pressure samples stayed normal; scoped per-daemon injection separately
+  proves warning/critical, pin/ISO-consent and30s-step recovery. No new M5 run.
+  Scratch REPORT.md lists every job, hashes and failures honestly. Formal
+  Tier-1 review failed before reading code three times (Endpoint unavailable);
+  no approval, commit or GitHub write. T.1b.1/T.3a/T.4a are ready for review,
+  not completion of full T.1b/T.3/T.4 or #110.
+- 2026-10-18 (#110 qualification): four calibrations take22.26–22.86s,
+  including outside CPU load. Every supported ProRes variant, live CBR H.264,
+  UHD60 HEVC10 and three full fit cells are covered;19–21/24 cells total,
+  skipped diagnostics explicit. Multi-canvas and low-end fitting files lose
+  nothing. M2 overloaded ISO loss44.39–53.67% vs measured53.09%/table52.62%:
+  no improved percentage-accuracy claim. New-only init/blank profiles choose30;
+  explicit/copy60, pins and no ISO consent survive restarts. Late-canvas floor
+  now joins at25%; native rollback restores real properties even when numbers
+  equal the last acknowledgement. Same-canvas multi-hub refusal remains
+  canvas-wide (verified one refusal, sibling restored, separate canvas adapts).
+
 - 2026-10-18 (#110 review fixes, current): uncommitted on7705e90. The
   governor NEVER thins ISO implicitly: `governor.allow_iso_thinning` is false
   by default; explicit opt-in permits it, pins still override it, and opt-out
@@ -1825,6 +1848,38 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-18 (#110 native rollback): the scoped VT-property experiment
+  `20261018-085056-self-tuning-2-cmd` reproduced a real uncertainty bug:
+  ExpectedFrameRate accepted 30, AverageBitRate and its rollback both failed,
+  the FPS rollback was skipped, and rejoining a 60-fps monitor cleared the
+  error without making any native call. The 19-second program remained whole.
+  Native setters now attempt both independent rollbacks, retain an uncertain
+  state, and force a full property write when restoring even the last
+  acknowledged rate. Preview/stream owners don't mistake that numeric target
+  for confirmed native state. Repeated identical refusals stay suppressed.
+  This is injected per-process refusal, not evidence of a spontaneous driver
+  failure. Scratch REPORT.md carries after-verification and remaining hubs.
+
+- 2026-10-18 (#110, self-tuning-2): new daemon-generated setups and blank
+  profiles start at 30 fps when physical memory is at most 8 GB or the
+  machine has at most 8 CPU cores. This is a portable conservative starting
+  point, not a backend/session-capacity claim. Explicit initialization fps,
+  imports, copies and existing profiles are unchanged; the ordinary governor
+  still never edits intended settings or implicitly enables ISO thinning.
+  Base AWS M2s have **24 GB**, not 8 GB: contention runs there cannot certify
+  an actual 8 GB machine. NVENC/QSV/AMF/software qualification stays with the
+  Windows lane. No saved M5 Max machine profile was present beside Ryan's
+  default setup; its existing measured per-chip row is retained, not replaced
+  by a new run on his Mac.
+- 2026-10-18 (#110, self-tuning-2): measured HEVC coverage checks every
+  recorded canvas's actual file dimensions/depth/quality/rate, instead of
+  rejecting all setups with extra canvases. Live H.264 retains BOTH its
+  table pixel cost and its table per-picture cost: a recording-only fit must
+  not silently change the normalized stream estimate. Other codec/depth
+  measurements remain diagnostic until their aggregate-resource fit is
+  qualified. Reports identify unmeasured cells rather than treating them as
+  free. Runtime qualification is recorded in this lane's scratch REPORT.md.
 
 - 2026-10-18 (#84 review fixes): **Governor per canvas; inline ids.**
   The live governor (#110) classifies stream slots by canvas
@@ -6531,6 +6586,16 @@ each section. Delete entries that stop being true.
   starts at 900 because the window's minimum width is 900.
 
 ## Gotchas
+
+- 2026-10-18 (#110 experiments): `e2e.Engine` re-signs its copied daemon in
+  a bundle, so its whole-file SHA differs from the source binary. Preserve
+  original bytes before A/B and assert those hashes; don't silently waive a
+  failed checksum. One weak-soak job refused before workload startup because
+  `.hw-job` was absent after rapidly handing the Mac lock between queued
+  jobs; the serial retry passed. The marker's check/remove is not atomic
+  (`release_builds`), but no orchestrator change was made in this lane. TERM
+  must raise KeyboardInterrupt in the weak wrapper: InterruptedError is an
+  OSError, which a best-effort ps reader can swallow and incorrectly PASS.
 
 - 2026-10-17 (#105 W.1e): NPFS refuses WAIT→NOWAIT with ERROR_PIPE_BUSY
   while this endpoint has buffered outgoing bytes (even an 8-byte release),

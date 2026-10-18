@@ -295,9 +295,10 @@ fn run<P: Platform>(
         // keyframe. One it refuses isn't fatal: it keeps its last rate
         // while frames are still picked at the new one, and that rate
         // isn't asked again until the request changes.
-        if encoding.fps == fps && encoding.refused.take().is_some() {
+        let uncertain = encoding.encoder.rate_uncertain();
+        if encoding.fps == fps && !uncertain && encoding.refused.take().is_some() {
             encoding.notice.result(None);
-        } else if encoding.fps != fps && encoding.refused != Some(fps) {
+        } else if (encoding.fps != fps || uncertain) && encoding.refused != Some(fps) {
             let bitrate = bitrate_kbps(encoding.output, fps);
             match encoding.encoder.set_rate(fps, bitrate) {
                 Ok(()) => {

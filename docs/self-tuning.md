@@ -1,8 +1,11 @@
 # Self-tuning (#110)
 
 This is the target design. T.1a's implemented coverage and measured limits
-are in the lane's scratch `REPORT.md`; T.1b remains open. Calibration currently measures HEVC,
-H.264 and ProRes 422, not every ProRes variant or live rate-control mode.
+are in the lane's scratch `REPORT.md`; T.1b remains open. Calibration prioritizes
+the three concurrent HEVC fit cells, 4K60 HEVC 10-bit and live constant-bitrate
+H.264, then diagnostic recording codecs including all supported ProRes
+variants. The deadline may skip diagnostic cells: the profile records each
+one and its reason. Live H.264 is diagnostic, not a fitted resource-pool model.
 Automatic runs belong only to the default daemon: setting `ISOCAST_SOCKET`
 or `ISOCAST_SETUP` disables them unless `ISOCAST_CALIBRATION=on` opts in.
 The snapshot, visual/layout, e2e, benchmark, stress, soak and motion harnesses
@@ -104,8 +107,26 @@ profile-aware estimate, including its tune memory. A file's `setup check`
 connects only to an already running daemon: when none is reachable it says
 capacity was **not checked**, without starting an engine; file validation
 still completes locally. Calibration alone
-never applies a setup patch. New-machine behavior is unchanged until a valid
-profile exists; low-end defaults are T.3, not an unreviewed T.1 side effect.
+never applies a setup patch. Missing/invalid profiles preserve table-based
+capacity estimates. New-setup defaults are a separate T.3 policy below.
+
+## New setups and pins (T.3)
+
+The daemon starts new `setup init` setups and newly created blank profiles at
+30 fps on machines with at most eight CPU cores or eight GB of physical RAM.
+The initialized canvas remains 1080p unless a size was explicitly supplied;
+a display below 30 Hz keeps its slower default. An explicit `setup init`
+fps wins. Existing setups, imported profiles and copies are never changed.
+The heuristic uses portable machine facts, not a guessed GPU vendor/session
+limit. It leaves more headroom on the measured base M2, but is not proof that
+every source, eight-GB machine or software encoder will keep up. Capacity
+checks and explicit Optimize still evaluate the actual workload.
+
+Persistent `governor.pins` are the per-setting opt-out for the supported
+runtime controls, listed below. Selecting Automatic removes the relevant
+pin; pinning restores its requested value where the backend accepts that
+restoration. Refusal remains visible. No default enables ISO thinning and
+no pin disables the native hardware safety controller.
 
 Real sessions may later refine conservative bounds only when their workload,
 output counters and outside-load state are known. A clean short take proves
@@ -193,12 +214,29 @@ using its last acknowledged encoder settings while frame selection follows
 the requested ceiling. An unchanged refused request is not retried per frame.
 Errors belong to the affected monitor: another healthy monitor cannot clear
 them, and closing that feed removes its error.
+If native rollback itself fails, the backend retains an uncertainty flag.
+Returning to the last acknowledged rate still makes a full native request;
+the preview cannot silently clear the warning by comparing equal numbers.
+FPS rollback is attempted even when bitrate rollback fails.
 Restore one step after 30 seconds below 70% measured budget with no losses;
 wait 30 seconds again before restoring another. A failed restoration backs
 off for 2 minutes. These are initial values to qualify, not a zero-drop
 promise against uncooperative external encoders.
 Upload-only pressure does not block recovery of video-work ceilings. The
 native fast admission share remains authoritative beneath every ceiling.
+
+The active-output sampler also reads macOS's kernel VM-pressure level.
+Warning/critical memory pressure wakes policy, permits preview reduction
+and blocks restoration; ISO intervention still requires consent. This is
+the OS pressure state, not a threshold on free RAM. Unsupported/read failure
+is unknown. No memory syscall is added to media callbacks or idle ticks.
+Rate ceilings reduce work/churn; they do not promise to release resident
+pools or solve pressure from other applications.
+
+A newly congested canvas joins the stream bitrate targets even when another
+has reached the shared 25% floor. This does not make independent bitrate
+hubs on one canvas independently recoverable: acknowledgement/failure is
+still canvas-scoped and requires further qualification.
 
 Intentional admission refusals are attributed by the writer/encoder that
 made them, not by inspecting the ceiling when delayed counters arrive.
@@ -213,8 +251,8 @@ a claim that the daemon has no timers or CPU cost.
 Every step emits old/new values, reason, scope and restoration state, shown
 in status and a plain-language app notice. Pins and `allow_iso_thinning`
 are explicit fields in the recording profile, persist across launches, and
-pins prohibit automatic changes to those fields. Manual edits pin the edited setting until the user
-chooses Automatic. Never silently overwrite a pinned setting; explain when
+pins prohibit automatic changes to those fields. Pins are explicit; a manual
+edit does not currently add one implicitly. Never silently overwrite a pinned setting; explain when
 the remaining load cannot fit. Governor state is runtime state, separate
 from the saved user's intended setup.
 

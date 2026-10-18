@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use isocast_protocol::machine::{
-    EncoderMeasurement, GraphicsMeasurement, MEASUREMENT_VERSION, MachineProfile, PROFILE_SCHEMA,
+    EncoderMeasurement, EncoderResource, Evidence, FIT_MIN_SECONDS, GraphicsMeasurement,
+    MEASUREMENT_VERSION, MachineProfile, PROFILE_SCHEMA, RateControlMode, SkippedMeasurement,
 };
 use isocast_protocol::{Codec, Container, Crop, Encoder, EncoderQuality, QualityPreset};
 
@@ -26,7 +27,10 @@ use crate::gpu::{FrameImporter, Gpu, GpuFrame};
 use crate::render::{Layer, Rect, Renderer};
 use crate::tune::Texture;
 use crate::ycbcr::ToYCbCr;
-use crate::{FileWriter, FramePool, Platform, Time, VideoTrackSpec, WriterSpec, space};
+use crate::{
+    FileWriter, FramePool, LiveVideoSpec, Platform, Time, VideoEncoder, VideoTrackSpec, WriterSpec,
+    space,
+};
 
 /// When the measurement stops starting new work, from its start. The
 /// daemon's own 30-second limit (startup and teardown included) is the
@@ -34,6 +38,9 @@ use crate::{FileWriter, FramePool, Platform, Time, VideoTrackSpec, WriterSpec, s
 const DEADLINE: Duration = Duration::from_secs(25);
 /// Slack kept below the deadline when deciding whether a cell still fits.
 const SLACK: Duration = Duration::from_millis(500);
+/// Further time diagnostic cells leave unused, so a slow last cell, frame
+/// release and the profile's write stay well inside the helper's watchdog.
+const DIAGNOSTIC_RESERVE: Duration = Duration::from_millis(1000);
 
 /// Each encoder session encodes this long before its timing starts, so
 /// session start-up and the first pictures' latency aren't counted.
@@ -57,6 +64,12 @@ const MAX_FILE_BYTES: f64 = 96.0 * 1e6;
 const MIN_FRAMES: u64 = 8;
 /// How long a session may refuse the same frame before the cell fails.
 const ACCEPT_STALL: Duration = Duration::from_secs(2);
+/// The live H.264 cell's target: the stream default (6000 kb/s constant
+/// bitrate, a keyframe every 2 s).
+const LIVE_BITRATE_KBPS: u32 = 6000;
+const LIVE_KEYFRAME_SECONDS: u32 = 2;
+/// Longest kept failure reason, so a native error can't bloat the profile.
+const MAX_REASON: usize = 300;
 /// Free space the scratch volume must keep beyond what the measurement
 /// writes.
 const FREE_RESERVE: u64 = 2_000_000_000;
@@ -126,57 +139,81 @@ pub fn measure<P: Platform>(platform: &P, scratch: &Path) -> Result<MachineProfi
         }
     };
 
+    let cells = cells();
+    // The GPU comes first but never takes the required encoder cells' time.
+    let required_time = cells
+        .iter()
+        .filter(|cell| cell.required())
+        .map(Cell::planned)
+        .sum::<Duration>()
+        + SLACK;
     let mut cycles: Cycles<P::Frame> = Vec::new();
-    let graphics = measure_graphics(platform, &mut cycles, deadline, &mut notes);
+    let graphics = measure_graphics(platform, &mut cycles, deadline, required_time, &mut notes);
 
-    notes.push(
-        "encoders: synthetic camera-like BGRA frames, high quality preset at constant quality; \
-         completed-picture counter deltas over a steady interval after a 0.25 s warm-up; \
-         files are finished and checked separately, so queued submissions and file-finalization \
-         latency do not count as encoder throughput"
-            .into(),
-    );
+    notes.push(format!(
+        "encoders ({backend}): synthetic camera-like BGRA frames; completed-picture counter \
+         deltas over a steady interval after a 0.25 s warm-up. Recording cells use the file \
+         writer at the high preset's constant quality; files are finished and checked \
+         separately, so queued submissions and finalization latency do not count. The live \
+         cell uses the stream's real-time H.264 encoder at {LIVE_BITRATE_KBPS} kb/s constant \
+         bitrate, counting pictures it returned. Required cells (the capacity fit's concurrent \
+         HEVC cells, which need full {FIT_MIN_SECONDS} s windows, then 4K60 HEVC 10-bit and \
+         live H.264) run before diagnostic cells; only fit cells may back capacity",
+        backend = backend()
+    ));
     let mut encoders = Vec::new();
-    let mut unmeasured = Vec::new();
-    // Codec and depth pairs whose first (smallest) session couldn't start.
-    let mut unusable: Vec<(Codec, u8)> = Vec::new();
+    let mut skipped = Vec::new();
+    // Paths, codecs and depths whose single session couldn't start.
+    let mut unusable = Vec::new();
     let prores = machine
         .hardware_encoders
         .iter()
         .any(|name| name.contains("ProRes"));
-    for (index, cell) in cells().iter().enumerate() {
-        let label = cell.label();
-        if !matches!(cell.codec, Codec::H264 | Codec::Hevc) && !prores {
-            unmeasured.push(format!("{label} (no hardware ProRes encoder listed)"));
+    for (index, cell) in cells.iter().enumerate() {
+        let mut skip = |reason: String| {
+            skipped.push(SkippedMeasurement {
+                label: cell.label(),
+                required: cell.required(),
+                reason: truncate(reason),
+            })
+        };
+        if cell.is_prores() && !prores {
+            skip("no hardware ProRes encoder listed".into());
             continue;
         }
-        if unusable.contains(&(cell.codec, cell.bit_depth)) {
-            unmeasured.push(format!("{label} (its codec's first session failed)"));
+        if unusable.contains(&cell.family()) {
+            skip("a session of the same path, codec and depth could not start".into());
             continue;
         }
-        if Instant::now() + cell.planned() + SLACK > deadline {
-            unmeasured.push(format!("{label} (out of time)"));
+        let reserve = if cell.required() {
+            SLACK
+        } else {
+            SLACK + DIAGNOSTIC_RESERVE
+        };
+        if Instant::now() + cell.planned() + reserve > deadline {
+            skip("out of time: the 30-second calibration limit".into());
             continue;
         }
         let frames = match frames_for(platform, &mut cycles, (cell.width, cell.height)) {
             Ok(frames) => frames,
             Err(err) => {
-                unmeasured.push(format!("{label} (no synthetic frames: {err})"));
+                skip(format!("no synthetic frames: {err}"));
                 continue;
             }
         };
-        match encode_cell(platform, cell, frames, scratch, index) {
+        let result = match cell.resource {
+            EncoderResource::RecordingWriter => encode_cell(platform, cell, frames, scratch, index),
+            EncoderResource::LiveEncoder => live_cell(platform, cell, frames),
+        };
+        match result {
             Ok(measurement) => encoders.push(measurement),
             Err(err) => {
-                if cell.sessions == 1 && (cell.width, cell.height) == HD && cell.fps == 30 {
-                    unusable.push((cell.codec, cell.bit_depth));
+                if cell.sessions == 1 && err.downcast_ref::<NotStarted>().is_some() {
+                    unusable.push(cell.family());
                 }
-                notes.push(format!("{label}: not measured: {err:#}"));
+                skip(format!("failed: {err:#}"));
             }
         }
-    }
-    if !unmeasured.is_empty() {
-        notes.push(format!("not measured: {}", unmeasured.join("; ")));
     }
     drop(cycles);
 
@@ -192,20 +229,45 @@ pub fn measure<P: Platform>(platform: &P, scratch: &Path) -> Result<MachineProfi
         graphics,
         memory_copy_bytes_per_second,
         disk_write_bytes_per_second,
+        complete: skipped.is_empty(),
+        skipped,
         notes,
     })
 }
 
-/// One encoder measurement to make: `sessions` concurrent files of one
-/// codec, depth, size and rate.
+/// One encoder measurement to make: `sessions` concurrent sessions of one
+/// path, codec, depth, size and rate.
 #[derive(Debug, Clone, Copy)]
 struct Cell {
+    resource: EncoderResource,
+    priority: Priority,
     codec: Codec,
     bit_depth: u8,
     width: u32,
     height: u32,
     fps: u32,
     sessions: u32,
+}
+
+/// The order cells run in: every required cell before any diagnostic one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Priority {
+    /// A concurrent HEVC cell the capacity fit uses (full windows required).
+    Fit,
+    /// Required coverage that is still only an observation.
+    Required,
+    Diagnostic,
+}
+
+/// A session of this path, codec and depth could not start; later cells of
+/// the same family are skipped rather than retried.
+#[derive(Debug)]
+struct NotStarted;
+
+impl std::fmt::Display for NotStarted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the encoder session could not start")
+    }
 }
 
 impl Cell {
@@ -215,15 +277,76 @@ impl Cell {
         } else {
             String::new()
         };
+        // ProRes ignores bit_depth (always 10 bits or more).
+        let depth = if self.is_prores() {
+            String::new()
+        } else {
+            format!(" {}-bit", self.bit_depth)
+        };
+        let (path, rate) = match self.resource {
+            EncoderResource::RecordingWriter => {
+                ("recording", format!("constant quality {}", self.quality()))
+            }
+            EncoderResource::LiveEncoder => {
+                ("live", format!("{LIVE_BITRATE_KBPS} kb/s constant bitrate"))
+            }
+        };
         format!(
-            "{:?} {}-bit {}×{} {} fps{sessions}",
-            self.codec, self.bit_depth, self.width, self.height, self.fps
+            "{path} {:?}{depth} {}×{} {} fps{sessions}, {rate}",
+            self.codec, self.width, self.height, self.fps
         )
+    }
+
+    fn required(&self) -> bool {
+        self.priority != Priority::Diagnostic
+    }
+
+    fn is_prores(&self) -> bool {
+        !matches!(self.codec, Codec::H264 | Codec::Hevc)
+    }
+
+    fn family(&self) -> (EncoderResource, Codec, u8) {
+        (self.resource, self.codec, self.bit_depth)
+    }
+
+    fn quality(&self) -> u8 {
+        EncoderQuality::Preset(QualityPreset::High).value()
     }
 
     /// How long the cell is planned to take, for the deadline.
     fn planned(&self) -> Duration {
         WARM_UP + WINDOW + OPEN_AND_FINISH + SESSION_GAP * self.sessions
+    }
+
+    /// Its labels for a measurement: only fit cells are fit evidence.
+    fn measurement(&self, frames: u64, seconds: f64, dropped: Option<u64>) -> EncoderMeasurement {
+        let recording = self.resource == EncoderResource::RecordingWriter;
+        EncoderMeasurement {
+            resource: self.resource,
+            backend: backend().into(),
+            evidence: if self.priority == Priority::Fit {
+                Evidence::Fit
+            } else {
+                Evidence::Diagnostic
+            },
+            rate_control: if recording {
+                RateControlMode::ConstantQuality
+            } else {
+                RateControlMode::ConstantBitrate
+            },
+            quality: recording.then(|| self.quality()),
+            bitrate_kbps: (!recording).then_some(LIVE_BITRATE_KBPS),
+            codec: self.codec,
+            bit_depth: self.bit_depth,
+            width: self.width,
+            height: self.height,
+            fps: self.fps,
+            sessions: self.sessions,
+            frames,
+            seconds,
+            frames_per_second: frames as f64 / seconds,
+            dropped,
+        }
     }
 
     fn encoder(&self) -> Encoder {
@@ -269,11 +392,37 @@ impl Cell {
     }
 }
 
-/// The encoder cells, most useful first, so a run that runs out of time
-/// keeps what matters: the concurrent HEVC cells used by the fit (including
-/// its two-session cross-check), then diagnostic codec/size/rate cells.
+/// The native encoder backend measurements name. The platform trait has
+/// no backend identity yet; macOS is the only calibration backend.
+fn backend() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "videotoolbox"
+    } else {
+        "unknown"
+    }
+}
+
+fn truncate(mut reason: String) -> String {
+    if reason.len() > MAX_REASON {
+        let mut end = MAX_REASON;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+        reason.push('…');
+    }
+    reason
+}
+
+/// The encoder cells in the order they run, so a run that runs out of time
+/// keeps what matters and says which cells it skipped: the concurrent HEVC
+/// cells the fit uses (including its two-session cross-check), then the
+/// other required cells (4K60 HEVC 10-bit, live H.264), then diagnostic
+/// cells, one of each codec and ProRes variant first.
 fn cells() -> Vec<Cell> {
-    let single = |codec, bit_depth, (width, height): (u32, u32), fps| Cell {
+    let cell = |priority, resource, codec, bit_depth, (width, height): (u32, u32), fps| Cell {
+        resource,
+        priority,
         codec,
         bit_depth,
         width,
@@ -281,26 +430,59 @@ fn cells() -> Vec<Cell> {
         fps,
         sessions: 1,
     };
-    let sizes = [(HD, 30), (HD, 60), (UHD, 30), (UHD, 60)];
+    let recording = |priority, codec, bit_depth, size, fps| {
+        cell(
+            priority,
+            EncoderResource::RecordingWriter,
+            codec,
+            bit_depth,
+            size,
+            fps,
+        )
+    };
+    let diagnostic =
+        |codec, bit_depth, size, fps| recording(Priority::Diagnostic, codec, bit_depth, size, fps);
     let mut cells = Vec::new();
     for (size, fps, sessions) in [(HD, 60, 2), (HD, 60, 4), (UHD, 30, 4)] {
         cells.push(Cell {
             sessions,
-            ..single(Codec::Hevc, 8, size, fps)
+            ..recording(Priority::Fit, Codec::Hevc, 8, size, fps)
         });
     }
-    for (codec, bit_depth) in [(Codec::Hevc, 8), (Codec::H264, 8)] {
-        for (size, fps) in sizes {
-            cells.push(single(codec, bit_depth, size, fps));
-        }
-    }
+    cells.push(recording(Priority::Required, Codec::Hevc, 10, UHD, 60));
+    cells.push(cell(
+        Priority::Required,
+        EncoderResource::LiveEncoder,
+        Codec::H264,
+        8,
+        HD,
+        60,
+    ));
     // ProRes ignores bit_depth (always 10 bits or more); 8 as in setups.
-    for (size, fps) in sizes {
-        cells.push(single(Codec::Prores422, 8, size, fps));
+    for (codec, bit_depth) in [
+        (Codec::H264, 8),
+        (Codec::Prores422, 8),
+        (Codec::Prores422Hq, 8),
+        (Codec::Prores4444, 8),
+        (Codec::Prores422Lt, 8),
+        (Codec::Prores422Proxy, 8),
+        (Codec::Hevc, 10),
+    ] {
+        cells.push(diagnostic(codec, bit_depth, HD, 60));
     }
-    for (size, fps) in sizes {
-        cells.push(single(Codec::Hevc, 10, size, fps));
+    for (codec, bit_depth) in [(Codec::Hevc, 8), (Codec::H264, 8), (Codec::Prores422, 8)] {
+        cells.push(diagnostic(codec, bit_depth, UHD, 60));
     }
+    for (codec, bit_depth) in [
+        (Codec::Hevc, 8),
+        (Codec::H264, 8),
+        (Codec::Prores422, 8),
+        (Codec::Hevc, 10),
+    ] {
+        cells.push(diagnostic(codec, bit_depth, UHD, 30));
+        cells.push(diagnostic(codec, bit_depth, HD, 30));
+    }
+    cells.push(diagnostic(Codec::Hevc, 8, HD, 60));
     cells
 }
 
@@ -358,30 +540,107 @@ fn encode_cell<P: Platform>(
     }
     let mut frames_done = 0;
     let mut longest = Duration::ZERO;
+    let mut shortest = Duration::MAX;
     for result in results {
         let (completed, elapsed) = result?;
         frames_done += completed;
         longest = longest.max(elapsed);
+        shortest = shortest.min(elapsed);
     }
-    let seconds = longest.as_secs_f64();
-    if frames_done < MIN_FRAMES * cell.sessions as u64 || seconds <= 0.0 {
-        bail!("only {frames_done} frames completed in its timed part, too few to report");
+    // A fit cell is fit evidence only over full windows in every session;
+    // a shorter one is not demoted to a diagnostic, it is not reported.
+    if cell.priority == Priority::Fit && shortest.as_secs_f64() < FIT_MIN_SECONDS {
+        bail!(
+            "a session was timed for only {:.2} s, shorter than the {FIT_MIN_SECONDS} s a fit \
+             measurement needs",
+            shortest.as_secs_f64()
+        );
     }
-    let frames_per_second = frames_done as f64 / seconds;
-    if !frames_per_second.is_finite() {
+    finished(cell, frames_done, longest, None)
+}
+
+/// `cell`'s measurement of `frames` completed over `timed`, if enough
+/// frames completed to report it.
+fn finished(
+    cell: &Cell,
+    frames: u64,
+    timed: Duration,
+    dropped: Option<u64>,
+) -> Result<EncoderMeasurement> {
+    let seconds = timed.as_secs_f64();
+    if frames < MIN_FRAMES * cell.sessions as u64 || seconds <= 0.0 {
+        bail!("only {frames} frames completed in its timed part, too few to report");
+    }
+    if !(frames as f64 / seconds).is_finite() {
         bail!("its timing was not a finite number");
     }
-    Ok(EncoderMeasurement {
-        codec: cell.codec,
-        bit_depth: cell.bit_depth,
-        width: cell.width,
-        height: cell.height,
-        fps: cell.fps,
-        sessions: cell.sessions,
-        frames: frames_done,
-        seconds,
-        frames_per_second,
-    })
+    Ok(cell.measurement(frames, seconds, dropped))
+}
+
+/// The live H.264 cell: the stream's real-time encoder at its default
+/// bitrate, given frames as fast as it takes them, counting the pictures
+/// it returned (and those it dropped) over the timed interval.
+fn live_cell<P: Platform>(
+    platform: &P,
+    cell: &Cell,
+    frames: &[P::Frame],
+) -> Result<EncoderMeasurement> {
+    if frames.is_empty() {
+        bail!("no synthetic frames");
+    }
+    let fps = cell.fps;
+    let mut encoder = platform
+        .create_video_encoder(&LiveVideoSpec {
+            width: cell.width,
+            height: cell.height,
+            fps,
+            bitrate_kbps: LIVE_BITRATE_KBPS,
+            constant_bitrate: true,
+            // As a stream: keyframes asked for on the grid, the encoder's
+            // own limit only a backstop at twice the interval.
+            keyframe_interval: 2 * fps * LIVE_KEYFRAME_SECONDS,
+            low_latency: false,
+        })
+        .context(NotStarted)?;
+    let keyframe_every = u64::from(fps * LIVE_KEYFRAME_SECONDS);
+    let start = Instant::now();
+    let warm_end = start + WARM_UP;
+    let window_end = warm_end + WINDOW;
+    let warm_cap = MAX_FRAMES / 4;
+    let base = Time::from_nanos(0);
+    let mut received: u64 = 0;
+    let mut n: u64 = 0;
+    let mut timed_from: Option<(Instant, u64, u64)> = None;
+    loop {
+        let now = Instant::now();
+        if timed_from.is_none() && (now >= warm_end || n >= warm_cap) {
+            timed_from = Some((now, received, encoder.dropped()));
+        }
+        if timed_from.is_some() && (now >= window_end || n >= MAX_FRAMES) {
+            break;
+        }
+        let frame = &frames[(n % frames.len() as u64) as usize];
+        // Waits a bounded time when its submissions are full, then drops.
+        encoder.encode(
+            frame,
+            base.add_ticks(n, fps),
+            n.is_multiple_of(keyframe_every),
+        )?;
+        n += 1;
+        while encoder.receive()?.is_some() {
+            received += 1;
+        }
+    }
+    let done = Instant::now();
+    let (from, before, dropped_before) = timed_from.expect("set before the loop ends");
+    let dropped = encoder.dropped().saturating_sub(dropped_before);
+    drop(encoder);
+    finished(
+        cell,
+        received.saturating_sub(before),
+        done.duration_since(from),
+        Some(dropped),
+    )
 }
 
 /// One session of a cell: deltas of completed pictures and elapsed time
@@ -393,7 +652,7 @@ fn encode_session<P: Platform>(
     max_frames: u64,
     barrier: &Barrier,
 ) -> Result<(u64, Duration)> {
-    let prepared = platform.create_writer(spec);
+    let prepared = platform.create_writer(spec).context(NotStarted);
     // Every session waits here, even one that failed, so none waits forever.
     barrier.wait();
     let mut writer = prepared?;
@@ -500,6 +759,7 @@ fn measure_graphics<P: Platform>(
     platform: &P,
     cycles: &mut Cycles<P::Frame>,
     deadline: Instant,
+    reserve: Duration,
     notes: &mut Vec<String>,
 ) -> Vec<GraphicsMeasurement> {
     let mut out = Vec::new();
@@ -513,8 +773,8 @@ fn measure_graphics<P: Platform>(
     let renderer = Renderer::new(&gpu, wgpu::TextureFormat::Bgra8Unorm);
     let to_ycbcr = ToYCbCr::new(&gpu);
     for size in [HD, UHD] {
-        // Leave the encoders, which come next, most of the time.
-        if Instant::now() + GPU_TIME + Duration::from_secs(15) > deadline {
+        // Leave the required encoder cells, which come next, their time.
+        if Instant::now() + GPU_TIME + reserve > deadline {
             notes.push(format!(
                 "GPU at {}×{} not measured: out of time",
                 size.0, size.1

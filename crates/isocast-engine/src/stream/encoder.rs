@@ -574,7 +574,7 @@ impl Retune {
 
     fn apply<E: VideoEncoder>(&mut self, video: &mut E, fps: u32, applied: &AtomicU32) {
         let wanted = crate::governor::stream_bitrate(self.canvas, self.intended);
-        if wanted == self.applied {
+        if wanted == self.applied && !video.rate_uncertain() {
             self.refused = None;
             return;
         }
@@ -601,7 +601,7 @@ impl Retune {
             }
             Err(err) => {
                 let message = format!(
-                    "the program's encoder kept {} kb/s instead of {wanted} kb/s: {err:#}",
+                    "the program's encoder last acknowledged {} kb/s; could not set {wanted} kb/s: {err:#}",
                     self.applied
                 );
                 isocast_diagnostics::diagnostic!("warn"; "{message}");

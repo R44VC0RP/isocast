@@ -87,6 +87,7 @@ pub struct H264Encoder {
     /// The bitrate the session was last told, and how it holds it (fixed
     /// when the session starts; a live change keeps it).
     bitrate_kbps: u32,
+    rate_uncertain: bool,
     rate_control: RateControl,
     low_latency: bool,
     force_keyframe: CFRetained<CFDictionary<CFString, CFBoolean>>,
@@ -325,6 +326,7 @@ impl H264Encoder {
             output,
             fps: spec.fps,
             bitrate_kbps: spec.bitrate_kbps,
+            rate_uncertain: false,
             rate_control,
             low_latency: spec.low_latency,
             force_keyframe,
@@ -521,6 +523,10 @@ impl VideoEncoder for H264Encoder {
         self.output.dropped.load(Ordering::Relaxed)
     }
 
+    fn rate_uncertain(&self) -> bool {
+        self.rate_uncertain
+    }
+
     /// Only what changed is set, under the rate control the session started
     /// with (constant, capped average or average); keyframe settings and the
     /// session stay. VideoToolbox has no transaction: if a property is
@@ -532,22 +538,29 @@ impl VideoEncoder for H264Encoder {
             bail!("cannot set the H.264 encoder to {bitrate_kbps} kb/s at {fps} fps");
         }
         let (old_fps, old_kbps) = (self.fps, self.bitrate_kbps);
+        let uncertain = self.rate_uncertain;
         let frame_rate = |fps: u32| unsafe {
             self.set(
                 kVTCompressionPropertyKey_ExpectedFrameRate,
                 &CFNumber::new_i32(fps as i32),
             )
         };
-        if fps != old_fps {
+        if fps != old_fps || uncertain {
             frame_rate(fps)?;
         }
-        if bitrate_kbps != old_kbps
+        if (bitrate_kbps != old_kbps || uncertain)
             && let Err(err) = self.apply_bitrate(old_kbps, bitrate_kbps)
         {
-            let mut restored = self.apply_bitrate(bitrate_kbps, old_kbps);
-            if fps != old_fps {
-                restored = restored.and_then(|()| frame_rate(old_fps));
-            }
+            let bitrate_restored = self.apply_bitrate(bitrate_kbps, old_kbps);
+            // A bitrate rollback failure must not skip the independent FPS
+            // rollback. Try both, then keep uncertainty until a full success.
+            let fps_restored = if fps != old_fps || uncertain {
+                frame_rate(old_fps)
+            } else {
+                Ok(())
+            };
+            let restored = bitrate_restored.and(fps_restored);
+            self.rate_uncertain = restored.is_err();
             return Err(match restored {
                 Ok(()) => err.context(format!(
                     "kept {old_kbps} kb/s at {old_fps} fps instead of {bitrate_kbps} kb/s"
@@ -560,6 +573,7 @@ impl VideoEncoder for H264Encoder {
         }
         self.fps = fps;
         self.bitrate_kbps = bitrate_kbps;
+        self.rate_uncertain = false;
         Ok(())
     }
 }

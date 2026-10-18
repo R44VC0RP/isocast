@@ -873,7 +873,8 @@ pub struct LibraryCreateParams {
     pub id: Option<String>,
     /// Copy this one (by id) instead of starting blank (OBS's Duplicate). A
     /// blank collection has one empty scene on the current canvas; a blank
-    /// profile records 60 fps HEVC with ISO files to ~/Movies/Isocast.
+    /// profile records HEVC with ISO files to ~/Movies/Isocast, at 30 fps on
+    /// <=8-core or <=8-GB machines and 60 fps otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_of: Option<String>,
     /// Switch to it once made (refused while recording or streaming).

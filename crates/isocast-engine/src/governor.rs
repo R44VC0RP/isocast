@@ -236,6 +236,25 @@ pub struct Headroom {
     pub recovery_ratio: f64,
     pub cpu_percent: Option<f64>,
     pub thermal_state: u32,
+    /// The OS's own memory-pressure level; None when the platform does not
+    /// report one (unknown, which is not evidence of normal or of pressure).
+    pub memory_pressure: Option<MemoryPressure>,
+}
+
+/// OS-declared memory pressure, not a free-memory estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemoryPressure {
+    Normal,
+    Warning,
+    Critical,
+}
+
+impl Headroom {
+    /// Warning or critical: wake the policy and block recovery.
+    pub fn memory_pressed(&self) -> bool {
+        self.memory_pressure
+            .is_some_and(|m| m >= MemoryPressure::Warning)
+    }
 }
 
 #[derive(Default)]
@@ -476,6 +495,10 @@ impl Controller {
                 || sample.protected_loss)
         {
             Some("thermal")
+        } else if health.is_some_and(|h| h.memory_pressure == Some(MemoryPressure::Critical)) {
+            // The OS is about to reclaim memory from processes. Only the
+            // preview and opted-in ISO steps below apply to "memory".
+            Some("memory")
         } else if recent_loss
             && sample.cpu_late
             && health.is_some_and(|h| h.cpu_percent.is_some_and(|p| p >= 90.0))
@@ -487,6 +510,10 @@ impl Controller {
             Some("encoder")
         } else if upload {
             Some("upload")
+        } else if health.is_some_and(Headroom::memory_pressed) {
+            // A measured bottleneck names the episode first; a lasting
+            // warning (common on 8 GB Macs) then still blocks recovery.
+            Some("memory")
         } else {
             None
         };
@@ -557,7 +584,10 @@ impl Controller {
             // own fast feedback: do not add a second sticky ISO controller.
             if settings.allow_iso_thinning
                 && unpinned_iso
-                && matches!(self.hold_cause, Some("CPU" | "GPU" | "disk" | "thermal"))
+                && matches!(
+                    self.hold_cause,
+                    Some("CPU" | "GPU" | "disk" | "thermal" | "memory")
+                )
                 && !production_loss
                 && sample.progressed
                 && self
@@ -669,6 +699,7 @@ impl Controller {
                     && h.recovery_ratio < 0.7
                     && h.cpu_percent.is_none_or(|p| p < 70.0)
                     && h.thermal_state < 2
+                    && !h.memory_pressed()
             });
         if settings.enabled && sample.active && !sample.paused {
             if healthy {
@@ -733,14 +764,33 @@ impl Controller {
             true
         });
         let rate_error = rate_error.or(preview_error);
-        if limits.stream < self.previous.stream {
+        // A canvas can become congested after another has already reached
+        // the shared floor. Target membership must not depend on a further
+        // percentage decrease (there may be none left).
+        let targets = STREAM_TARGETS.load(Ordering::Relaxed);
+        let add_targets = settings.enabled
+            && sample.active
+            && !sample.paused
+            && !settings.pinned("stream.video_bitrate_kbps")
+            && limits.stream < 100
+            && retunable
+            && (sample.upload_congestion >= 0.5
+                || self
+                    .pressure_since
+                    .is_some_and(|at| now.duration_since(at) >= Duration::from_secs(2)));
+        let targets_changed = add_targets && sample.congested_canvases & !targets != 0;
+        if targets_changed {
             STREAM_TARGETS.fetch_or(sample.congested_canvases, Ordering::Relaxed);
+            reason = format!(
+                "Automatic quality: a newly congested canvas requests {}% stream bitrate",
+                limits.stream
+            );
         }
         if limits.stream == 100 {
             STREAM_TARGETS.store(0, Ordering::Relaxed);
         }
         limits.apply();
-        if limits != self.previous || held != self.held {
+        if limits != self.previous || held != self.held || targets_changed {
             self.steps += 1;
             self.last_step = now;
         }

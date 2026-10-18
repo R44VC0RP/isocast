@@ -144,7 +144,7 @@ Make a scene collection (one empty scene on the canvas in use) or a profile (60 
 
 | Argument | Type | Description |
 |---|---|---|
-| `copy_of` | string (optional) | Copy this one (by id) instead of starting blank (OBS's Duplicate). A blank collection has one empty scene on the current canvas; a blank profile records 60 fps HEVC with ISO files to ~/Movies/Isocast. |
+| `copy_of` | string (optional) | Copy this one (by id) instead of starting blank (OBS's Duplicate). A blank collection has one empty scene on the current canvas; a blank profile records HEVC with ISO files to ~/Movies/Isocast, at 30 fps on <=8-core or <=8-GB machines and 60 fps otherwise. |
 | `id` | string (optional) | Its id (lowercase letters, digits and dashes); made from the name if absent. |
 | `kind` (required) | LibraryKind |  |
 | `name` (required) | string | Its name. |
@@ -376,7 +376,7 @@ Make a good starting setup from this Mac's devices: the main display, the best r
 | `camera` | string (optional) | The camera: an id, a name or part of one from `isocast devices`, or "none". If absent, the best real camera: a USB or other external camera, else Continuity Camera, else the built-in one; virtual cameras (OBS, NDI) and Desk View only if there is nothing else. |
 | `display` | string (optional) | The display to capture: "main", or an id or name from `isocast devices`. The main display if absent. |
 | `folder` | string (optional) | Where recordings go; `~/Movies/Isocast` if absent. |
-| `fps` | integer (optional) | Canvas frame rate: 60 if absent (or the display's, if it refreshes more slowly). |
+| `fps` | integer (optional) | Canvas frame rate: the daemon defaults to 30 on <=8-core or <=8-GB machines, otherwise 60 (or the display's slower refresh rate). |
 | `height` | integer (optional) |  |
 | `layout` | Layout | Where the camera goes in the "Screen + Camera" scene. |
 | `microphone` | string (optional) | The microphone: "default" (the system's default input, if absent), an id, a name or part of one, or "none". |

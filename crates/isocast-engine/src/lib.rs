@@ -432,6 +432,13 @@ pub trait VideoEncoder: Send {
     /// Frames the encoder dropped so far instead of encoding them.
     fn dropped(&self) -> u64;
 
+    /// A refused rate change could not be rolled back completely. The last
+    /// acknowledged rate is not proof of the current native properties;
+    /// requesting that rate again must still attempt restoration.
+    fn rate_uncertain(&self) -> bool {
+        false
+    }
+
     /// From the next frame, expect `fps` frames a second and aim for
     /// `bitrate_kbps` on average (a monitor changing its rate), keeping the
     /// session: no new keyframe.

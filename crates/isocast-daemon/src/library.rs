@@ -366,7 +366,13 @@ impl Daemon {
                     let (width, height) = canvas.unwrap_or((1920, 1080));
                     Document::Collection(Collection::blank(&name, width, height))
                 }
-                LibraryKind::Profile => Document::Profile(Profile::starter(&name)),
+                LibraryKind::Profile => {
+                    let mut profile = Profile::starter(&name);
+                    if let Some(machine) = crate::this_machine() {
+                        profile.canvas.fps = isocast_protocol::init::starting_fps(machine);
+                    }
+                    Document::Profile(profile)
+                }
             },
         };
         document.set_name(&name);

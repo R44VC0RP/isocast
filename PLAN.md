@@ -671,16 +671,25 @@ Tier 1: build → review → fixes → re-review for each behavior-changing slic
     repeatability under outside load and post-GPU-lane integration. M4
     overload prediction improves; M2 percentage accuracy is within variation,
     not proven better than the table. Do not call all of T.1 complete yet.
+    - [x] **T.1b.1 Bounded coverage and canvas predictions (ready for review).** Separate
+      recording/live paths and fit/diagnostic evidence, prioritize missing
+      4K60/10-bit and ProRes variants, list skipped cells, qualify covered
+      canvas predictions and repeated/outside-load calibration on base M2.
+      Diagnostic timing alone does not qualify a mixed-resource model.
+      M2: 22.26–22.86 s, all five ProRes variants/live H.264/UHD60 HEVC10;
+      19–21/24 cells explicitly covered. Fitting cases lose no frames;
+      overload prediction53.09%, actual44.39–53.67%, table52.62%: within
+      variation, not improved M2 percentage accuracy. Full T.1b stays open.
 - [ ] **T.2 Live governor.** Fixed reversible degradation order, hysteresis,
   visible reasons and protected-output integrity; qualify against outside
   CPU/GPU/encoder load without changing the established priority contract.
-  - [x] First reversible slice (ca4cc010; review fixes ready for re-review):
+  - [x] First reversible slice (merged via f5b7d263; review approved with follow-ups):
     monitor/vertical ceilings, explicitly opted-in ISO ceilings/hold, upload bitrate,
     status/events/UI and pins/off. AWS ten-minute CPU/GPU A/B: zero losses
     and zero governor steps. Foreign-encoder A/B: six bounded changes,
     recovery without cycling, intact file accounting, but severe load still
     loses protected video and program audio on both builds. Main257ea057
-    integrated staged/uncommitted:240 tests, strict e2e18/18 and seven native
+    integrated via eaf0b6a7:240 tests, strict e2e18/18 and seven native
     media contracts pass; animated mask/filtered ISO, split during hold and
     native monitor readback verified. Scratch REPORT.md is authoritative.
     B1/B2/B3/F1 fixes: owner-local intentional refusal attribution, nonfatal
@@ -688,7 +697,7 @@ Tier 1: build → review → fixes → re-review for each behavior-changing slic
     by default, and pressure/lifecycle-triggered sampling. Real before/after
     vertical pin/recovery and retune refusal tests pass; idle CPU is about
     0.01% of one core, indistinguishable from disabled policy. Final gates240
-    and strict e2e18/18 pass; fixes remain uncommitted on7705e90.
+    and strict e2e18/18 pass; fixes committed7c08ca3d and mergedf5b7d263.
   - [ ] Remaining qualification/steps: safe file-format/effort/software
     transitions, JPEG/vertical composition reductions, memory-pressure and
     per-encoder retune failure behavior. No zero-drop promise against foreign
@@ -696,9 +705,24 @@ Tier 1: build → review → fixes → re-review for each behavior-changing slic
 - [ ] **T.3 Low-end defaults and pins.** Measured 8 GB/base-chip defaults,
   persistent per-setting Automatic/pinned controls, backend-neutral mapping
   to NVENC/QSV/AMF/software with the Windows lane.
+  - [x] **T.3a Conservative initialization (ready for review).** New setups/blank profiles use
+    30 fps on <=8-core or <=8-GB machines; explicit fps and existing profiles
+    survive. Qualify persistent pins/ISO consent, base M2 defaults and native
+    rate rollback. Physical 8-GB/backend mapping remains separate.
+    API init/blank30 vs explicit/copy60 and restart persistence pass. Scoped
+    native refusal reproduces and fixes skipped FPS rollback/false recovery;
+    restored settings are actually acknowledged before clearing uncertainty.
 - [ ] **T.4 Weak-machine matrix.** Prototype taskpolicy/CPU limits and a
   GPU-contention helper during T.1; then bounded memory pressure, full
   e2e/bench/soak, GPU-less Windows software encoding and governor recovery.
+  - [x] **T.4a Bounded macOS contention (ready for review).** Real touched-memory competition
+    with verified readiness/cleanup, OS memory-pressure signal, base M2
+    strict e2e/bench/short soak and recovery. This is contention, not a
+    physical core/RAM limit or Windows software-encoder qualification.
+    CPU4/Metal/2GiB: strict18/18, three interleaved A/B pairs and a288 s
+    30-fps soak/crash checks pass, zero reported media losses. Injected
+    memory warning/critical respects pins/ISO consent and restores fully.
+    Gates242 pass. Tier-1 reviewer unavailable; no review approval claimed.
 
 ### A. Alpha: the daily driver (Ryan, 2026-10-13)
 
@@ -1756,6 +1780,15 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- T.1b.1/T.3a/T.4a (#110, 2026-10-18): explicit diagnostic/fit calibration
+  coverage, measured multi-canvas HEVC predictions with independent stream
+  assumptions, new-only30fps defaults, OS memory signal/bounded competition,
+  late-canvas floor and native rollback fixes. M2 real files, four calibrations,
+  strict18/18, three A/B pairs, short zero-drop soak/crashes, pins and failure
+  injection pass; full remote gates242. Uncommitted, ready for review (service
+  unavailable). Full T.1b/T.3/T.4 remain open for model/8GB/Windows scope.
+  Evidence: /Volumes/IsocastBuild/self-tuning-2/scratch/REPORT.md.
 
 - T.2 review fixes (2026-10-18, #110, uncommitted): intentional admission
   drops stay attached to their writer/encoder across restoration; delayed

@@ -43,8 +43,8 @@ pub struct InitOptions {
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
-    /// Canvas frame rate: 60 if absent (or the display's, if it refreshes
-    /// more slowly).
+    /// Canvas frame rate: the daemon defaults to 30 on <=8-core or <=8-GB
+    /// machines, otherwise 60 (or the display's slower refresh rate).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
     /// Where recordings go; `~/Movies/Isocast` if absent.
@@ -97,6 +97,19 @@ pub struct Initialized {
 
 /// Recording folder when none is given.
 pub const DEFAULT_FOLDER: &str = "~/Movies/Isocast";
+
+/// Conservative starting cadence for a new setup/profile, never an edit to
+/// an existing one. Memory and CPU counts are portable; they don't pretend
+/// to describe NVENC/QSV/AMF session limits or certify software encoding.
+pub fn starting_fps(machine: &crate::api::Machine) -> u32 {
+    if (machine.memory_gb > 0.0 && machine.memory_gb <= 8.0)
+        || (machine.cores > 0 && machine.cores <= 8)
+    {
+        30
+    } else {
+        60
+    }
+}
 
 /// Make a starting setup from `devices` (with their permissions).
 /// Fails, naming the valid choices, if an option names a device that
@@ -658,6 +671,30 @@ fn scenes(canvas: &Canvas, camera: bool, layout: Layout) -> Vec<Scene> {
 mod tests {
     use super::*;
     use crate::devices::{Display, Microphone, Permissions};
+
+    #[test]
+    fn starting_cadence_is_conservative_without_changing_explicit_options() {
+        let mut machine = crate::api::Machine {
+            chip: "backend-neutral".into(),
+            memory_gb: 24.0,
+            cores: 8,
+            os: String::new(),
+            hardware_encoders: Vec::new(),
+        };
+        assert_eq!(starting_fps(&machine), 30);
+        machine.cores = 16;
+        machine.memory_gb = 8.0;
+        assert_eq!(starting_fps(&machine), 30);
+        machine.memory_gb = 32.0;
+        assert_eq!(starting_fps(&machine), 60);
+        let options = InitOptions {
+            fps: Some(60),
+            ..Default::default()
+        };
+        let made = init(&devices(Vec::new(), Permission::Denied), &options).unwrap();
+        assert_eq!(made.setup.canvas.fps, 60);
+        assert!(!made.setup.governor.allow_iso_thinning);
+    }
 
     fn camera(name: &str, kind: CameraKind, suspended: bool) -> Camera {
         Camera {
