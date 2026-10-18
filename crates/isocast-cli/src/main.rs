@@ -1272,6 +1272,12 @@ enum SetupCommand {
             about = "Find OBS Studio's scene collections and profiles on this PC (%APPDATA%/obs-studio, or --folder), without importing anything. Reports collections and their profile's video, recording and stream settings."
         )
     )]
+    #[cfg_attr(
+        target_os = "linux",
+        command(
+            about = "Find OBS Studio's scene collections and profiles on this computer ($XDG_CONFIG_HOME/obs-studio, ~/.config/obs-studio by default, or --folder), without importing anything. Reports collections and their profile's video, recording and stream settings."
+        )
+    )]
     DiscoverObs {
         /// Look in this folder instead.
         #[arg(long)]

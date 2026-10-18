@@ -1010,7 +1010,8 @@ pub struct Options<'a> {
 /// (isolated engines and tests, so they never read the user's OBS).
 pub const FOLDER_ENV: &str = "ISOCAST_OBS_FOLDER";
 
-/// Where OBS keeps its settings on this Mac: `$ISOCAST_OBS_FOLDER` if set.
+/// Where OBS keeps its settings on this computer: `$ISOCAST_OBS_FOLDER` if
+/// set.
 pub fn obs_folder(home: &Path) -> PathBuf {
     match std::env::var_os(FOLDER_ENV) {
         Some(folder) if !folder.is_empty() => PathBuf::from(folder),
@@ -1019,6 +1020,13 @@ pub fn obs_folder(home: &Path) -> PathBuf {
         _ if cfg!(windows) => {
             crate::api::windows_folder("APPDATA", "AppData/Roaming").join("obs-studio")
         }
+        // $XDG_CONFIG_HOME when absolute (the XDG spec ignores relative and
+        // empty values), else ~/.config.
+        _ if cfg!(target_os = "linux") => std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .unwrap_or_else(|| home.join(".config"))
+            .join("obs-studio"),
         _ => home.join("Library/Application Support/obs-studio"),
     }
 }
