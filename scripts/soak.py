@@ -70,6 +70,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import e2e  # noqa: E402  (Engine, setup, capabilities, probe: one isolation model)
 
+os.environ["ISOCAST_CALIBRATION"] = "off"
+
 SOURCES = ["program", "bars", "bars2"]
 # canvas (w, h, fps); each ISO source's size; the program codec (None: the
 # best hardware one); the stream; minutes between splits; strict: drops in

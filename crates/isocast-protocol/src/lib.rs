@@ -22,6 +22,7 @@ pub mod isoprj;
 pub mod layout;
 pub mod library;
 pub mod located;
+pub mod machine;
 pub mod manifest;
 pub mod obs;
 pub mod optimize;

@@ -141,6 +141,33 @@ pub fn memory_path(setup_file: &Path) -> PathBuf {
     setup_file.with_extension("tune.json")
 }
 
+/// The machine calibration beside a tune-memory file. Named recording
+/// profiles share it; isolated setup files do not.
+pub fn profile_path(memory: &Path) -> PathBuf {
+    memory.with_extension("").with_extension("machine.json")
+}
+
+pub fn load_profile(
+    path: &Path,
+    machine: &Machine,
+    app_build: &str,
+) -> Option<isocast_protocol::machine::MachineProfile> {
+    // A profile is tiny; refuse oversized/corrupt files instead of growing
+    // the daemon or letting invalid timings affect admission.
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(256 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > 256 * 1024 {
+        return None;
+    }
+    let profile: isocast_protocol::machine::MachineProfile = serde_json::from_slice(&bytes).ok()?;
+    (profile.app_build == app_build && profile.valid_for(machine)).then_some(profile)
+}
+
 impl Memory {
     /// The measurements in `path`; none if it is missing or unreadable.
     pub fn load(path: &Path) -> Self {

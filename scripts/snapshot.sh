@@ -12,6 +12,7 @@
 # gives it an engine of its own in a scratch folder, recordings included,
 # and removes both when it ends.
 set -eu
+export ISOCAST_CALIBRATION=off
 here="$(cd "$(dirname "$0")" && pwd)"
 bin="${ISOCAST_BIN:-$here/../target/release}"
 work="$(mktemp -d "${TMPDIR:-/tmp}/isocast-snapshot.XXXXXX")"

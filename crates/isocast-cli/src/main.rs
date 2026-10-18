@@ -89,6 +89,25 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum MachineCommand {
+    /// Show the profile and calibration state without starting a measurement.
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start an idle-only self-test (at most 30 seconds); poll show for results.
+    Calibrate {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel a self-test, retaining the previous profile.
+    Cancel {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Read a bounded page from a redacted report preview.
     ReportFile {
@@ -370,6 +389,11 @@ enum Command {
         folder: Option<PathBuf>,
         #[arg(long)]
         json: bool,
+    },
+    /// Measure this machine quietly, inspect its profile, or cancel calibration.
+    Machine {
+        #[command(subcommand)]
+        command: MachineCommand,
     },
     /// Benchmark the encoders on a setup's files (the live setup if none is
     /// given), all at once as in a recording, and say whether this Mac keeps
@@ -1439,6 +1463,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
             folder,
             json,
         } => doctor(setup.as_deref(), folder, json),
+        Command::Machine { command } => {
+            let (method, json) = match command {
+                MachineCommand::Show { json } => (Method::MachineProfile, json),
+                MachineCommand::Calibrate { json } => (Method::MachineCalibrate, json),
+                MachineCommand::Cancel { json } => (Method::MachineCancel, json),
+            };
+            let result: isocast_protocol::machine::MachineStatus =
+                Client::connect_or_launch()?.call(method)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("{}", result.summary);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Tune {
             setup,
             folder,
@@ -1848,15 +1887,17 @@ fn check(path: &Path, json: bool) -> Result<ExitCode> {
     Ok(code)
 }
 
-/// Whether `setup`'s files fit this Mac's encoders, by per-chip data.
-#[cfg(target_os = "macos")]
+/// Use the daemon's estimate, including its profile and exact tune results;
+/// setup validation remains local if the daemon cannot answer.
 fn capacity_check(setup: &Setup) -> Option<isocast_protocol::api::Check> {
-    isocast_engine::estimate::check(&isocast_platform_macos::MacPlatform, setup, None)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn capacity_check(_setup: &Setup) -> Option<isocast_protocol::api::Check> {
-    None
+    let estimate: CapacityEstimate = Client::connect_or_launch()
+        .ok()?
+        .call(Method::EstimateCapacity(Box::new(CapacityParams {
+            setup: Some(setup.clone()),
+            ..Default::default()
+        })))
+        .ok()?;
+    isocast_engine::estimate::check(&estimate)
 }
 
 fn import_obs(
@@ -2388,6 +2429,7 @@ fn status(json: bool) -> Result<ExitCode> {
         }
         None => Status {
             state: EngineState::Idle,
+            machine_profile: None,
             load_warning: None,
             scene: None,
             preview: None,
@@ -2427,6 +2469,9 @@ fn status(json: bool) -> Result<ExitCode> {
     }
     if let Some(warning) = &status.load_warning {
         eprintln!("warning: {}", warning.message);
+    }
+    if let Some(machine) = &status.machine_profile {
+        println!("Machine: {}", machine.summary);
     }
     if let (Some(collection), Some(profile)) = (&status.collection, &status.profile) {
         println!(

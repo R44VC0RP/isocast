@@ -81,6 +81,8 @@ import e2e  # noqa: E402  (Engine, setup, capabilities, probe, check_file: one i
 from e2e import Failure, RpcError, require, until  # noqa: E402
 import soak  # noqa: E402  (process_metrics, scan_logs)
 
+os.environ["ISOCAST_CALIBRATION"] = "off"
+
 SCENARIOS = ("sources", "isos", "switching", "cycles", "clients", "replay", "multistream",
              "text_web", "disk")
 PROFILES = {

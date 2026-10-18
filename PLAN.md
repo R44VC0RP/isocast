@@ -643,6 +643,41 @@ come later (clips already carry in/out points on their take).
     codec/lifecycle/crash checks and release gates pass; full tables and
     rejected global-hint/sustained-pressure trials are in the round report.
 
+### T. Self-tuning on every machine (#110, 2026-10-17)
+
+Design and safety contract: [docs/self-tuning.md](docs/self-tuning.md).
+Tier 1: build → review → fixes → re-review for each behavior-changing slice.
+
+- [ ] **T.1 Measured machine profile.** Silent, cancellable, low-priority
+  calibration within 30 s, first launch/updates/on demand, never alongside
+  recording/streaming. Platform-neutral codec, compositor, conversion,
+  memory/disk measurements; versioned isolated persistence; method table,
+  CLI/MCP/status/Settings; measured capacity/Optimize with unchanged absent-
+  profile fallback. AWS M2s and exonbook: compare existing capacity cases
+  against real drops, cancel/start races, fresh-machine behavior.
+  - [x] **T.1a Profile foundation (awaiting Tier-1 re-review).** Portable
+    measurements, killable idle-only helper, persistence/build invalidation,
+    API/CLI/MCP/Settings and covered HEVC capacity/Optimize integration.
+    M2s/exonbook recordings, refusal/cancellation/deadline, fallback and full
+    strict e2e verified; details and scope limits in the lane's scratch
+    REPORT.md. Fix round 1 confines automatic calibration to the default
+    daemon, unifies capacity checks and preserves exact Optimize passes;
+    main integrated, 233 tests and strict e2e 18/18 pass.
+  - [ ] **T.1b Complete coverage and prediction qualification.** Other
+    ProRes variants, live-H.264 resource costs, missed 4K60/10-bit cells,
+    repeatability under outside load and post-GPU-lane integration. M4
+    overload prediction improves; M2 percentage accuracy is within variation,
+    not proven better than the table. Do not call all of T.1 complete yet.
+- [ ] **T.2 Live governor.** Fixed reversible degradation order, hysteresis,
+  visible reasons and protected-output integrity; qualify against outside
+  CPU/GPU/encoder load without changing the established priority contract.
+- [ ] **T.3 Low-end defaults and pins.** Measured 8 GB/base-chip defaults,
+  persistent per-setting Automatic/pinned controls, backend-neutral mapping
+  to NVENC/QSV/AMF/software with the Windows lane.
+- [ ] **T.4 Weak-machine matrix.** Prototype taskpolicy/CPU limits and a
+  GPU-contention helper during T.1; then bounded memory pressure, full
+  e2e/bench/soak, GPU-less Windows software encoding and governor recovery.
+
 ### A. Alpha: the daily driver (Ryan, 2026-10-13)
 
 The stopping point: once these are done, features freeze and Ryan uses
@@ -1627,6 +1662,21 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   footprint 416.3→204.1 MiB, CPU 65.8→64.8%, zero recording losses.
   Initial stress noise also reproduced on baseline; both preserved.
   Uncommitted for coordinator Tier-1 review: perf-2/scratch/REPORT.md.
+- T.1a fix round 1 (2026-10-17, #110, awaiting re-review): isolated engines
+  never auto-calibrate by default and harnesses force off; snapshot.sh
+  rendered after a 10 s wait with no calibration child. Failed-build retry
+  suppression, dead-owner cleanup, fit guards, unified capacity checks and
+  exact Optimize-pass preservation verified on M2-b. Merged main a9b661f;
+  remote gates 233 pass, one strict e2e run 18/18 pass. Evidence:
+  `/Volumes/IsocastBuild/machine-profile/scratch/REPORT.md`, Fix round 1.
+
+- T.1a (2026-10-17, #110, awaiting Tier-1 review): measured machine profile,
+  bounded idle-only calibration and shared API/CLI/MCP/Settings; covered HEVC
+  estimates/Optimize use local numbers. AWS M2s/exonbook media checks, race/
+  refusal/deadline/fallback, remote workspace gates (230 pass) and strict
+  e2e 18/18 pass. T.1b remains open; REPORT.md states coverage/accuracy limits.
+  T.4 contention prototype preserves failures (86.1%/96.2% drops vs clean
+  controls), not a governor or a true CPU-core-limit simulator.
 
 - #108/#109 (2026-10-17): the first layout audit's 11 issues fixed (narrow
   Controls/source toolbar/mixer/vertical head adapt, source child names

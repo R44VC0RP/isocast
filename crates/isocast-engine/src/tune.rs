@@ -1039,13 +1039,13 @@ const NOISE: u32 = 8;
 
 /// Busy, camera-like content: coloured blocks with fine noise, cut into
 /// shifted windows so every frame moves.
-struct Texture {
+pub(crate) struct Texture {
     width: usize,
     pixels: Vec<u8>,
 }
 
 impl Texture {
-    fn new(width: usize, height: usize) -> Self {
+    pub(crate) fn new(width: usize, height: usize) -> Self {
         let mut pixels = vec![0u8; width * height * 4];
         let mut x: u32 = 0x9E37_79B9;
         let mut next = move || {
@@ -1073,7 +1073,7 @@ impl Texture {
     }
 
     /// Copy the `width`×`height` window at (`dx`, `dy`) into a BGRA frame.
-    fn copy(
+    pub(crate) fn copy(
         &self,
         dx: usize,
         dy: usize,

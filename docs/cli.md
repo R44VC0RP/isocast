@@ -92,6 +92,10 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
 - [`isocast preview`](#isocast-preview)
 - [`isocast take`](#isocast-take)
 - [`isocast doctor`](#isocast-doctor)
+- [`isocast machine`](#isocast-machine)
+  - [`isocast machine show`](#isocast-machine-show)
+  - [`isocast machine calibrate`](#isocast-machine-calibrate)
+  - [`isocast machine cancel`](#isocast-machine-cancel)
 - [`isocast tune`](#isocast-tune)
 - [`isocast capacity`](#isocast-capacity)
 - [`isocast optimize`](#isocast-optimize)
@@ -181,6 +185,7 @@ Commands:
   preview        Stage a scene in preview, by id, to put on air with `take`
   take           Put the preview scene on air (with its transition unless --cut, --fade MS or --transition is given); the scene that was on air moves to preview
   doctor         Check this Mac and a setup: permissions, hardware encoders, whether the setup's devices are connected, and the recording disk's space and speed. Exits with an error if anything would stop a recording
+  machine        Measure this machine quietly, inspect its profile, or cancel calibration
   tune           Benchmark the encoders on a setup's files (the live setup if none is given), all at once as in a recording, and say whether this Mac keeps up (fits, keeps up with no margin, or can't keep up). If it doesn't fit, try changes closest first (a smaller program file, a lower quality preset, half the frame rate, one ISO file fewer) and recommend the closest that fits, as a patch for `plan` and `apply`. `start` warns when a setup exceeds what this measured. Runs in isocastd
   capacity       Predict, instantly and without benchmarking, whether a setup's files (the live setup's, at its sources' live formats, if none is given) fit this Mac's video encoders, from measured per-chip data, and list the closest changes that fit as patches for `plan` and `apply`. `tune` measures instead. Runs in isocastd
   optimize       Optimize the live setup for recording, streaming or both, like OBS's Auto-Configuration Wizard: recording favours quality and ISO files; streaming sets the service and a bitrate from the upload speed (tested unless --upload-kbps is given; a custom server only with `isocast stream speed-test`). Then `tune` benchmarks this Mac and steps down where it can't keep up. Prints a one-line summary and the changes; --apply makes them. Runs in isocastd
@@ -1596,6 +1601,59 @@ Options:
       --folder <FOLDER>  Check this folder instead of the setup's recording.folder
       --json             
   -h, --help             Print help
+```
+
+## isocast machine
+
+```text
+Measure this machine quietly, inspect its profile, or cancel calibration
+
+Usage: isocast machine <COMMAND>
+
+Commands:
+  show       Show the profile and calibration state without starting a measurement
+  calibrate  Start an idle-only self-test (at most 30 seconds); poll show for results
+  cancel     Cancel a self-test, retaining the previous profile
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## isocast machine show
+
+```text
+Show the profile and calibration state without starting a measurement
+
+Usage: isocast machine show [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast machine calibrate
+
+```text
+Start an idle-only self-test (at most 30 seconds); poll show for results
+
+Usage: isocast machine calibrate [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast machine cancel
+
+```text
+Cancel a self-test, retaining the previous profile
+
+Usage: isocast machine cancel [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
 ```
 
 ## isocast tune

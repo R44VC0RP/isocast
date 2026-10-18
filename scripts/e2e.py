@@ -201,7 +201,7 @@ class Engine:
         command(["codesign", "--verify", self.app])
         # Drop inherited Isocast overrides (including any user's stream key).
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("ISOCAST_")}
-        self.env.update(ISOCAST_SOCKET=str(self.sock), ISOCAST_SETUP=str(root / "setup.toml"),
+        self.env.update(ISOCAST_CALIBRATION="off", ISOCAST_SOCKET=str(self.sock), ISOCAST_SETUP=str(root / "setup.toml"),
                         ISOCAST_DEV_APP=str(self.app), ISOCAST_PLUGINS=str(root / "plugins"),
                         ISOCAST_TIMELINES=str(root / "timelines"), ISOCAST_MONITOR_SILENT="1",
                         ISOCAST_STREAM_KEY="e2e", ISOCAST_LOG_DIR=str(root / "logs"),

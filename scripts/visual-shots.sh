@@ -47,6 +47,7 @@ work="${ISOCAST_SHOTS_WORK:-/tmp/isocast-visual-shots}"
 rm -rf "${work:?}"
 mkdir -p "$work"
 export ISOCAST_SOCKET="$work/engine.sock"
+export ISOCAST_CALIBRATION=off
 # A dev app that doesn't exist, so the CLI starts the isocastd next to it.
 export ISOCAST_DEV_APP="$work/none.app"
 export TZ=UTC LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8

@@ -1757,6 +1757,32 @@ impl Isocast {
     }
 
     #[tool(
+        description = "Show this machine's measured capabilities and calibration state; missing or stale measurements fall back to the per-chip table.",
+        annotations(read_only_hint = true)
+    )]
+    async fn machine_profile(
+        &self,
+    ) -> Result<Json<isocast_protocol::machine::MachineStatus>, String> {
+        self.call(Method::MachineProfile).await
+    }
+
+    #[tool(
+        description = "Start a silent synthetic self-test, at most 30 seconds, without capture, windows or network access. Refused while outputs are active; starting an output cancels it. Poll machine_profile for completion."
+    )]
+    async fn machine_calibrate(
+        &self,
+    ) -> Result<Json<isocast_protocol::machine::MachineStatus>, String> {
+        self.call(Method::MachineCalibrate).await
+    }
+
+    #[tool(description = "Cancel machine calibration and retain the previous valid profile.")]
+    async fn machine_cancel(
+        &self,
+    ) -> Result<Json<isocast_protocol::machine::MachineStatus>, String> {
+        self.call(Method::MachineCancel).await
+    }
+
+    #[tool(
         description = "Benchmark the hardware encoders on a setup's video files (the live \
                        setup if none is given), all at once as in a recording, and say whether \
                        this Mac keeps up: `capacity` is fits, no_margin (keeps up, nothing to \

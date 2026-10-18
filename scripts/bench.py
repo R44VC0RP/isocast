@@ -471,7 +471,7 @@ def measure(args, daemon, label, index, cleanup):
     work = args.work
     dev_app = work / "Isocast Dev.app"
     sock = f"/tmp/isocast-bench-{hashlib.sha1(str(work).encode()).hexdigest()[:8]}.sock"
-    env = dict(os.environ, ISOCAST_DEV_APP=str(dev_app), ISOCAST_SOCKET=sock,
+    env = dict(os.environ, ISOCAST_CALIBRATION="off", ISOCAST_DEV_APP=str(dev_app), ISOCAST_SOCKET=sock,
                ISOCAST_SETUP=str(work / "live-setup.toml"), ISOCAST_MONITOR_SILENT="1",
                ISOCAST_STREAM_KEY="bench")
     # Each build's own plugins folder, tone filters and environment, if given.

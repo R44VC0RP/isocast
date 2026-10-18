@@ -62,6 +62,18 @@ impl Client {
         self.call(Method::EncoderOptions)
     }
 
+    pub fn machine_profile(&mut self) -> Result<isocast_protocol::machine::MachineStatus> {
+        self.call(Method::MachineProfile)
+    }
+
+    pub fn machine_calibrate(&mut self) -> Result<isocast_protocol::machine::MachineStatus> {
+        self.call(Method::MachineCalibrate)
+    }
+
+    pub fn machine_cancel(&mut self) -> Result<isocast_protocol::machine::MachineStatus> {
+        self.call(Method::MachineCancel)
+    }
+
     /// Forward a focused fallback key edge. Reuse this connection for both
     /// edges; disconnecting releases its push keys. The daemon accepts even
     /// globally registered chords and deduplicates matching native press edges.

@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-102 tools. Arguments marked required must be given; ids, not names,
+105 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -395,6 +395,18 @@ See the live engine's newest frame as a JPEG: the program (exactly what records 
 | `canvas` | CanvasId | "main" (the default) or "vertical": the vertical canvas's program (with target "program" or none). |
 | `target` | string (optional) | "program" (the default), "preview" (studio mode's preview scene), "vertical-program" or a video source id of the live setup. |
 | `width` | integer (optional) | Scale the picture down to at most this many pixels wide (default 1280). |
+
+## machine_calibrate
+
+Start a silent synthetic self-test, at most 30 seconds, without capture, windows or network access. Refused while outputs are active; starting an output cancels it. Poll machine_profile for completion.
+
+## machine_cancel
+
+Cancel machine calibration and retain the previous valid profile.
+
+## machine_profile
+
+Show this machine's measured capabilities and calibration state; missing or stale measurements fall back to the per-chip table.
 
 ## move_clip
 

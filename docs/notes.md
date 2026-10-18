@@ -15,6 +15,41 @@ each section. Delete entries that stop being true.
   use `$OutputEncoding = [Text.UTF8Encoding]::new($false)` when piping Unicode
   source to Python/rustc. Process plugins and recording still refuse the stub.
   Real control-plane CLI/MCP work; W.1d record/UI/writer remain separate.
+- 2026-10-17 (#110, fix round 1): automatic calibration is default-daemon
+  only; either ISOCAST_SOCKET or ISOCAST_SETUP disables it unless explicitly
+  opted in with ISOCAST_CALIBRATION=on. Snapshot/visual/layout/e2e/bench/
+  stress/soak/motion/drag-lag harnesses set off. Failed builds are remembered
+  in `setup.machine.failed-build`; explicit calibration retries, success
+  clears it, cancellation does not write it. Dead-owner calibration dirs
+  are swept (live/unknown owners and links retained). Profile measurement
+  version 3 prioritizes the three fit cells and rejects short/non-monotonic
+  samples. Recording-only Optimize retains its exact selected tune pass;
+  setup check/doctor now use the daemon's same profile-aware estimate.
+  Release `--snapshot-watch` is invalid (needs ui-dev/live-slint); use
+  `--snapshot … --state wait:10000` for a release-mode idle-window check.
+  Re-review evidence: machine-profile/scratch/REPORT.md, Fix round 1.
+
+- 2026-10-17 (#110, machine-profile lane): T.1a measurements live in
+  `setup.machine.json` beside the isolated setup/tune file; CLI
+  `isocast machine calibrate|show|cancel`, same method table/MCP. The helper
+  is nice 15/utility QoS, synthetic only, parent-killed/reaped before output
+  starts and at 29 s (its own watchdog also exits after 28 s). M2 wall
+  23.5 s, M4 Max 20.7 s; M2 omits 4K60 HEVC10 to meet the budget. Do not
+  equate file finish time with encoder throughput: the initial trial did,
+  and was rejected. Read-only completed-picture counter deltas are now used.
+  Only covered HEVC High/8-bit costs replace the table; codec/topology/live
+  H.264/recovery assumptions and unfinished T.1b are explicit in REPORT.md.
+  No governor or defaults change. Main advanced to GPU merge `9783eb22`
+  while this lane was uncommitted; coordinator owns commit/integration/review.
+  Evidence: `/Volumes/IsocastBuild/machine-profile/scratch/`.
+- 2026-10-17 (#110/T.4): bounded `scripts/weak-machine.py` + `weak-gpu.swift`
+  prototype uses an active hw-batch reservation, not a hostname allowlist:
+  m2-a's LocalHostName is `Mac-mini`. `taskpolicy` is `/usr/sbin/taskpolicy`.
+  Eight CPU competitors + Metal compute + background scheduling made strict
+  e2e record/iso lose 86.1%/96.2% of pictures and one audio dropout each;
+  unpressured controls were loss-free. These are contention, not true core
+  limits. Failed results propagate; helpers are cleaned up. No claim of
+  protection from this load until T.2. Job 20261017-135605-machine-profile-cmd.
 
 - 2026-10-17 (#100): **hw-batch `--mac any` jobs hold `.bench.lock` only
   while they build and pick a Mac**, then just that Mac's lock (as the

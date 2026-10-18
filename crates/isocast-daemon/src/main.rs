@@ -93,6 +93,7 @@ mod export;
 mod hotkeys;
 mod isoprj;
 mod library;
+mod machine;
 mod nle;
 mod optimize;
 mod platform;
@@ -108,6 +109,9 @@ mod virtual_camera;
 mod websocket;
 
 fn main() -> ExitCode {
+    if let Some(code) = machine::worker() {
+        return code;
+    }
     #[cfg(unix)]
     if isocast_diagnostics::native::requested() {
         return if isocast_diagnostics::native::run().is_ok() {
@@ -168,6 +172,7 @@ fn main() -> ExitCode {
             isocast_diagnostics::diagnostic!("isocastd listening on {}", socket.display());
             let daemon = Arc::new(Daemon::default());
             daemon.load_setup();
+            daemon.load_machine();
             daemon.recover_recordings();
             daemon.load_data();
             daemon.load_projectors();
@@ -799,6 +804,7 @@ fn id_of(line: &str) -> Option<u64> {
 
 #[derive(Default)]
 struct Daemon {
+    machine: Mutex<machine::Calibration>,
     emergency: AtomicBool,
     interrupted: Mutex<Vec<isocast_protocol::manifest::InterruptedRecording>>,
     /// Manifests startup recovery marked that no `start` has mentioned yet.
@@ -1302,6 +1308,7 @@ impl Daemon {
     fn graceful_shutdown(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         let _shutdown = self.shutdown_lock.lock();
+        let _ = self.cancel_calibration("Calibration cancelled by shutdown");
         loop {
             let result = self.stop();
             if self.state.lock().session.is_none() {
@@ -1401,6 +1408,7 @@ impl Daemon {
         let _starting = matches!(
             request.method,
             Method::Start(_)
+                | Method::Retake(_)
                 | Method::StreamStart(_)
                 | Method::TimelineExport(_)
                 | Method::VirtualCameraStart
@@ -1409,6 +1417,12 @@ impl Daemon {
                 | Method::Optimize(_)
         )
         .then(|| self.starting.read());
+        if _starting.is_some()
+            && let Err(error) =
+                self.cancel_calibration("Calibration deferred for an output or tune")
+        {
+            return Response::err(Some(id), error);
+        }
         if self.shutting_down.load(Ordering::SeqCst)
             && !matches!(
                 request.method,
@@ -1425,6 +1439,9 @@ impl Daemon {
         }
         let shutdown = request.method == Method::Shutdown;
         let result = match request.method {
+            Method::MachineProfile => to_json(self.machine_status(true)),
+            Method::MachineCalibrate => self.machine_calibrate().and_then(to_json),
+            Method::MachineCancel => self.machine_cancel().and_then(to_json),
             Method::Status => to_json(self.status()),
             Method::EncoderOptions => to_json(isocast_protocol::Codec::options()),
             Method::BugReport(params) => diagnostics::bug_report(self, &params).and_then(to_json),
@@ -1484,6 +1501,16 @@ impl Daemon {
             Method::Doctor(params) => check_folder(params.folder.as_deref()).and_then(|()| {
                 let setup = params.setup.or_else(|| self.state.lock().setup.clone());
                 let mut report = doctor(setup.as_ref(), params.folder.as_deref());
+                if let Some(setup) = setup
+                    && let Ok(estimate) = self.estimate_capacity(CapacityParams {
+                        setup: Some(setup),
+                        ..Default::default()
+                    })
+                {
+                    report
+                        .checks
+                        .extend(isocast_engine::estimate::check(&estimate));
+                }
                 report.checks.extend(self.plugins.doctor_check());
                 to_json(report)
             }),
@@ -2123,6 +2150,10 @@ impl Daemon {
 
     fn tune(&self, params: TuneParams) -> Result<Tuning, RpcError> {
         check_folder(params.folder.as_deref())?;
+        // Optimize already holds a read guard; recursive acquisition must
+        // not deadlock behind a queued shutdown writer.
+        let gate = self.starting.read_recursive();
+        self.cancel_calibration("Calibration deferred for tune")?;
         let mut state = self.state.lock();
         if state.session.is_some() || state.tuning || state.camera.active() {
             return Err(RpcError {
@@ -2149,6 +2180,7 @@ impl Daemon {
         }
         state.tuning = true;
         drop(state);
+        drop(gate);
         // Recording stays blocked until `tuning` clears, so clear it even if
         // the benchmark panics.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2840,6 +2872,7 @@ impl Daemon {
             .and_then(|session| self.recording_into(&session.takes));
         let mut status = Status {
             state: engine,
+            machine_profile: Some(self.machine_status(false)),
             #[cfg(target_os = "macos")]
             load_warning: isocast_platform_macos::pressure::warning(),
             #[cfg(not(target_os = "macos"))]
@@ -4940,6 +4973,11 @@ fn estimate_capacity(
     });
     let formats = |id: &str| live.get(id).or_else(|| probed.get(id)).copied();
     let kept = capacity::Memory::load(memory);
+    let profile = capacity::load_profile(
+        &capacity::profile_path(memory),
+        machine,
+        &daemon_build().build,
+    );
     let key = machine_key();
     isocast_engine::estimate::estimate(
         &isocast_engine::estimate::Inputs {
@@ -4949,6 +4987,7 @@ fn estimate_capacity(
             streaming,
             memory: key.map(|key| (&kept, key)),
             recording,
+            profile: profile.as_ref(),
         },
         add_iso,
     )

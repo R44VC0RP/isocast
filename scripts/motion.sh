@@ -19,6 +19,7 @@
 # events, the window recorded at 60 fps): scripts/motion/window.py, which
 # this script hands its arguments to.
 set -eu
+export ISOCAST_CALIBRATION=off
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/.." && pwd)"

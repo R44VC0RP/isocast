@@ -205,6 +205,91 @@ pub struct Inputs<'a> {
     pub memory: Option<(&'a Memory, &'a str)>,
     /// A recording runs: setup changes wait for the take to end.
     pub recording: bool,
+    /// Validated local calibration; absent preserves the per-chip model.
+    pub profile: Option<&'a isocast_protocol::machine::MachineProfile>,
+}
+
+/// Fit pixel work plus per-picture overhead from concurrent HD and UHD
+/// measurements. One session alone cannot determine aggregate capacity.
+fn calibrated_chip(inputs: &Inputs) -> Chip {
+    let mut chip = chip(&inputs.machine.chip);
+    let Some(profile) = inputs.profile.filter(|p| p.valid_for(inputs.machine)) else {
+        return chip;
+    };
+    // These concurrent cells cover HEVC High/8-bit, not another codec,
+    // depth or encoder effort. Leave other workloads on the old model.
+    let covered = |encoder: &isocast_protocol::Encoder| {
+        encoder.codec == Codec::Hevc
+            && encoder.effective_bit_depth() == 8
+            && encoder.quality.value()
+                == isocast_protocol::EncoderQuality::Preset(isocast_protocol::QualityPreset::High)
+                    .value()
+    };
+    let recording = &inputs.setup.recording;
+    if recording.program.enabled && !covered(&recording.program.encoder)
+        || recording.iso.enabled
+            && !recording.iso.sources.is_empty()
+            && !covered(&recording.iso.encoder)
+        || inputs.setup.canvas.fps > 60
+        || inputs.setup.canvas.width.max(inputs.setup.canvas.height) > 3840
+        || inputs.setup.vertical.is_some()
+        || recording.iso.sources.iter().any(|id| {
+            let (w, h, fps, _) = iso_format(inputs.setup, inputs.formats, id);
+            w.max(h) > 3840 || fps > 60
+        })
+    {
+        return chip;
+    }
+    let throughput = |width, fps, sessions| {
+        profile
+            .encoders
+            .iter()
+            .filter(|e| {
+                e.codec == Codec::Hevc
+                    && e.bit_depth == 8
+                    && e.width == width
+                    && e.fps == fps
+                    && e.sessions == sessions
+                    && e.frames >= 8 * u64::from(sessions)
+                    && e.seconds >= 0.5
+            })
+            .map(|e| e.frames_per_second)
+            .min_by(f64::total_cmp)
+    };
+    // At least two sessions per assumed engine. Engine topology is still
+    // explicitly from the table until the platform exposes resource pools.
+    let sessions = (chip.engines * 2).max(4);
+    let Some((hd, uhd)) = throughput(1920, 60, sessions).zip(throughput(3840, 30, sessions)) else {
+        return chip;
+    };
+    let Some(hd_two) = throughput(1920, 60, 2) else {
+        return chip;
+    };
+    if hd < hd_two {
+        return chip;
+    }
+    let hd_pixels = 1920.0 * 1080.0;
+    let uhd_pixels = 3840.0 * 2160.0;
+    let per_pixel = (uhd.recip() - hd.recip()) / (uhd_pixels - hd_pixels);
+    let per_picture = hd.recip() - per_pixel * hd_pixels;
+    if per_pixel <= 0.0 || per_picture < 0.0 {
+        return chip;
+    }
+    let rate = 1.0 / (per_pixel * f64::from(chip.engines.max(1)));
+    let overhead = per_picture / per_pixel;
+    if !rate.is_finite() || !overhead.is_finite() || !(1e6..=1e11).contains(&rate) {
+        return chip;
+    }
+    // A recording-codec test is not a live H.264 test. Keep the latter's
+    // existing normalized cost rather than pretending it was measured.
+    chip.stream_h264_cost *= rate / chip.rate;
+    chip.rate = rate;
+    chip.frame_overhead = overhead;
+    chip.basis = format!(
+        "measured: local concurrent HEVC HD/UHD on {}; engine count, live H.264 and overload recovery remain table assumptions",
+        profile.measured_at
+    );
+    chip
 }
 
 /// An ISO source's size and rate: its own fields (a camera's size and
@@ -1013,7 +1098,7 @@ fn admission(
 /// Predict whether `inputs.setup`'s files fit, with the closest changes
 /// that fit, and with `add_iso`, how to turn that ISO file on.
 pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstimate, String> {
-    let chip = chip(&inputs.machine.chip);
+    let chip = calibrated_chip(inputs);
     let setup = inputs.setup;
     let mut judgement = judge(
         &chip,
@@ -1119,68 +1204,26 @@ pub fn probed_formats<P: crate::Platform>(
 /// The `doctor` and `setup check` line: whether `setup`'s files fit this
 /// Mac's encoders (recording, and with its stream if it has one), with the
 /// closest change that fits.
-pub fn check<P: crate::Platform>(
-    platform: &P,
-    setup: &Setup,
-    memory: Option<(&Memory, &str)>,
-) -> Option<isocast_protocol::api::Check> {
+pub fn check(estimate: &CapacityEstimate) -> Option<isocast_protocol::api::Check> {
     use isocast_protocol::api::{Check, CheckStatus};
-    let vertical_program = setup
-        .vertical
-        .as_ref()
-        .and_then(|v| v.recording.as_ref())
-        .is_some_and(|r| r.enabled);
-    let has_video = setup.recording.program.enabled
-        || vertical_program
-        || (setup.recording.iso.enabled && !setup.recording.iso.sources.is_empty());
-    if !has_video {
+    if estimate.outputs.is_empty() {
         return None;
     }
-    let machine = platform.machine();
-    let formats = probed_formats(platform, setup, &|_| false);
-    let lookup = |id: &str| formats.get(id).copied();
-    let run = |streaming| {
-        estimate(
-            &Inputs {
-                machine: &machine,
-                setup,
-                formats: &lookup,
-                streaming: [streaming; 2],
-                memory,
-                recording: false,
-            },
-            None,
-        )
-        .ok()
-    };
-    let recording = run(false)?;
-    let streams = setup.stream.is_some() || has_vertical_stream(setup);
-    let streaming = if streams { run(true) } else { None };
-    let worst = match &streaming {
-        Some(s) if s.load > recording.load => s,
-        _ => &recording,
-    };
-    let status = match worst.capacity {
+    let status = match estimate.capacity {
         Capacity::Fits => CheckStatus::Ok,
         _ => CheckStatus::Warning,
     };
-    let mut detail = recording.summary.clone();
-    if let Some(s) = streaming
-        .as_ref()
-        .filter(|s| s.capacity != recording.capacity)
-    {
-        detail.push_str(&format!(
-            "; with the stream on, {}",
-            s.summary.trim_start_matches("this Mac's encoders ")
-        ));
+    let mut detail = estimate.summary.clone();
+    if estimate.streaming {
+        detail.push_str(" (including configured streams)");
     }
     detail.push_str(&format!(
         " [{}, {} engine(s); {}]",
-        worst.chip,
-        worst.encode_engines,
-        worst.basis.split(':').next().unwrap_or("")
+        estimate.chip,
+        estimate.encode_engines,
+        estimate.basis.split(':').next().unwrap_or("")
     ));
-    let fix = worst.suggestions.first().map(|s| match &s.change {
+    let fix = estimate.suggestions.first().map(|s| match &s.change {
         Some(change) => format!("{}: isocast plan --patch '{change}'", s.description),
         None => s.description.clone(),
     });
@@ -1247,6 +1290,7 @@ mod tests {
                 streaming: [streaming; 2],
                 memory: None,
                 recording: false,
+                profile: None,
             },
             None,
         )
@@ -1335,6 +1379,7 @@ mod tests {
             streaming: [false; 2],
             memory: None,
             recording: false,
+            profile: None,
         };
         let admitted = estimate(&inputs, Some("cam2")).unwrap().admission.unwrap();
         assert!(!admitted.on && !admitted.as_is, "{admitted:?}");

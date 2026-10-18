@@ -714,6 +714,10 @@ impl FileWriter for CrashSafeWriter {
         self.pending_video.len()
     }
 
+    fn completed_video_frames(&self) -> Option<u64> {
+        Some(self.encoded_frames)
+    }
+
     fn append_audio(&mut self, track: usize, samples: &[f32], pts: Time) -> Result<bool> {
         autoreleasepool(|_| self.append_samples(track, samples, pts))
     }

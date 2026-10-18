@@ -236,7 +236,7 @@ def run(cmd, env, check=True):
 
 
 def engine_env(sock, setup):
-    return dict(os.environ, ISOCAST_DEV_APP=str(DEV_APP), ISOCAST_SOCKET=sock,
+    return dict(os.environ, ISOCAST_CALIBRATION="off", ISOCAST_DEV_APP=str(DEV_APP), ISOCAST_SOCKET=sock,
                 ISOCAST_SETUP=str(setup), ISOCAST_MONITOR_SILENT="1")
 
 

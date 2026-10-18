@@ -271,6 +271,46 @@ impl Daemon {
             result = serde_json::from_value(merged)
                 .map_err(|err| failed(format!("tune's change didn't fit the setup: {err}")))?;
         }
+        // The setup benchmark doesn't include a live stream. A qualified
+        // local machine profile also judges the combined workload, using
+        // the exact same suggestions/admission model as `capacity`.
+        // Respect the selected exact pass, including a different codec or
+        // smaller variant that tune benchmarked successfully.
+        let tuned_fits = tuning.candidates.iter().any(|candidate| {
+            candidate.feasible && tuning.recommended.as_ref() == Some(&candidate.encoder)
+        }) || tuning
+            .variants
+            .iter()
+            .any(|variant| variant.feasible && tuning.change.as_ref() == Some(&variant.change));
+        if let Ok(estimate) = self.estimate_capacity(isocast_protocol::api::CapacityParams {
+            setup: Some(result.clone()),
+            stream: Some(params.goal.streams()),
+            add_iso: None,
+        }) && estimate.basis.starts_with("measured: local")
+        {
+            notes.push(format!("Machine profile: {}", estimate.summary));
+            if (params.goal.streams() || !tuned_fits)
+                && let Some(suggestion) = estimate.suggestions.iter().find(|s| {
+                    s.capacity == isocast_protocol::api::Capacity::Fits && s.change.is_some()
+                })
+            {
+                result = Setup::from_value(merge_patch(
+                    &to_json(&result)?,
+                    suggestion.change.as_ref().unwrap(),
+                ))
+                .map_err(|err| {
+                    failed(format!(
+                        "machine profile's change didn't fit the setup: {err}"
+                    ))
+                })?;
+                notes.push(format!(
+                    "Machine profile recommends: {}",
+                    suggestion.description
+                ));
+            } else if !params.goal.streams() && tuned_fits && !estimate.suggestions.is_empty() {
+                notes.push("Tune measured these files with headroom; keeping its result rather than applying the conservative machine-profile suggestion".into());
+            }
+        }
         if params.goal.streams() {
             notes.push(
                 "the stream's H.264 encoder isn't part of the benchmark; watch for dropped \

@@ -464,6 +464,7 @@ class Engine:
             if k.startswith("ISOCAST_"):
                 del self.env[k]
         self.env.update({
+            "ISOCAST_CALIBRATION": "off",
             "ISOCAST_SOCKET": os.path.join(self.dir, "engine.sock"),
             # A dev app that doesn't exist: the CLI starts the isocastd beside it.
             "ISOCAST_DEV_APP": os.path.join(self.dir, "none.app"),

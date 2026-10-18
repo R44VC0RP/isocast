@@ -92,7 +92,7 @@ def run(cmd, env, check=True, **kw):
 
 
 def engine_env(work, name):
-    return dict(os.environ, ISOCAST_SOCKET=str(work / f"{name}.sock"),
+    return dict(os.environ, ISOCAST_CALIBRATION="off", ISOCAST_SOCKET=str(work / f"{name}.sock"),
                 ISOCAST_SETUP=str(work / f"{name}-live.toml"),
                 ISOCAST_TIMELINES=str(work / f"{name}-timelines"), ISOCAST_MONITOR_SILENT="1")
 

@@ -105,6 +105,9 @@ impl Daemon {
     }
 
     pub(super) fn virtual_camera_start(self: &Arc<Self>) -> Result<VirtualCameraStatus, RpcError> {
+        // Extension activation can retry here outside the dispatcher.
+        let _gate = self.starting.read_recursive();
+        self.cancel_calibration("Calibration deferred for the virtual camera")?;
         if self.state.read().camera.removing {
             return Err(refused(
                 "virtual_camera: it is being removed from macOS; start it again once that finishes"

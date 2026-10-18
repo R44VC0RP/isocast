@@ -18,6 +18,7 @@ pub mod filter;
 pub mod gpu;
 pub mod hotkeys;
 pub mod layout;
+pub mod machine_profile;
 mod pacing;
 mod picture;
 pub mod project;
@@ -182,6 +183,14 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// paces frames or audio in real time (the program, a file's frame
     /// clock, an audio reader, the mix, a file writer).
     fn real_time_thread(&self) {}
+
+    /// Lower a disposable calibration helper's process/thread priority.
+    /// Only [`machine_profile::measure`] in the helper may call this.
+    /// Returns what was set, for the profile's notes; `None` where the
+    /// platform doesn't lower it.
+    fn calibration_priority(&self) -> Option<&'static str> {
+        None
+    }
 
     /// The CPU time the calling thread has used so far, if the OS tells:
     /// what the compositor costs per frame is measured with it.
@@ -713,6 +722,12 @@ pub trait FileWriter: Send {
     /// developer mode's traces.
     fn queue_depth(&self) -> usize {
         0
+    }
+
+    /// Completed encoded video pictures observed so far, when the backend
+    /// exposes them. Calibration uses deltas, never queued submissions.
+    fn completed_video_frames(&self) -> Option<u64> {
+        None
     }
 
     /// Append interleaved samples to audio track `track`. Returns `false` if

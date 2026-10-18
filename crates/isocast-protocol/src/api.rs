@@ -542,6 +542,12 @@ pub enum Method {
     /// folder holding it); the take's files are never touched. Returns
     /// [`TimelineInfo`](crate::timeline::TimelineInfo).
     TimelineRelink(crate::timeline::TimelineRelinkParams),
+    /// Measured machine capabilities and calibration state. Returns MachineStatus.
+    MachineProfile,
+    /// Start a silent, idle-only calibration (at most 30 seconds). Returns MachineStatus.
+    MachineCalibrate,
+    /// Cancel calibration, retaining the last valid profile. Returns MachineStatus.
+    MachineCancel,
     /// Write a timeline as a project Final Cut Pro (`fcpxml`), Premiere Pro
     /// (`xmeml`), DaVinci Resolve (`xmeml` with app `resolve`) or any
     /// OpenTimelineIO reader (`otio`) opens (#104): every
@@ -1564,6 +1570,9 @@ pub struct LoadWarning {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Status {
     pub state: EngineState,
+    /// A compact calibration summary; machine_profile returns the measurements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_profile: Option<crate::machine::MachineStatus>,
     /// A current episode of reduced system/encoder headroom; clears after
     /// recovery, not on a new take. Events are limited to one `warning` per
     /// cause every three minutes; status still shows suppressed episodes.

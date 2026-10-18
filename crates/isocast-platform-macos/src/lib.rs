@@ -149,6 +149,13 @@ impl isocast_engine::FileWriter for MacWriter {
         }
     }
 
+    fn completed_video_frames(&self) -> Option<u64> {
+        match self {
+            Self::CrashSafe(writer) => writer.completed_video_frames(),
+            Self::Asset(writer) => writer.completed_video_frames(),
+        }
+    }
+
     fn commit(&mut self) -> anyhow::Result<Option<std::time::Duration>> {
         match self {
             Self::Asset(w) => w.commit(),
@@ -303,6 +310,16 @@ impl Platform for MacPlatform {
         unsafe {
             libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
         }
+    }
+
+    fn calibration_priority(&self) -> Option<&'static str> {
+        // Calibration runs only in a disposable helper. Lower the whole
+        // process too: a writer creates its own threads after this call.
+        // SAFETY: changes only this process and the calling thread.
+        let process = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 15) };
+        let status =
+            unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
+        (process == 0 && status == 0).then_some("nice 15, utility quality of service")
     }
 
     fn thread_cpu_time(&self) -> Option<std::time::Duration> {

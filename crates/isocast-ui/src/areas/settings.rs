@@ -618,6 +618,18 @@ impl Area for Settings {
             "hotkeys" => app.open_dialog("settings", "hotkeys"),
             "report_bug" => app.open_dialog("bug-report", ""),
             "check_updates" => crate::update::check_now(),
+            "machine_calibrate" | "machine_cancel" => {
+                let method = if id == "machine_calibrate" {
+                    Method::MachineCalibrate
+                } else {
+                    Method::MachineCancel
+                };
+                app.call(method, |app, result| {
+                    if let Err(error) = result {
+                        app.toast(ToastKind::Error, "Machine calibration", &error.message);
+                    }
+                });
+            }
             "show_recordings" => {
                 let folder = app
                     .session
@@ -1557,6 +1569,18 @@ impl Settings {
         area.set_applying(d.applying);
 
         // General
+        let machine = s
+            .status
+            .as_ref()
+            .and_then(|status| status.machine_profile.as_ref());
+        area.set_machine_summary(
+            machine
+                .map_or("Not calibrated; using the per-chip capacity table", |m| {
+                    m.summary.as_str()
+                })
+                .into(),
+        );
+        area.set_machine_calibrating(machine.is_some_and(|m| m.running));
         area.set_name(text(&draft["name"]).into());
         area.set_setup_file(
             s.status

@@ -129,6 +129,23 @@ export component GeneralPage inherits SetPage {
         }
     }
     SetGroup {
+        title: "Machine Profile";
+        hint: SettingsArea.machine-summary;
+        GroupRow {
+            label: "Silent self-test";
+            place: RowPlace.only;
+            trailing-pad: Theme.space-2;
+            Centred {
+                Button {
+                    text: SettingsArea.machine-calibrating ? "Cancel" : "Calibrate";
+                    size: ControlSize.small;
+                    on-control: true;
+                    clicked => { Ui.menu(SettingsArea.machine-calibrating ? "machine_cancel" : "machine_calibrate"); }
+                }
+            }
+        }
+    }
+    SetGroup {
         title: "Updates";
         hint: SettingsArea.updates-available
             ? "Isocast checks once a day and asks before installing. An update never installs during a recording or stream; it waits until they stop."
