@@ -3981,8 +3981,7 @@ def check_pattern_take(e, path, manifest, cfg, layout, evidence, t0=None, label=
         rows = pattern_rows(file, specs, (w, h), fps)
         if t0 is None:
             t0 = (pattern_fit(rows, "bars", period) - offset) % period
-        oracle_check_rows(f"{label} {source}", file, rows, expected(offset), e.root, evidence,
-                          live=lambda slot, o=offset: take_slot(slot, o) - take_slot(slot - 1, o) == 1)
+        oracle_check_rows(f"{label} {source}", file, rows, expected(offset), e.root, evidence)
         if f.get("audio") and source in ("program", "bars", "bars2") and not pauses:
             # The tone beeps with every flash of the band (the bottom quarter
             # of the program and ISO pictures; a pause breaks the cadence).
@@ -4099,9 +4098,6 @@ def scenario_win_scenes(e, cfg, evidence):
         if not mixing:
             oracle.expect(index, t, f"scene {scene}", ("id", PATTERN_TAGS[scene], (t0 + slot) % period),
                           row["picture"])
-            before = state(slot - 1)
-            if slot > 0 and before == (scene, None):
-                oracle.previous[index] = {f"scene {scene}": ("id", PATTERN_TAGS[scene], (t0 + slot - 1) % period)}
             continue
         old, first, kind, length = mixing
         k = slot - first
