@@ -6906,6 +6906,13 @@ each section. Delete entries that stop being true.
   over controls, below-minimum sizes): triage before filing. The sweep
   starts at 900 because the window's minimum width is 900.
 
+- 2026-10-18: the frame oracle is strict unconditionally. #126 (media
+  pacing, 7df7983b) is merged, so `--tolerate-issue-126`, its "late by
+  #126" rule (`issue_126`, `late_by_126`), the `previous`-frame plumbing
+  behind it and the "KNOWN ISSUE #126" marking are gone from
+  scripts/e2e.py, merge-branch.sh and agent-rules.md. Any oracle mismatch
+  fails with a contact sheet; don't rerun to green, read the sheet.
+
 ## Gotchas
 
 - 2026-10-18 (#64): the media-source A/V check (two burst tracks mixed in

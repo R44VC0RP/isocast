@@ -37,10 +37,7 @@ names the first wrong picture, expected vs actual, with a contact sheet.
                has here; runs on any OS (Windows: scripts/oracle-windows.sh)
   --pattern-oracle MOVIE --fps N
                a file of the engine's test pattern, frame by frame (any OS)
-It is strict. Until #126 lands (media sources pacing on an ordinary thread,
-so a live picture now and then shows its sources' previous frames),
---tolerate-issue-126 accepts exactly that pattern and counts it; without the
-flag such a failure is marked "KNOWN ISSUE #126". Remove the flag with #126.
+It is strict, unconditionally: any mismatch fails with a contact sheet.
 """
 
 import argparse
@@ -2285,10 +2282,6 @@ ORACLE_SCENARIOS = ("oracle_record", "oracle_scenes", "oracle_takes", "oracle_ed
                     "oracle_canvases", "oracle_replay", "oracle_governor")
 # The lanes' suite while they work (about 3 minutes on the VM, --hosted).
 QUICK = ("oracle_record", "oracle_scenes", "oracle_takes", "oracle_edit", "oracle_masks")
-# #126 (media sources pacing on an ordinary thread) makes an occasional
-# live picture show its sources' previous frames. Strict by default; the
-# flag accepts exactly that pattern. Remove it when #126 lands.
-TOLERATE_ISSUE_126 = os.environ.get("ISOCAST_TOLERATE_ISSUE_126") == "1"
 # Measured on main (2026-10-18): a media source restarting on activation
 # shows its first frame at the first picture its scene is on air.
 RESTART_FIRST_FRAME = 0
@@ -2520,39 +2513,6 @@ def contact_sheet(path, index, out):
     return out if out.exists() else None
 
 
-def issue_126(oracle):
-    """Whether every mismatch of `oracle` is exactly the engine defect
-    #126 (media sources pacing on an ordinary thread, so under load a
-    picture shows frames that arrived late): only in a live recording
-    output (or an export copying such a picture of its take), at isolated
-    pictures (no two in a row), each showing for EVERY one of its regions
-    an older frame than expected but none older than the oracle expects at
-    the previous frame slot (for a 1x source: exactly that frame; for a
-    faster one, any frame in between), at most 1% of the output's pictures
-    (none in an output of fewer than 100). Returns the pictures, or None."""
-    bad = sorted({m[0] for m in oracle.mismatches})
-    if not bad or len(bad) > len(oracle.pictures) // 100 or any(b2 - b1 < 2 for b1, b2 in zip(bad, bad[1:])):
-        return None
-    for index in bad:
-        previous = oracle.previous.get(index)
-        wants, gots = oracle.wants.get(index, {}), oracle.gots.get(index, {})
-        if not previous or set(previous) != set(wants) or not all(late_by_126(wants[r], gots[r], previous[r])
-                                                                  for r in wants):
-            return None
-    return bad
-
-
-def late_by_126(want, got, previous):
-    """`got` is a frame of the same source no newer than the one before
-    `want` and no older than `previous` (what the previous slot shows)."""
-    if not all(isinstance(x, tuple) and x[0] == "id" for x in (want, got, previous)):
-        return False
-    if not want[1] == got[1] == previous[1]:
-        return False
-    span, behind = (want[2] - previous[2]) % 65536, (want[2] - got[2]) % 65536
-    return 1 <= behind <= span
-
-
 class Oracle:
     """Expected-vs-actual checks of one output; `verdict` fails with the
     first mismatch and a contact sheet."""
@@ -2560,13 +2520,10 @@ class Oracle:
     def __init__(self, label, path, root, evidence):
         self.label, self.path, self.root, self.evidence = label, Path(path), root, evidence
         self.checked, self.mismatches, self.pictures = 0, [], set()
-        self.wants, self.gots, self.previous = {}, {}, {}
 
     def expect(self, index, t, region, want, got, allowed=()):
         self.checked += 1
         self.pictures.add(index)
-        self.wants.setdefault(index, {})[region] = want
-        self.gots.setdefault(index, {})[region] = got
         if got == want or got in allowed:
             return
         self.mismatches.append((index, t, region, want, got))
@@ -2577,12 +2534,6 @@ class Oracle:
         require(self.checked > 0, f"{self.label}: the oracle checked nothing")
         if not self.mismatches:
             return row
-        known = issue_126(self)
-        if known is not None:
-            row["issue_126_pictures"] = known
-            self.evidence.setdefault("issue_126", []).append({"output": self.path.name, "pictures": known})
-            if TOLERATE_ISSUE_126:
-                return row
         index, t, region, want, got = self.mismatches[0]
         (self.root / "sheets").mkdir(exist_ok=True)
         sheet = contact_sheet(self.path, index, self.root / "sheets" / f"{self.path.stem}-{index}.png")
@@ -2596,9 +2547,7 @@ class Oracle:
                           "expected": describe(want), "actual": describe(got)}, sheet=sheet and str(sheet))
         later = "; ".join(f"{t2:.3f} s {r2}: expected {describe(w2)}, got {describe(g2)}"
                           for _, t2, r2, w2, g2 in self.mismatches[1:3])
-        mark = (f"KNOWN ISSUE #126 (each of {len(known)} isolated picture(s) shows every source's previous "
-                f"frame; --tolerate-issue-126 accepts exactly this until #126 lands): " if known else "")
-        raise Failure(f"{mark}{self.label} ({self.path.name}): first mismatch at picture {index} ({t:.4f} s), "
+        raise Failure(f"{self.label} ({self.path.name}): first mismatch at picture {index} ({t:.4f} s), "
                       f"{region}: expected {describe(want)}, got {describe(got)}; {len(self.mismatches)} of "
                       f"{self.checked} checks differ{' (then ' + later + ')' if later else ''}; "
                       f"contact sheet sheets/{sheet.name if sheet else None} in the scenario's folder")
@@ -2615,28 +2564,20 @@ def oracle_decode(path, regions, fps):
     return rows
 
 
-def oracle_compare(label, path, regions, expected, fps, root, evidence, live=None):
+def oracle_compare(label, path, regions, expected, fps, root, evidence):
     """Every picture's decoded regions against `expected(slot, region
     name)` (None: no check); see oracle_check_rows."""
-    return oracle_check_rows(label, path, oracle_decode(path, regions, fps), expected, root, evidence, live)
+    return oracle_check_rows(label, path, oracle_decode(path, regions, fps), expected, root, evidence)
 
 
-def oracle_check_rows(label, path, rows, expected, root, evidence, live=None):
-    """`rows` [(slot, pts, {region: decoded})] against `expected`. `live`
-    (a live recording's output) is `adjacent(slot)`: whether the file's
-    previous slot was presented one capture tick before this one, with
-    nothing cut out between (a pause, a split). Only there does the oracle
-    say what the previous presented slot showed, so #126 can be recognised;
-    at a pause's resume it can't, and nothing is excused."""
+def oracle_check_rows(label, path, rows, expected, root, evidence):
+    """`rows` [(slot, pts, {region: decoded})] against `expected`."""
     oracle = Oracle(label, path, root, evidence)
     for index, (slot, t, row) in enumerate(rows):
         for name, got in row.items():
             want = expected(slot, name)
             if want is not None:
                 oracle.expect(index, t, name, want, got)
-        if live and slot > 0 and live(slot):
-            oracle.previous[index] = {name: expected(slot - 1, name) for name in row
-                                      if expected(slot, name) is not None}
     return oracle.verdict()
 
 
@@ -2770,8 +2711,7 @@ def check_record_take(e, path, manifest, cfg, layout, count, evidence, vertical=
     for source, regions in outputs:
         file, f = manifest_file(path, manifest, source)
         offset = round((f.get("start_offset_seconds") or 0) * fps)
-        oracle_compare(f"{label} {source}", file, regions, expected(offset), fps, e.root, evidence,
-                       live=lambda slot, o=offset: take_slot(slot, o) - take_slot(slot - 1, o) == 1)
+        oracle_compare(f"{label} {source}", file, regions, expected(offset), fps, e.root, evidence)
         if source in ("program", "a") and (f.get("audio") or []):
             oracle_markers(f"{label} {source}", file,
                            lambda j, o=offset: media_frame(t0, take_slot(j, o), 1, count), fps, evidence)
@@ -2919,10 +2859,6 @@ def scenario_oracle_scenes(e, cfg, evidence):
         scene, mixing, b_since = state(slot)
         if not mixing:
             oracle.expect(index, t, f"scene {scene}", frame(scene, slot, b_since), row["picture"])
-            before = state(slot - 1)
-            if slot > 0 and before[0] == scene and not before[1] and (scene == "a" or slot - 1 >= b_since):
-                # A steady live picture: what its previous slot shows (#126).
-                oracle.previous[index] = {f"scene {scene}": frame(scene, slot - 1, b_since)}
             continue
         old, first, kind, length = mixing
         k = slot - first
@@ -3086,23 +3022,6 @@ def scenario_oracle_edit(e, cfg, evidence):
     anchors = {str(Path(p).resolve()): fit_anchor(oracle_decode(manifest_file(p, m, "program")[0],
                                                                 oracle_regions(layout), fps), "a", count)
                for p, m in takes}
-    # The take slots where a take file has #126's pattern: an export copying
-    # such a picture may show it too (and nothing else is excused there).
-    late_in_take = {}
-    for p, m in takes:
-        key = str(Path(p).resolve())
-        for source, regions in (("program", oracle_regions(layout)), ("a", oracle_regions([("a", (0, 0, 1, 1))])),
-                                ("b", oracle_regions([("b", (0, 0, 1, 1))]))):
-            file, f_ = manifest_file(p, m, source)
-            offset = round((f_.get("start_offset_seconds") or 0) * fps)
-            late = set()
-            for slot, _, row in oracle_decode(file, regions, fps):
-                u = slot + offset
-                if u > 0 and all(late_by_126(("id", ORACLE_TAGS[r], (anchors[key] + u) % count), got,
-                                             ("id", ORACLE_TAGS[r], (anchors[key] + u - 1) % count))
-                                 for r, got in row.items()):
-                    late.add(u)
-            late_in_take[(key, source)] = late
     model = EditModel([Path(p).resolve() for p, _ in takes], seconds * fps)
     problem = model.compare(e.rpc("timeline_get")["clips"], fps)
     require(problem is None, f"edit: the two takes didn't append whole: {problem}")
@@ -3184,10 +3103,6 @@ def scenario_oracle_edit(e, cfg, evidence):
                 names[name] = region
                 oracle.expect(index, t, name, ("id", region["tag"], take_frame(i, slot)),
                               oracle_read(pixels, w2, h2, region))
-            u = seg["in"] + slot - starts[i]
-            source = kind if kind in ("a", "b") else "program" if kind == "program" else (seg["angle"] or "program")
-            if slot > starts[i] and u in late_in_take[(seg["take"], source)]:
-                oracle.previous[index] = {n: ("id", r["tag"], (take_frame(i, slot) - 1) % count) for n, r in names.items()}
         evidence.setdefault("exports", []).append(oracle.verdict())
         if kind in ("program", "a", "edited"):
             oracle_markers(f"export {kind}", path, lambda j: take_frame(segment(j)[0], j), fps, evidence,
@@ -3410,8 +3325,6 @@ def scenario_oracle_masks(e, cfg, evidence):
         oracle = Oracle("mask-only media (B1)", program, e.root, evidence)
         for index, (slot, t, got) in enumerate(decoded):
             oracle.expect(index, t, "b1", ("id", 4, (m0 + slot) % count), got)
-            if slot > 0:
-                oracle.previous[index] = {"b1": ("id", 4, (m0 + slot - 1) % count)}
         try:
             oracle.verdict()
         except Failure as exc:
@@ -3549,7 +3462,7 @@ def scenario_oracle_replay(e, cfg, evidence):
     speeds = {"a": 1, "b": 1, "c": 1.5}
     oracle_compare("replay", replay, oracle_regions(RECORD_LAYOUT),
                    lambda slot, name: ("id", ORACLE_TAGS[name], media_frame(r0, slot, speeds[name], count)),
-                   fps, e.root, evidence, live=lambda slot: True)
+                   fps, e.root, evidence)
     oracle_markers("replay", replay, lambda j: media_frame(r0, j, 1, count), fps, evidence)
     last = round(video_times(replay)[-1] * fps)
     ends = (r0 + last - t0) % count  # the replay's last frame, as a slot of the take
@@ -3656,12 +3569,10 @@ def pattern_oracle(path, fps):
 
 
 def oracle_rules_selftest(work):
-    """The oracle's own rules on made-up pictures: the #126 allowance takes
-    exactly its pattern and nothing near it, and the edit model catches an
-    engine timeline that ignored or misplaced an edit."""
-    def run(changes, pictures=300, live=True, tolerate=False):
-        global TOLERATE_ISSUE_126
-        saved, TOLERATE_ISSUE_126 = TOLERATE_ISSUE_126, tolerate
+    """The oracle's own rules on made-up pictures: it is strict (any
+    mismatch fails, even one picture one frame late), and the edit model
+    catches an engine timeline that ignored or misplaced an edit."""
+    def run(changes, pictures=300):
         try:
             oracle = Oracle("rules", work / "none.mov", work, {})
             for i in range(pictures):
@@ -3670,46 +3581,29 @@ def oracle_rules_selftest(work):
                 got.update(changes.get(i, {}))
                 for r in want:
                     oracle.expect(i, i / 30, r, want[r], got[r])
-                if live and i:
-                    oracle.previous[i] = {r: ("id", ORACLE_TAGS[r], 999 + i) for r in want}
             oracle.verdict()
             return "pass"
-        except Failure as exc:
-            return "known #126" if str(exc).startswith("KNOWN ISSUE #126") else "fail"
-        finally:
-            TOLERATE_ISSUE_126 = saved
-    late = {r: ("id", ORACLE_TAGS[r], 999 + 100) for r in ("a", "b", "c")}
+        except Failure:
+            return "fail"
     cases = {
-        "the #126 pattern, strict": (run({100: late}), "known #126"),
-        "the #126 pattern, --tolerate-issue-126": (run({100: late}, tolerate=True), "pass"),
-        "one source one frame behind": (run({100: {"a": ("id", 1, 1099)}}, tolerate=True), "fail"),
-        "all sources two frames behind at 1x": (run({100: {r: ("id", ORACLE_TAGS[r], 1098) for r in "abc"}},
-                                                     tolerate=True), "fail"),
-        "two pictures in a row": (run({100: late, 101: {r: ("id", ORACLE_TAGS[r], 1100) for r in "abc"}},
-                                      tolerate=True), "fail"),
-        "more than 1% of pictures": (run({i: {r: ("id", ORACLE_TAGS[r], 999 + i) for r in "abc"}
-                                          for i in (10, 50, 100, 150)}, tolerate=True), "fail"),
-        "an export (no live previous frame)": (run({100: late}, live=False, tolerate=True), "fail"),
-        "a short output (under 100 pictures)": (run({40: {r: ("id", ORACLE_TAGS[r], 1039) for r in "abc"}},
-                                                     pictures=60, tolerate=True), "fail"),
+        "every picture as expected": (run({}), "pass"),
+        "every source one frame behind at one picture": (
+            run({100: {r: ("id", ORACLE_TAGS[r], 1099) for r in "abc"}}), "fail"),
+        "one source one frame behind": (run({100: {"a": ("id", 1, 1099)}}), "fail"),
+        "all sources two frames behind": (run({100: {r: ("id", ORACLE_TAGS[r], 1098) for r in "abc"}}), "fail"),
+        "a short output, one picture late": (run({40: {r: ("id", ORACLE_TAGS[r], 1039) for r in "abc"}},
+                                                  pictures=60), "fail"),
     }
     # A stale picture at a pause's resume (#124 re-review B1): 43 frames cut
-    # out after slot 99; picture 100 shows a frame 20 behind for every
-    # source, within the span the pause opened. Never #126.
-    def resumed(tolerate):
-        global TOLERATE_ISSUE_126
-        saved, TOLERATE_ISSUE_126 = TOLERATE_ISSUE_126, tolerate
-        want = lambda slot, r: ("id", ORACLE_TAGS[r], 1000 + slot + (43 if slot >= 100 else 0))  # noqa: E731
-        rows = [(slot, slot / 30, {r: (("id", ORACLE_TAGS[r], 1123) if slot == 100 else want(slot, r))
-                                   for r in ("a", "b", "c")}) for slot in range(300)]
-        try:
-            oracle_check_rows("rules", work / "none.mov", rows, want, work, {}, live=lambda slot: slot != 100)
-            return "pass"
-        except Failure as exc:
-            return "known #126" if str(exc).startswith("KNOWN ISSUE #126") else "fail"
-        finally:
-            TOLERATE_ISSUE_126 = saved
-    cases["a stale picture at a pause's resume, --tolerate-issue-126"] = (resumed(True), "fail")
+    # out after slot 99; picture 100 shows a frame 20 behind for every source.
+    want = lambda slot, r: ("id", ORACLE_TAGS[r], 1000 + slot + (43 if slot >= 100 else 0))  # noqa: E731
+    rows = [(slot, slot / 30, {r: (("id", ORACLE_TAGS[r], 1123) if slot == 100 else want(slot, r))
+                               for r in ("a", "b", "c")}) for slot in range(300)]
+    try:
+        oracle_check_rows("rules", work / "none.mov", rows, want, work, {})
+        cases["a stale picture at a pause's resume"] = ("pass", "fail")
+    except Failure:
+        cases["a stale picture at a pause's resume"] = ("fail", "fail")
     model = EditModel(["/t/1", "/t/2"], 90)
     model.set(30, 60, "crop", {"x": 0.25, "y": 0.25, "width": 0.75, "height": 0.75})
     engine = [{"take": "/t/1", "in_seconds": 0, "out_seconds": 1, "angle": None},
@@ -3864,10 +3758,6 @@ def run_case(args, root, name):
     if losses:
         dropped, slots = (sum(row[k] for row in losses) for k in ("dropped", "slots"))
         detail = f"; video drops {dropped}/{slots} ({dropped / slots:.1%})" if slots else "; no frame slots"
-    known = sum(len(x["pictures"]) for x in result.get("evidence", {}).get("issue_126", []))
-    if known:
-        detail += (f"; {known} picture(s) of known issue #126 "
-                   f"({'tolerated by --tolerate-issue-126' if TOLERATE_ISSUE_126 else 'not tolerated'})")
     print(f"{result['status']:4} {name}: {result['reason']}{detail}",
           file=sys.stderr if args.json else sys.stdout, flush=True)
     if not keep:
@@ -3951,9 +3841,6 @@ def main():
                              "on any OS (no engine); prints JSON")
     parser.add_argument("--engine-env", action="append", default=[], metavar="KEY=VALUE",
                         help="environment for the isolated engines (repeatable), e.g. a scratch build's fault switch")
-    parser.add_argument("--tolerate-issue-126", action="store_true",
-                        help="accept exactly the pattern of known engine issue #126 (a live picture showing every "
-                             "source's previous frame, isolated, <= 1%%), counted; remove when #126 lands")
     parser.add_argument("--pattern-oracle", type=Path, metavar="MOVIE", action="append",
                         help="check a file of the engine's test pattern frame by frame (any OS); with --fps")
     parser.add_argument("--fps", type=int, default=30, help="--pattern-oracle's frame rate")
@@ -3968,10 +3855,6 @@ def main():
     if args.list:
         print(json.dumps(list(SCENARIOS)) if args.json else "\n".join(SCENARIOS))
         return 0
-    if args.tolerate_issue_126:
-        global TOLERATE_ISSUE_126
-        os.environ["ISOCAST_TOLERATE_ISSUE_126"] = "1"  # the workers too
-        TOLERATE_ISSUE_126 = True
     if args.worker:
         return worker(args)
     if args.pattern_oracle:
@@ -3999,8 +3882,7 @@ def main():
     report = {"version": 1, "scenarios": [], "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
               # Which harness ran which scenarios (a merge check must run the merged one).
               "harness": {"e2e_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                          "scenarios": list(args.only or SCENARIOS),
-                          "tolerate_issue_126": TOLERATE_ISSUE_126}}
+                          "scenarios": list(args.only or SCENARIOS)}}
     root = None
     try:
         require(sys.platform == "darwin", "macOS is required")
