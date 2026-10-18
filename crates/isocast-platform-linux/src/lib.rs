@@ -6,6 +6,7 @@ mod browser;
 mod camera;
 mod encoder;
 pub mod frames;
+pub mod hotkeys;
 mod media;
 pub mod network;
 mod nvenc;

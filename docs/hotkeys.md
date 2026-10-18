@@ -294,3 +294,19 @@ either ends the hold. No system-wide keyboard hook is installed; with no
 holds the thread sleeps until a registered press or shutdown. Rebinding joins
 the old thread and releases its registrations before installing the new ones.
 Settings records an unclaimed chord from the focused window; Escape cancels.
+
+## Linux
+
+The daemon registers as `dev.isocast.Isocast` with the desktop portal's
+host Registry and binds every binding through the GlobalShortcuts portal,
+with its chord as the preferred trigger. The desktop picks the keys: GNOME
+and KDE ask the person, and Hyprland takes them from its config
+(`bind = MODS, KEY, global, dev.isocast.Isocast:<binding>`). A binding the
+desktop has no keys for yet is registered with a warning saying how to
+assign them. The portal needs the app's desktop entry: installed builds
+have it; for a development build run `scripts/linux-dev-install.sh`.
+A missing portal, or one that doesn't answer within 5 s (30 s while the
+desktop's shortcut dialog is open), leaves every binding focused-only, with
+the reason in its warning.
+
+Global capture on other platforms currently reports focused-only status.
