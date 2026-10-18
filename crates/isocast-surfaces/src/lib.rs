@@ -19,7 +19,7 @@ use std::fmt;
 mod mac;
 
 #[cfg(target_os = "macos")]
-pub use mac::{Exporter, Surface, fetch, host_now};
+pub use mac::{Exporter, Surface, fetch, host_now, retained_surfaces};
 
 #[cfg(not(target_os = "macos"))]
 mod other;

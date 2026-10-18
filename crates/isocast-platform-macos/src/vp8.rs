@@ -10,7 +10,6 @@ use std::ptr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
     CVImageBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBaseAddressOfPlane,
     CVPixelBufferGetBytesPerRow, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight,
@@ -59,11 +58,7 @@ impl Vp8Video {
 
     /// Decode one frame (and its alpha frame, if any) into a picture; none
     /// for a frame that isn't shown.
-    pub fn decode(
-        &mut self,
-        data: &[u8],
-        alpha: Option<&[u8]>,
-    ) -> Result<Option<CFRetained<CVImageBuffer>>> {
+    pub fn decode(&mut self, data: &[u8], alpha: Option<&[u8]>) -> Result<Option<PixelBuffer>> {
         let shown = &self.shown;
         let has_alpha = self.alpha.is_some();
         let frame = self
@@ -107,7 +102,7 @@ impl Vp8Video {
             self.pool = Some((pool, format, size));
         }
         let pool = &mut self.pool.as_mut().expect("set above").0;
-        let PixelBuffer(target) = take_waiting(pool)?;
+        let target = take_waiting(pool)?;
         if bgra {
             if self
                 .conversion
@@ -117,10 +112,10 @@ impl Vp8Video {
                 self.conversion = Some(((full, matrix), YpCbCrToArgb::new(full, matrix)?));
             }
             let conversion = &self.conversion.as_ref().expect("set above").1;
-            write_bgra(&frame, alpha_frame.as_ref(), conversion, &target)
+            write_bgra(&frame, alpha_frame.as_ref(), conversion, &target.0)
                 .with_context(|| format!("could not convert {shown}'s VP8 video"))?;
         } else {
-            write_420v(&frame, &target)
+            write_420v(&frame, &target.0)
                 .with_context(|| format!("could not convert {shown}'s VP8 video"))?;
         }
         Ok(Some(target))

@@ -1,6 +1,6 @@
 //! Display capture with ScreenCaptureKit.
 
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -293,6 +293,7 @@ pub(crate) fn native_size(display: CGDirectDisplayID) -> Option<(u32, u32)> {
 
 pub struct OutputIvars {
     sink: VideoSink<PixelBuffer>,
+    frames: Mutex<Option<crate::FramePool>>,
 }
 
 define_class!(
@@ -316,7 +317,13 @@ define_class!(
             if kind == SCStreamOutputType::Screen
                 && let Some((frame, at)) = complete_frame(sample)
             {
-                (self.ivars().sink.frame)(frame, at);
+                match crate::FramePool::copy(&mut self.ivars().frames.lock().unwrap(), &frame) {
+                    Ok(Some(frame)) => (self.ivars().sink.frame)(frame, at),
+                    Ok(None) => {} // Counted and warned by the pool ledger.
+                    Err(error) => {
+                        (self.ivars().sink.stopped)(format!("capture frame isolation: {error:#}"))
+                    }
+                }
             }
         }
     }
@@ -331,14 +338,22 @@ define_class!(
 
 impl StreamOutput {
     fn new(sink: VideoSink<PixelBuffer>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(OutputIvars { sink });
+        let this = Self::alloc().set_ivars(OutputIvars {
+            sink,
+            frames: Mutex::new(None),
+        });
         unsafe { msg_send![super(this), init] }
     }
 }
 
 /// The image and capture time of a sample buffer that holds a new frame.
 /// ScreenCaptureKit also sends buffers that only say nothing changed.
-fn complete_frame(sample: &CMSampleBuffer) -> Option<(PixelBuffer, Time)> {
+fn complete_frame(
+    sample: &CMSampleBuffer,
+) -> Option<(
+    objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+    Time,
+)> {
     let attachments = unsafe { sample.sample_attachments_array(false) }?;
     // SAFETY: CFArray and CFDictionary are toll-free bridged with their
     // Foundation counterparts, and the attachments are dictionaries.
@@ -352,5 +367,5 @@ fn complete_frame(sample: &CMSampleBuffer) -> Option<(PixelBuffer, Time)> {
     }
     let image = unsafe { sample.image_buffer() }?;
     let at = from_cm_time(unsafe { sample.presentation_time_stamp() });
-    Some((PixelBuffer(image), at))
+    Some((image, at))
 }

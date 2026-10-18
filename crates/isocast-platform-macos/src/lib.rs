@@ -312,6 +312,14 @@ impl Platform for MacPlatform {
         FramePool::ycbcr(width, height)
     }
 
+    fn retain_frame(frame: &PixelBuffer, usage: isocast_engine::FrameUse) -> Option<PixelBuffer> {
+        frame.retain(usage)
+    }
+
+    fn frame_budget(&self) -> Option<serde_json::Value> {
+        Some(frames::diagnostics())
+    }
+
     fn real_time_thread(&self) {
         // SAFETY: sets the calling thread's own quality of service.
         unsafe {

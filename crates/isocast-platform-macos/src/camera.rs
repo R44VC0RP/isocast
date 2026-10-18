@@ -357,6 +357,7 @@ fn describe(request: CameraRequest) -> String {
 }
 
 pub struct DelegateIvars {
+    frames: Mutex<Option<crate::FramePool>>,
     /// The size of the first frame, for devices without fixed formats.
     first_size: Mutex<Option<(u32, u32)>>,
     /// The device's name, and frames the capture output discarded since
@@ -420,7 +421,15 @@ define_class!(
                     *delivered = (Instant::now(), 0);
                 }
             }
-            (self.ivars().sink.frame)(PixelBuffer(image), host_time(time, clock.as_deref()));
+            match crate::FramePool::copy(&mut self.ivars().frames.lock().unwrap(), &image) {
+                Ok(Some(frame)) => {
+                    (self.ivars().sink.frame)(frame, host_time(time, clock.as_deref()))
+                }
+                Ok(None) => {} // Counted and warned by the pool ledger.
+                Err(error) => {
+                    (self.ivars().sink.stopped)(format!("camera frame isolation: {error:#}"))
+                }
+            }
         }
 
         #[unsafe(method(captureOutput:didDropSampleBuffer:fromConnection:))]
@@ -452,6 +461,7 @@ define_class!(
 impl VideoDelegate {
     fn new(sink: VideoSink<PixelBuffer>, name: String) -> Retained<Self> {
         let this = Self::alloc().set_ivars(DelegateIvars {
+            frames: Mutex::new(None),
             first_size: Mutex::new(None),
             name,
             dropped: Mutex::new((Instant::now(), 0)),

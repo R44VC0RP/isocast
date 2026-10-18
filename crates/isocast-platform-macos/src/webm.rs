@@ -698,6 +698,7 @@ pub struct VideoReader {
     pool: Option<FramePool>,
     /// Decoded frames waiting to be put in presentation order.
     pending: Vec<(i64, PixelBuffer)>,
+    frames: std::sync::Arc<crate::frames::Budget>,
     reorder: usize,
     ended: bool,
     shown: String,
@@ -841,6 +842,7 @@ impl VideoReader {
             tags,
             pool: None,
             pending: Vec::new(),
+            frames: crate::frames::Budget::new("matroska decoder", size, 0),
             reorder,
             ended: false,
             shown: shown.to_string(),
@@ -900,7 +902,7 @@ impl VideoReader {
             let frame = if self.has_alpha {
                 self.with_alpha(image, modifiable, alpha.as_ref())?
             } else {
-                image
+                self.frames.wrap(image)?
             };
             self.push(packet.time, frame);
         }
@@ -908,16 +910,22 @@ impl VideoReader {
     }
 
     /// Tag a decoded frame with its colour and queue it.
-    fn push(&mut self, time: i64, frame: CFRetained<CVImageBuffer>) {
+    fn push(&mut self, time: i64, frame: PixelBuffer) {
         if let Some(tags) = &self.tags {
             let mode = CVAttachmentMode::ShouldPropagate;
             unsafe {
-                frame.set_attachment(kCVImageBufferYCbCrMatrixKey, tags.matrix, mode);
-                frame.set_attachment(kCVImageBufferColorPrimariesKey, tags.primaries, mode);
-                frame.set_attachment(kCVImageBufferTransferFunctionKey, tags.transfer, mode);
+                frame
+                    .0
+                    .set_attachment(kCVImageBufferYCbCrMatrixKey, tags.matrix, mode);
+                frame
+                    .0
+                    .set_attachment(kCVImageBufferColorPrimariesKey, tags.primaries, mode);
+                frame
+                    .0
+                    .set_attachment(kCVImageBufferTransferFunctionKey, tags.transfer, mode);
             }
         }
-        self.pending.push((time, PixelBuffer(frame)));
+        self.pending.push((time, frame));
     }
 
     /// Decode a frame of the VP9 alpha stream, its luma being the alpha.
@@ -984,9 +992,9 @@ impl VideoReader {
         color: CFRetained<CVImageBuffer>,
         modifiable: bool,
         alpha: Option<&CFRetained<CVImageBuffer>>,
-    ) -> Result<CFRetained<CVImageBuffer>> {
+    ) -> Result<PixelBuffer> {
         let target = if modifiable {
-            color.clone()
+            self.frames.wrap(color.clone())?
         } else {
             let (width, height) = (
                 CVPixelBufferGetWidth(&color) as u32,
@@ -997,19 +1005,18 @@ impl VideoReader {
             }
             let pool = self.pool.as_mut().expect("set above");
             // The pool caps frames in flight; wait briefly for one back.
-            let PixelBuffer(target) =
-                take_waiting(pool).context("no free frame to combine alpha into")?;
-            copy_bgra(&color, &target)?;
+            let target = take_waiting(pool).context("no free frame to combine alpha into")?;
+            copy_bgra(&color, &target.0)?;
             target
         };
         let (width, height) = (
-            CVPixelBufferGetWidth(&target),
-            CVPixelBufferGetHeight(&target),
+            CVPixelBufferGetWidth(&target.0),
+            CVPixelBufferGetHeight(&target.0),
         );
-        let locked = Locked::new(&target, CVPixelBufferLockFlags(0))?;
-        let stride = CVPixelBufferGetBytesPerRow(&target);
-        let base = CVPixelBufferGetBaseAddress(&target) as *mut u8;
-        if !is_bgra(&target) || base.is_null() || stride < width * 4 {
+        let locked = Locked::new(&target.0, CVPixelBufferLockFlags(0))?;
+        let stride = CVPixelBufferGetBytesPerRow(&target.0);
+        let base = CVPixelBufferGetBaseAddress(&target.0) as *mut u8;
+        if !is_bgra(&target.0) || base.is_null() || stride < width * 4 {
             bail!(
                 "VideoToolbox gave {}'s video in an unexpected format",
                 self.shown

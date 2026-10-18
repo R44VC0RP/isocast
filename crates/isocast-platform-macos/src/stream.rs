@@ -119,6 +119,7 @@ enum RateControl {
 
 struct Output {
     health: Arc<crate::pressure::EncodeHealth>,
+    sources: crate::frames::NativeFrames,
     session_id: u64,
     purpose: &'static str,
     size: [u32; 2],
@@ -149,6 +150,7 @@ impl H264Encoder {
     pub fn new(spec: &LiveVideoSpec) -> Result<Self> {
         let output = Arc::new(Output {
             health: crate::pressure::EncodeHealth::new(spec.fps, !spec.low_latency),
+            sources: crate::frames::NativeFrames::default(),
             session_id: NEXT_ENCODER.fetch_add(1, Ordering::Relaxed),
             purpose: if spec.low_latency {
                 "monitor"
@@ -400,6 +402,10 @@ impl Drop for H264Encoder {
             );
         }
         unsafe { self.session.invalidate() };
+        for source in self.output.sources.drain() {
+            self.output.health.complete(source.submitted);
+            self.output.in_flight.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -420,7 +426,11 @@ impl VideoEncoder for H264Encoder {
         self.priority = Some(EncoderPressure::new(canvas));
     }
 
-    fn encode(&mut self, frame: &PixelBuffer, pts: Time, keyframe: bool) -> Result<()> {
+    fn encode(&mut self, input: &PixelBuffer, pts: Time, keyframe: bool) -> Result<()> {
+        let Some(frame) = input.retain(isocast_engine::FrameUse::Auxiliary) else {
+            self.output.dropped.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        };
         if self.started && self.priority.as_mut().is_some_and(|p| !p.admit()) {
             self.output.dropped.fetch_add(1, Ordering::Relaxed);
             if let Some(priority) = &mut self.priority {
@@ -476,16 +486,15 @@ impl VideoEncoder for H264Encoder {
         }
         self.output.in_flight.fetch_add(1, Ordering::Relaxed);
         let submitted = Instant::now();
-        let cookie = self.output.health.submit();
+        let submitted_ns = self.output.health.submit();
+        let cookie = self.output.sources.insert(frame, submitted_ns);
+        let mut flags = VTEncodeInfoFlags(0);
+        if !self.low_latency && self.output.callbacks.load(Ordering::Relaxed) >= 2 {
+            crate::frames::stall_consumer("live");
+        }
         let status = unsafe {
-            self.session.encode_frame(
-                &frame.0,
-                time,
-                duration,
-                options,
-                cookie as usize as *mut c_void,
-                ptr::null_mut(),
-            )
+            self.session
+                .encode_frame(&input.0, time, duration, options, cookie, &mut flags)
         };
         if let Some(priority) = &mut self.priority {
             // VideoToolbox can wait inside encode_frame before our submission
@@ -496,9 +505,17 @@ impl VideoEncoder for H264Encoder {
             // pressure. Keep pressure until a later submission fits its budget.
             priority.set(!first && submitted.elapsed() >= Duration::from_secs(1) / self.fps);
         }
-        if status != 0 {
-            self.output.health.complete(cookie);
+        if (status != 0 || flags.contains(VTEncodeInfoFlags::FrameDropped))
+            && let Some(source) = self.output.sources.take(cookie)
+        {
+            self.output.health.complete(source.submitted);
             self.output.in_flight.fetch_sub(1, Ordering::Relaxed);
+            if status == 0 {
+                self.output.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            self.output.ready.notify_all();
+        }
+        if status != 0 {
             self.output.last_os_status.store(status, Ordering::Relaxed);
             bail!("the H.264 encoder refused a frame (error {status})");
         }
@@ -627,9 +644,12 @@ unsafe extern "C-unwind" fn encoded(
     // SAFETY: the refcon is the encoder's `Output`, alive until the session
     // is invalidated.
     let output = unsafe { &*(refcon as *const Output) };
-    output.health.complete(frame as usize as u64);
+    let Some(source) = output.sources.take(frame) else {
+        return;
+    };
+    output.health.complete(source.submitted);
     output.latency_ns.store(
-        crate::pressure::monotonic_ns().saturating_sub(frame as usize as u64),
+        crate::pressure::monotonic_ns().saturating_sub(source.submitted),
         Ordering::Relaxed,
     );
     output.callbacks.fetch_add(1, Ordering::Relaxed);

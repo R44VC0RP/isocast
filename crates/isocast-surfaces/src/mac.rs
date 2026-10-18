@@ -50,7 +50,37 @@ const REPLY_TIMEOUT_MS: u32 = 1000;
 /// An 8-bit RGBA picture in GPU memory that several processes can use at
 /// once. Cloning shares the same surface.
 #[derive(Clone)]
-pub struct Surface(CFRetained<IOSurfaceRef>);
+pub struct Surface(
+    CFRetained<IOSurfaceRef>,
+    #[allow(dead_code)] Arc<SurfaceLease>,
+);
+
+struct SurfaceLease(u32);
+
+type SurfaceCounts = HashMap<u32, (usize, u64)>;
+fn surface_counts() -> &'static Mutex<SurfaceCounts> {
+    static COUNTS: OnceLock<Mutex<SurfaceCounts>> = OnceLock::new();
+    COUNTS.get_or_init(Mutex::default)
+}
+
+impl Drop for SurfaceLease {
+    fn drop(&mut self) {
+        let mut counts = surface_counts().lock().unwrap_or_else(|e| e.into_inner());
+        let (refs, _) = counts.get_mut(&self.0).expect("live surface");
+        *refs -= 1;
+        if *refs == 0 {
+            counts.remove(&self.0);
+        }
+    }
+}
+
+/// Distinct shared surfaces retained in this process, including GPU texture
+/// wrappers and pending Mach offers. A client may retain its own copies after
+/// disconnecting; those cannot pin a recorder pixel-buffer pool.
+pub fn retained_surfaces() -> (usize, u64) {
+    let counts = surface_counts().lock().unwrap_or_else(|e| e.into_inner());
+    (counts.len(), counts.values().map(|(_, bytes)| *bytes).sum())
+}
 
 // SAFETY: IOSurfaces are reference counted atomically and may be used from
 // any thread; their pixels are only touched by the GPU here.
@@ -61,7 +91,11 @@ impl Surface {
     /// Keep an existing surface alive for a Mach handoff. Its pixel format
     /// is unchanged; `texture` is only for RGBA surfaces, not camera BGRA.
     pub fn from_io_surface(surface: CFRetained<IOSurfaceRef>) -> Self {
-        Self(surface)
+        let id = surface.id();
+        let bytes = (surface.bytes_per_row() as u64).saturating_mul(surface.height() as u64);
+        let mut counts = surface_counts().lock().unwrap_or_else(|e| e.into_inner());
+        counts.entry(id).or_insert((0, bytes)).0 += 1;
+        Self(surface, Arc::new(SurfaceLease(id)))
     }
 
     /// A new `width`×`height` surface of 8-bit RGBA (`Rgba8Unorm` on the
@@ -92,7 +126,7 @@ impl Surface {
         let properties = CFDictionary::<CFString, CFNumber>::from_slices(&keys, &values);
         let surface = unsafe { IOSurfaceRef::new(properties.as_opaque()) }
             .with_context(|| format!("could not create a {width}×{height} IOSurface"))?;
-        Ok(Self(surface))
+        Ok(Self::from_io_surface(surface))
     }
 
     pub fn width(&self) -> u32 {
@@ -469,7 +503,7 @@ pub fn fetch(service: &str, token: Token, timeout: Duration) -> Result<Vec<Surfa
             let port = descriptor.name;
             if descriptor.type_ as u32 == MACH_MSG_PORT_DESCRIPTOR && port != MACH_PORT_NULL {
                 match IOSurfaceRef::lookup_from_mach_port(port) {
-                    Some(surface) => surfaces.push(Surface(surface)),
+                    Some(surface) => surfaces.push(Surface::from_io_surface(surface)),
                     None => failed = true,
                 }
                 unsafe { mach_port_deallocate(mach_task_self(), port) };

@@ -331,6 +331,10 @@ fn draw<P: Platform>(
     pts: Time,
 ) -> Result<()> {
     let size = output.size;
+    let Some(frame) = P::retain_frame(&frame, crate::FrameUse::Auxiliary) else {
+        status.lock().frames_dropped += 1;
+        return Ok(());
+    };
     if !output.in_flight.available()? {
         status.lock().frames_dropped += 1;
         return Ok(());

@@ -303,6 +303,7 @@ pub fn run_child(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let mut camera = (!handle.is_null()).then(|| Camera(handle));
+    let mut native_pool = None;
     reply(&mut socket, 0, 0)?;
     loop {
         deadline.store(
@@ -353,8 +354,14 @@ pub fn run_child(args: &[String]) -> Result<()> {
         let pixels = NonNull::new(pixels)
             .filter(|_| code == 0)
             .context("could not wrap camera IOSurface")?;
-        let frame = PixelBuffer(unsafe { CFRetained::<CVPixelBuffer>::from_raw(pixels) });
+        let frame = unsafe { CFRetained::<CVPixelBuffer>::from_raw(pixels) };
         stall("send");
+        // CMIO acknowledges enqueue, not release. Its private bounded pool
+        // must own the pixels before the parent is allowed to recycle them.
+        let Some(frame) = crate::FramePool::copy_native(&mut native_pool, &frame)? else {
+            reply(&mut socket, 1, 7)?;
+            continue;
+        };
         let code = if let Some(camera) = &camera {
             unsafe {
                 isocast_camera_send(

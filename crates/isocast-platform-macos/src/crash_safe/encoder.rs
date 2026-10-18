@@ -58,6 +58,7 @@ pub struct Encoded {
 
 struct Output {
     health: Arc<crate::pressure::EncodeHealth>,
+    sources: crate::frames::NativeFrames,
     frames: Mutex<VecDeque<Result<Encoded>>>,
     ready: Condvar,
     in_flight: AtomicU64,
@@ -79,6 +80,7 @@ impl VideoSession {
     pub fn new(spec: &VideoTrackSpec, timescale: i32) -> Result<Self> {
         let output = Arc::new(Output {
             health: crate::pressure::EncodeHealth::new(spec.fps, false),
+            sources: crate::frames::NativeFrames::default(),
             frames: Mutex::new(VecDeque::new()),
             ready: Condvar::new(),
             in_flight: AtomicU64::new(0),
@@ -234,19 +236,29 @@ impl VideoSession {
         let time = unsafe { CMTime::new(ticks, self.timescale) };
         self.output.in_flight.fetch_add(1, Ordering::Relaxed);
         let submitted = self.output.health.submit();
+        let cookie = self.output.sources.insert(frame.clone(), submitted);
+        let mut flags = VTEncodeInfoFlags(0);
         let status = unsafe {
             self.session.encode_frame(
                 &frame.0,
                 time,
                 self.frame_duration,
                 None,
-                submitted as usize as *mut c_void,
-                ptr::null_mut(),
+                cookie,
+                &mut flags,
             )
         };
-        if status != 0 {
-            self.output.health.complete(submitted);
+        if (status != 0 || flags.contains(VTEncodeInfoFlags::FrameDropped))
+            && let Some(source) = self.output.sources.take(cookie)
+        {
+            self.output.health.complete(source.submitted);
             self.output.in_flight.fetch_sub(1, Ordering::Relaxed);
+            if status == 0 {
+                self.output.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            self.output.ready.notify_all();
+        }
+        if status != 0 {
             bail!("the recording encoder refused a frame (error {status})");
         }
         Ok(())
@@ -297,6 +309,10 @@ impl Drop for VideoSession {
             );
         }
         unsafe { self.session.invalidate() };
+        for source in self.output.sources.drain() {
+            self.output.health.complete(source.submitted);
+            self.output.in_flight.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -323,7 +339,10 @@ unsafe extern "C-unwind" fn encoded(
     // SAFETY: the refcon is the session's `Output`, alive until the session
     // is invalidated.
     let output = unsafe { &*(refcon as *const Output) };
-    output.health.complete(frame as usize as u64);
+    let Some(source) = output.sources.take(frame) else {
+        return;
+    };
+    output.health.complete(source.submitted);
     let result = match unsafe { sample.as_ref() } {
         _ if status != 0 => Err(anyhow!("the recording encoder failed (error {status})")),
         None => {

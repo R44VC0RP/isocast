@@ -399,6 +399,9 @@ impl Encoder {
                 )
             };
             let pool = FramePool::ycbcr(self.size.0 as u32, self.size.1 as u32)?;
+            // Export's native-only encoder consumes raw CV buffers, outside
+            // the recorder. Its private pool reserves its full physical bound.
+            pool.reserve_native();
             self.scaler = Some((session, pool));
         }
         let mut frame = None;

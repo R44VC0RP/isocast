@@ -570,6 +570,17 @@ come later (clips already carry in/out points on their take).
 - [ ] **S.3 Astra optimization rounds.** GPT-6 Astra (opencode, xhigh)
   sessions with S.1/S.2 as their measuring stick, one hot path at a time,
   until Isocast beats OBS on every measure we can control.
+  - [ ] **S.3 #27 Frame-pool invariant.** Distinct-buffer ledger across
+    native/GPU owners, independent recording/auxiliary reserves, capture
+    isolation, status/doctor and governor feedback. Verify many-ISO/canvas/
+    replay/multiview/mask stress, flagship A/B, gates and strict e2e.
+    - [x] Buffer accounting and reservations implemented and qualified:
+      baseline 461 program losses → zero across ten files; final gates
+      244 unit tests + doctest, strict 18/18, flagship-1080 3-pair A/B.
+    - [ ] Stronger native-stream-stall guarantee and device qualification:
+      the existing native priority controller still sheds ISO frames when
+      a live submit stalls, despite zero permit refusals; display permission
+      and installed CMIO are unavailable. See frame-budget scratch REPORT.md.
   - [x] **S.3 #111 multiview and GPU follow-ups (perf-2), implementation.** Tile-sized
     scene rasters and completed program/preview reuse; contained GPU poll
     panics, snapshot/ISO loss recovery, virtual-camera pacing. #27's frame

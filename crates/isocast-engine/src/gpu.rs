@@ -396,6 +396,8 @@ impl Completion {
 
 /// A producer can be at most three pictures ahead of GPU completion.
 /// Holding its input frames cannot grow without bound during a driver stall.
+pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
+
 #[derive(Default)]
 pub(crate) struct InFlight(Vec<Completion>);
 
@@ -405,7 +407,7 @@ impl InFlight {
             done.ready()?;
         }
         self.0.retain(|done| !done.ready().unwrap_or(false));
-        Ok(self.0.len() < 3)
+        Ok(self.0.len() < MAX_FRAMES_IN_FLIGHT)
     }
 
     pub(crate) fn submit(&mut self, gpu: &Gpu, commands: wgpu::CommandBuffer) -> Completion {

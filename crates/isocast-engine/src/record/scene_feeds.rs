@@ -205,6 +205,7 @@ impl<F: Clone> SceneFeeds<F> {
         frame: F,
         at: Time,
         publisher: Option<Feed>,
+        retain: fn(&F, crate::FrameUse) -> Option<F>,
     ) {
         let mut state = self.state.lock();
         if let Some(publisher) = publisher {
@@ -222,6 +223,18 @@ impl<F: Clone> SceneFeeds<F> {
         {
             return;
         }
+        let next = retain(&frame, crate::FrameUse::Auxiliary).or_else(|| {
+            // Readers/GPU submissions hold their own leases. Retiring this
+            // stale publication must not require a seventeenth cache permit.
+            watched.slot.clear();
+            retain(&frame, crate::FrameUse::Auxiliary)
+        });
+        let Some(frame) = next else {
+            if let Some(publisher) = publisher {
+                state.publishing[publisher as usize] = None;
+            }
+            return;
+        };
         watched.published = Some((version, at));
         watched.slot.push(frame, at);
     }
@@ -341,7 +354,9 @@ pub(super) fn run<P: Platform>(
                 let publish = feeds.clone();
                 let id = id.clone();
                 let version = *version;
-                frame.then(move |(rgb, _), _| publish.publish(&id, version, rgb, tick, None));
+                frame.then(move |(rgb, _), _| {
+                    publish.publish(&id, version, rgb, tick, None, P::retain_frame)
+                });
                 if !std::mem::replace(&mut drew, true) {
                     feeds.recovered();
                 }

@@ -181,6 +181,13 @@ impl<F: Clone> Routes<F> {
         self.list.read().is_empty()
     }
 
+    fn has_recording(&self) -> bool {
+        self.list
+            .read()
+            .iter()
+            .any(|route| route.output.is_recording())
+    }
+
     /// Drop every output, so their receivers see the producer is gone.
     fn clear(&self) {
         self.list.lock().clear();
@@ -188,14 +195,23 @@ impl<F: Clone> Routes<F> {
 
     /// Send a frame to every output. One that has fallen behind misses it
     /// rather than holding up the others.
+    #[cfg(test)]
     pub(crate) fn video(&self, frame: &F, pts: Time, canvas: Option<CanvasId>) {
+        self.video_retained(frame, pts, canvas, |frame, _| Some(frame.clone()));
+    }
+
+    pub(crate) fn video_retained(
+        &self,
+        frame: &F,
+        pts: Time,
+        canvas: Option<CanvasId>,
+        retain: fn(&F, crate::FrameUse) -> Option<F>,
+    ) {
         for route in self.list.read().iter() {
             if pts >= route.from {
-                let sent = route.output.try_send(Packet::Video {
-                    frame: frame.clone(),
-                    pts,
-                });
+                let sent = route.output.video(frame, pts, retain);
                 if matches!(&sent, Err(TrySendError::Full(_)))
+                    && route.output.is_recording()
                     && let Some(canvas) = canvas
                 {
                     crate::governor::protected_loss(canvas, 1);
@@ -1334,7 +1350,7 @@ impl<P: Platform> Engine<P> {
         let slot = slot_of(&self.inner, target, MONITOR_FPS)?;
         // The program and the preview are drawn only while someone asks:
         // an idle one has no picture until its next frame.
-        Ok(match target {
+        let frame = match target {
             target if self.inner.canvas_target(target).is_some() => wait_for_frame(&slot),
             scene if self.inner.scene_target(scene).is_some() => {
                 let deadline = std::time::Instant::now() + super::FRESH_FRAME_WAIT;
@@ -1359,7 +1375,10 @@ impl<P: Platform> Engine<P> {
                 }
             }
             _ => slot.newest_timed(),
-        })
+        };
+        Ok(frame.and_then(|(frame, at)| {
+            P::retain_frame(&frame, crate::FrameUse::Auxiliary).map(|frame| (frame, at))
+        }))
     }
 
     /// The newest frame of `target` (see [`Engine::frame`]) newer than
@@ -1397,6 +1416,9 @@ impl<P: Platform> Engine<P> {
                     from = Time::from_nanos(at.as_nanos().saturating_add(1));
                     continue;
                 }
+                let Some(frame) = P::retain_frame(&frame, crate::FrameUse::Auxiliary) else {
+                    return Ok(None);
+                };
                 let (jpeg, width, height) = platform
                     .encode_jpeg(&frame, max_width, quality)
                     .map_err(|err| format!("{err:#}"))?;
@@ -1583,7 +1605,10 @@ impl<P: Platform> Engine<P> {
                         Duration::from_millis(50),
                     )
                 };
-                Ok(frame.map(|(frame, time)| super::virtual_camera::Input::Frame(frame, time)))
+                Ok(frame.and_then(|(frame, time)| {
+                    P::retain_frame(&frame, crate::FrameUse::Auxiliary)
+                        .map(|frame| super::virtual_camera::Input::Frame(frame, time))
+                }))
             },
             on_change,
         )
@@ -3050,6 +3075,7 @@ fn run_program<P: Platform>(
         program_rates.ask(output.control.take_program_wanted(), fps, now);
         preview_rates.ask(output.preview_wanted.swap(0, Ordering::SeqCst), fps, now);
         let outputs = !output.program_video.is_empty();
+        compositor.protect_inputs(output.program_video.has_recording());
         let monitored = program_rates.any(now);
         let preview_wanted = preview_rates.any(now);
         if now > tick + 3 * frame {
@@ -3100,6 +3126,7 @@ fn run_program<P: Platform>(
                                 rgb.as_ref().unwrap_or(&image).clone(),
                                 tick,
                                 Some(Feed::Program),
+                                P::retain_frame,
                             );
                         } else {
                             feeds.clear_reuse(Feed::Program);
@@ -3108,7 +3135,12 @@ fn run_program<P: Platform>(
                             output.program_rgb.push(rgb, tick);
                         }
                         output.program.push(image.clone(), tick);
-                        output.program_video.video(&image, tick, Some(canvas));
+                        output.program_video.video_retained(
+                            &image,
+                            tick,
+                            Some(canvas),
+                            P::retain_frame,
+                        );
                         output.frames_drawn.fetch_add(1, Ordering::Relaxed);
                         output
                             .timings
@@ -3148,6 +3180,7 @@ fn run_program<P: Platform>(
             .flatten();
         match scene {
             Some(scene) if preview_rates.draws(n, fps) => {
+                compositor.protect_inputs(false);
                 let staged = OnAir { scene, from: None };
                 if let Ok(Some((image, _))) =
                     compositor.draw(Feed::Preview, Some(&staged), tick, tick + frame / 2, true)
@@ -3162,6 +3195,7 @@ fn run_program<P: Platform>(
                             rgb.clone(),
                             tick,
                             Some(Feed::Preview),
+                            P::retain_frame,
                         );
                         slot.push(rgb, tick);
                     });
@@ -3544,6 +3578,9 @@ fn run_iso<P: Platform>(
         let Some(image) = runner.slot.newest_until(tick + frame / 2) else {
             continue;
         };
+        let Some(image) = P::retain_frame(&image, crate::FrameUse::Recording) else {
+            continue;
+        };
         // Encoder admission first, so a refused tick is never drawn.
         let mut admitted = false;
         for output in &mut runner.outputs {
@@ -3589,10 +3626,12 @@ fn run_iso<P: Platform>(
         let send = move |image: Option<P::Frame>| {
             for (output, admitted) in outputs {
                 let packet = match &image {
-                    Some(image) if admitted => Packet::Video {
-                        frame: image.clone(),
-                        pts: tick,
-                    },
+                    Some(image) if admitted => {
+                        match P::retain_frame(image, crate::FrameUse::Recording) {
+                            Some(frame) => Packet::Video { frame, pts: tick },
+                            None => Packet::Skipped { pts: tick },
+                        }
+                    }
                     _ => Packet::Skipped { pts: tick },
                 };
                 let _ = output.try_send(packet);

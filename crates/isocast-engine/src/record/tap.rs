@@ -13,8 +13,8 @@ use parking_lot::{Condvar, Mutex};
 use super::Packet;
 
 /// Raw pictures retained by a live tap, independent of its audio capacity.
-/// VideoToolbox may hold another eight; neither queue may grow to the
-/// compositor's 32-picture pool limit.
+/// The platform's auxiliary reserve also covers the dequeued picture and
+/// native submissions, shared with every other auxiliary consumer.
 pub(crate) const VIDEO_DEPTH: usize = 8;
 
 pub(super) enum Output<F> {
@@ -29,6 +29,34 @@ impl<F> From<SyncSender<Packet<F>>> for Output<F> {
 }
 
 impl<F> Output<F> {
+    pub(super) fn is_recording(&self) -> bool {
+        matches!(self, Self::Recording(_))
+    }
+
+    pub(super) fn video(
+        &self,
+        frame: &F,
+        pts: crate::Time,
+        retain: fn(&F, crate::FrameUse) -> Option<F>,
+    ) -> Result<(), TrySendError<Packet<F>>> {
+        let usage = if self.is_recording() {
+            crate::FrameUse::Recording
+        } else {
+            crate::FrameUse::Auxiliary
+        };
+        let mut kept = retain(frame, usage);
+        if kept.is_none()
+            && let Self::Live(tx) = self
+        {
+            tx.evict_video();
+            kept = retain(frame, usage);
+        }
+        match kept {
+            Some(frame) => self.try_send(Packet::Video { frame, pts }),
+            None => Err(TrySendError::Full(Packet::Skipped { pts })),
+        }
+    }
+
     pub(super) fn try_send(&self, packet: Packet<F>) -> Result<(), TrySendError<Packet<F>>> {
         match self {
             Self::Recording(tx) => tx.try_send(packet),
@@ -85,6 +113,21 @@ impl<F> Clone for Sender<F> {
 }
 
 impl<F> Sender<F> {
+    fn evict_video(&self) {
+        let mut state = self.0.state.lock();
+        let evicted = state
+            .packets
+            .iter()
+            .position(|p| matches!(p, Packet::Video { .. }))
+            .and_then(|index| state.packets.remove(index));
+        if evicted.is_some() {
+            state.video -= 1;
+            self.0.missed_video.fetch_add(1, Ordering::Relaxed);
+        }
+        drop(state);
+        drop(evicted);
+    }
+
     fn send(&self, packet: Packet<F>) -> Result<(), TrySendError<Packet<F>>> {
         let mut state = self.0.state.lock();
         if !state.receiving {

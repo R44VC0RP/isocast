@@ -50,7 +50,8 @@ use objc2_video_toolbox::{
 use crate::PixelBuffer;
 
 /// Bound encoder back-pressure without blocking the other inputs of the
-/// same file. Video buffers are retained, never copied.
+/// same file. Crash-safe writers retain permitted buffers through native
+/// completion; AVAssetWriter copies into its private bounded pool.
 pub(crate) const PENDING_VIDEO: usize = 32;
 /// ISOs must not build a long hardware backlog ahead of a protected output.
 pub(crate) const PENDING_ISO: usize = 4;
@@ -194,6 +195,7 @@ pub struct AssetWriter {
     /// The file's start on the host clock, and as the writer sees it.
     start: Option<(Time, CMTime)>,
     pending_video: VecDeque<(PixelBuffer, CMTime)>,
+    frame_pool: Option<crate::FramePool>,
     /// A tail repeat preserves audio if the final video slots were refused.
     last_video: Option<(PixelBuffer, CMTime)>,
     frame_duration: CMTime,
@@ -345,6 +347,7 @@ impl AssetWriter {
             timescale,
             start: None,
             pending_video: VecDeque::new(),
+            frame_pool: None,
             last_video: None,
             frame_duration: unsafe { CMTime::new(1, spec.video.fps as i32) },
             priority: None,
@@ -476,8 +479,12 @@ impl AssetWriter {
             }
         }
         let time = self.media_time(pts, self.timescale);
+        let Some(frame) = crate::FramePool::copy_native(&mut self.frame_pool, &frame.0)? else {
+            self.drain_ready()?;
+            return Ok(false);
+        };
         self.pending_video.push_back((frame.clone(), time));
-        self.last_video = Some((frame.clone(), time));
+        self.last_video = Some((frame, time));
         self.drain_ready()?;
         Ok(true)
     }

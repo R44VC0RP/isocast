@@ -123,11 +123,15 @@ Stopped status reports the next output's size and fps. MCP camera tools take
 
 The output worker samples the existing program/preview frames, or draws a
 named scene with the same compiled compositor. One GPU pass scales/converts
-to an IOSurface-backed BGRA pool (bounded at 32 outstanding buffers).
+to an IOSurface-backed BGRA pool governed by the frame-budget ledger.
+The native helper copies into its own bounded pool before acknowledging
+enqueue, so CMIO cannot keep the recorder's pooled pixels alive or see them
+recycled. Status exposes the helper's conservative native reservation.
 An authenticated private child owns all native CoreMediaIO sink calls. The
-worker transfers IOSurface references over Mach; CoreMediaIO's bounded sink
-queue (4 samples) transfers them onward without a CPU image copy. CoreVideo
-keeps surfaces out of the pool while downstream processes hold them. There
+worker transfers IOSurface references over Mach; the helper copies their
+pixels before CoreMediaIO's bounded sink queue (4 samples) transfers the
+private buffers onward. CoreVideo bounds that native pool's outstanding
+buffers independently of the recorder's pools. There
 is no raw shared file or globally discoverable IOSurface-id transport.
 
 Native open has a **2 s** deadline, frames **250 ms**, and close **500 ms**.

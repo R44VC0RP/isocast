@@ -67,6 +67,10 @@ pub(super) struct Compositor<P: Platform> {
     /// Each compiled source's newest frame (by source index), repeated
     /// until a newer one arrives.
     frames: Vec<Option<SourceFrame<P::Frame>>>,
+    /// A refused replacement must release the persistent input owners at
+    /// the next batch boundary, never in the middle of queued mask work.
+    evict_inputs: bool,
+    input_refused: bool,
     /// The sources the frame being drawn shows (source indexes).
     needed: Vec<u32>,
     /// Their frames' times, to compare with those a feed last drew.
@@ -114,12 +118,14 @@ pub(super) struct Compositor<P: Platform> {
     /// Scenes drawn as masks for the frame being drawn (scene indexes).
     mask_scenes: Vec<u32>,
     in_flight: InFlight,
+    protected_inputs: bool,
 }
 
 /// A source's newest frame, as drawn.
 struct SourceFrame<F> {
     /// The frame, kept so its surface isn't reused while it is drawn.
     _frame: F,
+    auxiliary: bool,
     at: Time,
     /// As imported, and after the source's filters.
     imported: GpuFrame,
@@ -239,6 +245,8 @@ impl<P: Platform> Compositor<P> {
             inputs: None,
             list: None,
             frames: Vec::new(),
+            evict_inputs: false,
+            input_refused: false,
             needed: Vec::new(),
             seen: Vec::new(),
             shown: Default::default(),
@@ -261,12 +269,17 @@ impl<P: Platform> Compositor<P> {
             remade: Vec::new(),
             mask_scenes: Vec::new(),
             in_flight: InFlight::default(),
+            protected_inputs: false,
         })
     }
 
     /// The canvas size it draws.
     pub(super) fn canvas(&self) -> (u32, u32) {
         self.canvas
+    }
+
+    pub(super) fn protect_inputs(&mut self, protected: bool) {
+        self.protected_inputs = protected;
     }
 
     pub(super) fn size(&self) -> (u32, u32) {
@@ -424,6 +437,32 @@ impl<P: Platform> Compositor<P> {
         if feed == Feed::Preview {
             self.starts[Feed::Preview as usize].clear();
         }
+        if self.shown.iter().all(|shown| shown.frame.is_none()) {
+            self.clear_inputs(false);
+        }
+    }
+
+    /// Bindings may not sample an evicted native buffer after it is recycled.
+    /// Earlier submissions have their own input holds through completion.
+    fn clear_inputs(&mut self, auxiliary_only: bool) {
+        let mut cleared = false;
+        if let Some(list) = &mut self.list {
+            for (source, frame) in self.frames.iter_mut().enumerate() {
+                if auxiliary_only && frame.as_ref().is_none_or(|frame| !frame.auxiliary) {
+                    continue;
+                }
+                list.set_picture(source as u32, None);
+                cleared |= frame.take().is_some();
+            }
+        }
+        if cleared {
+            // Re-importing even an unchanged picture may submit filter/mask
+            // work. Do not take the unfenced reuse shortcut after eviction.
+            for shown in &mut self.shown {
+                shown.seen.clear();
+            }
+        }
+        self.evict_inputs = false;
     }
 
     /// Note that `feed` shows `scenes` (by id) at `tick`: those it didn't
@@ -484,6 +523,16 @@ impl<P: Platform> Compositor<P> {
         if !self.in_flight.available()? {
             return Ok(None);
         }
+        if self.evict_inputs {
+            self.clear_inputs(true);
+            // Yield this draw's admission turn to owners waiting without a
+            // cache. Immediate reacquisition can let the same first sixteen
+            // scenes monopolize capacity forever at a common frame rate.
+            if !self.protected_inputs {
+                return Ok(None);
+            }
+        }
+        self.input_refused = false;
         let changing = on_air.and_then(|on_air| on_air.from.as_ref());
         let scene = self.scene(on_air.map(|on_air| &*on_air.scene));
         let from = changing.and_then(|changing| self.scene(Some(&changing.scene)));
@@ -491,6 +540,25 @@ impl<P: Platform> Compositor<P> {
             self.note_starts(feed, [on_air.map(|on_air| &on_air.scene), None], tick);
         }
         self.gather(scene, from);
+        // Hidden auxiliary inputs have no replacement attempts of their own;
+        // retaining them here could starve another, still-visible scene.
+        let mut cleared = false;
+        if let Some(list) = &mut self.list {
+            for (source, frame) in self.frames.iter_mut().enumerate() {
+                if frame.as_ref().is_some_and(|frame| frame.auxiliary)
+                    && !self.needed.contains(&(source as u32))
+                {
+                    list.set_picture(source as u32, None);
+                    *frame = None;
+                    cleared = true;
+                }
+            }
+        }
+        if cleared {
+            for shown in &mut self.shown {
+                shown.seen.clear();
+            }
+        }
         let moving = self.update_frames(tick, limit)?;
         let animating = self.update_looks(limit);
         if changing.is_none()
@@ -508,6 +576,7 @@ impl<P: Platform> Compositor<P> {
             && self.stinger.is_none()
             && !moving
             && !animating
+            && !self.input_refused
             && shown.version == version
             && shown.generation == generation
             && shown.scene == scene
@@ -531,7 +600,9 @@ impl<P: Platform> Compositor<P> {
             .flatten()
             .map(|frame| frame._frame.clone())
             .collect();
-        let canvas = canvas.filter(|_| !monitor || rgb.is_some());
+        // Keep showing the last completed picture while input capacity is
+        // reclaimed; never publish a black/partial replacement on refusal.
+        let canvas = canvas.filter(|_| !self.input_refused && (!monitor || rgb.is_some()));
         let Some(canvas) = canvas else {
             let encoder = self.gpu.device.create_command_encoder(&Default::default());
             let done = self.in_flight.submit(&self.gpu, encoder.finish());
@@ -702,6 +773,24 @@ impl<P: Platform> Compositor<P> {
             }
             match newest {
                 Some((frame, at)) if self.frames[index].as_ref().is_none_or(|f| f.at != at) => {
+                    // Masks use the same source-frame cache, so they carry
+                    // this permit through the GPU completion fence too.
+                    let usage = if self.protected_inputs {
+                        crate::FrameUse::Composition
+                    } else {
+                        crate::FrameUse::Auxiliary
+                    };
+                    let Some(frame) = P::retain_frame(&frame, usage) else {
+                        self.input_refused = true;
+                        if !self.protected_inputs
+                            && self.frames[index]
+                                .as_ref()
+                                .is_some_and(|frame| frame.auxiliary)
+                        {
+                            self.evict_inputs = true;
+                        }
+                        continue;
+                    };
                     let (imported, cached) = match self.importer.import_cached(&frame)? {
                         Some(imported) => (imported, true),
                         None => (self.importer.import(&frame)?, false),
@@ -719,6 +808,7 @@ impl<P: Platform> Compositor<P> {
                     self.remade[index] = true;
                     self.frames[index] = Some(SourceFrame {
                         _frame: frame,
+                        auxiliary: usage == crate::FrameUse::Auxiliary,
                         at,
                         imported,
                         picture,
@@ -1064,6 +1154,14 @@ impl<P: Platform> Compositor<P> {
             return Ok(overlay);
         };
         overlay.cut = at.saturating_since(since) >= cut_point;
+        let usage = if self.protected_inputs {
+            crate::FrameUse::Composition
+        } else {
+            crate::FrameUse::Auxiliary
+        };
+        let Some(frame) = P::retain_frame(&frame, usage) else {
+            return Ok(overlay);
+        };
         let frame = self.importer.import(&frame)?;
         let (width, height) = (frame.width, frame.height);
         let halves = stinger.matte.map(|matte| match matte.layout {

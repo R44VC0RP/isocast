@@ -61,6 +61,26 @@ static ISO_PINNED: AtomicBool = AtomicBool::new(false);
 static UNPINNED_ISO: AtomicBool = AtomicBool::new(false);
 static LOSSES: AtomicU64 = AtomicU64::new(0);
 static NOTICES: AtomicU64 = AtomicU64::new(0);
+static FRAME_PRESSURE: AtomicU64 = AtomicU64::new(0);
+static FULL_FRAME_BUDGETS: AtomicU32 = AtomicU32::new(0);
+
+/// Pool-local occupancy edges, not per-frame polling. Full caches remain
+/// pressure even if a still source stops attempting new admissions.
+pub fn frame_budget_full(full: bool) {
+    if full {
+        FULL_FRAME_BUDGETS.fetch_add(1, Ordering::Release);
+    } else {
+        FULL_FRAME_BUDGETS.fetch_sub(1, Ordering::Release);
+    }
+    frame_pressure();
+}
+
+/// Auxiliary admission is exhausted, before a protected producer loses a
+/// frame. Feed the existing governor without treating this as an ISO loss.
+pub fn frame_pressure() {
+    FRAME_PRESSURE.store(clock_ms().saturating_add(5000), Ordering::Release);
+    NOTICES.fetch_add(1, Ordering::Release);
+}
 
 #[derive(Default)]
 struct Shared {
@@ -408,6 +428,10 @@ impl Controller {
     pub fn tick(&mut self, settings: &GovernorSettings, sample: &Sample) -> Option<GovernorStatus> {
         let now = Instant::now();
         self.notices = NOTICES.load(Ordering::Acquire);
+        // One observation for both admission-pressure classification and
+        // recovery. The five-second tail precedes the normal 30 s quiet hold.
+        let frame_pressure = FULL_FRAME_BUDGETS.load(Ordering::Acquire) != 0
+            || clock_ms() < FRAME_PRESSURE.load(Ordering::Acquire);
         ISO_ALLOWED.store(settings.allow_iso_thinning, Ordering::Relaxed);
         if !settings.allow_iso_thinning {
             HOLD_UNTIL.store(0, Ordering::Relaxed);
@@ -504,6 +528,8 @@ impl Controller {
             && health.is_some_and(|h| h.cpu_percent.is_some_and(|p| p >= 90.0))
         {
             Some("CPU")
+        } else if frame_pressure {
+            Some("frame budget")
         } else if sample.gpu_late {
             Some("GPU")
         } else if sample.encoder_pressure || health.is_some_and(|h| h.encoder_threatened) {
@@ -622,7 +648,7 @@ impl Controller {
                         "Automatic quality: {cause} pressure; preview limited to {} fps",
                         limits.preview
                     );
-                } else if !matches!(cause, "upload" | "encoder" | "output")
+                } else if !matches!(cause, "upload" | "encoder" | "output" | "frame budget")
                     && sample.has_isos
                     && unpinned_iso
                     && limits.iso > 25
@@ -660,7 +686,7 @@ impl Controller {
                         && !matches!(cause, "disk" | "upload"))
                         || (sample.has_isos
                             && pinned_iso
-                            && !matches!(cause, "upload" | "encoder" | "output"))
+                            && !matches!(cause, "upload" | "encoder" | "output" | "frame budget"))
                         || (sample.has_vertical
                             && settings.pinned("vertical.fps")
                             && cause == "encoder")
@@ -689,6 +715,7 @@ impl Controller {
         // require actual production loss or an unhealthy measured budget.
         let video_limited = limits.preview > 0 || limits.iso < 100 || limits.vertical < 100;
         let healthy = !held
+            && !frame_pressure
             && !production_loss
             && !self.disk_bad
             && sample.progressed

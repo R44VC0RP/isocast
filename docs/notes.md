@@ -5,6 +5,105 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-18 (#27 review fixes): 5d06bfef + main6d6d58fd merged without a
+  commit (notes conflict keeps both histories). B1 auxiliary cache eviction
+  happens before the next GPU batch and yields that admission turn, so the
+  same first sixteen owners cannot continually reclaim every permit. Hidden
+  auxiliary inputs and idle compositors release caches too; bindings/reuse
+  state are cleared, older GPU submissions keep their own input leases.
+  B2 notices/counters are copied under the ledger mutex and reported through
+  bounded deferred logging outside it; status JSON is built outside it too.
+  B3 full-budget occupancy and the five-second refusal/release tail both
+  block the governor's 30-second recovery timer (memory pressure kept).
+  Ordinary clones now share a domain claim; independent deliveries still
+  deduplicate. Final evidence: frame-budget/scratch/REPORT.md and fix1/.
+- 2026-10-18 (#27 review verification): matched native pixel run103710,
+  24 staggered masked tiles:23 frozen before. Final130s run110027 keeps all
+  24 subscriptions open through50s saturation (8–10 changes/33s off air),
+  then12 open through recovery (34 changes/35s); program/ISO7800/7800.
+  Disable client read timeouts when testing deliberately shed frames: the
+  early5s client timeout could close a stream while JPEG demand continued.
+  The3s looping-counter experiment
+  aliased with the new~3s update cadence; use test_pattern's six-digit counter
+  for freshness, not repeated clip numbers or frame timestamps. Log-writer
+  delay102500→103117:299→0 program drops. Pressure50s: no false restoration;
+  last refusal53.66s, restore89.09s then118.48s, remaining12 viewers continue.
+  Stress103319:zero protected/audio loss. A/B103220:CPU42.3→42.1%, instructions
+  494.8→493.9M/s, footprint140.4→133.1MB. Gates247 unit +doctest, strict104755
+  18/18, all pass. Binary8e6501b8. Main6d6d58fd is merged without commit.
+  B2's isolated `ISOCAST_BUDGET_LOG_STALL_MS=AFTER_MS:DURATION_MS` probe is
+  capped at10s, once, developer-only; markers go to native-relay JSONL in
+  d.logs, not daemon.log. Original native-priority/device limits remain open.
+
+- 2026-10-18 (#27, frame-budget lane): replacement design is per-origin,
+  distinct-buffer accounting, not delivery permits. Independent reserves are
+  8 producer, 32 file-recording, 16 auxiliary and 36 protected-compositor
+  pictures; the CV pool's physical ceiling is their sum (92), allocated on
+  demand. The composition reserve is (GPU in-flight limit + one cached input)
+  × (main + MAX_EXTRA_CANVASES), not another arbitrary queue size. A buffer
+  shared across domains counts once in the physical union; repeat deliveries within a
+  domain do not spend another permit. Native VT callbacks retain the same
+  lease, as do GPU inputs/outputs through their existing completion fences.
+  Streams/replay, previews, scene tiles, source-mask caches and virtual-camera
+  reads use the auxiliary reserve; recorded-canvas inputs use composition,
+  and files/ISOs use recording. This fourth domain was added during audit:
+  a stalled passthrough ISO can fill the file reserve, but must not freeze
+  the program reading that same source. Auxiliary refusal feeds the governor
+  without asking it to thin ISOs. This protects against other domains, not a stalled protected
+  writer exceeding its own reserve or the machine's physical encode capacity.
+- 2026-10-18 (#27 design decisions): copy scarce SCK/AVCapture buffers once
+  at ingress, preserving format/bit depth/attachments, rather than letting
+  many outputs retain an eight-surface device pool. Decoder frames remain
+  zero-copy and have a per-reader ledger keyed by native CV buffer identity:
+  two samples aliasing the same native buffer share a charge too, not merely
+  Rust clones of one wrapper. AVAssetWriter's opaque lifetime is
+  isolated in a private threshold-limited copy pool and charged at its full
+  reservation, never reported as an invented exact native count. The camera
+  helper likewise copies before acknowledging enqueue: CMIO retains the
+  helper's pool, never the parent's recycled pixels. Shared IOSurface rings
+  are counted separately (including texture wrappers and Mach offers), with
+  their existing per-ring limit. This is a frame-pool invariant, not a
+  machine-wide RAM allocator or a count of Apple's private codec allocations.
+  Status/doctor expose the ledger and sticky refusal/allocation-failure totals.
+  Windows' platform hook remains explicitly unavailable, not a false pass.
+- 2026-10-18 (#27 diagnostics): isolated developer mode accepts
+  `ISOCAST_FRAME_STALL=iso|live`: hold one real consumer worker for 600 ms,
+  once, after two seconds. It does not stop VT callbacks or the daemon.
+  Normal mode ignores it. Use it to distinguish file-queue retention from
+  capture freshness; numbered media checks detect a frozen input even if
+  a program file continues storing repeated pictures at its nominal fps.
+- 2026-10-18 (#27 device qualification): M2-a's existing signed development
+  app reports screen recording not granted, and `virtual_camera_start` says
+  the camera is not installed/approved. No permission, setting, or install
+  was changed. The fallback AVAssetWriter path did qualify there: program
+  and two ISOs, each 360/360 at 60 fps, zero audio/video loss, full decode.
+  The saved `command` in hw-queue/done/20261018-090156-frame-budget-cmd.json
+  is the exact permission-aware retry through `hw-batch.py now cmd --gui`.
+  Pixel-copy format/plane tests are not a claim of real capture/CMIO success.
+- 2026-10-18 (#27 final verification, a16084a6 daemon): failing 24 s AWS
+  workload (six ISOs, three extra recorded canvases, stream/replay, masks,
+  40 multiview tiles, 1,320 cuts) loses 461 program frames on main; new
+  records every frame in all ten files and the stream/replay. All 45 budget
+  snapshots hold; refusals [0,0,1157,0], auxiliary peak16. Governor lowers
+  previews60→30→15. Final gates244 unit tests + one doctest, strict18/18.
+  Flagship-1080 A/B3 pairs: CPU41.6→42.4% (+0.8 points), instructions+0.5%,
+  GPU86.2→86.0ms/s, footprint125.6→124.7MB; zero media loss on both.
+- 2026-10-18 (#27 remaining native-policy limit): a600ms stopped ISO worker
+  fills its32-frame reserve (5 refused), but the program stays480/480 with
+  every numbered picture advancing. Its own ISO loses22 frames, accounted.
+  A600ms live-worker stall leaves every frame-budget domain unexhausted yet
+  loses51 ISO frames (program480/480, all audio intact): stream.rs includes
+  the hold in native submit latency/health, setting native priority pressure;
+  crash_safe::append_frame then refuses ISO before budget admission. This
+  priority contract is unchanged from main and separate from pool starvation.
+  After three diagnostic attempts, stopped expanding the fix: the wrong
+  assumption was that a native-consumer stall tests only buffer retention.
+  Keep #27 open for the stronger requested no-ISO-loss contract; reconcile
+  native stream-vs-ISO priority with #110 rather than tuning pool caps again.
+  Evidence/retry commands: hw-queue/done/20261018-092625-frame-budget-cmd.json,
+  frame-budget/scratch/consumer-stalls/stalls.json and REPORT.md. No assertion
+  was relaxed to hide this failure; no native policy change was made.
+
 - 2026-10-18 (#110 self-tuning-2 handoff): uncommitted on063a21a5. Gates242
   pass; the full strict suite ran once under CPU4+Metal+2GiB resident memory,
   18/18 zero-loss. M2-b's three interleaved flagship1080 A/B pairs lose no

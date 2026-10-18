@@ -537,6 +537,7 @@ pub fn emit(level: &str, component: &str, message: &str, fields: Value) {
             writer.bytes += 1;
             writer.partial_line = false;
         }
+        budget_write_delay(component, message);
         writer.file.write_all(&bytes)?;
         writer.bytes += bytes.len() as u64;
         // Unbuffered File: every complete line reaches the OS immediately.
@@ -631,6 +632,44 @@ pub fn diagnostic(level: &str, component: &str, message: String) {
             redact::Redactor::default().text(&message)
         );
     }
+}
+
+/// Isolated developer exercise of slow diagnostic storage, not slow media
+/// storage: AFTER_MS:DURATION_MS, once, while the real writer lock is held.
+fn budget_write_delay(component: &str, message: &str) {
+    static BEGAN: OnceLock<Instant> = OnceLock::new();
+    static FIRED: AtomicBool = AtomicBool::new(false);
+    if !developer()
+        || std::env::var_os("ISOCAST_SOCKET").is_none()
+        || component != "isocast_platform_macos::frames"
+        || !message.starts_with("frame budget")
+    {
+        return;
+    }
+    let Some((after, duration)) =
+        std::env::var("ISOCAST_BUDGET_LOG_STALL_MS")
+            .ok()
+            .and_then(|value| {
+                let (after, duration) = value.split_once(':')?;
+                Some((
+                    after.parse::<u64>().ok()?,
+                    duration.parse::<u64>().ok()?.min(10_000),
+                ))
+            })
+    else {
+        return;
+    };
+    if BEGAN.get_or_init(Instant::now).elapsed() < Duration::from_millis(after)
+        || FIRED.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    let _ = writeln!(
+        std::io::stderr(),
+        "injected diagnostic writer delay {duration} ms begins"
+    );
+    std::thread::sleep(Duration::from_millis(duration));
+    let _ = writeln!(std::io::stderr(), "injected diagnostic writer delay ends");
 }
 
 #[macro_export]

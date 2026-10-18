@@ -44,6 +44,7 @@ pub struct AvReader {
     reader: ManuallyDrop<Retained<AVAssetReader>>,
     output: ManuallyDrop<Retained<AVAssetReaderTrackOutput>>,
     path: String,
+    frames: std::sync::Arc<crate::frames::Budget>,
 }
 
 // SAFETY: the reader and its output are used by one thread at a time.
@@ -204,6 +205,7 @@ fn open_reader(path: &Path, part: MediaPart) -> Result<AvReader> {
         reader: ManuallyDrop::new(reader),
         output: ManuallyDrop::new(output),
         path: shown,
+        frames: crate::frames::Budget::new("decoder", (0, 0), 0),
     })
 }
 
@@ -273,7 +275,10 @@ impl AvReader {
                 continue;
             };
             let at = seconds(unsafe { sample.presentation_time_stamp() }).max(0.0);
-            return Ok(Some((PixelBuffer(image), Duration::from_secs_f64(at))));
+            return Ok(Some((
+                self.frames.wrap(image)?,
+                Duration::from_secs_f64(at),
+            )));
         }
         Ok(None)
     }

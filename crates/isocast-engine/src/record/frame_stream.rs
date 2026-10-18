@@ -406,7 +406,7 @@ impl Pace {
         }
         self.last = Some(at);
         self.skipped = None;
-        Some((frame, at))
+        P::retain_frame(&frame, crate::FrameUse::Auxiliary).map(|frame| (frame, at))
     }
 }
 

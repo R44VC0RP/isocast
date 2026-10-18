@@ -279,8 +279,12 @@ impl CrashSafeWriter {
             }
         }
         let time = self.ticks(pts, self.timescale as u32);
+        let Some(frame) = frame.retain(isocast_engine::FrameUse::Recording) else {
+            self.drain_ready(false)?;
+            return Ok(false);
+        };
         self.pending_video.push_back((frame.clone(), time));
-        self.last_video = Some((frame.clone(), time));
+        self.last_video = Some((frame, time));
         self.drain_ready(false)?;
         Ok(true)
     }
@@ -338,6 +342,9 @@ impl CrashSafeWriter {
                 self.backlog = true;
             }
             let (frame, time) = self.pending_video.pop_front().expect("not empty");
+            if self.priority.is_none() && self.encoded_frames >= 2 {
+                crate::frames::stall_consumer("iso");
+            }
             self.video.encode(&frame, time)?;
             if let Some(submitted) = submitted {
                 // VideoToolbox can block before MAX_IN_FLIGHT is reached.

@@ -2949,7 +2949,13 @@ impl Daemon {
             vertical_streams: streams::canvas_statuses(&state, CanvasId::Vertical),
             cpu_percent: self.cpu.lock().read(),
             data: Some(self.data.status()),
-            diagnostics: Some(isocast_diagnostics::health()),
+            diagnostics: Some({
+                let mut health = isocast_diagnostics::health();
+                health["frame_budget"] = NativePlatform
+                    .frame_budget()
+                    .unwrap_or(serde_json::Value::Null);
+                health
+            }),
             interrupted: self.interrupted.lock().clone(),
             timeline,
             timeline_problem,
@@ -5269,7 +5275,12 @@ fn frames(
     let mut missing = Vec::new();
     for id in ids {
         match recording.and_then(|control| control.newest_frame::<platform::Frame>(id)) {
-            Some(frame) => frames.push((id.clone(), frame)),
+            Some(frame) => {
+                let frame =
+                    NativePlatform::retain_frame(&frame, isocast_engine::FrameUse::Auxiliary)
+                        .context("snapshot: auxiliary frame budget exhausted")?;
+                frames.push((id.clone(), frame));
+            }
             None => missing.push(id.clone()),
         }
     }

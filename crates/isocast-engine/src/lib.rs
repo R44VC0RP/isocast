@@ -58,6 +58,18 @@ pub const SAMPLE_RATE: u32 = 48_000;
 /// Queued inputs and track timing mean this is not a maximum crash-loss bound.
 pub const MOVIE_FRAGMENT_SECONDS: i64 = 2;
 
+/// A frame's retention domain. Domains reserve independent capacity; clones
+/// and repeated deliveries of the same picture share that capacity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameUse {
+    Production = 0,
+    Recording = 1,
+    Auxiliary = 2,
+    /// Protected compositors must keep reading even when an ISO's file queue
+    /// has filled its separate recording reserve on the same source pool.
+    Composition = 3,
+}
+
 /// What the engine needs from the operating system.
 /// Platforms are cheap handles (macOS: a unit struct), cloned into the
 /// threads that generate synthetic sources.
@@ -180,6 +192,18 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// can convert pictures into ([`gpu::FrameImporter::ycbcr_target`]):
     /// what encoders take as is, at under half the size of BGRA.
     fn ycbcr_frame_pool(&self, width: u32, height: u32) -> anyhow::Result<Self::FramePool>;
+
+    /// Move a retained reference to an output's domain before queueing it or
+    /// giving it to a GPU/native encoder. Refusal is local to that domain,
+    /// never charged to another output's reserve.
+    fn retain_frame(frame: &Self::Frame, _usage: FrameUse) -> Option<Self::Frame> {
+        Some(frame.clone())
+    }
+
+    /// The platform's distinct-buffer ledger, including GPU/native owners.
+    fn frame_budget(&self) -> Option<serde_json::Value> {
+        None
+    }
 
     /// Ask the OS to run the calling thread ahead of background work: it
     /// paces frames or audio in real time (the program, a file's frame

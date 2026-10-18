@@ -98,6 +98,21 @@ pub fn doctor<P: Platform>(platform: &P, setup: Option<&Setup>, folder: Option<&
     }
 
     // Hardware encoders.
+    if let Some(budget) = platform.frame_budget() {
+        let invariant = budget["invariant"].as_bool() == Some(true);
+        let refused = budget["refused"]
+            .as_array()
+            .is_some_and(|counts| counts.iter().any(|n| n.as_u64().unwrap_or(0) != 0));
+        checks.push(check(
+            "frame budget",
+            if !invariant { CheckStatus::Problem } else if refused { CheckStatus::Warning } else { CheckStatus::Ok },
+            format!("distinct-buffer invariant {}; reserves: production {}, recording {}, auxiliary {}, composition {}; refusals {} (since daemon start)",
+                if invariant { "holds" } else { "FAILED" }, budget["production_reserve"], budget["recording_reserve"], budget["auxiliary_limit"], budget["composition_reserve"], budget["refused"]),
+            refused.then_some("reduce auxiliary viewers/outputs; status.diagnostics.frame_budget identifies the exhausted domain"),
+        ));
+    }
+
+    // Hardware encoders.
     let has = |name: &str| machine.hardware_encoders.iter().any(|e| e.contains(name));
     checks.push(check(
         "hardware encoders",
