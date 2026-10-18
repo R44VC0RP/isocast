@@ -699,6 +699,21 @@ Tier 1: build → review → fixes → re-review for each behavior-changing slic
       ISO loss percentages remain approximate, not improved accuracy. Exact
       H264-only/10bit/ProRes fallback and Optimize notes verified. Local H264
       coefficients and ProRes pool models remain open, not inferred from diagnostics.
+    - [x] **T.1b.3 ProRes resources (ready for review).** Full concurrent variant/native HW-vs-SW
+      observations, quantitative UHD bound, same-volume disk planning and
+      separate CPU/GPU/frame-bandwidth accounting; no free-ProRes or unknown
+      admission claims. Qualify noisy program/ISO/mixed workloads on AWS M2s,
+      software fallback and governor consent/pins qualified. Final gates250,
+      strict18/18 once, three ProRes A/B pairs0loss. Hardware variants and
+      mixed HEVC/ProRes/H264 output decode/count correctly. Actual software
+      EncoderID mapping and fresh per-CPU counters verified. SW4444 paired
+      ISO startup still loses native pictures while program/audio stay whole;
+      model explicitly refuses a Fits/admission claim for that unqualified
+      recovery case (not hidden by changing native safety). Program-only SW
+     4444 and other tested SW variants are loss-free. UHD scaling remains
+      conservative, not an exact capacity/loss forecast. Evidence:
+      self-tuning-2/scratch/prores/REPORT.md.
+      Windows profiles wait for the Windows daemon switch.
 - [ ] **T.2 Live governor.** Fixed reversible degradation order, hysteresis,
   visible reasons and protected-output integrity; qualify against outside
   CPU/GPU/encoder load without changing the established priority contract.
@@ -1835,6 +1850,14 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   drop off-timeline files and don't store failed waveform reads, editor
   kept in front when it has the keyboard. Evidence:
   /Volumes/IsocastBuild/followups-008/scratch/REPORT.md.
+- T.1b.3 (#110, 2026-10-18): ProRes no longer counts as free H.26x capacity;
+  native HW/SW resource cells, CPU/GPU/frame/disk accounting and live-backend
+  invalidation share estimate/admission/Optimize. Governor handles secondary
+  ProRes resource pressure while preserving main/pins/ISO consent. AWS actual
+  HW/SW files, mixed stream, controlled governor/CPU signals, strict18/18,
+  ProRes3-pair A/B and full remote gates250 verified. Native SW4444 ISO startup
+  remains explicitly unqualified; no numeric loss forecast or exact UHD
+  capacity promise. Uncommitted, ready for review; Windows waits for switch.
 
 - T.1b.2/T.2b/T.3b/T.4b (#110, 2026-10-18): main6d6d58fd fast-forwarded;
   hybrid mixed H26x model/coverage fixes, independent hub failures and named

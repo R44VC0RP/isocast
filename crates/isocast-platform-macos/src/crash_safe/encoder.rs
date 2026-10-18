@@ -28,7 +28,7 @@ use objc2_core_video::{
     kCVImageBufferYCbCrMatrix_ITU_R_709_2,
 };
 use objc2_video_toolbox::{
-    VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
+    VTCompressionSession, VTEncodeInfoFlags, VTSessionCopyProperty, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_ColorPrimaries,
     kVTCompressionPropertyKey_ExpectedFrameRate,
     kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
@@ -70,6 +70,7 @@ pub struct VideoSession {
     output: Arc<Output>,
     timescale: i32,
     frame_duration: CMTime,
+    hardware_accelerated: Option<bool>,
 }
 
 // SAFETY: VideoToolbox sessions may be used from any thread; this one is
@@ -144,10 +145,16 @@ impl VideoSession {
         };
         unsafe {
             set(kVTCompressionPropertyKey_RealTime, CFBoolean::new(true))?;
-            set(
+            let rate = set(
                 kVTCompressionPropertyKey_ExpectedFrameRate,
                 &CFNumber::new_i32(spec.fps as i32),
-            )?;
+            );
+            // Software ProRes can refuse this advisory rate-control hint.
+            // It is intra-frame: the submitted PTS/duration and movie track
+            // still determine cadence, as on the AVAssetWriter path.
+            if hardware_only {
+                rate?;
+            }
             // Frames of another size (the program drawn at the canvas size
             // for a smaller file) are scaled to fit, keeping their shape.
             let scaling = CFDictionary::<CFString, CFString>::from_slices(
@@ -207,10 +214,31 @@ impl VideoSession {
                 bail!("the recording encoder could not prepare (error {status})");
             }
         }
+        let property = |key: &str| unsafe {
+            let mut value: *const CFType = ptr::null();
+            let status = VTSessionCopyProperty(
+                &session,
+                &CFString::from_str(key),
+                None,
+                (&raw mut value).cast(),
+            );
+            NonNull::new(value.cast_mut())
+                .map(|value| CFRetained::<CFType>::from_raw(value))
+                .filter(|_| status == 0)
+        };
+        let hardware_accelerated = property("UsingHardwareAcceleratedVideoEncoder")
+            .and_then(|value| value.downcast::<CFBoolean>().ok())
+            .map(|value| value.as_bool())
+            .or_else(|| {
+                property("EncoderID")
+                    .and_then(|value| value.downcast::<CFString>().ok())
+                    .and_then(|id| crate::system::encoder_hardware(&id.to_string()))
+            });
         Ok(Self {
             session,
             output,
             timescale,
+            hardware_accelerated,
             frame_duration: unsafe {
                 CMTime::new(i64::from(timescale) / i64::from(spec.fps), timescale)
             },
@@ -219,6 +247,10 @@ impl VideoSession {
 
     pub fn in_flight(&self) -> u64 {
         self.output.in_flight.load(Ordering::Relaxed)
+    }
+
+    pub fn hardware_accelerated(&self) -> Option<bool> {
+        self.hardware_accelerated
     }
 
     pub fn protect(&self, protected: bool) {

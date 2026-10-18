@@ -5,6 +5,31 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-18 (#110 ProRes resumed handoff): user freed exonbook; final source
+  built/gated remotely,250 tests/doctests (one native ignored), strict18/18
+  once. Five noisy HW ProRes variants and7HD422 files lose nothing; fresh HW
+  calibration22.40s and mixed HEVC/ProRes/H264 files360/360 plus stream890
+  frames decode/count cleanly. SW selection comes from actual session ID;
+  six full SW cells/positive fresh CPU in22.48s. Four tested noisy SW variants
+  are loss-free; pairedSW4444 ISO startup loses43/240 (later46/120), program
+  and audio whole. Model now explicitly warns startup_recovery/NoMargin,
+  never silently reduces ISO or claims a zero-loss startup. Program-only SW
+ 4444 passes240/240. ProRes A/B3pairs0loss, CPU medians47.3→47.0% overlapping.
+  Controlled HW/SW governor runs preserve main/pinnedshorts/ISOs and correctly
+  thin only unpinned square; final PTS/pins verified. Uncommitted report:
+  self-tuning-2/scratch/prores/REPORT.md. The old host blocker below is resolved.
+
+- 2026-10-18 (#110 ProRes external blocker): base5703950e, current source
+  uncommitted and NOT fully verified. Twenty-minute remote-build retry ended
+ 69; final check exonbook39GiB below40GiB guard, bothAWS Macs reserved. Pruned
+  only this lane's generated exonbook UI cache then its remote build lane;
+  insufficient unshared space, no other lane/user files touched. No local
+  build or loweredguard. Early native measurements/calibration and source
+  review fixes are retained in self-tuning-2/scratch/prores/REPORT.md; final
+  source (software identity, whole-system CPU, live-backend invalidation,
+  estimator fixes) still needs compile/gates/current-binary qualification.
+  Exact resume command in REPORT; Windows waits for daemon switch.
+
 - 2026-10-18 (#110/#27 merge qualification): HEADbb8790a5 + main59f78393
   merged with `--no-commit`. Governor conflict keeps BOTH `frame budget`
   exclusion from ISO pin diagnosis and named-secondary `unpinned_secondary`;
@@ -2046,6 +2071,36 @@ each section. Delete entries that stop being true.
   longer pushes the editor behind the studio when the editor has the
   keyboard (Behind becomes Show then). Checked in code only: proving it
   needs a real window plus a live stream on a test Mac.
+- 2026-10-18 (#110 ProRes final corrections): Apple omits both the optional
+  UsingHardware Boolean and catalogue IsHardware flag for built-in SW ProRes.
+  Explicit flags win; otherwise only five exact catalogue-present software
+  EncoderIDs verified with hardware disabled are mapped false. Other missing
+  identities remain unknown. The software ExpectedFrameRate hint is advisory;
+  timestamps/durations still define file cadence. A running mismatch, unknown
+  backend or missing first snapshot invalidates previous HW observations
+  locally, never rewrites the saved profile. An unpaced throughput test cannot
+  qualify native software startup/recovery with both ISO and protected outputs;
+  that resource remains unknown and cannot auto-admit/resize an ISO.
+
+- 2026-10-18 (#110 ProRes in progress): default AWS M2 native sessions report
+  hardware for every supported ProRes variant; base chip is not synonymous
+  with software. Capacity's prior ProRes0/Fits ignores native/disk resources:
+  noisy three-UHD-HQ test was then correctly refused by Start (558MB/s measured,
+ 661MB/s planned). Add separate native/CPU/GPU/frame-bandwidth/disk observations
+  and full concurrent calibration cells; no numeric ProRes ISO-loss promise.
+  Existing H.26x-only table fallback remains unchanged; unqualified ProRes
+  native/destination capacity must warn and cannot auto-resize/admit an ISO.
+- 2026-10-18 (#110 software ProRes): native software encoder rejects the
+  advisory ExpectedFrameRate hint and does not implement the optional
+  UsingHardwareAcceleratedVideoEncoder property. Actual EncoderID is exposed
+  (`com.apple.videotoolbox.videoencoder.prores-422` in the scoped experiment).
+  Resolve the actual ID against the native catalogue's explicit HW flag;
+  missing property/ID is unknown, never automatically software. Native service
+  CPU is outside isocastd, so process CPU alone is not its cost: whole-system
+  busy CPU deltas during calibration include services and outside activity.
+  No production force-software switch or mid-recording backend transition.
+  Runtime qualification is still pending in prores/REPORT.md; Windows waits
+  for its daemon switch.
 
 - 2026-10-18 (#110 remaining): a failed retune belongs to its native hub,
   not its canvas. Destinations sharing that hub/replay/warm owner retain the
@@ -6852,6 +6907,17 @@ each section. Delete entries that stop being true.
   as "in step" whatever the decoder does. followups-007's t64.sh second pair
   was measured that way. Start a fresh engine per pair and check the peak
   (followups-008/scratch/t64.sh).
+- 2026-10-18 (#110 ProRes CPU): HOST_CPU_LOAD_INFO is cached about1s on the
+  AWS Macs, so a complete0.6s active cell can report0CPU. Direct test under
+  owned workers: host counter0then481/594tickjumps, per-CPU info65–68ticks/0.1s.
+  Calibration now uses fresh host_processor_info and frees each Mach buffer;
+  zero/reset deltas remain unknown. Live monitor's sampling is unchanged.
+- 2026-10-18 (#110 evidence transport): hw-batch's rsync failed after mixed
+  run130327 passed, then its unchecked cleanup deleted remoteout anyway.
+  Retained profile/movies allowed evidence recovery130735 without a new take.
+  Software governor130216 failed during SSH push (never started);130831 passed.
+  A separate orchestrator fix should check fetch success before removing
+  remote evidence; none was mixed into this recording/model lane.
 
 - 2026-10-18 (#110 pins): live file counters can lag pin time by a full
   status interval. A post-pin RPC comparison counted six old square skips as

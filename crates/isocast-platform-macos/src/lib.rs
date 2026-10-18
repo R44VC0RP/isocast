@@ -86,6 +86,13 @@ pub enum MacWriter {
 impl isocast_engine::FileWriter for MacWriter {
     type Frame = PixelBuffer;
 
+    fn hardware_accelerated(&self) -> Option<bool> {
+        match self {
+            Self::Asset(w) => w.hardware_accelerated(),
+            Self::CrashSafe(w) => w.hardware_accelerated(),
+        }
+    }
+
     fn intentional_video_drops(&self) -> u64 {
         match self {
             Self::Asset(w) => w.intentional_video_drops(),
@@ -254,6 +261,10 @@ impl Platform for MacPlatform {
         let usage = unsafe { usage.assume_init() };
         let seconds = |t: libc::timeval| t.tv_sec as f64 + f64::from(t.tv_usec) / 1e6;
         Some(seconds(usage.ru_utime) + seconds(usage.ru_stime))
+    }
+
+    fn system_cpu_seconds(&self) -> Option<f64> {
+        crate::pressure::system_cpu_seconds()
     }
 
     fn write_latency(&self, probe: &Path) -> Option<std::time::Duration> {

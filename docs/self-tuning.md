@@ -79,7 +79,8 @@ No serial number, device/capture names, stream key or content is stored.
 
 Validate version, machine/OS/backend fingerprint, finite positive timings,
 dimensions and sample bounds before use. Missing, corrupt, stale or foreign
-profiles use the current per-chip table unchanged. Save by writing and
+profiles use the current H.26x per-chip table unchanged; ProRes capacity is
+explicitly unqualified until full native resource measurements exist. Save by writing and
 syncing a sibling temporary file then replacing the old file atomically;
 cancelled/failed runs never overwrite a useful profile. No profile is sent.
 
@@ -101,12 +102,12 @@ Covered mixed HEVC/H.264 recording workloads combine the local HEVC fit
 with H.264's table-normalized pixel and per-picture costs on the existing
 shared H.26x engine model. Their basis explicitly says `mixed`: H.264 costs
 are assumed, not fitted from diagnostic timings. Live H.264 also preserves
-both table-normalized costs. H.264-only, ProRes, unsupported depth/quality,
+both table-normalized costs. H.264-only, unsupported H.26x depth/quality,
 oversize/rate and unknown source formats retain the table. Every suggestion
 and ISO-admission candidate selects coverage again for its actual workload;
 the added ISO source is probed without opening capture. Optimize uses the
-same model and discloses mixed assumptions. This is not a qualified ProRes
-resource-pool model or an exact prediction of lost ISO pictures.
+same model and discloses mixed assumptions. ProRes uses the separate resource
+model below, not a multiplier on H.26x pixel demand.
 Existing exact `tune` failures remain a safety override. Optimize uses the
 profile to choose/rank candidates but still measures the actual setup when
 coverage is incomplete; `speed_test` remains an explicit, separate network
@@ -117,8 +118,68 @@ profile-aware estimate, including its tune memory. A file's `setup check`
 connects only to an already running daemon: when none is reachable it says
 capacity was **not checked**, without starting an engine; file validation
 still completes locally. Calibration alone
-never applies a setup patch. Missing/invalid profiles preserve table-based
-capacity estimates. New-setup defaults are a separate T.3 policy below.
+never applies a setup patch. Missing/invalid profiles preserve H.26x table-based
+capacity estimates; ProRes unknowns do not mean free capacity. New-setup
+defaults are a separate T.3 policy below.
+
+### ProRes resources
+
+Calibration prioritizes full (at least0.5s per session) two-session HD cells
+for Proxy, LT, 422, HQ and4444, plus a concurrent UHD422 control. The profile
+records the native session's actual hardware/software selection. A codec in
+the hardware catalogue is not proof that a particular session uses it.
+Single-session or short-window observations remain diagnostic. Skips and
+unknown/mixed backend selection never become zero-cost or fitted resources.
+
+Capacity reports separate `resources`: native ProRes service demand, process
+CPU, simple graphics work, BGRA-equivalent frame bandwidth and recording-disk
+write demand. Native demand adds per-output shares of the concurrent measured
+budget. AboveHD it uses the worse of HD-pixel scaling and the measured UHD422
+bound; other variants use their HD/reference ratio, explicitly an extrapolation.
+`process_cpu` excludes native-service CPU; a separate `system_cpu` observation
+counts all busy host cores during the cell, including native software services,
+startup/drain and outside work. Its conservative summed demand is compared to
+the machine's core count, not mistaken for isolated encoder CPU. Scene/decode
+work is additional. GPU calibration excludes arbitrary filters/conversion;
+frame bandwidth counts one input read only. These are work observations,
+not certified whole-machine headroom.
+
+Disk demand uses the existing published codec target-rate planning for all
+recording files. Only the same filesystem as the calibrated64MiB burst may
+use its measured write rate, with the normal15% fit margin; another volume
+is unknown and needs tune there. Burst throughput is not sustained speed.
+Unknown native/disk capacity cannot produce Fits or automatic smaller-source
+ISO admission. ProRes has no numeric ISO-loss forecast: a zero in the legacy
+`iso_drop_percent` is not a promise of zero losses; use resources/summary.
+
+Live files expose the take's codec and observed `hardware_accelerated`, not
+next-take setup settings. The governor diagnoses CPU pressure for actual
+software-ProRes files, and permits secondary-ProRes reduction for encoder,
+CPU/GPU/disk pressure after preview and any explicitly allowed ISO step.
+Secondary ProRes uses its governor ceiling without borrowing the H.26x native
+secondary share. Main, named/global pins and ISO consent retain their contract;
+no running codec/backend/format is changed. Software ProRes may reject the
+advisory ExpectedFrameRate hint: submitted timestamps/durations still define
+the file cadence, and H.26x retains strict property handling.
+If software ProRes does not expose UsingHardwareAcceleratedVideoEncoder, the
+actual session EncoderID is matched against the native catalogue's explicit
+hardware flag. Apple's catalogue omits that flag for five built-in software
+ProRes IDs; those exact, catalogue-present IDs are mapped from the verified
+force-hardware-off qualification, not a prefix/name heuristic. Other
+unsupported/missing identities remain unknown, never guessed
+from the chip name or from a missing Boolean property.
+When a running take reports a different or unknown backend from calibration,
+live capacity invalidates that codec's ProRes observations for the estimate
+without rewriting the saved profile. It cannot apply old hardware costs to
+a newly selected software session.
+Software ProRes with both ISOs and protected outputs also reports unqualified
+`startup_recovery`: a native startup stall can temporarily reduce ISO admission
+even when the measured steady native/CPU budget fits. This prevents a Fits or
+automatic ISO-resize/admission claim based only on an unpaced calibration;
+the existing native safety controller is not disabled to hide those losses.
+
+Windows profile support waits for the Windows daemon switch; it is not inferred
+from these macOS measurements.
 
 ## New setups and pins (T.3)
 

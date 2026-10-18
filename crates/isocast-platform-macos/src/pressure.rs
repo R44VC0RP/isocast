@@ -28,6 +28,62 @@ pub fn warning() -> Option<LoadWarning> {
     WARNING.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// Non-consuming host CPU observation for bounded calibration cells. Native
+/// ProRes software encoding can run in a service outside isocastd; process
+/// CPU alone must not be called its full cost.
+pub(crate) fn system_cpu_seconds() -> Option<f64> {
+    unsafe extern "C" {
+        fn mach_host_self() -> u32;
+        fn host_processor_info(
+            host: u32,
+            flavor: i32,
+            processors: *mut u32,
+            info: *mut *mut i32,
+            count: *mut u32,
+        ) -> i32;
+        fn vm_deallocate(task: u32, address: usize, size: usize) -> i32;
+        static mach_task_self_: u32;
+    }
+    static HOST: OnceLock<u32> = OnceLock::new();
+    let host = *HOST.get_or_init(|| unsafe { mach_host_self() });
+    let mut ticks: *mut i32 = std::ptr::null_mut();
+    let mut count = 0u32;
+    let mut processors = 0u32;
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    // host_statistics(HOST_CPU_LOAD_INFO) is cached for about a second on
+    // these Macs: a full 0.6s active cell can read zero CPU. Per-CPU counters
+    // are fresh; their returned Mach allocation must be released every time.
+    if hz <= 0
+        || unsafe { host_processor_info(host, 2, &mut processors, &mut ticks, &mut count) } != 0
+        || ticks.is_null()
+    {
+        return None;
+    }
+    let valid = processors > 0 && processors <= 4096 && processors.checked_mul(4) == Some(count);
+    let seconds = valid.then(|| {
+        // SAFETY: the successful native call returned count integer entries,
+        // checked against four CPU-state counters per processor above.
+        let ticks = unsafe { std::slice::from_raw_parts(ticks.cast::<u32>(), count as usize) };
+        ticks
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u64::from(c[0]) + u64::from(c[1]) + u64::from(c[3]))
+            .sum::<u64>() as f64
+            / hz as f64
+    });
+    // SAFETY: exactly the allocation and byte count returned by Mach; no
+    // references to its counters survive the calculation above.
+    unsafe {
+        vm_deallocate(
+            mach_task_self_,
+            ticks as usize,
+            count as usize * std::mem::size_of::<i32>(),
+        )
+    };
+    seconds
+}
+
 pub(crate) fn session_failed(status: i32) {
     // -12908 also means descriptor exhaustion; callers exclude that first.
     if status == -12908 {

@@ -594,6 +594,7 @@ impl Daemon {
             state.session.is_some(),
             &memory,
             None,
+            &crate::prores_backends(state),
         ) {
             Ok(estimate) => estimate,
             // No estimate for this Mac: nothing to judge by.

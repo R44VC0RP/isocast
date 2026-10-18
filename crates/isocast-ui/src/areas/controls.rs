@@ -797,6 +797,7 @@ fn sample_overload(fits: bool) -> Overload {
             engine_pixels_per_second: 8e8,
             basis: "measured".into(),
             outputs: Vec::new(),
+            resources: Vec::new(),
             load: if fits { 0.6 } else { 1.09 },
             capacity: if fits {
                 Capacity::Fits

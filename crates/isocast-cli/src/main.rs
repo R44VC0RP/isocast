@@ -3184,13 +3184,48 @@ fn capacity(
             if o.assumed { " (size assumed)" } else { "" }
         );
     }
+    for resource in &estimate.resources {
+        let (scale, unit) = if resource.unit == "bytes/second" {
+            (1e6, "MB/s")
+        } else {
+            (1.0, resource.unit.as_str())
+        };
+        println!(
+            "  {}: {:.2} {}; capacity {}{}",
+            resource.resource,
+            resource.demand / scale,
+            unit,
+            resource
+                .capacity
+                .map_or_else(|| "unqualified".into(), |v| format!("{:.2}", v / scale)),
+            resource
+                .load
+                .map_or_else(String::new, |v| format!(", {:.0}% load", v * 100.0))
+        );
+        println!("    {}", resource.basis);
+    }
     let verdict = match estimate.capacity {
         Capacity::Fits => "fits",
+        Capacity::NoMargin
+            if estimate.resources.iter().any(|r| {
+                matches!(
+                    r.resource.as_str(),
+                    "prores" | "recording_disk" | "startup_recovery"
+                ) && r.capacity.is_none()
+            }) =>
+        {
+            "not qualified"
+        }
         Capacity::NoMargin => "keeps up, no margin",
         Capacity::CannotKeepUp => "can't keep up",
     };
     println!(
-        "Verdict: {verdict}, busiest engine at {:.0}%{}",
+        "Verdict: {verdict}, {} at {:.0}%{}",
+        if estimate.resources.is_empty() {
+            "busiest engine"
+        } else {
+            "largest modelled resource"
+        },
         estimate.load * 100.0,
         if estimate.streaming {
             ", stream counted"

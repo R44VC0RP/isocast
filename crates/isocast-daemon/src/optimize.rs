@@ -287,7 +287,8 @@ impl Daemon {
             stream: Some(params.goal.streams()),
             add_iso: None,
         }) && (estimate.basis.starts_with("measured: local")
-            || estimate.basis.starts_with("mixed: measured local"))
+            || estimate.basis.starts_with("mixed: measured local")
+            || !estimate.resources.is_empty())
         {
             notes.push(format!("Machine profile: {}", estimate.summary));
             if estimate.basis.starts_with("mixed:") {

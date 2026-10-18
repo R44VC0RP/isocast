@@ -177,6 +177,13 @@ pub trait Platform: Clone + Send + Sync + 'static {
         None
     }
 
+    /// Cumulative busy CPU core-seconds across the system. Calibration uses
+    /// deltas to include native encoder services, not only the helper process.
+    /// Outside activity is included and makes this observation conservative.
+    fn system_cpu_seconds(&self) -> Option<f64> {
+        None
+    }
+
     /// How long a small write to `probe` (a scratch file beside a
     /// recording) takes to reach the disk: written and synced, without
     /// flushing the drive's own cache. `None` where it can't be measured.
@@ -777,6 +784,12 @@ pub trait FileWriter: Send {
     /// Completed encoded video pictures observed so far, when the backend
     /// exposes them. Calibration uses deltas, never queued submissions.
     fn completed_video_frames(&self) -> Option<u64> {
+        None
+    }
+
+    /// Actual native session selection, not the machine's codec catalogue.
+    /// Unknown for backends that cannot inspect the running encoder.
+    fn hardware_accelerated(&self) -> Option<bool> {
         None
     }
 

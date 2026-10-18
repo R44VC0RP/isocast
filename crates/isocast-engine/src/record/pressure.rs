@@ -112,14 +112,24 @@ impl EncoderPressure {
     }
 
     pub fn admit(&mut self) -> bool {
+        self.admit_with_native(true)
+    }
+
+    /// ProRes has its own encoder resource: apply only the explicit governor
+    /// ceiling, not the H.26x native secondary share. Main remains protected.
+    pub fn admit_governor(&mut self) -> bool {
+        self.admit_with_native(false)
+    }
+
+    fn admit_with_native(&mut self, shared_native: bool) -> bool {
         if self.canvas.is_main() {
             return true;
         }
-        if self.held() {
+        if shared_native && self.held() {
             self.refused += 1;
             return false;
         }
-        let native = if MAIN_OUTPUTS.load(Ordering::Relaxed) == 0 {
+        let native = if !shared_native || MAIN_OUTPUTS.load(Ordering::Relaxed) == 0 {
             1000
         } else {
             VERTICAL_SHARE.load(Ordering::Relaxed)

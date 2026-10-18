@@ -368,6 +368,10 @@ pub struct Sample {
     /// Currently protected non-main canvases, not parked encoder reservations.
     pub secondary_canvases: Vec<CanvasId>,
     pub has_stream: bool,
+    /// Actual running take's ProRes files, including CPU fallback. A codec
+    /// catalogue or next-take setup does not identify the running backend.
+    pub prores_files: u32,
+    pub software_prores_files: u32,
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -590,6 +594,11 @@ impl Controller {
             // The OS is about to reclaim memory from processes. Only the
             // preview and opted-in ISO steps below apply to "memory".
             Some("memory")
+        } else if sample.software_prores_files > 0
+            && (sample.encoder_pressure || health.is_some_and(|h| h.encoder_threatened))
+            && health.is_some_and(|h| h.cpu_percent.is_some_and(|p| p >= 70.0))
+        {
+            Some("CPU (software ProRes)")
         } else if recent_loss
             && sample.cpu_late
             && health.is_some_and(|h| h.cpu_percent.is_some_and(|p| p >= 90.0))
@@ -679,7 +688,7 @@ impl Controller {
                 && unpinned_iso
                 && matches!(
                     self.hold_cause,
-                    Some("CPU" | "GPU" | "disk" | "thermal" | "memory")
+                    Some("CPU" | "CPU (software ProRes)" | "GPU" | "disk" | "thermal" | "memory")
                 )
                 && !production_loss
                 && sample.progressed
@@ -740,11 +749,13 @@ impl Controller {
                     && sample.main_protected
                     && unpinned_secondary
                     && limits.vertical > 25
-                    && cause == "encoder"
+                    && (cause == "encoder"
+                        || sample.prores_files > 0
+                            && matches!(cause, "CPU" | "CPU (software ProRes)" | "GPU" | "disk"))
                 {
                     limits.vertical -= 25;
                     reason = format!(
-                        "Automatic quality: encoder pressure remains; unpinned secondary canvas video limited to {}%",
+                        "Automatic quality: {cause} pressure remains; unpinned secondary canvas video limited to {}%",
                         limits.vertical
                     );
                 } else {
@@ -754,7 +765,14 @@ impl Controller {
                         || (sample.has_isos
                             && pinned_iso
                             && !matches!(cause, "upload" | "encoder" | "output" | "frame budget"))
-                        || (sample.has_vertical && !unpinned_secondary && cause == "encoder")
+                        || (sample.has_vertical
+                            && !unpinned_secondary
+                            && (cause == "encoder"
+                                || sample.prores_files > 0
+                                    && matches!(
+                                        cause,
+                                        "CPU" | "CPU (software ProRes)" | "GPU" | "disk"
+                                    )))
                         || (sample.has_stream
                             && settings.pinned("stream.video_bitrate_kbps")
                             && upload);

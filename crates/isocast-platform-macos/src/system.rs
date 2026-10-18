@@ -10,7 +10,7 @@ use isocast_protocol::api::Machine;
 use isocast_protocol::{Canvas, SourceKind};
 use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFRetained, CFString, CFType};
 use objc2_video_toolbox::{
-    VTCopyVideoEncoderList, kVTVideoEncoderList_DisplayName,
+    VTCopyVideoEncoderList, kVTVideoEncoderList_DisplayName, kVTVideoEncoderList_EncoderID,
     kVTVideoEncoderList_IsHardwareAccelerated,
 };
 
@@ -31,6 +31,56 @@ pub fn machine() -> Machine {
         ),
         hardware_encoders: hardware_encoders(),
     }
+}
+
+/// Resolve an actual running session's EncoderID, not a codec name or an
+/// assumption that the machine's available hardware was selected. Software
+/// ProRes exposes EncoderID but can refuse UsingHardwareAcceleratedVideoEncoder.
+/// Apple's catalogue also omits its HW flag for its built-in software ProRes
+/// implementations. These exact IDs were verified by disabling hardware in
+/// isolated VT sessions on the AWS M2; arbitrary missing flags remain unknown.
+pub(crate) fn encoder_hardware(id: &str) -> Option<bool> {
+    static TYPES: std::sync::OnceLock<std::collections::HashMap<String, bool>> =
+        std::sync::OnceLock::new();
+    TYPES
+        .get_or_init(|| {
+            let mut out = std::collections::HashMap::new();
+            let mut list = ptr::null();
+            let status = unsafe { VTCopyVideoEncoderList(None, ptr::NonNull::from(&mut list)) };
+            let Some(list) = ptr::NonNull::new(list.cast_mut()).filter(|_| status == 0) else {
+                return out;
+            };
+            let list: CFRetained<CFArray> = unsafe { CFRetained::from_raw(list) };
+            let list: &CFArray<CFDictionary<CFString, CFType>> = unsafe { list.cast_unchecked() };
+            for encoder in list.iter() {
+                let id = encoder
+                    .get(unsafe { kVTVideoEncoderList_EncoderID })
+                    .and_then(|v| v.downcast::<CFString>().ok());
+                let hardware = encoder
+                    .get(unsafe { kVTVideoEncoderList_IsHardwareAccelerated })
+                    .and_then(|v| v.downcast::<CFBoolean>().ok());
+                if let Some(id) = id {
+                    let id = id.to_string();
+                    let hardware = hardware.map(|h| h.as_bool()).or_else(|| {
+                        matches!(
+                            id.as_str(),
+                            "com.apple.videotoolbox.videoencoder.prores-422"
+                                | "com.apple.videotoolbox.videoencoder.prores-422hq"
+                                | "com.apple.videotoolbox.videoencoder.prores-422lt"
+                                | "com.apple.videotoolbox.videoencoder.prores-422proxy"
+                                | "com.apple.videotoolbox.videoencoder.prores-4444"
+                        )
+                        .then_some(false)
+                    });
+                    if let Some(hardware) = hardware {
+                        out.insert(id, hardware);
+                    }
+                }
+            }
+            out
+        })
+        .get(id)
+        .copied()
 }
 
 /// Names of the video encoders that run on the media engines.

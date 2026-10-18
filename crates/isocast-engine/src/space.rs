@@ -10,6 +10,22 @@ use crate::WriterSpec;
 /// How long an open-ended recording must have room for before it starts.
 pub const MIN_OPEN_ENDED_SECONDS: f64 = 10.0 * 60.0;
 
+/// Device of an existing path or its closest existing parent. Only a local
+/// calibration on this same filesystem may provide a disk-speed observation.
+pub fn device(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        path.ancestors()
+            .find_map(|p| fs::metadata(p).ok().map(|m| m.dev()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// A generous estimate of a file's data rate, in bytes per second (the
 /// protocol's `encoder_bytes_per_second`, which clients share). Real files
 /// are usually far smaller (a still screen compresses to almost nothing);

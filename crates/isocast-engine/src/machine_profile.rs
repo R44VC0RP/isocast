@@ -98,7 +98,7 @@ const MEMORY_TIME: Duration = Duration::from_millis(250);
 const MEMORY_MAX_PASSES: usize = 32;
 
 /// The scratch disk write: this many bytes, written and synced.
-const DISK_BYTES: usize = 16 << 20;
+const DISK_BYTES: usize = 64 << 20;
 const DISK_CHUNK: usize = 4 << 20;
 
 const HD: (u32, u32) = (1920, 1080);
@@ -165,10 +165,6 @@ pub fn measure<P: Platform>(platform: &P, scratch: &Path) -> Result<MachineProfi
     let mut skipped = Vec::new();
     // Paths, codecs and depths whose single session couldn't start.
     let mut unusable = Vec::new();
-    let prores = machine
-        .hardware_encoders
-        .iter()
-        .any(|name| name.contains("ProRes"));
     for (index, cell) in cells.iter().enumerate() {
         let mut skip = |reason: String| {
             skipped.push(SkippedMeasurement {
@@ -177,10 +173,6 @@ pub fn measure<P: Platform>(platform: &P, scratch: &Path) -> Result<MachineProfi
                 reason: truncate(reason),
             })
         };
-        if cell.is_prores() && !prores {
-            skip("no hardware ProRes encoder listed".into());
-            continue;
-        }
         if unusable.contains(&cell.family()) {
             skip("a session of the same path, codec and depth could not start".into());
             continue;
@@ -229,6 +221,7 @@ pub fn measure<P: Platform>(platform: &P, scratch: &Path) -> Result<MachineProfi
         graphics,
         memory_copy_bytes_per_second,
         disk_write_bytes_per_second,
+        disk_device: space::device(scratch),
         complete: skipped.is_empty(),
         skipped,
         notes,
@@ -254,6 +247,7 @@ struct Cell {
 enum Priority {
     /// A concurrent HEVC cell the capacity fit uses (full windows required).
     Fit,
+    ProresResource,
     /// Required coverage that is still only an observation.
     Required,
     Diagnostic,
@@ -326,6 +320,8 @@ impl Cell {
             backend: backend().into(),
             evidence: if self.priority == Priority::Fit {
                 Evidence::Fit
+            } else if self.priority == Priority::ProresResource {
+                Evidence::ProresResource
             } else {
                 Evidence::Diagnostic
             },
@@ -346,6 +342,9 @@ impl Cell {
             seconds,
             frames_per_second: frames as f64 / seconds,
             dropped,
+            hardware_accelerated: None,
+            process_cpu_seconds_per_frame: None,
+            system_cpu_seconds_per_frame: None,
         }
     }
 
@@ -362,7 +361,12 @@ impl Cell {
     /// would grow past [`MAX_FILE_BYTES`].
     fn max_frames(&self) -> u64 {
         let per_frame = self.file_bytes_per_second() / f64::from(self.fps.max(1));
-        let by_size = (MAX_FILE_BYTES / per_frame.max(1.0)).floor() as u64;
+        let budget = if self.priority == Priority::ProresResource {
+            512.0 * 1e6
+        } else {
+            MAX_FILE_BYTES
+        };
+        let by_size = (budget / per_frame.max(1.0)).floor() as u64;
         by_size.clamp(MIN_FRAMES * 2, MAX_FRAMES)
     }
 
@@ -458,6 +462,24 @@ fn cells() -> Vec<Cell> {
         HD,
         60,
     ));
+    // Native resources, not free H.26x pixels: full concurrent windows and
+    // explicit HW/SW selection precede single-session diagnostics.
+    for codec in [
+        Codec::Prores422,
+        Codec::Prores422Proxy,
+        Codec::Prores422Lt,
+        Codec::Prores422Hq,
+        Codec::Prores4444,
+    ] {
+        cells.push(Cell {
+            sessions: 2,
+            ..recording(Priority::ProresResource, codec, 8, HD, 60)
+        });
+    }
+    cells.push(Cell {
+        sessions: 2,
+        ..recording(Priority::ProresResource, Codec::Prores422, 8, UHD, 30)
+    });
     // ProRes ignores bit_depth (always 10 bits or more); 8 as in setups.
     for (codec, bit_depth) in [
         (Codec::H264, 8),
@@ -514,7 +536,9 @@ fn encode_cell<P: Platform>(
         .map(|session| scratch.join(format!("encode-{index}-{session}.mov")))
         .collect();
     let barrier = Barrier::new(sessions);
-    let results: Vec<Result<(u64, Duration)>> = thread::scope(|scope| {
+    let cpu_before = platform.process_cpu_seconds();
+    let system_cpu_before = platform.system_cpu_seconds();
+    let results: Vec<Result<(u64, Duration, Option<bool>)>> = thread::scope(|scope| {
         let threads: Vec<_> = paths
             .iter()
             .map(|path| {
@@ -541,22 +565,43 @@ fn encode_cell<P: Platform>(
     let mut frames_done = 0;
     let mut longest = Duration::ZERO;
     let mut shortest = Duration::MAX;
+    let mut backends = Vec::new();
     for result in results {
-        let (completed, elapsed) = result?;
+        let (completed, elapsed, hardware) = result?;
+        backends.push(hardware);
         frames_done += completed;
         longest = longest.max(elapsed);
         shortest = shortest.min(elapsed);
     }
     // A fit cell is fit evidence only over full windows in every session;
     // a shorter one is not demoted to a diagnostic, it is not reported.
-    if cell.priority == Priority::Fit && shortest.as_secs_f64() < FIT_MIN_SECONDS {
+    if matches!(cell.priority, Priority::Fit | Priority::ProresResource)
+        && shortest.as_secs_f64() < FIT_MIN_SECONDS
+    {
         bail!(
             "a session was timed for only {:.2} s, shorter than the {FIT_MIN_SECONDS} s a fit \
              measurement needs",
             shortest.as_secs_f64()
         );
     }
-    finished(cell, frames_done, longest, None)
+    let mut measurement = finished(cell, frames_done, longest, None)?;
+    measurement.hardware_accelerated = backends
+        .first()
+        .copied()
+        .flatten()
+        .filter(|first| backends.iter().all(|b| *b == Some(*first)));
+    if cell.priority == Priority::ProresResource && measurement.hardware_accelerated.is_none() {
+        bail!("native ProRes hardware/software selection is unknown or differs between sessions");
+    }
+    measurement.process_cpu_seconds_per_frame = cpu_before
+        .zip(platform.process_cpu_seconds())
+        .filter(|(before, after)| after >= before)
+        .map(|(before, after)| (after - before) / frames_done.max(1) as f64);
+    measurement.system_cpu_seconds_per_frame = system_cpu_before
+        .zip(platform.system_cpu_seconds())
+        .filter(|(before, after)| after > before)
+        .map(|(before, after)| (after - before) / frames_done.max(1) as f64);
+    Ok(measurement)
 }
 
 /// `cell`'s measurement of `frames` completed over `timed`, if enough
@@ -651,7 +696,7 @@ fn encode_session<P: Platform>(
     frames: &[P::Frame],
     max_frames: u64,
     barrier: &Barrier,
-) -> Result<(u64, Duration)> {
+) -> Result<(u64, Duration, Option<bool>)> {
     let prepared = platform.create_writer(spec).context(NotStarted);
     // Every session waits here, even one that failed, so none waits forever.
     barrier.wait();
@@ -701,9 +746,14 @@ fn encode_session<P: Platform>(
         .context("backend does not expose completed video frames")?;
     // Do not include native drain or fsync time in a steady-state encoder
     // measurement. Still require successful finalization before accepting it.
+    let hardware = writer.hardware_accelerated();
     writer.finish(base.add_ticks(n, fps))?;
     let (from, before) = timed_from.expect("set before the loop ends");
-    Ok((completed.saturating_sub(before), done.duration_since(from)))
+    Ok((
+        completed.saturating_sub(before),
+        done.duration_since(from),
+        hardware,
+    ))
 }
 
 /// Synthetic frames by size, drawn once (or why they couldn't be).

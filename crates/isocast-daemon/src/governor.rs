@@ -325,6 +325,17 @@ fn sample(
     sample.paused = (!ready || paused) && !live_stream && !replay.iter().any(|on| *on);
     sample.has_vertical = sample.vertical_protected;
     if let Some(live) = &live {
+        for file in &live.files {
+            if file.codec.is_some_and(|codec| {
+                !matches!(
+                    codec,
+                    isocast_protocol::Codec::H264 | isocast_protocol::Codec::Hevc
+                )
+            }) {
+                sample.prores_files += 1;
+                sample.software_prores_files += u32::from(file.hardware_accelerated == Some(false));
+            }
+        }
         let frames = live.files.iter().map(|f| f.frames).sum::<u64>();
         if previous.session == session && !paused {
             progressed |= frames > previous.record_frames;

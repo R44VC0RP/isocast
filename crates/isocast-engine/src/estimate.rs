@@ -206,6 +206,7 @@ struct Judgement {
     load: f64,
     capacity: Capacity,
     iso_drop: f64,
+    resources: Vec<isocast_protocol::api::ResourceEstimate>,
 }
 
 /// A source's (width, height, fps) while it runs, if known.
@@ -238,6 +239,7 @@ struct Model {
     table: Chip,
     fit: Option<Chip>,
     mixed: Option<Chip>,
+    profile: Option<isocast_protocol::machine::MachineProfile>,
 }
 
 impl Model {
@@ -257,7 +259,12 @@ impl Model {
             ),
             ..fit.clone()
         });
-        Model { table, fit, mixed }
+        Model {
+            table,
+            fit,
+            mixed,
+            profile: profile.cloned(),
+        }
     }
 
     /// The measured fit for an all-HEVC workload its cells cover, the
@@ -272,6 +279,37 @@ impl Model {
             (Coverage::Mixed, _, Some(mixed)) => mixed,
             _ => &self.table,
         }
+    }
+
+    fn judge(&self, setup: &Setup, formats: Formats, streaming: [bool; 2]) -> Judgement {
+        let chip = self.chip(setup, formats);
+        let mut judged = judge(chip, setup, formats, streaming[0], streaming[1]);
+        if judged
+            .outputs
+            .iter()
+            .any(|o| !matches!(o.codec, Codec::Hevc | Codec::H264))
+        {
+            judged.resources = prores_resources(setup, &judged.outputs, self.profile.as_ref());
+            for resource in &judged.resources {
+                if let Some(load) = resource.load {
+                    judged.load = judged.load.max(load);
+                }
+            }
+            judged.capacity = verdict(judged.load);
+            if judged.resources.iter().any(|r| {
+                matches!(
+                    r.resource.as_str(),
+                    "prores" | "recording_disk" | "startup_recovery"
+                ) && r.load.is_none()
+            }) && judged.capacity == Capacity::Fits
+            {
+                judged.capacity = Capacity::NoMargin;
+            }
+            // A bandwidth/ProRes load is not the H.26x native ISO share model.
+            // Do not manufacture a numeric ISO-loss forecast for these pools.
+            judged.iso_drop = 0.0;
+        }
+        judged
     }
 }
 
@@ -654,6 +692,7 @@ fn judge(
         load,
         capacity: verdict(load),
         iso_drop,
+        resources: Vec::new(),
     }
 }
 
@@ -683,6 +722,236 @@ fn verdict(load: f64) -> Capacity {
     }
 }
 
+/// ProRes does not consume H.26x pixels, but it is not free. Only full,
+/// concurrent cells with observed native selection supply its native budget.
+/// CPU/GPU/copy observations are explicitly lower-bound work, not a claim
+/// that filters, conversion services or another process have spare capacity.
+fn prores_resources(
+    setup: &Setup,
+    outputs: &[EstimatedOutput],
+    profile: Option<&isocast_protocol::machine::MachineProfile>,
+) -> Vec<isocast_protocol::api::ResourceEstimate> {
+    use isocast_protocol::api::ResourceEstimate;
+    use isocast_protocol::machine::{EncoderResource, Evidence, FIT_MIN_SECONDS};
+    let prores: Vec<_> = outputs
+        .iter()
+        .filter(|o| !matches!(o.codec, Codec::Hevc | Codec::H264))
+        .collect();
+    let hd = 1920.0 * 1080.0;
+    let mut native = 0.0;
+    let mut process_cpu = 0.0;
+    let mut system_cpu = 0.0;
+    let mut covered = true;
+    let mut cpu_known = true;
+    let mut system_cpu_known = true;
+    let mut hardware = 0;
+    let mut software = 0;
+    for output in &prores {
+        let cell = profile.and_then(|p| {
+            p.encoders
+                .iter()
+                .filter(|m| {
+                    m.codec == output.codec
+                        && m.backend == "videotoolbox"
+                        && m.resource == EncoderResource::RecordingWriter
+                        && m.evidence == Evidence::ProresResource
+                        && m.sessions >= 2
+                        && m.seconds >= FIT_MIN_SECONDS
+                        && m.hardware_accelerated.is_some()
+                        && m.width == 1920
+                        && m.height == 1080
+                })
+                .min_by(|a, b| a.frames_per_second.total_cmp(&b.frames_per_second))
+        });
+        let pixels = f64::from(output.width) * f64::from(output.height);
+        let eligible = !output.assumed
+            && output.fps <= 60
+            && pixels <= 3840.0 * 2160.0
+            && output.width.max(output.height) <= 3840;
+        if let Some(cell) = cell.filter(|_| eligible) {
+            // Scaling up by pixels retains HD's per-picture cost too, a
+            // deliberately conservative bound rather than a fitted zero-cost
+            // overhead. A full UHD422 control must exist before scaling up.
+            let uhd = profile.and_then(|p| {
+                p.encoders
+                    .iter()
+                    .filter(|m| {
+                        m.codec == Codec::Prores422
+                            && m.evidence == Evidence::ProresResource
+                            && m.backend == cell.backend
+                            && m.width == 3840
+                            && m.height == 2160
+                            && m.hardware_accelerated == cell.hardware_accelerated
+                    })
+                    .min_by(|a, b| a.frames_per_second.total_cmp(&b.frames_per_second))
+            });
+            let scale = (pixels / hd).max(1.0);
+            let mut demand = f64::from(output.fps) * scale / cell.frames_per_second;
+            if pixels > hd {
+                let reference = profile.and_then(|p| {
+                    p.encoders
+                        .iter()
+                        .filter(|m| {
+                            m.codec == Codec::Prores422
+                                && m.evidence == Evidence::ProresResource
+                                && m.backend == cell.backend
+                                && m.width == 1920
+                                && m.height == 1080
+                                && m.hardware_accelerated == cell.hardware_accelerated
+                        })
+                        .min_by(|a, b| a.frames_per_second.total_cmp(&b.frames_per_second))
+                });
+                if let Some((uhd, reference)) = uhd.zip(reference) {
+                    // A slow UHD control must veto an optimistic HD scaling.
+                    // Other variants use the measured HD variant/reference
+                    // ratio; their UHD scaling is still explicitly assumed.
+                    demand = demand.max(
+                        f64::from(output.fps) * (pixels / (hd * 4.0)) / uhd.frames_per_second
+                            * reference.frames_per_second
+                            / cell.frames_per_second,
+                    );
+                } else {
+                    covered = false;
+                }
+            }
+            native += demand;
+            if cell.hardware_accelerated == Some(true) {
+                hardware += 1;
+            } else {
+                software += 1;
+            }
+            if let Some(cpu) = cell.process_cpu_seconds_per_frame {
+                process_cpu += f64::from(output.fps) * scale * cpu;
+            } else {
+                cpu_known = false;
+            }
+            if let Some(cpu) = cell.system_cpu_seconds_per_frame {
+                system_cpu += f64::from(output.fps) * scale * cpu;
+            } else {
+                system_cpu_known = false;
+            }
+        } else {
+            covered = false;
+            cpu_known = false;
+            system_cpu_known = false;
+        }
+    }
+    let raw_bytes = prores
+        .iter()
+        .map(|o| f64::from(o.width) * f64::from(o.height) * f64::from(o.fps) * 4.0)
+        .sum::<f64>();
+    let mut disk_bytes = 0.0;
+    for output in outputs.iter().filter(|o| o.kind != OutputKind::Stream) {
+        let encoder = if output.kind == OutputKind::Iso {
+            setup.recording.iso.encoder.clone()
+        } else if output.output == PROGRAM {
+            setup.recording.program.encoder.clone()
+        } else {
+            output
+                .output
+                .strip_suffix("-program")
+                .and_then(|id| CanvasId::parse(id).ok())
+                .and_then(|id| setup.for_canvas(id))
+                .map(|s| s.recording.program.encoder)
+                .unwrap_or_else(|| isocast_protocol::Encoder {
+                    codec: output.codec,
+                    ..Default::default()
+                })
+        };
+        disk_bytes += isocast_protocol::encoder_bytes_per_second(
+            &encoder,
+            output.width,
+            output.height,
+            output.fps,
+            2,
+        );
+    }
+    let folder = if let Some(rest) = setup.recording.folder.strip_prefix("~/") {
+        std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(rest))
+    } else {
+        Some(std::path::PathBuf::from(&setup.recording.folder))
+    };
+    let disk_capacity = profile
+        .and_then(|p| p.disk_device.zip(p.disk_write_bytes_per_second))
+        .filter(|(device, _)| {
+            folder.as_ref().and_then(|f| crate::space::device(f)) == Some(*device)
+        })
+        // The verdict keeps its normal 15% margin. This is still a burst,
+        // not a sustained guarantee, and never borrowed from another volume.
+        .map(|(_, rate)| rate);
+    let gpu_seconds = profile.and_then(|p| {
+        std::iter::once(setup.clone())
+            .chain(
+                setup
+                    .extra_canvas_ids()
+                    .into_iter()
+                    .filter_map(|c| setup.for_canvas(c)),
+            )
+            .filter(|s| s.recording.program.enabled || s.stream.is_some())
+            .map(|s| {
+                p.graphics
+                    .iter()
+                    .filter(|g| g.width * g.height >= s.canvas.width * s.canvas.height)
+                    .min_by_key(|g| g.width * g.height)
+                    .map(|g| g.composite_ms / 1000.0 * f64::from(s.canvas.fps))
+            })
+            .sum::<Option<f64>>()
+    });
+    let cpu_capacity = profile
+        .filter(|p| p.machine.cores > 0 && system_cpu_known && covered)
+        .map(|p| f64::from(p.machine.cores));
+    let mut resources = vec![
+        ResourceEstimate {
+            resource: "prores".into(), unit: "native resource seconds/second".into(),
+            demand: native, capacity: covered.then_some(1.0), load: covered.then_some(native),
+            basis: format!("{}; {hardware} hardware / {software} software outputs identified from full concurrent native-session measurements. Additive shared-resource model; larger pictures take the worse HD-pixel scaling or measured UHD422 bound. Other variants extrapolate UHD using their HD cost ratio (assumed). Unmeasured work is not free",
+                if covered { "measured local ProRes service demand" } else { "unqualified or incomplete ProRes coverage" }),
+        },
+        ResourceEstimate {
+            resource: "system_cpu".into(), unit: "CPU core seconds/second".into(),
+            demand: system_cpu, capacity: cpu_capacity, load: cpu_capacity.map(|v| system_cpu / v),
+            basis: format!("{} whole-system busy CPU during concurrent native cells, including native services/startup/drain/outside activity; conservative additive scaling, not isolated encoder CPU. Scene/decode work is additional; live CPU pressure is authoritative", if system_cpu_known && covered { "measured" } else { "partial/unknown" }),
+        },
+        ResourceEstimate {
+            resource: "process_cpu".into(), unit: "CPU core seconds/second".into(),
+            demand: process_cpu, capacity: None, load: None,
+            basis: format!("{}; includes cell startup/drain, excludes native-service CPU and other processes. Not total CPU headroom; live OS/encoder pressure remains authoritative",
+                if cpu_known { "measured process-CPU observation" } else { "partial/unknown process-CPU observation" }),
+        },
+        ResourceEstimate {
+            resource: "graphics".into(), unit: "GPU seconds/second".into(),
+            demand: gpu_seconds.unwrap_or(0.0), capacity: None, load: None,
+            basis: format!("{} simple compositor workload only; scene filters, native ProRes conversion and concurrent GPU work are additional/unqualified", if gpu_seconds.is_some() { "measured" } else { "unmeasured/partial" }),
+        },
+        ResourceEstimate {
+            resource: "frame_bandwidth".into(), unit: "bytes/second".into(),
+            demand: raw_bytes, capacity: None, load: None,
+            basis: "one BGRA-equivalent input read per ProRes output; conversion/copy passes are additional, not a certified memory-bandwidth budget".into(),
+        },
+        ResourceEstimate {
+            resource: "recording_disk".into(), unit: "bytes/second".into(),
+            demand: disk_bytes, capacity: disk_capacity, load: disk_capacity.map(|v| disk_bytes / v),
+            basis: if disk_capacity.is_some() {
+                "published codec target-rate planning (all recording files); calibrated same-volume 64 MiB burst rate, with the normal 15% fit margin, not a sustained guarantee".into()
+            } else { "published codec target-rate planning (all recording files); destination throughput unmeasured or on another volume, run tune there".into() },
+        },
+    ];
+    if software > 0
+        && outputs.iter().any(|o| o.kind == OutputKind::Iso)
+        && outputs.iter().any(|o| o.protected)
+    {
+        // AWS software4444: one startup stall set native ISO admission to75%,
+        // recovering slowly despite a fitting steady service budget. Never
+        // promise a zero-loss start from an unpaced throughput calibration.
+        resources.push(ResourceEstimate {
+            resource: "startup_recovery".into(), unit: "qualification".into(),
+            demand: 0.0, capacity: None, load: None,
+            basis: "software ProRes startup/recovery with protected outputs can temporarily shed ISO pictures even below the steady resource budget; zero-loss starts are not qualified by this calibration. Native safety remains authoritative".into(),
+        });
+    }
+    resources
+}
+
 /// The same for setups that ask the same of the encoders.
 fn workload_key(outputs: &[EstimatedOutput]) -> String {
     let mut parts: Vec<String> = outputs
@@ -709,6 +978,27 @@ fn percent(load: f64) -> String {
 }
 
 fn summary(judgement: &Judgement) -> String {
+    if !judgement.resources.is_empty() {
+        let unknown = judgement.resources.iter().any(|r| {
+            matches!(
+                r.resource.as_str(),
+                "prores" | "recording_disk" | "startup_recovery"
+            ) && r.load.is_none()
+        });
+        return format!(
+            "ProRes resource estimate: {}; largest modelled load {}; CPU/native-service, graphics and destination-disk observations are listed separately. No numeric ISO-loss forecast; content, filters and outside load require a real tune",
+            if unknown {
+                "native ProRes, destination or startup/recovery capacity is not fully qualified; do not assume this fits"
+            } else {
+                match judgement.capacity {
+                    Capacity::Fits => "modelled encoder/bandwidth work fits with margin",
+                    Capacity::NoMargin => "modelled work has no safe margin",
+                    Capacity::CannotKeepUp => "modelled work exceeds a resource budget",
+                }
+            },
+            percent(judgement.load)
+        );
+    }
     let busiest = percent(judgement.load);
     // Outputs of canvases besides the main one: a protected output that
     // isn't the main program's or stream's.
@@ -1107,9 +1397,9 @@ fn try_options(
         };
         // `stream_stop` stops the main canvas's streams only.
         let streams = streaming[0] && method != Some("stream_stop");
-        let chip = model.chip(&changed, formats);
-        let judgement = judge(chip, &changed, formats, streams, streaming[1]);
-        if judgement.outputs.iter().all(|o| o.pixels_per_second == 0.0)
+        let judgement = model.judge(&changed, formats, [streams, streaming[1]]);
+        if judgement.resources.is_empty()
+            && judgement.outputs.iter().all(|o| o.pixels_per_second == 0.0)
             && !judgement.outputs.is_empty()
         {
             continue;
@@ -1217,14 +1507,15 @@ fn admission(
             "add_iso: turning on {id:?}'s ISO file leaves an invalid setup"
         ));
     };
-    let full = judge(
-        model.chip(&added, formats),
-        &added,
-        formats,
-        streaming[0],
-        streaming[1],
-    );
-    if full.capacity != Capacity::CannotKeepUp {
+    let full = model.judge(&added, formats, streaming);
+    if full.capacity != Capacity::CannotKeepUp
+        && !full.resources.iter().any(|r| {
+            matches!(
+                r.resource.as_str(),
+                "prores" | "recording_disk" | "startup_recovery"
+            ) && r.load.is_none()
+        })
+    {
         let (w, h, fps, _) = iso_format(&added, formats, id);
         return Ok(IsoAdmission {
             source: id.into(),
@@ -1238,19 +1529,23 @@ fn admission(
             fps: Some(fps),
         });
     }
-    let why = format!(
-        "at full size, this Mac's encoders can't keep up with it beside the other files (the \
+    let why = if !full.resources.is_empty() {
+        summary(&full)
+    } else {
+        format!(
+            "at full size, this Mac's encoders can't keep up with it beside the other files (the \
          busiest engine at about {})",
-        percent(full.load)
-    );
+            percent(full.load)
+        )
+    };
     // Only this source changes: the rest of the setup is the user's.
     let options = source_options(&added, formats, id);
     let mut tried = try_options(model, &added, formats, streaming, &options, false);
     tried.sort_by_key(|a| (a.0, a.1));
-    if let Some((_, _, fit, _)) = tried
-        .into_iter()
-        .find(|t| t.2.capacity != Capacity::CannotKeepUp)
-    {
+    if let Some((_, _, fit, _)) = tried.into_iter().find(|t| {
+        t.2.capacity == Capacity::Fits
+            || full.resources.is_empty() && t.2.capacity != Capacity::CannotKeepUp
+    }) {
         let change = fit.change.map(|p| merge_patch(&add, &p));
         let (w, h, fps, _) = change
             .as_ref()
@@ -1291,13 +1586,7 @@ pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstima
     let model = Model::new(inputs);
     let setup = inputs.setup;
     let chip = model.chip(setup, inputs.formats);
-    let mut judgement = judge(
-        chip,
-        setup,
-        inputs.formats,
-        inputs.streaming[0],
-        inputs.streaming[1],
-    );
+    let mut judgement = model.judge(setup, inputs.formats, inputs.streaming);
     let mut measured = None;
     if let Some((memory, machine)) = inputs.memory {
         let workload = capacity::workload(setup, |id| {
@@ -1363,6 +1652,7 @@ pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstima
         streaming: inputs.streaming.iter().any(|on| *on),
         iso_drop_percent: judgement.iso_drop,
         outputs: judgement.outputs,
+        resources: judgement.resources,
         suggestions,
         admission,
         measured,
@@ -1508,6 +1798,120 @@ mod tests {
         assert_eq!(chip("Apple M3 Ultra").engines, 4);
         assert!(chip("Apple M9 Pro").basis.starts_with("assumed"));
         assert!(chip("Intel Core i9").basis.starts_with("assumed"));
+    }
+
+    #[test]
+    fn prores_is_a_separate_finite_resource_not_free_h26x_work() {
+        use isocast_protocol::machine::{MEASUREMENT_VERSION, MachineProfile, PROFILE_SCHEMA};
+        let m = machine("Apple M2");
+        let mut setup = soak(&[("screen", 1920, 1080)], false);
+        setup.recording.iso.encoder.codec = Codec::Prores422;
+        setup.recording.program.encoder.codec = Codec::Prores422;
+        let none = |_: &str| None;
+        let profile: MachineProfile = serde_json::from_value(json!({
+            "schema_version": PROFILE_SCHEMA, "measurement_version": MEASUREMENT_VERSION,
+            "app_version": env!("CARGO_PKG_VERSION"), "app_build":"test", "measured_at":"test",
+            "machine":m,"seconds":3.0,"graphics":[],"skipped":[],"complete":true,"notes":[],
+            "disk_device":crate::space::device(std::path::Path::new("/tmp")),
+            "disk_write_bytes_per_second":5e9,
+            "encoders":[{"codec":"prores422","bit_depth":8,"width":1920,"height":1080,
+                "fps":60,"sessions":2,"frames":300,"seconds":1.0,"frames_per_second":300.0,
+                "resource":"recording_writer","backend":"videotoolbox","evidence":"prores_resource",
+                "rate_control":"constant_quality","quality":70,"hardware_accelerated":true,
+                "process_cpu_seconds_per_frame":0.0001}]
+        }))
+        .unwrap();
+        let inputs = Inputs {
+            machine: &m,
+            setup: &setup,
+            formats: &none,
+            streaming: [false; 2],
+            memory: None,
+            recording: false,
+            profile: Some(&profile),
+        };
+        let estimate = super::estimate(&inputs, None).unwrap();
+        assert_eq!(estimate.capacity, Capacity::Fits);
+        assert_eq!(estimate.resources[0].load, Some(0.4));
+        assert!(estimate.outputs.iter().all(|o| o.pixels_per_second == 0.0));
+        let mut software = profile.clone();
+        software.encoders[0].hardware_accelerated = Some(false);
+        let software_estimate = super::estimate(
+            &Inputs {
+                profile: Some(&software),
+                ..inputs
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(software_estimate.capacity, Capacity::NoMargin);
+        assert!(
+            software_estimate
+                .resources
+                .iter()
+                .any(|r| r.resource == "startup_recovery")
+        );
+        assert_eq!(run(&setup, false).capacity, Capacity::NoMargin);
+        let mut not_recording = setup.clone();
+        not_recording.recording.iso.enabled = false;
+        not_recording.recording.iso.sources.clear();
+        let unqualified = super::estimate(
+            &Inputs {
+                setup: &not_recording,
+                profile: None,
+                ..inputs
+            },
+            Some("screen"),
+        )
+        .unwrap();
+        assert!(!unqualified.admission.unwrap().on);
+        let mut other_disk = profile.clone();
+        other_disk.disk_device = None;
+        assert_eq!(
+            super::estimate(
+                &Inputs {
+                    profile: Some(&other_disk),
+                    ..inputs
+                },
+                None
+            )
+            .unwrap()
+            .capacity,
+            Capacity::NoMargin
+        );
+        let other = super::estimate(
+            &Inputs {
+                setup: &not_recording,
+                profile: Some(&other_disk),
+                ..inputs
+            },
+            Some("screen"),
+        )
+        .unwrap();
+        assert!(!other.admission.unwrap().on);
+        let mut slow_uhd = profile.clone();
+        slow_uhd.encoders[0].frames = 600;
+        slow_uhd.encoders[0].frames_per_second = 600.0;
+        let mut uhd = slow_uhd.encoders[0].clone();
+        uhd.width = 3840;
+        uhd.height = 2160;
+        uhd.frames = 40;
+        uhd.frames_per_second = 40.0;
+        slow_uhd.encoders.push(uhd);
+        let mut big = not_recording.clone();
+        big.canvas.width = 3840;
+        big.canvas.height = 2160;
+        let result = super::estimate(
+            &Inputs {
+                setup: &big,
+                profile: Some(&slow_uhd),
+                ..inputs
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.resources[0].load, Some(1.5));
+        assert_eq!(result.capacity, Capacity::CannotKeepUp);
     }
 
     /// The base M2's measured results (docs/notes.md, #66): fits,

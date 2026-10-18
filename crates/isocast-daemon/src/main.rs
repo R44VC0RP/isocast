@@ -3535,12 +3535,23 @@ impl Daemon {
         }
         // Else what the chip's numbers predict, with the stream if it runs
         // (#66): only when it can't keep up, so a fitting setup never nags.
-        let streaming = {
+        let (streaming, backends) = {
             let state = self.state.lock();
-            [state.streaming_on(CanvasId::Main), state.streaming_extra()]
+            (
+                [state.streaming_on(CanvasId::Main), state.streaming_extra()],
+                prores_backends(&state),
+            )
         };
-        let estimate =
-            estimate_capacity(&setup, Some(engine), streaming, true, &memory, None).ok()?;
+        let estimate = estimate_capacity(
+            &setup,
+            Some(engine),
+            streaming,
+            true,
+            &memory,
+            None,
+            &backends,
+        )
+        .ok()?;
         if estimate.capacity != isocast_protocol::api::Capacity::CannotKeepUp {
             return None;
         }
@@ -3559,7 +3570,7 @@ impl Daemon {
     /// `estimate_capacity`: whether a setup's files (the live setup's, at
     /// its sources' live formats) fit this Mac's encoders, by per-chip data.
     fn estimate_capacity(&self, params: CapacityParams) -> Result<CapacityEstimate, RpcError> {
-        let (setup, streaming, recording, engine, memory) = {
+        let (setup, streaming, recording, engine, memory, backends) = {
             let state = self.state.read();
             let live = params.setup.is_none();
             let Some(setup) = params.setup.or_else(|| state.setup.clone()) else {
@@ -3582,7 +3593,12 @@ impl Daemon {
             let recording = live && state.session.is_some();
             let engine = state.engine.clone().filter(|_| live);
             let memory = capacity::memory_path(state.file.legacy());
-            (setup, streaming, recording, engine, memory)
+            let backends = if live {
+                prores_backends(&state)
+            } else {
+                Vec::new()
+            };
+            (setup, streaming, recording, engine, memory, backends)
         };
         estimate_capacity(
             &setup,
@@ -3591,6 +3607,7 @@ impl Daemon {
             recording,
             &memory,
             params.add_iso.as_deref(),
+            &backends,
         )
         .map_err(|message| RpcError {
             code: RpcError::INVALID_PARAMS,
@@ -5129,6 +5146,30 @@ fn this_machine() -> Option<&'static isocast_protocol::api::Machine> {
     Some(MACHINE.get_or_init(|| NativePlatform.machine()))
 }
 
+/// Backend observations from the actual take, not editable next-take settings.
+fn prores_backends(state: &State) -> Vec<(isocast_protocol::Codec, Option<bool>)> {
+    state
+        .session
+        .as_ref()
+        .and_then(|s| s.live.lock().clone())
+        .map(|live| {
+            live.files
+                .into_iter()
+                .filter_map(|f| {
+                    f.codec
+                        .filter(|c| {
+                            !matches!(
+                                c,
+                                isocast_protocol::Codec::H264 | isocast_protocol::Codec::Hevc
+                            )
+                        })
+                        .map(|c| (c, f.hardware_accelerated))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Estimate `setup`'s capacity: sources at their live formats in `engine`
 /// (if it runs this setup), else probed.
 fn estimate_capacity(
@@ -5138,6 +5179,7 @@ fn estimate_capacity(
     recording: bool,
     memory: &Path,
     add_iso: Option<&str>,
+    backends: &[(isocast_protocol::Codec, Option<bool>)],
 ) -> Result<CapacityEstimate, String> {
     let Some(machine) = this_machine() else {
         return Err("capacity estimates are only supported on macOS so far".into());
@@ -5157,11 +5199,25 @@ fn estimate_capacity(
     });
     let formats = |id: &str| live.get(id).or_else(|| probed.get(id)).copied();
     let kept = capacity::Memory::load(memory);
-    let profile = capacity::load_profile(
+    let mut profile = capacity::load_profile(
         &capacity::profile_path(memory),
         machine,
         &daemon_build().build,
     );
+    if let Some(profile) = &mut profile {
+        // A running native fallback must not inherit earlier hardware costs.
+        // Unknown/different selection invalidates only that codec's resource
+        // observations here; the saved profile is never rewritten in a take.
+        // During startup the first live-file snapshot may not exist yet:
+        // an empty observation list is unknown, not proof that HW was chosen.
+        profile.encoders.retain(|m| {
+            m.evidence != isocast_protocol::machine::Evidence::ProresResource
+                || (!recording || backends.iter().any(|(codec, _)| *codec == m.codec))
+                    && backends.iter().filter(|(codec, _)| *codec == m.codec).all(
+                        |(_, hardware)| hardware.is_some() && *hardware == m.hardware_accelerated,
+                    )
+        });
+    }
     let key = machine_key();
     isocast_engine::estimate::estimate(
         &isocast_engine::estimate::Inputs {
