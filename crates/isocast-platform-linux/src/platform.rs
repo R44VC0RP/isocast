@@ -164,7 +164,7 @@ impl Platform for LinuxPlatform {
     }
     fn source_open_timeout(&self, source: &SourceKind) -> std::time::Duration {
         std::time::Duration::from_secs(match source {
-            SourceKind::Display(_) => 120,
+            SourceKind::Display(_) | SourceKind::Window(_) => 120,
             // PipeWire allows 5s enumeration then 5s for the first samples.
             SourceKind::Microphone(_)
             | SourceKind::SystemAudio(_)
@@ -244,6 +244,19 @@ impl Platform for LinuxPlatform {
                     channels: None,
                 }))
             }
+            SourceKind::Window(window) => Ok(Some(Probe {
+                device: window.app.clone(),
+                video: portal::saved_size(&ScreenTarget::Window {
+                    app: &window.app,
+                    title: window.title.as_deref(),
+                })
+                .map(|(width, height)| CaptureFormat {
+                    width,
+                    height,
+                    fps: canvas.fps,
+                }),
+                channels: None,
+            })),
             SourceKind::Microphone(mic) => {
                 let (devices, _, _) = pipewire_audio::devices()?;
                 let device = devices.iter().find(|d| d.id == mic.device || d.name == mic.device)

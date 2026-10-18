@@ -107,6 +107,7 @@ pub fn displays() -> Result<Vec<Display>> {
     saved.entry("main".into()).or_default();
     Ok(saved
         .into_iter()
+        .filter(|(id, _)| !id.starts_with(WINDOW_KEY))
         .map(|(id, info)| Display {
             name: if id == "main" {
                 "Choose a screen (desktop portal)".into()
@@ -195,6 +196,43 @@ impl Drop for Capture {
     }
 }
 
+/// Saved window selections are kept under `window:` and the source's app
+/// (and title, if it gives one), apart from displays.
+const WINDOW_KEY: &str = "window:";
+
+/// The key a target's portal selection is saved under, and whether the
+/// portal should offer windows instead of monitors.
+fn target_key(target: &ScreenTarget<'_>) -> Result<(String, bool)> {
+    let (key, window) = match *target {
+        ScreenTarget::Display(id) if !id.is_empty() && !id.starts_with(WINDOW_KEY) => {
+            (id.to_owned(), false)
+        }
+        ScreenTarget::Window { app, title } if !app.is_empty() => (
+            match title {
+                Some(title) => format!("{WINDOW_KEY}{app}:{title}"),
+                None => format!("{WINDOW_KEY}{app}"),
+            },
+            true,
+        ),
+        _ => bail!(
+            "screen target: Linux shares one screen or one window chosen in the desktop portal; use a display or window source"
+        ),
+    };
+    ensure!(
+        key.len() <= 128,
+        "screen target: a display id or window app and title must be at most 128 bytes together"
+    );
+    Ok((key, window))
+}
+
+/// The size the portal last gave `target`, if it was shared before.
+pub fn saved_size(target: &ScreenTarget<'_>) -> Option<(u32, u32)> {
+    let (key, _) = target_key(target).ok()?;
+    let _lock = SETTINGS_LOCK.lock();
+    let saved = load().ok()?.remove(&key)?;
+    (saved.width > 0 && saved.height > 0).then_some((saved.width, saved.height))
+}
+
 pub fn capture(
     target: ScreenTarget<'_>,
     fps: u32,
@@ -206,12 +244,7 @@ pub fn capture(
         !ten_bit,
         "Linux screen capture: 10-bit capture is not supported; select 8-bit ISO recording"
     );
-    let key = match target {
-        ScreenTarget::Display(id) if !id.is_empty() && id.len() <= 128 => id.to_owned(),
-        _ => bail!(
-            "screen target: Linux supports display sources selected through the desktop portal"
-        ),
-    };
+    let (key, window) = target_key(&target)?;
     {
         let mut declined = DECLINED.lock().unwrap_or_else(|error| error.into_inner());
         declined.retain(|_, when| when.elapsed() < Duration::from_secs(600));
@@ -259,7 +292,7 @@ pub fn capture(
                     let requested = if cursor { CursorMode::Embedded } else { CursorMode::Hidden };
                     ensure!(available.contains(requested), "desktop portal cannot provide the requested cursor mode");
                     let options = SelectSourcesOptions::default()
-                        .set_sources(Some(SourceType::Monitor.into())).set_multiple(false)
+                        .set_sources(Some(if window { SourceType::Window } else { SourceType::Monitor }.into())).set_multiple(false)
                         .set_cursor_mode(requested).set_persist_mode(PersistMode::ExplicitlyRevoked)
                         .set_restore_token(token.as_deref());
                     portal.select_sources(&session, options).await?.response()?;
@@ -316,4 +349,49 @@ pub fn capture(
     let (video, format) = pipewire_video::start(remote, node, fps, sink)?;
     capture.video = Some(video);
     Ok((capture, format))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_and_displays_are_saved_apart() {
+        assert_eq!(
+            target_key(&ScreenTarget::Display("main")).unwrap(),
+            ("main".into(), false)
+        );
+        assert_eq!(
+            target_key(&ScreenTarget::Window {
+                app: "firefox",
+                title: None
+            })
+            .unwrap(),
+            ("window:firefox".into(), true)
+        );
+        assert_eq!(
+            target_key(&ScreenTarget::Window {
+                app: "firefox",
+                title: Some("Docs")
+            })
+            .unwrap(),
+            ("window:firefox:Docs".into(), true)
+        );
+        for refused in [
+            ScreenTarget::Display(""),
+            ScreenTarget::Display("window:firefox"),
+            ScreenTarget::Window {
+                app: "",
+                title: None,
+            },
+            ScreenTarget::Application {
+                app: "firefox",
+                display: "main",
+            },
+        ] {
+            assert!(target_key(&refused).is_err());
+        }
+        let long = "x".repeat(130);
+        assert!(target_key(&ScreenTarget::Display(&long)).is_err());
+    }
 }

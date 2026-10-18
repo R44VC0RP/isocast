@@ -99,6 +99,8 @@ pub fn start(
 
 struct State {
     format: Option<CaptureFormat>,
+    /// The stream's own width, which `format` rounds down to even.
+    stream_width: u32,
     pixels: VideoFormat,
     pool: Option<FramePool>,
     sink: Arc<VideoSink<Frame>>,
@@ -148,6 +150,7 @@ fn run(
     )?);
     let state = State {
         format: None,
+        stream_width: 0,
         pixels: VideoFormat::BGRA,
         pool: None,
         sink,
@@ -251,9 +254,11 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
     );
     // Desktop streams may report 0/1 (variable rate). The engine records at
     // the requested rate; actual delivery timestamps remain independent.
+    // The portal shares windows at any size, but H.264's 4:2:0 needs even
+    // ones: drop the last column or row of an odd size.
     let format = CaptureFormat {
-        width: size.width,
-        height: size.height,
+        width: even(size.width),
+        height: even(size.height),
         fps,
     };
     if let Some(previous) = state.format {
@@ -265,6 +270,7 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
         state.pool = Some(FramePool::new(format.width, format.height)?);
         state.format = Some(format);
     }
+    state.stream_width = size.width;
     state.pixels = raw.format();
     *state.startup.borrow_mut() = format!(
         "negotiated {}x{} {:?}; no mapped buffer received",
@@ -309,6 +315,24 @@ fn configure(stream: &pw::stream::Stream, state: &mut State, pod: &Pod, fps: u32
         Pod::from_bytes(&header).context("invalid metadata pod")?,
     ])?;
     Ok(())
+}
+
+/// `size` rounded down to an even number, unless it is 1.
+fn even(size: u32) -> u32 {
+    if size >= 2 { size & !1 } else { size }
+}
+
+/// A chunk's row stride: its own, or for a chunk that gives none (0), a
+/// tightly packed row of the stream's width.
+fn chunk_stride(stride: i32, stream_width: u32, format: VideoFormat) -> i32 {
+    if stride != 0 {
+        return stride;
+    }
+    let pixel_bytes = match format {
+        VideoFormat::RGB | VideoFormat::BGR => 3,
+        _ => 4,
+    };
+    i32::try_from(stream_width as usize * pixel_bytes).unwrap_or(i32::MAX)
 }
 
 fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
@@ -379,7 +403,7 @@ fn process(stream: &pw::stream::Stream, state: &mut State) -> Result<()> {
         data.maxsize,
         chunk.offset,
         chunk.size,
-        chunk.stride,
+        chunk_stride(chunk.stride, state.stream_width, state.pixels),
         format.width,
         format.height,
         state.pixels,
@@ -671,6 +695,27 @@ mod tests {
             copy_bgra(&source, &mut target, &layout, VideoFormat::BGRA);
             assert_eq!(target, expected);
         }
+    }
+
+    #[test]
+    fn odd_streams_copy_into_even_frames() {
+        assert_eq!(
+            (even(2118), even(1059), even(2), even(1)),
+            (2118, 1058, 2, 1)
+        );
+        // A 3x3 BGRA stream with no stride copies its top-left 2x2.
+        let stride = chunk_stride(0, 3, VideoFormat::BGRA);
+        assert_eq!(stride, 12);
+        assert_eq!(chunk_stride(-16, 3, VideoFormat::BGRA), -16);
+        assert_eq!(chunk_stride(0, 3, VideoFormat::RGB), 9);
+        let source: Vec<u8> = (0..36).collect();
+        let layout = Layout::new(36, 0, 36, stride, even(3), even(3), VideoFormat::BGRA).unwrap();
+        let mut target = [0; 16];
+        copy_bgra(&source, &mut target, &layout, VideoFormat::BGRA);
+        assert_eq!(
+            target,
+            [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 17, 18, 19]
+        );
     }
 
     #[test]
