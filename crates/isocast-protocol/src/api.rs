@@ -1703,6 +1703,10 @@ pub struct DaemonBuild {
     /// The running executable, as it was when the daemon started.
     pub executable: String,
     pub pid: u32,
+    /// This isolated daemon finishes and exits when its launching client's
+    /// lifetime pipe closes. Older daemons cannot safely own a `record` run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parent_owned: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

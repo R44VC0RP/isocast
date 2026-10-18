@@ -1539,10 +1539,9 @@ Shipped (v1): 7.1, 7.2, 7.4a, 7.5, 7.6. Next, in order:
 
 ### W. Windows port (Ryan, 2026-10-17; GitHub #105)
 
-This supersedes Windows being parked under N.4 and section 9. Use GitHub
-Actions' Windows runners only until Windows reaches the macOS alpha bar
-(`docs/alpha-test.md`), with hardware-only checks explicitly outstanding;
-then Ryan supplies a Windows machine. Stop for delegator review/merge after
+This supersedes Windows being parked under N.4 and section 9. Use the native
+exon-desk loop (exclusively assigned to this lane) and GitHub Actions as the
+clean-machine milestone check. Stop for delegator review/merge after
 each milestone. Shared recording changes are Tier 1 and must preserve
 macOS behavior; Windows-only code is Tier 2. Merge current main between
 slices, especially alongside the GPU, vertical-canvas and editor lanes.
@@ -1556,7 +1555,7 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   only**, waits for the exact snapshot's run and saves results/failed logs.
   Done when both real hosted jobs pass and their URLs are in the report;
   no main/tag/release writes. Add main to the workflow after qualification.
-- [ ] **W.1 Platform seams (#28).** Mechanical daemon generic over
+- [x] **W.1 Platform seams (#28).** Mechanical daemon generic over
   `Platform`; plugin, hotkey and diagnostics hooks through the trait;
   `isocast record` drives an isolated daemon; UI platform seam and
   target-specific wgpu backends. Extend portable CI to the engine once
@@ -1567,7 +1566,7 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
     non-Unix exclusive manifest creation without changing the Unix path;
     build engine/test binaries on Windows without running them. Preserve
     all durability errors (Windows recording/flush qualification is W.2).
-  - [ ] **W.1b Daemon platform selection.** One concrete platform alias and
+  - [x] **W.1b Daemon platform selection.** One concrete platform alias and
     a fail-closed stub behind `Platform`; replace per-call macOS shims
     mechanically, preserving dispatch and lifecycle on Mac.
   - [x] **W.1c OS services and IPC compile seam.** Platform hooks for
@@ -1576,38 +1575,118 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
     W.6); macOS retains native Unix socket types and plugin sandbox policy.
     Windows process plugins/shared surfaces remain explicitly unsupported.
     Native build/clippy/tests, CLI/MCP and Mac gates/e2e/bench verified;
-    clean-machine Actions daemon/CLI build awaits the coordinator.
-  - [ ] **W.1d CLI as a client.** Isolated-daemon `record`, remove direct
-    platform calls, preserve CLI/API/MCP behavior; Windows build-only gate.
-  - [ ] **W.1e UI platform seam.** Keep macOS window/media integration
-    behind its native seam; explicit Windows stubs and a Windows UI build.
-- [ ] **W.2 Cross-platform writer.** Prefer extracting the existing
+    clean-machine Actions run 39060641784 passes portable Windows/Ubuntu
+    and the Windows daemon/CLI build.
+  - [x] **W.1d CLI as a client.** Isolated-daemon `record`, no CLI native
+    capture/recording/capacity calls. Parent-death finalization, real child
+    reaping and old-daemon handshake; same API/MCP. Mac lifecycle/edge probes,
+    strict e2e, gates and measured foreground A/B pass; Windows control path
+    and owned-child lifetime pass (recording still refused by the stub).
+    Actions 39065225187 passes portable jobs and the native build gate. Extra process
+    costs about 44 ms warm startup and 45 MiB RSS on M2-a; no memory/timing
+    equivalence claim. W.6 must port Windows XML NLE file URLs (OTIO works
+    through its existing plain-path seam; XML is explicitly refused).
+  - [x] **W.1e UI platform seam.** Mac window/media paths unchanged;
+    Windows UI/daemon/CLI build, strict scoped clippy and UI tests pass.
+    Slint compiles on an 8 MiB Windows build worker (main stack was 1 MiB).
+    Real first-launch UI renders offscreen on RTX 5070/DX12; media, native
+    panels, focused key hooks and editor playback remain explicit stubs.
+    Pipe names include owner SID; native nonblocking I/O and shared-client
+    deferred polling preserve buffered control bytes. Windows UI CI gate
+    added; coordinator commit/clean-machine run next, not media qualification.
+- [x] **W.2 Cross-platform writer.** Prefer extracting the existing
   crash-safe BMFF muxer without changing its bytes; qualify against the
   macOS writer before choosing it over ffmpeg. Windows file ownership,
   no-link/reparse-point checks, atomic manifests, flush and repair must
   preserve 500 ms fragments, actual commit watermarks, every complete
   track, true timestamp gaps, drop accounting and torn-finalize recovery.
   macOS encoders, admission/pressure and startup order stay unchanged.
+  - [x] **W.2a Encoded-packet mux and ownership.** Qualify a separate
+    portable BMFF writer accepting NVENC/MF compressed access units and
+    AAC (explicit encoder priming, no raw pixels). Reuse our box/index
+    algorithms without switching either Mac writer or its selection.
+    Windows handle-anchored ownership/locks, 500 ms fragments, exact sample
+    accounting, commit watermarks, safe finish and standalone repair.
+    Native NVENC H.264/HEVC 8/10-bit input proof; 14 process-kill cases,
+    exact paused commitments, torn publication/header and interrupted-repair
+    regressions, aliases and rational packet timing pass. Mac production
+    writers untouched; new APFS layer repairs Windows fragments identically.
+    Standalone library proof; W.2b/W.2c below add launch integration before W.3.
+  - [x] **W.2b Launch recovery and manifests.** Integrate Windows recovery
+    under the same pinned folder lease as manifest I/O; atomic replacement
+    and honest recovered counts/durations. Preserve the Unix paths.
+    Real daemon startup repairs isw2 takes, retains historical facts when
+    inspection is unavailable, preserves unknown fields and pauses, and
+    reports persistence failure without deleting the old manifest. Pinned
+    native rename, read-only inspection and bounded manifest enumeration;
+    record-start skips historical media rather than rescanning it twice.
+  - [x] **W.2c Native kill qualification.** On exon-desk, NVENC H.264/HEVC
+    and AAC inputs, MP4/MOV, kill/commit/gap/empty-track/torn-finish/alias
+    matrices, full decode and A/V checks, plus next-launch repair/idempotence.
+    Distinguish encoded-packet writer proof from W.4/W.5 capture/encoder
+    integration; no power-cut guarantee inferred from process kills.
+    W.2a matrices plus eight writer kills repaired by actual daemon launch,
+    seven daemon-recovery kills, four metadata-publication kills, readonly/
+    alias/large-folder checks and byte-idempotent relaunches pass. Native
+    MF/NVENC producer integration remains W.4/W.5, not claimed here.
 - [ ] **W.3 Platform contract tests.** Shared executable contracts for
   clock/timestamp mapping, bounded frame pools and retention, GPU completion,
   capture teardown, encoder pressure/loss, A/V timing, commit/finalize,
   interrupted recovery and ownership. Every implemented platform must pass;
   extend existing checks first, obtain approval before new test files.
+  - [x] **W.3a Shared native contract harness.** Dedicated harness/test files
+    approved on2026-10-17. Identical generic Platform checks, one bounded
+    worker per case: clock, pools/retention, GPU completion, writer pressure,
+    A/V timing, commit/kill/recovery/ownership and capture teardown. Reports
+    distinguish passed, failed, unavailable and not requested; a stub/core
+    pass is never full native qualification. Verify the verifier rejects
+    wrong counts, timing, shortened tracks and missing capabilities.
+  - [ ] **W.3b Both native backends qualified.** Mac native suite on a
+    reserved test machine; Windows native suite after the capture lane exposes
+    a Platform implementation and writer. W.5c3 now exports WGC/DX12 and
+    NVENC/MF video encoder pieces, but still selects StubPlatform. Do not mark this done from
+    a Windows stub or packet-only writer run.
+    Blocked: Windows still has no native Platform adapter. The new Mac
+    early-importer-drop GPU probe retains one pool slot per completed round
+    (32→31→30→29), even after independent render work. Stop after three
+    unsuccessful diagnostic attempts. Independent texture lifetime remains
+    the chosen contract (owned textures must not depend on a live importer);
+    further Mac importer/runtime investigation is a separate Tier-1 change.
+    Keep the failure visible; do not weaken it to obtain a green full run.
 - [ ] **W.4 Windows synthetic platform.** Add `isocast-platform-windows`:
   clock, bounded BGRA/YUV frames, importer, synthetic sources and W.2 writer.
-  Software Media Foundation H.264/AAC for hosted recording; fail clearly
+  Prefer hardware MF/NVENC when available, software only as last resort for
+  hosted recording; fail clearly
   for unsupported devices/codecs. A synthetic program and ISOs produce
   decodable, aligned files on windows-latest, with honest loss counters.
 - [ ] **W.5 Capture, audio and encoders.** Windows.Graphics.Capture for
   screens/windows, Media Foundation cameras, WASAPI input/loopback/output,
-  MF/NVENC/QSV/AMF capability selection, permissions and reconnects. Exercise
+  NVENC-first, hardware MF (NVENC/QSV/AMF) fallback, software last;
+  permissions and reconnects. WGC D3D11 textures stay GPU-resident through
+  D3D11/DX12 shared-surface interop with wgpu and DirectX-resource NVENC
+  input: no hot-path CPU pixel readback. Async low-latency encode tuned for
+  recording quality; per-ISO sessions within detected RTX 5070/driver limits,
+  retaining program priority and ISO shedding. Exercise
   everything runners expose; list hardware paths unqualified rather than
   treating synthetic or software-encoder success as hardware evidence.
+  From W.5 every milestone reports exon-desk versus OBS on matched scenes
+  at 1080p60 and 4K60 with ISOs: launch-to-first-preview, ready-to-record,
+  start-record latency, CPU/GPU/memory and dropped frames. Install isolated
+  OBS as a permitted test dependency, never use Ryan's OBS profile.
 - [ ] **W.6 App, IPC and shared surfaces.** Slint Windows window and native
   integration, same-user named pipes with isolated engines, D3D11/D3D12
   surface hand-over/fences with adapter identity and bounded per-viewer
   lifetime. Verify CLI/MCP/app use the one API, client death/resize/stalls
   cannot corrupt frames or stop recording, and shutdown cleans resources.
+  Measure first preview and ready-to-record before setting latency targets;
+  lazy initialization, parallel device opens and pre-warm must keep blocking
+  work off the UI thread. Performance is a design requirement, not a later
+  optimization pass.
+  Platform-aware wording pass: preserve Mac copy, but Windows says "this PC",
+  "Credential Manager" and "Explorer", uses Ctrl shortcuts, and names the
+  real Windows executable/privacy controls instead of Mac/Keychain/Finder/
+  Command glyphs or "Isocast Engine" macOS privacy instructions. Cover
+  onboarding, capacity/admission, settings, errors and shortcut labels.
 - [ ] **W.7 Packaging and updates.** Choose MSIX or installer; reproducible
   install/upgrade/uninstall, correct paths and per-user state, verified
   update authenticity and rollback. Build/test packages on runners; signing
@@ -1636,6 +1715,84 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 
 ## Log
 
+- W integration (2026-10-18, #105 #28 #110 #114): main49e7732 merged into
+  agent/windows with profile-aware capacity checks retained, standalone
+  record explicitly starting a new project, workspace lock versions0.0.7,
+  and unsupported non-mac calibration skipped before any worker launch.
+  Merged full hosted e2e19/19 passes; real record Ctrl-C exits0 with3complete
+  H.264 files, no drops, private workspace removed and sentinel target intact.
+  Its .isoprj opens via the real editor's project-open path after private
+  timeline cleanup, with decoded preview and3file lanes. Mac full gates
+  pass233unit+1doctest; Windows scoped strict clippy and190tests pass.
+  GPU-lifetime task remains separate; no such fix is included in the merge.
+
+- W.3a (2026-10-17, #105 #28): shared development-only Platform contract
+  workers and bounded runner implemented; new files explicitly approved.
+  Same generic clock/pool/GPU/writer/capture checks, real decode/A-V and
+  commit-kill-repair verification,12 falsification/selftests on both hosts.
+  Mac/Windows strict scoped clippy and build pass; existing Mac full gates
+  pass232unit+1doctest. Windows stub/core passes; native/full is explicitly
+  unavailable. Mac full suite has7passes/1GPU failure: dropping the importer
+  before submitted work completes retains one pool slot per round. Strict
+  test preserved and independently reviewed, no production backend changes.
+  W.3b and whole W.3 remain blocked on Mac lifetime investigation and the
+  capture lane's Windows Platform/FileWriter adapter. CI additions run only
+  the supported core profiles, not a false full-native qualification.
+
+- W.2b/W.2c (2026-10-17, #105 #28): Windows startup now repairs encoded
+  takes and writes truthful manifests through one pinned folder lease.
+  Fixed stale999999-frame/999s claims in a real daemon reproduction; counts
+  now match verified packets. Historical finalized counts survive readonly,
+  held, foreign and missing files; unknown fields/pauses retained. Native
+  NtSetInformationFile replaces the Win32 rename wrapper that returned87 on
+  Win10. Eight writer-kill/daemon-relaunch cases preserve all published packet
+  bytes (four pauses exactly3.2s); seven daemon-recovery kills and four
+  metadata-publication kills converge safely.12 manifest edge cases,10020
+  unrelated files and concurrent reads pass; second launch is byte-idempotent.
+  Record-start scans100 historical manifests in9ms instead of234ms in a
+  bounded fixture, by leaving their media to launch recovery. Windows strict
+  clippy and105 existing tests pass; Mac full gates232 tests+doctest pass.
+  Mac writer/encoder paths unchanged. W.3 contracts follow this storage slice.
+
+- W.2a (2026-10-17, #105 #28): new encoder-neutral isocast-mux accepts
+  compressed access units, not CPU pixels. Native H.264/HEVC MOV/MP4 and
+  Annex B/length-prefix outputs preserve packet payloads and timing; Main10
+  also decodes. 14 process kills: 13 recoverable movies plus one explicit
+  no-media early start; active loss at most 0.495 s, four pauses recover
+  their exact 3.2 s promise. Fixed a reproduced interrupted-repair bug where
+  an appended zero byte completed a torn commit; one-byte tail sealing makes
+  retries stable. Alias/pinned-directory, 1.5M-sample admission, jitter/gap,
+  empty/unequal-track and torn-header checks pass. Windows-created fragments
+  repair on APFS byte-identically to normal finish. Full Mac gates 232 unit
+  + 1 doctest pass (1 existing hardware ignore); Mac writer paths unchanged.
+  New crate added to portable CI; W.2b next-launch manifests remain next.
+
+- W.1e (2026-10-17, #105 #28): Windows UI builds alongside daemon/CLI;
+  fixed the observed Slint build-script 1 MiB stack overflow using an 8 MiB
+  Windows-only worker. Mac compiler/rendering paths remain unchanged.
+  Native release build, strict UI/client/IPC clippy, 12 UI tests + 1 doctest
+  pass; Mac full gates 232 unit + 1 doc pass (1 existing hardware ignore).
+  RTX 5070/DX12 renders real first-launch UI to 1280x800 PNG. Actual process
+  counters replace Windows zero stubs. SID namespaces and 2000 empty polls,
+  full 64 KiB/partial writes, busy mode transitions, EOF and actual shared
+  parser deferral/partial-line recovery pass on both pipe endpoints.
+  Main 24bea09 RC merge is separately staged; feature uncommitted for
+  coordinator. W.2 writer next; no Windows capture/recording/shared-surface
+  or full visual/DPI parity claim.
+
+- W.1d (2026-10-17, #105 #28): `record` now uses a private, parent-owned
+  daemon; the CLI no longer depends on MacPlatform. Same report/exit behavior,
+  killed-owner finalization, concurrent isolated runs and untouched default
+  daemon verified on M2-a. Twenty auto-stop/SIGINT races return 20 reports;
+  a forced cleanup failure still prints the completed report; private
+  engines register no global hotkeys, old daemons are refused before Start.
+  Full remote gates: 232 unit + 1 doctest pass, 1 existing hardware ignore;
+  Windows: 190 unit tests and strict scoped clippy pass; strict e2e18/18.
+  Three interleaved 1080p60 program+2ISO pairs: CPU44.8->44.2%, all18 files
+  whole, no video/audio loss; warm start callback264->308ms, RSS128->173MiB.
+  Startup retry/exit waiting reduced new callback353->308ms and setupcheck
+  155->70ms (base40ms), capacity JSON identical. Main a9b661f merge staged
+  separately; feature unstaged for coordinator. W.1c Actions39060641784 green.
 - C.6 #114 (2026-10-17): recordings start a new project each unless a
   timeline is chosen as the record target; the app shows and changes the
   choice next to Start Recording, in the status bar and in the editor.

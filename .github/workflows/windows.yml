@@ -54,21 +54,22 @@ jobs:
       # Native service builds live below; recording qualification needs W.2+.
       - name: Build portable crates
         id: build
-        run: cargo build --locked -p isocast-protocol -p isocast-diagnostics -p isocast-obsws
+        run: cargo build --locked -p isocast-protocol -p isocast-diagnostics -p isocast-obsws -p isocast-mux
 
       - name: Clippy portable crates
-        run: cargo clippy --locked --keep-going --all-targets -p isocast-protocol -p isocast-diagnostics -p isocast-obsws -- -D warnings
+        run: cargo clippy --locked --keep-going --all-targets -p isocast-protocol -p isocast-diagnostics -p isocast-obsws -p isocast-mux -- -D warnings
 
       - name: Test portable crates
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: cargo test --locked --no-fail-fast -p isocast-protocol -p isocast-diagnostics -p isocast-obsws
+        run: cargo test --locked --no-fail-fast -p isocast-protocol -p isocast-diagnostics -p isocast-obsws -p isocast-mux
 
   engine:
-    # W.1c: real local RPC with the stub platform, not a recording claim.
+    # W.1e: UI/native services compile with explicit platform stubs, not a
+    # Windows capture, recording or shared-GPU-surface claim.
     # Native runtime checks run on exon-desk; this is the clean-machine build.
-    name: daemon + CLI build (windows-latest)
+    name: daemon + CLI + UI build (windows-latest)
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -79,7 +80,7 @@ jobs:
 
       - name: Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup toolchain install stable --profile minimal --component clippy
           rustup default stable
           rustc --version --verbose
           cargo --version
@@ -92,4 +93,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/ci/windows' }}
 
       - name: Build native services and test binaries (do not run)
-        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-ipc -p isocast-client -p isocast-daemon -p isocast-cli
+        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-ipc -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-ui -p isocast-platform-contracts
+
+      - name: Check Platform contract harness
+        run: |
+          cargo clippy --locked --all-targets -p isocast-platform-contracts -- -D warnings
+          python -m unittest discover -s scripts -p test_platform_contracts.py
+
+      # Explicit CPU placeholder baseline, NOT native Windows qualification.
+      - name: Clock and pool contracts (stub)
+        run: python scripts/platform-contracts.py --bin target/debug/isocast-platform-contracts.exe --backend stub --suite core --work "$RUNNER_TEMP/platform-contracts"

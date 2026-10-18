@@ -18,9 +18,12 @@ pub use mac::{Helper, render_png};
 pub use other::{Helper, render_png};
 
 /// The helper's size in points.
+#[cfg(target_os = "macos")]
 const WIDTH: f64 = 300.0;
+#[cfg(target_os = "macos")]
 const HEIGHT: f64 = 76.0;
 /// The gap between it and the System Settings window.
+#[cfg(target_os = "macos")]
 const GAP: f64 = 12.0;
 
 #[cfg(target_os = "macos")]

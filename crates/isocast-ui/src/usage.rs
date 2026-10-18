@@ -33,14 +33,63 @@ fn rusage() -> libc::rusage {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub fn cpu_time() -> Duration {
-    Duration::ZERO
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: current-process pseudo-handle and correctly sized live outputs.
+    let read = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    // A failed measurement must not masquerade as a zero-CPU benchmark.
+    assert_ne!(
+        read,
+        0,
+        "could not read process CPU time: {}",
+        std::io::Error::last_os_error()
+    );
+    let time = |t: FILETIME| {
+        let ticks = (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+        Duration::new(ticks / 10_000_000, (ticks % 10_000_000) as u32 * 100)
+    };
+    time(kernel) + time(user)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub fn peak_memory() -> u64 {
-    0
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: a live output buffer, with the size required by the API.
+    let read = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters,
+            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+    };
+    assert_ne!(
+        read,
+        0,
+        "could not read peak process memory: {}",
+        std::io::Error::last_os_error()
+    );
+    counters.PeakWorkingSetSize as u64
 }
 
 /// CPU use between two readings, in percent of one core.

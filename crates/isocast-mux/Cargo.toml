@@ -1,0 +1,26 @@
+[package]
+name = "isocast-mux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Crash-safe MOV/MP4 storage for encoded video and AAC packets."
+
+[dependencies]
+anyhow = "1.0.104"
+isocast-protocol = { path = "../isocast-protocol" }
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+serde_json = "1.0.154"
+windows-sys = { version = "0.61", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }

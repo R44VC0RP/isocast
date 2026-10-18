@@ -606,9 +606,8 @@ fn escape(text: &str) -> String {
 /// `path` percent-encoded for a URL (every byte but unreserved ones and
 /// `/`).
 fn url_path(path: &Path) -> String {
-    use std::os::unix::ffi::OsStrExt;
     let mut out = String::new();
-    for &byte in path.as_os_str().as_bytes() {
+    for &byte in path.as_os_str().as_encoded_bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
                 out.push(byte as char)
@@ -1320,6 +1319,11 @@ impl Daemon {
     ) -> Result<NleExported, RpcError> {
         check_folder(params.folder.as_deref())?;
         let format = params.format;
+        if cfg!(windows) && matches!(format, NleFormat::Fcpxml | NleFormat::Xmeml) {
+            return Err(invalid(
+                "format: XML media URLs are not supported on Windows yet; use otio",
+            ));
+        }
         let app = params.app.unwrap_or(match format {
             NleFormat::Fcpxml => NleApp::FinalCut,
             NleFormat::Xmeml => NleApp::Premiere,

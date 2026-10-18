@@ -375,8 +375,20 @@ impl Daemon {
             }
         });
         #[cfg(target_os = "macos")]
-        let registrations =
-            isocast_platform_macos::hotkeys::MacHotkeys.replace(keys, generation, on_key);
+        let registrations = if crate::PARENT_OWNED.load(Ordering::SeqCst) {
+            // Foreground record previously opened no global shortcuts. A
+            // private engine must not steal the app's chords or fire actions
+            // from an otherwise inactive profile. Focused API input still works.
+            keys.into_iter()
+                .map(|key| Registration {
+                    binding: key.binding,
+                    global: false,
+                    warning: None,
+                })
+                .collect()
+        } else {
+            isocast_platform_macos::hotkeys::MacHotkeys.replace(keys, generation, on_key)
+        };
         #[cfg(not(target_os = "macos"))]
         let registrations: Vec<Registration> = {
             let _ = on_key;

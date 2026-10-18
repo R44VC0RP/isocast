@@ -7,15 +7,19 @@ fn main() {
         // SAFETY: the build script is single-threaded so far.
         unsafe { std::env::set_var("SLINT_LIVE_PREVIEW", "1") };
     }
-    slint_build::compile_with_config(
-        "ui/app.slint",
-        slint_build::CompilerConfiguration::new()
-            .with_style("fluent-dark".into())
-            // Element names and types, which `--a11y` (Slint's element
-            // search API) needs.
-            .with_debug_info(true),
-    )
-    .expect("the Slint interface compiles");
+    // The Windows build-script main thread has a 1 MiB stack. Compiling this
+    // interface overflows it; use the same 8 MiB budget as macOS's main thread.
+    // This is a host/build-time setting, not an app or renderer fallback.
+    #[cfg(windows)]
+    std::thread::Builder::new()
+        .name("Slint compiler".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(compile_interface)
+        .expect("the Slint compiler thread starts")
+        .join()
+        .expect("the Slint interface compiles");
+    #[cfg(not(windows))]
+    compile_interface();
     if live {
         add_live_reload();
     }
@@ -32,6 +36,18 @@ fn main() {
             plist.display()
         );
     }
+}
+
+fn compile_interface() {
+    slint_build::compile_with_config(
+        "ui/app.slint",
+        slint_build::CompilerConfiguration::new()
+            .with_style("fluent-dark".into())
+            // Element names and types, which `--a11y` (Slint's element
+            // search API) needs.
+            .with_debug_info(true),
+    )
+    .expect("the Slint interface compiles");
 }
 
 /// Gives the live wrapper's `AppWindow` a `live_reload()`: read ui/ again

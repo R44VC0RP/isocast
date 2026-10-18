@@ -95,7 +95,16 @@ impl SharedFrames {
     pub fn next(&mut self, timeout: Option<Duration>) -> Result<Option<SharedFrame>> {
         let stream = self.reader.get_ref();
         let poll = timeout == Some(Duration::ZERO);
+        #[cfg(not(windows))]
         stream.set_nonblocking(poll)?;
+        #[cfg(windows)]
+        match stream.set_nonblocking(poll) {
+            // NPFS cannot enter NOWAIT while release/control bytes are still
+            // buffered outbound. The mode remains unchanged: a zero-time poll
+            // may retry later, rather than disconnecting a healthy stream.
+            Err(error) if poll && error.kind() == ErrorKind::WouldBlock => return Ok(None),
+            result => result?,
+        }
         if !poll {
             stream.set_read_timeout(timeout)?;
         }

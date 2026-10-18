@@ -46,15 +46,19 @@ use super::{
     SPLIT_LEAD, SPLIT_SOON_LEAD, STALL_AFTER, START_DELAY, STATUS_INTERVAL, SessionControl, Shared,
     Slots, SourceFilters, SplitRefused, SplitTake, SplitTiming, Take, create_writers, expand_home,
     interrupted_note, interrupted_sessions, is_program, live_status, plan_take, sidechain_sources,
-    take_manifest, wait_for_frame, write_manifest, write_manifest_durable,
+    take_manifest, wait_for_frame,
 };
 use super::{AudioStopped, audio_stop_errors, file_audio_stops};
+#[cfg(not(windows))]
+use super::{write_manifest, write_manifest_durable};
 use crate::audio_filter::AudioStage;
 use crate::critical::Critical;
 use crate::gpu::{Completion, Gpu, PendingFrame};
 use crate::source::{self, Audio, AudioFeed, FrameSlot, Timeline, Video};
 use crate::transition::stinger_id;
 use crate::{FileWriter, Platform, SAMPLE_RATE, Time, space};
+#[cfg(windows)]
+use isocast_protocol::manifest::SessionManifest;
 
 /// How often audio levels are measured and reported, and failed sources
 /// noticed.
@@ -3456,7 +3460,18 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     if let Some(note) = interrupted_note(&interrupted_sessions(&folder, true), true) {
         warnings.push(note);
     }
+    #[cfg(not(windows))]
     let _folder_lock = FolderLock::hold(&folder);
+    #[cfg(windows)]
+    let folder_lock = FolderLock::hold(&folder)?;
+    // Every checkpoint uses the original Windows folder object even if the
+    // path or a parent junction is renamed meanwhile. Unix stays unchanged.
+    #[cfg(windows)]
+    let write_manifest =
+        |path: &Path, manifest: &SessionManifest| folder_lock.write(path, manifest, false);
+    #[cfg(windows)]
+    let write_manifest_durable =
+        |path: &Path, manifest: &SessionManifest| folder_lock.write(path, manifest, true);
 
     // The sources the files need: each must be running (a missing device or
     // permission fails here, before any file exists).

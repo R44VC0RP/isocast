@@ -41,4 +41,5 @@ wgpu = { version = "=30.0.1", default-features = false, features = ["std", "park
 wgpu = { version = "=30.0.1", default-features = false, features = ["metal"] }
 
 [target.'cfg(windows)'.dependencies]
+isocast-mux = { path = "../isocast-mux" }
 wgpu = { version = "=30.0.1", default-features = false, features = ["dx12"] }

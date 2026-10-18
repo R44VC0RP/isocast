@@ -1,0 +1,499 @@
+use std::collections::BTreeSet;
+use std::ffi::{OsStr, OsString};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::mem::{offset_of, size_of};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::fs::{FileExt, OpenOptionsExt};
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::path::{Path, PathBuf};
+use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, bail};
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT,
+    FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation, NtCreateFile,
+    NtSetInformationFile,
+};
+use windows_sys::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_FILES, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError,
+    UNICODE_STRING,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FULL_DIR_INFO, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
+    FileDispositionInfo, FileFullDirectoryInfo, FileFullDirectoryRestartInfo,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
+    GetFinalPathNameByHandleW, SetFileInformationByHandle, VOLUME_NAME_DOS,
+};
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+use super::OpenMode;
+
+pub(super) fn open_directory(path: &Path) -> io::Result<File> {
+    // Only this initial resolution may follow a symlink/junction. Permit a
+    // directory rename: RootDirectory below still refers to the same object.
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    if !file.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "recording folder is not a directory",
+        ));
+    }
+    Ok(file)
+}
+
+pub(super) fn manifest_names(directory: &File, limit: usize) -> io::Result<Vec<OsString>> {
+    const BUFFER_BYTES: usize = 64 * 1024;
+    const NAME_OFFSET: usize = offset_of!(FILE_FULL_DIR_INFO, FileName);
+    // FILE_FULL_DIR_INFO and each NextEntryOffset require 8-byte alignment.
+    let mut buffer = vec![0u64; BUFFER_BYTES / size_of::<u64>()];
+    let mut class = FileFullDirectoryRestartInfo;
+    if limit > 1000 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "manifest name limit exceeds 1000",
+        ));
+    }
+    let mut names = BTreeSet::new();
+    loop {
+        // The Win32 wrapper completes the query synchronously. There is no
+        // stack IOSB or pending NT query retaining our buffer after return.
+        // Zeroing also prevents a malformed short response reusing old names.
+        buffer.fill(0);
+        // SAFETY: the pinned directory and aligned, writable buffer remain
+        // live for the whole call. Directory::manifest_names serializes its cursor.
+        if unsafe {
+            GetFileInformationByHandleEx(
+                directory.as_raw_handle(),
+                class,
+                buffer.as_mut_ptr().cast(),
+                BUFFER_BYTES as u32,
+            )
+        } == 0
+        {
+            let error = io::Error::last_os_error();
+            return if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                Ok(names.into_iter().rev().collect())
+            } else {
+                Err(error)
+            };
+        }
+        class = FileFullDirectoryInfo;
+        let mut offset: usize = 0;
+        loop {
+            if !offset.is_multiple_of(8) || offset > BUFFER_BYTES - NAME_OFFSET {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid directory record alignment or bounds",
+                ));
+            }
+            // Read only the fixed header, not sizeof(FILE_FULL_DIR_INFO): its
+            // trailing padding need not be present after the final short name.
+            // SAFETY: the fixed header fits in the initialized allocation and
+            // both u32 fields have their required alignment. No returned pointer
+            // is dereferenced.
+            let (length, next) = unsafe {
+                let base = buffer.as_ptr().cast::<u8>().add(offset);
+                (
+                    base.add(offset_of!(FILE_FULL_DIR_INFO, FileNameLength))
+                        .cast::<u32>()
+                        .read() as usize,
+                    base.add(offset_of!(FILE_FULL_DIR_INFO, NextEntryOffset))
+                        .cast::<u32>()
+                        .read() as usize,
+                )
+            };
+            let available = BUFFER_BYTES - offset;
+            if length == 0
+                || !length.is_multiple_of(2)
+                || length > available - NAME_OFFSET
+                || (next != 0
+                    && (!next.is_multiple_of(8)
+                        || next < NAME_OFFSET + length
+                        || next > available - NAME_OFFSET))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid directory name length or next-entry offset",
+                ));
+            }
+            // SAFETY: the even byte length and trailing UTF-16 buffer fit
+            // entirely within this record and the allocation, as checked above.
+            let wide = unsafe {
+                std::slice::from_raw_parts(
+                    buffer
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(offset + NAME_OFFSET)
+                        .cast::<u16>(),
+                    length / 2,
+                )
+            };
+            if wide.contains(&0) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "NUL in directory entry name",
+                ));
+            }
+            // Windows names can contain unpaired surrogates. Preserve them;
+            // callers apply the existing child-name policy before opening.
+            let name = OsString::from_wide(wide);
+            let text = name.to_string_lossy();
+            if !text.starts_with('.') && text.to_ascii_lowercase().ends_with(".session.json") {
+                names.insert(name);
+                if names.len() > limit {
+                    names.pop_first();
+                }
+            }
+            if next == 0 {
+                break;
+            }
+            offset += next;
+        }
+    }
+}
+
+pub(super) fn path(directory: &File) -> io::Result<PathBuf> {
+    final_path(directory)
+}
+
+fn final_path(file: &File) -> io::Result<PathBuf> {
+    let mut wide = vec![0u16; 512];
+    // A rename can grow the path between calls. Bound both allocation and
+    // retries rather than trusting a size obtained from a separate query.
+    for _ in 0..4 {
+        // SAFETY: file is live and wide has the specified writable capacity.
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle(),
+                wide.as_mut_ptr(),
+                wide.len() as u32,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        } as usize;
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if length < wide.len() {
+            return Ok(PathBuf::from(OsString::from_wide(&wide[..length])));
+        }
+        if length >= 65_536 {
+            break;
+        }
+        wide.resize(length + 1, 0);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "normalized handle path is too long or keeps changing",
+    ))
+}
+
+pub(super) fn replace_metadata(
+    directory: &File,
+    name: &OsStr,
+    bytes: &[u8],
+    durable: bool,
+) -> Result<()> {
+    let mut temporary = create_metadata_temp(directory, name)?;
+    let publish = (|| -> Result<()> {
+        temporary
+            .write_all(bytes)
+            .context("could not write complete metadata temporary")?;
+        if durable {
+            temporary
+                .sync_all()
+                .context("could not flush metadata temporary before publication")?;
+        }
+        let replace = match open_child(directory, name, OpenMode::Read) {
+            Ok(existing) => {
+                // Refuse existing reparse/hard links (open_child), and short-name
+                // or case aliases here. Only compare this handle's normalized
+                // basename; NEVER reopen or rename through the returned path.
+                if final_path(&existing)?.file_name() != Some(name) {
+                    bail!("metadata destination must use its exact long file name, not an alias");
+                }
+                // Rename cannot replace a destination held open without
+                // delete sharing. Drop our inspection before the atomic rename.
+                true
+            }
+            Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => false,
+            Err(error) => return Err(error).context("metadata destination is not safe to replace"),
+        };
+        // This replaces the directory entry, never writes through the target.
+        // A newly appearing target is refused if inspection found no target.
+        // Other processes can still change an existing entry after inspection;
+        // rename does not follow its final symlink or modify other hard links.
+        rename_metadata(directory, &temporary, name, replace)
+            .context("could not publish metadata temporary")
+    })();
+    if let Err(error) = publish {
+        // Only the owned create-new handle is eligible for cleanup. In
+        // particular, do not remove the temp name via a pathname after closing.
+        if let Err(cleanup) = delete_metadata_temp(&temporary) {
+            return Err(error).context(format!(
+                "also could not remove owned metadata temporary: {cleanup}"
+            ));
+        }
+        return Err(error);
+    }
+    // Publication succeeded. No cleanup is allowed from this point onward,
+    // even if the final flush fails: this handle is now the destination file.
+    if durable {
+        temporary
+            .sync_all()
+            .context("metadata was published, but its post-publication flush failed")?;
+    }
+    Ok(())
+}
+
+fn create_metadata_temp(directory: &File, destination: &OsStr) -> Result<File> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    for _ in 0..64 {
+        let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        // Hidden-name convention plus .partial: a process-kill orphan is never
+        // a .session.json recovery candidate. Creation is atomic, not a probe.
+        let name = format!(
+            ".isocast-{}-{stamp:x}-{serial:x}.partial",
+            std::process::id()
+        );
+        if name
+            .as_bytes()
+            .eq_ignore_ascii_case(destination.as_encoded_bytes())
+        {
+            continue;
+        }
+        match open_child(directory, OsStr::new(&name), OpenMode::MetadataTemp) {
+            Ok(file) => return Ok(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error).context("could not create metadata temporary"),
+        }
+    }
+    bail!("could not create metadata temporary after 64 name collisions")
+}
+
+fn rename_metadata(directory: &File, file: &File, name: &OsStr, replace: bool) -> io::Result<()> {
+    let wide: Vec<u16> = name.encode_wide().collect();
+    let name_bytes = wide
+        .len()
+        .checked_mul(2)
+        .filter(|length| *length <= u16::MAX as usize)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "metadata name is too long"))?;
+    let bytes = size_of::<FILE_RENAME_INFORMATION>() + name_bytes;
+    let mut buffer = vec![0u64; bytes.div_ceil(size_of::<u64>())];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    // SAFETY: the zeroed allocation has sufficient size and alignment for the
+    // structure, its counted UTF-16 name, and a trailing NUL. Both handles are
+    // live throughout the call; only one validated child is used. The WDK
+    // binding's ReplaceIfExists is a one-byte BOOLEAN (Rust bool), not BOOL.
+    unsafe {
+        (*info).Anonymous.ReplaceIfExists = replace;
+        (*info).RootDirectory = directory.as_raw_handle();
+        (*info).FileNameLength = name_bytes as u32;
+        std::ptr::copy_nonoverlapping(
+            wide.as_ptr(),
+            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            wide.len(),
+        );
+    }
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // Windows 10 rejected our non-NULL RootDirectory rename through
+    // SetFileInformationByHandle(FileRenameInfo) with ERROR_INVALID_PARAMETER.
+    // Use the native class/structure with documented handle-relative semantics:
+    // https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
+    //
+    // SAFETY: this private temporary was opened by open_child with
+    // FILE_SYNCHRONOUS_IO_NONALERT and SYNCHRONIZE (in FILE_GENERIC_*).
+    // NtCreateFile's contract makes ALL subsequent I/O on that file object
+    // synchronous: the I/O manager waits non-alertably for completion even if
+    // a driver pends its IRP. NtSetInformationFile therefore returns the final
+    // status, with no pending I/O retaining this stack IOSB or name buffer.
+    // Do not pass an asynchronous/alertable handle here or change those flags.
+    // https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntcreatefile
+    let status = unsafe {
+        NtSetInformationFile(
+            file.as_raw_handle(),
+            &mut status_block,
+            info.cast(),
+            bytes as u32,
+            FileRenameInformation,
+        )
+    };
+    if status < 0 {
+        // SAFETY: a pure conversion of the completed NT error status. For a
+        // non-pending return, the API's status (not the IOSB) is authoritative.
+        return Err(io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosError(status) } as i32,
+        ));
+    }
+    Ok(())
+}
+
+fn delete_metadata_temp(file: &File) -> io::Result<()> {
+    // Fail closed if validation itself fails. A leftover hidden .partial is
+    // preferable to deleting an object we cannot prove is our regular file.
+    validate_file(file)?;
+    let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: this is our still-open create-new DELETE handle, with write and
+    // delete sharing denied since creation. It has not been renamed/published.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            (&info as *const FILE_DISPOSITION_INFO).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+pub(super) fn open_child(directory: &File, name: &OsStr, mode: OpenMode) -> io::Result<File> {
+    let mut wide: Vec<u16> = name.encode_wide().collect();
+    let length = wide
+        .len()
+        .checked_mul(2)
+        .and_then(|n| u16::try_from(n).ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "child name is too long"))?;
+    let name = UNICODE_STRING {
+        Length: length,
+        MaximumLength: length,
+        Buffer: wide.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: directory.as_raw_handle(),
+        ObjectName: &name,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: null(),
+        SecurityQualityOfService: null(),
+    };
+    let (access, sharing, disposition) = match mode {
+        // FILE_CREATE is NT's atomic create_new, not OPEN_IF or overwrite.
+        OpenMode::Create => (
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            FILE_SHARE_READ,
+            FILE_CREATE,
+        ),
+        // Keep this very same owned handle through write, flush, rename and
+        // cleanup. No other writer or deleter can swap the temporary entry.
+        OpenMode::MetadataTemp => (
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
+            FILE_SHARE_READ,
+            FILE_CREATE,
+        ),
+        OpenMode::Repair => (
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            FILE_SHARE_READ,
+            FILE_OPEN,
+        ),
+        OpenMode::Read => (
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+        ),
+        // Several recordings need to open the same lock for LockFileEx's
+        // shared lock. Deny delete sharing, so nobody can replace its name
+        // and thereby create an independent folder-lock domain.
+        OpenMode::Lock => (
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN_IF,
+        ),
+    };
+    let mut handle = null_mut();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    // SAFETY: all pointers outlive the synchronous call; the counted name
+    // is one validated child (no slash, colon, root or device syntax), and
+    // the RootDirectory handle remains open. No OBJ_INHERIT is specified.
+    //
+    // NtCreateFile is a synchronous create API: IRP_MJ_CREATE carries
+    // IRP_SYNCHRONOUS_API, even if a lower driver pends its IRP. The I/O
+    // manager completes the create before returning to user mode. In
+    // addition FILE_SYNCHRONOUS_IO_NONALERT (with SYNCHRONIZE included in
+    // FILE_GENERIC_*) makes every subsequent I/O synchronous/non-alertable.
+    // There is therefore no outstanding operation retaining this stack
+    // IOSB on return. Do not change these to overlapped/alertable options.
+    // See Microsoft's NtCreateFile and IRP_MJ_CREATE API documentation.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            access,
+            &attributes,
+            &mut status_block,
+            null(),
+            FILE_ATTRIBUTE_NORMAL,
+            sharing,
+            disposition,
+            FILE_OPEN_REPARSE_POINT | FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+            null(),
+            0,
+        )
+    };
+    if status < 0 {
+        // SAFETY: a pure conversion of the completed NT error status.
+        return Err(io::Error::from_raw_os_error(
+            unsafe { RtlNtStatusToDosError(status) } as i32,
+        ));
+    }
+    // SAFETY: a successful synchronous NtCreateFile returns a new owned
+    // handle. File closes it on validation failure as well as on normal Drop.
+    let file = unsafe { File::from_raw_handle(handle) };
+    validate_file(&file)?;
+    // For writable media, FILE_SHARE_READ is the lifetime ownership guard:
+    // any competing write/delete open conflicts, including existing handles
+    // and opens through hard-link/short-name aliases. Repair requests WRITE
+    // with that same sharing policy, so cannot acquire a live writer's file.
+    // Unlike LockFileEx on media bytes, it permits normal read-only probes
+    // (the reader must share WRITE, as for any file being written on Windows).
+    // The guard is released by closing this handle or process termination.
+    Ok(file)
+}
+
+pub(super) fn validate_file(file: &File) -> io::Result<()> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: file owns a live handle and info is a writable output structure.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Metadata is queried on the opened object, never through its path.
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reparse points (including cloud/sync placeholders) are not supported; choose a local, non-synced recording folder",
+        ));
+    }
+    // FILE_NON_DIRECTORY_FILE alone also admits devices, hence FILE_TYPE_DISK.
+    // SAFETY: file owns a live handle throughout the query.
+    let kind = unsafe { GetFileType(file.as_raw_handle()) };
+    if kind != FILE_TYPE_DISK
+        || info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE) != 0
+        || info.nNumberOfLinks != 1
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "child must be a regular disk file with exactly one link and no reparse point",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    file.seek_read(buf, offset)
+}
+
+pub(super) fn write_at(file: &File, buf: &[u8], offset: u64) -> io::Result<usize> {
+    file.seek_write(buf, offset)
+}

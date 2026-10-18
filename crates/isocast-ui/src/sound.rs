@@ -13,17 +13,24 @@
 //! it.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+#[cfg(target_os = "macos")]
+use std::time::Duration;
+use std::time::Instant;
 
 /// How long after the moment the display link gives it a played picture
 /// is on screen: the frames the window's Metal layer keeps queued, about
 /// two refreshes at 60 Hz (measured in a real window on isocast-m2-b: the
 /// sound was 37 ms early without it, 20.5 ms with 17 ms; see
 /// docs/notes.md). ISOCAST_AV_OFFSET_MS overrides it.
+#[cfg(target_os = "macos")]
 const PICTURE_LATENCY: Duration = Duration::from_millis(37);
 
 /// A stretch of the timeline's sound: from `start` to `end` on the
 /// timeline, `file_seconds` into `path` at `start` (none: no sound there).
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "editor audio playback is not implemented yet")
+)]
 pub struct Stretch {
     pub path: Option<PathBuf>,
     pub start: f64,
@@ -33,6 +40,10 @@ pub struct Stretch {
 
 /// What a [`Sound`] plays: `stretches` from timeline second `from`, which
 /// was the playhead at `origin`, at `speed` times real time.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "editor audio playback is not implemented yet")
+)]
 pub struct Plan {
     pub stretches: Vec<Stretch>,
     pub from: f64,
@@ -50,6 +61,7 @@ pub struct Sound {
 impl Sound {
     /// Start playing `plan` on a thread of its own (opening the files
     /// takes a moment; it starts in step with the playhead regardless).
+    #[cfg(target_os = "macos")]
     pub fn start(plan: Plan) -> Option<Self> {
         if plan.speed <= 0.0 || plan.stretches.iter().all(|s| s.path.is_none()) {
             return None;
@@ -58,10 +70,7 @@ impl Sound {
         let spawned = std::thread::Builder::new()
             .name("editor-sound".into())
             .spawn(move || {
-                #[cfg(target_os = "macos")]
                 mac::play(&plan, &stopped);
-                #[cfg(not(target_os = "macos"))]
-                let _ = (&plan, stopped.recv());
             });
         match spawned {
             Ok(_) => Some(Self { _stop: stop }),
@@ -71,9 +80,17 @@ impl Sound {
             }
         }
     }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn start(_plan: Plan) -> Option<Self> {
+        // No playback backend: don't allocate a waiting thread and pretend
+        // it is playing sound. The editor's optional sound stays absent.
+        None
+    }
 }
 
 /// The picture latency, or ISOCAST_AV_OFFSET_MS's.
+#[cfg(target_os = "macos")]
 fn picture_latency() -> Duration {
     std::env::var("ISOCAST_AV_OFFSET_MS")
         .ok()

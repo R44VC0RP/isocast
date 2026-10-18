@@ -175,6 +175,17 @@ impl Daemon {
         if let Some(profile) = &calibration.status.profile {
             calibration.status.summary = profile.summary();
         }
+        // The disposable measurement worker is implemented only on macOS.
+        // An unavailable backend is not a failed calibration; do not launch
+        // it or write a failed-build marker on other platforms.
+        if !cfg!(target_os = "macos") {
+            if calibration.status.profile.is_none() {
+                calibration.status.summary =
+                    "Calibration is not available on this platform yet; using the capacity table"
+                        .into();
+            }
+            return;
+        }
         // Other daemons cannot see our outputs. An isolated snapshot/test
         // engine must never spend hardware encoder capacity automatically.
         let allowed = match std::env::var("ISOCAST_CALIBRATION").as_deref() {
@@ -238,7 +249,7 @@ impl Daemon {
         if self.shutting_down.load(Ordering::SeqCst) || self.busy().is_some() {
             return Err(busy());
         }
-        if crate::this_machine().is_none() {
+        if !cfg!(target_os = "macos") || crate::this_machine().is_none() {
             return Err(failed("this platform has no calibration backend yet"));
         }
         let mut calibration = self.machine.lock();

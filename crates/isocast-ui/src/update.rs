@@ -65,6 +65,7 @@ pub use other::{
 /// a recording (paused or not), a stream, a timeline export, the virtual
 /// camera (a call may be showing it) or the replay buffer. The engine's
 /// `shutdown_if_idle` decides the same atomically before it stops.
+#[cfg(target_os = "macos")]
 fn busy_with(
     status: Option<&isocast_protocol::api::Status>,
     stream_active: bool,

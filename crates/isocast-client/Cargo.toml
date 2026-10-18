@@ -20,10 +20,13 @@ isocast-ipc = { path = "../isocast-ipc" }
 isocast-surfaces = { path = "../isocast-surfaces", optional = true }
 serde = "1.0.229"
 serde_json = "1.0.154"
-wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"], optional = true }
+tempfile = "3.27.0"
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+wgpu = { version = "=30.0.1", default-features = false, features = ["metal"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+wgpu = { version = "=30.0.1", default-features = false, features = ["dx12"], optional = true }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_System_Threading"] }

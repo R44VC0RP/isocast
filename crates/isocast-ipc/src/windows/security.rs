@@ -1,5 +1,5 @@
 use std::io;
-use std::mem::size_of;
+use std::mem::{align_of, offset_of, size_of};
 use std::os::windows::io::{AsRawHandle, OwnedHandle};
 use std::ptr::null_mut;
 
@@ -10,10 +10,10 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAce, EqualSid, GetLengthSid,
-    GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor, OWNER_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
-    SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
-    TOKEN_QUERY, TOKEN_USER, TokenUser,
+    GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor, IsValidSid,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR, SID, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+    SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ALL_ACCESS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
@@ -28,11 +28,15 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_SYNCHRONIZE, WaitForSingleObject,
 };
 
-use super::{Pipe, closed, last_error, owned, win_error};
+use super::{PIPE_BUFFER_SIZE, Pipe, closed, last_error, owned, win_error};
 
 // GetTokenInformation writes a TOKEN_USER followed by its SID. usize storage
 // provides the header's alignment; moving the Vec never moves its allocation.
-pub(super) struct User(Vec<usize>);
+pub(super) struct User {
+    data: Vec<usize>,
+    sid_offset: usize,
+    sid_length: usize,
+}
 
 // Retain the process object while the stream exists, preventing PID reuse after
 // authentication. This is process-token inspection, never thread impersonation.
@@ -85,13 +89,54 @@ impl User {
         {
             return Err(last_error());
         }
-        Ok(Self(data))
+        let invalid = || io::Error::other("Windows returned an invalid token user SID");
+        let length = size as usize;
+        if length < size_of::<TOKEN_USER>() || length > data.len() * size_of::<usize>() {
+            return Err(invalid());
+        }
+        // SAFETY: GetTokenInformation initialized the aligned TOKEN_USER header.
+        let sid = unsafe { (*data.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        let sid_offset = (sid as usize)
+            .checked_sub(data.as_ptr() as usize)
+            .ok_or_else(invalid)?;
+        let header_length = offset_of!(SID, SubAuthority);
+        if sid_offset < size_of::<TOKEN_USER>()
+            || !sid_offset.is_multiple_of(align_of::<SID>())
+            || sid_offset > length.saturating_sub(header_length)
+        {
+            return Err(invalid());
+        }
+        // Validate the variable-sized tail BEFORE asking SID APIs to inspect it.
+        // The subauthority count is a byte within the now-bounds-checked header.
+        let count = unsafe {
+            *data
+                .as_ptr()
+                .cast::<u8>()
+                .add(sid_offset + offset_of!(SID, SubAuthorityCount))
+        };
+        let sid_length = header_length + usize::from(count) * size_of::<u32>();
+        if sid_length > length - sid_offset || unsafe { IsValidSid(sid) } == 0 {
+            return Err(invalid());
+        }
+        if unsafe { GetLengthSid(sid) } as usize != sid_length {
+            return Err(invalid());
+        }
+        Ok(Self {
+            data,
+            sid_offset,
+            sid_length,
+        })
     }
 
     fn sid(&self) -> PSID {
-        // SAFETY: aligned storage containing a successful TOKEN_USER result;
-        // its SID points within the same, still-live allocation.
-        unsafe { (*self.0.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+        // SAFETY: of_process validated the SID's complete span in this allocation.
+        unsafe { self.data.as_ptr().cast::<u8>().add(self.sid_offset) as PSID }
+    }
+
+    pub(super) fn sid_bytes(&self) -> &[u8] {
+        // SAFETY: immutable, validated SID bytes owned by self. The borrow cannot
+        // outlive the token storage, and excludes TOKEN_USER's pointer/padding.
+        unsafe { std::slice::from_raw_parts(self.sid().cast(), self.sid_length) }
     }
 
     pub(super) fn verify_peer(&self, pipe: &Pipe) -> io::Result<Peer> {
@@ -196,8 +241,8 @@ impl User {
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | first_flag,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_UNLIMITED_INSTANCES,
-                64 * 1024,
-                64 * 1024,
+                PIPE_BUFFER_SIZE,
+                PIPE_BUFFER_SIZE,
                 0,
                 &attributes,
             )

@@ -13,7 +13,9 @@
 //!   `Image`, and the box drawn by Slint, set in the same event so they
 //!   are drawn in the same frame. Slint then redraws the window per frame.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
+#[cfg(target_os = "macos")]
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -22,10 +24,12 @@ use isocast_client::shared::SharedFrame;
 use slint::ComponentHandle;
 use slint::wgpu_30::wgpu;
 
+#[cfg(target_os = "macos")]
+use crate::Theme;
 use crate::frames::Feed;
 #[cfg(target_os = "macos")]
 pub use crate::layers::{BoxShape, BoxStyle};
-use crate::{AppWindow, CanvasArea, Theme, Ui};
+use crate::{AppWindow, CanvasArea, Ui};
 
 /// The selected item's box (see layers.rs; the same off macOS).
 #[cfg(not(target_os = "macos"))]
@@ -818,6 +822,7 @@ fn geometry(app: &AppWindow) -> crate::layers::Geometry {
 
 /// The control bar's master level's inside, in window points (its native
 /// layer's place).
+#[cfg(target_os = "macos")]
 pub fn meter_rect(app: &AppWindow) -> [f64; 4] {
     [
         app.get_master_meter_x() as f64,

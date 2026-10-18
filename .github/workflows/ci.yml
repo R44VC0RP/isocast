@@ -50,6 +50,13 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      - name: Platform clock and pool contracts
+        run: |
+          cargo clippy --locked --all-targets -p isocast-platform-contracts -- -D warnings
+          cargo build --locked -p isocast-platform-contracts
+          python3 -m unittest discover -s scripts -p test_platform_contracts.py
+          python3 scripts/platform-contracts.py --bin target/debug/isocast-platform-contracts --backend native --suite core --work "$RUNNER_TEMP/platform-contracts"
+
       - name: PR description checks (unit tests)
         run: python3 .github/scripts/pr_checks_test.py
 

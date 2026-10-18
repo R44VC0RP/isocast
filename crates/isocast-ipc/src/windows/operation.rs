@@ -47,12 +47,14 @@ impl<'a> Operation<'a> {
     pub(super) unsafe fn submit(
         &mut self,
         start: impl FnOnce(*mut OVERLAPPED) -> i32,
-    ) -> io::Result<()> {
+    ) -> Result<(), u32> {
         let success = start(self.overlapped.get());
         if success == 0 {
             let code = unsafe { GetLastError() };
             if code != ERROR_IO_PENDING {
-                return Err(win_error(code));
+                // Submission errors need call-site context: ERROR_NO_DATA is an
+                // empty NOWAIT read, but a closed pipe for other operations.
+                return Err(code);
             }
         }
         self.pending = true;

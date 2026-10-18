@@ -9,16 +9,22 @@
 //! to record a shortcut (`capture`); that press and its release go
 //! nowhere else.
 
+#[cfg(target_os = "macos")]
 use std::cell::RefCell;
+#[cfg(target_os = "macos")]
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+#[cfg(target_os = "macos")]
 use isocast_client::{Client, DaemonError};
+#[cfg(target_os = "macos")]
 use isocast_protocol::hotkeys::{Chord, Phase};
 
 /// Gets the next chord typed (`None`: Escape, cancelled).
 pub type Capture = Box<dyn FnOnce(Option<String>)>;
 
+#[cfg(target_os = "macos")]
 struct State {
     tx: Sender<(String, Phase)>,
     /// Keys held (by key code), with the chord their press sent: a
@@ -29,11 +35,13 @@ struct State {
     taken: Vec<i64>,
 }
 
+#[cfg(target_os = "macos")]
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
 /// Start forwarding (once, from the window's thread).
+#[cfg(target_os = "macos")]
 pub fn start() {
     if STATE.with(|s| s.borrow().is_some()) {
         return;
@@ -56,6 +64,7 @@ pub fn start() {
 
 /// Give the next key press to `capture` instead of the daemon (or stop
 /// waiting for one, with `None`).
+#[cfg(target_os = "macos")]
 pub fn capture(capture: Option<Capture>) {
     STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
@@ -67,6 +76,7 @@ pub fn capture(capture: Option<Capture>) {
 /// The daemon's end: one connection for every edge, so a held push-to-talk
 /// key is released if this app goes away (the daemon releases a closed
 /// connection's holds). It connects to a running daemon only.
+#[cfg(target_os = "macos")]
 fn forward(rx: Receiver<(String, Phase)>) {
     let mut client: Option<Client> = None;
     while let Ok((keys, phase)) = rx.recv() {
@@ -91,6 +101,7 @@ fn forward(rx: Receiver<(String, Phase)>) {
 /// A key went down or up (`code` a key code; media keys are 1000 + their
 /// NX key type), with these modifiers (ctrl 1, alt 2, shift 4, cmd 8).
 /// Whether the event goes on to the window.
+#[cfg(target_os = "macos")]
 fn key(code: i64, name: &str, modifiers: u32, down: bool, repeat: bool) -> bool {
     debug(format_args!(
         "key {name} ({code}) modifiers {modifiers} {} {}",
@@ -148,6 +159,7 @@ fn key(code: i64, name: &str, modifiers: u32, down: bool, repeat: bool) -> bool 
 /// The modifiers changed (`modifiers` now held): a held chord that needs
 /// one that was let go is released (AppKit sends no key-up for a key
 /// pressed with Command, so its release shows here).
+#[cfg(target_os = "macos")]
 fn modifiers_changed(modifiers: u32) {
     STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
@@ -170,6 +182,7 @@ fn modifiers_changed(modifiers: u32) {
 }
 
 /// A chord's modifiers (ctrl 1, alt 2, shift 4, cmd 8).
+#[cfg(target_os = "macos")]
 fn chord_modifiers(chord: &str) -> u32 {
     let parts: Vec<&str> = chord.split('+').collect();
     let mut bits = 0;
@@ -187,6 +200,7 @@ fn chord_modifiers(chord: &str) -> u32 {
 
 /// With ISOCAST_DEBUG_KEYS set, each key edge and what the daemon said
 /// goes to stderr (for a bug report about hotkeys).
+#[cfg(target_os = "macos")]
 fn debug(what: std::fmt::Arguments) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *ON.get_or_init(|| std::env::var_os("ISOCAST_DEBUG_KEYS").is_some()) {
@@ -196,6 +210,7 @@ fn debug(what: std::fmt::Arguments) {
 
 /// The app (or its window) is no longer the active one: release every
 /// key still held.
+#[cfg(target_os = "macos")]
 pub fn release_all() {
     STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
@@ -208,6 +223,7 @@ pub fn release_all() {
 }
 
 /// "ctrl+alt+shift+cmd+key", the daemon's canonical order.
+#[cfg(target_os = "macos")]
 pub fn chord_text(modifiers: u32, name: &str) -> String {
     let mut parts = Vec::new();
     for (bit, part) in [(1, "ctrl"), (2, "alt"), (4, "shift"), (8, "cmd")] {
@@ -289,6 +305,7 @@ fn key_label(key: &str) -> String {
 }
 
 /// AppKit's virtual key codes (HIToolbox Events.h), the daemon's names.
+#[cfg(target_os = "macos")]
 const KEY_CODES: &[(u16, &str)] = &[
     (0, "a"),
     (1, "s"),
@@ -391,11 +408,13 @@ const KEY_CODES: &[(u16, &str)] = &[
     (126, "up"),
 ];
 
+#[cfg(target_os = "macos")]
 fn key_name(code: u16) -> Option<&'static str> {
     KEY_CODES.iter().find(|(c, _)| *c == code).map(|(_, n)| *n)
 }
 
 /// NX key types of the media keys (as the daemon reads them).
+#[cfg(target_os = "macos")]
 fn media_name(kind: i64) -> Option<&'static str> {
     Some(match kind {
         0 => "media_volume_up",
@@ -409,6 +428,7 @@ fn media_name(kind: i64) -> Option<&'static str> {
 }
 
 /// NSEventModifierFlags → ctrl 1, alt 2, shift 4, cmd 8.
+#[cfg(target_os = "macos")]
 fn modifiers(flags: usize) -> u32 {
     ((flags & (1 << 18) != 0) as u32)
         | (((flags & (1 << 19) != 0) as u32) << 1)
@@ -516,4 +536,17 @@ unsafe fn ns_string(text: &str) -> objc2::rc::Retained<objc2::runtime::AnyObject
 }
 
 #[cfg(not(target_os = "macos"))]
-fn install() {}
+pub fn start() {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn release_all() {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn capture(capture: Option<Capture>) {
+    // No physical-key hook yet. Cancel rather than leaving Settings waiting
+    // for a key that this platform's stub cannot deliver.
+    if let Some(capture) = capture {
+        eprintln!("hotkeys: focused shortcut capture is not implemented on this platform");
+        capture(None);
+    }
+}

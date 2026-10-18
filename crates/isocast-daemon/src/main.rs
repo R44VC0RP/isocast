@@ -108,6 +108,8 @@ mod timeline;
 mod virtual_camera;
 mod websocket;
 
+static PARENT_OWNED: AtomicBool = AtomicBool::new(false);
+
 fn main() -> ExitCode {
     if let Some(code) = machine::worker() {
         return code;
@@ -171,6 +173,37 @@ fn main() -> ExitCode {
             isocast_diagnostics::ready();
             isocast_diagnostics::diagnostic!("isocastd listening on {}", socket.display());
             let daemon = Arc::new(Daemon::default());
+            if std::env::args_os().any(|arg| arg == "--exit-on-stdin-close") {
+                let owned = daemon.clone();
+                // stdin is a lifetime pipe, not a second control protocol.
+                // Closing it (also on CLI crash/kill) uses the same durable
+                // shutdown as the API. No PID polling/reuse or forced kill.
+                if let Err(error) =
+                    thread::Builder::new()
+                        .name("record owner".into())
+                        .spawn(move || {
+                            use std::io::Read;
+                            let mut byte = [0];
+                            let mut input = std::io::stdin().lock();
+                            loop {
+                                match input.read(&mut byte) {
+                                    Err(error)
+                                        if error.kind() == std::io::ErrorKind::Interrupted =>
+                                    {
+                                        continue;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            owned.graceful_shutdown();
+                            std::process::exit(0);
+                        })
+                {
+                    isocast_diagnostics::diagnostic!("error"; "isocastd: could not watch record owner: {error}");
+                    return ExitCode::FAILURE;
+                }
+                PARENT_OWNED.store(true, Ordering::SeqCst);
+            }
             daemon.load_setup();
             daemon.load_machine();
             daemon.recover_recordings();
@@ -4080,6 +4113,7 @@ fn daemon_build() -> isocast_protocol::api::DaemonBuild {
             })
             .clone(),
         pid: std::process::id(),
+        parent_owned: PARENT_OWNED.load(Ordering::SeqCst),
     }
 }
 

@@ -18,6 +18,7 @@ pub fn take() -> Vec<PathBuf> {
     std::mem::take(&mut *OPENED.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
+#[cfg(target_os = "macos")]
 fn opened(paths: Vec<PathBuf>) {
     isocast_diagnostics::diagnostic!("info"; "documents: asked to open {paths:?}");
     OPENED

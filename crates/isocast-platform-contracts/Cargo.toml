@@ -1,0 +1,22 @@
+[package]
+name = "isocast-platform-contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Isolated native Platform contract workers (development only)."
+
+[dependencies]
+anyhow = "1.0.104"
+serde_json = "1.0.154"
+isocast-engine = { path = "../isocast-engine" }
+isocast-protocol = { path = "../isocast-protocol" }
+isocast-platform-stub = { path = "../isocast-platform-stub" }
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+isocast-platform-macos = { path = "../isocast-platform-macos" }
+wgpu = { version = "=30.0.1", default-features = false, features = ["metal"] }
+
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "=30.0.1", default-features = false, features = ["dx12"] }

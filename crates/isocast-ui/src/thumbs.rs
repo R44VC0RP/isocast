@@ -189,6 +189,10 @@ impl Preview {
 /// A stretch of the timeline played from one file (#94): from `start` to
 /// `end` on the timeline, `file_seconds` into the file at `start` (none:
 /// its file is missing, nothing is shown there).
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "native media decoding is not implemented yet")
+)]
 pub struct Segment {
     pub path: Option<PathBuf>,
     pub start: f64,

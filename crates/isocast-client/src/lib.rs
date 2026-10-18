@@ -2,11 +2,14 @@
 //! calling methods and watching events. The CLI, MCP and the app all use
 //! this one client.
 
+mod isolated;
 pub mod library;
 #[cfg(feature = "shared")]
 pub mod shared;
 #[cfg(windows)]
 mod windows;
+
+pub use isolated::IsolatedDaemon;
 
 use isocast_ipc::Stream as UnixStream;
 use std::io::{BufRead, BufReader, Write};
@@ -287,8 +290,24 @@ fn launch() -> Result<()> {
 /// whichever terminal or agent app started it, so they are granted once.
 #[cfg(target_os = "macos")]
 fn spawn_daemon(daemon: &Path, log: &Path) -> std::io::Result<()> {
+    let pid = spawn_daemon_with(daemon, log, None)?;
+    // Reap it if it exits while this process is still running.
+    std::thread::spawn(move || unsafe {
+        let mut status = 0;
+        libc::waitpid(pid, &mut status, 0);
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_daemon_with(
+    daemon: &Path,
+    log: &Path,
+    isolated: Option<&isolated::SpawnOptions>,
+) -> std::io::Result<libc::pid_t> {
     use std::ffi::{CString, c_char, c_int};
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::ptr;
 
     unsafe extern "C" {
@@ -311,7 +330,44 @@ fn spawn_daemon(daemon: &Path, log: &Path) -> std::io::Result<()> {
     let program = CString::new(daemon.as_os_str().as_bytes())?;
     let log = CString::new(log.as_os_str().as_bytes())?;
     let null = c"/dev/null";
-    let argv = [program.as_ptr(), ptr::null()];
+    let mut argv = vec![program.as_ptr()];
+    if isolated.is_some() {
+        argv.push(c"--exit-on-stdin-close".as_ptr());
+    }
+    argv.push(ptr::null());
+    // Only the isolated path takes an environment snapshot. Normal launch
+    // still passes the process environment straight through _NSGetEnviron.
+    let environment = isolated
+        .map(|options| {
+            std::env::vars_os()
+                .filter(|(key, _)| {
+                    !options
+                        .env
+                        .iter()
+                        .any(|(name, _)| key.as_os_str() == std::ffi::OsStr::new(name))
+                })
+                .chain(
+                    options
+                        .env
+                        .iter()
+                        .map(|(key, value)| ((*key).into(), value.as_os_str().to_owned())),
+                )
+                .map(|(key, value)| {
+                    let mut entry = key.into_vec();
+                    entry.push(b'=');
+                    entry.extend_from_slice(value.as_bytes());
+                    CString::new(entry).map_err(std::io::Error::from)
+                })
+                .collect::<std::io::Result<Vec<_>>>()
+        })
+        .transpose()?;
+    let envp = environment.as_ref().map(|entries| {
+        entries
+            .iter()
+            .map(|entry| entry.as_ptr())
+            .chain([ptr::null()])
+            .collect::<Vec<_>>()
+    });
     unsafe {
         let mut attrs: libc::posix_spawnattr_t = ptr::null_mut();
         check(libc::posix_spawnattr_init(&mut attrs))?;
@@ -324,13 +380,27 @@ fn spawn_daemon(daemon: &Path, log: &Path) -> std::io::Result<()> {
             ))?;
             check(libc::posix_spawnattr_setpgroup(&mut attrs, 0))?;
             check(responsibility_spawnattrs_setdisclaim(&mut attrs, 1))?;
-            check(libc::posix_spawn_file_actions_addopen(
-                &mut actions,
-                0,
-                null.as_ptr(),
-                libc::O_RDONLY,
-                0,
-            ))?;
+            if let Some(options) = isolated {
+                let input = options.input.as_raw_fd();
+                check(libc::posix_spawn_file_actions_adddup2(
+                    &mut actions,
+                    input,
+                    0,
+                ))?;
+                // A descriptor mentioned in file actions escapes CLOEXEC_DEFAULT;
+                // keep the pipe reader only as stdin, never at its old fd too.
+                if input != 0 {
+                    check(libc::posix_spawn_file_actions_addclose(&mut actions, input))?;
+                }
+            } else {
+                check(libc::posix_spawn_file_actions_addopen(
+                    &mut actions,
+                    0,
+                    null.as_ptr(),
+                    libc::O_RDONLY,
+                    0,
+                ))?;
+            }
             check(libc::posix_spawn_file_actions_addopen(
                 &mut actions,
                 1,
@@ -346,14 +416,12 @@ fn spawn_daemon(daemon: &Path, log: &Path) -> std::io::Result<()> {
                 &actions,
                 &attrs,
                 argv.as_ptr().cast(),
-                (*_NSGetEnviron()).cast(),
+                envp.as_ref().map_or_else(
+                    || (*_NSGetEnviron()).cast(),
+                    |entries| entries.as_ptr().cast(),
+                ),
             ))?;
-            // Reap it if it exits while this process is still running.
-            std::thread::spawn(move || {
-                let mut status = 0;
-                libc::waitpid(pid, &mut status, 0);
-            });
-            Ok(())
+            Ok(pid)
         })();
         libc::posix_spawn_file_actions_destroy(&mut actions);
         libc::posix_spawnattr_destroy(&mut attrs);

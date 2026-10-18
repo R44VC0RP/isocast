@@ -60,6 +60,10 @@ fn reduce_motion() -> bool {
 
 /// What to ask for in the open panel.
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "native file panels are not implemented yet")
+)]
 pub struct Choose<'a> {
     /// A folder instead of files.
     pub folders: bool,
@@ -71,6 +75,7 @@ pub struct Choose<'a> {
 }
 
 /// `path` with a leading `~` made this user's home folder.
+#[cfg(target_os = "macos")]
 pub fn expand_home(path: &str) -> String {
     match (path.strip_prefix('~'), std::env::var("HOME")) {
         (Some(rest), Ok(home)) if rest.is_empty() || rest.starts_with('/') => {

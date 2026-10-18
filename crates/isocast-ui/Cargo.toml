@@ -52,6 +52,10 @@ wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+# Real process counters: Windows UI measurements must not report stub zeroes.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
 # macOS: the preview's picture and selection box as Core Animation layers
 # under the window's interface (see src/layers.rs), so the interface isn't
 # redrawn for every video frame.

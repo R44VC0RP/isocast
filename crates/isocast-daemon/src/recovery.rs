@@ -149,13 +149,22 @@ impl Daemon {
         recovered.sort_by(|a, b| b.recording.started_at.cmp(&a.recording.started_at));
         recovered.truncate(20);
         for take in recovered.iter().filter(|r| r.newly_detected) {
-            // Files a crash-safe writer left were finished from their
-            // fragments just now; the manifest's errors say what each holds.
-            let finished = take.recording.errors.iter().any(|e| {
-                e.contains("crash-safe fragments that reached the disk")
-                    || e.contains("completed at launch")
-            });
+            #[cfg(windows)]
             self.publish(Event::Warning {
+                message: format!(
+                    "recording recovery inspected {}; see the manifest and status.interrupted for each file's verified media, unknown counts and any persistence errors",
+                    take.manifest.display(),
+                ),
+            });
+            #[cfg(not(windows))]
+            {
+                // Files a crash-safe writer left were finished from their
+                // fragments just now; the manifest's errors say what each holds.
+                let finished = take.recording.errors.iter().any(|e| {
+                    e.contains("crash-safe fragments that reached the disk")
+                        || e.contains("completed at launch")
+                });
+                self.publish(Event::Warning {
                 message: if finished {
                     format!(
                         "recording interrupted: {}; its files were finished from what reached the disk (see the manifest's errors and status.interrupted)",
@@ -168,6 +177,7 @@ impl Daemon {
                     )
                 },
             });
+            }
         }
         *self.interrupted_unnoted.lock() = recovered
             .iter()

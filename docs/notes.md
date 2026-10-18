@@ -5,6 +5,16 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-17 (#105 W.1e): Windows UI now builds with Slint 1.18.1/Skia
+  and renders offscreen through RTX 5070/DX12. First native release build
+  of daemon/CLI/UI took 14m11s; relinking generated UI after a client change
+  still took 12m17s (warm dependencies, not a fast-edit-loop claim). MSVC
+  build-script main stack is 1 MiB; build.rs uses a Windows-host 8 MiB compiler
+  worker. Runtime app main did not need a stack override for the smoke.
+  Native panels/key hooks, editor decode/audio, shared surfaces and capture
+  are still stubs; W.6 owns real-window/DPI/font parity. Snapshot evidence:
+  windows/scratch/w1e/windows-main.png. Isolated smoke daemon was stopped.
+
 - 2026-10-17 (#105 W.1c): `scripts/windows-remote.sh status|sync|cargo|build|run|fetch`
   uses exon-desk-lan, the PowerShell wrapper and binary git-archive over SSH.
   Managed source is `C:\isocast-dev\src`; warm target/cache, isolated home,
@@ -1735,6 +1745,141 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-18 (#105 #110 #114): merge qualification retains main's profile-
+  aware CLI capacity_check and estimate::check, not the isolated check or
+  check_estimates helper. `isocast record` explicitly sends new_project:true,
+  into:None. Non-mac calibration loads compatible existing status but never
+  launches a worker (even ISOCAST_CALIBRATION=on); explicit calibration is
+  refused before scratch/worker creation, not remembered as a failed build.
+  Mac behaviour stays unchanged. Native merged e2e19/19 and Ctrl-C pass;
+  an isolated recording's self-contained .isoprj opens in the real editor
+  after its private timeline workspace is gone (preview +3file lanes).
+  Evidence: windows/scratch/merge-main/{e2e,record-editor}. GPU lifetime
+  investigation is a separate subsequent Tier-1 task, not part of this merge.
+
+- 2026-10-17 (#105 W.3): dedicated Platform contract harness/test files were
+  explicitly approved. New isocast-platform-contracts workers plus Python
+  runner use one generic implementation per case, isolated fresh directories,
+  bounded/killed/reaped children and explicit unavailable results. Windows
+  native is unavailable until the capture lane supplies Platform/FileWriter;
+  StubPlatform core results never qualify native Windows. Mac normal/pressure
+  recordings, A/V, commit/kill/recovery and capture teardown pass, as do the
+  original GPU tests. New stronger early-importer-drop GPU test is blocked:
+  after three completed command-only rounds, availability is31,30,29 of32.
+  Pixel correctness and completion callbacks pass; source-free render and
+  empty submission do not restore slots. No production backend edits made.
+  Ryan delegated the lifetime decision: retain the independent-lifetime
+  contract, because the API returns owned GPU textures. Full qualification
+  remains blocked pending separate Mac importer/runtime investigation; do
+  not convert the failing case into a pass by keeping its importer alive.
+  Final review finds no source-frame retainer in the test: wgpu-core drops
+  its trackers before the completion callback. The correlated boundary is
+  CVMetalTexture outliving CVMetalTextureCache; exact native ownership is
+  still unproved. Normal importer-outlives-textures production ordering was
+  not shown broken. Evidence: windows/scratch/w3a/gpu-three-rounds/gpu.err.
+- 2026-10-17 (#105 W.3): don't equate capture callback-arrival and presentation
+  time. Real ScreenCaptureKit samples were7.5–13.3ms ahead of arrival; the
+  contract permits one requested presentation period, not an invented10ms
+  latency target. Core tick checks are engine arithmetic at a native origin,
+  not a two-hour drift measurement. GPU readback proves pixels/lifetimes, not
+  absence of internal copies; no zero-copy performance claim from these tests.
+
+- 2026-10-17 (#105 W.2b/W.2c): Windows startup recovery is storage-level,
+  independent of NativePlatform's capture/encoder implementation. Engine cfg
+  routes to `isocast_mux::recovery`; Unix bodies and Mac writers are unchanged.
+  A pinned exclusive Directory spans manifest reads, media repair and atomic
+  replacement. Live Windows checkpoints keep their original shared Directory;
+  ownership failure fails closed. Read-only inspect first: already finished
+  movies can be open in players or readonly. Historical Failed/Interrupted
+  facts survive failed revalidation; fresh Recording accepted counts become
+  unknown unless indexes prove them. Preserve unknown JSON extensions, pauses
+  and producer errors; pause verification uses every track, not longest end.
+- 2026-10-17 (#105): Windows10 rejects RootDirectory with Win32
+  SetFileInformationByHandle(FileRenameInfo), error87, despite newer docs.
+  Use native NtSetInformationFile(FileRenameInformation) with the WDK ABI and
+  the still-open synchronous DELETE-owned temp. Flush before/after publication;
+  never delete a published file after a flush error. Crash-orphan dot-prefixed
+  .partial files are ignored and retained, not deleted through guessed names.
+  Unsupported cloud/reparse/locking volumes still fail closed; no power-loss
+  directory-durability or write/fsync fault-injection guarantee is claimed.
+- 2026-10-17 (#105): enumerate the pinned folder while retaining only100
+  newest manifest names, not all media names or a10000-entry cutoff. Return
+  caller-spelled paths for status/root matching, never reopen them during the
+  pass. At record start inspect only still-Recording manifests; historical
+  Failed/Interrupted media is rechecked at launch, avoiding two full scans
+  per new take. Native100-manifest fixture234ms→9ms; not a full encoder/startup
+  benchmark. Windows native recording contract tests still need the capture
+  lane's encoder integration; packet writer and daemon repair are qualified.
+
+- 2026-10-17 (#105 W.2a): `isocast-mux` is a separately qualified packet
+  writer, not a switch of Mac recording backends. Both Mac crash-safe VT/AAC
+  and legacy AVAssetWriter paths stay untouched. Inputs are NVENC/MF-compatible
+  compressed access units + avcC/hvcC, no raw pixels; 48 kHz mono/stereo AAC-LC
+  with explicit encoder priming. New identifying brand `isw2` prevents old
+  Mac recovery from guessing Apple's 2112-sample priming for Windows files.
+  B-frames/config changes are refused; adapters must drain encoders before
+  commit, preserve time origin and split before the 1.5M total-sample budget
+  (headroom includes pending/held outputs). W.2b now wires anchored recovery
+  and atomic truthful manifests into the daemon (see the newer entry above).
+- 2026-10-17 (#105 W.2a): a fragment's index is initially `free`, followed
+  by mdat and a metadata-hashed `icmt` trailer; only then is its kind patched
+  to moof. Recovery validates complete records, keeps all populated tracks,
+  and seals an abandoned tail with one `!` byte before appending its final
+  index. Necessary, not cosmetic: a missing final hash byte equal to zero
+  was completed by recovery's next moov-size byte, promoting an uncommitted
+  fragment on retry. Native repro and regression live in windows/scratch
+  REPORT.md. The seal never touches verified media; no truncation, no payload
+  reread/hash of hours of media. `unverified_tail` explains omitted bytes.
+- 2026-10-17 (#105 W.2a): pinned-directory leases bind creation/repair and
+  `.isocast.lock` to one object, including through a rebound folder junction.
+  Windows share-read-only writable media allows compatible live readers but
+  refuses competing writers/deletes; all reparse children (including cloud
+  placeholders) and hard links are refused. Use local non-synced folders;
+  OneDrive/network volumes are not qualified. Read inspections retain shared
+  leases, so keep them short before exclusive recovery. This is process-kill
+  and explicit file-flush qualification, not a power-cut/directory-fsync claim.
+
+- 2026-10-17 (#105 W.1d): `isocast record` is now a private daemon client,
+  not in-process MacPlatform. IsolatedDaemon overrides only child storage
+  paths, keeps a sole lifetime-pipe writer and reaps the real child. The
+  daemon finishes on EOF (including killed CLI); `parent_owned` status
+  handshake refuses older signed apps that ignore the launch flag. Successful
+  exit cleans its runtime directory; failure/crash retains diagnostics.
+  Private engines do not register global hotkeys. Start/Stop timeouts and
+  lost event streams follow Status until the actual outcome; completed
+  reports print even if later cleanup fails. `setup check` keeps the same
+  capacity JSON through EstimateCapacity on a private engine. Windows still
+  refuses media via StubPlatform; owned-process control/lifetime is verified.
+
+- 2026-10-17 (#105, Ryan): Windows startup/recording performance is a
+  standing design requirement. Keep WGC D3D11 textures on GPU into wgpu
+  interop and native DirectX-resource NVENC; hardware MF fallback, software
+  last. Async low-latency recording-quality presets and per-ISO sessions
+  obey detected driver/session caps and existing priority/shedding. Measure
+  launch-to-preview/ready-to-record before setting targets; parallel device
+  opens, lazy work/pre-warm, no UI-thread blocking. From W.5 every report
+  compares matched 1080p60/4K60+ISO scenes against isolated OBS on exon-desk
+  (install allowed): startup/record-start latency, CPU/GPU/memory and drops.
+
+- 2026-10-17 (#105 #28, W.1b): the daemon selects `NativePlatform` once
+  in `platform.rs`; it is a re-export of MacPlatform on Mac (no wrapper or
+  dynamic dispatch), and StubPlatform elsewhere. Media/clock/credential,
+  snapshot, export and recovery calls use the trait. `app_identifier`
+  gains a trait hook, delegating to the same Keychain bundle-id lookup on
+  Mac. The stub is deliberately CPU-synthetic only, not a working renderer
+  or recorder; unsupported native operations fail rather than pretending
+  to capture, write, flush, protect secrets or measure free disk space.
+  Unix IPC/process hooks and native diagnostics/hotkeys/plugins are still
+  W.1c; their policy is not changed here.
+
+- 2026-10-17 (#105 #28, W.1a): W.0 hosted run 39043755843 is green on
+  both OSes, merged in 603c3ac. W.1 is sliced into engine build boundary,
+  daemon platform selection, OS services/IPC, CLI and UI. The engine keeps
+  exactly its macOS Metal features; Windows selects DX12. Non-Unix manifest
+  creation uses std's atomic `create_new` (Windows also opens the reparse
+  point), not an unchecked create/truncate. File/folder sync failures still
+  propagate; this is compile groundwork, not a claim of qualified Windows
+  durability. Security-103 is integrated; no daemon plugin policy changes.
 - 2026-10-17 (#114): **A recording goes to a new project unless one was
   chosen.** The current timeline used to take every finished take, and it
   never ended, so separate recordings became takes of one edit. Now the
@@ -1863,26 +2008,6 @@ each section. Delete entries that stop being true.
   let the name run into the empty ISO lane (`ListRow.label-room`).
   Gotcha: Slint `Text` layout info feeds the docks' layout, so any label
   chosen from its own dock's `width` is a binding loop error.
-- 2026-10-17 (#105 #28, W.1b): the daemon selects `NativePlatform` once
-  in `platform.rs`; it is a re-export of MacPlatform on Mac (no wrapper or
-  dynamic dispatch), and StubPlatform elsewhere. Media/clock/credential,
-  snapshot, export and recovery calls use the trait. `app_identifier`
-  gains a trait hook, delegating to the same Keychain bundle-id lookup on
-  Mac. The stub is deliberately CPU-synthetic only, not a working renderer
-  or recorder; unsupported native operations fail rather than pretending
-  to capture, write, flush, protect secrets or measure free disk space.
-  Unix IPC/process hooks and native diagnostics/hotkeys/plugins are still
-  W.1c; their policy is not changed here.
-
-- 2026-10-17 (#105 #28, W.1a): W.0 hosted run 39043755843 is green on
-  both OSes, merged in 603c3ac. W.1 is sliced into engine build boundary,
-  daemon platform selection, OS services/IPC, CLI and UI. The engine keeps
-  exactly its macOS Metal features; Windows selects DX12. Non-Unix manifest
-  creation uses std's atomic `create_new` (Windows also opens the reparse
-  point), not an unchecked create/truncate. File/folder sync failures still
-  propagate; this is compile groundwork, not a claim of qualified Windows
-  durability. Security-103 is integrated; no daemon plugin policy changes.
-
 - 2026-10-17 (#106): **Release notes live in `docs/releases/X.Y.Z.md`.**
   They are read at the tag (preflight via the contents API, the release
   job from its checkout), embedded in the appcast as markdown and used as
@@ -6206,6 +6331,34 @@ each section. Delete entries that stop being true.
 
 ## Gotchas
 
+- 2026-10-17 (#105 W.1e): NPFS refuses WAIT→NOWAIT with ERROR_PIPE_BUSY
+  while this endpoint has buffered outgoing bytes (even an 8-byte release),
+  or a blocking operation is pending. Stream keeps its previous mode and
+  exposes WouldBlock. On Windows only, SharedFrames::next(ZERO) defers that
+  poll instead of disconnecting; the next call retries. Native probes cover
+  buffered control, split JSON lines and peer-close-with-unread-ack at both
+  endpoints (mode change then succeeds, read EOF, no perpetual deferral).
+  A mode switch is not cancellation of old I/O. Pre-existing release writes
+  discard errors in Drop; full-control-buffer backpressure remains W.6 work.
+- 2026-10-17 (#105 W.1e): Pipe namespace v2 hashes binary owner SID plus
+  normalized path with domain/length separation. Stop old Windows engines
+  with their old client/API before replacing binaries; there is no insecure
+  legacy-name fallback. SID is public: namespacing prevents accidental
+  cross-user sharing, not targeted squatting. First-instance reservation,
+  protected owner-only DACL, kernel PID/token/pipe-owner checks and remote
+  refusal remain required. Cross-account negative testing remains unqualified.
+
+- 2026-10-17 (#105 W.1d): Do not build a baseline source tree into the same
+  Cargo target and then trust unchanged candidate fingerprints: source paths
+  and archive mtimes reused a baseline protocol artifact, which was caught by
+  the new parent_owned field failing to compile. Only the lane's affected
+  workspace packages were cleaned (third-party caches kept), then rebuilt.
+  Separate baseline target dirs avoid this; account for their disk cost.
+  Windows WMI executable paths may start `\\?\`; normalize that prefix before
+  checking that a process belongs to C:\isocast-dev (one probe wrongly counted
+  zero processes). New NLE XML exporters use Unix file URL assumptions;
+  Windows explicitly refuses XML until that seam is ported, not malformed
+  successful exports. OTIO plain-path behavior is unchanged.
 - 2026-10-17 (#114): **A `self.x.lock()` temporary in a struct literal
   lives to the end of the `let`.** Two `self.timelines.lock()` calls as
   fields of `Status { … }` deadlocked `status` (parking_lot isn't

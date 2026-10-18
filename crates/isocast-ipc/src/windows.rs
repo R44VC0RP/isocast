@@ -3,7 +3,8 @@ use std::net::Shutdown;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
@@ -19,7 +20,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::CancelIoEx;
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    GetNamedPipeServerProcessId, PeekNamedPipe, WaitNamedPipeW,
+    GetNamedPipeServerProcessId, PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_WAIT, PeekNamedPipe,
+    SetNamedPipeHandleState, WaitNamedPipeW,
 };
 
 mod name;
@@ -28,6 +30,8 @@ mod security;
 
 use operation::Operation;
 use security::{Peer, User};
+
+const PIPE_BUFFER_SIZE: u32 = 64 * 1024;
 
 /// A local, owner-only listener. The logical path's parent must exist.
 pub struct Listener {
@@ -41,8 +45,8 @@ pub struct Listener {
 
 impl Listener {
     pub fn bind(path: impl AsRef<Path>) -> io::Result<Self> {
-        let name = name::pipe_name(path.as_ref())?;
         let user = User::current()?;
+        let name = name::pipe_name(path.as_ref(), user.sid_bytes())?;
         let waiting = user.create_pipe(&name, true)?;
         Ok(Self {
             name,
@@ -84,8 +88,9 @@ impl Iterator for Incoming<'_> {
     }
 }
 
-/// Clones share the connection, shutdown state and timeout settings. One read
-/// and one write may run concurrently; operations in each direction serialize.
+/// Clones share the connection, shutdown state, nonblocking mode and timeouts.
+/// One read and one write may run concurrently; operations in each direction
+/// serialize (or return WouldBlock when nonblocking).
 pub struct Stream(Arc<State>);
 
 struct State {
@@ -94,6 +99,9 @@ struct State {
     pipe: Mutex<Option<Arc<Pipe>>>,
     read: Mutex<()>,
     write: Mutex<()>,
+    // Changes and native submissions serialize under pipe. Atomic access also
+    // lets a new nonblocking call avoid waiting for a busy direction lock.
+    nonblocking: AtomicBool,
     timeouts: Mutex<Timeouts>,
     _peer: Peer,
 }
@@ -106,8 +114,8 @@ struct Timeouts {
 
 impl Stream {
     pub fn connect(path: impl AsRef<Path>) -> io::Result<Self> {
-        let name = name::pipe_name(path.as_ref())?;
         let user = User::current()?;
+        let name = name::pipe_name(path.as_ref(), user.sid_bytes())?;
         let pipe = Pipe::connect(&name)?;
         let peer = user.verify_peer(&pipe)?;
         Ok(Self::new(pipe, peer))
@@ -118,6 +126,7 @@ impl Stream {
             pipe: Mutex::new(Some(Arc::new(pipe))),
             read: Mutex::new(()),
             write: Mutex::new(()),
+            nonblocking: AtomicBool::new(false),
             timeouts: Mutex::new(Timeouts::default()),
             _peer: peer,
         }))
@@ -136,6 +145,30 @@ impl Stream {
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         validate_timeout(timeout)?;
         lock(&self.0.timeouts).write = timeout;
+        Ok(())
+    }
+
+    /// Change both directions for this stream and all its clones. Nonblocking
+    /// reads/writes ignore timeouts; false restores the saved timeout settings.
+    ///
+    /// This is not cancellation: a call already in progress may finish in its
+    /// old mode. Windows can refuse a mode switch while I/O is outstanding;
+    /// that error leaves the previous mode intact. Use shutdown to wake blocked
+    /// I/O, not a mode switch (cancelling writes can lose accepted byte counts).
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        let state = lock(&self.0.pipe);
+        let pipe = state.as_ref().ok_or_else(closed)?;
+        if self.0.nonblocking.load(Ordering::Relaxed) == nonblocking {
+            return Ok(());
+        }
+        let mode = PIPE_READMODE_BYTE | if nonblocking { PIPE_NOWAIT } else { PIPE_WAIT };
+        // SAFETY: a live duplex handle, serialized against submission/shutdown.
+        // NOWAIT is used for immediate byte-stream results, not as a substitute
+        // for overlapped I/O. The listener's ConnectNamedPipe stays in PIPE_WAIT.
+        if unsafe { SetNamedPipeHandleState(pipe.raw(), &mode, null(), null()) } == 0 {
+            return Err(last_error());
+        }
+        self.0.nonblocking.store(nonblocking, Ordering::Release);
         Ok(())
     }
 
@@ -177,12 +210,13 @@ impl Stream {
         if buffer.is_empty() {
             return Ok(0);
         }
-        let _read = lock(&self.0.read);
+        let _read = self.lock_direction(&self.0.read)?;
         let timeout = lock(&self.0.timeouts).read;
         let state = lock(&self.0.pipe);
         let Some(pipe) = state.as_ref().cloned() else {
             return Ok(0);
         };
+        let nonblocking = self.0.nonblocking.load(Ordering::Relaxed);
         let mut operation = Operation::new(&pipe)?;
         // SAFETY: buffer stays exclusively borrowed until operation completes
         // or its drop cancels AND drains it, on every exit (including unwinding).
@@ -198,7 +232,15 @@ impl Stream {
             })
         };
         drop(state);
-        match submitted.and_then(|()| operation.wait(timeout)) {
+        let submitted = match submitted {
+            // ERROR_NO_DATA is ambiguous outside ReadFile. Check the live pipe
+            // rather than turning an empty poll into EOF or hiding a close.
+            Err(ERROR_NO_DATA) if nonblocking => pipe.check_connected().and(Err(would_block())),
+            result => result.map_err(win_error),
+        };
+        // PIPE_NOWAIT completes without waiting for peer data. Do not emulate
+        // it by submitting PIPE_WAIT and cancelling with a zero timeout.
+        match submitted.and_then(|()| operation.wait(if nonblocking { None } else { timeout })) {
             Ok(bytes) => Ok(bytes as usize),
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(0),
             Err(error) => Err(error),
@@ -209,10 +251,19 @@ impl Stream {
         if buffer.is_empty() {
             return Ok(0);
         }
-        let _write = lock(&self.0.write);
+        let _write = self.lock_direction(&self.0.write)?;
         let timeout = lock(&self.0.timeouts).write;
         let state = lock(&self.0.pipe);
         let pipe = state.as_ref().cloned().ok_or_else(closed)?;
+        let nonblocking = self.0.nonblocking.load(Ordering::Relaxed);
+        // Windows may return zero rather than a partial write if the whole
+        // request exceeds pipe quota. At least an empty pipe must make progress
+        // for large buffers. Return every native partial count unchanged.
+        let limit = if nonblocking {
+            PIPE_BUFFER_SIZE
+        } else {
+            u32::MAX
+        };
         let mut operation = Operation::new(&pipe)?;
         // SAFETY: buffer remains borrowed and unchanged until completion or the
         // operation's cancel-and-drain drop. The state lock serializes shutdown.
@@ -221,15 +272,32 @@ impl Stream {
                 WriteFile(
                     pipe.raw(),
                     buffer.as_ptr(),
-                    buffer.len().min(u32::MAX as usize) as u32,
+                    buffer.len().min(limit as usize) as u32,
                     null_mut(),
                     overlapped,
                 )
             })
         };
         drop(state);
-        submitted?;
-        operation.wait(timeout).map(|bytes| bytes as usize)
+        submitted.map_err(win_error)?;
+        // NOWAIT writes return the accepted count, including zero for no room.
+        // Never cancel a submitted blocking write to implement a poll: bytes
+        // may already have reached the peer before an aborted completion.
+        match operation.wait(if nonblocking { None } else { timeout })? {
+            0 if nonblocking => Err(would_block()),
+            bytes => Ok(bytes as usize),
+        }
+    }
+
+    fn lock_direction<'a>(&self, direction: &'a Mutex<()>) -> io::Result<MutexGuard<'a, ()>> {
+        if !self.0.nonblocking.load(Ordering::Acquire) {
+            return Ok(lock(direction));
+        }
+        match direction.try_lock() {
+            Ok(guard) => Ok(guard),
+            Err(TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+            Err(TryLockError::WouldBlock) => Err(would_block()),
+        }
     }
 }
 
@@ -353,8 +421,8 @@ impl Pipe {
         match unsafe { operation.submit(|overlapped| ConnectNamedPipe(self.raw(), overlapped)) } {
             Ok(()) => operation.wait(None).map(|_| ()),
             // A client can connect between CreateNamedPipe and ConnectNamedPipe.
-            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_CONNECTED as i32) => Ok(()),
-            Err(error) => Err(error),
+            Err(ERROR_PIPE_CONNECTED) => Ok(()),
+            Err(code) => Err(win_error(code)),
         }
     }
 
@@ -373,6 +441,25 @@ impl Pipe {
             return Err(last_error());
         }
         Ok(pid)
+    }
+
+    fn check_connected(&self) -> io::Result<()> {
+        // SAFETY: no output buffer and an overlapped handle: this probe cannot
+        // queue behind a synchronous read. A successful empty peek is not EOF.
+        if unsafe {
+            PeekNamedPipe(
+                self.raw(),
+                null_mut(),
+                0,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+            )
+        } == 0
+        {
+            return Err(last_error());
+        }
+        Ok(())
     }
 }
 
@@ -395,6 +482,10 @@ fn validate_timeout(timeout: Option<Duration>) -> io::Result<()> {
 
 fn closed() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "local pipe is closed")
+}
+
+fn would_block() -> io::Error {
+    io::Error::new(io::ErrorKind::WouldBlock, "local pipe I/O would block")
 }
 
 // SAFETY: callers pass only fresh handles returned by owning Win32 APIs,

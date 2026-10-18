@@ -1532,16 +1532,19 @@ fn audio_stop_errors(
 /// Write the manifest so that a reader (or a crash) never sees half of it.
 /// The `.partial` is made new (`O_EXCL | O_NOFOLLOW`), never written
 /// through whatever was at its name (a link a plugin put there, say).
+#[cfg(not(windows))]
 fn write_manifest(path: &Path, manifest: &SessionManifest) -> Result<()> {
     write_manifest_with(path, manifest, false)
 }
 
 /// Write the manifest and flush it (and its folder entry) through to the
 /// disk: for the checkpoint a pause reply vouches for.
+#[cfg(not(windows))]
 fn write_manifest_durable(path: &Path, manifest: &SessionManifest) -> Result<()> {
     write_manifest_with(path, manifest, true)
 }
 
+#[cfg(not(windows))]
 fn write_manifest_with(path: &Path, manifest: &SessionManifest, durable: bool) -> Result<()> {
     use std::io::Write;
     #[cfg(unix)]
@@ -1588,24 +1591,29 @@ fn write_manifest_with(path: &Path, manifest: &SessionManifest, durable: bool) -
 /// The file recordings in a folder lock (shared) while they write there, so
 /// a manifest a killed or crashed recording left saying "recording" can be
 /// told from one still being written.
+#[cfg(not(windows))]
 const FOLDER_LOCK: &str = ".isocast.lock";
 
 /// What an interrupted session's manifest says about it.
+#[cfg(not(windows))]
 const INTERRUPTED: &str = "the recording ended without finishing: the process recording it \
                            (isocastd or `isocast record`) was stopped or crashed; only completed \
                            fragments may be playable, and a file with no completed fragment may \
                            not open. Recoverable durations and frame counts are unknown; inspect \
                            every file's video and audio tracks";
 /// The same, for files a crash-safe writer left and recovery finished.
+#[cfg(not(windows))]
 const INTERRUPTED_RECOVERED: &str = "the recording ended without finishing: the process recording it (isocastd or `isocast \
      record`) was stopped or crashed. Its files were finished from the fragments that had \
      reached the disk; the durations here are what was recovered, frame counts are unknown";
 
 /// A recording's hold on its folder's lock, released when dropped.
+#[cfg(not(windows))]
 pub(crate) struct FolderLock {
     _file: std::fs::File,
 }
 
+#[cfg(not(windows))]
 impl FolderLock {
     /// Hold `folder`'s lock alongside other recordings there; `None` if the
     /// folder can't be locked (some network shares).
@@ -1616,6 +1624,40 @@ impl FolderLock {
     }
 }
 
+#[cfg(windows)]
+pub(crate) struct FolderLock {
+    directory: isocast_mux::file::Directory,
+}
+
+#[cfg(windows)]
+impl FolderLock {
+    pub(crate) fn hold(folder: &Path) -> Result<Self> {
+        Ok(Self {
+            directory: isocast_mux::file::Directory::for_recording(folder).with_context(|| {
+                format!(
+                    "could not acquire recording ownership of {}",
+                    folder.display()
+                )
+            })?,
+        })
+    }
+
+    pub(crate) fn write(
+        &self,
+        path: &Path,
+        manifest: &SessionManifest,
+        durable: bool,
+    ) -> Result<()> {
+        isocast_mux::recovery::write_manifest_in(
+            &self.directory,
+            path.file_name().context("manifest has no file name")?,
+            manifest,
+            durable,
+        )
+    }
+}
+
+#[cfg(not(windows))]
 fn lock_file(folder: &Path) -> Option<std::fs::File> {
     std::fs::OpenOptions::new()
         .create(true)
@@ -1630,6 +1672,12 @@ fn lock_file(folder: &Path) -> Option<std::fs::File> {
 /// while a recording writes in the folder (it holds the lock), or if the
 /// folder can't be read or locked. With `mark`, each is rewritten as failed,
 /// saying so.
+#[cfg(windows)]
+pub fn interrupted_sessions(folder: &Path, mark: bool) -> Vec<PathBuf> {
+    isocast_mux::recovery::interrupted_sessions(folder, mark).unwrap_or_default()
+}
+
+#[cfg(not(windows))]
 pub fn interrupted_sessions(folder: &Path, mark: bool) -> Vec<PathBuf> {
     let Some(lock) = lock_file(folder) else {
         return Vec::new();
@@ -1669,6 +1717,27 @@ pub fn interrupted_sessions(folder: &Path, mark: bool) -> Vec<PathBuf> {
 
 /// What to tell the user about `interrupted` sessions (see
 /// [`interrupted_sessions`]), marked or not.
+#[cfg(windows)]
+pub fn interrupted_note(interrupted: &[PathBuf], marked: bool) -> Option<String> {
+    if interrupted.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "earlier recordings {}: {}; inspect each manifest for verified media, unknown counts and any persistence errors",
+        if marked {
+            "were inspected for recovery"
+        } else {
+            "may have been interrupted"
+        },
+        interrupted
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))
+}
+
+#[cfg(not(windows))]
 pub fn interrupted_note(interrupted: &[PathBuf], marked: bool) -> Option<String> {
     let list = interrupted
         .iter()
@@ -1708,6 +1777,7 @@ pub fn interrupted_note(interrupted: &[PathBuf], marked: bool) -> Option<String>
 
 /// Both launch-time and recording-start recovery use the pause policy. An
 /// open pause stays open: the crash time cannot be reconstructed from its cut.
+#[cfg(not(windows))]
 fn annotate_interrupted_pauses(manifest: &mut SessionManifest) {
     if manifest.pauses.is_empty() {
         return;
@@ -1744,6 +1814,33 @@ fn annotate_interrupted_pauses(manifest: &mut SessionManifest) {
 
 /// Repair orphaned manifests only under the recording folder's exclusive
 /// lock. Probe durable media for duration; never infer frame/drop counts.
+#[cfg(windows)]
+pub fn recover_interrupted<P: Platform>(
+    _platform: &P,
+    folder: &Path,
+) -> Vec<isocast_protocol::manifest::InterruptedRecording> {
+    match isocast_mux::recovery::recover_directory(folder) {
+        Ok(recovery) => {
+            for warning in recovery.warnings {
+                isocast_diagnostics::diagnostic!("warn"; "recording recovery: {}: {warning}", folder.display());
+            }
+            recovery.sessions
+        }
+        Err(error) => {
+            // A live recording owns a shared lease; leave it alone. All other
+            // failures remain visible, rather than pretending repair succeeded.
+            if !error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+            {
+                isocast_diagnostics::diagnostic!("warn"; "recording recovery: {}: {error:#}", folder.display());
+            }
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(not(windows))]
 pub fn recover_interrupted<P: Platform>(
     platform: &P,
     folder: &Path,
@@ -1893,6 +1990,16 @@ pub fn recover_interrupted<P: Platform>(
 
 /// A controlled emergency stop finished the media normally, but the take
 /// was interrupted by a critical-state failure, not ended by the operator.
+#[cfg(windows)]
+pub fn mark_interrupted(report: &Report, why: &str) {
+    for path in &report.takes {
+        if let Err(error) = isocast_mux::recovery::mark_interrupted(path, why) {
+            isocast_diagnostics::diagnostic!("warn"; "could not mark emergency recording {}: {error:#}", path.display());
+        }
+    }
+}
+
+#[cfg(not(windows))]
 pub fn mark_interrupted(report: &Report, why: &str) {
     for path in &report.takes {
         if let Some(mut manifest) = std::fs::read_to_string(path)

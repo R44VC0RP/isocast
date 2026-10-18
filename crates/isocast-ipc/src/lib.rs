@@ -1,5 +1,12 @@
 //! The daemon's local byte-stream transport. Unix retains the standard
 //! library's types and behavior; Windows uses authenticated local named pipes.
+//!
+//! Windows pipe names include the process user's binary SID and the normalized
+//! logical path. This namespace replaced path-only names: restart existing
+//! Windows development daemons when upgrading; there is no old-name fallback.
+//! A SID is not secret. Namespace isolation does not prevent targeted name
+//! squatting; first-instance reservation, owner-only ACLs and peer checks remain
+//! the security boundary.
 
 #[cfg(unix)]
 pub use std::os::unix::net::{UnixListener as Listener, UnixStream as Stream};
