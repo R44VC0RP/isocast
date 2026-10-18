@@ -6,6 +6,14 @@
 // Each area has a global of its own for its data (areas/*/state.slint);
 // put things here only when more than one area needs them.
 
+// An extra canvas (#120), for the canvas monitor's switcher.
+export struct ExtraCanvas {
+    id: string,
+    label: string,
+    width: int,
+    height: int,
+}
+
 export enum ConnectionState { connecting, connected, disconnected, failed }
 
 export global Ui {
@@ -21,19 +29,26 @@ export global Ui {
     in property <int> canvas-width: 1920;
     in property <int> canvas-height: 1080;
     in property <int> canvas-fps: 30;
-    // The vertical canvas (#86): the setup has one, its size, its monitor
-    // shown beside the others (View → Vertical Canvas), and the editor
-    // edits it (the canvas-* above are then its).
-    in property <bool> has-vertical;
-    in property <int> vertical-width: 1080;
-    in property <int> vertical-height: 1920;
-    in-out property <bool> show-vertical: true;
-    in property <bool> editing-vertical;
-    // Which of two candidate layouts the vertical column uses (snapshots
+    // The extra canvases (#86, #120): the setup has one, the chosen one
+    // (its id, name and size; its monitor shown beside the others, View →
+    // Canvas Monitor), the editor edits it (the canvas-* above are then
+    // its), and every extra canvas, for the monitor's switcher.
+    in property <bool> has-extra;
+    in property <string> extra-id;
+    in property <string> extra-label: "Vertical";
+    in property <int> extra-width: 1080;
+    in property <int> extra-height: 1920;
+    in property <[ExtraCanvas]> extra-canvases;
+    in-out property <bool> show-extra: true;
+    // The extra canvas chosen for the monitor (its id; kept with the
+    // window's layout).
+    in-out property <string> extra-choice;
+    in property <bool> editing-extra;
+    // Which of two candidate layouts the canvas column uses (snapshots
     // choose between them, `--state vertical-layout:wide|compact`; not
     // saved): "wide" (up to 30% of the stage, as tall as the edited
     // monitor) or "compact" (up to 20%, at most 60% of its height).
-    in-out property <string> vertical-layout: "compact";
+    in-out property <string> extra-layout: "compact";
     // Streaming (the program's LIVE badge and its green ring; recording
     // alone keeps PGM and the 1px ring).
     in property <bool> live;

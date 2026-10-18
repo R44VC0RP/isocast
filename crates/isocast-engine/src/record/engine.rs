@@ -24,7 +24,6 @@ use isocast_protocol::api::{
 use isocast_protocol::manifest::SessionStatus;
 use isocast_protocol::{
     Canvas, CanvasId, Codec, Monitoring, PROGRAM, Setup, SourceKind, Transition, TransitionKind,
-    VERTICAL_PROGRAM,
 };
 
 use super::disk::{DiskMeter, DiskProbe};
@@ -1513,8 +1512,9 @@ impl<P: Platform> Engine<P> {
                 "virtual_camera.target: preview is empty; stage a scene with isocast preview ID, or choose program, scene or source"
             );
         }
-        if settings.target == Target::Vertical {
-            vertical_camera_slot(&self.inner, fps).map_err(anyhow::Error::msg)?;
+        let extra = settings.target_canvas();
+        if let Some(canvas) = extra {
+            canvas_camera_slot(&self.inner, canvas, fps).map_err(anyhow::Error::msg)?;
         }
         let status = VirtualCameraStatus {
             settings: settings.clone(),
@@ -1548,18 +1548,20 @@ impl<P: Platform> Engine<P> {
                         super::virtual_camera::Input::Scene(scenes, settings.scene.clone().unwrap())
                     }));
                 }
-                let target = match settings.target {
-                    Target::Program => PROGRAM,
-                    Target::Preview => "preview",
-                    Target::Source => settings.source.as_deref().unwrap(),
-                    Target::Vertical => VERTICAL_PROGRAM,
-                    Target::Scene => unreachable!(),
-                };
-                let slot = match settings.target {
-                    // A contained vertical failure fails the camera, saying
-                    // why, rather than dropping every frame quietly.
-                    Target::Vertical => vertical_camera_slot(&inner, fps),
-                    _ => slot_of(&inner, target, fps),
+                let slot = match (settings.target, extra) {
+                    // A contained failure of the extra canvas fails the
+                    // camera, saying why, rather than dropping every frame
+                    // quietly.
+                    (_, Some(canvas)) => canvas_camera_slot(&inner, canvas, fps),
+                    (Target::Program, None) => slot_of(&inner, PROGRAM, fps),
+                    (Target::Preview, None) => slot_of(&inner, "preview", fps),
+                    (Target::Source, None) => {
+                        slot_of(&inner, settings.source.as_deref().unwrap(), fps)
+                    }
+                    (Target::Scene | Target::Vertical | Target::Canvas, None) => Err(
+                        "virtual_camera.canvas: give an extra canvas's id for target = canvas"
+                            .to_string(),
+                    ),
                 };
                 let slot = match slot {
                     Ok(slot) => slot,
@@ -2693,14 +2695,24 @@ fn stream_source<P: Platform>(
 /// vertical), or why it has none: the canvas is off, or its program
 /// stopped (a contained vertical failure: `engine.vertical.stopped` says
 /// how it comes back).
-fn vertical_camera_slot<P: Platform>(
+/// The program slot of extra canvas `canvas` for the virtual camera
+/// (target = vertical or canvas), or why it can't show it.
+fn canvas_camera_slot<P: Platform>(
     inner: &Arc<Inner<P>>,
+    canvas: CanvasId,
     fps: u32,
 ) -> Result<Arc<FrameSlot<P::Frame>>, String> {
-    let slot = slot_of(inner, VERTICAL_PROGRAM, fps).map_err(|_| {
-        "virtual_camera.target: vertical needs the vertical canvas; turn it on ([vertical]) \
-         or give program, preview, scene or source"
-            .to_string()
+    let slot = slot_of(inner, &canvas.program_target(), fps).map_err(|_| {
+        if canvas.is_vertical() {
+            "virtual_camera.target: vertical needs the vertical canvas; turn it on ([vertical]) \
+             or give program, preview, scene or source"
+                .to_string()
+        } else {
+            format!(
+                "virtual_camera.canvas: the canvas {canvas:?} isn't on; add it ([[canvases]]) \
+                 or give another target"
+            )
+        }
     })?;
     if let Some(why) = slot.stopped() {
         let recovery = if why.contains("scene state is broken")
@@ -2708,10 +2720,10 @@ fn vertical_camera_slot<P: Platform>(
         {
             "restart the engine"
         } else {
-            "after recording stops, turn the vertical canvas off and on, or restart the engine"
+            "after recording stops, turn the canvas off and on, or restart the engine"
         };
         return Err(format!(
-            "virtual_camera: the vertical program stopped ({why}); {recovery}, then start \
+            "virtual_camera: the {canvas} program stopped ({why}); {recovery}, then start \
              the camera again, or give program"
         ));
     }

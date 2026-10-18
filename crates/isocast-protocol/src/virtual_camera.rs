@@ -16,8 +16,13 @@ pub struct VirtualCameraSettings {
     pub scene: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// The extra canvas (a `[[canvases]]` id, or `vertical`), for target
+    /// = canvas (#120).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas: Option<String>,
     /// Output dimensions; both absent uses the canvas (the vertical
-    /// canvas's for target = vertical). Other aspect ratios
+    /// canvas's for target = vertical, the extra canvas's for target =
+    /// canvas). Other aspect ratios
     /// are letterboxed. These are the camera extension's advertised modes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
@@ -35,6 +40,8 @@ pub enum Target {
     Source,
     /// The vertical canvas's program (`[vertical]` must be on).
     Vertical,
+    /// An extra canvas's program (`canvas`: a `[[canvases]]` id, #120).
+    Canvas,
 }
 
 /// Keep in the same order as camera-extension/Camera.swift.
@@ -52,13 +59,28 @@ impl VirtualCameraSettings {
         self == &Self::default()
     }
 
-    /// The canvas the camera's picture comes from: the vertical one for
-    /// target = vertical (the main one while the setup has none, which
-    /// `issues` reports), else the main one.
+    /// The extra canvas whose program the camera shows: the vertical one
+    /// for target = vertical, `canvas` for target = canvas; None for the
+    /// others (and an invalid `canvas`, which `issues` reports).
+    pub fn target_canvas(&self) -> Option<crate::CanvasId> {
+        match self.target {
+            Target::Vertical => Some(crate::CanvasId::Vertical),
+            Target::Canvas => self
+                .canvas
+                .as_deref()
+                .and_then(|id| crate::CanvasId::parse(id).ok())
+                .filter(|c| !c.is_main()),
+            _ => None,
+        }
+    }
+
+    /// The canvas the camera's picture comes from: the extra one for
+    /// target = vertical or canvas (the main one while the setup lacks
+    /// it, which `issues` reports), else the main one.
     fn canvas(&self, setup: &Setup) -> crate::Canvas {
-        match (&self.target, &setup.vertical) {
-            (Target::Vertical, Some(vertical)) => vertical.canvas(&setup.canvas),
-            _ => setup.canvas.clone(),
+        match self.target_canvas().and_then(|c| setup.extra_canvas(c)) {
+            Some(extra) => extra.canvas(&setup.canvas),
+            None => setup.canvas.clone(),
         }
     }
 
@@ -130,6 +152,35 @@ impl VirtualCameraSettings {
                     .into(),
             );
         }
+        if self.target == Target::Canvas {
+            let extras: Vec<String> = setup
+                .extra_canvas_ids()
+                .iter()
+                .map(|c| c.to_string())
+                .collect();
+            let listed = if extras.is_empty() {
+                "(none; add one in Settings › Video › Canvases)".to_string()
+            } else {
+                extras.join(", ")
+            };
+            match self.target_canvas() {
+                Some(canvas) if setup.has_canvas(canvas) => {}
+                Some(canvas) => add(
+                    "canvas",
+                    format!("{canvas:?} isn't an extra canvas of the setup; give one of: {listed}"),
+                ),
+                None => add(
+                    "canvas",
+                    format!("give an extra canvas's id for target = canvas: {listed}"),
+                ),
+            }
+        }
+        if self.target != Target::Canvas && self.canvas.is_some() {
+            add(
+                "canvas",
+                "only valid with target = canvas; otherwise omit canvas".into(),
+            );
+        }
         if self.target != Target::Scene && self.scene.is_some() {
             add(
                 "scene",
@@ -149,8 +200,8 @@ impl VirtualCameraSettings {
                 } else {
                     "height"
                 },
-                "give width and height together, or omit both for the canvas size (the vertical \
-                 canvas's for target = vertical)"
+                "give width and height together, or omit both for the canvas size (the extra \
+                 canvas's for target = vertical or canvas)"
                     .into(),
             );
         } else if self.width.is_some() && !SIZES.contains(&self.size(setup)) {

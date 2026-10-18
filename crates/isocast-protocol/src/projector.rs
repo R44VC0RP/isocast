@@ -13,10 +13,9 @@ use crate::devices::Display;
 /// The main canvas (`canvas`, the default).
 pub const MAIN_CANVAS: &str = "main";
 /// The setup's vertical canvas (#86, #96): its program, its own preview
-/// and its arrangement of a scene.
+/// and its arrangement of a scene. Any other extra canvas (`[[canvases]]`,
+/// #120) is named by its id the same way.
 pub const VERTICAL_CANVAS: &str = "vertical";
-/// The canvases a projector can show.
-pub const CANVASES: [&str; 2] = [MAIN_CANVAS, VERTICAL_CANVAS];
 
 /// What a projector shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -75,6 +74,12 @@ impl MultiviewLayout {
             Self::Grid3 => 7,
             Self::Grid2 => 2,
         }
+    }
+
+    /// The most extra canvases' programs it shows in place of scenes
+    /// (#120): half its scene tiles, at least one.
+    pub fn canvas_tiles(self) -> usize {
+        (self.scenes() / 2).max(1)
     }
 
     /// Where each tile goes, as fractions of the grid (x, y, width,
@@ -141,8 +146,9 @@ pub struct Projector {
     /// Stable while it is open (`projector-1`, …).
     pub id: String,
     pub view: ProjectorView,
-    /// The canvas it shows: `main`, or `vertical` (the setup's vertical
-    /// canvas: its program, preview or scene).
+    /// The canvas it shows: `main`, `vertical` (the setup's vertical
+    /// canvas) or a `[[canvases]]` id (#120): its program, preview or
+    /// scene.
     pub canvas: String,
     /// The scene, for `view = scene`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +163,11 @@ pub struct Projector {
     /// program instead of a scene.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vertical: bool,
+    /// For `view = multiview`: extra canvases (ids) whose programs fill
+    /// its last tiles instead of scenes, in order (#120); with
+    /// `vertical`, the vertical canvas's comes first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canvases: Vec<String>,
     #[serde(default)]
     pub placement: Placement,
     /// An app window shows it now (as the app last said). False while no
@@ -169,24 +180,47 @@ impl Projector {
     /// The `shared_frames` target its picture comes from (none for a
     /// multiview, whose tiles each have their own).
     pub fn target(&self) -> Option<String> {
-        let vertical = self.canvas == VERTICAL_CANVAS;
+        let canvas = self.canvas_id();
         match self.view {
-            ProjectorView::Program if vertical => Some(crate::VERTICAL_PROGRAM.into()),
-            ProjectorView::Program => Some("program".into()),
-            ProjectorView::Preview if vertical => Some(VERTICAL_PREVIEW.into()),
-            ProjectorView::Preview => Some("preview".into()),
-            ProjectorView::Scene if vertical => {
-                self.scene.as_ref().map(|id| vertical_scene_target(id))
-            }
-            ProjectorView::Scene => self.scene.as_ref().map(|id| scene_target(id)),
+            ProjectorView::Program => Some(canvas.program_target()),
+            ProjectorView::Preview => Some(canvas.preview_target()),
+            ProjectorView::Scene => self
+                .scene
+                .as_ref()
+                .map(|id| format!("{}{id}", canvas.scene_prefix())),
             ProjectorView::Source => self.source.clone(),
             ProjectorView::Multiview => None,
         }
     }
 
+    /// The canvas it shows (main if its `canvas` isn't a canvas id).
+    pub fn canvas_id(&self) -> crate::CanvasId {
+        crate::CanvasId::parse(&self.canvas).unwrap_or_default()
+    }
+
     /// Whether it shows the vertical canvas.
     pub fn is_vertical(&self) -> bool {
         self.canvas == VERTICAL_CANVAS
+    }
+
+    /// For a multiview: the extra canvases whose programs fill its last
+    /// tiles, in order (the vertical one first with `vertical`), each once.
+    pub fn tile_canvases(&self) -> Vec<crate::CanvasId> {
+        let mut out: Vec<crate::CanvasId> = Vec::new();
+        let ids = self
+            .vertical
+            .then_some(VERTICAL_CANVAS)
+            .into_iter()
+            .chain(self.canvases.iter().map(String::as_str));
+        for id in ids {
+            if let Ok(canvas) = crate::CanvasId::parse(id)
+                && !canvas.is_main()
+                && !out.contains(&canvas)
+            {
+                out.push(canvas);
+            }
+        }
+        out
     }
 
     /// Whether `other` shows the same picture (the same view of the same
@@ -228,8 +262,9 @@ pub struct OpenParams {
     /// The video source's id, for `view = source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// The canvas: `main` (the default), or `vertical` (the live setup's
-    /// vertical canvas; views program, preview and scene).
+    /// The canvas: `main` (the default), `vertical` (the live setup's
+    /// vertical canvas) or one of its `[[canvases]]` ids (#120); views
+    /// program, preview and scene.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas: Option<String>,
     /// The grid, for `view = multiview`: `top-8` (the default), `3x3` or
@@ -241,6 +276,13 @@ pub struct OpenParams {
     /// vertical canvas). Absent: as the open multiview has it, else no.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical: Option<bool>,
+    /// For `view = multiview`: extra canvases (`vertical` or
+    /// `[[canvases]]` ids) whose programs fill the grid's last tiles in
+    /// place of scenes, in order (#120); at most half the grid's scene
+    /// tiles (one in `2x2`). Absent: as the open multiview has it, else
+    /// none; empty: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvases: Option<Vec<String>>,
     /// `true`: full screen on `display` (the main display if absent);
     /// `false`: in a window. Absent: where the same view was last (a
     /// window the first time), or full screen if `display` is given.

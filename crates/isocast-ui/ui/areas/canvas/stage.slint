@@ -6,10 +6,11 @@
 // and the control bar. In Studio Mode it splits into Preview (left,
 // edited) and Program (right), each with its own viewer line (a PREVIEW
 // or PROGRAM tag and the scene's name), and the studio column (area C)
-// between them, as in OBS. A vertical canvas (#86) adds its program in a
-// column of its own at the stage's right (a VERTICAL tag, its scene and a
-// menu over it); editing the vertical canvas puts it in the monitors
-// instead, and that column goes.
+// between them, as in OBS. An extra canvas (#86, #120) adds its program in
+// a column of its own at the stage's right (its name as a tag, its scene
+// and a menu over it); with several, the menu switches which one the
+// column shows. Editing an extra canvas puts it in the monitors instead,
+// and that column goes.
 
 import { Theme } from "../../theme.slint";
 import { Ui } from "../../state.slint";
@@ -18,11 +19,11 @@ import { CanvasArea } from "state.slint";
 import { Monitor } from "monitor.slint";
 import { StudioColumn } from "../controls/studio.slint";
 
-// The canvas's format: "1920×1080 · 30p" ("Vertical · 1080×1920 · 30p"
-// while editing the vertical canvas).
+// The canvas's format: "1920×1080 · 30p" ("Shorts · 1080×1920 · 30p"
+// while editing an extra canvas).
 global Format {
-    out property <string> canvas: (Ui.editing-vertical ? "Vertical · " : "") + Ui.canvas-width + "×" + Ui.canvas-height + " · " + Ui.canvas-fps + "p";
-    out property <string> vertical: Ui.vertical-width + "×" + Ui.vertical-height;
+    out property <string> canvas: (Ui.editing-extra ? Ui.extra-label + " · " : "") + Ui.canvas-width + "×" + Ui.canvas-height + " · " + Ui.canvas-fps + "p";
+    out property <string> extra: Ui.extra-width + "×" + Ui.extra-height;
 }
 
 // A viewer line's small text (11px `text-3`).
@@ -177,30 +178,32 @@ component MonitorHead inherits Rectangle {
     }
 }
 
-// The vertical monitor's line (#86): its tag (VERTICAL, green while it
-// streams), its scene, and its menu (Vertical Canvas: show, edit, record,
-// stream, settings).
+// The canvas monitor's line (#86, #120): its tag (the canvas's name, red
+// while it streams), its scene, and its menu (the canvases to show when
+// there are several, then show, edit, record, stream, projector,
+// settings).
 // It is as wide as the picture, so in a narrow one the size makes way
 // first (the menu keeps its chevron, and says the size to screen
 // readers), then the scene's name (#108); nothing runs past its edge.
 // What it drops is in its tooltip and accessible label (#112).
-component VerticalHead inherits Rectangle {
+component CanvasHead inherits Rectangle {
     height: Theme.statusbar;
     clip: true;
     accessible-role: groupbox;
-    accessible-label: "Vertical canvas " + Format.vertical + ", " + CanvasArea.vertical-name;
+    accessible-label: Ui.extra-label + " canvas " + Format.extra + ", " + CanvasArea.extra-name;
 
+    property <string> tag-word: Ui.extra-label.to-uppercase();
     // What the size and the name would take (measured off the layout, so
     // choosing what shows can't loop through it).
     size-words := Text {
         visible: false;
-        text: Format.vertical;
+        text: Format.extra;
         font-size: Theme.fs-xs;
         letter-spacing: Theme.tracking-xs;
     }
     long-tag := Tag {
         visible: false;
-        text: "VERTICAL · REC";
+        text: root.tag-word + " · REC";
     }
     // Recording, a narrow head's tag says just "REC".
     property <bool> long-tag-fits: long-tag.preferred-width + 4px <= root.width;
@@ -208,13 +211,13 @@ component VerticalHead inherits Rectangle {
     property <bool> show-size: root.fixed + size-words.preferred-width + Theme.space-1 + min(name.preferred-width, 48px) <= root.width;
     property <bool> show-name: root.fixed + 24px <= root.width;
     // Without room for even the chevron, its menu is on a right-click on
-    // the picture and in View › Vertical Canvas.
+    // the picture and in View › Canvases.
     property <bool> show-menu: root.fixed <= root.width;
 
     // The name (and the menu) it had to drop, on hover (#112).
     if !root.show-name || !root.show-menu || name.preferred-width > name.width + 0.5px: Tooltip {
         Tip {
-            text: CanvasArea.vertical-name + " · " + Format.vertical + (root.show-menu ? "" : ". Right-click the picture for its menu");
+            text: Ui.extra-label + ": " + CanvasArea.extra-name + " · " + Format.extra + (root.show-menu ? "" : ". Right-click the picture for its menu");
         }
     }
 
@@ -223,14 +226,14 @@ component VerticalHead inherits Rectangle {
         padding-right: 2px;
         spacing: Theme.space-2;
         tag := Tag {
-            text: CanvasArea.vertical-record ? (root.long-tag-fits ? "VERTICAL · REC" : "REC") : "VERTICAL";
-            tone: CanvasArea.vertical-live ? TagTone.program : TagTone.neutral;
+            text: CanvasArea.extra-record ? (root.long-tag-fits ? root.tag-word + " · REC" : "REC") : root.tag-word;
+            tone: CanvasArea.extra-live ? TagTone.program : TagTone.neutral;
         }
         name := Text {
             horizontal-stretch: 1;
             min-width: 0px;
             opacity: root.show-name ? 1 : 0;
-            text: CanvasArea.vertical-name;
+            text: CanvasArea.extra-name;
             color: Theme.text;
             font-size: Theme.fs-sm;
             font-weight: Theme.weight-medium;
@@ -241,10 +244,10 @@ component VerticalHead inherits Rectangle {
         if root.show-menu: VerticalLayout {
             alignment: center;
             TextMenuButton {
-                text: root.show-size ? Format.vertical : "";
-                label: "Vertical canvas " + Format.vertical;
-                menu-open: Menus.open && Menus.owner == "viewer:vertical";
-                clicked => { Menus.request("viewer:vertical", self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+                text: root.show-size ? Format.extra : "";
+                label: Ui.extra-label + " canvas " + Format.extra + (Ui.extra-canvases.length > 1 ? ", switch canvas" : "");
+                menu-open: Menus.open && Menus.owner == "viewer:extra";
+                clicked => { Menus.request("viewer:extra", self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
             }
         }
     }
@@ -277,13 +280,14 @@ export component Stage inherits Rectangle {
     out property <length> program-height: Ui.studio ? program.picture-height : 0;
     out property <int> program-pixel-width: program.picture-pixel-width;
     out property <int> program-pixel-height: program.picture-pixel-height;
-    // The vertical canvas's program picture (#86; zero size when hidden).
-    out property <length> vertical-x: vertical.picture-left;
-    out property <length> vertical-y: vertical.picture-top;
-    out property <length> vertical-width: root.v-shown ? vertical.picture-width : 0;
-    out property <length> vertical-height: root.v-shown ? vertical.picture-height : 0;
-    out property <int> vertical-pixel-width: vertical.picture-pixel-width;
-    out property <int> vertical-pixel-height: vertical.picture-pixel-height;
+    // The chosen extra canvas's program picture (#86, #120; zero size
+    // when hidden).
+    out property <length> extra-x: extra.picture-left;
+    out property <length> extra-y: extra.picture-top;
+    out property <length> extra-width: root.v-shown ? extra.picture-width : 0;
+    out property <length> extra-height: root.v-shown ? extra.picture-height : 0;
+    out property <int> extra-pixel-width: extra.picture-pixel-width;
+    out property <int> extra-pixel-height: extra.picture-pixel-height;
     // The whole stage (the native layers' area).
     out property <length> stage-x: root.absolute-position.x;
     out property <length> stage-y: root.absolute-position.y;
@@ -296,11 +300,11 @@ export component Stage inherits Rectangle {
     property <length> head: Theme.statusbar;
     property <bool> actual: Ui.preview-scale == "canvas";
     property <float> aspect: max(1, Ui.canvas-width) / max(1, Ui.canvas-height);
-    // The vertical column (#86): its picture as tall as the stage allows,
+    // The canvas column (#86, #120): its picture as tall as the stage allows,
     // at most 30% of the stage's width; the rest is the main stage's.
-    property <bool> v-shown: Ui.has-setup && Ui.has-vertical && Ui.show-vertical && !Ui.editing-vertical;
-    property <float> v-aspect: max(1, Ui.vertical-width) / max(1, Ui.vertical-height);
-    property <bool> v-compact: Ui.vertical-layout == "compact";
+    property <bool> v-shown: Ui.has-setup && Ui.has-extra && Ui.show-extra && !Ui.editing-extra;
+    property <float> v-aspect: max(1, Ui.extra-width) / max(1, Ui.extra-height);
+    property <bool> v-compact: Ui.extra-layout == "compact";
     property <length> v-pic-w: min(root.width * (root.v-compact ? 0.2 : 0.3), max(0px, root.height - root.pad - root.head) * (root.v-compact ? 0.6 : 1) * root.v-aspect);
     property <length> v-pic-h: root.v-pic-w / root.v-aspect;
     property <length> v-column: root.v-shown ? root.v-pic-w + root.pad : 0px;
@@ -350,7 +354,7 @@ export component Stage inherits Rectangle {
         actual-size: root.actual;
         editor: true;
         picture: CanvasArea.picture;
-        program-live: !Ui.studio && (Ui.editing-vertical ? CanvasArea.vertical-live : Ui.live);
+        program-live: !Ui.studio && (Ui.editing-extra ? CanvasArea.extra-live : Ui.live);
         empty-text: CanvasArea.empty-text;
         waiting: CanvasArea.waiting;
         error-text: CanvasArea.picture-error;
@@ -365,7 +369,7 @@ export component Stage inherits Rectangle {
         actual-size: root.actual;
         editor: false;
         picture: CanvasArea.program-picture;
-        program-live: Ui.editing-vertical ? CanvasArea.vertical-live : Ui.live;
+        program-live: Ui.editing-extra ? CanvasArea.extra-live : Ui.live;
         empty-text: CanvasArea.program-empty-text;
         waiting: CanvasArea.program-waiting;
     }
@@ -391,39 +395,39 @@ export component Stage inherits Rectangle {
         name: CanvasArea.program-name;
         info: Format.canvas;
     }
-    // The vertical canvas's program: kept made and hidden (as Studio
+    // The chosen extra canvas's program: kept made and hidden (as Studio
     // Mode's program is), its line over it; as tall as the edited monitor
     // when the stage's height limits it, else centred.
     property <length> v-head-y: max(0px, (root.height - root.pad - root.head - root.v-pic-h) / 2);
-    vertical := Monitor {
+    extra := Monitor {
         visible: root.v-shown;
         x: root.main-w;
         y: root.v-head-y + root.head;
         width: root.v-shown ? root.v-pic-w : 0;
         height: root.v-shown ? root.v-pic-h : 0;
-        canvas-width: max(1, Ui.vertical-width);
-        canvas-height: max(1, Ui.vertical-height);
-        label: "Vertical";
+        canvas-width: max(1, Ui.extra-width);
+        canvas-height: max(1, Ui.extra-height);
+        label: Ui.extra-label;
         editor: false;
-        picture: CanvasArea.vertical-picture;
-        program-live: CanvasArea.vertical-live;
-        empty-text: CanvasArea.vertical-empty-text;
-        waiting: CanvasArea.vertical-waiting;
+        picture: CanvasArea.extra-picture;
+        program-live: CanvasArea.extra-live;
+        empty-text: CanvasArea.extra-empty-text;
+        waiting: CanvasArea.extra-waiting;
     }
-    // Right-click on the vertical picture: its menu, with Open Projector
+    // Right-click on the canvas picture: its menu, with Open Projector
     // (#96). Draws nothing.
     if root.v-shown: TouchArea {
-        x: vertical.x;
-        y: vertical.y;
-        width: vertical.width;
-        height: vertical.height;
+        x: extra.x;
+        y: extra.y;
+        width: extra.width;
+        height: extra.height;
         pointer-event(event) => {
             if event.kind == PointerEventKind.up && event.button == PointerEventButton.right {
-                Menus.request("vertical-monitor", self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, 0, 0);
+                Menus.request("extra-monitor", self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y, 0, 0);
             }
         }
     }
-    if root.v-shown: VerticalHead {
+    if root.v-shown: CanvasHead {
         x: root.main-w;
         y: root.v-head-y;
         width: root.v-pic-w;

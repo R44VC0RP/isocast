@@ -4737,14 +4737,20 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
                                         && !setup.source(id).is_some_and(|s| s.kind.has_video())
                                 })
                         }
-                        Target::Vertical => previous.vertical.is_some() && setup.vertical.is_none(),
+                        Target::Vertical | Target::Canvas => {
+                            after
+                                .target_canvas()
+                                .is_some_and(|c| previous.has_canvas(c) && !setup.has_canvas(c))
+                                && before.canvas == after.canvas
+                        }
                         _ => false,
                     };
                 if removed {
-                    notes.push("virtual_camera: its selected scene/video source (or the vertical canvas) was removed while stopped; falling back to program".into());
+                    notes.push("virtual_camera: its selected scene/video source (or extra canvas) was removed while stopped; falling back to program".into());
                     setup.virtual_camera.target = Target::Program;
                     setup.virtual_camera.scene = None;
                     setup.virtual_camera.source = None;
+                    setup.virtual_camera.canvas = None;
                     changes = diff(&current, &to_json(&setup)?);
                 }
             }
@@ -4759,12 +4765,17 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
             // does the vertical canvas it shows (target = vertical).
             if state.camera.active()
                 && state.setup.as_ref().is_some_and(|current| {
-                    let vertical = |s: &Setup| s.vertical.as_ref().map(|v| v.canvas(&s.canvas));
+                    // The extra canvas it shows (target = vertical or canvas).
+                    let shown = |s: &Setup| {
+                        current
+                            .virtual_camera
+                            .target_canvas()
+                            .and_then(|c| s.extra_canvas(c))
+                            .map(|v| v.canvas(&s.canvas))
+                    };
                     current.canvas != setup.canvas
                         || current.virtual_camera != setup.virtual_camera
-                        || (current.virtual_camera.target
-                            == isocast_protocol::virtual_camera::Target::Vertical
-                            && vertical(current) != vertical(&setup))
+                        || shown(current) != shown(&setup)
                 })
             {
                 problems.push(Issue { path: "virtual_camera".into(), message: "stop the virtual camera before changing its settings or canvas; scene contents can be edited live".into() });

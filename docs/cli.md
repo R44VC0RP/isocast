@@ -2331,8 +2331,9 @@ Options:
       --window             In a window (where this view was last, unless --frame)
       --frame <X,Y,W,H>    The window's place: X,Y,WIDTH,HEIGHT in points from the main display's top left
       --layout <LAYOUT>    The multiview's grid: top-8 (the default), 3x3 or 2x2 [possible values: top-8, 3x3, 2x2]
-      --canvas <CANVAS>    The canvas: main (the default), or vertical (the setup's vertical canvas: its program, preview or a scene as it arranges it) [possible values: main, vertical]
+      --canvas <CANVAS>    The canvas: main (the default), vertical (the setup's vertical canvas) or a [[canvases]] id (`isocast canvas list`): its program, preview or a scene as it arranges it
       --vertical [<BOOL>]  A multiview's last tile shows the vertical canvas's program instead of a scene (--vertical=false takes it back out) [possible values: true, false]
+      --canvases [<ID,…>]  A multiview's last tiles show these extra canvases' programs instead of scenes: ids, comma-separated (`isocast canvas list`); --canvases= takes them back out
       --json               
   -h, --help               Print help
 ```

@@ -95,7 +95,7 @@ SIZES = [
 ]
 # From the window's minimum width (900 points, ui/app.slint) up.
 SWEEP = "900-2700:200@900x1"
-SWEEP_VIEWS = ["main", "studio-mode", "vertical-canvas", "settings-output", "editor"]
+SWEEP_VIEWS = ["main", "studio-mode", "vertical-canvas", "canvases", "settings-output", "editor"]
 
 MAIN = (
     "the main window: a Scenes dock and a Sources dock on the left, the "
@@ -124,6 +124,27 @@ VIEWS = [
     ("projector-vertical", ["vertical-canvas:on", "projector:vertical-program", "wait:1000"], "a projector window "
      "showing the vertical (9:16) canvas's program picture (this setup's scenes are made for 16:9, "
      "so the picture may fill only part of the tall canvas; the rest is black)", {}),
+    ("canvases", ["vertical-canvas:on", "extra-canvases:shorts=1080x1920,square=1080x1080",
+                  "extra-canvas:square", "wait:800"], MAIN + "; besides the main canvas the setup has "
+     "three extra canvases (Vertical, Shorts, Square); the Square canvas's picture shows in a column "
+     "of its own at the stage's right, under a line with its name as a tag (SQUARE), its scene and a "
+     "size menu (1080×1080 ⌄)", {}),
+    ("canvases-menu", ["vertical-canvas:on", "extra-canvases:shorts=1080x1920,square=1080x1080",
+                       "wait:800", "menu:viewer:extra", "wait:300"], MAIN + "; a canvas column at the "
+     "stage's right, and its menu open: the three extra canvases (Vertical checked, Shorts, Square) "
+     "with their sizes, then show, edit, record, stream, replay and projector items", {}),
+    ("edit-canvas-extra", ["vertical-canvas:on", "extra-canvases:shorts=1080x1920", "wait:800",
+                           "edit-canvas:shorts", "wait:800"], MAIN + "; the editor edits the Shorts "
+     "canvas, so the preview is a tall 9:16 picture and the viewer line says Shorts · 1080×1920; "
+     "the canvas column is gone while editing it", {}),
+    ("projector-canvas", ["extra-canvases:square=1080x1080", "wait:800", "projector:square-program",
+                          "wait:1000"], "a projector window showing an extra square (1:1) canvas's "
+     "program picture (this setup's scenes are made for 16:9, so the picture may fill only part of "
+     "the square; the rest is black)", {}),
+    ("multiview-canvases", ["vertical-canvas:on", "extra-canvases:square=1080x1080", "wait:1500",
+                            "studio", "projector:multiview", "wait:1000"], "a Multiview projector "
+     "window: large Preview and Program tiles on top, scene tiles below, and its last two tiles "
+     "show the extra canvases' programs, labelled VERTICAL and SQUARE", {}),
     ("editor", ["editor", "wait:800", "create-thumbs"], "the Editor window: the picture viewer on top "
      "(no transport row: playback is by keys), a toolbar row (edit tools pill, the timeline's name "
      "and length, Export, a zoom slider), and a timeline with a time ruler and playhead, a Program "

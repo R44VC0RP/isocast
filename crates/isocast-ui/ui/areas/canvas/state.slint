@@ -77,15 +77,15 @@ export global CanvasArea {
     in property <bool> waiting;
     in property <string> picture-error;
     in property <bool> program-waiting;
-    // The vertical canvas's monitor beside the others (#86): its picture,
-    // no frame yet, what it says instead of one, the scene on air on it,
-    // and whether it is recorded and live.
-    in property <image> vertical-picture;
-    in property <bool> vertical-waiting;
-    in property <string> vertical-empty-text;
-    in property <string> vertical-name;
-    in property <bool> vertical-record;
-    in property <bool> vertical-live;
+    // The chosen extra canvas's monitor beside the others (#86, #120):
+    // its picture, no frame yet, what it says instead of one, the scene on
+    // air on it, and whether it is recorded and live.
+    in property <image> extra-picture;
+    in property <bool> extra-waiting;
+    in property <string> extra-empty-text;
+    in property <string> extra-name;
+    in property <bool> extra-record;
+    in property <bool> extra-live;
     // Studio Mode's monitor heads: the scenes in preview and on air.
     in property <string> preview-name;
     in property <string> program-name;

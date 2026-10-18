@@ -123,6 +123,9 @@ impl App {
             crate::platform::apply_system_settings(window);
         }
         app.session.borrow_mut().studio = window.global::<Ui>().get_studio();
+        // The extra canvas the canvas monitor showed last (#120).
+        app.session.borrow_mut().extra_choice =
+            isocast_protocol::CanvasId::parse(&window.global::<Ui>().get_extra_choice()).ok();
         app.connect(window);
         for area in app.areas() {
             area.connect(&app, window);
@@ -343,7 +346,10 @@ impl App {
             }
             Event::CanvasSceneChanged { canvas, scene, .. } => {
                 if !canvas.is_main() {
-                    self.session.borrow_mut().vertical_scene = Some(scene.clone());
+                    self.session
+                        .borrow_mut()
+                        .canvas_scenes
+                        .insert(*canvas, scene.clone());
                     self.changed(Changed::SCENES);
                 }
             }
@@ -351,7 +357,10 @@ impl App {
                 if !canvas.is_main() {
                     {
                         let mut s = self.session.borrow_mut();
-                        s.vertical_preview = scene.clone();
+                        match scene {
+                            Some(scene) => s.canvas_previews.insert(*canvas, scene.clone()),
+                            None => s.canvas_previews.remove(canvas),
+                        };
                         s.studio = s.staged().is_some();
                     }
                     self.changed(Changed::SCENES);
@@ -405,12 +414,10 @@ impl App {
                 self.session.borrow_mut().vcam = Some(camera.clone());
                 self.changed(Changed::VCAM);
             }
-            // The Controls dock shows the main canvas's buffer; the
-            // vertical one's (`isocast replay --canvas vertical`) isn't
-            // shown here yet.
-            Event::Replay { replay } if !replay.canvas.is_main() => {}
+            // The Controls dock shows the main canvas's buffer; the canvas
+            // monitor's menu the others' (#120).
             Event::Replay { replay } => {
-                self.session.borrow_mut().replay = Some(replay.clone());
+                self.session.borrow_mut().set_replay(replay.clone());
                 self.changed(Changed::REPLAY);
             }
             // The window that asked says so itself; a hotkey's or another
@@ -462,10 +469,18 @@ impl App {
             Event::Stream { stream } => {
                 let (before, several) = {
                     let s = self.session.borrow();
-                    let list = if stream.canvas.is_main() {
+                    let list: &[isocast_protocol::stream::StreamStatus] = if stream.canvas.is_main()
+                    {
                         &s.streams
-                    } else {
+                    } else if stream.canvas.is_vertical() {
                         &s.vertical_streams
+                    } else {
+                        // A canvas the session doesn't know (yet): no
+                        // earlier state.
+                        s.canvases
+                            .iter()
+                            .find(|c| c.id == stream.canvas)
+                            .map_or(&[], |c| c.streams.as_slice())
                     };
                     let before = list.iter().find(|x| x.id == stream.id).map(|x| x.state);
                     (before, list.len() > 1)
@@ -473,9 +488,15 @@ impl App {
                 self.session.borrow_mut().set_stream(stream.clone());
                 // Each destination says so itself when there are several.
                 let canvas = if stream.canvas.is_main() {
-                    ""
+                    String::new()
                 } else {
-                    "vertical "
+                    format!(
+                        "{} ",
+                        self.session
+                            .borrow()
+                            .canvas_label(stream.canvas)
+                            .to_lowercase()
+                    )
                 };
                 let what = if several {
                     format!("the {canvas}stream to {}", stream.id)
@@ -612,18 +633,36 @@ impl App {
                 format!("Isocast — {name}").into()
             });
             ui.set_setup_name(name.into());
-            // The canvas being edited: the vertical one's while editing it.
+            // The canvas being edited: an extra one's while editing it.
             if let Some(setup) = s.edited_setup() {
                 ui.set_canvas_width(setup.canvas.width as i32);
                 ui.set_canvas_height(setup.canvas.height as i32);
                 ui.set_canvas_fps(setup.canvas.fps as i32);
             }
-            ui.set_has_vertical(s.vertical.is_some());
-            ui.set_editing_vertical(s.editing_vertical());
-            if let Some(vertical) = &s.vertical {
-                ui.set_vertical_width(vertical.canvas.width as i32);
-                ui.set_vertical_height(vertical.canvas.height as i32);
+            // The extra canvases (#120): the chosen one's monitor and the
+            // monitor's canvas switcher.
+            ui.set_has_extra(s.extra.is_some());
+            ui.set_editing_extra(s.editing_extra());
+            if let (Some(extra), Some(canvas)) = (&s.extra, s.extra_canvas()) {
+                ui.set_extra_width(extra.canvas.width as i32);
+                ui.set_extra_height(extra.canvas.height as i32);
+                ui.set_extra_id(canvas.as_str().into());
+                ui.set_extra_label(s.canvas_label(canvas).into());
             }
+            let canvases: Vec<crate::ExtraCanvas> = s
+                .extra_canvases()
+                .into_iter()
+                .filter_map(|canvas| {
+                    let size = s.setup.as_ref()?.extra_canvas(canvas)?;
+                    Some(crate::ExtraCanvas {
+                        id: canvas.as_str().into(),
+                        label: s.canvas_label(canvas).into(),
+                        width: size.width as i32,
+                        height: size.height as i32,
+                    })
+                })
+                .collect();
+            ui.set_extra_canvases(slint::ModelRc::new(slint::VecModel::from(canvases)));
         }
         if changed.any(Changed::SCENES | Changed::SETUP) {
             ui.set_on_air_scene(s.on_air().cloned().unwrap_or_default().into());
@@ -758,8 +797,8 @@ impl App {
     }
 
     /// `edit`, then `done` with whether the daemon applied it. While the
-    /// canvas editor edits the vertical canvas, what the patch changes in
-    /// scenes' items goes to their vertical items (#86).
+    /// canvas editor edits an extra canvas, what the patch changes in
+    /// scenes' items goes to their arrangement for it (#86, #120).
     pub fn edit_then(
         self: &Rc<Self>,
         patch: Value,
@@ -785,9 +824,9 @@ impl App {
     ) {
         {
             let mut s = self.session.borrow_mut();
-            let patch = match (canvas, s.setup_json()) {
-                (CanvasId::Vertical, Some(shown)) if s.vertical.is_some() => {
-                    model::route_vertical(shown, patch)
+            let patch = match s.setup_json() {
+                Some(shown) if model::canvas_json(shown, canvas).is_object() => {
+                    model::route_canvas(shown, canvas, patch)
                 }
                 _ => patch,
             };
@@ -1143,13 +1182,12 @@ impl App {
                     if !s.busy_stream {
                         s.set_streams(status.stream.clone(), status.streams.clone());
                     }
-                    if !s.busy_vertical_stream {
+                    if !s.busy_canvas_stream {
                         s.vertical_streams = status.vertical_streams.clone();
                         s.canvases = status.canvases.clone();
                     }
                     if fresh {
-                        s.vertical_scene = status.vertical_scene.clone();
-                        s.vertical_preview = status.vertical_preview.clone();
+                        s.set_canvas_scenes(&status.canvases);
                         s.studio = s.staged().is_some();
                     }
                     if !s.busy_vcam {
@@ -1199,7 +1237,7 @@ impl App {
     }
 
     /// Click on a scene: on air, or into preview in Studio Mode. While
-    /// editing a vertical canvas with scenes of its own, its scene (#86);
+    /// editing an extra canvas with scenes of its own, its scene (#86);
     /// one that follows the main canvas switches with it.
     pub fn choose_scene(self: &Rc<Self>, id: &str) {
         let (studio, canvas) = {
@@ -1208,13 +1246,16 @@ impl App {
             s.selection = None;
             let canvas = s.scene_canvas();
             let studio = s.studio;
-            let slot = match (studio, canvas) {
-                (true, CanvasId::Main) => &mut s.preview,
-                (false, CanvasId::Main) => &mut s.scene,
-                (true, _) => &mut s.vertical_preview,
-                (false, _) => &mut s.vertical_scene,
-            };
-            *slot = Some(id.to_string());
+            match (studio, canvas) {
+                (true, CanvasId::Main) => s.preview = Some(id.to_string()),
+                (false, CanvasId::Main) => s.scene = Some(id.to_string()),
+                (true, other) => {
+                    s.canvas_previews.insert(other, id.to_string());
+                }
+                (false, other) => {
+                    s.canvas_scenes.insert(other, id.to_string());
+                }
+            }
             (studio, canvas)
         };
         self.changed(Changed::SCENES | Changed::SELECTION);
@@ -1244,7 +1285,7 @@ impl App {
     }
 
     /// Studio Mode: put the preview on air with `transition` (a quick
-    /// transition) or the setup's; the vertical canvas's own preview while
+    /// transition) or the setup's; an extra canvas's own preview while
     /// editing it, if it has scenes of its own (#86).
     pub fn take(self: &Rc<Self>, transition: Option<isocast_protocol::Transition>) {
         let canvas = {
@@ -1259,9 +1300,11 @@ impl App {
                     let on_air = s.scene.replace(preview);
                     s.preview = on_air;
                 }
-                _ => {
-                    let on_air = s.vertical_scene.replace(preview);
-                    s.vertical_preview = on_air;
+                other => {
+                    match s.canvas_scenes.insert(other, preview) {
+                        Some(on_air) => s.canvas_previews.insert(other, on_air),
+                        None => s.canvas_previews.remove(&other),
+                    };
                 }
             }
             canvas
@@ -1315,59 +1358,56 @@ impl App {
                 }
             });
         }
-        self.stage_vertical_preview();
+        self.stage_extra_preview();
     }
 
-    /// Studio Mode while editing a vertical canvas with scenes of its own
-    /// (#86): its own preview starts with the scene on air on it, and is
-    /// cleared when Studio Mode ends.
-    pub fn stage_vertical_preview(self: &Rc<Self>) {
-        let action = {
+    /// Studio Mode while editing an extra canvas with scenes of its own
+    /// (#86, #120): its own preview starts with the scene on air on it,
+    /// and is cleared when Studio Mode ends.
+    pub fn stage_extra_preview(self: &Rc<Self>) {
+        let (canvas, action) = {
             let mut s = self.session.borrow_mut();
-            if s.scene_canvas() != CanvasId::Vertical {
+            let canvas = s.scene_canvas();
+            if canvas.is_main() {
                 return;
             }
-            match (s.studio, s.vertical_preview.is_some()) {
+            let action = match (s.studio, s.canvas_previews.contains_key(&canvas)) {
                 (true, false) => {
-                    let scene = s.vertical_scene.clone().or_else(|| s.editing_scene());
-                    s.vertical_preview = scene.clone();
+                    let scene = s
+                        .canvas_scenes
+                        .get(&canvas)
+                        .cloned()
+                        .or_else(|| s.editing_scene());
+                    if let Some(scene) = &scene {
+                        s.canvas_previews.insert(canvas, scene.clone());
+                    }
                     scene.map(Some)
                 }
                 (false, true) => {
-                    s.vertical_preview = None;
+                    s.canvas_previews.remove(&canvas);
                     Some(None)
                 }
                 _ => None,
-            }
+            };
+            (canvas, action)
         };
         match action {
             Some(Some(scene)) => {
                 self.changed(Changed::SCENES);
-                self.call(
-                    Method::Preview {
-                        scene,
-                        canvas: CanvasId::Vertical,
-                    },
-                    |app, result| {
-                        if let Err(error) = result {
-                            app.failed("Couldn’t put the vertical scene in preview", &error);
-                            app.refresh_status(true);
-                        }
-                    },
-                );
+                self.call(Method::Preview { scene, canvas }, |app, result| {
+                    if let Err(error) = result {
+                        app.failed("Couldn’t put the canvas’s scene in preview", &error);
+                        app.refresh_status(true);
+                    }
+                });
             }
             Some(None) => {
                 self.changed(Changed::SCENES);
-                self.call(
-                    Method::ClearCanvasPreview {
-                        canvas: CanvasId::Vertical,
-                    },
-                    |app, result| {
-                        if let Err(error) = result {
-                            app.failed("Couldn’t clear the vertical preview", &error);
-                        }
-                    },
-                );
+                self.call(Method::ClearCanvasPreview { canvas }, |app, result| {
+                    if let Err(error) = result {
+                        app.failed("Couldn’t clear the canvas’s preview", &error);
+                    }
+                });
             }
             None => {}
         }
@@ -1534,6 +1574,18 @@ impl App {
             }
             "reset_ui" => {
                 prefs::reset(&window, false);
+                // The canvas monitor back to the first extra canvas (#120),
+                // after editing the main canvas again (the edited canvas
+                // never changes under the editor).
+                if self.session.borrow().editing_extra() {
+                    self.menu("edit_canvas_main");
+                }
+                {
+                    let mut s = self.session.borrow_mut();
+                    s.extra_choice = None;
+                    s.refresh_extra();
+                }
+                self.changed(Changed::SETUP);
                 saved(self);
             }
             "reset_docks" => {

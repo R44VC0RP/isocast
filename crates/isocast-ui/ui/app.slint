@@ -10,7 +10,7 @@
 
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { Ui, ConnectionState } from "state.slint";
+import { Ui, ConnectionState, ExtraCanvas } from "state.slint";
 import {
     ColumnSplitter, EditCommands, MenuHost, Menus, RowSplitter, SettingsForms, Toasts, ToastStack, Viewport,
 } from "kit.slint";
@@ -50,7 +50,7 @@ import { WizardSheet } from "areas/wizard/sheet.slint";
 import { ProjectorsArea } from "areas/projectors/projector.slint";
 
 // What Rust sees: the globals and the structs in their models.
-export { Theme, Ui, ConnectionState, Menus, Toasts, EditCommands, SettingsForms }
+export { Theme, Ui, ConnectionState, ExtraCanvas, Menus, Toasts, EditCommands, SettingsForms }
 export { CanvasArea, SourcesArea, MixerArea, ControlsArea, SettingsArea, LibraryArea }
 export { CreateArea }
 export { DeveloperArea }
@@ -94,12 +94,12 @@ component Workspace inherits VerticalLayout {
     out property <length> program-height: stage.program-height;
     out property <int> program-pixel-width: stage.program-pixel-width;
     out property <int> program-pixel-height: stage.program-pixel-height;
-    out property <length> vertical-x: stage.vertical-x;
-    out property <length> vertical-y: stage.vertical-y;
-    out property <length> vertical-width: stage.vertical-width;
-    out property <length> vertical-height: stage.vertical-height;
-    out property <int> vertical-pixel-width: stage.vertical-pixel-width;
-    out property <int> vertical-pixel-height: stage.vertical-pixel-height;
+    out property <length> extra-x: stage.extra-x;
+    out property <length> extra-y: stage.extra-y;
+    out property <length> extra-width: stage.extra-width;
+    out property <length> extra-height: stage.extra-height;
+    out property <int> extra-pixel-width: stage.extra-pixel-width;
+    out property <int> extra-pixel-height: stage.extra-pixel-height;
     out property <length> stage-x: stage.stage-x;
     out property <length> stage-y: stage.stage-y;
     out property <length> stage-width: stage.stage-width;
@@ -384,13 +384,13 @@ export component AppWindow inherits Window {
     out property <length> program-height: workspace.program-height;
     out property <int> program-pixel-width: workspace.program-pixel-width;
     out property <int> program-pixel-height: workspace.program-pixel-height;
-    // The vertical canvas's program picture (#86).
-    out property <length> vertical-x: workspace.vertical-x;
-    out property <length> vertical-y: workspace.vertical-y;
-    out property <length> vertical-width: workspace.vertical-width;
-    out property <length> vertical-height: workspace.vertical-height;
-    out property <int> vertical-pixel-width: workspace.vertical-pixel-width;
-    out property <int> vertical-pixel-height: workspace.vertical-pixel-height;
+    // The chosen extra canvas's program picture (#86, #120).
+    out property <length> extra-x: workspace.extra-x;
+    out property <length> extra-y: workspace.extra-y;
+    out property <length> extra-width: workspace.extra-width;
+    out property <length> extra-height: workspace.extra-height;
+    out property <int> extra-pixel-width: workspace.extra-pixel-width;
+    out property <int> extra-pixel-height: workspace.extra-pixel-height;
     // The whole preview area (the native layers' stage).
     out property <length> stage-x: workspace.stage-x;
     out property <length> stage-y: workspace.stage-y;

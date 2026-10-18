@@ -3,8 +3,8 @@
 //! box drawn at the layout of the setup revision each frame was drawn
 //! from, so box and picture can't drift apart, even while the item is
 //! dragged. One `Preview` per monitor: the edited one (`program`, or in
-//! Studio Mode `preview`), Studio Mode's program, and the vertical
-//! canvas's program beside them (#86).
+//! Studio Mode `preview`), Studio Mode's program, and the chosen extra
+//! canvas's program beside them (#86, #120).
 //!
 //! Two ways to put them on screen:
 //! - macOS: Core Animation layers under the interface (`layers.rs`); the
@@ -163,8 +163,9 @@ pub enum Role {
     Editor,
     /// Studio Mode's program monitor.
     Program,
-    /// The vertical canvas's program monitor, beside the others (#86).
-    Vertical,
+    /// The chosen extra canvas's program monitor, beside the others (#86,
+    /// #120).
+    Extra,
 }
 
 /// Where pictures go: the shared layers (macOS), or Slint images.
@@ -386,7 +387,7 @@ impl Preview {
                 canvas.set_picture_error(error.into());
             }
             Role::Program => canvas.set_program_waiting(waiting),
-            Role::Vertical => canvas.set_vertical_waiting(waiting),
+            Role::Extra => canvas.set_extra_waiting(waiting),
         }
     }
 
@@ -429,7 +430,7 @@ impl Preview {
                     match self.role {
                         Role::Editor => canvas.set_picture(slint::Image::default()),
                         Role::Program => canvas.set_program_picture(slint::Image::default()),
-                        Role::Vertical => canvas.set_vertical_picture(slint::Image::default()),
+                        Role::Extra => canvas.set_extra_picture(slint::Image::default()),
                     }
                 }
             }
@@ -530,10 +531,7 @@ impl Preview {
                 app.get_program_pixel_width(),
                 app.get_program_pixel_height(),
             ),
-            Role::Vertical => (
-                app.get_vertical_pixel_width(),
-                app.get_vertical_pixel_height(),
-            ),
+            Role::Extra => (app.get_extra_pixel_width(), app.get_extra_pixel_height()),
         };
         let size = (size.0.max(16) as u32, size.1.max(16) as u32);
         if size != self.size {
@@ -642,7 +640,7 @@ impl Preview {
         };
         let rect = match self.role {
             Role::Editor => self.box_rect(&app, frame.revision),
-            Role::Program | Role::Vertical => None,
+            Role::Program | Role::Extra => None,
         };
         if self.check && self.role == Role::Editor {
             self.check_frame(&app, &frame, rect.map(|b| b.rect));
@@ -666,8 +664,8 @@ impl Preview {
                 let mut layers = layers.borrow_mut();
                 match (self.role, frame) {
                     (Role::Program, Some(frame)) => layers.show_program(frame),
-                    (Role::Vertical, Some(frame)) => layers.show_vertical(frame),
-                    (Role::Program | Role::Vertical, None) => {}
+                    (Role::Extra, Some(frame)) => layers.show_extra(frame),
+                    (Role::Program | Role::Extra, None) => {}
                     (Role::Editor, _) => layers.show(frame, rect, self.style, geometry(app)),
                 }
             }
@@ -697,7 +695,7 @@ impl Preview {
                     match self.role {
                         Role::Editor => canvas.set_picture(self.images[&key].clone()),
                         Role::Program => canvas.set_program_picture(self.images[&key].clone()),
-                        Role::Vertical => canvas.set_vertical_picture(self.images[&key].clone()),
+                        Role::Extra => canvas.set_extra_picture(self.images[&key].clone()),
                     }
                 }
                 if self.role == Role::Editor {
@@ -809,11 +807,11 @@ fn geometry(app: &AppWindow) -> crate::layers::Geometry {
             app.get_program_width() as f64,
             app.get_program_height() as f64,
         ],
-        vertical: [
-            app.get_vertical_x() as f64 - ax,
-            app.get_vertical_y() as f64 - ay,
-            app.get_vertical_width() as f64,
-            app.get_vertical_height() as f64,
+        extra: [
+            app.get_extra_x() as f64 - ax,
+            app.get_extra_y() as f64 - ay,
+            app.get_extra_width() as f64,
+            app.get_extra_height() as f64,
         ],
         scale: app.get_canvas_scale() as f64,
         meter: meter_rect(app),

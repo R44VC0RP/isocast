@@ -183,30 +183,35 @@ pub struct Session {
     /// streams kept up to date by stream events.
     pub canvases: Vec<isocast_protocol::api::CanvasStatus>,
     /// Starting or stopping the vertical canvas's stream.
-    pub busy_vertical_stream: bool,
+    pub busy_canvas_stream: bool,
     pub devices: Option<Devices>,
     /// The live engine's sources by id.
     pub running: HashMap<String, SourceStatus>,
     /// The newest audio levels by source id ("program" for the mix).
     pub levels: HashMap<String, AudioLevel>,
     pub scene: Option<String>,
-    /// The scene on air on the vertical canvas (Status; the main one's
-    /// while it follows the main canvas).
-    pub vertical_scene: Option<String>,
-    /// The scene in the vertical canvas's own preview (Studio Mode).
-    pub vertical_preview: Option<String>,
+    /// The scene on air on each extra canvas (Status and
+    /// `canvas_scene_changed`; the main one's while it follows the main
+    /// canvas).
+    pub canvas_scenes: HashMap<CanvasId, String>,
+    /// The scene in each extra canvas's own preview (Studio Mode).
+    pub canvas_previews: HashMap<CanvasId, String>,
     pub preview: Option<String>,
     pub studio: bool,
     pub selection: Option<Selection>,
-    /// The canvas editor edits the vertical canvas (#86), while the setup
-    /// has one (else the main canvas, as without this).
-    pub vertical_edit: bool,
-    /// The setup shown as its vertical canvas (`Setup::for_canvas`): its
-    /// size and each scene's vertical items (or the main ones it falls
-    /// back to). None without a vertical canvas.
-    pub vertical: Option<Rc<Setup>>,
-    /// `shown` as the vertical canvas edits it (see `canvas_json`).
-    pub(crate) vertical_shown: Option<Value>,
+    /// The extra canvas chosen for the canvas monitor beside the others
+    /// and for editing (#120); the first extra canvas while it is absent
+    /// or the setup hasn't it (see [`Session::extra_canvas`]).
+    pub extra_choice: Option<CanvasId>,
+    /// The canvas editor edits the chosen extra canvas (#86, #120), while
+    /// the setup has one (else the main canvas, as without this).
+    pub extra_edit: bool,
+    /// The setup shown as the chosen extra canvas (`Setup::for_canvas`):
+    /// its size and each scene's own arrangement for it (or the main
+    /// items it falls back to). None without an extra canvas.
+    pub extra: Option<Rc<Setup>>,
+    /// `shown` as the chosen extra canvas edits it (see `canvas_json`).
+    pub(crate) extra_shown: Option<Value>,
     pub busy_record: bool,
     pub busy_stream: bool,
     /// The virtual camera, from Status and `virtual_camera` events.
@@ -258,37 +263,89 @@ impl Session {
         }
     }
 
-    /// Whether the canvas editor edits the vertical canvas.
-    pub fn editing_vertical(&self) -> bool {
-        self.vertical_edit && self.vertical.is_some()
+    /// The extra canvas the canvas monitor shows and Edit edits (#120):
+    /// the one chosen, if the setup has it, else its first (the vertical
+    /// one first). None without an extra canvas.
+    pub fn extra_canvas(&self) -> Option<CanvasId> {
+        let setup = self.setup.as_ref()?;
+        self.extra_choice
+            .filter(|c| setup.extra_canvas(*c).is_some())
+            .or_else(|| setup.extra_canvas_ids().first().copied())
+    }
+
+    /// Every extra canvas of the setup shown, the vertical one first.
+    pub fn extra_canvases(&self) -> Vec<CanvasId> {
+        self.setup
+            .as_ref()
+            .map(|s| s.extra_canvas_ids())
+            .unwrap_or_default()
+    }
+
+    /// An extra canvas's name ("Vertical", or its `name`).
+    pub fn canvas_label(&self, canvas: CanvasId) -> String {
+        match &self.setup {
+            Some(setup) => model::canvas_label(setup, canvas),
+            None => canvas.as_str().to_string(),
+        }
+    }
+
+    /// Whether the canvas editor edits an extra canvas (the chosen one).
+    pub fn editing_extra(&self) -> bool {
+        self.extra_edit && self.extra.is_some()
     }
 
     /// The canvas whose items edits change (see `App::edit`).
     pub fn edit_canvas(&self) -> CanvasId {
-        if self.editing_vertical() {
-            CanvasId::Vertical
+        match self.extra_canvas() {
+            Some(canvas) if self.editing_extra() => canvas,
+            _ => CanvasId::Main,
+        }
+    }
+
+    /// Extra canvas `canvas` has scenes of its own on air (it doesn't
+    /// follow the main canvas's).
+    pub fn independent(&self, canvas: CanvasId) -> bool {
+        self.setup
+            .as_ref()
+            .and_then(|x| x.extra_canvas(canvas))
+            .is_some_and(|v| !v.follow_main)
+    }
+
+    /// The canvas whose scenes the Scenes dock and Studio Mode switch:
+    /// the extra one being edited if it has scenes of its own, else the
+    /// main one (which the others follow).
+    pub fn scene_canvas(&self) -> CanvasId {
+        let canvas = self.edit_canvas();
+        if !canvas.is_main() && self.independent(canvas) {
+            canvas
         } else {
             CanvasId::Main
         }
     }
 
-    /// The vertical canvas has scenes of its own on air (it doesn't
-    /// follow the main canvas's).
-    pub fn vertical_independent(&self) -> bool {
-        self.setup
-            .as_ref()
-            .and_then(|x| x.vertical.as_ref())
-            .is_some_and(|v| !v.follow_main)
+    /// The scene on air on canvas `canvas` (an extra canvas that follows
+    /// the main one: the main one's, whatever it was switched to while it
+    /// didn't: the daemon drops that without an event when it starts
+    /// following, so the setup shown decides).
+    pub fn scene_on(&self, canvas: CanvasId) -> Option<&String> {
+        match canvas {
+            CanvasId::Main => self.scene.as_ref(),
+            other if self.independent(other) => {
+                self.canvas_scenes.get(&other).or(self.scene.as_ref())
+            }
+            _ => self.scene.as_ref(),
+        }
     }
 
-    /// The canvas whose scenes the Scenes dock and Studio Mode switch:
-    /// the vertical one while editing it and it has scenes of its own,
-    /// else the main one (which the vertical canvas follows).
-    pub fn scene_canvas(&self) -> CanvasId {
-        if self.editing_vertical() && self.vertical_independent() {
-            CanvasId::Vertical
-        } else {
-            CanvasId::Main
+    /// The scene in canvas `canvas`'s preview (Studio Mode): an extra
+    /// canvas's own while it picks its own scenes, else the main one's.
+    pub fn preview_on(&self, canvas: CanvasId) -> Option<&String> {
+        match canvas {
+            CanvasId::Main => self.preview.as_ref(),
+            other if self.independent(other) => {
+                self.canvas_previews.get(&other).or(self.preview.as_ref())
+            }
+            _ => self.preview.as_ref(),
         }
     }
 
@@ -296,7 +353,7 @@ impl Session {
     pub fn on_air(&self) -> Option<&String> {
         match self.scene_canvas() {
             CanvasId::Main => self.scene.as_ref(),
-            _ => self.vertical_scene.as_ref(),
+            other => self.canvas_scenes.get(&other),
         }
     }
 
@@ -304,8 +361,20 @@ impl Session {
     pub fn staged(&self) -> Option<&String> {
         match self.scene_canvas() {
             CanvasId::Main => self.preview.as_ref(),
-            _ => self.vertical_preview.as_ref(),
+            other => self.canvas_previews.get(&other),
         }
+    }
+
+    /// Take each extra canvas's scene and preview from a status read.
+    pub fn set_canvas_scenes(&mut self, canvases: &[isocast_protocol::api::CanvasStatus]) {
+        self.canvas_scenes = canvases
+            .iter()
+            .filter_map(|c| Some((c.id, c.scene.clone()?)))
+            .collect();
+        self.canvas_previews = canvases
+            .iter()
+            .filter_map(|c| Some((c.id, c.preview.clone()?)))
+            .collect();
     }
 
     /// The setup shown as JSON as the canvas editor and the Sources dock
@@ -314,8 +383,8 @@ impl Session {
     /// canvas's size; else the setup shown. Only for reading items: whole
     /// setups written back come from [`Session::setup_json`].
     pub fn canvas_json(&self) -> Option<&Value> {
-        if self.editing_vertical() {
-            self.vertical_shown.as_ref()
+        if self.editing_extra() {
+            self.extra_shown.as_ref()
         } else {
             self.shown.as_ref()
         }
@@ -324,8 +393,8 @@ impl Session {
     /// The setup the canvas editor shows and edits: the vertical canvas's
     /// while editing it, else the setup shown.
     pub fn edited_setup(&self) -> Option<&Rc<Setup>> {
-        if self.editing_vertical() {
-            self.vertical.as_ref()
+        if self.editing_extra() {
+            self.extra.as_ref()
         } else {
             self.setup.as_ref()
         }
@@ -335,8 +404,8 @@ impl Session {
     /// vertical canvas while editing that).
     pub fn confirmed_edited(&self) -> Option<Rc<Setup>> {
         let setup = self.confirmed_setup()?;
-        if self.editing_vertical() {
-            setup.for_canvas(CanvasId::Vertical).map(Rc::new)
+        if self.editing_extra() {
+            setup.for_canvas(self.edit_canvas()).map(Rc::new)
         } else {
             Some(setup)
         }
@@ -344,7 +413,7 @@ impl Session {
 
     /// A patch changing `fields` of the item at the end of `chain` in scene
     /// `scene`. Sent with `App::edit`, it changes the canvas being edited
-    /// (see [`model::route_vertical`]).
+    /// (see [`model::route_canvas`]).
     pub fn canvas_item_patch(&self, scene: &str, chain: &[&SceneItem], fields: Value) -> Value {
         model::item_patch(scene, chain, fields)
     }
@@ -411,16 +480,31 @@ impl Session {
             },
             None => None,
         };
-        self.vertical = self
-            .setup
-            .as_ref()
-            .and_then(|setup| setup.for_canvas(CanvasId::Vertical))
-            .map(Rc::new);
-        self.vertical_shown = value
-            .as_ref()
-            .filter(|_| self.vertical.is_some())
-            .map(model::vertical_view);
         self.shown = value;
+        self.refresh_extra();
+    }
+
+    /// The chosen extra canvas's view of the setup shown (after the setup
+    /// or the choice changed).
+    pub(crate) fn refresh_extra(&mut self) {
+        // The canvas being edited went: back to the main canvas, rather
+        // than editing another one unasked.
+        if self.extra_edit
+            && let (Some(setup), Some(chosen)) = (&self.setup, self.extra_choice)
+            && !setup.has_canvas(chosen)
+        {
+            self.extra_edit = false;
+            self.selection = None;
+        }
+        let canvas = self.extra_canvas();
+        self.extra = canvas
+            .zip(self.setup.as_ref())
+            .and_then(|(canvas, setup)| setup.for_canvas(canvas))
+            .map(Rc::new);
+        self.extra_shown = canvas
+            .zip(self.shown.as_ref())
+            .filter(|_| self.extra.is_some())
+            .map(|(canvas, shown)| model::canvas_view(shown, canvas));
     }
 
     /// Before a change: keep the setup as it was, for undo (a stream of
@@ -476,6 +560,16 @@ impl Session {
             streams
         };
         self.stream = summarize(&self.streams);
+    }
+
+    /// A replay buffer's status (a `replay` event, or a start or stop):
+    /// the main canvas's, or an extra canvas's (#120).
+    pub fn set_replay(&mut self, status: isocast_protocol::replay::ReplayStatus) {
+        if status.canvas.is_main() {
+            self.replay = Some(status);
+        } else if let Some(canvas) = self.canvases.iter_mut().find(|c| c.id == status.canvas) {
+            canvas.replay = Some(status);
+        }
     }
 
     /// One destination's status changed (a `stream` event).

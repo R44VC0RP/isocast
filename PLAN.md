@@ -1176,6 +1176,12 @@ native app; each verified against OBS's behaviour on a test Mac.
   OBS import of Aitum Multistream and Vertical Canvas, Settings › Video ›
   Canvases and Stream › Streams of every canvas.
   - [ ] Tier-1 review and coordinator commit.
+  - [x] **G.12a Extra canvases in the app (#120, #96, #95).** The canvas
+    monitor shows the chosen extra canvas (its ⌄ menu switches canvases),
+    Edit <name> Canvas edits any canvas's arrangements, projectors and
+    multiview tiles for every canvas (`projector_open` `canvas: ID`,
+    multiview `canvases`), replay per canvas from the monitor's menu,
+    virtual camera `target = "canvas"`.
 - [x] **G.10 Multistream (#73).** `[stream]` is the main destination,
   `[[stream.destinations]]` more (service, server, enabled, own key, own
   bitrate/size); one Stream each, matching formats share one encoder, a
@@ -4773,6 +4779,14 @@ One line per finished task, newest last.
   a main switch) and the square's own scene. Bench A/B single canvas
   41.9% vs 41.8% CPU, 0 drops; layout audit 40/40.
   canvases/scratch/REPORT.md.
+- G.12a / #120 (2026-10-18): extra canvases in the app. Real take on
+  isocast-m2-b (hw-batch 20261018-092435, desktop session): the app opened
+  square and shorts program projectors and a multiview with both canvases
+  (all three through `projector_open`); a display capture read back 100%
+  green in the square projector, 100% red over 100% blue in the shorts
+  one, and the multiview's last tiles green / red+blue; square 1080×1080
+  and main 1920×1080 files 900 frames / 30 s. Offscreen design A/B, layout
+  audit, gates, e2e. canvas-ui/scratch/REPORT.md.
 - G.12 / #84 review fixes (2026-10-18): merged main (#110 governor);
   governor per canvas (congested `[[canvases]]` stream retuned 5000 →
   1250 kb/s while main held 6000 with 0 drops, isocast-m2-a), inline

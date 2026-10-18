@@ -36,11 +36,18 @@ fn canvas_json(app: &Rc<App>) -> Option<Value> {
 }
 
 /// Prune `items` (a JSON list) with `prune`, in a scene's main items and
-/// its vertical ones.
+/// its arrangements for extra canvases.
 fn prune_scene(scene: &mut Value, prune: impl Fn(&Value) -> Value) {
     scene["items"] = prune(&scene["items"]);
     if scene["vertical"].is_object() {
         scene["vertical"]["items"] = prune(&scene["vertical"]["items"]);
+    }
+    if let Some(canvases) = scene["canvases"].as_object_mut() {
+        for arrangement in canvases.values_mut() {
+            if arrangement.is_object() {
+                arrangement["items"] = prune(&arrangement["items"]);
+            }
+        }
     }
 }
 
@@ -631,7 +638,14 @@ fn uses(setup: &Setup, id: &str) -> usize {
     setup
         .scenes
         .iter()
-        .map(|s| walk(&s.items, id) + s.vertical.as_ref().map_or(0, |v| walk(&v.items, id)))
+        .map(|s| {
+            walk(&s.items, id)
+                + s.vertical.as_ref().map_or(0, |v| walk(&v.items, id))
+                + s.canvases
+                    .values()
+                    .map(|v| walk(&v.items, id))
+                    .sum::<usize>()
+        })
         .sum()
 }
 
@@ -650,8 +664,8 @@ pub fn remove_from_scene(app: &Rc<App>, scene: &str, chain: &[Value]) {
         .as_str()
         .and_then(|id| model::find_source(&typed, id));
     app.select("");
-    // On the vertical canvas only the item goes: the main canvas (or its
-    // layout the vertical one falls back to) may still show the source.
+    // On an extra canvas only the item goes: the main canvas (or its
+    // layout the extra one falls back to) may still show the source.
     if let Some(source) = source
         && canvas == CanvasId::Main
         && source.kind.has_video()
@@ -676,8 +690,7 @@ pub fn remove_from_scene(app: &Rc<App>, scene: &str, chain: &[Value]) {
         .map(model::scene_name)
         .unwrap_or(scene)
         .to_string();
-    let vertical = canvas == CanvasId::Vertical;
-    let before = model::canvas_items(&setup, scene, vertical);
+    let before = model::canvas_items(&setup, scene, canvas);
     app.edit(
         item_patch_json(scene, chain, json!({ "remove": true })),
         EditOptions::default(),
@@ -692,7 +705,7 @@ pub fn remove_from_scene(app: &Rc<App>, scene: &str, chain: &[Value]) {
         // Back on the canvas it was removed from, whichever is edited now.
         .action("Undo", move |app| {
             let now = setup_json(app)
-                .map(|s| model::canvas_items(&s, &scene, vertical))
+                .map(|s| model::canvas_items(&s, &scene, canvas))
                 .unwrap_or_default();
             app.edit_on(
                 json!({ "scenes": [{ "id": scene, "items": replace_list(&now, &before) }] }),
@@ -1222,6 +1235,9 @@ fn group_id(app: &Rc<App>) -> String {
         keys(&scene.items, &mut taken);
         if let Some(vertical) = &scene.vertical {
             keys(&vertical.items, &mut taken);
+        }
+        for arrangement in scene.canvases.values() {
+            keys(&arrangement.items, &mut taken);
         }
     }
     model::new_id("Group", taken)

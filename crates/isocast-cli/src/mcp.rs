@@ -1388,8 +1388,10 @@ impl Isocast {
         description = "Open a projector: the program, studio mode's preview, a scene (`scene` \
                        id), a video source (`source` id) or a multiview grid (`layout`: top-8, \
                        3x3 or 2x2; preview, program and scenes with labels and tally; \
-                       `vertical` true puts the vertical program in its last tile), with \
-                       `canvas` \"vertical\" the vertical canvas's program, preview or scene, full \
+                       `vertical` true puts the vertical program in its last tile, \
+                       `canvases` [ids] puts those extra canvases' programs in its last \
+                       tiles), with `canvas` \"vertical\" or a [[canvases]] id that canvas's \
+                       program, preview or scene, full \
                        screen on a display (`fullscreen`, `display`: main, an id or a name from \
                        list_projectors) or in a window (`fullscreen` false, optional `frame` in \
                        points). The Isocast app shows it, and opens it when it next starts if \

@@ -33,15 +33,20 @@ pub enum Command {
         /// The multiview's grid: top-8 (the default), 3x3 or 2x2.
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(MultiviewLayout::NAMES))]
         layout: Option<String>,
-        /// The canvas: main (the default), or vertical (the setup's
-        /// vertical canvas: its program, preview or a scene as it arranges
-        /// it).
-        #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(isocast_protocol::projector::CANVASES))]
+        /// The canvas: main (the default), vertical (the setup's vertical
+        /// canvas) or a [[canvases]] id (`isocast canvas list`): its
+        /// program, preview or a scene as it arranges it.
+        #[arg(long)]
         canvas: Option<String>,
         /// A multiview's last tile shows the vertical canvas's program
         /// instead of a scene (--vertical=false takes it back out).
         #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
         vertical: Option<bool>,
+        /// A multiview's last tiles show these extra canvases' programs
+        /// instead of scenes: ids, comma-separated (`isocast canvas
+        /// list`); --canvases= takes them back out.
+        #[arg(long, value_name = "ID,…", num_args = 0..=1, default_missing_value = "")]
+        canvases: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -89,6 +94,7 @@ pub fn run(command: Command) -> Result<ExitCode> {
             layout,
             canvas,
             vertical,
+            canvases,
             json,
         } => {
             let view: ProjectorView = serde_json::from_value(serde_json::json!(view))?;
@@ -116,6 +122,13 @@ pub fn run(command: Command) -> Result<ExitCode> {
                 canvas,
                 layout,
                 vertical,
+                canvases: canvases.map(|list| {
+                    list.split(',')
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                }),
                 fullscreen: match (fullscreen || display.is_some(), window) {
                     (true, _) => Some(true),
                     (false, true) => Some(false),
@@ -190,20 +203,31 @@ pub fn print_one(projector: &Projector) {
         ProjectorView::Source => {
             format!("source {}", projector.source.as_deref().unwrap_or("?"))
         }
-        ProjectorView::Multiview => format!(
-            "multiview {}{}",
-            projector.layout.unwrap_or_default().name(),
-            if projector.vertical {
-                " with the vertical program"
-            } else {
-                ""
-            }
-        ),
+        ProjectorView::Multiview => {
+            let tiles: Vec<String> = projector
+                .tile_canvases()
+                .iter()
+                .map(|c| c.to_string())
+                .collect();
+            format!(
+                "multiview {}{}",
+                projector.layout.unwrap_or_default().name(),
+                if tiles.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " with the {} program{}",
+                        tiles.join(", "),
+                        if tiles.len() == 1 { "" } else { "s" }
+                    )
+                }
+            )
+        }
     };
-    let what = if projector.is_vertical() {
-        format!("vertical {what}")
-    } else {
+    let what = if projector.canvas_id().is_main() {
         what
+    } else {
+        format!("{} {what}", projector.canvas)
     };
     let placement = &projector.placement;
     let place = match (placement.fullscreen, &placement.display, placement.frame) {

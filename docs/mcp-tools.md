@@ -484,11 +484,12 @@ Open a project file (`<name>.isoprj`, in every project folder) or a project fold
 
 ## open_projector
 
-Open a projector: the program, studio mode's preview, a scene (`scene` id), a video source (`source` id) or a multiview grid (`layout`: top-8, 3x3 or 2x2; preview, program and scenes with labels and tally; `vertical` true puts the vertical program in its last tile), with `canvas` "vertical" the vertical canvas's program, preview or scene, full screen on a display (`fullscreen`, `display`: main, an id or a name from list_projectors) or in a window (`fullscreen` false, optional `frame` in points). The Isocast app shows it, and opens it when it next starts if it isn't running (`shown` says whether a window shows it). Opening a view that is already open moves it. Absent placement: where that view was last.
+Open a projector: the program, studio mode's preview, a scene (`scene` id), a video source (`source` id) or a multiview grid (`layout`: top-8, 3x3 or 2x2; preview, program and scenes with labels and tally; `vertical` true puts the vertical program in its last tile, `canvases` [ids] puts those extra canvases' programs in its last tiles), with `canvas` "vertical" or a [[canvases]] id that canvas's program, preview or scene, full screen on a display (`fullscreen`, `display`: main, an id or a name from list_projectors) or in a window (`fullscreen` false, optional `frame` in points). The Isocast app shows it, and opens it when it next starts if it isn't running (`shown` says whether a window shows it). Opening a view that is already open moves it. Absent placement: where that view was last.
 
 | Argument | Type | Description |
 |---|---|---|
-| `canvas` | string (optional) | The canvas: `main` (the default), or `vertical` (the live setup's vertical canvas; views program, preview and scene). |
+| `canvas` | string (optional) | The canvas: `main` (the default), `vertical` (the live setup's vertical canvas) or one of its `[[canvases]]` ids (#120); views program, preview and scene. |
+| `canvases` | array (optional) | For `view = multiview`: extra canvases (`vertical` or `[[canvases]]` ids) whose programs fill the grid's last tiles in place of scenes, in order (#120); at most half the grid's scene tiles (one in `2x2`). Absent: as the open multiview has it, else none; empty: none. |
 | `display` | string (optional) | `main`, a display's id or its name (`isocast devices`). |
 | `frame` | Frame | The window's place (not full screen). Absent: where the same view was last, else the app picks. |
 | `fullscreen` | boolean (optional) | `true`: full screen on `display` (the main display if absent); `false`: in a window. Absent: where the same view was last (a window the first time), or full screen if `display` is given. |

@@ -55,7 +55,7 @@ pub fn load(window: &AppWindow) {
     flag("docks_locked", &|v| ui.set_docks_locked(v));
     flag("preview_locked", &|v| ui.set_preview_locked(v));
     flag("studio", &|v| ui.set_studio(v));
-    flag("vertical_preview", &|v| ui.set_show_vertical(v));
+    flag("vertical_preview", &|v| ui.set_show_extra(v));
     // The Create view (area G).
     flag("create", &|v| {
         window.global::<crate::CreateArea>().set_active(v)
@@ -65,6 +65,9 @@ pub fn load(window: &AppWindow) {
     length("sources_width", &|v| ui.set_sources_width(v));
     length("transitions_width", &|v| ui.set_transitions_width(v));
     length("controls_width", &|v| ui.set_controls_width(v));
+    if let Some(v) = saved.get("canvas_monitor").and_then(Value::as_str) {
+        ui.set_extra_choice(v.into());
+    }
     if let Some(v) = saved.get("preview_scale").and_then(Value::as_str) {
         ui.set_preview_scale(v.into());
     }
@@ -106,7 +109,8 @@ pub fn save(window: &AppWindow) {
         "docks_locked": ui.get_docks_locked(),
         "preview_locked": ui.get_preview_locked(),
         "studio": ui.get_studio(),
-        "vertical_preview": ui.get_show_vertical(),
+        "vertical_preview": ui.get_show_extra(),
+        "canvas_monitor": ui.get_extra_choice().as_str(),
         "create": window.global::<crate::CreateArea>().get_active(),
         "docks_height": ui.get_docks_height(),
         "scenes_width": ui.get_scenes_width(),
@@ -152,7 +156,9 @@ pub fn reset(window: &AppWindow, docks_only: bool) {
         ui.set_show_status_bar(true);
         ui.set_preview_locked(false);
         ui.set_preview_scale("window".into());
-        ui.set_show_vertical(true);
+        ui.set_show_extra(true);
+        // The canvas monitor shows the first extra canvas again.
+        ui.set_extra_choice("".into());
     }
 }
 

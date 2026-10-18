@@ -138,7 +138,7 @@ on every stream and key command. In the app, Settings › Stream has a
 a vertical canvas) and the same service, server, key and destination
 steps for each. Start Streaming starts the vertical canvas's streams too
 when they are set up with keys (else it says what's missing, with a way
-to Settings), and stops them with the main one's; the vertical monitor's
+to Settings), and stops them with the main one's; the canvas monitor's
 menu starts or stops them alone. The status bar adds the vertical
 canvas's state (`vertical live for 00:12:34`, `vertical reconnecting`).
 
@@ -194,6 +194,18 @@ why.
 Importing an OBS profile brings Aitum Multistream's outputs (as
 destinations) and Vertical Canvas's canvases and outputs; their keys stay
 in OBS.
+
+In the app (#120), the canvas monitor at the stage's right shows one extra
+canvas at a time; its line's ⌄ menu switches between them and has Edit
+<name> Canvas (the editor then edits that canvas's arrangements), Record,
+Start/Stop Stream, Start/Stop/Save Replay Buffer and Program/Preview
+Projector for the canvas it shows. A scene's right-click menu opens a
+Scene Projector on any canvas, and Multiview shows the extra canvases'
+programs in its last tiles. On the method table a projector takes
+`canvas: ID` (`isocast projector open program --canvas shorts`) and a
+multiview `canvases: [ID, …]` (`--canvases shorts,square`; at most half
+its scene tiles). The virtual camera shows a canvas's program with
+`virtual_camera.target = "canvas"` and `canvas = "shorts"`.
 
 ## Service presets
 

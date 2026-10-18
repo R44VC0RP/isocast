@@ -3,16 +3,24 @@
 //! words, names, the items along a path, and merge patches that change
 //! one item.
 
-use isocast_protocol::{Rect, Scene, SceneItem, Setup, Source};
+use isocast_protocol::{CanvasId, Rect, Scene, SceneItem, Setup, Source};
 use serde_json::{Value, json};
 
 /// Recovery differs for a contained canvas failure and poisoned scene state.
-pub fn vertical_recovery(reason: &str) -> &'static str {
+pub fn vertical_recovery(reason: &str) -> String {
+    canvas_recovery(reason, "the vertical canvas")
+}
+
+/// How to bring back a canvas (`what`: "the vertical canvas", "Shorts")
+/// whose program stopped for `reason`.
+pub fn canvas_recovery(reason: &str, what: &str) -> String {
     if reason.contains("scene state is broken") || reason.contains("scene worker has broken state")
     {
-        "Restart the engine once recording and streaming stop."
+        "Restart the engine once recording and streaming stop.".into()
     } else {
-        "After recording stops, turn the vertical canvas off and on in Settings › Video, or restart the engine."
+        format!(
+            "After recording stops, turn {what} off and on in Settings › Video, or restart the engine."
+        )
     }
 }
 
@@ -186,28 +194,100 @@ pub fn item_patch(scene: &str, chain: &[&SceneItem], fields: Value) -> Value {
     json!({ "scenes": [{ "id": scene, "items": [node] }] })
 }
 
-/// The setup `shown` (JSON) as the vertical canvas edits it (#86): each
-/// scene's own vertical items and layout in place of the main ones (a
-/// scene without them shows the main ones fitted and centred, as
-/// `Setup::for_canvas` does),
-/// and the vertical canvas's size and rate as `canvas`.
-pub fn vertical_view(shown: &Value) -> Value {
+/// Extra canvas `canvas`'s settings in setup JSON `shown`: `vertical`, or
+/// its `canvases` entry (#84); null if it hasn't it (or it is main).
+pub fn canvas_json(shown: &Value, canvas: CanvasId) -> &Value {
+    match canvas {
+        CanvasId::Main => &Value::Null,
+        CanvasId::Vertical => &shown["vertical"],
+        other => shown["canvases"]
+            .as_array()
+            .and_then(|list| list.iter().find(|c| c["id"] == other.as_str()))
+            .unwrap_or(&Value::Null),
+    }
+}
+
+/// Scene JSON `scene`'s own arrangement for extra canvas `canvas`
+/// (`vertical`, or `canvases.<id>`); null without one.
+pub fn arrangement_json(scene: &Value, canvas: CanvasId) -> &Value {
+    match canvas {
+        CanvasId::Main => &Value::Null,
+        CanvasId::Vertical => &scene["vertical"],
+        other => &scene["canvases"][other.as_str()],
+    }
+}
+
+/// A merge patch making `change` to extra canvas `canvas`'s settings:
+/// under `vertical`, or its `canvases` entry (the daemon merges that list
+/// by id).
+pub fn canvas_patch(canvas: CanvasId, change: Value) -> Value {
+    if canvas.is_vertical() {
+        return json!({ "vertical": change });
+    }
+    let mut entry = change;
+    if let Some(object) = entry.as_object_mut() {
+        object.insert("id".into(), canvas.as_str().into());
+    }
+    json!({ "canvases": [entry] })
+}
+
+/// A scene patch entry setting (or with null, removing) its arrangement
+/// for extra canvas `canvas`.
+fn arrangement_patch(entry: &mut Value, canvas: CanvasId, arrangement: Value) {
+    if canvas.is_vertical() {
+        entry["vertical"] = arrangement;
+    } else {
+        entry["canvases"][canvas.as_str()] = arrangement;
+    }
+}
+
+/// The patch dropping scene `scene`'s own arrangement for extra canvas
+/// `canvas`, so it shows the main layout there again.
+pub fn drop_arrangement(scene: &str, canvas: CanvasId) -> Value {
+    let mut entry = json!({ "id": scene });
+    arrangement_patch(&mut entry, canvas, Value::Null);
+    json!({ "scenes": [entry] })
+}
+
+/// An extra canvas's name as the interface shows it: "Vertical" for the
+/// `[vertical]` canvas, else its `name` (its id without one).
+pub fn canvas_label(setup: &Setup, canvas: CanvasId) -> String {
+    match canvas {
+        CanvasId::Main => "Main".into(),
+        CanvasId::Vertical => "Vertical".into(),
+        other => setup
+            .extra_canvas(other)
+            .and_then(|c| c.name.clone())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| other.as_str().to_string()),
+    }
+}
+
+/// The setup `shown` (JSON) as extra canvas `canvas` edits it (#86, #120):
+/// each scene's own arrangement for it in place of the main items and
+/// layout (a scene without one shows the main ones fitted and centred, as
+/// `Setup::for_canvas` does), and the canvas's size and rate as `canvas`.
+pub fn canvas_view(shown: &Value, canvas: CanvasId) -> Value {
     let mut out = shown.clone();
-    let vertical = &shown["vertical"];
-    out["canvas"]["width"] = vertical.get("width").cloned().unwrap_or(json!(1080));
-    out["canvas"]["height"] = vertical.get("height").cloned().unwrap_or(json!(1920));
-    if let Some(fps) = vertical.get("fps").filter(|f| !f.is_null()) {
+    let settings = canvas_json(shown, canvas);
+    out["canvas"]["width"] = settings.get("width").cloned().unwrap_or(json!(1080));
+    out["canvas"]["height"] = settings.get("height").cloned().unwrap_or(json!(1920));
+    if let Some(fps) = settings.get("fps").filter(|f| !f.is_null()) {
         out["canvas"]["fps"] = fps.clone();
     }
     if let Some(object) = out.as_object_mut() {
         object.remove("vertical");
+        object.remove("canvases");
     }
     if let Some(scenes) = out["scenes"].as_array_mut() {
         for scene in scenes {
+            let own = arrangement_json(scene, canvas).clone();
             let Some(object) = scene.as_object_mut() else {
                 continue;
             };
-            if let Some(own) = object.remove("vertical").filter(Value::is_object) {
+            object.remove("vertical");
+            object.remove("canvases");
+            if own.is_object() {
                 object.insert(
                     "items".into(),
                     own.get("items").cloned().unwrap_or(json!([])),
@@ -217,7 +297,7 @@ pub fn vertical_view(shown: &Value) -> Value {
                     None => object.remove("layout"),
                 };
             } else if let Some(items) = object.get("items") {
-                let fitted = fitted_items(shown, items);
+                let fitted = fitted_items(shown, canvas, items);
                 object.insert("items".into(), fitted);
             }
         }
@@ -225,40 +305,42 @@ pub fn vertical_view(shown: &Value) -> Value {
     out
 }
 
-/// The items of scene `scene` on one canvas of `shown`: the main ones, or
-/// (`vertical`) its vertical ones (the main ones where it has none).
-pub fn canvas_items(shown: &Value, scene: &str, vertical: bool) -> Vec<Value> {
+/// The items of scene `scene` on canvas `canvas` of `shown`: the main
+/// ones, or an extra canvas's own (the main ones fitted where it has none).
+pub fn canvas_items(shown: &Value, scene: &str, canvas: CanvasId) -> Vec<Value> {
     let Some(scene) = shown["scenes"]
         .as_array()
         .and_then(|scenes| scenes.iter().find(|s| s["id"] == scene))
     else {
         return Vec::new();
     };
-    let items = if vertical && scene["vertical"].is_object() {
-        scene["vertical"]["items"].clone()
-    } else if vertical {
-        fitted_items(shown, &scene["items"])
-    } else {
+    let own = arrangement_json(scene, canvas);
+    let items = if canvas.is_main() {
         scene["items"].clone()
+    } else if own.is_object() {
+        own["items"].clone()
+    } else {
+        fitted_items(shown, canvas, &scene["items"])
     };
     items.as_array().cloned().unwrap_or_default()
 }
 
-/// A scene's main `items` (JSON) as the vertical canvas of `shown` shows
-/// them while the scene has no vertical items of its own: fitted inside it
-/// and centred, as `Setup::for_canvas` does (#109). Unchanged if they
-/// don't parse (the daemon says why).
-fn fitted_items(shown: &Value, items: &Value) -> Value {
+/// A scene's main `items` (JSON) as extra canvas `canvas` of `shown` shows
+/// them while the scene has no arrangement of its own for it: fitted
+/// inside it and centred, as `Setup::for_canvas` does (#109). Unchanged
+/// if they don't parse (the daemon says why).
+fn fitted_items(shown: &Value, canvas: CanvasId, items: &Value) -> Value {
     let size = |value: &Value, key: &str, default: u64| {
         value.get(key).and_then(Value::as_u64).unwrap_or(default) as u32
     };
+    let settings = canvas_json(shown, canvas);
     let from = (
         size(&shown["canvas"], "width", 1920),
         size(&shown["canvas"], "height", 1080),
     );
     let to = (
-        size(&shown["vertical"], "width", 1080),
-        size(&shown["vertical"], "height", 1920),
+        size(settings, "width", 1080),
+        size(settings, "height", 1920),
     );
     let Ok(mut typed) = serde_json::from_value::<Vec<isocast_protocol::SceneItem>>(items.clone())
     else {
@@ -269,7 +351,7 @@ fn fitted_items(shown: &Value, items: &Value) -> Value {
         .into_iter()
         .flatten()
         .filter_map(|scene| serde_json::from_value::<isocast_protocol::Scene>(scene.clone()).ok())
-        .filter(|scene| scene.letterboxed())
+        .filter(|scene| scene.letterboxed_on(canvas))
         .map(|scene| scene.id)
         .collect();
     isocast_protocol::fit_items(&mut typed, from, to, &|id| {
@@ -278,13 +360,17 @@ fn fitted_items(shown: &Value, items: &Value) -> Value {
     serde_json::to_value(typed).unwrap_or_else(|_| items.clone())
 }
 
-/// `patch` sent while editing the vertical canvas (#86): what it changes in
-/// existing scenes' `items` goes to their vertical items instead, so no
-/// edit of the vertical layout can change the main one. A scene without
-/// vertical items of its own yet gets them made from the main ones as the
-/// vertical canvas shows them (fitted and centred, #109) with the change in. Everything else (scene
-/// names, transitions, new scenes, sources) is left as it is.
-pub fn route_vertical(shown: &Value, patch: Value) -> Value {
+/// `patch` sent while editing extra canvas `canvas` (#86, #120): what it
+/// changes in existing scenes' `items` goes to their arrangement for that
+/// canvas instead, so no edit of its layout can change the main one. A
+/// scene without an arrangement of its own yet gets one made from the
+/// main items as the canvas shows them (fitted and centred, #109) with
+/// the change in. Everything else (scene names, transitions, new scenes,
+/// sources) is left as it is.
+pub fn route_canvas(shown: &Value, canvas: CanvasId, patch: Value) -> Value {
+    if canvas.is_main() {
+        return patch;
+    }
     let Some(entries) = patch["scenes"].as_array() else {
         return patch;
     };
@@ -304,27 +390,27 @@ pub fn route_vertical(shown: &Value, patch: Value) -> Value {
             if let Some(object) = entry.as_object_mut() {
                 object.remove("items");
             }
-            let vertical = if scene["vertical"].is_object() {
+            let arrangement = if arrangement_json(scene, canvas).is_object() {
                 json!({ "items": items })
             } else {
-                let base = fitted_items(shown, scene.get("items").unwrap_or(&json!([])));
+                let base = fitted_items(shown, canvas, scene.get("items").unwrap_or(&json!([])));
                 let made = isocast_protocol::change::merge_patch(
                     &json!({ "items": base }),
                     &json!({ "items": items }),
                 );
-                let mut vertical = json!({ "items": made["items"] });
+                let mut arrangement = json!({ "items": made["items"] });
                 if !scene["layout"].is_null() {
-                    vertical["layout"] = scene["layout"].clone();
+                    arrangement["layout"] = scene["layout"].clone();
                 }
-                vertical
+                arrangement
             };
-            let vertical = match entry.get("vertical") {
-                Some(other) if other.is_object() => {
-                    isocast_protocol::change::merge_patch(other, &vertical)
+            let arrangement = match arrangement_json(&entry, canvas) {
+                other if other.is_object() => {
+                    isocast_protocol::change::merge_patch(other, &arrangement)
                 }
-                _ => vertical,
+                _ => arrangement,
             };
-            entry["vertical"] = vertical;
+            arrangement_patch(&mut entry, canvas, arrangement);
             entry
         })
         .collect();

@@ -44,6 +44,7 @@ pub const STATES: &[&str] = &[
     "toast-audio-stops:REPORT.json",
     "transition:KIND",
     "vcam[:missing|approval|running|failed|removable]",
+    "vcam-target:program|preview|scene|source|vertical|canvas:ID (as its Shows menu picks it)",
     "replay[:running|failed|saved]",
     "pause",
     "resume",
@@ -202,13 +203,13 @@ impl Area for Controls {
         let weak = Rc::downgrade(app);
         area.on_toggle_replay(move || {
             if let Some(app) = weak.upgrade() {
-                toggle_replay(&app);
+                toggle_replay(&app, isocast_protocol::CanvasId::Main);
             }
         });
         let weak = Rc::downgrade(app);
         area.on_save_replay(move || {
             if let Some(app) = weak.upgrade() {
-                save_replay(&app);
+                save_replay(&app, isocast_protocol::CanvasId::Main);
             }
         });
         let weak = Rc::downgrade(app);
@@ -630,6 +631,11 @@ impl Area for Controls {
                     area.set_vcam_details_serial(area.get_vcam_details_serial() + 1);
                 }
             }
+            // The camera's Shows choice, as its popover's menu makes it.
+            "vcam-target" => {
+                set_vcam(app, "target", arg);
+                app.flush();
+            }
             // Start the replay buffer through the Controls dock; with an
             // argument, as the daemon reports that state.
             "replay" => match arg {
@@ -641,7 +647,7 @@ impl Area for Controls {
                         .as_ref()
                         .is_some_and(|r| r.state == ReplayState::Running);
                     if !on {
-                        toggle_replay(app);
+                        toggle_replay(app, isocast_protocol::CanvasId::Main);
                     }
                 }
                 "running" | "failed" => {
@@ -2327,15 +2333,36 @@ fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
     if setup.is_some_and(|x| x.vertical.is_some()) || settings.target == VcamTarget::Vertical {
         targets.push(kit::option("vertical", "Vertical program", ""));
     }
+    // Every other extra canvas's program (#120): `canvas:ID`.
+    let chosen_canvas = (settings.target == VcamTarget::Canvas)
+        .then(|| settings.canvas.clone().unwrap_or_default());
+    let mut offered = false;
+    for canvas in s.extra_canvases().into_iter().filter(|c| !c.is_vertical()) {
+        offered |= chosen_canvas.as_deref() == Some(canvas.as_str());
+        targets.push(kit::option(
+            &format!("canvas:{canvas}"),
+            &format!("{} program", s.canvas_label(canvas)),
+            "",
+        ));
+    }
+    if let Some(id) = chosen_canvas.as_deref().filter(|_| !offered) {
+        targets.push(kit::option(
+            &format!("canvas:{id}"),
+            &format!("{id} program"),
+            "",
+        ));
+    }
     area.set_vcam_targets(model(targets));
     area.set_vcam_target(
         match settings.target {
-            VcamTarget::Program => "program",
-            VcamTarget::Preview => "preview",
-            VcamTarget::Scene => "scene",
-            VcamTarget::Source => "source",
-            VcamTarget::Vertical => "vertical",
+            VcamTarget::Program => "program".to_string(),
+            VcamTarget::Preview => "preview".into(),
+            VcamTarget::Scene => "scene".into(),
+            VcamTarget::Source => "source".into(),
+            VcamTarget::Vertical => "vertical".into(),
+            VcamTarget::Canvas => format!("canvas:{}", settings.canvas.as_deref().unwrap_or("")),
         }
+        .as_str()
         .into(),
     );
     area.set_vcam_scenes(model(setup.map_or(Vec::new(), |x| {
@@ -2377,9 +2404,18 @@ fn show_vcam(app: &Rc<App>, area: &ControlsArea) {
         }
         .into(),
     );
-    // What it sends (running), or would send (the next start's).
+    // What it sends (running), or would send (the next start's: a
+    // stopped camera's status still has the last start's size).
     let (w, h, fps) = match status {
-        Some(x) if x.width > 0 => (x.width, x.height, x.fps),
+        Some(x)
+            if x.width > 0
+                && matches!(
+                    x.state,
+                    VirtualCameraState::Running | VirtualCameraState::Starting
+                ) =>
+        {
+            (x.width, x.height, x.fps)
+        }
         _ => {
             let (w, h) = setup.map_or((0, 0), |x| settings.size(x));
             (w, h, setup.map_or(0, |x| settings.fps(x)))
@@ -2538,15 +2574,45 @@ fn set_vcam(app: &Rc<App>, field: &str, value: &str) {
             return;
         };
         let current = &setup.virtual_camera;
+        // Leaving a canvas target: its size (picked for that canvas's
+        // shape, #120) goes too, so the new picture isn't letterboxed into
+        // it.
+        let unsize = |mut patch: Value| {
+            if current.target == VcamTarget::Canvas {
+                patch["width"] = Value::Null;
+                patch["height"] = Value::Null;
+            }
+            patch
+        };
         match field {
             "target" => match value {
                 // A scene or source is needed with them: the one chosen
                 // before, else the first.
-                "scene" => json!({ "target": "scene", "source": null,
-                    "scene": current.scene.clone().or_else(|| first(setup.scenes.iter().map(|x| x.id.clone()).collect())) }),
-                "source" => json!({ "target": "source", "scene": null,
-                    "source": current.source.clone().or_else(|| first(setup.sources.iter().filter(|x| x.kind.has_video()).map(|x| x.id.clone()).collect())) }),
-                other => json!({ "target": other, "scene": null, "source": null }),
+                "scene" => unsize(json!({ "target": "scene", "source": null, "canvas": null,
+                    "scene": current.scene.clone().or_else(|| first(setup.scenes.iter().map(|x| x.id.clone()).collect())) })),
+                "source" => unsize(json!({ "target": "source", "scene": null, "canvas": null,
+                    "source": current.source.clone().or_else(|| first(setup.sources.iter().filter(|x| x.kind.has_video()).map(|x| x.id.clone()).collect())) })),
+                other => match other.strip_prefix("canvas:") {
+                    // An extra canvas (#120): its size if the camera
+                    // offers it, else the offered size of its shape.
+                    Some(id) => {
+                        let size = isocast_protocol::CanvasId::parse(id)
+                            .ok()
+                            .and_then(|c| setup.extra_canvas(c))
+                            .map(|c| c.canvas(&setup.canvas))
+                            .map(|c| (c.width, c.height));
+                        let (width, height) = match size {
+                            Some(size) if VCAM_SIZES.contains(&size) => (json!(null), json!(null)),
+                            Some((w, h)) if h > w => (json!(1080), json!(1920)),
+                            _ => (json!(1920), json!(1080)),
+                        };
+                        json!({ "target": "canvas", "canvas": id, "scene": null, "source": null,
+                            "width": width, "height": height })
+                    }
+                    None => unsize(
+                        json!({ "target": other, "scene": null, "source": null, "canvas": null }),
+                    ),
+                },
             },
             "scene" => json!({ "scene": value }),
             "source" => json!({ "source": value }),
@@ -2662,28 +2728,44 @@ fn megabytes(bytes: u64) -> String {
     }
 }
 
-/// Start or stop the replay buffer.
-fn toggle_replay(app: &Rc<App>) {
+/// Canvas `canvas`'s replay buffer, as last told (#120: each canvas has
+/// its own).
+pub(crate) fn replay_of(
+    s: &crate::session::Session,
+    canvas: isocast_protocol::CanvasId,
+) -> Option<&ReplayStatus> {
+    if canvas.is_main() {
+        s.replay.as_ref()
+    } else {
+        s.canvases
+            .iter()
+            .find(|c| c.id == canvas)
+            .and_then(|c| c.replay.as_ref())
+    }
+}
+
+/// Start or stop canvas `canvas`'s replay buffer (the Controls dock's is
+/// the main canvas's; the canvas monitor's menu has the others', #120).
+pub(crate) fn toggle_replay(app: &Rc<App>, canvas: isocast_protocol::CanvasId) {
     let on = {
         let mut s = app.session.borrow_mut();
         if s.busy_replay {
             return;
         }
         s.busy_replay = true;
-        s.replay
-            .as_ref()
-            .is_some_and(|x| x.state == ReplayState::Running)
+        replay_of(&s, canvas).is_some_and(|x| x.state == ReplayState::Running)
     };
     app.changed(Changed::BUSY | Changed::REPLAY);
+    let params = isocast_protocol::replay::ReplayParams::of(canvas);
     let method = if on {
-        Method::ReplayStop(None)
+        Method::ReplayStop(params)
     } else {
-        Method::ReplayStart(None)
+        Method::ReplayStart(params)
     };
     app.call_as::<ReplayStatus>(method, move |app, result| {
         app.session.borrow_mut().busy_replay = false;
         match result {
-            Ok(status) => app.session.borrow_mut().replay = Some(status),
+            Ok(status) => app.session.borrow_mut().set_replay(status),
             Err(error) => {
                 app.failed(
                     if on {
@@ -2700,8 +2782,9 @@ fn toggle_replay(app: &Rc<App>) {
     });
 }
 
-/// Save Replay: the buffer's last seconds to a file; a toast says where.
-fn save_replay(app: &Rc<App>) {
+/// Save Replay: canvas `canvas`'s buffer's last seconds to a file; a
+/// toast says where.
+pub(crate) fn save_replay(app: &Rc<App>, canvas: isocast_protocol::CanvasId) {
     {
         let mut s = app.session.borrow_mut();
         if s.saving_replay {
@@ -2710,7 +2793,8 @@ fn save_replay(app: &Rc<App>) {
         s.saving_replay = true;
     }
     app.changed(Changed::REPLAY);
-    app.call_as::<ReplaySaved>(Method::ReplaySave(None), |app, result| {
+    let params = isocast_protocol::replay::ReplayParams::of(canvas);
+    app.call_as::<ReplaySaved>(Method::ReplaySave(params), |app, result| {
         app.session.borrow_mut().saving_replay = false;
         match result {
             Ok(saved) => replay_saved(app, &saved),
@@ -2784,7 +2868,7 @@ fn toggle_vertical_alongside(app: &Rc<App>, start: bool) {
         canvas: isocast_protocol::CanvasId::Vertical,
         ..Default::default()
     };
-    app.session.borrow_mut().busy_vertical_stream = true;
+    app.session.borrow_mut().busy_canvas_stream = true;
     app.changed(Changed::BUSY);
     let method = if start {
         Method::StreamStart(Some(params))
@@ -2812,7 +2896,7 @@ fn toggle_vertical_alongside(app: &Rc<App>, start: bool) {
                 app.refresh_status(true);
             }
         }
-        app.session.borrow_mut().busy_vertical_stream = false;
+        app.session.borrow_mut().busy_canvas_stream = false;
         app.changed(Changed::BUSY | Changed::STREAM);
     });
 }

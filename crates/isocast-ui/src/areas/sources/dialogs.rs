@@ -310,12 +310,13 @@ fn new_item(app: &Rc<App>, scene: &str, fields: Value, visible: bool) -> Value {
     item
 }
 
-/// The setup as canvas `canvas` has it (the vertical canvas's items and
+/// The setup as canvas `canvas` has it (an extra canvas's items and
 /// size, or the main ones).
 fn canvas_setup(s: &crate::session::Session, canvas: CanvasId) -> Option<Rc<Setup>> {
     match canvas {
         CanvasId::Main => s.setup.clone(),
-        _ => s.vertical.clone(),
+        other if s.extra_canvas() == Some(other) => s.extra.clone(),
+        other => s.setup.as_ref()?.for_canvas(other).map(Rc::new),
     }
 }
 

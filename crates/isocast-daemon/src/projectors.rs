@@ -12,10 +12,11 @@ use std::fs;
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use isocast_protocol::CanvasId;
 use isocast_protocol::devices::Display;
 use isocast_protocol::projector::{
-    CANVASES, CloseParams, MAIN_CANVAS, MultiviewLayout, OpenParams, PlaceParams, Placement,
-    Projector, ProjectorView, Projectors, VERTICAL_CANVAS,
+    CloseParams, MAIN_CANVAS, MultiviewLayout, OpenParams, PlaceParams, Placement, Projector,
+    ProjectorView, Projectors, VERTICAL_CANVAS,
 };
 
 /// What is kept on disk.
@@ -38,6 +39,9 @@ struct Saved {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     waiting: Vec<Projector>,
 }
+
+/// The most projectors kept waiting for their displays (#95).
+const MAX_WAITING: usize = 16;
 
 #[derive(Default)]
 pub(super) struct ProjectorState {
@@ -164,6 +168,9 @@ impl ProjectorState {
                     .insert(key(&projector), projector.placement.clone());
                 saved.waiting.retain(|p| !p.same_view(&projector));
                 saved.waiting.push(projector);
+                // Bounded (#95): the oldest give way.
+                let over = saved.waiting.len().saturating_sub(MAX_WAITING);
+                saved.waiting.drain(..over);
             }
         }
         let mut kept = self.saved.lock();
@@ -251,23 +258,50 @@ impl Daemon {
 
     pub(super) fn projector_open(&self, params: OpenParams) -> Result<Projector, RpcError> {
         let canvas = params.canvas.clone().unwrap_or_else(|| MAIN_CANVAS.into());
-        if !CANVASES.contains(&canvas.as_str()) {
-            return Err(invalid(format!(
-                "canvas: {canvas:?} isn't a canvas; canvases: {}",
-                CANVASES.join(", ")
-            )));
-        }
-        let vertical = canvas == VERTICAL_CANVAS;
-        if vertical
+        // Kept as parsed (trimmed), so the same canvas written two ways is
+        // one view (`same_view`, placements).
+        let canvas = match CanvasId::parse(&canvas) {
+            Ok(id) => id.as_str().to_string(),
+            Err(_) => canvas,
+        };
+        // The live setup's canvases (#120), for the checks below.
+        let canvas_ids: Vec<CanvasId> = {
+            let state = self.state.lock();
+            state
+                .setup
+                .as_ref()
+                .map(|s| s.canvas_ids())
+                .unwrap_or_else(|| vec![CanvasId::Main])
+        };
+        let listed = || {
+            canvas_ids
+                .iter()
+                .map(|c| c.as_str().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let extra = match CanvasId::parse(&canvas) {
+            Ok(CanvasId::Main) => false,
+            Ok(id) if canvas_ids.contains(&id) => true,
+            // Said apart below, with how to add it.
+            Ok(CanvasId::Vertical) => true,
+            _ => {
+                return Err(invalid(format!(
+                    "canvas: {canvas:?} isn't a canvas of the live setup; canvases: {}",
+                    listed()
+                )));
+            }
+        };
+        if extra
             && matches!(
                 params.view,
                 ProjectorView::Source | ProjectorView::Multiview
             )
         {
             return Err(invalid(format!(
-                "canvas: \"vertical\" shows views program, preview and scene; a {} is the \
-                 same on every canvas, so leave canvas out (a multiview shows the vertical \
-                 program with vertical = true)",
+                "canvas: {canvas:?} shows views program, preview and scene; a {} is the \
+                 same on every canvas, so leave canvas out (a multiview shows extra \
+                 canvases' programs with canvases = [...])",
                 if params.view == ProjectorView::Source {
                     "source"
                 } else {
@@ -275,6 +309,7 @@ impl Daemon {
                 }
             )));
         }
+        let vertical = canvas == VERTICAL_CANVAS;
         let only = |field: &str, given: bool, view: &str| {
             if given {
                 Err(invalid(format!(
@@ -297,12 +332,48 @@ impl Daemon {
         if params.view != ProjectorView::Multiview {
             only("layout", params.layout.is_some(), "multiview")?;
             only("vertical", params.vertical.is_some(), "multiview")?;
+            only("canvases", params.canvases.is_some(), "multiview")?;
         }
+        // A multiview's canvas tiles: extra canvases of the live setup, each
+        // once, at most half its scene tiles.
+        let tile_canvases: Option<Vec<String>> = match &params.canvases {
+            None => None,
+            Some(list) => {
+                let mut kept: Vec<String> = Vec::new();
+                for (i, id) in list.iter().enumerate() {
+                    match CanvasId::parse(id) {
+                        Ok(c) if !c.is_main() && canvas_ids.contains(&c) => {
+                            if !kept.iter().any(|k| k == c.as_str()) {
+                                kept.push(c.as_str().to_string());
+                            }
+                        }
+                        _ => {
+                            let extras: Vec<&str> = canvas_ids
+                                .iter()
+                                .filter(|c| !c.is_main())
+                                .map(|c| c.as_str())
+                                .collect();
+                            return Err(invalid(format!(
+                                "canvases[{i}]: {id:?} isn't an extra canvas of the live setup; \
+                                 extra canvases: {}",
+                                if extras.is_empty() {
+                                    "(none)".to_string()
+                                } else {
+                                    extras.join(", ")
+                                }
+                            )));
+                        }
+                    }
+                }
+                Some(kept)
+            }
+        };
         {
             let state = self.state.lock();
             let setup = state.setup.as_ref();
             let has_vertical = setup.is_some_and(|s| s.vertical.is_some());
             if (vertical || params.vertical == Some(true)) && !has_vertical {
+                // (A `[[canvases]]` id the setup lacks was refused above.)
                 let field = if vertical { "canvas" } else { "vertical" };
                 return Err(invalid(format!(
                     "{field}: the live setup has no vertical canvas; add one first (Settings › \
@@ -388,6 +459,7 @@ impl Daemon {
             layout: (params.view == ProjectorView::Multiview)
                 .then(|| params.layout.unwrap_or(MultiviewLayout::Top8)),
             vertical: params.vertical == Some(true),
+            canvases: tile_canvases.clone().unwrap_or_default(),
             placement: Placement::default(),
             shown: false,
         };
@@ -436,6 +508,39 @@ impl Daemon {
                 projector.placement.display = None;
                 projector.placement.frame = None;
             }
+            // A multiview's canvas tiles fit its grid (the one it will
+            // have: given, else the open one's).
+            if projector.view == ProjectorView::Multiview {
+                let open = saved.open.iter().find(|p| p.same_view(&projector));
+                let layout = params
+                    .layout
+                    .or_else(|| open.and_then(|p| p.layout))
+                    .unwrap_or(MultiviewLayout::Top8);
+                let mut will = projector.clone();
+                if let Some(open) = open {
+                    if params.vertical.is_none() {
+                        will.vertical = open.vertical;
+                    }
+                    if tile_canvases.is_none() {
+                        will.canvases = open.canvases.clone();
+                    }
+                }
+                let most = layout.canvas_tiles();
+                let count = will.tile_canvases().len();
+                if count > most
+                    && (params.layout.is_some()
+                        || tile_canvases.is_some()
+                        || params.vertical.is_some())
+                {
+                    return Err(invalid(format!(
+                        "canvases: a {} multiview shows at most {most} canvas tile{} (the rest \
+                         are scenes), not {count}; give fewer, or layout top-8 for up to {}",
+                        layout.name(),
+                        if most == 1 { "" } else { "s" },
+                        MultiviewLayout::Top8.canvas_tiles()
+                    )));
+                }
+            }
             match saved.open.iter_mut().find(|p| p.same_view(&projector)) {
                 Some(open) => {
                     open.placement = projector.placement.clone();
@@ -444,6 +549,9 @@ impl Daemon {
                     }
                     if params.vertical.is_some() {
                         open.vertical = projector.vertical;
+                    }
+                    if tile_canvases.is_some() {
+                        open.canvases = projector.canvases.clone();
                     }
                     open.clone()
                 }

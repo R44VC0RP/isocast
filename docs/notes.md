@@ -1880,6 +1880,48 @@ each section. Delete entries that stop being true.
   measurements remain diagnostic until their aggregate-resource fit is
   qualified. Reports identify unmeasured cells rather than treating them as
   free. Runtime qualification is recorded in this lane's scratch REPORT.md.
+- 2026-10-18 (#120 review fixes): leaving a virtual camera `canvas`
+  target clears the size it set (a 1080×1920 picked for a portrait canvas
+  no longer letterboxes the program); the camera's caption shows the next
+  start's size while stopped (a stopped status keeps the last start's).
+  `projector_open` stores the parsed (trimmed) canvas id. View › Reset UI
+  clears the chosen canvas (after going back to editing the main one).
+  The app reads an extra canvas's own scene/preview only while it doesn't
+  follow main: the daemon drops them without an event when a canvas starts
+  following (`canvas_link` → `Some(true)`), so `Session::scene_on`/
+  `preview_on` go by the setup shown. Offscreen `menu:OWNER` opens menus
+  at the preview's centre; `press:LABEL` on the chevron shows the canvas
+  menu under it, as a click does. Snapshot state `vcam-target:VALUE`.
+- 2026-10-18 (#120, #96, #95): **Extra canvases in the app.** One canvas
+  monitor beside the others shows the *chosen* extra canvas (vertical or
+  any `[[canvases]]`; the first by default, the choice kept in the window
+  prefs as `canvas_monitor`); its line's tag is the canvas's name and its
+  ⌄ menu lists the canvases (with sizes, a check on the shown one) before
+  show/edit/record/stream/replay/settings and the projector items. Picked
+  over a row of tabs above the monitor (both rendered offscreen,
+  canvas-ui/scratch/design/): the menu scales to 8 canvases in a 20%
+  column, takes no height from the picture, and keeps the line as it was
+  with one canvas; tabs were one click faster but unreadable past ~4 in a
+  narrow column. Edit <name> Canvas edits the chosen canvas (gestures go
+  to `scenes[].canvases.<id>` through `model::route_canvas`, generalising
+  `route_vertical`); Studio Mode's own preview for an independent canvas
+  is generalised the same way (`App::stage_extra_preview`). Session keeps
+  each canvas's scene/preview in maps (`canvas_scenes`/`canvas_previews`),
+  so a `canvas_scene_changed` for one canvas no longer overwrites another's
+  (it used to: every non-main event set `vertical_scene`). Projectors:
+  `projector_open` `canvas` takes any extra canvas id of the live setup
+  (refused with the canvases listed otherwise); multiview gains
+  `canvases: [ids]` (their programs fill the last tiles, at most half the
+  grid's scene tiles: 4 in top-8, 3 in 3x3, 1 in 2x2; refused beyond, with
+  the numbers); `vertical: true` still works and counts as `vertical` in
+  that list. The app's multiview shows every extra canvas that fits.
+  Virtual camera: `target = "canvas"` with `canvas = ID` (the vertical one
+  stays `target = "vertical"`); choosing a canvas whose size the camera
+  doesn't advertise picks 1080×1920 or 1920×1080 by its shape (letterboxed).
+  Replay per canvas in the app: the canvas monitor's menu starts, stops and
+  saves the chosen canvas's buffer (the Controls dock stays the main
+  canvas's). Settings tabs take `stream@ID` and `video@ID`. The daemon's
+  waiting full-screen projector list is capped at 16 (#95).
 
 - 2026-10-18 (#84 review fixes): **Governor per canvas; inline ids.**
   The live governor (#110) classifies stream slots by canvas

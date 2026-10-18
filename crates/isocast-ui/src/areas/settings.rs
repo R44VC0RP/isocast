@@ -668,10 +668,13 @@ impl Area for Settings {
         // "stream:Add your stream key first." opens Stream saying why (or
         // the notice set just before, as Start Streaming does).
         let (tab, notice) = arg.split_once(':').unwrap_or((arg, ""));
-        // "stream-vertical:…": Stream showing the vertical canvas's (#96).
-        let (tab, canvas) = match tab {
-            "stream-vertical" => ("stream", CanvasId::Vertical),
-            tab => (tab, CanvasId::Main),
+        // "stream-vertical:…": Stream showing the vertical canvas's (#96);
+        // "stream@ID", "video@ID": Stream showing extra canvas ID's, Video
+        // with its row open (#120).
+        let (tab, canvas) = match tab.split_once('@') {
+            Some((tab, id)) => (tab, CanvasId::parse(id).unwrap_or(CanvasId::Main)),
+            None if tab == "stream-vertical" => ("stream", CanvasId::Vertical),
+            None => (tab, CanvasId::Main),
         };
         let notice = match (notice, tab) {
             ("", "stream") => area.get_notice().to_string(),
@@ -702,7 +705,12 @@ impl Area for Settings {
         if !canvas.is_main()
             && let Some(d) = self.draft.borrow_mut().as_mut()
         {
-            d.canvas = canvas;
+            if tab == "video" {
+                d.edit_canvas = Some(canvas);
+                d.canvas_closed = false;
+            } else {
+                d.canvas = canvas;
+            }
         }
         area.set_tab(tab.into());
         area.set_quality_advanced(false);
@@ -1160,7 +1168,7 @@ impl Settings {
                         d.refused = format!(
                             "The vertical canvas stays on: {} {} a vertical layout of {} own. \
                              To keep nothing you’d lose, put each back on the main layout \
-                             first (View › Vertical Canvas › Use Main Layout for This Scene, \
+                             first (View › Canvases › Use Main Layout for This Scene, \
                              while editing the vertical canvas).",
                             own.join(", "),
                             if own.len() == 1 { "has" } else { "have" },
