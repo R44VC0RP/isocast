@@ -46,7 +46,7 @@ jobs:
       head: ${{ steps.refs.outputs.head }}
       base: ${{ steps.refs.outputs.base }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
@@ -91,7 +91,7 @@ jobs:
 
       - name: Upload
         if: ${{ steps.refs.outputs.ui == 'false' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: visual-screenshots
           path: ${{ runner.temp }}/visual/
@@ -105,7 +105,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.changes.outputs.head }}
           fetch-depth: 0
@@ -124,7 +124,7 @@ jobs:
           rustc --version
 
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: visual-release
           # Only main writes the cache (run this workflow by hand on main to
@@ -189,7 +189,7 @@ jobs:
 
       - name: Upload
         if: ${{ !cancelled() && steps.compare.outcome == 'success' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: visual-screenshots
           path: ${{ runner.temp }}/visual/
