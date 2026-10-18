@@ -103,6 +103,11 @@ pub struct Chip {
     pub stream_h264_cost: f64,
     /// Live H.264's per-picture cost must not inherit a recording-only fit.
     pub stream_frame_overhead: f64,
+    /// An H.264 recording file's cost per pixel and per picture: the
+    /// table's, kept as that share of the engines beside a measured HEVC
+    /// fit (no H.264 recording cell qualifies a fit of its own).
+    pub h264_cost: f64,
+    pub h264_frame_overhead: f64,
     pub basis: String,
 }
 
@@ -120,6 +125,8 @@ pub fn chip(name: &str) -> Chip {
             overload_iso_efficiency: row.overload_iso_efficiency.unwrap_or(1.0),
             stream_h264_cost: row.stream_h264_cost.unwrap_or(table.codec_cost.h264),
             stream_frame_overhead: row.frame_overhead_pixels,
+            h264_cost: table.codec_cost.h264,
+            h264_frame_overhead: row.frame_overhead_pixels,
             basis: row.basis.clone(),
         };
     }
@@ -146,6 +153,8 @@ pub fn chip(name: &str) -> Chip {
             overload_iso_efficiency: 1.0,
             stream_h264_cost: table.codec_cost.h264,
             stream_frame_overhead: 0.0,
+            h264_cost: table.codec_cost.h264,
+            h264_frame_overhead: 0.0,
             basis: format!(
                 "assumed: {engines} encode engine(s) as on other {} chips, each as fast as \
                  measured on other {generation} chips; not measured on this chip",
@@ -167,6 +176,8 @@ pub fn chip(name: &str) -> Chip {
                 overload_iso_efficiency: 1.0,
                 stream_h264_cost: table.codec_cost.h264,
                 stream_frame_overhead: 0.0,
+                h264_cost: table.codec_cost.h264,
+                h264_frame_overhead: 0.0,
                 basis: format!(
                     "assumed: a newer chip than any measured, taken to be as fast as the newest \
                      measured generation, with {engines} encode engine(s)"
@@ -181,6 +192,8 @@ pub fn chip(name: &str) -> Chip {
             overload_iso_efficiency: 1.0,
             stream_h264_cost: table.codec_cost.h264,
             stream_frame_overhead: 0.0,
+            h264_cost: table.codec_cost.h264,
+            h264_frame_overhead: 0.0,
             basis: "assumed: a chip with no measured data, judged cautiously".into(),
         },
     }
@@ -216,49 +229,125 @@ pub struct Inputs<'a> {
     pub profile: Option<&'a isocast_protocol::machine::MachineProfile>,
 }
 
-/// Fit pixel work plus per-picture overhead from concurrent HD and UHD
-/// measurements. One session alone cannot determine aggregate capacity.
-fn calibrated_chip(inputs: &Inputs) -> Chip {
-    let mut chip = chip(&inputs.machine.chip);
-    let Some(profile) = inputs.profile.filter(|p| p.valid_for(inputs.machine)) else {
-        return chip;
-    };
-    // These concurrent cells cover HEVC High/8-bit, not another codec,
-    // depth or encoder effort. Leave other workloads on the old model.
-    let covered = |encoder: &isocast_protocol::Encoder| {
-        encoder.codec == Codec::Hevc
+/// The per-chip table's engines and, from a valid local profile, the
+/// measured HEVC fit, also as a mixed model for HEVC beside H.264
+/// recording files. Each judged workload (the setup, every suggestion, an
+/// added ISO file) picks its own: a change can leave the qualified cells
+/// (10-bit, ProRes, oversize) or depend on a size nobody knows (#110).
+struct Model {
+    table: Chip,
+    fit: Option<Chip>,
+    mixed: Option<Chip>,
+}
+
+impl Model {
+    fn new(inputs: &Inputs) -> Self {
+        let table = chip(&inputs.machine.chip);
+        let profile = inputs.profile.filter(|p| p.valid_for(inputs.machine));
+        let fit = profile.and_then(|profile| fitted_chip(&table, profile));
+        // The same engines and fit: H.264 recording files keep the table's
+        // share of them (scaled with the fit, like live H.264), shared on
+        // the table's H.264/HEVC engine topology. Not measured mixed.
+        let mixed = fit.as_ref().zip(profile).map(|(fit, profile)| Chip {
+            basis: format!(
+                "mixed: measured local concurrent HEVC HD/UHD on {} for HEVC files; assumed \
+                 table costs for H.264 recording files and live H.264, on the table's shared \
+                 H.264/HEVC engines; engine count and overload recovery remain table assumptions",
+                profile.measured_at
+            ),
+            ..fit.clone()
+        });
+        Model { table, fit, mixed }
+    }
+
+    /// The measured fit for an all-HEVC workload its cells cover, the
+    /// mixed model for covered HEVC beside eligible H.264 recording files,
+    /// else the table.
+    fn chip(&self, setup: &Setup, formats: Formats) -> &Chip {
+        if self.fit.is_none() {
+            return &self.table;
+        }
+        match (coverage(setup, formats), &self.fit, &self.mixed) {
+            (Coverage::Hevc, Some(fit), _) => fit,
+            (Coverage::Mixed, _, Some(mixed)) => mixed,
+            _ => &self.table,
+        }
+    }
+}
+
+/// Which model a setup's recording files allow.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Coverage {
+    /// Something the fit doesn't cover, or no HEVC file it measures.
+    Table,
+    /// Only HEVC files the fit's cells cover.
+    Hevc,
+    /// Covered HEVC files and H.264 files with the same limits.
+    Mixed,
+}
+
+/// Which model covers every recording file of `setup`: HEVC (or, beside
+/// at least one HEVC file, H.264) High/8-bit within 3840×2160 and 60 fps,
+/// at a known size. A source at an assumed (canvas) size never certifies
+/// a measured fit; live streams don't change the choice (their cost stays
+/// the table's share either way).
+fn coverage(setup: &Setup, formats: Formats) -> Coverage {
+    // These concurrent cells cover HEVC High/8-bit, not another depth or
+    // encoder effort; H.264 at the same settings keeps its table cost.
+    let eligible = |encoder: &isocast_protocol::Encoder| {
+        matches!(encoder.codec, Codec::Hevc | Codec::H264)
             && encoder.effective_bit_depth() == 8
             && encoder.quality.value()
                 == isocast_protocol::EncoderQuality::Preset(isocast_protocol::QualityPreset::High)
                     .value()
     };
-    let recording = &inputs.setup.recording;
     let format_covered = |w: u32, h: u32, fps: u32| {
         w.max(h) <= 3840 && u64::from(w) * u64::from(h) <= 3840 * 2160 && fps <= 60
     };
-    let program_covered = |setup: &Setup| {
+    // (codec, covered) for each recording file.
+    let mut files: Vec<(Codec, bool)> = Vec::new();
+    let mut program = |setup: &Setup| {
         let program = &setup.recording.program;
-        let (w, h) = program.size(&setup.canvas);
-        !program.enabled || covered(&program.encoder) && format_covered(w, h, setup.canvas.fps)
+        if program.enabled {
+            let (w, h) = program.size(&setup.canvas);
+            files.push((
+                program.encoder.codec,
+                eligible(&program.encoder) && format_covered(w, h, setup.canvas.fps),
+            ));
+        }
     };
-    if !program_covered(inputs.setup)
-        || recording.iso.enabled
-            && !recording.iso.sources.is_empty()
-            && !covered(&recording.iso.encoder)
-        || inputs
-            .setup
-            .extra_canvas_ids()
-            .into_iter()
-            .filter_map(|canvas| inputs.setup.for_canvas(canvas))
-            .any(|setup| !program_covered(&setup))
-        || recording.iso.enabled
-            && recording.iso.sources.iter().any(|id| {
-                let (w, h, fps, _) = iso_format(inputs.setup, inputs.formats, id);
-                !format_covered(w, h, fps)
-            })
-    {
-        return chip;
+    program(setup);
+    for canvas in setup.extra_canvas_ids() {
+        if let Some(extra) = setup.for_canvas(canvas) {
+            program(&extra);
+        }
     }
+    let iso = &setup.recording.iso;
+    if iso.enabled {
+        for id in &iso.sources {
+            let (w, h, fps, assumed) = iso_format(setup, formats, id);
+            files.push((
+                iso.encoder.codec,
+                eligible(&iso.encoder) && !assumed && format_covered(w, h, fps),
+            ));
+        }
+    }
+    if files.iter().any(|(_, covered)| !covered) {
+        return Coverage::Table;
+    }
+    let has = |codec: Codec| files.iter().any(|(c, _)| *c == codec);
+    match (has(Codec::Hevc), has(Codec::H264)) {
+        (true, false) => Coverage::Hevc,
+        (true, true) => Coverage::Mixed,
+        // Nothing measured contributes: exactly the table.
+        _ => Coverage::Table,
+    }
+}
+
+/// Fit pixel work plus per-picture overhead from concurrent HD and UHD
+/// measurements. One session alone cannot determine aggregate capacity.
+fn fitted_chip(table: &Chip, profile: &isocast_protocol::machine::MachineProfile) -> Option<Chip> {
+    let mut chip = table.clone();
     let throughput = |width, fps, sessions| {
         profile
             .encoders
@@ -278,38 +367,37 @@ fn calibrated_chip(inputs: &Inputs) -> Chip {
     // At least two sessions per assumed engine. Engine topology is still
     // explicitly from the table until the platform exposes resource pools.
     let sessions = (chip.engines * 2).max(4);
-    let Some((hd, uhd)) = throughput(1920, 60, sessions).zip(throughput(3840, 30, sessions)) else {
-        return chip;
-    };
-    let Some(hd_two) = throughput(1920, 60, 2) else {
-        return chip;
-    };
+    let (hd, uhd) = throughput(1920, 60, sessions).zip(throughput(3840, 30, sessions))?;
+    let hd_two = throughput(1920, 60, 2)?;
     if hd < hd_two {
-        return chip;
+        return None;
     }
     let hd_pixels = 1920.0 * 1080.0;
     let uhd_pixels = 3840.0 * 2160.0;
     let per_pixel = (uhd.recip() - hd.recip()) / (uhd_pixels - hd_pixels);
     let per_picture = hd.recip() - per_pixel * hd_pixels;
     if per_pixel <= 0.0 || per_picture < 0.0 {
-        return chip;
+        return None;
     }
     let rate = 1.0 / (per_pixel * f64::from(chip.engines.max(1)));
     let overhead = per_picture / per_pixel;
     if !rate.is_finite() || !overhead.is_finite() || !(1e6..=1e11).contains(&rate) {
-        return chip;
+        return None;
     }
     // A recording-codec test is not a live H.264 test. Keep the latter's
     // existing normalized cost rather than pretending it was measured.
+    // H.264 recording files likewise keep the table's share.
     chip.stream_h264_cost *= rate / chip.rate;
     chip.stream_frame_overhead *= rate / chip.rate;
+    chip.h264_cost *= rate / chip.rate;
+    chip.h264_frame_overhead *= rate / chip.rate;
     chip.rate = rate;
     chip.frame_overhead = overhead;
     chip.basis = format!(
         "measured: local concurrent HEVC HD/UHD on {}; engine count, live H.264 and overload recovery remain table assumptions",
         profile.measured_at
     );
-    chip
+    Some(chip)
 }
 
 /// An ISO source's size and rate: its own fields (a camera's size and
@@ -459,10 +547,10 @@ fn judge(
             codec,
             protected: kind != OutputKind::Iso,
             pixels_per_second: codec_cost(codec).map_or(0.0, |cost| {
-                let (cost, overhead) = if kind == OutputKind::Stream {
-                    (chip.stream_h264_cost, chip.stream_frame_overhead)
-                } else {
-                    (cost, chip.frame_overhead)
+                let (cost, overhead) = match (kind, codec) {
+                    (OutputKind::Stream, _) => (chip.stream_h264_cost, chip.stream_frame_overhead),
+                    (_, Codec::H264) => (chip.h264_cost, chip.h264_frame_overhead),
+                    _ => (cost, chip.frame_overhead),
                 };
                 pixels * cost + f64::from(fps) * overhead
             }),
@@ -963,7 +1051,7 @@ type Tried = (u32, usize, CapacitySuggestion, Vec<String>);
 
 /// Singles and pairs of `options`, judged.
 fn try_options(
-    chip: &Chip,
+    model: &Model,
     setup: &Setup,
     formats: Formats,
     streaming: [bool; 2],
@@ -1019,6 +1107,7 @@ fn try_options(
         };
         // `stream_stop` stops the main canvas's streams only.
         let streams = streaming[0] && method != Some("stream_stop");
+        let chip = model.chip(&changed, formats);
         let judgement = judge(chip, &changed, formats, streams, streaming[1]);
         if judgement.outputs.iter().all(|o| o.pixels_per_second == 0.0)
             && !judgement.outputs.is_empty()
@@ -1085,7 +1174,7 @@ fn pick(mut tried: Vec<Tried>) -> Vec<CapacitySuggestion> {
 /// How to turn on `id`'s ISO file so the setup keeps up: as it is, else
 /// with the source smaller or slower, else not at all.
 fn admission(
-    chip: &Chip,
+    model: &Model,
     setup: &Setup,
     formats: Formats,
     streaming: [bool; 2],
@@ -1128,7 +1217,13 @@ fn admission(
             "add_iso: turning on {id:?}'s ISO file leaves an invalid setup"
         ));
     };
-    let full = judge(chip, &added, formats, streaming[0], streaming[1]);
+    let full = judge(
+        model.chip(&added, formats),
+        &added,
+        formats,
+        streaming[0],
+        streaming[1],
+    );
     if full.capacity != Capacity::CannotKeepUp {
         let (w, h, fps, _) = iso_format(&added, formats, id);
         return Ok(IsoAdmission {
@@ -1150,7 +1245,7 @@ fn admission(
     );
     // Only this source changes: the rest of the setup is the user's.
     let options = source_options(&added, formats, id);
-    let mut tried = try_options(chip, &added, formats, streaming, &options, false);
+    let mut tried = try_options(model, &added, formats, streaming, &options, false);
     tried.sort_by_key(|a| (a.0, a.1));
     if let Some((_, _, fit, _)) = tried
         .into_iter()
@@ -1193,10 +1288,11 @@ fn admission(
 /// Predict whether `inputs.setup`'s files fit, with the closest changes
 /// that fit, and with `add_iso`, how to turn that ISO file on.
 pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstimate, String> {
-    let chip = calibrated_chip(inputs);
+    let model = Model::new(inputs);
     let setup = inputs.setup;
+    let chip = model.chip(setup, inputs.formats);
     let mut judgement = judge(
-        &chip,
+        chip,
         setup,
         inputs.formats,
         inputs.streaming[0],
@@ -1237,7 +1333,7 @@ pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstima
     } else {
         let options = options(setup, inputs.formats, inputs.streaming);
         pick(try_options(
-            &chip,
+            &model,
             setup,
             inputs.formats,
             inputs.streaming,
@@ -1247,7 +1343,7 @@ pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstima
     };
     let admission = match add_iso {
         Some(id) => Some(admission(
-            &chip,
+            &model,
             setup,
             inputs.formats,
             inputs.streaming,
@@ -1273,24 +1369,32 @@ pub fn estimate(inputs: &Inputs, add_iso: Option<&str>) -> Result<CapacityEstima
     })
 }
 
-/// Each ISO source's format by probing it without opening it (a screen's
-/// size, a camera's best format), but those `known` already; sources it
-/// can't probe are left out.
+/// Each ISO source's format, and `add_iso`'s (the ISO file asked to be
+/// turned on), by probing it without opening it (a screen's size, a
+/// camera's best format), but those `known` already; sources it can't
+/// probe are left out.
 pub fn probed_formats<P: crate::Platform>(
     platform: &P,
     setup: &Setup,
+    add_iso: Option<&str>,
     known: &dyn Fn(&str) -> bool,
 ) -> std::collections::HashMap<String, (u32, u32, u32)> {
     let mut formats = std::collections::HashMap::new();
     let iso = &setup.recording.iso;
-    for id in iso.sources.iter().filter(|id| iso.enabled && !known(id)) {
-        let Some(source) = setup.source(id) else {
+    let ids = iso
+        .sources
+        .iter()
+        .filter(|_| iso.enabled)
+        .map(String::as_str)
+        .chain(add_iso);
+    for id in ids.filter(|id| !known(id)) {
+        let Some(source) = setup.source(id).filter(|_| !formats.contains_key(id)) else {
             continue;
         };
         if let Ok(Some(probe)) = platform.probe(&source.kind, &setup.canvas)
             && let Some(video) = probe.video
         {
-            formats.insert(id.clone(), (video.width, video.height, video.fps));
+            formats.insert(id.to_string(), (video.width, video.height, video.fps));
         }
     }
     formats
@@ -1561,26 +1665,140 @@ mod tests {
                 / e.engine_pixels_per_second
         };
         assert!((stream_cost(&measured) - stream_cost(&fallback)).abs() < 1e-10);
-        // An uncovered file on any canvas retains the table, even though
-        // the main canvas itself is covered. Oversized file overrides count.
-        for encoder in [
-            json!({ "codec": "h264" }),
-            json!({ "codec": "hevc", "bit_depth": 10 }),
+        // H.264 beside covered HEVC is the labelled mixed model; an
+        // uncovered file on any canvas retains the table, even though the
+        // main canvas itself is covered.
+        for (encoder, prefix) in [
+            (json!({ "codec": "h264" }), "mixed:"),
+            (
+                json!({ "codec": "hevc", "bit_depth": 10 }),
+                fallback.basis.as_str(),
+            ),
+            (
+                json!({ "codec": "h264", "bit_depth": 10 }),
+                fallback.basis.as_str(),
+            ),
         ] {
             value["canvases"][0]["recording"]["encoder"] = encoder;
             let setup = Setup::from_value(value.clone()).unwrap();
-            assert!(
-                !estimate(
-                    &Inputs {
-                        setup: &setup,
-                        ..inputs
-                    },
-                    None
-                )
-                .unwrap()
-                .basis
-                .starts_with("measured:")
-            );
+            let basis = estimate(
+                &Inputs {
+                    setup: &setup,
+                    ..inputs
+                },
+                None,
+            )
+            .unwrap()
+            .basis;
+            assert!(basis.starts_with(prefix), "{basis}");
         }
+        // Each judged workload picks its own model: a covered setup's
+        // H.264, 10-bit or oversized candidate, or an ISO file at a size
+        // nobody knows (a screen not yet probed), changes it.
+        let model = Model::new(&inputs);
+        let basis = |setup: &Setup, formats: Formats| model.chip(setup, formats).basis.clone();
+        let with = |base: &Setup, edit: &dyn Fn(&mut Value)| {
+            let mut value = serde_json::to_value(base).unwrap();
+            edit(&mut value);
+            Setup::from_value(value).unwrap()
+        };
+        assert!(basis(&setup, &none).starts_with("measured:"));
+        let h264 = with(&setup, &|v: &mut Value| {
+            v["recording"]["iso"]["encoder"]["codec"] = json!("h264");
+        });
+        assert!(basis(&h264, &none).starts_with("mixed:"));
+        let deep = with(&setup, &|v: &mut Value| {
+            v["recording"]["iso"]["encoder"]["bit_depth"] = json!(10);
+        });
+        assert_eq!(basis(&deep, &none), fallback.basis);
+        let add_desk = |v: &mut Value| {
+            v["sources"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({ "id": "desk", "kind": "display", "display": "main" }));
+            v["recording"]["iso"]["sources"] = json!(["screen", "desk"]);
+        };
+        let screen = with(&setup, &add_desk);
+        let h264_screen = with(&h264, &add_desk);
+        let probed = |id: &str| (id == "desk").then_some((1920u32, 1080u32, 60u32));
+        let oversize = |id: &str| (id == "desk").then_some((5120u32, 2880u32, 60u32));
+        assert_eq!(basis(&screen, &none), fallback.basis);
+        assert_eq!(basis(&h264_screen, &none), fallback.basis);
+        assert!(basis(&screen, &probed).starts_with("measured:"));
+        assert!(basis(&h264_screen, &probed).starts_with("mixed:"));
+        assert_eq!(basis(&screen, &oversize), fallback.basis);
+        assert_eq!(basis(&h264_screen, &oversize), fallback.basis);
+
+        // Mixed: every H.264 output (recording file and live) asks exactly
+        // the table's share of the engines; the HEVC files take the fit's.
+        let share = |e: &CapacityEstimate| {
+            e.outputs
+                .iter()
+                .map(|o| {
+                    (
+                        o.output.clone(),
+                        (o.codec, o.pixels_per_second / e.engine_pixels_per_second),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let mixed = estimate(
+            &Inputs {
+                setup: &h264,
+                ..inputs
+            },
+            None,
+        )
+        .unwrap();
+        let table = estimate(
+            &Inputs {
+                setup: &h264,
+                profile: None,
+                ..inputs
+            },
+            None,
+        )
+        .unwrap();
+        assert!(mixed.basis.starts_with("mixed:"), "{}", mixed.basis);
+        let (mixed_share, table_share) = (share(&mixed), share(&table));
+        assert_eq!(
+            mixed_share.keys().collect::<Vec<_>>(),
+            table_share.keys().collect::<Vec<_>>()
+        );
+        assert!(mixed_share.contains_key("screen") && mixed_share.contains_key("stream"));
+        for (output, (codec, load)) in &mixed_share {
+            let table_load = table_share[output].1;
+            if *codec == Codec::H264 {
+                assert!((load - table_load).abs() < 1e-12, "{output}");
+            } else {
+                assert!((load - table_load).abs() > 1e-3, "{output}");
+            }
+        }
+
+        // H.264 alone has nothing measured: exactly the table.
+        let only = with(&h264, &|v: &mut Value| {
+            v["recording"]["program"]["encoder"]["codec"] = json!("h264");
+            v["canvases"][0]["recording"]["encoder"]["codec"] = json!("h264");
+        });
+        let measured_only = estimate(
+            &Inputs {
+                setup: &only,
+                ..inputs
+            },
+            None,
+        )
+        .unwrap();
+        let table_only = estimate(
+            &Inputs {
+                setup: &only,
+                profile: None,
+                ..inputs
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(measured_only.basis, table_only.basis);
+        assert_eq!(measured_only.load, table_only.load);
+        assert_eq!(share(&measured_only), share(&table_only));
     }
 }

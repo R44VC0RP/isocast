@@ -97,6 +97,16 @@ predictions. Preserve per-picture overhead and separate live H.264 cost
 (#79/#96). Never infer multiple-engine capacity from one encoder's speed.
 The fit requires full (at least 0.5 s) windows and HD60×4 throughput no lower
 than HD60×2. These three cells precede diagnostic codec cells in calibration.
+Covered mixed HEVC/H.264 recording workloads combine the local HEVC fit
+with H.264's table-normalized pixel and per-picture costs on the existing
+shared H.26x engine model. Their basis explicitly says `mixed`: H.264 costs
+are assumed, not fitted from diagnostic timings. Live H.264 also preserves
+both table-normalized costs. H.264-only, ProRes, unsupported depth/quality,
+oversize/rate and unknown source formats retain the table. Every suggestion
+and ISO-admission candidate selects coverage again for its actual workload;
+the added ISO source is probed without opening capture. Optimize uses the
+same model and discloses mixed assumptions. This is not a qualified ProRes
+resource-pool model or an exact prediction of lost ISO pictures.
 Existing exact `tune` failures remain a safety override. Optimize uses the
 profile to choose/rank candidates but still measures the actual setup when
 coverage is incomplete; `speed_test` remains an explicit, separate network
@@ -152,9 +162,13 @@ Automatic Quality → "Allow ISO Frame Thinning"), **off by default**. Off,
 every ISO counts as pinned. On, skipped ISO pictures are permanently missing
 from those files; the switch's hint says so. `pins` accepts `preview.fps`,
 `recording.iso.fps`, `recording.iso.sources.<source-id>.fps`, `vertical.fps`
-and `stream.video_bitrate_kbps`; the ISO pins remain overrides when thinning
+`canvases.<canvas-id>.fps` and `stream.video_bitrate_kbps`; the ISO pins remain overrides when thinning
 is allowed (and are kept, but have no extra effect, while it is off).
 Settings edits the same profile fields through the normal draft/Apply path.
+The legacy `vertical.fps` pin protects all secondary canvases; a named
+`canvases.shorts.fps` pin protects just `shorts`. Main never thins. Named pins
+use the ordinary setup/API/CLI/MCP patch path; file writers preserve the
+actual canvas id while retaining the native secondary priority class.
 Pins and the default prevent governor overrides, not physical frame loss or
 native overload protection: the pre-existing native encoder safety
 controller (#41/#60/#68) still sheds ISO pictures on real encoder overload,
@@ -234,9 +248,16 @@ Rate ceilings reduce work/churn; they do not promise to release resident
 pools or solve pressure from other applications.
 
 A newly congested canvas joins the stream bitrate targets even when another
-has reached the shared 25% floor. This does not make independent bitrate
-hubs on one canvas independently recoverable: acknowledgement/failure is
-still canvas-scoped and requires further qualification.
+has reached the shared 25% floor. Acknowledgement and refusal are owned by
+each native encoder hub, not the canvas. A failed hub does not restore or
+disable its healthy siblings. Destinations sharing one hub still share its
+rate and failure; aggregate governor status shows the lowest acknowledged
+percentage, while each destination reports its own acknowledged target.
+An unchanged refusal is suppressed. Recreating the native encoder retries;
+stopping one destination cannot reset a hub still held by replay or a warm
+recording reservation. Closing its last owner removes its notice. Congestion
+targeting and the percentage ladder remain per-canvas/shared, not independent
+per-destination upload optimization.
 
 Intentional admission refusals are attributed by the writer/encoder that
 made them, not by inspecting the ceiling when delayed counters arrive.

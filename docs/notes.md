@@ -5,6 +5,32 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-18 (#110/#27 merge qualification): HEADbb8790a5 + main59f78393
+  merged with `--no-commit`. Governor conflict keeps BOTH `frame budget`
+  exclusion from ISO pin diagnosis and named-secondary `unpinned_secondary`;
+  per-hub ownership and budget-full/5s-tail +30s-quiet restoration retained.
+  Notes conflict keeps both histories. Remote gates249 pass, strict112811
+ 18/18 zero-loss once. Combined AWS112520:24 tiles saturated50s; lastbudget
+  refusal53.65s, preview15→30 at88.20s/full118.61s, no early recovery. Healthy
+  hub1500/failed4000 stay isolated, one VT refusal; three130s files7800/7800
+  frames with equal A/V, no drops. Congested streams lose309/235 video pictures
+  (audio intact), explicitly not a loss-free-upload claim. First combined
+  runner failed due to missing proxy dictionary; corrected experiment only,
+  no production patch/assertion relaxation. Scratch budget-merge/REPORT.md
+  has hashes/results. Merge remains staged/uncommitted; no owned helpers left.
+
+- 2026-10-18 (#110 remaining handoff): branch fast-forwarded to main6d6d58fd
+  before edits; current work uncommitted. Mixed H26x overlay, per-hub refusal
+  ownership and named secondary pins qualified onAWS. Gates243/strict18/18,
+  stream3-pair A/B0loss. Real `memory_pressure -p33 -s1` (NOT `-S`) reached
+ 7.92–8.40GiB available and actual warninglevel2; three94.7s files2841frames
+  each and stream2793frames lose nothing, preview fully restores59.91s after
+  release. Helpers/watchdogs reaped; resumed inspection found no lane jobs
+  or helpers left running. Report: self-tuning-2/scratch/remaining/REPORT.md.
+  Regular reviewer unavailable>1h; Astra fallback review/re-review and final
+  evidence acceptance have no blockers. Regular-model review before release
+  remains required. Prior slices are committed6c4663ca/merged6d6d58fd, not
+  pending approval despite the historical entries below.
 - 2026-10-18 (#27 review fixes): 5d06bfef + main6d6d58fd merged without a
   commit (notes conflict keeps both histories). B1 auxiliary cache eviction
   happens before the next GPU batch and yields that admission turn, so the
@@ -1947,6 +1973,23 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-18 (#110 remaining): a failed retune belongs to its native hub,
+  not its canvas. Destinations sharing that hub/replay/warm owner retain the
+  same failure latch; independent siblings continue. Destroying/recreating
+  the actual encoder retries. Aggregate stream percentage is the minimum
+  active acknowledgement. Congestion targeting/ladder remains per canvas.
+  `canvases.<id>.fps` pins one secondary canvas; legacy `vertical.fps` keeps
+  all-secondary meaning. File writers must pass realcanvasID, not flatten
+  every non-main file toVertical. Native overload safety remains independent.
+- 2026-10-18 (#110 mixed model): use measured HEVC costs beside separately
+  normalized table H264 recording/live costs; no diagnostic FPS becomes a
+  pool-capacity coefficient. Mixed basis is explicit; every suggested or
+  admitted workload selects its own coverage, unknown dimensions fall back.
+  Mixed file overload actual74.06–77.01% vs predicted67.16%; two-live-hub
+  overload actual61.11% vs69.04%. These qualify categorical boundaries, not
+  improved loss-percentage accuracy. ProRes/10bit resource models and local
+  H264 coefficients remain open; Windows waits for the daemon switch.
 
 - 2026-10-18 (#110 native rollback): the scoped VT-property experiment
   `20261018-085056-self-tuning-2-cmd` reproduced a real uncertainty bug:
@@ -6727,6 +6770,14 @@ each section. Delete entries that stop being true.
   starts at 900 because the window's minimum width is 900.
 
 ## Gotchas
+
+- 2026-10-18 (#110 pins): live file counters can lag pin time by a full
+  status interval. A post-pin RPC comparison counted six old square skips as
+  new losses. Retained final-file PTS proved last gap20.200s, pin request
+ 20.190s, then139 continuous30fps pictures; no new engine change/rerun needed.
+  The earlier real bug was `create_writers` flattening every extra canvas to
+  Vertical, now fixed. Persistence uses library documents, not a guaranteed
+  legacy setup.toml: verify through get/apply/restart instead of copying it.
 
 - 2026-10-18 (#110 experiments): `e2e.Engine` re-signs its copied daemon in
   a bundle, so its whole-file SHA differs from the source binary. Preserve

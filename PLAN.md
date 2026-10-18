@@ -682,7 +682,7 @@ Tier 1: build → review → fixes → re-review for each behavior-changing slic
     repeatability under outside load and post-GPU-lane integration. M4
     overload prediction improves; M2 percentage accuracy is within variation,
     not proven better than the table. Do not call all of T.1 complete yet.
-    - [x] **T.1b.1 Bounded coverage and canvas predictions (ready for review).** Separate
+    - [x] **T.1b.1 Bounded coverage and canvas predictions (merged6d6d58fd).** Separate
       recording/live paths and fit/diagnostic evidence, prioritize missing
       4K60/10-bit and ProRes variants, list skipped cells, qualify covered
       canvas predictions and repeated/outside-load calibration on base M2.
@@ -691,6 +691,14 @@ Tier 1: build → review → fixes → re-review for each behavior-changing slic
       19–21/24 cells explicitly covered. Fitting cases lose no frames;
       overload prediction53.09%, actual44.39–53.67%, table52.62%: within
       variation, not improved M2 percentage accuracy. Full T.1b stays open.
+    - [x] **T.1b.2 Hybrid mixed H26x model (ready for review).** Local HEVC
+      costs plus independently normalized table H264 file/live costs, explicit
+      mixed provenance. Re-evaluate coverage for each suggestion/admission;
+      unknown source formats fall back, added ISO sources are probed. Real
+      HEVC+H264 file pairs and two-live-hub+HEVC cases fit/overload as predicted;
+      ISO loss percentages remain approximate, not improved accuracy. Exact
+      H264-only/10bit/ProRes fallback and Optimize notes verified. Local H264
+      coefficients and ProRes pool models remain open, not inferred from diagnostics.
 - [ ] **T.2 Live governor.** Fixed reversible degradation order, hysteresis,
   visible reasons and protected-output integrity; qualify against outside
   CPU/GPU/encoder load without changing the established priority contract.
@@ -713,20 +721,30 @@ Tier 1: build → review → fixes → re-review for each behavior-changing slic
     transitions, JPEG/vertical composition reductions, memory-pressure and
     per-encoder retune failure behavior. No zero-drop promise against foreign
     workloads that already exhaust protected encoder capacity.
+  - [x] **T.2b Per-hub refusal/acknowledgement (ready for review).** A
+    failed encoder no longer restores healthy siblings. Weak owner lifetime,
+    active-hub aggregation and refusal suppression verified with three real
+    hubs: healthy1500/failed4000/other-canvas1250; closing/recreating failed
+    owner clears/retries only that hub. Congestion ladder remains canvas-scoped.
 - [ ] **T.3 Low-end defaults and pins.** Measured 8 GB/base-chip defaults,
   persistent per-setting Automatic/pinned controls, backend-neutral mapping
   to NVENC/QSV/AMF/software with the Windows lane.
-  - [x] **T.3a Conservative initialization (ready for review).** New setups/blank profiles use
+  - [x] **T.3a Conservative initialization (merged6d6d58fd).** New setups/blank profiles use
     30 fps on <=8-core or <=8-GB machines; explicit fps and existing profiles
     survive. Qualify persistent pins/ISO consent, base M2 defaults and native
     rate rollback. Physical 8-GB/backend mapping remains separate.
     API init/blank30 vs explicit/copy60 and restart persistence pass. Scoped
     native refusal reproduces and fixes skipped FPS rollback/false recovery;
     restored settings are actually acknowledged before clearing uncertainty.
+  - [x] **T.3b Named secondary pins (ready for review).**
+    `canvases.<id>.fps` protects just that secondary canvas; legacy
+    `vertical.fps` protects all. Writers retain actual canvas ids. Real files
+    prove pinned shorts/main/ISOs whole, square thinned before live pin and
+    continuous30fps afterwards. Pins persist; native safety is not disabled.
 - [ ] **T.4 Weak-machine matrix.** Prototype taskpolicy/CPU limits and a
   GPU-contention helper during T.1; then bounded memory pressure, full
   e2e/bench/soak, GPU-less Windows software encoding and governor recovery.
-  - [x] **T.4a Bounded macOS contention (ready for review).** Real touched-memory competition
+  - [x] **T.4a Bounded macOS contention (merged6d6d58fd).** Real touched-memory competition
     with verified readiness/cleanup, OS memory-pressure signal, base M2
     strict e2e/bench/short soak and recovery. This is contention, not a
     physical core/RAM limit or Windows software-encoder qualification.
@@ -734,6 +752,14 @@ Tier 1: build → review → fixes → re-review for each behavior-changing slic
     30-fps soak/crash checks pass, zero reported media losses. Injected
     memory warning/critical respects pins/ISO consent and restores fully.
     Gates242 pass. Tier-1 reviewer unavailable; no review approval claimed.
+  - [x] **T.4b Real AWS memory pressure (ready for review).** Authorized
+    `memory_pressure -p33` without `-S` produces7.92–8.40GiB available and
+    actual warninglevel2. Under program/UHD+HD ISO/stream/preview load,
+    files2841frames each and stream2793 lose nothing; preview restores fully
+    59.91s after release. Watchdogs/guards/cleanup verified. This simulates
+    an available-memory budget, not a physical8GiB chip. Gates243, strict18/18
+    and stream A/B3pairs pass. Astra fallback review/re-review accepted;
+    regular-model review remains required before release.
 
 ### A. Alpha: the daily driver (Ryan, 2026-10-13)
 
@@ -1797,6 +1823,15 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- T.1b.2/T.2b/T.3b/T.4b (#110, 2026-10-18): main6d6d58fd fast-forwarded;
+  hybrid mixed H26x model/coverage fixes, independent hub failures and named
+  secondary pins implemented. Real mixed file/live boundaries, refused hub
+  isolation/recreation, exact pin-file PTS, persistence and genuine AWS memory
+  pressure/recovery verified. Full remote gates243 and strict18/18 once,
+  stream A/B3pairs0loss. Fallback review/re-review accepted (regular reviewer
+  unavailable>1h); uncommitted, ready for review. Explicit model/simulation
+  limits and job IDs: self-tuning-2/scratch/remaining/REPORT.md.
 
 - T.1b.1/T.3a/T.4a (#110, 2026-10-18): explicit diagnostic/fit calibration
   coverage, measured multi-canvas HEVC predictions with independent stream

@@ -5152,7 +5152,7 @@ fn estimate_capacity(
                 .collect()
         })
         .unwrap_or_default();
-    let probed = isocast_engine::estimate::probed_formats(&NativePlatform, setup, &|id| {
+    let probed = isocast_engine::estimate::probed_formats(&NativePlatform, setup, add_iso, &|id| {
         live.contains_key(id)
     });
     let formats = |id: &str| live.get(id).or_else(|| probed.get(id)).copied();

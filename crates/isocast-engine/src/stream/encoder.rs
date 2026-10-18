@@ -67,7 +67,7 @@ pub(crate) struct Hub {
     /// governor has the encoder doing now.
     spec: EncoderSpec,
     /// The video bitrate the encoder has acknowledged: `spec`'s until the
-    /// governor retunes it (see [`crate::governor::stream_bitrate`]).
+    /// governor retunes it (see [`crate::governor::StreamRate`]).
     applied_kbps: AtomicU32,
     stop: AtomicBool,
     /// Ended by itself (the program stopped or it failed): new outputs
@@ -400,6 +400,9 @@ fn encode<P: Platform>(
     let mut live = false;
     let mut tap = Some(tap);
     loop {
+        retune
+            .rate
+            .active(hub.sink_count.load(Ordering::SeqCst) > 0);
         if hub.stop.load(Ordering::SeqCst) {
             return Ok(Ended::Stopped);
         }
@@ -554,6 +557,7 @@ fn encode<P: Platform>(
 /// and is tried again only once the governor asks for something else.
 struct Retune {
     canvas: CanvasId,
+    rate: crate::governor::StreamRate,
     /// What the outputs asked for (the hub's spec).
     intended: u32,
     /// What the encoder acknowledged last.
@@ -566,6 +570,7 @@ impl Retune {
     fn new(canvas: CanvasId, intended: u32) -> Self {
         Self {
             canvas,
+            rate: crate::governor::StreamRate::new(canvas, intended),
             intended,
             applied: intended,
             refused: None,
@@ -573,7 +578,7 @@ impl Retune {
     }
 
     fn apply<E: VideoEncoder>(&mut self, video: &mut E, fps: u32, applied: &AtomicU32) {
-        let wanted = crate::governor::stream_bitrate(self.canvas, self.intended);
+        let wanted = self.rate.wanted();
         if wanted == self.applied && !video.rate_uncertain() {
             self.refused = None;
             return;
@@ -597,7 +602,7 @@ impl Retune {
                 self.applied = wanted;
                 self.refused = None;
                 applied.store(wanted, Ordering::Relaxed);
-                crate::governor::stream_rate_result(self.canvas, self.intended, wanted, None);
+                self.rate.result(wanted, None);
             }
             Err(err) => {
                 let message = format!(
@@ -606,12 +611,7 @@ impl Retune {
                 );
                 isocast_diagnostics::diagnostic!("warn"; "{message}");
                 self.refused = Some(wanted);
-                crate::governor::stream_rate_result(
-                    self.canvas,
-                    self.intended,
-                    self.applied,
-                    Some(message),
-                );
+                self.rate.result(self.applied, Some(message));
             }
         }
     }

@@ -286,9 +286,13 @@ impl Daemon {
             setup: Some(result.clone()),
             stream: Some(params.goal.streams()),
             add_iso: None,
-        }) && estimate.basis.starts_with("measured: local")
+        }) && (estimate.basis.starts_with("measured: local")
+            || estimate.basis.starts_with("mixed: measured local"))
         {
             notes.push(format!("Machine profile: {}", estimate.summary));
+            if estimate.basis.starts_with("mixed:") {
+                notes.push("The mixed estimate measures HEVC costs locally; H.264 recording and live costs remain per-chip table assumptions".into());
+            }
             if (params.goal.streams() || !tuned_fits)
                 && let Some(suggestion) = estimate.suggestions.iter().find(|s| {
                     s.capacity == isocast_protocol::api::Capacity::Fits && s.change.is_some()

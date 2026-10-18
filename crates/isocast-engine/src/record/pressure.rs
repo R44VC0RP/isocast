@@ -5,7 +5,8 @@
 //! admission happens here in the engine, before an ISO frame is drawn for
 //! its file ([`IsoCredit`]), so a refused tick costs no GPU work (#29).
 
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use isocast_protocol::CanvasId;
@@ -79,6 +80,7 @@ pub struct EncoderPressure {
     adjusted: Instant,
     credit: u32,
     refused: u64,
+    governor_pin: Arc<AtomicBool>,
 }
 
 impl EncoderPressure {
@@ -95,6 +97,7 @@ impl EncoderPressure {
             adjusted: Instant::now(),
             credit: 0,
             refused: 0,
+            governor_pin: crate::governor::secondary_pin(canvas),
         }
     }
 
@@ -121,7 +124,7 @@ impl EncoderPressure {
         } else {
             VERTICAL_SHARE.load(Ordering::Relaxed)
         };
-        self.credit += native.min(crate::governor::vertical_ceiling());
+        self.credit += native.min(crate::governor::secondary_ceiling(&self.governor_pin));
         if self.credit < 1000 {
             self.refused += 1;
             return false;

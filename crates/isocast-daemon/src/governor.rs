@@ -170,7 +170,7 @@ fn sample(
     daemon: &Daemon,
     previous: &mut Previous,
 ) -> (isocast_protocol::governor::GovernorSettings, Sample) {
-    let (setup, engine, session, ready, live, streams, replay, monitors) = {
+    let (setup, engine, session, ready, live, streams, replay, secondary_replay, monitors) = {
         let state = daemon.state.read();
         let streams = state
             .streams
@@ -196,6 +196,14 @@ fn sample(
             state.session.as_ref().and_then(|s| s.live.lock().clone()),
             streams,
             [state.replay.active_on(CanvasId::Main), extra_replay(&state)],
+            state
+                .setup
+                .as_ref()
+                .map(|setup| setup.extra_canvas_ids())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|canvas| state.replay.active_on(*canvas))
+                .collect::<Vec<_>>(),
             state
                 .wanted_at
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(3)),
@@ -239,23 +247,24 @@ fn sample(
         .chain(extras.iter().map(|c| c.program()))
         .collect();
     let is_program = |source: &str| programs.iter().any(|p| p == source);
-    sample.vertical_protected = recording
-        && live.as_ref().map_or_else(
-            || {
-                setup.as_ref().is_some_and(|s| {
-                    extras.iter().any(|c| {
-                        s.extra_canvas(*c)
+    sample.secondary_canvases = extras
+        .iter()
+        .copied()
+        .filter(|canvas| {
+            recording
+                && live.as_ref().map_or_else(
+                    || {
+                        setup
+                            .as_ref()
+                            .and_then(|s| s.extra_canvas(*canvas))
                             .and_then(|v| v.recording.as_ref())
                             .is_some_and(|p| p.enabled)
-                    })
-                })
-            },
-            |live| {
-                live.files
-                    .iter()
-                    .any(|f| f.source != PROGRAM && is_program(&f.source))
-            },
-        );
+                    },
+                    |live| live.files.iter().any(|f| f.source == canvas.program()),
+                )
+        })
+        .collect();
+    sample.vertical_protected = !sample.secondary_canvases.is_empty();
     sample.has_isos = recording
         && live.as_ref().map_or_else(
             || {
@@ -287,6 +296,9 @@ fn sample(
             }
             if vertical {
                 sample.vertical_protected = true;
+                if !sample.secondary_canvases.contains(&canvas) {
+                    sample.secondary_canvases.push(canvas);
+                }
             } else {
                 sample.main_protected = true;
             }
@@ -304,6 +316,11 @@ fn sample(
     // loss through the shared encoder worker's immediate loss hook.
     sample.main_protected |= replay[0];
     sample.vertical_protected |= replay[1];
+    for canvas in secondary_replay {
+        if !sample.secondary_canvases.contains(&canvas) {
+            sample.secondary_canvases.push(canvas);
+        }
+    }
     sample.active = ready || sample.has_stream || replay.iter().any(|on| *on);
     sample.paused = (!ready || paused) && !live_stream && !replay.iter().any(|on| *on);
     sample.has_vertical = sample.vertical_protected;

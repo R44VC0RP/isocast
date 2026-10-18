@@ -29,8 +29,6 @@ static STREAM: AtomicU32 = AtomicU32::new(100);
 /// slot ([`canvas_slot`]): main is bit 0, so another canvas's congestion
 /// never lowers main's bitrate (#84).
 static STREAM_TARGETS: AtomicU32 = AtomicU32::new(0);
-static STREAM_APPLIED: [AtomicU32; CANVAS_SLOTS] = [const { AtomicU32::new(100) }; CANVAS_SLOTS];
-static RATE_FAILED: [AtomicBool; CANVAS_SLOTS] = [const { AtomicBool::new(false) }; CANVAS_SLOTS];
 
 /// Per-canvas governor slots: main 0, vertical 1, then each other canvas
 /// in the order the process first sees it. Past the last slot, canvases
@@ -86,8 +84,9 @@ pub fn frame_pressure() {
 struct Shared {
     settings: GovernorSettings,
     pins: HashMap<String, Weak<AtomicBool>>,
+    secondary_pins: HashMap<CanvasId, Weak<AtomicBool>>,
     status: GovernorStatus,
-    rate_error: Option<String>,
+    streams: Vec<Weak<StreamRateState>>,
     previews: Vec<Weak<PreviewState>>,
 }
 fn shared() -> &'static Mutex<Shared> {
@@ -148,37 +147,101 @@ pub(crate) fn iso_ceiling(pin: &AtomicBool) -> u32 {
         1000
     }
 }
-pub fn vertical_ceiling() -> u32 {
-    if ENABLED.load(Ordering::Relaxed) && MAIN_ACTIVE.load(Ordering::Relaxed) {
+pub(crate) fn secondary_pin(canvas: CanvasId) -> Arc<AtomicBool> {
+    let mut state = shared().lock();
+    if let Some(pin) = state.secondary_pins.get(&canvas).and_then(Weak::upgrade) {
+        return pin;
+    }
+    let pin = Arc::new(AtomicBool::new(state.settings.secondary_pinned(canvas)));
+    state.secondary_pins.insert(canvas, Arc::downgrade(&pin));
+    pin
+}
+
+pub(crate) fn secondary_ceiling(pin: &AtomicBool) -> u32 {
+    if ENABLED.load(Ordering::Relaxed)
+        && MAIN_ACTIVE.load(Ordering::Relaxed)
+        && !pin.load(Ordering::Relaxed)
+    {
         VERTICAL.load(Ordering::Relaxed) * 10
     } else {
         1000
     }
 }
-pub fn stream_bitrate(canvas: CanvasId, intended_kbps: u32) -> u32 {
-    let index = canvas_slot(canvas);
-    if !ENABLED.load(Ordering::Relaxed)
-        || RATE_FAILED[index].load(Ordering::Acquire)
-        || STREAM_TARGETS.load(Ordering::Relaxed) & (1 << index) == 0
-    {
-        return intended_kbps;
-    }
-    (intended_kbps.saturating_mul(STREAM.load(Ordering::Relaxed)) / 100).max(500.min(intended_kbps))
+struct StreamRateState {
+    canvas: CanvasId,
+    slot: usize,
+    intended: u32,
+    active: AtomicBool,
+    applied: AtomicU32,
+    failed: AtomicBool,
+    error: Mutex<Option<String>>,
 }
-/// Called on the encoder owner. No blocking lock in the failure path.
-pub fn stream_rate_result(canvas: CanvasId, intended: u32, applied: u32, error: Option<String>) {
-    let index = canvas_slot(canvas);
-    STREAM_APPLIED[index].store(
-        applied.saturating_mul(100) / intended.max(1),
-        Ordering::Relaxed,
-    );
-    if let Some(error) = error {
-        RATE_FAILED[index].store(true, Ordering::Release);
-        if let Some(mut state) = shared().try_lock() {
-            state.rate_error = Some(error);
+
+/// One native hub owns its failure and acknowledgement. Shared destinations
+/// share this handle; a different hub on the same canvas does not. Slot
+/// resolution/registration happens once, never on the per-picture path.
+pub(crate) struct StreamRate(Option<Arc<StreamRateState>>);
+
+impl StreamRate {
+    pub fn new(canvas: CanvasId, intended: u32) -> Self {
+        let state = Arc::new(StreamRateState {
+            canvas,
+            slot: canvas_slot(canvas),
+            intended,
+            active: AtomicBool::new(false),
+            applied: AtomicU32::new(intended),
+            failed: AtomicBool::new(false),
+            error: Mutex::new(None),
+        });
+        shared().lock().streams.push(Arc::downgrade(&state));
+        NOTICES.fetch_add(1, Ordering::Release);
+        Self(Some(state))
+    }
+
+    pub fn active(&self, active: bool) {
+        let state = self.0.as_ref().expect("live stream rate");
+        if state.active.swap(active, Ordering::Relaxed) != active {
+            NOTICES.fetch_add(1, Ordering::Release);
         }
     }
-    NOTICES.fetch_add(1, Ordering::Release);
+
+    pub fn wanted(&self) -> u32 {
+        let state = self.0.as_ref().expect("live stream rate");
+        if !ENABLED.load(Ordering::Relaxed)
+            || !state.active.load(Ordering::Relaxed)
+            || state.failed.load(Ordering::Acquire)
+            || STREAM_TARGETS.load(Ordering::Relaxed) & (1 << state.slot) == 0
+        {
+            return state.intended;
+        }
+        (state
+            .intended
+            .saturating_mul(STREAM.load(Ordering::Relaxed))
+            / 100)
+            .max(500.min(state.intended))
+    }
+
+    /// Owner-thread callback: only atomics and a nonblocking error lock.
+    /// A successful restoration updates acknowledgement, not the failure
+    /// latch: otherwise a refused reduction/restoration could retry forever.
+    pub fn result(&self, applied: u32, error: Option<String>) {
+        let state = self.0.as_ref().expect("live stream rate");
+        state.applied.store(applied, Ordering::Relaxed);
+        if let Some(error) = error {
+            state.failed.store(true, Ordering::Release);
+            if let Some(mut message) = state.error.try_lock() {
+                *message = Some(error);
+            }
+        }
+        NOTICES.fetch_add(1, Ordering::Release);
+    }
+}
+
+impl Drop for StreamRate {
+    fn drop(&mut self) {
+        drop(self.0.take());
+        NOTICES.fetch_add(1, Ordering::Release);
+    }
 }
 
 #[derive(Default)]
@@ -302,6 +365,8 @@ pub struct Sample {
     pub has_isos: bool,
     pub has_monitors: bool,
     pub has_vertical: bool,
+    /// Currently protected non-main canvases, not parked encoder reservations.
+    pub secondary_canvases: Vec<CanvasId>,
     pub has_stream: bool,
 }
 
@@ -438,6 +503,19 @@ impl Controller {
         }
         let mut state = shared().lock();
         state.settings = settings.clone();
+        state.secondary_pins.retain(|canvas, weak| {
+            let Some(pin) = weak.upgrade() else {
+                return false;
+            };
+            pin.store(settings.secondary_pinned(*canvas), Ordering::Relaxed);
+            true
+        });
+        let unpinned_secondary = sample
+            .secondary_canvases
+            .iter()
+            .any(|canvas| !settings.secondary_pinned(*canvas));
+        state.streams.retain(|weak| weak.strong_count() > 0);
+        let streams: Vec<_> = state.streams.iter().filter_map(Weak::upgrade).collect();
         let mut unpinned_iso = false;
         let mut pinned_iso = false;
         state.pins.retain(|source, weak| {
@@ -467,19 +545,6 @@ impl Controller {
         if !sample.has_stream {
             limits.stream = 100;
             STREAM_TARGETS.store(0, Ordering::Relaxed);
-            for applied in &STREAM_APPLIED {
-                applied.store(100, Ordering::Relaxed);
-            }
-            for failed in &RATE_FAILED {
-                failed.store(false, Ordering::Relaxed);
-            }
-            state.rate_error = None;
-        }
-        for i in 0..CANVAS_SLOTS {
-            if sample.stream_canvases & (1 << i) == 0 {
-                STREAM_APPLIED[i].store(100, Ordering::Relaxed);
-                RATE_FAILED[i].store(false, Ordering::Relaxed);
-            }
         }
         if settings.pinned("preview.fps") {
             limits.preview = 0;
@@ -487,7 +552,7 @@ impl Controller {
         if !unpinned_iso {
             limits.iso = 100;
         }
-        if settings.pinned("vertical.fps") || !sample.main_protected {
+        if !unpinned_secondary || !sample.main_protected {
             limits.vertical = 100;
         }
         if settings.pinned("stream.video_bitrate_kbps") {
@@ -507,8 +572,10 @@ impl Controller {
             .last_loss
             .is_some_and(|at| now.duration_since(at) < Duration::from_secs(5));
         let upload = sample.upload_congestion >= 0.25;
-        let retunable = (0..CANVAS_SLOTS).any(|i| {
-            sample.congested_canvases & (1 << i) != 0 && !RATE_FAILED[i].load(Ordering::Acquire)
+        let retunable = streams.iter().any(|stream| {
+            stream.active.load(Ordering::Relaxed)
+                && sample.congested_canvases & (1 << stream.slot) != 0
+                && !stream.failed.load(Ordering::Acquire)
         });
         let cause = if self.disk_bad {
             Some("disk")
@@ -671,13 +738,13 @@ impl Controller {
                     );
                 } else if sample.has_vertical
                     && sample.main_protected
-                    && !settings.pinned("vertical.fps")
+                    && unpinned_secondary
                     && limits.vertical > 25
                     && cause == "encoder"
                 {
                     limits.vertical -= 25;
                     reason = format!(
-                        "Automatic quality: encoder pressure remains; vertical video limited to {}%",
+                        "Automatic quality: encoder pressure remains; unpinned secondary canvas video limited to {}%",
                         limits.vertical
                     );
                 } else {
@@ -687,9 +754,7 @@ impl Controller {
                         || (sample.has_isos
                             && pinned_iso
                             && !matches!(cause, "upload" | "encoder" | "output" | "frame budget"))
-                        || (sample.has_vertical
-                            && settings.pinned("vertical.fps")
-                            && cause == "encoder")
+                        || (sample.has_vertical && !unpinned_secondary && cause == "encoder")
                         || (sample.has_stream
                             && settings.pinned("stream.video_bitrate_kbps")
                             && upload);
@@ -779,8 +844,15 @@ impl Controller {
                 if held { 0 } else { limits.iso }
             );
         }
-        let rate_error = (sample.has_stream && RATE_FAILED.iter().any(|failed| failed.load(Ordering::Acquire)))
-            .then(|| state.rate_error.clone().unwrap_or_else(|| "A stream encoder refused retuning; its last acknowledged target is shown in stream status. Restart that stream to retry".into()));
+        let rate_error = streams.iter().find_map(|stream| {
+            (stream.active.load(Ordering::Relaxed) && stream.failed.load(Ordering::Acquire))
+                .then(|| format!(
+                    "{} canvas, {} kb/s encoder: {}. Other encoder hubs remain automatic; recreate this encoder to retry",
+                    stream.canvas,
+                    stream.intended,
+                    stream.error.lock().as_deref().unwrap_or("optional bitrate retune refused")
+                ))
+        });
         let mut preview_error = None;
         state.previews.retain(|weak| {
             let Some(preview) = weak.upgrade() else { return false };
@@ -832,9 +904,16 @@ impl Controller {
             iso_percent: if held { 0 } else { limits.iso },
             vertical_percent: limits.vertical,
             stream_bitrate_percent: if sample.has_stream {
-                (0..CANVAS_SLOTS)
-                    .filter(|i| sample.stream_canvases & (1 << i) != 0)
-                    .map(|i| STREAM_APPLIED[i].load(Ordering::Relaxed))
+                streams
+                    .iter()
+                    .filter(|stream| {
+                        stream.active.load(Ordering::Relaxed)
+                            && sample.stream_canvases & (1 << stream.slot) != 0
+                    })
+                    .map(|stream| {
+                        stream.applied.load(Ordering::Relaxed).saturating_mul(100)
+                            / stream.intended.max(1)
+                    })
                     .min()
                     .unwrap_or(100)
             } else {

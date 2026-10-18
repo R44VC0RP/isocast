@@ -1161,13 +1161,10 @@ fn create_writers<P: Platform>(platform: &P, plans: &[Arc<FilePlan>]) -> Result<
     for plan in plans {
         match platform.create_writer(&plan.spec) {
             Ok(mut writer) => {
-                if is_program(plan) {
-                    writer.prioritize_video(if plan.source == PROGRAM {
-                        isocast_protocol::CanvasId::Main
-                    } else {
-                        // Every extra canvas's program: protected, after main's.
-                        isocast_protocol::CanvasId::Vertical
-                    });
+                if let Some(canvas) = program_canvas(plan) {
+                    // Preserve the id for per-canvas pins; native admission
+                    // still puts every non-main canvas in the secondary class.
+                    writer.prioritize_video(canvas);
                 }
                 writers.push(writer);
             }

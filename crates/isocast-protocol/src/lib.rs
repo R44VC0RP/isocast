@@ -2530,7 +2530,7 @@ impl Setup {
         }
         for (i, pin) in self.governor.pins.iter().enumerate() {
             if !governor::GovernorSettings::valid_pin(pin) {
-                issues.add(format!("governor.pins[{i}]"), "valid pins: preview.fps, recording.iso.fps, recording.iso.sources.<source-id>.fps, vertical.fps, stream.video_bitrate_kbps");
+                issues.add(format!("governor.pins[{i}]"), "valid pins: preview.fps, recording.iso.fps, recording.iso.sources.<source-id>.fps, vertical.fps, canvases.<canvas-id>.fps (secondary canvases only), stream.video_bitrate_kbps");
             }
         }
 
