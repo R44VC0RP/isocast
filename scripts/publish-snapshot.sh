@@ -94,10 +94,27 @@ git -C "$public" add -A
 if git -C "$public" diff --cached --quiet; then
     echo "publish: nothing changed since the last snapshot"
 else
+    # Credit outside contributors: their commits since the last snapshot
+    # become Co-authored-by trailers, so GitHub shows them on the public
+    # commit (the public history is one snapshot commit per publish).
+    me="$(git -C "$here" config user.email)"
+    last="$(cat "$public/.git/isocast-published" 2>/dev/null || true)"
+    range="$ref"
+    if [ -n "$last" ] && git -C "$here" cat-file -e "$last^{commit}" 2>/dev/null; then
+        range="$last..$ref"
+    else
+        range="$ref~50..$ref"
+    fi
+    trailers="$(git -C "$here" log --no-merges --format='%an <%ae>' "$range" 2>/dev/null |
+        grep -v -F "<$me>" | sort -u | sed 's/^/Co-authored-by: /')"
+    if [ -n "$trailers" ]; then
+        message="$(printf '%s\n\n%s' "$message" "$trailers")"
+    fi
     git -C "$public" -c user.name="$(git -C "$here" config user.name)" \
-        -c user.email="$(git -C "$here" config user.email)" commit -q -m "$message"
+        -c user.email="$me" commit -q -m "$message"
     echo "publish: committed $(git -C "$public" log --oneline -1)"
 fi
+git -C "$here" rev-parse "$ref" > "$public/.git/isocast-published"
 
 # 4. GitHub.
 if [ "$create" = 1 ] && ! gh repo view "$repo" >/dev/null 2>&1; then
