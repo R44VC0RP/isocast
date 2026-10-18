@@ -103,12 +103,24 @@ pub(crate) struct Budget {
     size: (u32, u32),
     format: u32,
     owner: String,
+    /// Application-owned reorder pictures held inside a decoder, in the
+    /// same ledger as its returned pictures (not an unaccounted second pool).
+    decoder_reorder: usize,
     opaque_native: AtomicBool,
     usage: Mutex<Usage>,
 }
 
 impl Budget {
     pub(crate) fn new(purpose: &'static str, size: (u32, u32), format: u32) -> Arc<Self> {
+        Self::with_decoder_reorder(purpose, size, format, 0)
+    }
+
+    pub(crate) fn with_decoder_reorder(
+        purpose: &'static str,
+        size: (u32, u32),
+        format: u32,
+        decoder_reorder: usize,
+    ) -> Arc<Self> {
         let budget = Arc::new(Self {
             id: NEXT_POOL.fetch_add(1, Ordering::Relaxed),
             purpose,
@@ -118,6 +130,7 @@ impl Budget {
                 .name()
                 .unwrap_or("unnamed")
                 .to_owned(),
+            decoder_reorder,
             opaque_native: AtomicBool::new(false),
             usage: Mutex::new(Usage::default()),
         });
@@ -127,12 +140,20 @@ impl Budget {
         budget
     }
 
+    fn limit(&self, domain: usize) -> usize {
+        LIMITS[domain] + if domain == 0 { self.decoder_reorder } else { 0 }
+    }
+
+    fn physical_limit(&self) -> usize {
+        MAX_FRAMES_IN_FLIGHT as usize + self.decoder_reorder
+    }
+
     fn acquire(self: &Arc<Self>, native_id: Option<u64>) -> Option<Lease> {
         let mut state = self.usage.lock().unwrap_or_else(|e| e.into_inner());
         let first = native_id
             .and_then(|id| state.frames.get(&id))
             .is_none_or(|refs| refs[0] == 0);
-        if first && state.used[0] >= LIMITS[0] {
+        if first && state.used[0] >= self.limit(0) {
             let refused = Self::refuse(&mut state, 0);
             drop(state);
             self.report(refused);
@@ -180,7 +201,7 @@ impl Budget {
                     refused.domain,
                     refused.count,
                     refused.distinct,
-                    MAX_FRAMES_IN_FLIGHT
+                    self.physical_limit()
                 ),
             );
         }
@@ -231,7 +252,7 @@ impl Lease {
         let mut state = claim.budget.usage.lock().unwrap_or_else(|e| e.into_inner());
         let class = usage as usize;
         let first = state.frames[&claim.id][class] == 0;
-        if first && state.used[class] >= LIMITS[class] {
+        if first && state.used[class] >= claim.budget.limit(class) {
             let refused = Budget::refuse(&mut state, class);
             drop(state);
             claim.budget.report(refused);
@@ -286,18 +307,21 @@ pub(crate) fn diagnostics() -> serde_json::Value {
             "id": pool.id, "purpose": pool.purpose, "owner": pool.owner, "size": pool.size, "pixel_format": pool.format,
             "distinct": if opaque { None } else { Some(distinct) }, "peak": peak,
             "application_distinct": distinct,
-            "opaque_native_reservation": if opaque { MAX_FRAMES_IN_FLIGHT } else { 0 },
+            "opaque_native_reservation": if opaque { pool.physical_limit() } else { 0 },
+            "decoder_reorder": pool.decoder_reorder,
+            "production_reserve": pool.limit(0), "physical_limit": pool.physical_limit(),
             "production": used[0], "recording": used[1], "auxiliary": used[2],
             "composition": used[3],
             "refused": refused, "allocation_refused": allocation_refused,
-            "invariant": used.iter().zip(LIMITS).all(|(used, limit)| *used <= limit)
-                && distinct <= MAX_FRAMES_IN_FLIGHT as usize,
+            "invariant": used.iter().enumerate().all(|(domain, used)| *used <= pool.limit(domain))
+                && distinct <= pool.physical_limit(),
         })
     }).collect();
     serde_json::json!({
         "physical_limit": MAX_FRAMES_IN_FLIGHT, "production_reserve": LIMITS[0],
         "recording_reserve": LIMITS[1], "auxiliary_limit": LIMITS[2],
         "composition_reserve": LIMITS[3],
+        "limits": "top-level reserves are defaults; each pool includes its decoder_reorder in production_reserve and physical_limit",
         "refusal_domains": ["production", "recording", "auxiliary", "composition"],
         "counts": "distinct buffers; a shared picture counts once in each domain, once in the physical union",
         "refused": REFUSED.each_ref().map(|n| n.load(Ordering::Relaxed)),
@@ -770,6 +794,22 @@ mod tests {
         drop((production, recording, auxiliary, composition));
         assert!(pool.budget.usage.lock().unwrap().frames.is_empty());
         assert!(pool.take().unwrap().is_some());
+    }
+
+    #[test]
+    fn decoder_reorder_shares_a_bounded_production_reserve() {
+        let decoder = Budget::with_decoder_reorder("decoder", (64, 64), 0, 4);
+        let mut frames: Vec<_> = (0..LIMITS[0] + 4)
+            .map(|_| decoder.acquire(None).unwrap())
+            .collect();
+        assert_eq!(decoder.usage.lock().unwrap().used[0], 12);
+        assert!(decoder.acquire(None).is_none());
+        drop(frames.pop());
+        assert!(decoder.acquire(None).is_some());
+        assert_eq!(decoder.physical_limit(), MAX_FRAMES_IN_FLIGHT as usize + 4);
+        for (domain, limit) in LIMITS.iter().enumerate().skip(1) {
+            assert_eq!(decoder.limit(domain), *limit);
+        }
     }
 
     #[test]

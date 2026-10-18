@@ -2118,6 +2118,15 @@ each section. Delete entries that stop being true.
   overload actual61.11% vs69.04%. These qualify categorical boundaries, not
   improved loss-percentage accuracy. ProRes/10bit resource models and local
   H264 coefficients remain open; Windows waits for the daemon switch.
+- 2026-10-18 (#126): media's decoded next frame is visible to timed
+  FrameSlot readers before its delivery wake, only when its PTS fits their
+  cutoff. It shares the producer's existing buffer; ordinary history,
+  untimed previews and capture counters keep their delivery schedule.
+  Media video also uses real-time QoS, but QoS alone was insufficient:
+  asynchronous tracing caught a decoded picture waiting 20 ms to publish.
+  Pending frames cancel on stop/off-air; restart waits recheck every 5 ms.
+  M2-b: five strict oracle passes (21,108 checks), full strict e2e 26/26,
+  A/B gate passes. See media-pacing/scratch/REPORT.md.
 
 - 2026-10-18 (#110 native rollback): the scoped VT-property experiment
   `20261018-085056-self-tuning-2-cmd` reproduced a real uncertainty bug:
@@ -6926,6 +6935,14 @@ each section. Delete entries that stop being true.
   The earlier real bug was `create_writers` flattening every extra canvas to
   Vertical, now fixed. Persistence uses library documents, not a guaranteed
   legacy setup.toml: verify through get/apply/restart instead of copying it.
+- 2026-10-18 (#126): per-frame stderr tracing perturbs scheduling. The
+  diagnostic rerun queued trace lines with try_send to a separate thread
+  and stamped delivery inside the slot lock, after insertion. Both tracing
+  patches are scratch-only; no diagnostic overhead remains in the fix.
+  A separate 6 fps restart probe with 40/50 ms off-air gaps still shows the
+  old play's picture at the first resumed slot (2 wrong pictures vs 9 on
+  the baseline). This is the existing on-air notification/first-slot race,
+  not the steady-state media delivery race fixed here; follow-up needed.
 
 - 2026-10-18 (#110 experiments): `e2e.Engine` re-signs its copied daemon in
   a bundle, so its whole-file SHA differs from the source binary. Preserve

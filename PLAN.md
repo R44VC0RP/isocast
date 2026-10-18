@@ -875,6 +875,10 @@ layout editing, Windows, release prep).
   program (recording too) showed the flash two frames late. It now runs at
   the program thread's QoS. M2-b interleaved: base 2/15 runs at 33.31 ms,
   fixed 0/30, generator late wakes 1-7 per run to 0.
+- [x] **A.4 Media previous-frame pictures (GitHub #126):** expose the
+  already-decoded next frame to timestamp-based selection, without waiting
+  for its producer's delivery wake. Five strict M2 1080p60 runs: 21,108
+  oracle checks, zero mismatches; full strict e2e 26/26; A/B gate passes.
 - [ ] **A.4 Split + stream losses (GitHub #60), qualification partial:**
   synchronous native stream submission stalls now signal pressure; final
   build's 16 post-split takes have zero protected losses. Cold stream startup
@@ -1867,6 +1871,11 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   stream A/B3pairs0loss. Fallback review/re-review accepted (regular reviewer
   unavailable>1h); uncommitted, ready for review. Explicit model/simulation
   limits and job IDs: self-tuning-2/scratch/remaining/REPORT.md.
+- A.4 / #126 (2026-10-18): media lookahead removes the decode-to-delivery
+  scheduling race. QoS alone still failed; async traces caught a decoded
+  frame waiting 20 ms for delivery. Five strict record/scenes/takes runs
+  passed with zero previous pictures; full strict 26/26 and three-pair
+  A/B gate passed. Evidence: media-pacing/scratch/REPORT.md.
 
 - T.1b.1/T.3a/T.4a (#110, 2026-10-18): explicit diagnostic/fit calibration
   coverage, measured multi-canvas HEVC predictions with independent stream

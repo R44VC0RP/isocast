@@ -106,7 +106,7 @@ pub fn doctor<P: Platform>(platform: &P, setup: Option<&Setup>, folder: Option<&
         checks.push(check(
             "frame budget",
             if !invariant { CheckStatus::Problem } else if refused { CheckStatus::Warning } else { CheckStatus::Ok },
-            format!("distinct-buffer invariant {}; reserves: production {}, recording {}, auxiliary {}, composition {}; refusals {} (since daemon start)",
+            format!("distinct-buffer invariant {}; base reserves: production {}, recording {}, auxiliary {}, composition {}; refusals {} (since daemon start)",
                 if invariant { "holds" } else { "FAILED" }, budget["production_reserve"], budget["recording_reserve"], budget["auxiliary_limit"], budget["composition_reserve"], budget["refused"]),
             refused.then_some("reduce auxiliary viewers/outputs; status.diagnostics.frame_budget identifies the exhausted domain"),
         ));

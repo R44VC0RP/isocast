@@ -142,6 +142,9 @@ impl Timeline {
 /// The latest frames from a source, for frame clocks to choose from.
 pub(crate) struct FrameSlot<F> {
     frames: Mutex<VecDeque<(F, Time)>>,
+    /// Media's decoded next pictures. Timed readers can select them without
+    /// waiting for the producer's delivery wake; untimed readers cannot.
+    ahead: Option<Mutex<VecDeque<(F, Time)>>>,
     /// The most frames kept.
     capacity: usize,
     /// Signalled when a frame arrives.
@@ -169,6 +172,7 @@ impl<F: Clone> FrameSlot<F> {
     pub(crate) fn with_capacity(timeline: Arc<Timeline>, capacity: usize) -> Self {
         Self {
             frames: Mutex::new(VecDeque::with_capacity(capacity)),
+            ahead: None,
             capacity: capacity.max(1),
             arrived: Condvar::new(),
             stopped: Mutex::new(None),
@@ -202,6 +206,18 @@ impl<F: Clone> FrameSlot<F> {
         self.arrived.notify_all();
     }
 
+    /// The newest decoded media frame whose timestamp is in the reader's
+    /// presentation window. Readers share the buffers without copying pixels.
+    fn ahead_until(&self, limit: Time) -> Option<(F, Time)> {
+        self.ahead
+            .as_ref()?
+            .lock()
+            .iter()
+            .rev()
+            .find(|(_, at)| *at <= limit)
+            .cloned()
+    }
+
     /// The newest frame captured at or after `from`, and when, waiting up
     /// to `timeout` for one to arrive; leaves it for the frame clock.
     pub(crate) fn wait_from(&self, from: Time, timeout: Duration) -> Option<(F, Time)> {
@@ -214,19 +230,19 @@ impl<F: Clone> FrameSlot<F> {
         frames.back().filter(|(_, at)| *at >= from).cloned()
     }
 
-    /// The newest frame captured no later than `limit`. Older frames are
-    /// released, since later ticks will never choose them.
+    /// The newest frame captured no later than `limit`. Other readers may
+    /// still be drawing an earlier tick, so only the producer trims history.
     pub(crate) fn newest_until(&self, limit: Time) -> Option<F> {
-        let mut frames = self.frames.lock();
-        let index = frames.iter().rposition(|(_, at)| *at <= limit)?;
-        frames.drain(..index);
-        frames.front().map(|(frame, _)| frame.clone())
+        self.peek_until_timed(limit).map(|(frame, _)| frame)
     }
 
     /// The newest frame captured no later than `limit`, and when (which
     /// tells it from the frame before), leaving it (and older ones) for the
     /// frame clock.
     pub(crate) fn peek_until_timed(&self, limit: Time) -> Option<(F, Time)> {
+        if let Some(frame) = self.ahead_until(limit) {
+            return Some(frame);
+        }
         let frames = self.frames.lock();
         let (frame, at) = frames.iter().rev().find(|(_, at)| *at <= limit)?;
         Some((frame.clone(), *at))
@@ -235,6 +251,9 @@ impl<F: Clone> FrameSlot<F> {
     /// The newest frame captured from `from` to `until`, and when, leaving
     /// it for the frame clock.
     pub(crate) fn peek_between(&self, from: Time, until: Time) -> Option<(F, Time)> {
+        if let Some(frame) = self.ahead_until(until).filter(|(_, at)| *at >= from) {
+            return Some(frame);
+        }
         let frames = self.frames.lock();
         let (frame, at) = frames
             .iter()
@@ -264,7 +283,27 @@ impl<F: Clone> FrameSlot<F> {
 
     /// Forget every frame.
     pub(crate) fn clear(&self) {
-        self.frames.lock().clear();
+        // Same lock order as media delivery: invalidation and promotion
+        // of a pending picture must not leave either store selectable.
+        let mut ahead = self.ahead.as_ref().map(|ahead| ahead.lock());
+        let mut frames = self.frames.lock();
+        frames.clear();
+        if let Some(ahead) = ahead.as_mut() {
+            ahead.clear();
+        }
+    }
+
+    /// A stinger starts a new play only after every canvas let it go.
+    /// Hold the on-air lock through invalidation so a concurrent canvas
+    /// cannot activate the shared source between the check and the clear.
+    pub(crate) fn clear_if_inactive(&self, id: &str) {
+        let on_air = self.timeline.on_air.lock();
+        if on_air
+            .as_ref()
+            .is_none_or(|sources| !sources.contains_key(id))
+        {
+            self.clear();
+        }
     }
 
     /// The newest frame and when it was captured, leaving it for the frame
@@ -1493,7 +1532,14 @@ fn media<P: Platform>(
                 format!("source:{id}:video"),
                 Duration::from_secs(1) / setup.canvas.fps,
             );
-            let slot = Arc::new(FrameSlot::new(timeline.clone()));
+            // Canvases may draw up to three ticks late, independently of
+            // the ISOs. Five delivered pictures cover that window at up to
+            // 1.5 times the canvas cadence; with two decoded next pictures
+            // this holds at most seven of macOS's base eight production
+            // buffers. A decoder adds its own reorder depth to that budget.
+            let mut slot = FrameSlot::with_capacity(timeline.clone(), 5);
+            slot.ahead = Some(Mutex::new(VecDeque::with_capacity(2)));
+            let slot = Arc::new(slot);
             // The first frame now, so the source is ready at once.
             let first = playlist
                 .files
@@ -1512,6 +1558,8 @@ fn media<P: Platform>(
                     playlist.clone(),
                 );
                 move |stop| {
+                    // Decode the following frame promptly too (#126).
+                    platform.real_time_thread();
                     // Reported like a capture that stopped, so the engine
                     // says so and opens it again once the file is back.
                     let failed = |err: anyhow::Error| slot.stop(format!("{err:#}"));
@@ -1522,18 +1570,74 @@ fn media<P: Platform>(
                         stop,
                         &failed,
                         |reader, base, on| {
-                            while let Some((frame, at)) = reader.next_video()? {
-                                if !on() {
+                            let ahead = slot.ahead.as_ref().expect("media slot");
+                            let mut ended = false;
+                            loop {
+                                if stop.load(Ordering::SeqCst) || !on() {
+                                    ahead.lock().clear();
                                     return Ok(false);
                                 }
-                                let pts = base + at.div_f64(speed);
-                                // Off air while waiting: the frame is stale.
-                                if !sleep_until(&platform, &mut clock, pts, stop) || !on() {
-                                    return Ok(false);
+                                // Keep two pictures decoded before pacing
+                                // delivery. A transient decoder stall must
+                                // not hide the next presentation's picture.
+                                if !ended && ahead.lock().len() < 2 {
+                                    let Some((frame, at)) = reader.next_video()? else {
+                                        // On a looping playlist, open the
+                                        // next file while this one's last
+                                        // picture is still queued. Reorder
+                                        // priming must not start at its first
+                                        // presentation deadline.
+                                        if playlist.repeat {
+                                            return Ok(true);
+                                        }
+                                        ended = true;
+                                        continue;
+                                    };
+                                    if !on() {
+                                        ahead.lock().clear();
+                                        return Ok(false);
+                                    }
+                                    let pts = base + at.div_f64(speed);
+                                    ahead.lock().push_back((frame, pts));
+                                    continue;
                                 }
+                                let Some(pts) = ahead.lock().front().map(|(_, at)| *at) else {
+                                    if ended {
+                                        return Ok(true);
+                                    }
+                                    continue;
+                                };
+                                loop {
+                                    if stop.load(Ordering::SeqCst) || !on() {
+                                        ahead.lock().clear();
+                                        return Ok(false);
+                                    }
+                                    let now = platform.now();
+                                    if now >= pts {
+                                        break;
+                                    }
+                                    // A restart cancels its pending frame
+                                    // even in a low-frame-rate file.
+                                    let until = if playlist.restart {
+                                        pts.min(now + Duration::from_millis(5))
+                                    } else {
+                                        pts
+                                    };
+                                    if !sleep_until(&platform, &mut clock, until, stop) {
+                                        ahead.lock().clear();
+                                        return Ok(false);
+                                    }
+                                }
+                                let mut pending = ahead.lock();
+                                let Some((frame, pts)) = pending.pop_front() else {
+                                    // A second canvas can clear the shared
+                                    // slot without ending this activation.
+                                    // Discard only this picture; on() above
+                                    // decides whether the play has ended.
+                                    continue;
+                                };
                                 slot.push(frame, pts);
                             }
-                            Ok(true)
                         },
                     );
                 }

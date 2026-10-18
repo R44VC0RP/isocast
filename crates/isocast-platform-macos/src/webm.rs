@@ -842,7 +842,12 @@ impl VideoReader {
             tags,
             pool: None,
             pending: Vec::new(),
-            frames: crate::frames::Budget::new("matroska decoder", size, 0),
+            frames: crate::frames::Budget::with_decoder_reorder(
+                "matroska decoder",
+                size,
+                0,
+                reorder,
+            ),
             reorder,
             ended: false,
             shown: shown.to_string(),

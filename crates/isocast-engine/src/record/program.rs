@@ -1004,11 +1004,12 @@ impl<P: Platform> Compositor<P> {
             // starts again.
             (Some(playing), Some((id, _))) if playing.id == id => None,
             (_, Some((id, began))) => {
-                // Frames of an earlier play must not show in this one.
+                // Frames of an earlier activation must not show in this
+                // one, but another canvas may still be playing this file.
                 if let Some(inputs) = &self.inputs
                     && let Some((_, slot)) = inputs.all.iter().find(|(slot, _)| *slot == id)
                 {
-                    slot.clear();
+                    slot.clear_if_inactive(&id);
                 }
                 Some(Playing {
                     id,
