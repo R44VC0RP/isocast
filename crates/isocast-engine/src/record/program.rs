@@ -16,11 +16,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use isocast_protocol::{Crop, Filter, ItemTransition, MatteLayout, Stinger, TransitionKind};
 
-use super::scenes::ProgramScenes;
+use super::scenes::{MaskUse, ProgramScenes};
 use super::{Changing, OnAir};
 use crate::compiled::{CompiledScenes, LaidOut, NodeId};
 use crate::draw_list::DrawList;
-use crate::filter::Filters;
+use crate::filter::{Filters, MaskKey};
 use crate::gpu::{FrameImporter, Gpu, GpuFrame, InFlight, PendingFrame};
 use crate::render::{Affine, Layer, Rect, Renderer};
 use crate::scene::ItemLook;
@@ -108,6 +108,11 @@ pub(super) struct Compositor<P: Platform> {
     starts: [Vec<(Arc<str>, Time)>; 2],
     /// Animated properties evaluated for the last frame drawn.
     animated: u32,
+    /// Which sources' pictures changed in the frame being drawn (by source
+    /// index), for the sources they mask.
+    remade: Vec<bool>,
+    /// Scenes drawn as masks for the frame being drawn (scene indexes).
+    mask_scenes: Vec<u32>,
     in_flight: InFlight,
 }
 
@@ -207,7 +212,8 @@ impl<P: Platform> Compositor<P> {
         gpu: Gpu,
     ) -> Result<Self> {
         let renderer = Renderer::new(&gpu, wgpu::TextureFormat::Bgra8Unorm);
-        let filters = Filters::new(&gpu, renderer.format(), true);
+        let mut filters = Filters::new(&gpu, renderer.format(), true);
+        filters.use_masks(true);
         let transitions = Transitions::new(&gpu, renderer.format());
         let importer = platform.frame_importer(&gpu)?;
         let pool = platform.ycbcr_frame_pool(size.0, size.1)?;
@@ -252,6 +258,8 @@ impl<P: Platform> Compositor<P> {
             epoch: Time::from_nanos(0),
             starts: Default::default(),
             animated: 0,
+            remade: Vec::new(),
+            mask_scenes: Vec::new(),
             in_flight: InFlight::default(),
         })
     }
@@ -272,6 +280,7 @@ impl<P: Platform> Compositor<P> {
     /// The engine's clock started at `epoch`.
     pub(super) fn set_epoch(&mut self, epoch: Time) {
         self.epoch = epoch;
+        self.filters.set_epoch(epoch);
     }
 
     /// Animated properties evaluated for the last frame [`Compositor::draw`]
@@ -341,6 +350,11 @@ impl<P: Platform> Compositor<P> {
         }
         self.frames = frames;
         self.told = vec![None; compiled.sources.len()];
+        // Mask pictures no source reads any more are let go.
+        let masks: Vec<MaskKey> = (scenes.masks.iter().flatten())
+            .map(|used| mask_key(&compiled, *used))
+            .collect();
+        self.filters.retain_masks(|key| masks.contains(key));
         self.inputs = Some(scenes);
         true
     }
@@ -477,7 +491,7 @@ impl<P: Platform> Compositor<P> {
             self.note_starts(feed, [on_air.map(|on_air| &on_air.scene), None], tick);
         }
         self.gather(scene, from);
-        let moving = self.update_frames(limit)?;
+        let moving = self.update_frames(tick, limit)?;
         let animating = self.update_looks(limit);
         if changing.is_none()
             && let Some(scene) = scene
@@ -618,19 +632,19 @@ impl<P: Platform> Compositor<P> {
             return;
         };
         let compiled = list.compiled();
+        let masks = self
+            .inputs
+            .as_ref()
+            .map_or(&[][..], |inputs| &inputs.masks[..]);
         for scene in [scene, from].into_iter().flatten() {
             for &source in &compiled.list[scene].sources {
-                if !self.needed.contains(&source) {
-                    self.needed.push(source);
-                }
+                need(&mut self.needed, masks, compiled, source, 0);
             }
         }
         // Items hiding with a transition still show their sources.
         for change in self.items.values().filter(|change| !change.showing) {
-            if let Some(source) = change.source
-                && !self.needed.contains(&source)
-            {
-                self.needed.push(source);
+            if let Some(source) = change.source {
+                need(&mut self.needed, masks, compiled, source, 0);
             }
         }
     }
@@ -638,14 +652,19 @@ impl<P: Platform> Compositor<P> {
     /// Take the newest frame of each source in `needed` captured no later
     /// than `limit` (a source's last frame if none is new), through its
     /// filters, and show it in the draw list; note the frames' times in
-    /// `seen`. Returns whether a source's filters move by themselves.
-    fn update_frames(&mut self, limit: Time) -> Result<bool> {
+    /// `seen`. Filters, and scenes drawn as masks, are drawn for `tick`,
+    /// the frame's presentation time (`limit` only picks frames). Returns
+    /// whether a source's filters move by themselves.
+    fn update_frames(&mut self, tick: Time, limit: Time) -> Result<bool> {
         self.seen.clear();
         let (Some(inputs), Some(list)) = (self.inputs.clone(), self.list.as_mut()) else {
             return Ok(false);
         };
         let compiled = list.compiled().clone();
         let mut moving = false;
+        self.remade.clear();
+        self.remade.resize(compiled.sources.len(), false);
+        self.mask_scenes.clear();
         for &source in &self.needed {
             let index = source as usize;
             let newest = inputs.slots[index]
@@ -653,6 +672,34 @@ impl<P: Platform> Compositor<P> {
                 .and_then(|slot| slot.peek_until_timed(limit));
             let filters = &inputs.filters[index];
             let id = &*compiled.sources[index];
+            // Its masks' pictures: their sources came before it in
+            // `needed`; scenes are drawn now, from those sources.
+            let mut masks_changed = false;
+            for &used in &inputs.masks[index] {
+                match used {
+                    MaskUse::Source(mask) => masks_changed |= self.remade[mask as usize],
+                    MaskUse::Scene(scene) => {
+                        masks_changed = true;
+                        if self.mask_scenes.contains(&scene) {
+                            continue;
+                        }
+                        self.mask_scenes.push(scene);
+                        let scene = scene as usize;
+                        list.animate(scene, tick, self.epoch, self.epoch);
+                        let mut encoder =
+                            self.gpu.device.create_command_encoder(&Default::default());
+                        list.upload(&mut encoder);
+                        let canvas =
+                            list.encode_canvas(&self.gpu, &self.renderer, &mut encoder, scene);
+                        self.gpu.queue.submit([encoder.finish()]);
+                        let key = MaskKey::Scene(compiled.list[scene].id.to_string());
+                        let most = largest(&self.frames, &inputs.masks, used);
+                        let own = Some(compiled.canvas);
+                        self.filters
+                            .set_mask(&self.gpu, &self.renderer, key, &canvas, own, most);
+                    }
+                }
+            }
             match newest {
                 Some((frame, at)) if self.frames[index].as_ref().is_none_or(|f| f.at != at) => {
                     let (imported, cached) = match self.importer.import_cached(&frame)? {
@@ -666,9 +713,10 @@ impl<P: Platform> Compositor<P> {
                         id,
                         &imported,
                         filters,
-                        limit,
+                        tick,
                     );
                     let group = group(list, &self.gpu, &self.renderer, &imported, &picture, cached);
+                    self.remade[index] = true;
                     self.frames[index] = Some(SourceFrame {
                         _frame: frame,
                         at,
@@ -679,13 +727,15 @@ impl<P: Platform> Compositor<P> {
                         stale: false,
                     });
                 }
-                // The same frame: only moving filters (or new ones) change
-                // its picture.
+                // The same frame: only moving filters (or new ones, or
+                // its masks' pictures) change its picture.
                 _ if inputs.moving[index]
+                    || masks_changed
                     || self.frames[index].as_ref().is_some_and(|frame| frame.stale) =>
                 {
                     if let Some(current) = &mut self.frames[index] {
                         current.stale = false;
+                        self.remade[index] = true;
                         current.picture = filtered(
                             &mut self.filters,
                             &self.gpu,
@@ -693,7 +743,7 @@ impl<P: Platform> Compositor<P> {
                             id,
                             &current.imported,
                             filters,
-                            limit,
+                            tick,
                         );
                         current.group = group(
                             list,
@@ -707,8 +757,18 @@ impl<P: Platform> Compositor<P> {
                 }
                 _ => {}
             }
-            moving |= inputs.moving[index];
+            moving |= inputs.moving[index] || masks_changed;
             let current = self.frames[index].as_ref();
+            // Its picture masks others (#115): theirs are drawn after it.
+            if inputs.masking[index]
+                && self.remade[index]
+                && let Some(frame) = current
+            {
+                let key = MaskKey::Source(id.to_string());
+                let most = largest(&self.frames, &inputs.masks, MaskUse::Source(source));
+                self.filters
+                    .set_mask(&self.gpu, &self.renderer, key, &frame.picture, None, most);
+            }
             list.set_picture(
                 source,
                 current.map(|frame| (&frame.picture, frame.group.clone())),
@@ -885,12 +945,22 @@ impl<P: Platform> Compositor<P> {
         out.clear();
         if let Some(list) = &self.list {
             let compiled = list.compiled();
+            // With what their masks show (#115): a mask's media plays and a
+            // browser mask stays loaded while what it masks is on air.
+            let masks = self
+                .inputs
+                .as_ref()
+                .map_or(&[][..], |inputs| &inputs.masks[..]);
+            let mut shown = Vec::new();
             for scene in [scene, from].into_iter().flatten() {
                 for &source in &compiled.list[scene].sources {
-                    let id = &compiled.sources[source as usize];
-                    if !out.contains(id) {
-                        out.push(id.clone());
-                    }
+                    need(&mut shown, masks, compiled, source, 0);
+                }
+            }
+            for source in shown {
+                let id = &compiled.sources[source as usize];
+                if !out.contains(id) {
+                    out.push(id.clone());
                 }
             }
         }
@@ -1148,6 +1218,57 @@ impl<P: Platform> Drop for Compositor<P> {
         // On timeout InFlight cancels delivery, but GPU callbacks retain
         // the native buffers until it is actually safe to release them.
         let _ = self.in_flight.drain();
+    }
+}
+
+/// Add source `source` (an index) to `needed`, after what its masks show
+/// (`masks`, by source index), each once.
+fn need(
+    needed: &mut Vec<u32>,
+    masks: &[Vec<MaskUse>],
+    compiled: &CompiledScenes,
+    source: u32,
+    depth: u32,
+) {
+    if needed.contains(&source) || depth > isocast_protocol::MAX_MASK_DEPTH {
+        return;
+    }
+    for &used in masks.get(source as usize).into_iter().flatten() {
+        match used {
+            MaskUse::Source(mask) => need(needed, masks, compiled, mask, depth + 1),
+            MaskUse::Scene(scene) => {
+                for &shown in &compiled.list[scene as usize].sources {
+                    need(needed, masks, compiled, shown, depth + 1);
+                }
+            }
+        }
+    }
+    if !needed.contains(&source) {
+        needed.push(source);
+    }
+}
+
+/// The largest picture (by its last frame) of the sources mask `used`
+/// masks (`masks`, by source index), if any has one yet.
+fn largest<F>(
+    frames: &[Option<SourceFrame<F>>],
+    masks: &[Vec<MaskUse>],
+    used: MaskUse,
+) -> Option<(u32, u32)> {
+    masks
+        .iter()
+        .zip(frames)
+        .filter(|(uses, _)| uses.contains(&used))
+        .filter_map(|(_, frame)| frame.as_ref())
+        .map(|frame| (frame.imported.width, frame.imported.height))
+        .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)))
+}
+
+/// What a source mask reads, as the filters know it.
+fn mask_key(compiled: &CompiledScenes, used: MaskUse) -> MaskKey {
+    match used {
+        MaskUse::Source(index) => MaskKey::Source(compiled.sources[index as usize].to_string()),
+        MaskUse::Scene(index) => MaskKey::Scene(compiled.list[index as usize].id.to_string()),
     }
 }
 

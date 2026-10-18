@@ -6,6 +6,7 @@
         [--scenario flagship] [--runs 3] [--seconds 20] [--real] \
         [--plugins DIR] [--compare-plugins DIR] \
         [--tone-filters TOML] [--compare-tone-filters TOML]
+        [--camera-filters TOML] [--compare-camera-filters TOML]
 
 Each run signs the daemon into its own copy of the development app
 (`<work>/Isocast Dev.app`), starts it on its own socket and setup file (never
@@ -23,7 +24,8 @@ Ryan's), records (or streams) the scenario, and measures:
 
 --plugins gives a build its own plugins folder (ISOCAST_PLUGINS, with plugins
 installed by that build), --tone-filters audio filters on the synthetic
-tone (`'{ kind = "gain", gain_db = -6 }'`) and --env KEY=VALUE environment
+tone (`'{ kind = "gain", gain_db = -6 }'`), --camera-filters video filters on
+the synthetic camera (`'{ kind = "shape_mask", shape = "circle" }'`), and --env KEY=VALUE environment
 variables for its daemon (so one binary can be measured with a flag off and
 on); the --compare-… forms are the baseline's. --timeline opens a timeline (`timeline new`) on --daemon's runs
 before recording, so each take is added to it, and checks it was. --developer
@@ -327,7 +329,7 @@ def make_clips(work):
 
 
 def setup_toml(scenario, real, work, folder, camera="Studio Video", mic="Studio Audio",
-               tone_filters=None):
+               tone_filters=None, camera_filters=None):
     clips = work / "clips"
     big = scenario not in ("flagship-1080", "stream", "program-1080", "camera-1080",
                            "flagship-1080+projectors", "dual")
@@ -356,6 +358,7 @@ kind = "system_audio"
         audio = '["mic", "desktop-audio"]'
         iso_audio = '["mic"]'
     else:
+        camera_line = f"filters = [{camera_filters}]" if camera_filters else ""
         sources = f"""
 [[sources]]
 id = "desktop"
@@ -368,6 +371,7 @@ id = "camera"
 kind = "media"
 files = ["{clips / CAMERA_CLIP}"]
 loop = true
+{camera_line}
 
 [[sources]]
 id = "tone"
@@ -483,6 +487,7 @@ def measure(args, daemon, label, index, cleanup):
     if plugins:
         env["ISOCAST_PLUGINS"] = str(plugins.resolve())
     tone_filters = args.compare_tone_filters if base else args.tone_filters
+    camera_filters = args.compare_camera_filters if base else args.camera_filters
     cli = args.cli
     listeners = []
 
@@ -501,7 +506,8 @@ def measure(args, daemon, label, index, cleanup):
     folder = work / "runs" / f"{time.strftime('%Y%m%d-%H%M%S')}-{label}-{index}"
     folder.mkdir(parents=True, exist_ok=True)
     setup = work / f"setup-{args.scenario}{'-real' if args.real else ''}-{label}.toml"
-    text = setup_toml(args.scenario, args.real, work, folder, args.camera, args.mic, tone_filters)
+    text = setup_toml(args.scenario, args.real, work, folder, args.camera, args.mic, tone_filters,
+                      camera_filters)
     # --developer: developer mode on for --daemon's runs (what it costs).
     developer = args.developer and not base
     if developer:
@@ -695,6 +701,8 @@ def measure(args, daemon, label, index, cleanup):
         result["plugins"] = str(plugins)
     if tone_filters:
         result["tone_filters"] = tone_filters
+    if camera_filters:
+        result["camera_filters"] = camera_filters
     if compositor:
         result["compositor"] = compositor
     result["engine"] = engine_status
@@ -845,6 +853,9 @@ def main():
     p.add_argument("--tone-filters", help='audio filters on the synthetic tone, as TOML inline tables: '
                    '\'{ kind = "gain", gain_db = -6 }\'')
     p.add_argument("--compare-tone-filters", help="the same for --compare's runs")
+    p.add_argument("--camera-filters", help='video filters on the synthetic camera, as TOML inline tables: '
+                   '\'{ kind = "shape_mask", shape = "circle" }\'')
+    p.add_argument("--compare-camera-filters", help="the same for --compare's runs")
     p.add_argument("--developer", action="store_true",
                    help="developer mode on for --daemon's runs (verbose logs and traces), to measure its cost")
     p.add_argument("--timeline", action="store_true",

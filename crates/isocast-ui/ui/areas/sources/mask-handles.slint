@@ -1,0 +1,187 @@
+// A shape mask's handles over the picture in Filters (#115): the mask's
+// box, turned with it, to move (drag inside), size (the 8 handles on its
+// corners and sides) and turn (the knob above it). It is drawn where the
+// pointer has it while dragging, and tells the Rust side
+// (src/areas/sources/dialogs.rs) the mask's new numbers as it goes, which
+// changes the filter like its form does.
+
+import { Theme } from "../../theme.slint";
+import { SourcesArea } from "state.slint";
+
+export component MaskHandles inherits Rectangle {
+    // How far from a handle (or the knob) the pointer still takes it.
+    property <length> reach: 9px;
+    // How far above the box the knob is.
+    property <length> knob: 22px;
+
+    // The box as the filter has it, or as the pointer has it while
+    // dragging: its centre and size, in this element's pixels.
+    property <bool> dragging;
+    property <length> d-cx;
+    property <length> d-cy;
+    property <length> d-bw;
+    property <length> d-bh;
+    property <float> d-rot;
+    property <length> cx: root.dragging ? root.d-cx : SourcesArea.mask-x * root.width;
+    property <length> cy: root.dragging ? root.d-cy : SourcesArea.mask-y * root.height;
+    property <length> bw: root.dragging ? root.d-bw : max(0px, SourcesArea.mask-w * root.width);
+    property <length> bh: root.dragging ? root.d-bh : max(0px, SourcesArea.mask-h * root.height);
+    property <float> rot: root.dragging ? root.d-rot : SourcesArea.mask-rotation;
+
+    // What a drag does: "move", "size" (with the side it pulls, -1, 0 or
+    // 1 across and down) or "turn"; and the box when it began.
+    property <string> action;
+    property <int> sx;
+    property <int> sy;
+    property <length> cx0;
+    property <length> cy0;
+    property <length> bw0;
+    property <length> bh0;
+    property <float> rot0;
+
+    // The pointer area reaches this far past the picture, so handles on
+    // its edges (and a drag past them) stay in reach.
+    property <length> margin: 24px;
+    // The pointer, in this element's pixels.
+    property <length> px: ta.mouse-x - root.margin;
+    property <length> py: ta.mouse-y - root.margin;
+    // The pointer in the box's own frame (turned back), from its centre.
+    property <length> lx: (root.px - root.cx) * cos(root.rot * 1deg) + (root.py - root.cy) * sin(root.rot * 1deg);
+    property <length> ly: -(root.px - root.cx) * sin(root.rot * 1deg) + (root.py - root.cy) * cos(root.rot * 1deg);
+
+    accessible-role: none;
+
+    function near(a: length, b: length) -> bool {
+        return abs(a - b) < root.reach;
+    }
+
+    function report(done: bool) {
+        SourcesArea.mask-moved(root.d-cx / max(1px, root.width), root.d-cy / max(1px, root.height),
+            root.d-bw / max(1px, root.width), root.d-bh / max(1px, root.height), root.d-rot, done);
+    }
+
+    // The box, turned about its centre.
+    Rectangle {
+        x: root.cx - root.bw / 2;
+        y: root.cy - root.bh / 2;
+        width: root.bw;
+        height: root.bh;
+        transform-rotation: root.rot * 1deg;
+
+        // A dark ring outside the yellow line keeps it seen on bright
+        // pictures, as the canvas's selection box does.
+        Rectangle {
+            x: -2px;
+            y: -2px;
+            width: parent.width + 4px;
+            height: parent.height + 4px;
+            border-width: 1px;
+            border-color: Theme.box-ring;
+        }
+        Rectangle {
+            x: -1px;
+            y: -1px;
+            width: parent.width + 2px;
+            height: parent.height + 2px;
+            border-width: 1px;
+            border-color: Theme.selection-ring;
+        }
+        // The knob's stem and the knob.
+        Rectangle {
+            x: (parent.width - 1px) / 2;
+            y: -root.knob;
+            width: 1px;
+            height: root.knob - 1px;
+            background: Theme.selection-ring;
+        }
+        Rectangle {
+            x: (parent.width - Theme.handle) / 2;
+            y: -root.knob - Theme.handle / 2;
+            width: Theme.handle;
+            height: Theme.handle;
+            border-radius: Theme.handle / 2;
+            background: Theme.accent;
+            border-width: 1px;
+            border-color: Theme.handle-edge;
+        }
+        for handle in [
+            { x: 0, y: 0 }, { x: 0.5, y: 0 }, { x: 1, y: 0 },
+            { x: 0, y: 0.5 }, { x: 1, y: 0.5 },
+            { x: 0, y: 1 }, { x: 0.5, y: 1 }, { x: 1, y: 1 },
+        ]: Rectangle {
+            x: parent.width * handle.x - Theme.handle / 2;
+            y: parent.height * handle.y - Theme.handle / 2;
+            width: Theme.handle;
+            height: Theme.handle;
+            border-radius: Theme.handle / 2;
+            background: Theme.bone;
+            border-width: 1px;
+            border-color: Theme.handle-edge;
+        }
+    }
+
+    ta := TouchArea {
+        x: -root.margin;
+        y: -root.margin;
+        width: root.width + 2 * root.margin;
+        height: root.height + 2 * root.margin;
+        mouse-cursor: root.dragging ? (root.action == "move" ? MouseCursor.move : MouseCursor.crosshair) : MouseCursor.default;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                root.cx0 = root.cx;
+                root.cy0 = root.cy;
+                root.bw0 = root.bw;
+                root.bh0 = root.bh;
+                root.rot0 = root.rot;
+                root.d-cx = root.cx;
+                root.d-cy = root.cy;
+                root.d-bw = root.bw;
+                root.d-bh = root.bh;
+                root.d-rot = root.rot;
+                // The knob, a handle on a side or corner, or the box.
+                root.sx = 0;
+                root.sy = 0;
+                if near(root.lx, 0px) && near(root.ly, -root.bh / 2 - root.knob) {
+                    root.action = "turn";
+                } else {
+                    if (near(root.ly, 0px) || near(abs(root.ly), root.bh / 2)) && near(abs(root.lx), root.bw / 2) {
+                        root.sx = root.lx > 0 ? 1 : -1;
+                    }
+                    if (near(root.lx, 0px) || near(abs(root.lx), root.bw / 2)) && near(abs(root.ly), root.bh / 2) {
+                        root.sy = root.ly > 0 ? 1 : -1;
+                    }
+                    root.action = root.sx != 0 || root.sy != 0 ? "size" : abs(root.lx) <= root.bw / 2 && abs(root.ly) <= root.bh / 2 ? "move" : "";
+                }
+                root.dragging = root.action != "";
+            }
+            if event.kind == PointerEventKind.up && root.dragging {
+                root.report(true);
+                root.dragging = false;
+            }
+        }
+        moved => {
+            if !root.dragging {
+                return;
+            }
+            if root.action == "move" {
+                root.d-cx = root.cx0 + self.mouse-x - self.pressed-x;
+                root.d-cy = root.cy0 + self.mouse-y - self.pressed-y;
+            } else if root.action == "turn" {
+                root.d-rot = round((atan2((root.py - root.cy0) / 1px, (root.px - root.cx0) / 1px) + 90deg) / 1deg * 10) / 10;
+            } else {
+                // Pulled in the box's own frame; the far side stays put.
+                let dx = self.mouse-x - self.pressed-x;
+                let dy = self.mouse-y - self.pressed-y;
+                let c = cos(root.rot0 * 1deg);
+                let s = sin(root.rot0 * 1deg);
+                root.d-bw = root.sx == 0 ? root.bw0 : max(4px, root.bw0 + root.sx * (dx * c + dy * s));
+                root.d-bh = root.sy == 0 ? root.bh0 : max(4px, root.bh0 + root.sy * (-dx * s + dy * c));
+                let u = root.sx * (root.d-bw - root.bw0) / 2;
+                let v = root.sy * (root.d-bh - root.bh0) / 2;
+                root.d-cx = root.cx0 + u * c - v * s;
+                root.d-cy = root.cy0 + u * s + v * c;
+            }
+            root.report(false);
+        }
+    }
+}

@@ -119,11 +119,11 @@ pub struct Animation {
     pub start: AnimationStart,
 }
 
-fn is_zero(value: &i32) -> bool {
+pub(crate) fn is_zero(value: &i32) -> bool {
     *value == 0
 }
 
-fn is_ease_in_out(easing: &Easing) -> bool {
+pub(crate) fn is_ease_in_out(easing: &Easing) -> bool {
     *easing == Easing::EaseInOut
 }
 
@@ -144,7 +144,7 @@ impl Default for Iterations {
 }
 
 impl Iterations {
-    fn is_once(&self) -> bool {
+    pub(crate) fn is_once(&self) -> bool {
         *self == Self::Count(1.0)
     }
 }
@@ -199,7 +199,7 @@ pub enum PlayDirection {
 }
 
 impl PlayDirection {
-    fn is_normal(&self) -> bool {
+    pub(crate) fn is_normal(&self) -> bool {
         *self == Self::Normal
     }
 }
@@ -223,7 +223,7 @@ pub enum Fill {
 }
 
 impl Fill {
-    fn is_both(&self) -> bool {
+    pub(crate) fn is_both(&self) -> bool {
         *self == Self::Both
     }
 }
@@ -246,7 +246,7 @@ pub enum AnimationStart {
 }
 
 impl AnimationStart {
-    fn is_on_air(&self) -> bool {
+    pub(crate) fn is_on_air(&self) -> bool {
         *self == Self::OnAir
     }
 }

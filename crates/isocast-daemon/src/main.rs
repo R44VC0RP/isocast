@@ -2321,10 +2321,11 @@ impl Daemon {
                         ids_or_none(setup.scenes.iter().map(|s| &s.id))
                     )));
                 };
-                let sources: Vec<String> = found
-                    .video_sources(&setup.scenes)
-                    .into_iter()
-                    .map(String::from)
+                let shown = found.video_sources(&setup.scenes);
+                // And what their masks show (#115).
+                let masks = setup.mask_needs(&shown);
+                let sources: Vec<String> = (shown.iter().chain(&masks))
+                    .map(|id| id.to_string())
                     .collect();
                 check_cameras(&setup, &sources, control.as_deref())?;
                 let (png, width, height) = scene_png(

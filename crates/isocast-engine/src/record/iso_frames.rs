@@ -33,6 +33,8 @@ pub(super) struct IsoFrames<P: Platform> {
     source_filters: Option<SourceFilters>,
     /// What filtered or rescaled frames are drawn with, made on first use.
     drawing: Option<Drawing>,
+    /// When the engine's clock started (mask animations on `clock`).
+    epoch: Time,
     in_flight: InFlight,
 }
 
@@ -64,6 +66,7 @@ impl<P: Platform> IsoFrames<P> {
         id: &str,
         size: (u32, u32),
         source_filters: Option<SourceFilters>,
+        epoch: Time,
     ) -> Result<Self> {
         let importer = platform.frame_importer(&gpu)?;
         let pool = platform.ycbcr_frame_pool(size.0, size.1)?;
@@ -77,6 +80,7 @@ impl<P: Platform> IsoFrames<P> {
             size,
             source_filters,
             drawing: None,
+            epoch,
             in_flight: InFlight::default(),
         })
     }
@@ -111,9 +115,11 @@ impl<P: Platform> IsoFrames<P> {
             Some(bound) => bound,
             None => {
                 let (gpu, to_ycbcr, size) = (&self.gpu, &self.to_ycbcr, self.size);
+                let epoch = self.epoch;
                 let drawing = self.drawing.get_or_insert_with(|| {
                     let renderer = Renderer::new(gpu, wgpu::TextureFormat::Bgra8Unorm);
-                    let filters = Filters::new(gpu, renderer.format(), true);
+                    let mut filters = Filters::new(gpu, renderer.format(), true);
+                    filters.set_epoch(epoch);
                     let picture = crate::scene::canvas_texture(gpu, renderer.format(), size);
                     let picture_bound = to_ycbcr.bind(gpu, &picture);
                     Drawing {

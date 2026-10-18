@@ -12,7 +12,7 @@ use isocast_protocol::projector::{OpenParams, ProjectorView, Projectors};
 use isocast_protocol::replay::ReplayState;
 use isocast_protocol::stream::{StreamState, StreamStatus};
 use isocast_protocol::virtual_camera::VirtualCameraState;
-use isocast_protocol::{Scene, SceneItem, Source};
+use isocast_protocol::{Filter, FilterKind, Scene, SceneItem, Source};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
@@ -82,6 +82,15 @@ pub const SUPPORTED: &[&str] = &[
     // Sources
     "GetSourceActive",
     "GetSourceScreenshot",
+    // Filters
+    "GetSourceFilterKindList",
+    "GetSourceFilterList",
+    "GetSourceFilterDefaultSettings",
+    "CreateSourceFilter",
+    "RemoveSourceFilter",
+    "GetSourceFilter",
+    "SetSourceFilterSettings",
+    "SetSourceFilterEnabled",
     // Outputs
     "GetVirtualCamStatus",
     "ToggleVirtualCam",
@@ -134,6 +143,7 @@ pub mod code {
     pub const STUDIO_MODE_NOT_ACTIVE: u16 = 506;
     pub const RESOURCE_NOT_FOUND: u16 = 600;
     pub const INVALID_RESOURCE_STATE: u16 = 604;
+    pub const INVALID_FILTER_KIND: u16 = 607;
     pub const RESOURCE_NOT_CONFIGURABLE: u16 = 606;
     pub const REQUEST_PROCESSING_FAILED: u16 = 702;
     pub const CANNOT_ACT: u16 = 703;
@@ -347,6 +357,122 @@ fn input<'w>(world: &'w World, data: &Data) -> Result<&'w Source, Fail> {
             ),
         )
     })
+}
+
+/// The source a filter request names (`sourceName` or `sourceUuid`):
+/// only sources with a picture have filters in Isocast.
+fn filter_source<'w>(world: &'w World, data: &Data) -> Result<&'w Source, Fail> {
+    let name = data.str("sourceName")?;
+    let id = data.str("sourceUuid")?;
+    if name.is_none() && id.is_none() {
+        return Err(missing("sourceName` or `sourceUuid"));
+    }
+    if let Some(source) = world.find_input(name, id) {
+        if !source.kind.has_video() {
+            return Err(Fail::new(
+                code::INVALID_RESOURCE_STATE,
+                format!(
+                    "`{}` has no picture, so it has no filters in Isocast (its audio filters are \
+                     set in the setup).",
+                    id.or(name).unwrap_or_default()
+                ),
+            ));
+        }
+        return Ok(source);
+    }
+    Err(Fail::new(
+        code::RESOURCE_NOT_FOUND,
+        format!(
+            "No source with filters was found by the {} `{}` (scenes have none in Isocast). \
+             Sources: {}.",
+            if id.is_some() { "uuid" } else { "name" },
+            id.or(name).unwrap_or_default(),
+            names(world.sources().iter().map(|s| world.input_name(&s.id)))
+        ),
+    ))
+}
+
+/// The filter of `source` called `name` (its id, else its kind), and its
+/// index.
+fn find_filter<'s>(source: &'s Source, name: &str) -> Result<(usize, &'s Filter), Fail> {
+    source
+        .filters
+        .iter()
+        .enumerate()
+        .find(|(_, filter)| filter.key() == name)
+        .ok_or_else(|| {
+            Fail::new(
+                code::RESOURCE_NOT_FOUND,
+                format!(
+                    "No filter was found by the name `{name}`. Filters of `{}`: {}.",
+                    source.id,
+                    names(source.filters.iter().map(|f| f.key().to_string()))
+                ),
+            )
+        })
+}
+
+/// A filter as obs-websocket describes one.
+fn filter_entry(filter: &Filter, index: usize) -> Value {
+    let mut settings = short_numbers(filter);
+    if let Some(settings) = settings.as_object_mut() {
+        for field in ["id", "kind", "enabled"] {
+            settings.remove(field);
+        }
+    }
+    json!({
+        "filterEnabled": filter.enabled,
+        "filterIndex": index,
+        "filterKind": filter.kind.label(),
+        "filterSettings": settings,
+    })
+}
+
+/// `value` as JSON with its f32 numbers as written (0.8, not
+/// 0.800000011920929): through text, which writes them shortest.
+fn short_numbers(value: &impl serde::Serialize) -> Value {
+    serde_json::to_string(value)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// A patch of filter `filter` (by its key) with `changes`.
+fn filter_patch(filter: &Filter, changes: Value) -> Value {
+    let mut patch = match changes {
+        Value::Object(changes) => changes,
+        _ => Map::new(),
+    };
+    match &filter.id {
+        Some(id) => patch.insert("id".into(), json!(id)),
+        None => patch.insert("kind".into(), json!(filter.kind.label())),
+    };
+    Value::Object(patch)
+}
+
+/// A filter kind's default settings; an error naming the kinds if it
+/// isn't one, or naming the settings it needs.
+fn filter_defaults(kind: &str) -> Result<Value, Fail> {
+    if !FilterKind::NAMES.contains(&kind) {
+        return Err(Fail::new(
+            code::INVALID_FILTER_KIND,
+            format!(
+                "filterKind: `{kind}` isn't an Isocast filter kind. Kinds: {}.",
+                FilterKind::NAMES.join(", ")
+            ),
+        ));
+    }
+    match serde_json::from_value::<FilterKind>(json!({ "kind": kind })) {
+        Ok(defaults) => {
+            let mut value = short_numbers(&defaults);
+            if let Some(value) = value.as_object_mut() {
+                value.remove("kind");
+            }
+            Ok(value)
+        }
+        // A setting it needs (like an image's path) has no default.
+        Err(_) => Ok(json!({})),
+    }
 }
 
 /// An input with sound, for the audio requests.
@@ -1210,6 +1336,120 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
                 ),
             ))
         }
+        // Filters: Isocast's own, by their keys (id, else kind), with
+        // Isocast's settings.
+        "GetSourceFilterKindList" => Ok(json!({ "sourceFilterKinds": FilterKind::NAMES })),
+        "GetSourceFilterList" => {
+            let world = World::new(ctx.live()?, None);
+            let source = filter_source(&world, &d)?;
+            let filters: Vec<Value> = source
+                .filters
+                .iter()
+                .enumerate()
+                .map(|(index, filter)| {
+                    let mut entry = filter_entry(filter, index);
+                    entry["filterName"] = json!(filter.key());
+                    entry
+                })
+                .collect();
+            Ok(json!({ "filters": filters }))
+        }
+        "GetSourceFilterDefaultSettings" => {
+            let kind = d.need_str("filterKind")?;
+            let defaults = filter_defaults(kind)?;
+            Ok(json!({ "defaultFilterSettings": defaults }))
+        }
+        "GetSourceFilter" => {
+            let world = World::new(ctx.live()?, None);
+            let source = filter_source(&world, &d)?;
+            let (index, filter) = find_filter(source, d.need_str("filterName")?)?;
+            Ok(filter_entry(filter, index))
+        }
+        "CreateSourceFilter" => {
+            let name = d.need_str("filterName")?.to_string();
+            let kind = d.need_str("filterKind")?.to_string();
+            let mut settings = match d.get("filterSettings") {
+                None => Map::new(),
+                Some(Value::Object(settings)) => settings.clone(),
+                Some(_) => {
+                    return Err(Fail::new(
+                        code::INVALID_REQUEST_FIELD_TYPE,
+                        "The field value of `filterSettings` must be an object.",
+                    ));
+                }
+            };
+            filter_defaults(&kind)?;
+            let world = World::new(ctx.live()?, None);
+            let source = filter_source(&world, &d)?;
+            if source.filters.iter().any(|f| f.key() == name) {
+                return Err(Fail::new(
+                    601,
+                    format!("A filter already exists by the name `{name}`."),
+                ));
+            }
+            settings.insert("id".into(), json!(name));
+            settings.insert("kind".into(), json!(kind));
+            let patch = json!({ "sources": [{ "id": source.id, "filters": [settings] }] });
+            ctx.patch(|_| Ok(patch.clone()), false)?;
+            Ok(Value::Null)
+        }
+        "RemoveSourceFilter" => {
+            let world = World::new(ctx.live()?, None);
+            let source = filter_source(&world, &d)?;
+            let (_, filter) = find_filter(source, d.need_str("filterName")?)?;
+            let patch = json!({ "sources": [{ "id": source.id,
+                "filters": [filter_patch(filter, json!({ "remove": true }))] }] });
+            ctx.patch(|_| Ok(patch.clone()), false)?;
+            Ok(Value::Null)
+        }
+        "SetSourceFilterEnabled" => {
+            let enabled = d.need_bool("filterEnabled")?;
+            let world = World::new(ctx.live()?, None);
+            let source = filter_source(&world, &d)?;
+            let (_, filter) = find_filter(source, d.need_str("filterName")?)?;
+            let patch = json!({ "sources": [{ "id": source.id,
+                "filters": [filter_patch(filter, json!({ "enabled": enabled }))] }] });
+            ctx.patch(|_| Ok(patch.clone()), false)?;
+            Ok(Value::Null)
+        }
+        "SetSourceFilterSettings" => {
+            let Some(settings) = d.get("filterSettings").and_then(Value::as_object) else {
+                return Err(match d.get("filterSettings") {
+                    None => missing("filterSettings"),
+                    Some(_) => Fail::new(
+                        code::INVALID_REQUEST_FIELD_TYPE,
+                        "The field value of `filterSettings` must be an object.",
+                    ),
+                });
+            };
+            let overlay = d.bool("overlay")?.unwrap_or(true);
+            let world = World::new(ctx.live()?, None);
+            let source = filter_source(&world, &d)?;
+            let (_, filter) = find_filter(source, d.need_str("filterName")?)?;
+            let fields = filter.kind.fields();
+            if let Some(unknown) = settings.keys().find(|k| !fields.contains(k)) {
+                return Err(Fail::new(
+                    code::INVALID_REQUEST_FIELD,
+                    format!(
+                        "filterSettings.{unknown}: a {} filter has no such setting; its settings: {}",
+                        filter.kind.label(),
+                        fields.join(", ")
+                    ),
+                ));
+            }
+            let mut changes = Map::new();
+            if !overlay {
+                // Every setting not given goes back to its default.
+                for field in fields {
+                    changes.insert(field.clone(), Value::Null);
+                }
+            }
+            changes.extend(settings.clone());
+            let patch = json!({ "sources": [{ "id": source.id,
+                "filters": [filter_patch(filter, Value::Object(changes))] }] });
+            ctx.patch(|_| Ok(patch.clone()), false)?;
+            Ok(Value::Null)
+        }
         "GetSourceScreenshot" => {
             let format = d.need_str("imageFormat")?;
             if !format.eq_ignore_ascii_case("png") {
@@ -1754,16 +1994,8 @@ const KNOWN: &[&str] = &[
     "GetStreamServiceSettings",
     "SetStreamServiceSettings",
     "SetRecordDirectory",
-    "GetSourceFilterKindList",
-    "GetSourceFilterList",
-    "GetSourceFilterDefaultSettings",
-    "CreateSourceFilter",
-    "RemoveSourceFilter",
     "SetSourceFilterName",
-    "GetSourceFilter",
     "SetSourceFilterIndex",
-    "SetSourceFilterSettings",
-    "SetSourceFilterEnabled",
     "CallVendorRequest",
     "GetHotkeyList",
     "TriggerHotkeyByName",

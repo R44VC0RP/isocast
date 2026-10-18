@@ -40,6 +40,12 @@ export component PreviewWell inherits Rectangle {
     // its bottom; Paper: 288px).
     in property <length> area-height: 288px;
 
+    // Where the picture is in the well (for what is drawn over it).
+    out property <length> picture-x: (root.width - root.fit-w) / 2;
+    out property <length> picture-y: 1px + root.line-h + (root.area-height - Theme.space-3 - root.fit-h) / 2;
+    out property <length> picture-w: root.fit-w;
+    out property <length> picture-h: root.fit-h;
+
     property <length> line-h: 28px;
     property <float> ratio: max(0.1, root.aspect);
     // Paper's 488×275 in a 596×288 room: the room less its 12px foot and

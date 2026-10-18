@@ -780,6 +780,33 @@ impl DrawList {
         }
     }
 
+    /// Encode drawing scene `scene` (an index), and the scenes it shows,
+    /// on its own canvas, as a source mask reads it (#115). Returns the
+    /// canvas as a picture.
+    pub(crate) fn encode_canvas(
+        &mut self,
+        gpu: &Gpu,
+        renderer: &Renderer,
+        encoder: &mut wgpu::CommandEncoder,
+        scene: usize,
+    ) -> GpuFrame {
+        self.encode_nested(gpu, renderer, encoder, scene);
+        self.make_canvas(gpu, renderer, scene);
+        let view = self.canvases[scene]
+            .as_ref()
+            .expect("made above")
+            .view
+            .clone();
+        self.draws += self.encode_one(renderer, encoder, scene, &view, wgpu::Color::TRANSPARENT);
+        self.drawn[scene] = self.pass;
+        let (width, height) = self.raster_size.unwrap_or(self.compiled.canvas);
+        GpuFrame {
+            width,
+            height,
+            pixels: crate::gpu::GpuPixels::Premultiplied(view.texture().clone()),
+        }
+    }
+
     /// The canvas scene `scene` (an index) was drawn on in this pass, as a
     /// picture for [`crate::scene::layers`].
     pub(crate) fn canvas_frame(&self, scene: usize) -> Option<GpuFrame> {

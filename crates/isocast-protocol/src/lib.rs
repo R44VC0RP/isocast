@@ -24,6 +24,7 @@ pub mod library;
 pub mod located;
 pub mod machine;
 pub mod manifest;
+mod mask;
 pub mod obs;
 pub mod optimize;
 pub mod plugin;
@@ -43,6 +44,7 @@ pub use content::{Content, ContentKind};
 pub use fields::UnknownFields;
 pub use filter::*;
 pub use layout::Layout;
+pub use mask::*;
 pub use source::*;
 pub use transition::*;
 
@@ -2302,6 +2304,7 @@ impl Setup {
         for (i, source) in self.sources.iter().enumerate() {
             audio_filter::check_chain(&format!("sources[{i}]"), source, &audio, &mut issues);
         }
+        mask::check_mask_refs(self, &video, &mut issues);
 
         animation::check_keyframes(&self.keyframes, &mut issues);
         let keyframes: Vec<&str> = self.keyframes.iter().map(|k| k.id.as_str()).collect();

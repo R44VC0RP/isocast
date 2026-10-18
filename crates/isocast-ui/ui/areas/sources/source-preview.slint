@@ -7,23 +7,43 @@
 import { Theme } from "../../theme.slint";
 import { PreviewWell } from "../../kit.slint";
 import { SourcesArea } from "state.slint";
+import { MaskHandles } from "mask-handles.slint";
 
 export component SourcePreview inherits VerticalLayout {
     // The room for the picture under the viewer line (Paper: 288px).
     in property <length> area-height: 288px;
     in property <string> name;
+    // Draw the selected shape mask's handles (Filters).
+    in property <bool> handles;
 
     padding-left: Theme.sheet-pad;
     padding-right: Theme.sheet-pad;
     padding-bottom: Theme.space-4;
 
-    PreviewWell {
-        area-height: root.area-height;
-        format: SourcesArea.preview-format;
-        name: root.name;
-        picture: SourcesArea.preview;
-        picture-shown: SourcesArea.preview-shown;
-        aspect: SourcesArea.preview-aspect;
-        note: SourcesArea.preview-note;
+    Rectangle {
+        height: well.height;
+        well := PreviewWell {
+            width: parent.width;
+            area-height: root.area-height;
+            format: SourcesArea.preview-format;
+            name: root.name;
+            picture: SourcesArea.preview;
+            picture-shown: SourcesArea.preview-shown;
+            aspect: SourcesArea.preview-aspect;
+            note: SourcesArea.preview-note;
+        }
+        // A shape mask's box, to move, size and turn on the picture,
+        // kept inside the well.
+        if root.handles && SourcesArea.mask-handles && SourcesArea.preview-note == "": Rectangle {
+            width: well.width;
+            height: well.height;
+            clip: true;
+            MaskHandles {
+                x: well.picture-x;
+                y: well.picture-y;
+                width: well.picture-w;
+                height: well.picture-h;
+            }
+        }
     }
 }

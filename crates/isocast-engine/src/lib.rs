@@ -19,6 +19,7 @@ pub mod gpu;
 pub mod hotkeys;
 pub mod layout;
 pub mod machine_profile;
+mod mask;
 mod pacing;
 mod picture;
 pub mod project;

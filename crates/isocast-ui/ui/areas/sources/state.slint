@@ -148,6 +148,17 @@ export global SourcesArea {
     // ("1920×1080 · 30p · Stereo"; "" until it says).
     in property <string> preview-format;
 
+    // ---- A shape mask's handles over the Filters picture (#115): the
+    // selected filter is a shape mask, its box (centre and size as
+    // fractions of the picture) and rotation (°, clockwise).
+    in property <bool> mask-handles;
+    in property <string> mask-shape;
+    in property <float> mask-x: 0.5;
+    in property <float> mask-y: 0.5;
+    in property <float> mask-w: 0.8;
+    in property <float> mask-h: 0.8;
+    in property <float> mask-rotation;
+
     // ---- Edit Transform ("transform")
     in property <string> transform-title;
     // The selected item's name ("" for none): the sheet's title.
@@ -228,6 +239,9 @@ export global SourcesArea {
     // A filter row's menu (list, key, window point), and a new name for it.
     callback filter-menu(string, string, length, length);
     callback filter-rename(string, string, string);
+    // The shape mask's handles moved it: centre x, y, width, height (as
+    // fractions of the picture) and rotation; `done` when let go.
+    callback mask-moved(float, float, float, float, float, bool);
     // A number of the transform (x, y, w, h, rotate, scale, crop-left…,
     // opacity, radius, border-width, shadow-blur): `live` while dragging.
     callback transform-number(string, float, bool);

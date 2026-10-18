@@ -365,6 +365,16 @@ impl Area for Sources {
             .sources
             .dialogs
             .filter_defaults(&app));
+        wire!(
+            area,
+            app,
+            on_mask_moved,
+            |app, w, x, y, width, height, rotation, done| {
+                app.sources
+                    .dialogs
+                    .mask_moved(&app, &w, [x, y, width, height, rotation], done)
+            }
+        );
         wire!(area, app, on_transform_number, |app, w, field, v, live| {
             app.sources
                 .dialogs

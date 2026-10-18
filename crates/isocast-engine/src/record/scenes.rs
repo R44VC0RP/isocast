@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use isocast_protocol::{Filter, FilterKind, Setup};
+use isocast_protocol::{Filter, FilterKind, MaskRef, Setup};
 
 use super::Slots;
 use crate::compiled::{CompiledScenes, LaidOut, NodeId, NodeIds, compile};
@@ -61,10 +61,23 @@ pub(super) struct ProgramScenes<F> {
     /// Each compiled source's filters, by source index.
     pub filters: Vec<Arc<[Filter]>>,
     /// Whether a source's filters change its picture over time even when
-    /// its frame doesn't (scrolling, a render delay).
+    /// its frame doesn't (scrolling, a render delay, animated masks).
     pub moving: Vec<bool>,
+    /// What each compiled source's source masks read (#115), in order;
+    /// sources only masks show are compiled sources too.
+    pub masks: Vec<Vec<MaskUse>>,
+    /// Whether a source's picture masks another's.
+    pub masking: Vec<bool>,
     /// Every slot the program reads, stinger videos too, by id.
     pub all: Slots<F>,
+}
+
+/// What a source mask reads: a compiled source, or a scene's canvas (by
+/// index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MaskUse {
+    Source(u32),
+    Scene(u32),
 }
 
 /// A change for the scene thread to resolve.
@@ -460,6 +473,15 @@ fn resolve<F: Clone>(
             compiled.sized[index as usize] = LaidOut::Read(size);
         }
     }
+    // Sources only source masks show run in step too (#115).
+    let shown: Vec<String> = compiled.sources.iter().map(|id| id.to_string()).collect();
+    let shown: Vec<&str> = shown.iter().map(String::as_str).collect();
+    for id in setup.mask_needs(&shown) {
+        if compiled.source_index(id).is_none() {
+            compiled.sources.push(id.into());
+            compiled.sized.push(LaidOut::Unread);
+        }
+    }
     // A new generation only if something moved.
     let geometry: Vec<_> = compiled
         .nodes
@@ -490,14 +512,37 @@ fn resolve<F: Clone>(
     let moving = filters
         .iter()
         .map(|filters| {
-            filters.iter().any(|filter| {
-                matches!(
-                    filter.kind,
-                    FilterKind::Scroll(_) | FilterKind::RenderDelay(_)
-                )
+            filters.iter().any(|filter| match &filter.kind {
+                FilterKind::Scroll(_) | FilterKind::RenderDelay(_) => true,
+                FilterKind::ShapeMask(mask) => !mask.animations.is_empty(),
+                FilterKind::GradientMask(mask) => !mask.animations.is_empty(),
+                FilterKind::SourceMask(mask) => !mask.animations.is_empty(),
+                _ => false,
             })
         })
         .collect();
+    let masks: Vec<Vec<MaskUse>> = compiled
+        .sources
+        .iter()
+        .map(|id| {
+            setup
+                .masks_of(id)
+                .into_iter()
+                .filter_map(|mask| match mask {
+                    MaskRef::Source(id) => compiled.source_index(id).map(MaskUse::Source),
+                    MaskRef::Scene(id) => compiled
+                        .scene_index(Some(id))
+                        .map(|index| MaskUse::Scene(index as u32)),
+                })
+                .collect()
+        })
+        .collect();
+    let mut masking = vec![false; compiled.sources.len()];
+    for used in masks.iter().flatten() {
+        if let MaskUse::Source(index) = used {
+            masking[*index as usize] = true;
+        }
+    }
     ProgramScenes {
         version,
         revision: input.revision,
@@ -505,6 +550,8 @@ fn resolve<F: Clone>(
         slots: compiled.sources.iter().map(|id| slot(id)).collect(),
         filters,
         moving,
+        masks,
+        masking,
         all: input.slots,
         compiled: Arc::new(compiled),
     }

@@ -2484,6 +2484,7 @@ impl<'a, 'v> Importer<'a, 'v> {
                     delay_ms: delay.min(500) as u32,
                 })
             }
+            "advanced_masks_filter" => return self.advanced_mask(where_, s),
             _ => {
                 return Err(format!(
                     "Isocast has no {:?} filter (a plugin or another system's kind)",
@@ -2491,6 +2492,195 @@ impl<'a, 'v> Importer<'a, 'v> {
                 ));
             }
         })
+    }
+
+    /// The Advanced Masks plugin's filter (#115) as a mask filter. Its
+    /// settings are read as its scene collections store them (only those
+    /// changed from its defaults); the numbering of its menus follows the
+    /// order its interface lists them in, which the collections we have
+    /// seen agree with. What doesn't map is said in a note.
+    fn advanced_mask(&mut self, where_: &str, s: &Value) -> Result<FilterKind, String> {
+        let float = |key: &str| number(s, key).map(|v| v as f32);
+        if int(s, "mask_effect").unwrap_or(1) == 2 {
+            return Err(
+                "it is an adjustment mask (colour changes through a mask), which Isocast \
+                        doesn't have; only alpha masks are imported"
+                    .into(),
+            );
+        }
+        // Its positions are in the masked source's pixels, whose size it
+        // keeps with them; else the canvas's.
+        let (w, h) = match (float("mask_source_width"), float("mask_source_height")) {
+            (Some(w), Some(h)) if w > 0.0 && h > 0.0 => (w, h),
+            _ => {
+                self.notes.push(format!(
+                    "{where_}: the masked picture's size isn't saved with the mask; its \
+                     position and size are read against the canvas"
+                ));
+                (self.to.0 as f32, self.to.1 as f32)
+            }
+        };
+        if flag(s, "shape_relative") == Some(true) {
+            self.notes.push(format!(
+                "{where_}: its Scene View Transformation (positions in the scene) isn't \
+                 imported; the mask is placed on the source's own picture"
+            ));
+        }
+        match int(s, "mask_type").unwrap_or(1) {
+            1 => {}
+            2 => {
+                let channel = match int(s, "mask_source_mask_properties_list").unwrap_or(1) {
+                    1 => MaskChannel::Alpha,
+                    2 | 3 => MaskChannel::Luminance,
+                    _ => {
+                        self.notes.push(format!(
+                            "{where_}: its custom channel mix became the mask's luminance"
+                        ));
+                        MaskChannel::Luminance
+                    }
+                };
+                if int(s, "mask_source_compression_list").unwrap_or(1) != 1 {
+                    self.notes.push(format!(
+                        "{where_}: its threshold or range compression isn't imported; set the \
+                         mask's threshold and softness"
+                    ));
+                }
+                let Some(name) = text(s, "mask_source").filter(|n| !n.is_empty()) else {
+                    return Err("no mask source chosen".into());
+                };
+                let (mask_source, mask_scene) =
+                    match self.by_name.get(name).map(|&i| self.targets[i].clone()) {
+                        Some(Target::Source {
+                            id, video: true, ..
+                        }) => (Some(id), None),
+                        Some(Target::Scene(id)) => (None, Some(id)),
+                        _ => {
+                            return Err(format!(
+                                "its mask source {name:?} isn't an imported source or scene with \
+                                 a picture"
+                            ));
+                        }
+                    };
+                return Ok(FilterKind::SourceMask(SourceMask {
+                    mask_source,
+                    mask_scene,
+                    channel,
+                    ..SourceMask::default()
+                }));
+            }
+            4 => {
+                let position = float("mask_gradient_position").unwrap_or(w / 2.0);
+                let width = float("mask_gradient_width").unwrap_or(w / 2.0).max(1.0);
+                return Ok(FilterKind::GradientMask(GradientMask {
+                    x: position / w,
+                    angle: float("mask_gradient_rotation").unwrap_or(0.0),
+                    length: width / w,
+                    // From hidden to shown along it.
+                    stops: vec![
+                        GradientStop {
+                            at: 0.0,
+                            opacity: 0.0,
+                        },
+                        GradientStop {
+                            at: 1.0,
+                            opacity: 1.0,
+                        },
+                    ],
+                    invert: flag(s, "mask_gradient_invert").unwrap_or(false),
+                    ..GradientMask::default()
+                }));
+            }
+            3 => {
+                return Err(
+                    "its image masks map to Isocast's image_mask filter; add one with \
+                            the image file"
+                        .into(),
+                );
+            }
+            other => {
+                return Err(format!(
+                    "its mask type {other} (BSM alpha wipe or a newer kind) has no Isocast \
+                     equivalent"
+                ));
+            }
+        }
+        let shape = match int(s, "shape_type").unwrap_or(1) {
+            1 => MaskShape::Rectangle,
+            2 => MaskShape::Circle,
+            3 => MaskShape::Ellipse,
+            4 => MaskShape::Polygon,
+            5 => MaskShape::Star,
+            6 => MaskShape::Heart,
+            _ => {
+                return Err(
+                    "its squircle, superellipse or superformula shape has no Isocast equivalent"
+                        .into(),
+                );
+            }
+        };
+        let (bw, bh) = match shape {
+            MaskShape::Rectangle => (
+                float("rectangle_width").unwrap_or(w * 0.8),
+                float("rectangle_height").unwrap_or(h * 0.8),
+            ),
+            MaskShape::Circle => {
+                let r = float("circle_radius").unwrap_or(w.min(h) * 0.4);
+                (2.0 * r, 2.0 * r)
+            }
+            MaskShape::Ellipse => (
+                float("shape_ellipse_a").unwrap_or(w * 0.8),
+                float("shape_ellipse_b").unwrap_or(h * 0.8),
+            ),
+            MaskShape::Heart => {
+                let size = float("heart_size").unwrap_or(w.min(h) * 0.8);
+                (size, size)
+            }
+            MaskShape::Polygon | MaskShape::Star => {
+                self.notes.push(format!(
+                    "{where_}: its polygon or star size, sides and points aren't read; Isocast's \
+                     defaults are used"
+                ));
+                (w * 0.8, h * 0.8)
+            }
+        };
+        let radius = match (shape, int(s, "rectangle_corner_type").unwrap_or(1)) {
+            (MaskShape::Rectangle, 2) => Radius::Each([
+                float("rectangle_corner_radius_tl").unwrap_or(0.0),
+                float("rectangle_corner_radius_tr").unwrap_or(0.0),
+                float("rectangle_corner_radius_br").unwrap_or(0.0),
+                float("rectangle_corner_radius_bl").unwrap_or(0.0),
+            ]),
+            (MaskShape::Rectangle, _) => {
+                Radius::All(float("rectangle_corner_radius").unwrap_or(0.0))
+            }
+            (MaskShape::Star, _) => Radius::All(float("star_corner_radius").unwrap_or(0.0)),
+            _ => Radius::All(0.0),
+        };
+        let feather = match int(s, "shape_feather_type").unwrap_or(1) {
+            1 => 0.0,
+            kind => {
+                if kind != 3 {
+                    self.notes.push(format!(
+                        "{where_}: its inner or outer feather is centred on the edge in Isocast"
+                    ));
+                }
+                float("shape_feather_amount")
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1000.0)
+            }
+        };
+        Ok(FilterKind::ShapeMask(ShapeMask {
+            shape,
+            x: float("shape_center_x").unwrap_or(w / 2.0) / w,
+            y: float("shape_center_y").unwrap_or(h / 2.0) / h,
+            width: (bw / w).clamp(0.0, 10.0),
+            height: (bh / h).clamp(0.0, 10.0),
+            rotation: float("shape_rotation").unwrap_or(0.0),
+            radius,
+            feather,
+            invert: flag(s, "shape_invert").unwrap_or(false),
+            ..ShapeMask::default()
+        }))
     }
 
     /// The Source Record plugin's filter: the source is recorded to its own
@@ -3870,6 +4060,62 @@ mod tests {
             (imported.counts.obs_filters, imported.counts.filters),
             (12, 9)
         );
+        assert!(imported.problems.is_empty(), "{:?}", imported.problems);
+    }
+
+    #[test]
+    fn advanced_masks_filters_become_mask_filters() {
+        // As the plugin's collections store them (defaults left out).
+        let filters = json!([
+            { "name": "Round", "id": "advanced_masks_filter",
+              "versioned_id": "advanced_masks_filter_v2",
+              "settings": { "mask_source_width": 1920, "mask_source_height": 1080,
+                            "shape_center_x": 960.0, "shape_center_y": 540.0,
+                            "rectangle_width": 1152.0, "rectangle_height": 540.0,
+                            "rectangle_corner_radius": 20.0, "rectangle_corner_type": 1,
+                            "shape_feather_type": 1 } },
+            { "name": "Heart", "id": "advanced_masks_filter",
+              "settings": { "mask_type": 1, "mask_source_width": 1920,
+                            "mask_source_height": 1080, "shape_type": 6, "heart_size": 540,
+                            "shape_center_x": 480.0, "shape_center_y": 270.0,
+                            "shape_rotation": 24.0, "shape_invert": true } },
+            { "name": "Cutout", "id": "advanced_masks_filter",
+              "settings": { "mask_type": 2, "mask_source": "Logo",
+                            "mask_source_mask_properties_list": 1 } },
+            { "name": "Formula", "id": "advanced_masks_filter",
+              "settings": { "shape_type": 7 } },
+            { "name": "Grade", "id": "advanced_masks_filter",
+              "settings": { "mask_effect": 2 } },
+        ]);
+        let imported = run(collection(json!([
+            { "name": "Cam", "id": "image_source", "settings": { "file": "/img/a.png" },
+              "filters": filters },
+            { "name": "Logo", "id": "image_source", "settings": { "file": "/img/logo.png" } },
+        ])));
+        let filters = &imported.setup.sources[0].filters;
+        let FilterKind::ShapeMask(round) = &filters[0].kind else {
+            panic!("{filters:?}")
+        };
+        assert_eq!(round.shape, MaskShape::Rectangle);
+        assert_eq!(
+            (round.x, round.y, round.width, round.height),
+            (0.5, 0.5, 0.6, 0.5)
+        );
+        assert_eq!(round.radius, Radius::All(20.0));
+        let FilterKind::ShapeMask(heart) = &filters[1].kind else {
+            panic!("{filters:?}")
+        };
+        assert_eq!(heart.shape, MaskShape::Heart);
+        assert_eq!((heart.x, heart.y, heart.rotation), (0.25, 0.25, 24.0));
+        assert!(heart.invert);
+        let FilterKind::SourceMask(cutout) = &filters[2].kind else {
+            panic!("{filters:?}")
+        };
+        let logo = &imported.setup.sources[1].id;
+        assert_eq!(cutout.mask_source.as_ref(), Some(logo));
+        assert_eq!(cutout.channel, MaskChannel::Alpha);
+        assert_eq!(filters.len(), 3);
+        assert_eq!(imported.unsupported.len(), 2, "{:?}", imported.unsupported);
         assert!(imported.problems.is_empty(), "{:?}", imported.problems);
     }
 

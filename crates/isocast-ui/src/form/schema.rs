@@ -314,6 +314,14 @@ fn field(schema: &Value, name: &str, raw: &Value, required: bool) -> Field {
 /// Fields people look for first come first; the schema lists them
 /// alphabetically.
 const ORDER: &[&str] = &[
+    // Masks (#115): what masks, then where.
+    "shape",
+    "gradient",
+    "mask_source",
+    "mask_scene",
+    "channel",
+    "x",
+    "y",
     "display",
     "device",
     "app",
@@ -334,6 +342,7 @@ const ORDER: &[&str] = &[
     "align",
     "width",
     "height",
+    "rotation",
     "fps",
     "cursor",
 ];

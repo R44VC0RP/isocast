@@ -951,6 +951,9 @@ Plus one of these, chosen by its tag:
 - `kind = "image_mask"`: [ImageMask](#imagemask)
 - `kind = "lut"`: [ApplyLut](#applylut)
 - `kind = "render_delay"`: [RenderDelay](#renderdelay)
+- `kind = "shape_mask"`: [ShapeMask](#shapemask)
+- `kind = "gradient_mask"`: [GradientMask](#gradientmask)
+- `kind = "source_mask"`: [SourceMask](#sourcemask)
 
 ## ColorCorrection
 
@@ -1113,6 +1116,162 @@ Shows the picture later, to line it up with sound that arrives late (OBS's Rende
 | Field | Type | Description |
 |---|---|---|
 | `delay_ms` | integer | 0 to 500 milliseconds. Default `0`. |
+
+## ShapeMask
+
+Shows the picture inside a shape (OBS Advanced Masks' shape masks).
+
+| Field | Type | Description |
+|---|---|---|
+| `animations` | list of [MaskAnimation](#maskanimation) | Animations of its numbers (see [`MaskAnimation`]). |
+| `combine` | [MaskCombine](#maskcombine) |  Default `"intersect"`. |
+| `feather` | number | Softens the edge over this many pixels, centred on it. Default `0.0`. |
+| `height` | number | Its height as a fraction of the picture's. Default `0.800000011920929`. |
+| `inner_radius` | number | How far a star's notches reach out, as a fraction of its points' reach: 0.05 to 1. Default `0.5`. |
+| `invert` | boolean | Show the picture outside the shape instead. |
+| `points` | integer | A star's points: 3 to 32. Default `5`. |
+| `radius` | [Radius](#radius) | Rounds corners, in pixels: each of a rectangle's (top left, top right, bottom right, bottom left), or a polygon's and star's (the first value). |
+| `rotation` | number | Turns the shape about its centre, in degrees clockwise. Default `0.0`. |
+| `shape` | [MaskShape](#maskshape) |  Default `"rectangle"`. |
+| `sides` | integer | A polygon's sides: 3 to 32. Default `6`. |
+| `width` | number | The shape's box: its width as a fraction of the picture's. Default `0.800000011920929`. |
+| `x` | number | Where the shape's centre is across the picture: 0 (left edge) to 1 (right edge). Default `0.5`. |
+| `y` | number | And down: 0 (top) to 1 (bottom). Default `0.5`. |
+
+## MaskAnimation
+
+Animates a mask's numbers over time, as an item's `animations` do (CSS's `animation`), with its stops written in place: each stop sets some of the mask's numbers by their field names.
+
+| Field | Type | Description |
+|---|---|---|
+| `delay_ms` | integer | How long after its clock starts it starts, in milliseconds; less than 0 starts it part of the way through. |
+| `direction` | [PlayDirection](#playdirection) | |
+| `duration_ms` (required) | integer | How long one run takes, in milliseconds. |
+| `easing` | [Easing](#easing) | How each stretch between stops speeds up and slows down, unless a stop says otherwise: `ease_in_out` if absent. |
+| `fill` | [Fill](#fill) | |
+| `frames` (required) | list of [MaskKeyframe](#maskkeyframe) | The stops, in order of `at`. A number no stop at 0 (or 1) sets runs from (or to) the mask's own value. |
+| `iterations` | [Iterations](#iterations) | How many runs: a number (1 if absent) or `"infinite"`. |
+| `start` | [AnimationStart](#animationstart) | The clock it runs on: `clock` (the engine's: loops stay in step, in the program and in filtered ISO files and previews alike), or `on_air` and `shown` (both: from when the masked source's picture is first drawn). Snapshots show animations at their start. |
+
+## MaskKeyframe
+
+One stop of a mask animation: the mask's numbers at `at`. Each kind of mask animates its own: shape masks `x`, `y`, `width`, `height`, `rotation`, `radius`, `inner_radius` and `feather`; gradient masks `x`, `y`, `angle`, `length` and `feather`; source masks `x`, `y`, `scale`, `threshold` and `softness`.
+
+| Field | Type | Description |
+|---|---|---|
+| `angle` | number (optional) | |
+| `at` (required) | number | How far through a run it is, from 0 (the start) to 1 (the end). |
+| `easing` | [Easing](#easing) (optional) | How the stretch from this stop to the next speeds up and slows down, in place of the animation's `easing`. |
+| `feather` | number (optional) | |
+| `height` | number (optional) | |
+| `inner_radius` | number (optional) | |
+| `length` | number (optional) | |
+| `radius` | [Radius](#radius) (optional) | |
+| `rotation` | number (optional) | |
+| `scale` | number (optional) | |
+| `softness` | number (optional) | |
+| `threshold` | number (optional) | |
+| `width` | number (optional) | |
+| `x` | number (optional) | |
+| `y` | number (optional) | |
+
+## MaskCombine
+
+How a mask combines with the masks before it in the chain.
+
+One of:
+
+- `"intersect"`: Only what this mask and those before it both show stays (the first mask simply masks).
+- `"add"`: What this mask shows is added to what those before it show (of the picture before them).
+- `"subtract"`: What this mask shows is taken away from what those before it show.
+
+## MaskShape
+
+A shape mask's shape.
+
+One of:
+
+- `"rectangle"`: Fills its box, with each corner rounded by `radius`.
+- `"circle"`: The largest circle that fits its box.
+- `"ellipse"`: Fills its box.
+- `"polygon"`: A regular polygon with `sides`, the largest that fits its box, a corner at the top; corners rounded by `radius`.
+- `"star"`: A star with `points`, the largest that fits its box, a point at the top; `inner_radius` sets how deep its notches go.
+- `"heart"`: A heart, the largest that fits its box.
+
+## GradientMask
+
+Fades the picture in or out along a gradient (OBS Advanced Masks' gradient masks).
+
+| Field | Type | Description |
+|---|---|---|
+| `angle` | number | A linear gradient's direction, in degrees clockwise: 0 runs left to right, 90 top to bottom. Default `0.0`. |
+| `animations` | list of [MaskAnimation](#maskanimation) | Animations of its numbers (see [`MaskAnimation`]). |
+| `combine` | [MaskCombine](#maskcombine) |  Default `"intersect"`. |
+| `feather` | number | Softens the gradient over this many more pixels. Default `0.0`. |
+| `gradient` | [GradientShape](#gradientshape) |  Default `"linear"`. |
+| `invert` | boolean | Show where the gradient hides, and hide where it shows. |
+| `length` | number | How long it is: 1 spans the picture along its direction (linear), or reaches its corners from the middle (radial). Default `1.0`. |
+| `stops` | list of [GradientStop](#gradientstop) | How much shows along it, from its start to its end (2 to 8 stops, in order of `at`); between stops it changes evenly. Before the first and after the last, their opacity holds. Default `[{"at": 0.0, "opacity": 1.0}, {"at": 1.0, "opacity": 0.0}]`. |
+| `x` | number | The gradient's centre across the picture: 0 (left) to 1 (right). Default `0.5`. |
+| `y` | number | And down: 0 (top) to 1 (bottom). Default `0.5`. |
+
+## GradientShape
+
+A gradient mask's shape.
+
+One of:
+
+- `"linear"`: Changes along a line through its centre, in the direction `angle`.
+- `"radial"`: Changes outwards from its centre.
+
+## GradientStop
+
+One stop of a gradient mask.
+
+| Field | Type | Description |
+|---|---|---|
+| `at` (required) | number | Where along the gradient: 0 (its start) to 1 (its end). |
+| `opacity` (required) | number | How much of the picture shows there: 0 (none) to 1 (all). |
+
+## SourceMask
+
+Uses another source's or scene's live picture as the mask (OBS Advanced Masks' source masks), frame by frame in step with the program. Until the mask has a picture, nothing of the source shows, whatever `invert`, `threshold` or `combine` say. Previews of the source alone, and its ISO file, show it unmasked by other sources.
+
+| Field | Type | Description |
+|---|---|---|
+| `animations` | list of [MaskAnimation](#maskanimation) | Animations of its numbers (see [`MaskAnimation`]). |
+| `channel` | [MaskChannel](#maskchannel) |  Default `"luminance"`. |
+| `combine` | [MaskCombine](#maskcombine) |  Default `"intersect"`. |
+| `fit` | [MaskFit](#maskfit) |  Default `"stretch"`. |
+| `invert` | boolean | Show the picture where the mask would hide it, and hide it where it would show. |
+| `mask_scene` | string (optional) | Or the id of a scene, drawn on its own canvas, that masks. |
+| `mask_source` | string (optional) | The id of the video source whose picture masks (give it or `mask_scene`). It runs, and is on air (media play, pages load), while a source it masks does. |
+| `scale` | number | Scales the mask's picture about its centre, after `fit`. Default `1.0`. |
+| `softness` | number | How gradually it turns, 0 (at once: a hard edge) to 1 (evenly from 0 to 1, which with a threshold of 0.5 uses the value as it is). Default `1.0`. |
+| `threshold` | number | With `softness`, where the channel's value turns from hiding to showing the picture: 0 to 1. Default `0.5`. |
+| `x` | number | Where the mask's centre is across the masked picture: 0 (left) to 1 (right). Default `0.5`. |
+| `y` | number | And down: 0 (top) to 1 (bottom). Default `0.5`. |
+
+## MaskChannel
+
+What a source mask reads of the mask's picture.
+
+One of:
+
+- `"red"` \| `"green"` \| `"blue"`
+- `"luminance"`: Its brightness: white shows the picture, black (or transparent) hides it. Right for black-and-white mask videos.
+- `"alpha"`: Its opacity: opaque shows the picture, transparent hides it.
+
+## MaskFit
+
+How a source mask's picture is placed on the masked picture before `scale`, `x` and `y` move it.
+
+One of:
+
+- `"stretch"`: Stretched over the whole picture.
+- `"contain"`: As large as fits inside, keeping its shape; outside it nothing shows.
+- `"cover"`: Covers the picture, keeping its shape; its overflow is cut off.
+- `"none"`: Pixel for pixel, at its own size.
 
 ## DisplaySource
 

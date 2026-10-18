@@ -146,8 +146,9 @@ pub(crate) struct Request {
     pub(crate) slots: u32,
 }
 
-/// A source's filters as they are now (the live setup's).
-pub(crate) type LiveFilters = Box<dyn Fn() -> Vec<Filter> + Send>;
+/// A source's filters as they are now (the live setup's), and when the
+/// engine's clock started (mask animations on `clock` run from it).
+pub(crate) type LiveFilters = Box<dyn Fn() -> (Vec<Filter>, Option<Time>) + Send>;
 
 /// Start a viewer's stream of `request`. `source` finds where the target's
 /// frames arrive (looked up again all the time, since a source can reopen,
@@ -260,8 +261,10 @@ fn run<P: Platform>(
             continue;
         }
         // Changed filters show at once, even on a still picture.
+        let mut epoch = None;
         if let Some(filters) = &filters {
-            let now = filters();
+            let (now, started) = filters();
+            epoch = started;
             if now != drawn_filters {
                 drawn_filters = now;
                 if let Some(ring) = &mut ring {
@@ -284,6 +287,9 @@ fn run<P: Platform>(
         if drawn_filters.iter().any(|filter| filter.enabled) {
             let filtering =
                 filtering.get_or_insert_with(|| Filters::new(&gpu, renderer.format(), true));
+            if let Some(epoch) = epoch {
+                filtering.set_epoch(epoch);
+            }
             picture = filtering.apply(
                 &gpu,
                 &renderer,

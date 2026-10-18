@@ -12,12 +12,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use isocast_protocol::{
-    ColorCorrection, CropPad, Filter, FilterKind, KeyAdjust, MaskMode, Scaling, Scroll,
+    ColorCorrection, CropPad, Filter, FilterKind, KeyAdjust, MaskMode, MaskRef, Scaling, Scroll,
 };
 use wgpu::util::DeviceExt;
 
 use crate::Time;
 use crate::gpu::{Gpu, GpuFrame, GpuPixels};
+use crate::mask::{self, Clock};
 use crate::picture::{self, Picture};
 use crate::record::expand_home;
 use crate::render::{KERNELS, Layer, Renderer, scale_method};
@@ -39,6 +40,9 @@ struct Params {
 // A mask image (straight alpha), and a colour lookup table.
 @group(0) @binding(4) var mask: texture_2d<f32>;
 @group(0) @binding(5) var lut: texture_3d<f32>;
+// The picture before a run of masks, which `combine` adds to or takes
+// from.
+@group(0) @binding(6) var base: texture_2d<f32>;
 
 struct Varyings {
     @builtin(position) position: vec4<f32>,
@@ -300,6 +304,9 @@ const PASSES: &[&str] = &[
     "sharpen",
     "image_mask",
     "apply_lut",
+    "shape_mask",
+    "gradient_mask",
+    "source_mask",
 ];
 
 /// The filter passes for targets of one format, and each source's
@@ -324,6 +331,43 @@ pub struct Filters {
     /// Recent pictures for render delays, by source id and pass; only
     /// kept when drawing over time (not for snapshots).
     delays: Option<HashMap<(String, usize), Delay>>,
+    /// Whoever applies these filters gives source masks their pictures
+    /// ([`Filters::set_mask`]); otherwise source masks are skipped.
+    masks_on: bool,
+    /// The pictures source masks read, each as last given.
+    masks: HashMap<MaskKey, MaskPicture>,
+    /// Counts mask canvases made, so bindings of an old one are made
+    /// again.
+    mask_generation: u64,
+    /// Bound for a source mask whose picture hasn't come yet: nothing
+    /// shows through it.
+    blank_mask: wgpu::Texture,
+    /// When the engine's clock started, for mask animations on `clock`.
+    epoch: Time,
+}
+
+/// The picture a source mask reads: a source's, or a scene's canvas.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MaskKey {
+    Source(String),
+    Scene(String),
+}
+
+impl MaskKey {
+    pub fn of(mask: MaskRef<'_>) -> Self {
+        match mask {
+            MaskRef::Source(id) => Self::Source(id.to_string()),
+            MaskRef::Scene(id) => Self::Scene(id.to_string()),
+        }
+    }
+}
+
+/// A mask's picture, premultiplied, on a canvas of its own.
+struct MaskPicture {
+    texture: wgpu::Texture,
+    generation: u64,
+    /// The picture's own size (the canvas may be smaller).
+    size: (u32, u32),
 }
 
 /// One source's filters on the GPU.
@@ -340,6 +384,10 @@ struct Chain {
 struct Bound {
     entry: &'static str,
     file: Option<File>,
+    /// The mask canvas it reads (its generation), and the canvas a run of
+    /// masks started from.
+    mask: u64,
+    base: usize,
     params: wgpu::Buffer,
     group: wgpu::BindGroup,
 }
@@ -361,6 +409,10 @@ struct Pass {
     file: Option<File>,
     /// A render delay, which copies instead of drawing.
     delay: Option<Duration>,
+    /// A source mask's picture.
+    mask: Option<MaskKey>,
+    /// The canvas the run of masks it is in started from.
+    base: usize,
 }
 
 /// A file a filter reads, by what it is read as.
@@ -390,7 +442,7 @@ impl Filters {
         let device = &gpu.device;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("filters"),
-            source: wgpu::ShaderSource::Wgsl(format!("{SHADER}{KERNELS}").into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{SHADER}{KERNELS}{}", mask::SHADER).into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("filter"),
@@ -443,6 +495,16 @@ impl Filters {
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
                     count: None,
@@ -511,7 +573,88 @@ impl Filters {
             blank_image: upload_image(gpu, 1, 1, &[255; 4]),
             blank_table: upload_table(gpu, 1, &[255; 4]),
             delays: over_time.then(HashMap::new),
+            masks_on: false,
+            masks: HashMap::new(),
+            mask_generation: 0,
+            blank_mask: upload_image(gpu, 1, 1, &[0; 4]),
+            epoch: Time::from_nanos(0),
         }
+    }
+
+    /// Whether source masks read pictures given with
+    /// [`Filters::set_mask`] (the program and scene snapshots do), or are
+    /// skipped (a source's own preview and ISO file). Turning them off
+    /// lets go of their pictures.
+    pub fn use_masks(&mut self, on: bool) {
+        self.masks_on = on;
+        if !on {
+            self.masks.clear();
+        }
+    }
+
+    /// The engine's clock started at `epoch` (mask animations on the
+    /// `clock` clock run from it).
+    pub fn set_epoch(&mut self, epoch: Time) {
+        self.epoch = epoch;
+    }
+
+    /// `frame` is mask `key`'s picture from now on: drawn (premultiplied)
+    /// on the mask's canvas, submitted before the filters that read it.
+    /// `most`, the largest picture it masks, caps the canvas: a 4K mask
+    /// over a 1080p camera is drawn at 1080p, which is all it can show
+    /// and costs a quarter.
+    pub fn set_mask(
+        &mut self,
+        gpu: &Gpu,
+        renderer: &Renderer,
+        key: MaskKey,
+        frame: &GpuFrame,
+        own: Option<(u32, u32)>,
+        most: Option<(u32, u32)>,
+    ) {
+        // Its own size, which placement (`fit = none`) reads: a scene's
+        // canvas size, though a smaller monitor draws it smaller.
+        let own = own.unwrap_or((frame.width, frame.height));
+        let own = (own.0.max(1), own.1.max(1));
+        let drawn = (frame.width.max(1), frame.height.max(1));
+        let size = most.map_or(drawn, |(w, h)| {
+            (drawn.0.min(w.max(1)), drawn.1.min(h.max(1)))
+        });
+        let picture = match self.masks.get_mut(&key) {
+            Some(picture) if (picture.texture.width(), picture.texture.height()) == size => {
+                picture.size = own;
+                &self.masks[&key]
+            }
+            _ => {
+                self.mask_generation += 1;
+                let texture = canvas_texture(gpu, self.format, size);
+                self.masks.insert(
+                    key.clone(),
+                    MaskPicture {
+                        texture,
+                        generation: self.mask_generation,
+                        size: own,
+                    },
+                );
+                &self.masks[&key]
+            }
+        };
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let layer = Layer::full(frame, size.0, size.1);
+        renderer.encode(
+            gpu,
+            &mut encoder,
+            &picture.texture,
+            &[layer],
+            size,
+            wgpu::Color::TRANSPARENT,
+        );
+        gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// Let go of the pictures of masks `keep` says aren't used any more.
+    pub fn retain_masks(&mut self, keep: impl Fn(&MaskKey) -> bool) {
+        self.masks.retain(|key, _| keep(key));
     }
 
     /// `file` on the GPU, loaded on first use; `None` (said once) if it
@@ -542,15 +685,43 @@ impl Filters {
         at: Time,
     ) -> GpuFrame {
         let started = *self.started.entry(id.to_string()).or_insert(at);
-        let seconds = at.saturating_since(started).as_secs_f64();
+        let clock = Clock {
+            at,
+            started,
+            epoch: self.epoch,
+            // Snapshots show mask animations as they start.
+            still: self.delays.is_none(),
+        };
         let mut sizes = vec![(frame.width, frame.height)];
         let mut passes = Vec::new();
+        // The canvas a run of masks started from (for `combine`).
+        let mut run: Option<usize> = None;
         for filter in filters.iter().filter(|filter| filter.enabled) {
-            let Some(mut pass) = pass(&filter.kind, sizes[sizes.len() - 1], seconds) else {
+            let size = sizes[sizes.len() - 1];
+            let Some(mut pass) = pass(&filter.kind, size, &clock) else {
                 continue;
             };
             if pass.delay.is_some() && self.delays.is_none() {
                 continue;
+            }
+            if let (Some(key), FilterKind::SourceMask(settings)) = (&pass.mask, &filter.kind) {
+                if !self.masks_on {
+                    continue;
+                }
+                // Until its picture comes, the mask (blank) shows nothing.
+                let picture = self.masks.get(key);
+                let mask_size = picture.map_or((1, 1), |picture| picture.size);
+                pass.params = mask::source(settings, size, mask_size, &clock).params;
+                // No picture yet: nothing shows, whatever its invert,
+                // threshold or combine (it fails closed).
+                if picture.is_none() {
+                    pass.params[2][1] = 1.0;
+                }
+            }
+            if pass.entry.ends_with("_mask") && pass.entry != "image_mask" {
+                pass.base = *run.get_or_insert(sizes.len() - 1);
+            } else {
+                run = None;
             }
             if let Some(file) = &pass.file {
                 match self.asset(gpu, file) {
@@ -615,7 +786,7 @@ impl Filters {
                     );
                 }
                 None => {
-                    let group = self.bind(gpu, id, i, pass, &canvases[i]);
+                    let group = self.bind(gpu, id, i, pass, &canvases[i], &canvases[pass.base]);
                     encode_pass(
                         &mut encoder,
                         pass.entry,
@@ -694,6 +865,7 @@ impl Filters {
         index: usize,
         pass: &Pass,
         from: &wgpu::Texture,
+        base: &wgpu::Texture,
     ) -> wgpu::BindGroup {
         let uniform: Vec<u8> = pass
             .params
@@ -705,9 +877,16 @@ impl Filters {
         if chain.bound.len() <= index {
             chain.bound.resize_with(index + 1, || None);
         }
+        let mask = pass.mask.as_ref().map(|key| self.masks.get(key));
+        let mask_generation = match mask {
+            Some(Some(picture)) => picture.generation,
+            _ => 0,
+        };
         if let Some(bound) = &chain.bound[index]
             && bound.entry == pass.entry
             && bound.file == pass.file
+            && bound.mask == mask_generation
+            && bound.base == pass.base
         {
             gpu.queue.write_buffer(&bound.params, 0, &uniform);
             return bound.group.clone();
@@ -730,6 +909,12 @@ impl Filters {
             Some(Asset::Table { texture, .. }) => table = texture,
             None => {}
         }
+        match mask {
+            Some(Some(picture)) => image = &picture.texture,
+            Some(None) => image = &self.blank_mask,
+            None => {}
+        }
+        let base = base.create_view(&Default::default());
         let image = image.create_view(&Default::default());
         let table = table.create_view(&Default::default());
         let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -760,12 +945,18 @@ impl Filters {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(&table),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&base),
+                },
             ],
         });
         let chain = self.chains.get_mut(id).expect("made by apply");
         chain.bound[index] = Some(Bound {
             entry: pass.entry,
             file: pass.file.clone(),
+            mask: mask_generation,
+            base: pass.base,
             params,
             group: group.clone(),
         });
@@ -806,13 +997,14 @@ pub fn output_size(filters: &[Filter], size: (u32, u32)) -> (u32, u32) {
         .iter()
         .filter(|filter| filter.enabled)
         .fold(size, |size, filter| {
-            pass(&filter.kind, size, 0.0).map_or(size, |pass| pass.size)
+            pass(&filter.kind, size, &Clock::ZERO).map_or(size, |pass| pass.size)
         })
 }
 
-/// The pass that runs `kind` on a picture of `size`, `seconds` after the
-/// source's filters started; `None` if it would change nothing.
-fn pass(kind: &FilterKind, size: (u32, u32), seconds: f64) -> Option<Pass> {
+/// The pass that runs `kind` on a picture of `size` at `clock`; `None` if
+/// it would change nothing.
+fn pass(kind: &FilterKind, size: (u32, u32), clock: &Clock) -> Option<Pass> {
+    let seconds = clock.at.saturating_since(clock.started).as_secs_f64();
     let (entry, params) = match kind {
         FilterKind::ColorCorrection(settings) => ("color_correction", color_correction(settings)),
         FilterKind::ChromaKey(settings) => {
@@ -878,6 +1070,8 @@ fn pass(kind: &FilterKind, size: (u32, u32), seconds: f64) -> Option<Pass> {
                 size,
                 file: Some(File::Image(settings.path.clone())),
                 delay: None,
+                mask: None,
+                base: 0,
             });
         }
         FilterKind::ApplyLut(settings) => {
@@ -889,6 +1083,8 @@ fn pass(kind: &FilterKind, size: (u32, u32), seconds: f64) -> Option<Pass> {
                 size,
                 file: Some(File::Table(settings.path.clone())),
                 delay: None,
+                mask: None,
+                base: 0,
             });
         }
         FilterKind::RenderDelay(settings) => {
@@ -901,11 +1097,33 @@ fn pass(kind: &FilterKind, size: (u32, u32), seconds: f64) -> Option<Pass> {
                 size,
                 file: None,
                 delay: Some(Duration::from_millis(settings.delay_ms.into())),
+                mask: None,
+                base: 0,
             });
         }
         FilterKind::CropPad(settings) => return Some(crop_pad(settings, size)),
         FilterKind::Scaling(settings) => return scaling(settings, size),
         FilterKind::Scroll(settings) => return Some(scroll(settings, size, seconds)),
+        FilterKind::ShapeMask(settings) => {
+            let pass = mask::shape(settings, size, clock);
+            (pass.entry, pass.params)
+        }
+        FilterKind::GradientMask(settings) => {
+            let pass = mask::gradient(settings, size, clock);
+            (pass.entry, pass.params)
+        }
+        FilterKind::SourceMask(settings) => {
+            let key = MaskKey::of(settings.mask()?);
+            return Some(Pass {
+                entry: "source_mask",
+                params: [[0.0; 4]; PARAMS],
+                size,
+                file: None,
+                delay: None,
+                mask: Some(key),
+                base: 0,
+            });
+        }
     };
     Some(Pass {
         entry,
@@ -913,6 +1131,8 @@ fn pass(kind: &FilterKind, size: (u32, u32), seconds: f64) -> Option<Pass> {
         size,
         file: None,
         delay: None,
+        mask: None,
+        base: 0,
     })
 }
 
@@ -1098,6 +1318,8 @@ fn crop_pad(settings: &CropPad, (width, height): (u32, u32)) -> Pass {
         size,
         file: None,
         delay: None,
+        mask: None,
+        base: 0,
     }
 }
 
@@ -1127,6 +1349,8 @@ fn scaling(settings: &Scaling, (width, height): (u32, u32)) -> Option<Pass> {
         size,
         file: None,
         delay: None,
+        mask: None,
+        base: 0,
     })
 }
 
@@ -1155,6 +1379,8 @@ fn scroll(settings: &Scroll, (width, height): (u32, u32), seconds: f64) -> Pass 
         size,
         file: None,
         delay: None,
+        mask: None,
+        base: 0,
     }
 }
 

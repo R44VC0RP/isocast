@@ -1102,21 +1102,24 @@ impl Dialogs {
                 };
                 let fields = form::fields(def, filter["kind"].as_str().unwrap_or_default());
                 let s = app.session.borrow();
+                let skip = filter_skips(&filter);
                 let ctx = Context {
                     kind: "filter",
                     source: Some(&id),
                     setup: s.setup.as_deref(),
                     devices: s.devices.as_ref(),
                     running: None,
-                    skip: &["id", "enabled"],
+                    skip: &skip,
                     refreshing: false,
                     typing: self.filter_typing.get(),
                 };
                 let groups = form::build(&ctx, &fields, filter.as_object().unwrap_or(&Map::new()));
                 drop(s);
                 self.filter_form.show(groups);
+                self.show_mask_handles(window, &filter, &source["filters"]);
             }
             None => {
+                area.set_mask_handles(false);
                 area.set_filter_list(list.into());
                 area.set_filter_key(SharedString::new());
                 area.set_filter_heading("".into());
@@ -1525,6 +1528,67 @@ impl Dialogs {
             None => EditOptions::default(),
         };
         self.filters_patch(app, &list, vec![patch], options);
+    }
+
+    /// Show the handles of `filter` if it is a shape mask (#115): its box
+    /// and rotation, its own or its kind's defaults. Not while a filter
+    /// after it in `chain` moves or resizes the picture (crop/pad,
+    /// scaling, scroll): the box would be drawn in the wrong place.
+    fn show_mask_handles(&self, window: &AppWindow, filter: &Value, chain: &Value) {
+        let area = window.global::<SourcesArea>();
+        let key = filter_key(filter);
+        let reshaped = chain.as_array().is_some_and(|chain| {
+            chain
+                .iter()
+                .skip_while(|f| filter_key(f) != key)
+                .skip(1)
+                .filter(|f| f["enabled"] != false)
+                .any(|f| matches!(f["kind"].as_str(), Some("crop_pad" | "scaling" | "scroll")))
+        });
+        let shape = filter["kind"] == "shape_mask" && !reshaped;
+        area.set_mask_handles(shape);
+        if !shape {
+            return;
+        }
+        let defaults = isocast_protocol::ShapeMask::default();
+        let number = |key: &str, default: f32| filter[key].as_f64().map_or(default, |v| v as f32);
+        area.set_mask_shape(filter["shape"].as_str().unwrap_or("rectangle").into());
+        area.set_mask_x(number("x", defaults.x));
+        area.set_mask_y(number("y", defaults.y));
+        area.set_mask_w(number("width", defaults.width));
+        area.set_mask_h(number("height", defaults.height));
+        area.set_mask_rotation(number("rotation", defaults.rotation));
+    }
+
+    /// The shape mask's handles moved it to `[x, y, width, height,
+    /// rotation]`: change the filter, as one gesture until `done`.
+    pub fn mask_moved(&self, app: &Rc<App>, window: &AppWindow, box_: [f32; 5], done: bool) {
+        let Some((_, filter)) = self.selected_filter(app) else {
+            return;
+        };
+        if filter["kind"] != "shape_mask" {
+            return;
+        }
+        // Tidy numbers: a ten-thousandth of the picture, a tenth of a degree.
+        let fraction = |v: f32| ((f64::from(v) * 10_000.0).round() / 10_000.0).clamp(-10.0, 10.0);
+        let [x, y, width, height, rotation] = box_;
+        let rotation = (f64::from(rotation) * 10.0).round() / 10.0;
+        // -180 to 180, as the form shows it.
+        let rotation = (rotation + 180.0).rem_euclid(360.0) - 180.0;
+        let mut changes = Map::new();
+        changes.insert("x".into(), json!(fraction(x)));
+        changes.insert("y".into(), json!(fraction(y)));
+        changes.insert("width".into(), json!(fraction(width).max(0.0)));
+        changes.insert("height".into(), json!(fraction(height).max(0.0)));
+        changes.insert("rotation".into(), json!(rotation));
+        self.filter_change(app, changes, (!done).then_some("handles"));
+        // Where it was let go, until the changed setup comes back.
+        let area = window.global::<SourcesArea>();
+        area.set_mask_x(x);
+        area.set_mask_y(y);
+        area.set_mask_w(width.max(0.0));
+        area.set_mask_h(height.max(0.0));
+        area.set_mask_rotation(rotation as f32);
     }
 
     // ---------- Edit Transform ----------
@@ -1970,3 +2034,27 @@ fn anchor(align: &str) -> (f64, f64) {
 }
 
 use slint::Model as _;
+
+/// The fields a filter's form leaves out: its id and switch (the list has
+/// them), a mask's animations (written in the setup), and a shape mask's
+/// numbers its shape doesn't use (#115).
+fn filter_skips(filter: &Value) -> Vec<&'static str> {
+    let mut skip = vec!["id", "enabled"];
+    let kind = filter["kind"].as_str().unwrap_or_default();
+    if kind.ends_with("_mask") && kind != "image_mask" {
+        skip.push("animations");
+    }
+    if kind == "shape_mask" {
+        let shape = filter["shape"].as_str().unwrap_or("rectangle");
+        if shape != "polygon" {
+            skip.push("sides");
+        }
+        if shape != "star" {
+            skip.extend(["points", "inner_radius"]);
+        }
+        if !matches!(shape, "rectangle" | "polygon" | "star") {
+            skip.push("radius");
+        }
+    }
+    skip
+}

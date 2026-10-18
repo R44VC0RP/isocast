@@ -1894,6 +1894,47 @@ each section. Delete entries that stop being true.
   point), not an unchecked create/truncate. File/folder sync failures still
   propagate; this is compile groundwork, not a claim of qualified Windows
   durability. Security-103 is integrated; no daemon plugin policy changes.
+- 2026-10-18 (#115): **Masks are filters on the source, three kinds.**
+  `shape_mask`, `gradient_mask` and `source_mask` rather than one `mask`
+  kind with a sub-type, so the schema-made forms and field-path errors
+  stay flat. Positions and sizes are fractions of the masked picture (a
+  mask fits any resolution; the plugin's pixel units were its most
+  common complaint), radii and feathers its pixels. A source mask's
+  source is `mask_source` / `mask_scene`, not `source`/`scene`, because
+  list patches key unnamed filters by `source` before `kind`. Masks
+  combine with what masks before them left of the picture before the run
+  (`intersect` multiplies; `add`/`subtract` read that picture through an
+  extra binding). Mask animations carry their stops in the filter (not
+  `[[keyframes]]`, whose properties are an item's); `clock` runs on the
+  engine clock, `on_air`/`shown` from when the source's filters first
+  drew. Source masks apply where the program draws (and scene
+  snapshots); a source's own preview and its ISO file stay unmasked. A
+  mask source with no frame yet hides what it masks. Scene masks draw
+  the scene on its own canvas just before the masked source's filters,
+  their animations on the engine clock. Handles: the "frame" design (the
+  canvas's selection ring, 8 handles and a turn knob) over the "corner
+  brackets" one: the same language as the canvas, edges to pull one side.
+- 2026-10-18 (#115, review fixes): **What a mask shows is on air with
+  what it masks; a missing mask hides; filters run at the tick.** The
+  on-air list (media playback, browser loading) now includes what masks
+  show, so a mask-only video plays and restarts like a shown one. A
+  source mask without a picture yet makes its source fully transparent,
+  whatever invert, threshold or combine say. Every live filter owner
+  (program, scene feeds, filtered ISO files, source previews) gets the
+  engine's epoch, so `clock` mask animations agree everywhere; snapshots
+  show mask animations at their start. The program draws filters and
+  mask scenes for the frame's presentation tick, not the later
+  frame-selection limit (scroll and render delay move with it: half a
+  frame earlier, consistently). A scene mask's placement uses the
+  scene's canvas size, whatever size a monitor draws it at. Masks may
+  reach at most 16 deep (MAX_MASK_DEPTH), validated with a field path.
+- 2026-10-18 (#115): **Advanced Masks import reads menus by their order.**
+  Without the plugin's code, its numbered settings (mask_type, shape_type,
+  feather type, channel list) are read in the order its interface lists
+  them; the scene collections on GitHub agree (mask_type 2 with a
+  mask_source, shape_type 6 with heart_size). Unknown keys (polygon/star
+  sizes, gradient width, thresholds) aren't guessed; a note says so.
+
 - 2026-10-17 (#114): **A recording goes to a new project unless one was
   chosen.** The current timeline used to take every finished take, and it
   never ended, so separate recordings became takes of one edit. Now the
@@ -6373,6 +6414,14 @@ each section. Delete entries that stop being true.
   zero processes). New NLE XML exporters use Unix file URL assumptions;
   Windows explicitly refuses XML until that seam is ported, not malformed
   successful exports. OTIO plain-path behavior is unchanged.
+- 2026-10-18 (#115): **schemars drops a field's default when it has
+  `skip_serializing_if`.** The Filters form then shows "+ Add" for it
+  (`combine` did); serialize such enums always if the form should show
+  them.
+- 2026-10-18 (#115): **Offscreen `drag:` only reaches a TouchArea while
+  the pointer is over it.** Drags that left the picture did nothing, so
+  the mask handles' TouchArea reaches 24 px past the picture.
+
 - 2026-10-17 (#114): **A `self.x.lock()` temporary in a struct literal
   lives to the end of the `let`.** Two `self.timelines.lock()` calls as
   fields of `Status { … }` deadlocked `status` (parking_lot isn't

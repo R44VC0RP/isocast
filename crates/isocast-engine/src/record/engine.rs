@@ -1308,9 +1308,10 @@ impl<P: Platform> Engine<P> {
             let (inner, id) = (self.inner.clone(), target.to_string());
             Box::new(move || {
                 let setup = inner.state.read().setup.clone();
-                setup
+                let filters = setup
                     .source(&id)
-                    .map_or_else(Vec::new, |s| s.filters.clone())
+                    .map_or_else(Vec::new, |s| s.filters.clone());
+                (filters, inner.epoch())
             }) as shared_frames::LiveFilters
         });
         let inner = self.inner.clone();
@@ -1571,6 +1572,12 @@ fn needed_sources(setup: &Setup) -> Vec<String> {
             .filter(|s| s.kind.has_audio() && s.audio.monitor != Monitoring::Off)
             .map(|s| s.id.as_str()),
     );
+    // What sources' masks show runs while they do (#115).
+    let mut masks = setup.mask_needs(&ids);
+    if let Some(vertical) = &vertical {
+        masks.extend(vertical.mask_needs(&ids));
+    }
+    ids.extend(masks);
     let mut unique: Vec<String> = Vec::new();
     for id in ids {
         if setup.source(id).is_some() && !unique.iter().any(|u| u == id) {
@@ -3111,6 +3118,9 @@ struct IsoRunner<P: Platform> {
     ycbcr_only: bool,
     /// Every source's filters, if the files record this one filtered.
     filters: Option<SourceFilters>,
+    /// When the engine's clock started: mask animations on `clock` run
+    /// from it, as in the program (#115).
+    epoch: Time,
     /// Where frames are filtered or converted, made when the first frame
     /// needs it.
     stage: Option<Box<IsoFrames<P>>>,
@@ -3155,10 +3165,15 @@ impl<P: Platform> IsoRunner<P> {
                     None => gpu.insert(Gpu::for_platform(platform)?).clone(),
                 }
             };
-            let stage = IsoFrames::new(platform, gpu, &self.id, self.size, self.filters.clone())
-                .with_context(|| {
-                    format!("could not prepare {:?}'s frames for its file", self.id)
-                })?;
+            let stage = IsoFrames::new(
+                platform,
+                gpu,
+                &self.id,
+                self.size,
+                self.filters.clone(),
+                self.epoch,
+            )
+            .with_context(|| format!("could not prepare {:?}'s frames for its file", self.id))?;
             self.stage = Some(Box::new(stage));
             isocast_diagnostics::diagnostic!("debug"; "{}: opened ISO GPU stage", self.id);
         }
@@ -3773,6 +3788,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             fps,
             ycbcr_only,
             filters: filtered.contains(&id).then(|| control.filters.clone()),
+            epoch: inner.epoch().expect("the engine clock has started"),
             stage: None,
             outputs: Vec::new(),
         };

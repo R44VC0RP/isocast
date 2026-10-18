@@ -54,6 +54,25 @@ are filtered.
 | Image Mask/Blend | `image_mask` (done, 4.9d) |
 | Apply LUT (.cube, .png) | `lut` (done, 4.9d) |
 | Render Delay | `render_delay` (done, 4.9e) |
+| Advanced Masks plugin: shape masks (rectangle, circle, ellipse, regular polygon, star, heart) | `shape_mask` (done, #115) |
+| Advanced Masks plugin: gradient masks | `gradient_mask`, linear or radial with up to 8 stops (done, #115) |
+| Advanced Masks plugin: source masks (a source or scene as the mask) | `source_mask`, by luminance, alpha or one channel, with threshold and softness (done, #115) |
+| Advanced Masks plugin: image masks | `image_mask` (the plugin's image masks aren't imported; add one with the file) |
+| Advanced Masks plugin: adjustment masks, BSM alpha wipe, squircle/superformula, custom channel mix | not built; import leaves them out with a note |
+
+Mask filters stack: each one's `combine` (`intersect`, `add`,
+`subtract`) says how it joins the masks before it, and their numbers
+animate with stops written in the filter (`animations`). They are
+written from the plugin's public description, not its code. Importing an
+OBS collection maps Advanced Masks filters' alpha shape, source and
+gradient masks; positions are read against the masked source's size
+saved with the filter. Its menus are numbered as its interface lists
+them (the collections seen agree); polygon and star sizes, the gradient's
+width, source-mask thresholds and Scene View Transformation aren't read
+(a note says so). obs-websocket's filter requests (`GetSourceFilterList`,
+`GetSourceFilter`, `SetSourceFilterSettings`, `SetSourceFilterEnabled`,
+`CreateSourceFilter`, `RemoveSourceFilter`, `GetSourceFilterKindList`,
+`GetSourceFilterDefaultSettings`) use Isocast's own kinds and settings.
 
 ## Audio filters, task 4.10
 

@@ -107,6 +107,31 @@ Easing is a name (`linear`, `ease_in`, `ease_out`, `ease_in_out`), a
 `cubic_bezier`, or `steps`. Animations are evaluated once per canvas
 tick, for animated properties only.
 
+## Masks
+
+Three filter kinds mask a source's picture (#115): `shape_mask`
+(rectangle with a radius per corner, circle, ellipse, polygon, star,
+heart), `gradient_mask` (linear or radial, with stops) and `source_mask`
+(another source's or scene's live picture, by its luminance, alpha or one
+channel, in step with the program). Positions and sizes are fractions of
+the picture, radii and feathers its pixels. Stack them; `combine` says
+how each joins those before it. Their numbers animate with stops of
+their own:
+
+```toml
+[[sources]]
+id = "camera"
+kind = "camera"
+filters = [
+  { id = "round", kind = "shape_mask", shape = "circle", width = 0.6, height = 0.9, feather = 4 },
+  { id = "wipe", kind = "source_mask", mask_source = "wipe-video", channel = "luminance",
+    animations = [{ duration_ms = 2000, iterations = "infinite", frames = [{ at = 1, scale = 1.2 }] }] },
+]
+```
+
+A source mask's source runs while what it masks does. In Filters, a
+shape mask's box has handles on the picture to move, size and turn it.
+
 ## Changing scenes from code
 
 Read the setup and its revision, plan a change, then apply it at that

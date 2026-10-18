@@ -453,7 +453,7 @@ impl Animations {
 }
 
 impl Timing {
-    fn of(animation: &Animation) -> Self {
+    pub(crate) fn of(animation: &Animation) -> Self {
         const MS: i64 = 1_000_000;
         Self {
             duration: i64::from(animation.duration_ms) * MS,
@@ -473,7 +473,7 @@ impl Timing {
     /// no effect (before or after its runs without a fill). Whole
     /// nanoseconds throughout, so a loop stays on schedule however long it
     /// runs.
-    fn progress(&self, elapsed: i64) -> Option<f64> {
+    pub(crate) fn progress(&self, elapsed: i64) -> Option<f64> {
         let local = elapsed - self.delay;
         let holds_start = matches!(self.fill, Fill::Backwards | Fill::Both);
         let holds_end = matches!(self.fill, Fill::Forwards | Fill::Both);

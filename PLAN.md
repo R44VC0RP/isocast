@@ -1109,6 +1109,16 @@ native app; each verified against OBS's behaviour on a test Mac.
   14.2, while System Audio Recording isn't allowed, or forced with
   `ISOCAST_AUDIO_CAPTURE=screencapturekit`); `system_audio.exclude`
   leaves apps out; the `system_audio` permission; app pickers in the app.
+- [x] **G.11 Advanced masks (#115).** `shape_mask` (rectangle with a
+  radius per corner, circle, ellipse, regular polygon, star, heart;
+  feather, invert, position, size, rotation), `gradient_mask` (linear or
+  radial, up to 8 stops, feather) and `source_mask` (any video source or
+  scene as a live mask by luminance, alpha or a channel; threshold,
+  softness, fit, scale, position; frame-synchronised in the compositor,
+  GPU only; the mask source runs only while what it masks does). Masks
+  stack with `combine` (intersect, add, subtract) and animate with stops
+  of their own. Setup schema/CLI/MCP, obs-websocket filter requests, OBS
+  import of Advanced Masks filters, and handles on the Filters picture.
 - [x] **G.10 Multistream (#73).** `[stream]` is the main destination,
   `[[stream.destinations]]` more (service, server, enabled, own key, own
   bitrate/size); one Stream each, matching formats share one encoder, a
@@ -4637,3 +4647,15 @@ One line per finished task, newest last.
   folder still works and restarts the plugin. Standalone record reaches a
   running read plugin in 0.3 s on head and not at all in 20 s on main.
   Export-only healing is left alone on head and wrongly rewritten on main.
+- G.11 (2026-10-18): mask filters (#115): shape, gradient and source/scene
+  masks with combine and keyframes; 25/25 offscreen scene snapshots match
+  numpy-made expected images within 1 LSB; a 6 s take on isocast-m2-a with
+  a video mask: 180/180 frames show the masked bar exactly where the mask
+  video's bar is in the same frame, moving one mask frame per program
+  frame; Filters handles drag/size/turn verified offscreen.
+- G.11 review fixes (2026-10-18): mask-only media play and restart (on
+  air with what they mask), missing masks fail closed, clock animations
+  agree in filtered ISOs/previews, scene masks drawn at the tick, fit =
+  none scene masks keep their size in small monitors; each reproduced on
+  the reviewed build and fixed, in recorded takes on isocast-m2-a; 28/28
+  pixel checks.
