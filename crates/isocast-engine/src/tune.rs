@@ -104,6 +104,9 @@ pub fn tune<P: Platform>(
     std::fs::create_dir_all(&folder)
         .with_context(|| format!("could not create {}", folder.display()))?;
     let scratch = folder.join(".isocast-tune");
+    // Files an earlier run left behind (it was killed or panicked) would
+    // fail every benchmark that writes to the same name.
+    let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch)?;
     let tuner = Tuner {
         platform,
@@ -989,8 +992,23 @@ fn benchmark<P: Platform>(platform: &P, loads: &[Load], scratch: &Path) -> Resul
 /// Encode one stream of moving, hard-to-compress frames of `input` size
 /// (scaled to the file's, if it differs). Returns how long the timed part
 /// took (after the warm-up, until the encoder took its last frame; frames
-/// in flight cancel out at both ends), and the file's size.
+/// in flight cancel out at both ends), and the file's size. A failed stream
+/// removes its file, which would otherwise make the next candidate's fail
+/// with "File exists".
 fn encode_stream<P: Platform>(
+    platform: &P,
+    spec: &WriterSpec,
+    input: (u32, u32),
+    barrier: &Barrier,
+) -> Result<(Duration, u64)> {
+    let result = encode_stream_to(platform, spec, input, barrier);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&spec.path);
+    }
+    result
+}
+
+fn encode_stream_to<P: Platform>(
     platform: &P,
     spec: &WriterSpec,
     input: (u32, u32),

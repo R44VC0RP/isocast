@@ -263,6 +263,18 @@ impl Daemon {
             setup: Some(prepared.clone()),
             folder: params.folder.clone(),
         })?;
+        // A benchmark that couldn't run measured nothing: say why, rather
+        // than report "nothing to change" as if the setup had been judged.
+        if tuning.candidates.iter().all(|c| c.capacity.is_none()) && tuning.variants.is_empty() {
+            let reason = tuning
+                .candidates
+                .first()
+                .and_then(|c| c.reason.as_deref())
+                .unwrap_or("unknown error");
+            return Err(failed(format!(
+                "the benchmark could not run, so nothing was optimized: {reason}"
+            )));
+        }
         let to_json =
             |setup: &Setup| serde_json::to_value(setup).map_err(|e| failed(e.to_string()));
         let mut result = prepared;
