@@ -15,6 +15,7 @@ import {
 } from "../../kit.slint";
 import { SettingsArea } from "state.slint";
 import { PermissionRows } from "../permissions/sheet.slint";
+import { PermissionsArea } from "../permissions/state.slint";
 
 // A step in the header: its dot (the number, or a check once done) and
 // its name.
@@ -329,7 +330,9 @@ component PermissionsStep inherits VerticalLayout {
     alignment: start;
     StepTitle {
         title: "Let Isocast see and hear";
-        lead: "macOS asks you once for each. You can skip any of them now; your setup leaves out what it can’t use, and you can allow it later.";
+        lead: PermissionsArea.unknown-access
+            ? "Access is checked when capture starts; no per-app permission prompt is available. See each item for guidance."
+            : "macOS asks you once for each. You can skip any of them now; your setup leaves out what it can’t use, and you can allow it later.";
     }
     Rectangle {
         height: 1px;

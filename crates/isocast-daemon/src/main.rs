@@ -83,7 +83,7 @@ const WATCH_HANGUP_CHECK: Duration = Duration::from_secs(1);
 /// any amount of memory. A setup is far smaller.
 const MAX_REQUEST: usize = 16 << 20;
 
-use platform::NativePlatform;
+use platform::{NativePlatform, native};
 
 mod canvases;
 mod data;
@@ -929,7 +929,7 @@ impl CpuMeter {
 
 /// The processor time this process has used, user and system, in seconds.
 fn process_cpu_seconds() -> Option<f64> {
-    NativePlatform.process_cpu_seconds()
+    native().process_cpu_seconds()
 }
 
 #[derive(Default)]
@@ -1332,7 +1332,7 @@ fn start_engine(
     on_event: OnEngineEvent,
 ) -> Result<Arc<dyn LiveEngine>> {
     Ok(Arc::new(LiveEngineOf::start(
-        &NativePlatform,
+        native(),
         setup,
         Some(control),
         Some(on_event),
@@ -2951,9 +2951,7 @@ impl Daemon {
             data: Some(self.data.status()),
             diagnostics: Some({
                 let mut health = isocast_diagnostics::health();
-                health["frame_budget"] = NativePlatform
-                    .frame_budget()
-                    .unwrap_or(serde_json::Value::Null);
+                health["frame_budget"] = native().frame_budget().unwrap_or(serde_json::Value::Null);
                 health
             }),
             interrupted: self.interrupted.lock().clone(),
@@ -4106,6 +4104,10 @@ impl Daemon {
         };
         session.stop.store(true, Ordering::SeqCst);
         let id = session.id;
+        #[cfg(windows)]
+        if let Some(control) = state.control() {
+            control.wake_recording();
+        }
         let timeout = state.wait_while_for(&self.ended, STOP_TIMEOUT, |s| s.ended_session < id);
         if timeout.timed_out() {
             return Err(RpcError {
@@ -4984,7 +4986,7 @@ fn redact_value(value: &mut serde_json::Value, key: &str) {
 
 /// The host clock, which markers and scene switches are stamped with.
 fn now() -> Time {
-    NativePlatform.now()
+    native().now()
 }
 
 /// The Keychain service this build keeps stream keys under:
@@ -5001,7 +5003,7 @@ fn key_service() -> &'static str {
 }
 
 fn app_identifier() -> Option<String> {
-    NativePlatform.app_identifier()
+    native().app_identifier()
 }
 
 /// The stream key for `account`: this build's own, or one an older Isocast
@@ -5089,11 +5091,11 @@ fn retire_legacy_key(account: &str) {
 }
 
 fn has_secret(service: &str, account: &str) -> Result<bool> {
-    NativePlatform.has_secret(service, account)
+    native().has_secret(service, account)
 }
 
 fn secret(service: &str, account: &str) -> Result<Option<String>> {
-    let key = NativePlatform.secret(service, account)?;
+    let key = native().secret(service, account)?;
     if let Some(key) = &key {
         isocast_diagnostics::redact::remember_secret(service, account, key);
     }
@@ -5101,23 +5103,23 @@ fn secret(service: &str, account: &str) -> Result<Option<String>> {
 }
 
 fn set_secret(service: &str, account: &str, value: &str) -> Result<()> {
-    NativePlatform.set_secret(service, account, value)
+    native().set_secret(service, account, value)
 }
 
 fn delete_secret(service: &str, account: &str) -> Result<bool> {
-    NativePlatform.delete_secret(service, account)
+    native().delete_secret(service, account)
 }
 
 fn permissions() -> Result<PermissionsReport> {
-    NativePlatform.permissions()
+    native().permissions()
 }
 
 fn request_permissions(only: Option<PermissionKind>) -> Result<PermissionsReport> {
-    NativePlatform.request_permissions(only)
+    native().request_permissions(only)
 }
 
 fn open_permission_settings(permission: PermissionKind) -> Result<String> {
-    NativePlatform.open_permission_settings(permission)
+    native().open_permission_settings(permission)
 }
 
 /// A take's drop counts when it began, and whether its overload was said.
@@ -5143,7 +5145,7 @@ fn overloaded(dropped: u64, due: u64) -> bool {
 fn this_machine() -> Option<&'static isocast_protocol::api::Machine> {
     static MACHINE: std::sync::OnceLock<isocast_protocol::api::Machine> =
         std::sync::OnceLock::new();
-    Some(MACHINE.get_or_init(|| NativePlatform.machine()))
+    Some(MACHINE.get_or_init(|| native().machine()))
 }
 
 /// Backend observations from the actual take, not editable next-take settings.
@@ -5181,6 +5183,11 @@ fn estimate_capacity(
     add_iso: Option<&str>,
     backends: &[(isocast_protocol::Codec, Option<bool>)],
 ) -> Result<CapacityEstimate, String> {
+    if !cfg!(target_os = "macos") {
+        // The table is measured for Apple's media engines, not a CPU-named
+        // Windows GPU. Native encoder budgeting has a separate qualification.
+        return Err("capacity estimates are only supported on macOS so far".into());
+    }
     let Some(machine) = this_machine() else {
         return Err("capacity estimates are only supported on macOS so far".into());
     };
@@ -5194,7 +5201,7 @@ fn estimate_capacity(
                 .collect()
         })
         .unwrap_or_default();
-    let probed = isocast_engine::estimate::probed_formats(&NativePlatform, setup, add_iso, &|id| {
+    let probed = isocast_engine::estimate::probed_formats(native(), setup, add_iso, &|id| {
         live.contains_key(id)
     });
     let formats = |id: &str| live.get(id).or_else(|| probed.get(id)).copied();
@@ -5236,11 +5243,11 @@ fn estimate_capacity(
 /// Which machine and OS `tune`'s measurements here hold for.
 fn machine_key() -> Option<&'static str> {
     static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    Some(KEY.get_or_init(|| capacity::machine_key(&NativePlatform.machine())))
+    Some(KEY.get_or_init(|| capacity::machine_key(&native().machine())))
 }
 
 fn tune(setup: &Setup, folder: Option<&Path>, memory: &Path) -> Result<Tuning> {
-    isocast_engine::tune::tune(&NativePlatform, setup, folder, Some(memory))
+    isocast_engine::tune::tune(native(), setup, folder, Some(memory))
 }
 
 /// Refuse a scene id the setup (the recording's, while recording) lacks.
@@ -5309,7 +5316,7 @@ fn with_graphics<T>(draw: impl FnOnce(&mut Graphics) -> Result<T>) -> Result<T> 
     }
     let graphics = match &mut *cached {
         Some(graphics) => graphics,
-        none => none.insert(Graphics::new(&NativePlatform)?),
+        none => none.insert(Graphics::new(native())?),
     };
     let result = draw(graphics);
     // Lost while drawing: this answer may fail, the next opens a new one.
@@ -5341,7 +5348,7 @@ fn frames(
         }
     }
     frames.extend(isocast_engine::snapshot::take_frames(
-        &NativePlatform,
+        native(),
         setup,
         &missing,
         data,
@@ -5386,18 +5393,18 @@ fn scene_png(
 /// it that exists).
 fn free_bytes(folder: &Path) -> Option<u64> {
     let existing = folder.ancestors().find(|path| path.exists())?;
-    NativePlatform
+    native()
         .volume(existing)
         .ok()
         .map(|volume| volume.free_bytes)
 }
 
 fn doctor(setup: Option<&Setup>, folder: Option<&Path>) -> isocast_protocol::api::Doctor {
-    isocast_engine::doctor::doctor(&NativePlatform, setup, folder)
+    isocast_engine::doctor::doctor(native(), setup, folder)
 }
 
 fn devices() -> Result<isocast_protocol::devices::Devices> {
-    NativePlatform.devices()
+    native().devices()
 }
 
 /// Read an OBS scene collection, matching its devices and sizes against
@@ -5469,7 +5476,7 @@ fn content_size(kind: &SourceKind) -> Option<(u32, u32)> {
     let (tx, rx) = std::sync::mpsc::channel();
     let kind = kind.clone();
     thread::spawn(move || {
-        let _ = tx.send(isocast_engine::content_size(&NativePlatform, &kind));
+        let _ = tx.send(isocast_engine::content_size(native(), &kind));
     });
     match rx.recv_timeout(CONTENT_SIZE_TIMEOUT) {
         Ok(size) => size,

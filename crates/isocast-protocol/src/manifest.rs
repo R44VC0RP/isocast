@@ -6,6 +6,8 @@
 //! manifest is written when the session starts, again once every file has
 //! started, and when it ends, so it survives a crash.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +48,52 @@ pub struct SessionManifest {
     pub pauses: Vec<Pause>,
     /// Problems during recording.
     pub errors: Vec<String>,
+    /// Camera capture metadata by source id: every camera source running
+    /// when the session started, including cameras recorded only through
+    /// the program. Absent when the platform reports none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cameras: BTreeMap<String, CameraCaptureMetadata>,
+}
+
+/// What a camera's driver said about its frames, as observed by the
+/// capture over its lifetime (from when it opened until the manifest was
+/// written), not counts of the frames in the encoded files.
+///
+/// Each `sample_*` list holds the distinct states seen for one per-sample
+/// flag, at most once each: `null` (the sample didn't carry the flag),
+/// `false` and `true`. It is not a per-frame log.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CameraCaptureMetadata {
+    /// The platform's identifier for the device.
+    pub device_id: String,
+    /// The device's name.
+    pub device_name: String,
+    /// The interlace mode the negotiated media type declares, as the
+    /// platform's raw value (Windows: `MFVideoInterlaceMode`).
+    #[serde(default)]
+    pub media_type_interlace_mode: u32,
+    /// How interlaced fields are handled: currently always "weave", both
+    /// fields kept in one frame as delivered. Weave preserves the pixels;
+    /// it does not remove temporal combing, and the codec may still be
+    /// lossy.
+    #[serde(default)]
+    pub field_handling: String,
+    /// Native delivery path. Windows distinguishes GPU NV12 copies from
+    /// shared MJPEG software decoding followed by a BGRA GPU upload.
+    #[serde(default)]
+    pub delivery: String,
+    /// Distinct "interlaced" sample flags seen.
+    #[serde(default)]
+    pub sample_interlaced: Vec<Option<bool>>,
+    /// Distinct "bottom field first" sample flags seen.
+    #[serde(default)]
+    pub sample_bottom_field_first: Vec<Option<bool>>,
+    /// Distinct "single field" sample flags seen.
+    #[serde(default)]
+    pub sample_single_field: Vec<Option<bool>>,
+    /// Distinct "repeat first field" sample flags seen.
+    #[serde(default)]
+    pub sample_repeat_first_field: Vec<Option<bool>>,
 }
 
 /// One pause: start/end on the uncut take clock, and the resulting join on

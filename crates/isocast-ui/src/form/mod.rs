@@ -324,10 +324,12 @@ fn control(
 fn empty_note(devices: Option<&Devices>, what: &str) -> Option<&'static str> {
     use isocast_protocol::devices::Permission;
     let devices = devices?;
-    if what == "windows" && devices.permissions.screen_recording != Permission::Granted {
+    // Unknown isn't a refusal, so it gets no note.
+    let refused = |p: Permission| !matches!(p, Permission::Granted | Permission::Unknown);
+    if what == "windows" && refused(devices.permissions.screen_recording) {
         return Some("Screen recording isn’t allowed, so no windows are listed.");
     }
-    if what == "cameras" && devices.permissions.camera != Permission::Granted {
+    if what == "cameras" && refused(devices.permissions.camera) {
         return Some("Camera access isn’t allowed, so no cameras are listed.");
     }
     None

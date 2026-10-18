@@ -142,9 +142,7 @@ impl Daemon {
         folders.dedup();
         let mut recovered = folders
             .iter()
-            .flat_map(|p| {
-                isocast_engine::record::recover_interrupted(&crate::platform::NativePlatform, p)
-            })
+            .flat_map(|p| isocast_engine::record::recover_interrupted(crate::platform::native(), p))
             .collect::<Vec<_>>();
         recovered.sort_by(|a, b| b.recording.started_at.cmp(&a.recording.started_at));
         recovered.truncate(20);

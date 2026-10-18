@@ -42,9 +42,9 @@ use super::{
     FolderLock, Formats, MIN_FREE_BYTES, MIN_FREE_SECONDS, MIN_TAKE, MIX_QUEUE_DEPTH, MONITOR_FPS,
     OnAir, Output, Packet, QUEUE_DEPTH, RecordOptions, Report, SPACE_CHECK_INTERVAL, SPEED_MARGIN,
     SPLIT_LEAD, SPLIT_SOON_LEAD, STALL_AFTER, START_DELAY, STATUS_INTERVAL, SessionControl, Shared,
-    Slots, SourceFilters, SplitRefused, SplitTake, SplitTiming, Take, create_writers, expand_home,
-    interrupted_note, interrupted_sessions, is_program, live_status, plan_take, sidechain_sources,
-    take_manifest, wait_for_frame,
+    Slots, SourceFilters, SplitRefused, SplitTake, SplitTiming, Take, WriterInputs, create_writers,
+    expand_home, interrupted_note, interrupted_sessions, is_program, live_status, plan_take,
+    sidechain_sources, take_manifest, wait_for_frame,
 };
 use super::{AudioStopped, audio_stop_errors, file_audio_stops};
 #[cfg(not(windows))]
@@ -3394,7 +3394,8 @@ struct IsoRunner<P: Platform> {
     /// The files' frame size.
     size: (u32, u32),
     fps: u32,
-    /// Its files' encoders take only Y'CbCr (H.264, HEVC).
+    /// Its files' encoders take only Y'CbCr (H.264, HEVC on a platform
+    /// whose encoders want Y'CbCr).
     ycbcr_only: bool,
     /// Every source's filters, if the files record this one filtered.
     filters: Option<SourceFilters>,
@@ -3427,7 +3428,10 @@ type IsoGpu = Mutex<Option<Gpu>>;
 impl<P: Platform> IsoRunner<P> {
     /// Whether `image` must go through the stage before the files take it.
     fn needs_stage(&self, platform: &P, image: &P::Frame) -> bool {
-        self.filters.is_some() || (self.ycbcr_only && !platform.frame_is_ycbcr(image))
+        self.filters.is_some()
+            || (self.ycbcr_only && !platform.frame_is_ycbcr(image))
+            || (platform.encoder_frame_format() == crate::EncoderFrameFormat::Bgra
+                && platform.frame_size(image) != self.size)
     }
 
     /// The stage, made if it isn't yet. Setting one up takes a while (a
@@ -3896,6 +3900,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     let mut formats = Formats {
         video: BTreeMap::new(),
         audio: BTreeMap::new(),
+        cameras: BTreeMap::new(),
     };
     let mut slots: BTreeMap<String, Arc<FrameSlot<P::Frame>>> = BTreeMap::new();
     let mut readers: BTreeMap<String, Arc<Routes<P::Frame>>> = BTreeMap::new();
@@ -3916,6 +3921,9 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             if let Some(audio) = &live.audio {
                 formats.audio.insert(id.clone(), audio.channels);
                 readers.insert(id.clone(), audio.routes.clone());
+            }
+            if let Some(camera) = live.opened.as_ref().and_then(|o| o.camera_metadata()) {
+                formats.cameras.insert(id.clone(), camera);
             }
             if live.run == SourceRun::Failed
                 && setup
@@ -4108,7 +4116,12 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
     // Each ISO source's frame clock, with the stage its frames go through
     // set up now if its frames need one: that takes a few frames' time.
     let iso_gpu = IsoGpu::default();
-    let ycbcr_only = matches!(iso.encoder.codec, Codec::H264 | Codec::Hevc);
+    let ycbcr_only = platform.encoder_frame_format() == crate::EncoderFrameFormat::Ycbcr
+        && matches!(iso.encoder.codec, Codec::H264 | Codec::Hevc);
+    // Encoders that take BGRA as drawn open for the pixel format a raw ISO
+    // source's frames come in, so those sources' first frames decide their
+    // stage before the writers open.
+    let raw_inputs = platform.encoder_frame_format() == crate::EncoderFrameFormat::Bgra;
     let mut runners: BTreeMap<String, IsoRunner<P>> = BTreeMap::new();
     for plan in plans.iter().filter(|plan| !is_program(plan)) {
         let id = plan.source.as_str();
@@ -4131,7 +4144,16 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             stage: None,
             outputs: Vec::new(),
         };
-        let newest = runner.slot.newest();
+        let newest = match raw_inputs && runner.filters.is_none() {
+            true => Some(
+                wait_for_frame(&runner.slot)
+                    .with_context(|| {
+                        format!("recording.iso.sources: {id:?} has no input picture yet")
+                    })?
+                    .0,
+            ),
+            false => runner.slot.newest(),
+        };
         if runner.filters.is_some()
             || newest.is_some_and(|frame| runner.needs_stage(platform, &frame))
         {
@@ -4139,7 +4161,17 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         }
         runners.insert(id.to_string(), runner);
     }
-    let writers = create_writers(platform, plans)?;
+    // The sources whose files take their frames as captured (no stage):
+    // their writers open for those frames' pixel format. Kept for splits.
+    let writer_inputs: WriterInputs<P::Frame> = match raw_inputs {
+        true => runners
+            .iter()
+            .filter(|(_, runner)| runner.stage.is_none())
+            .map(|(id, runner)| (id.clone(), runner.slot.clone()))
+            .collect(),
+        false => WriterInputs::new(),
+    };
+    let writers = create_writers(platform, plans, &writer_inputs)?;
 
     // The recording starts on a program frame, at least a moment from now
     // so every file is ready for it.
@@ -4277,6 +4309,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 &stops(),
                 Some(control),
                 canvas_controls,
+                &formats.cameras,
             ),
         )
     };
@@ -4410,6 +4443,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                                 &stops(),
                                 Some(control),
                                 canvas_controls,
+                                &formats.cameras,
                             ),
                         )
                     } else {
@@ -4524,7 +4558,9 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 if let Some((timing, reply)) = control.take_split() {
                     let number = takes.len() as u32 + 1;
                     let next = plan_take(setup, &formats, &folder, number)
-                        .and_then(|plan| Ok((create_writers(platform, &plan.plans)?, plan)))
+                        .and_then(|plan| {
+                            Ok((create_writers(platform, &plan.plans, &writer_inputs)?, plan))
+                        })
                         .map_err(|err| SplitRefused {
                             ending: false,
                             busy: false,
@@ -4670,6 +4706,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                             &stops,
                             Some(control),
                             canvas_controls,
+                            &formats.cameras,
                         );
                         let _ = write_manifest(&take.manifest_path, &manifest);
                         take.manifest = Some(manifest);
@@ -4706,7 +4743,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 // announced file gets a moment; checked again here for one
                 // asked for since the split above), or when every file has
                 // stopped (for example because the disk is full).
-                if options.stop.load(Ordering::SeqCst) {
+                let observed_stop = options.stop.load(Ordering::SeqCst);
+                if observed_stop {
                     let current = takes.last().expect("a take");
                     shared.stop_at(now.max(current.epoch + MIN_TAKE));
                 }
@@ -4725,6 +4763,9 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 if now >= end {
                     break;
                 }
+                #[cfg(windows)]
+                control.wait_recording(&options.stop, observed_stop);
+                #[cfg(not(windows))]
                 thread::sleep(Duration::from_millis(10));
             }
         });
@@ -4845,6 +4886,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 &stops,
                 Some(control),
                 canvas_controls,
+                &formats.cameras,
             );
             if let Err(err) = write_manifest(&take.manifest_path, &manifest) {
                 file_errors.push(format!("{err:#}"));

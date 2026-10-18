@@ -10,7 +10,8 @@
 //!   once per frame, a frame stays out of the pool until every clone is
 //!   dropped, pressure returns `None` without drawing, one freed slot lets
 //!   exactly one frame through, pools and frames move across threads, and
-//!   frames outlive their pool. Opens nothing. Pixels are not read back:
+//!   frames outlive their pool. Opens no capture devices (native pools may
+//!   allocate GPU resources). Pixels are not read back:
 //!   frames have no public pixel API (the GPU contract reads them).
 //! - `gpu`: visible pixels, alias effects and lifetime through the GPU API.
 //!   This does not measure whether an importer performs internal copies. A CPU-drawn
@@ -874,7 +875,9 @@ fn bgra_plane(frame: &GpuFrame, what: &str) -> Result<(&'static str, wgpu::Textu
     let (kind, texture) = match &frame.pixels {
         GpuPixels::Rgb(texture) => ("rgb", texture.clone()),
         GpuPixels::Premultiplied(texture) => ("premultiplied", texture.clone()),
-        GpuPixels::YCbCr { .. } => bail!("{what}: a BGRA frame was imported as Y'CbCr planes"),
+        GpuPixels::YCbCr { .. } | GpuPixels::YCbCrBiPlanar { .. } => {
+            bail!("{what}: a BGRA frame was imported as Y'CbCr planes")
+        }
     };
     check_texture(&texture, what, wgpu::TextureUsages::TEXTURE_BINDING)?;
     Ok((kind, texture))

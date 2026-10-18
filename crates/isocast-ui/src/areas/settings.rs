@@ -2638,7 +2638,10 @@ impl Settings {
                 if devices.displays.is_empty() {
                     format!(
                         "No displays found{}.",
-                        if devices.permissions.screen_recording != Permission::Granted {
+                        if !matches!(
+                            devices.permissions.screen_recording,
+                            Permission::Granted | Permission::Unknown
+                        ) {
                             " (screen recording isn’t allowed yet)"
                         } else {
                             ""

@@ -4,7 +4,7 @@
 
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -49,6 +49,7 @@ impl DiskProbe {
         // Detached, so a write that never returns (a network share gone
         // away) can't hold up the end of the recording.
         let failed = state.clone();
+        #[cfg(not(windows))]
         let failed_path = path.clone();
         let _ = isocast_diagnostics::spawn(
             "disk probe",
@@ -59,6 +60,7 @@ impl DiskProbe {
                     ..Default::default()
                 };
                 failed.1.notify_all();
+                #[cfg(not(windows))]
                 let _ = std::fs::remove_file(failed_path);
             },
         );
@@ -88,7 +90,7 @@ impl Drop for DiskProbe {
     }
 }
 
-fn probe<P: Platform>(platform: &P, path: &PathBuf, shared: &(Mutex<ProbeState>, Condvar)) {
+fn probe<P: Platform>(platform: &P, path: &Path, shared: &(Mutex<ProbeState>, Condvar)) {
     let measure = || {
         let mut times: Vec<Duration> = (0..PROBES)
             .filter_map(|_| platform.write_latency(path))
@@ -118,6 +120,10 @@ fn probe<P: Platform>(platform: &P, path: &PathBuf, shared: &(Mutex<ProbeState>,
         }
         thread::sleep(PROBE_INTERVAL);
     }
+    // Windows has no latency-write implementation yet: it has never owned
+    // this pathname. A future native probe must clean up its owned HANDLE,
+    // not let a pathname-only unlink remove an existing or replaced file.
+    #[cfg(not(windows))]
     let _ = std::fs::remove_file(path);
 }
 

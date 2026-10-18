@@ -49,7 +49,7 @@ pub struct Window {
     pub app: String,
     pub bundle_id: String,
     pub title: Option<String>,
-    /// Size in points.
+    /// Size in points on macOS; physical pixels on Windows.
     pub width: u32,
     pub height: u32,
 }
@@ -192,6 +192,11 @@ pub enum Permission {
     Restricted,
     /// Not granted; the system doesn't say whether it was ever asked.
     NotGranted,
+    /// Access cannot be determined without attempting use: the system
+    /// offers this process no way to check it (as for an unpackaged app
+    /// on Windows). Recording still tries; it never means granted or
+    /// denied.
+    Unknown,
 }
 
 impl Permission {
@@ -202,6 +207,7 @@ impl Permission {
             Self::NotDetermined => "not asked yet",
             Self::Restricted => "restricted",
             Self::NotGranted => "not granted",
+            Self::Unknown => "unknown",
         }
     }
 }

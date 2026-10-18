@@ -36,6 +36,8 @@ enum OpenMode {
     Lock,
     #[cfg(windows)]
     MetadataTemp,
+    #[cfg(windows)]
+    CancelEmpty,
 }
 
 /// An anchored recording (shared) or repair (exclusive) folder lease.
@@ -173,6 +175,10 @@ impl Directory {
             _directory: self.clone(),
             position: 0,
             writable,
+            #[cfg(windows)]
+            created: matches!(mode, OpenMode::Create),
+            #[cfg(windows)]
+            name: name.to_os_string(),
         })
     }
 }
@@ -189,9 +195,40 @@ pub struct MediaFile {
     // patch cannot redirect the next append. No OS cursor is ever consulted.
     position: u64,
     writable: bool,
+    #[cfg(windows)]
+    created: bool,
+    #[cfg(windows)]
+    name: OsString,
 }
 
 impl MediaFile {
+    /// Cancel only a newly created movie matching its initial header. The caller
+    /// must have accepted no samples and supply its own nonempty header (<=256
+    /// bytes). Any refusal retains the file, never truncates it. The same folder
+    /// lease outlives both the original and deletion handles.
+    #[cfg(windows)]
+    pub(crate) fn cancel_empty(self, expected_header: &[u8]) -> Result<()> {
+        let Self {
+            file,
+            _directory: directory,
+            created,
+            name,
+            ..
+        } = self;
+        let cancel = (|| -> Result<()> {
+            if !created {
+                bail!("only media opened for creation can be cancelled");
+            }
+            platform::cancel_empty(&directory.inner.directory, file, &name, expected_header)
+        })();
+        cancel.with_context(|| {
+            format!(
+                "could not cancel empty media {}; file retained",
+                name.to_string_lossy()
+            )
+        })
+    }
+
     pub fn metadata(&self) -> io::Result<Metadata> {
         self.file.metadata()
     }

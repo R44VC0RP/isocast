@@ -149,7 +149,11 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
             Some((found, found.id.clone()))
         }
     };
-    let screen_allowed = permissions.screen_recording == Permission::Granted;
+    // Unknown can't be checked without trying, so capture is attempted.
+    let screen_allowed = matches!(
+        permissions.screen_recording,
+        Permission::Granted | Permission::Unknown
+    );
     let fps = options.fps.unwrap_or_else(|| {
         // A display that refreshes more slowly than 60 Hz sets the pace.
         match display.as_ref().map(|(d, _)| d.refresh_rate.round() as u32) {
@@ -238,12 +242,20 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
             }
         ));
         let kind = match permissions.camera {
-            Permission::Granted | Permission::NotDetermined => {
+            Permission::Granted | Permission::NotDetermined | Permission::Unknown => {
                 iso.push("camera".to_string());
                 if permissions.camera == Permission::NotDetermined {
                     notes.push(
                         "macOS asks for camera access the first time the camera is used; \
                          `isocast permissions --request` asks now."
+                            .into(),
+                    );
+                }
+                if permissions.camera == Permission::Unknown {
+                    notes.push(
+                        "Camera access can't be checked without using the camera, so it is \
+                         tried when recording starts; if it shows no picture, allow camera \
+                         access in the system's privacy settings."
                             .into(),
                     );
                 }
@@ -298,7 +310,10 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
     match (microphone, permissions.microphone) {
         (None, _) if options.microphone.as_deref() == Some("none") => {}
         (None, _) => notes.push("No microphone was found, so there is none in the setup.".into()),
-        (Some((found, device)), Permission::Granted | Permission::NotDetermined) => {
+        (
+            Some((found, device)),
+            Permission::Granted | Permission::NotDetermined | Permission::Unknown,
+        ) => {
             notes.push(if device == "default" {
                 format!(
                     "Microphone: the system's default input, now {:?}.",
@@ -311,6 +326,14 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
                 notes.push(
                     "macOS asks for microphone access the first time it is used; `isocast \
                      permissions --request` asks now."
+                        .into(),
+                );
+            }
+            if permissions.microphone == Permission::Unknown {
+                notes.push(
+                    "Microphone access can't be checked without using it, so it is tried \
+                     when recording starts; if it records silence, allow microphone access \
+                     in the system's privacy settings."
                         .into(),
                 );
             }

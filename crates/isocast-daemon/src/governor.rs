@@ -125,11 +125,12 @@ pub(super) fn start(daemon: &Arc<Daemon>) {
                                 message: warning.message,
                             });
                         }
-                        pressure |= crate::platform::NativePlatform
-                            .governor_headroom()
-                            .is_some_and(|sample| {
-                                sample.encoder_threatened || sample.memory_pressed()
-                            });
+                        pressure |=
+                            crate::platform::native()
+                                .governor_headroom()
+                                .is_some_and(|sample| {
+                                    sample.encoder_threatened || sample.memory_pressed()
+                                });
                     }
                 } else if last_activity.is_some_and(Activity::active) {
                     // Clear stale native warning/health once, not on idle ticks.
@@ -223,7 +224,7 @@ fn sample(
     previous.stalls = stalls;
     #[cfg(target_os = "macos")]
     {
-        sample.headroom = crate::platform::NativePlatform.governor_headroom();
+        sample.headroom = crate::platform::native().governor_headroom();
     }
     let pause = engine
         .as_ref()

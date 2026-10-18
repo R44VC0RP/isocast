@@ -418,7 +418,7 @@ pub(super) fn worker() -> Option<std::process::ExitCode> {
             .map(PathBuf::from)
             .ok_or_else(|| anyhow::anyhow!("missing scratch folder"))?;
         let mut profile =
-            isocast_engine::machine_profile::measure(&crate::platform::NativePlatform, &scratch)?;
+            isocast_engine::machine_profile::measure(crate::platform::native(), &scratch)?;
         profile.app_build = crate::daemon_build().build;
         let mut file = OpenOptions::new()
             .write(true)

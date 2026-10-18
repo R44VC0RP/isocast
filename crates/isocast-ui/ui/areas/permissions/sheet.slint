@@ -256,7 +256,9 @@ export component PermissionsSheet inherits Rectangle {
                     accessible-role: AccessibleRole.text;
                 }
                 Text {
-                    text: "macOS asks once for each. " + PermissionsArea.app-name + " only records the screens, cameras and microphones you add to a scene.";
+                    text: PermissionsArea.unknown-access
+                        ? "Access is checked when capture starts; no per-app permission prompt is available. See each item for guidance."
+                        : "macOS asks once for each. " + PermissionsArea.app-name + " only records the screens, cameras and microphones you add to a scene.";
                     color: Theme.text-2;
                     line-height-factor: Theme.leading-welcome;
                     wrap: word-wrap;

@@ -35,5 +35,8 @@ serde_json = "1.0.154"
 [target.'cfg(target_os = "macos")'.dependencies]
 isocast-platform-macos = { path = "../isocast-platform-macos" }
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
+[target.'cfg(windows)'.dependencies]
+isocast-platform-windows = { path = "../isocast-platform-windows" }
+
+[target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
 isocast-platform-stub = { path = "../isocast-platform-stub" }

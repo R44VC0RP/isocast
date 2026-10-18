@@ -51,8 +51,8 @@ function WithRefresh({ children }) {
 /** Why a list of choices is empty, if the engine said. */
 function emptyNote(devices, what) {
   if (!devices) return "Looking…";
-  if (what === "windows" && devices.permissions?.screen_recording !== "granted") return "Screen recording isn’t allowed, so no windows are listed.";
-  if (what === "cameras" && devices.permissions?.camera !== "granted") return "Camera access isn’t allowed, so no cameras are listed.";
+  if (what === "windows" && !["granted", "unknown"].includes(devices.permissions?.screen_recording)) return "Screen recording isn’t allowed, so no windows are listed.";
+  if (what === "cameras" && !["granted", "unknown"].includes(devices.permissions?.camera)) return "Camera access isn’t allowed, so no cameras are listed.";
   return null;
 }
 

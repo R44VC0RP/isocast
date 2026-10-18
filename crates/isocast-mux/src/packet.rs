@@ -135,6 +135,52 @@ impl Writer {
         audio: &[AudioConfig],
         config: Config,
     ) -> Result<Self> {
+        Self::with_mux(container, video, audio, config, |tracks| {
+            let mut mux = mp4::Writer::create(path, container, created)?;
+            mux.set_tracks(tracks)?;
+            Ok(mux)
+        })
+    }
+
+    /// Install actual encoder descriptions on an already-reserved file. Some
+    /// hardware encoders reveal their configuration only with the first packet;
+    /// ownership must still be acquired before the take is announced.
+    pub fn from_reserved(
+        mux: mp4::Writer,
+        video: VideoConfig,
+        audio: &[AudioConfig],
+        config: Config,
+    ) -> Result<Self> {
+        Self::configure_reserved(&mut Some(mux), video, audio, config)
+    }
+
+    /// Configure an owned reservation without losing it on invalid encoder
+    /// descriptions. Every fallible validation precedes taking the handle;
+    /// callers can still preserve accepted audio if video never configures.
+    pub fn configure_reserved(
+        reserved: &mut Option<mp4::Writer>,
+        video: VideoConfig,
+        audio: &[AudioConfig],
+        config: Config,
+    ) -> Result<Self> {
+        let container = reserved.as_ref().context("no reserved movie")?.container();
+        Self::with_mux(container, video, audio, config, |tracks| {
+            // set_tracks validates before mutation, and writes no file bytes.
+            reserved
+                .as_mut()
+                .context("no reserved movie")?
+                .set_tracks(tracks)?;
+            Ok(reserved.take().expect("validated reservation"))
+        })
+    }
+
+    fn with_mux(
+        container: Container,
+        video: VideoConfig,
+        audio: &[AudioConfig],
+        config: Config,
+        create: impl FnOnce(Vec<Track>) -> Result<mp4::Writer>,
+    ) -> Result<Self> {
         if !matches!(container, Container::Mov | Container::Mp4) {
             bail!("container: encoded movie writer supports mov or mp4");
         }
@@ -193,8 +239,7 @@ impl Writer {
                 fragment_shift: u64::from(delay - a.priming),
             });
         }
-        let mut mux = mp4::Writer::create(path, container, created)?;
-        mux.set_tracks(tracks.clone())?;
+        let mux = create(tracks.clone())?;
         let pending = (0..tracks.len()).map(|_| Pending::default()).collect();
         Ok(Self {
             mux: Some(mux),
@@ -336,6 +381,27 @@ impl Writer {
         let mux = self.mux.take().context("movie is finished")?;
         mux.finish()?;
         Ok(self.progress())
+    }
+
+    /// Cancel a file that has accepted no encoded media. Refusal after packet
+    /// admission leaves this writer usable so its caller can finish those data.
+    #[cfg(windows)]
+    pub fn cancel_empty(&mut self) -> Result<()> {
+        if self.pending.iter().any(|p| p.accepted != 0) {
+            bail!("movie has accepted packets; finish it instead of cancelling");
+        }
+        let mux = self
+            .mux
+            .take()
+            .context("movie is already finished or cancelled")?;
+        self.failed = Some("movie was cancelled".into());
+        let result = mux.cancel_empty();
+        if let Err(error) = &result {
+            self.failed = Some(format!(
+                "empty-file cancellation failed; file retained: {error:#}"
+            ));
+        }
+        result
     }
 
     pub fn progress(&self) -> Progress {

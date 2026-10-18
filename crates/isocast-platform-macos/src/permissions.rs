@@ -338,7 +338,7 @@ pub(crate) fn live_report(permissions: Permissions) -> PermissionsReport {
         && PermissionKind::ALL.into_iter().any(|kind| {
             !matches!(
                 permissions.get(kind),
-                Permission::Granted | Permission::NotDetermined
+                Permission::Granted | Permission::NotDetermined | Permission::Unknown
             )
         });
     let fresh = missing.then(granted_after_restart).flatten();
@@ -437,6 +437,15 @@ fn report_with(permissions: Permissions, waiting: [bool; KINDS]) -> PermissionsR
                 Permission::Denied | Permission::NotGranted => (
                     PermissionAction::OpenSettings,
                     Some(format!("{} access was refused: {settings}", kind.label())),
+                ),
+                // macOS always says; kept for completeness.
+                Permission::Unknown => (
+                    PermissionAction::OpenSettings,
+                    Some(format!(
+                        "{} access can't be checked without using it, so recording tries it; \
+                         if that fails, {settings}",
+                        kind.label()
+                    )),
                 ),
             };
             PermissionDetail {

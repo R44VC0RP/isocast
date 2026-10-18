@@ -26,8 +26,9 @@ use crate::record::expand_home;
 use crate::synthetic::{TestPattern, Tone};
 use crate::text;
 use crate::{
-    AudioSink, BrowserControl, BrowserPage, CameraRequest, CaptureFormat, FramePool, MediaInfo,
-    MediaPart, MediaReader, PageLocation, Platform, SAMPLE_RATE, ScreenTarget, Time, VideoSink,
+    AudioSink, BrowserControl, BrowserPage, CameraMetadataReader, CameraRequest, CaptureFormat,
+    FramePool, MediaInfo, MediaPart, MediaReader, PageLocation, Platform, SAMPLE_RATE,
+    ScreenTarget, Time, VideoSink,
 };
 
 /// Audio is delivered in 10 ms chunks by generators, like a capture device.
@@ -377,6 +378,8 @@ pub(crate) struct Opened<P: Platform> {
 enum Running<P: Platform> {
     Capture {
         _capture: P::Capture,
+        /// A camera's metadata reader, from [`Platform::camera_metadata`].
+        camera: Option<CameraMetadataReader>,
     },
     Generator {
         _generator: Generator,
@@ -403,6 +406,13 @@ impl<P: Platform> Opened<P> {
             Running::Generator { _generator } => get(_generator),
             Running::Generators { _generators } => _generators.iter().find_map(get),
             Running::Browser { _watcher, .. } => _watcher.as_ref().and_then(get),
+            _ => None,
+        }
+    }
+    /// What a camera source's capture has observed, if its platform says.
+    pub(crate) fn camera_metadata(&self) -> Option<CameraMetadataReader> {
+        match &self._running {
+            Running::Capture { camera, .. } => camera.clone(),
             _ => None,
         }
     }
@@ -740,7 +750,8 @@ fn open_native<P: Platform>(
             let sink = slot_sink(&slot);
             let (capture, format) =
                 platform.capture_camera(device, request, &setup.canvas, sink)?;
-            Ok(captured_video(slot, capture, format))
+            let camera = platform.camera_metadata(&capture);
+            Ok(captured_video(slot, capture, format, camera))
         }
         SourceKind::Microphone(microphone) => {
             let (feed, sink, chunks) = audio_feed();
@@ -881,7 +892,7 @@ fn screen<P: Platform>(
     let sink = slot_sink(&slot);
     let (capture, format) =
         platform.capture_screen(target, setup.canvas.fps, ten_bit, cursor, sink)?;
-    Ok(captured_video(slot, capture, format))
+    Ok(captured_video(slot, capture, format, None))
 }
 
 /// Unload a browser source's page while the program doesn't show it
@@ -934,6 +945,7 @@ fn captured_video<P: Platform>(
     slot: Arc<FrameSlot<P::Frame>>,
     capture: P::Capture,
     format: CaptureFormat,
+    camera: Option<CameraMetadataReader>,
 ) -> Opened<P> {
     Opened {
         video: Some(Video {
@@ -943,7 +955,10 @@ fn captured_video<P: Platform>(
             fps: format.fps,
         }),
         audio: None,
-        _running: Running::Capture { _capture: capture },
+        _running: Running::Capture {
+            _capture: capture,
+            camera,
+        },
     }
 }
 
@@ -960,7 +975,10 @@ fn captured_audio<P: Platform>(
             chunks,
             channels,
         }),
-        _running: Running::Capture { _capture: capture },
+        _running: Running::Capture {
+            _capture: capture,
+            camera: None,
+        },
     }
 }
 

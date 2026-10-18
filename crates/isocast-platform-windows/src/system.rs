@@ -1,0 +1,430 @@
+//! What this Windows machine is, the volumes recordings go to, CPU time,
+//! and MMCSS registration for the engine's real-time threads.
+//!
+//! Every query here is read-only and cheap: none opens a graphics device or
+//! an encoder, writes the registry, changes process-wide priority, or
+//! creates a directory.
+
+use std::cell::RefCell;
+use std::fs::{File, OpenOptions};
+use std::marker::PhantomData;
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
+use std::path::Path;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use isocast_engine::Volume;
+use isocast_protocol::api::Machine;
+use windows::Wdk::Storage::FileSystem::{
+    FileFsDeviceInformation, FileFsFullSizeInformation, NtQueryVolumeInformationFile,
+};
+use windows::Wdk::System::SystemServices::{
+    FILE_FS_DEVICE_INFORMATION, FILE_FS_FULL_SIZE_INFORMATION, FILE_REMOTE_DEVICE, RtlGetVersion,
+};
+use windows::Win32::Foundation::{ERROR_SUCCESS, FILETIME, HANDLE};
+use windows::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, GetFinalPathNameByHandleW,
+    GetVolumeInformationByHandleW, VOLUME_NAME_GUID,
+};
+use windows::Win32::System::IO::IO_STATUS_BLOCK;
+use windows::Win32::System::Ioctl::{FILE_DEVICE_DFS, FILE_DEVICE_NETWORK_FILE_SYSTEM};
+use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+use windows::Win32::System::SystemInformation::{
+    GlobalMemoryStatusEx, MEMORYSTATUSEX, OSVERSIONINFOEXW, OSVERSIONINFOW,
+};
+use windows::Win32::System::SystemServices::VER_NT_WORKSTATION;
+use windows::Win32::System::Threading::{
+    ALL_PROCESSOR_GROUPS, AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
+    GetActiveProcessorCount, GetCurrentProcess, GetCurrentThread, GetProcessTimes, GetThreadTimes,
+};
+use windows::core::{PCWSTR, w};
+
+/// The longest path `GetFinalPathNameByHandleW` is asked for, in UTF-16
+/// units: NT paths are limited to 32,767 characters.
+const MAX_FINAL_PATH: usize = 32_768;
+/// The largest registry string read, in bytes. CPU names and version
+/// labels are far shorter; anything longer isn't what we asked for.
+const MAX_REGISTRY_BYTES: u32 = 1024;
+
+/// The CPU, memory, logical cores and Windows version. Hardware encoders
+/// stay empty: listing them means loading Media Foundation transforms or
+/// GPU drivers, which this cheap startup query must not do.
+pub(crate) fn machine() -> Machine {
+    Machine {
+        chip: cpu_name().unwrap_or_else(|| "unknown".into()),
+        // 0 means unknown, as on the other platforms.
+        memory_gb: memory_bytes().map_or(0.0, |bytes| bytes as f64 / (1u64 << 30) as f64),
+        // SAFETY: plain query; 0 (failure) means unknown.
+        cores: unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) },
+        os: os_version().unwrap_or_else(|| "Windows (unknown version)".into()),
+        hardware_encoders: Vec::new(),
+    }
+}
+
+/// The processor's marketing name, from the read-only registry key the
+/// kernel fills at boot from CPUID.
+fn cpu_name() -> Option<String> {
+    let name = registry_string(
+        w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"),
+        w!("ProcessorNameString"),
+    )?;
+    // Some CPUs pad their brand string with spaces.
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+fn memory_bytes() -> Option<u64> {
+    let mut status = MEMORYSTATUSEX {
+        dwLength: size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: a correctly sized output structure with its length set.
+    unsafe { GlobalMemoryStatusEx(&mut status) }.ok()?;
+    (status.ullTotalPhys > 0).then_some(status.ullTotalPhys)
+}
+
+/// The real Windows version. `RtlGetVersion`, unlike `GetVersionEx`, isn't
+/// shimmed by the application manifest. The registry's `ProductName` is
+/// not used: it still says "Windows 10" on Windows 11.
+fn os_version() -> Option<String> {
+    let mut info = OSVERSIONINFOEXW {
+        dwOSVersionInfoSize: size_of::<OSVERSIONINFOEXW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: RtlGetVersion accepts the larger OSVERSIONINFOEXW when its
+    // size field says so; the pointer is to a live, correctly sized struct.
+    let status = unsafe { RtlGetVersion((&raw mut info).cast::<OSVERSIONINFOW>()) };
+    if status.is_err() {
+        return None;
+    }
+    let (major, minor, build) = (info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber);
+    let workstation = u32::from(info.wProductType) == VER_NT_WORKSTATION;
+    // Microsoft names client builds 22000 and later Windows 11. Server
+    // builds share numbers with client ones (2025 and 11 24H2 are both
+    // 26100), so a server is named only by its version number.
+    let name = match (workstation, major, build) {
+        (true, 10, 22000..) => "Windows 11",
+        (true, 10, _) => "Windows 10",
+        (true, _, _) => "Windows",
+        (false, _, _) => "Windows Server",
+    };
+    // Like "24H2"; missing on early Windows 10 builds.
+    let release = registry_string(
+        w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"),
+        w!("DisplayVersion"),
+    )
+    .map(|release| release.trim().to_owned())
+    .filter(|release| !release.is_empty());
+    Some(match release {
+        Some(release) => format!("{name} {release} ({major}.{minor}.{build})"),
+        None => format!("{name} ({major}.{minor}.{build})"),
+    })
+}
+
+/// A `REG_SZ` value under `HKEY_LOCAL_MACHINE`, read without opening the
+/// key for writing. `None` if missing, not a string, too long, or holding
+/// a NUL inside it.
+fn registry_string(subkey: PCWSTR, value: PCWSTR) -> Option<String> {
+    let mut bytes = 0u32;
+    // SAFETY: a size query (no buffer) into a live u32.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            subkey,
+            value,
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut bytes),
+        )
+    };
+    if status != ERROR_SUCCESS || bytes == 0 || bytes > MAX_REGISTRY_BYTES {
+        return None;
+    }
+    let mut buffer = vec![0u16; bytes.div_ceil(2) as usize];
+    let mut written = (buffer.len() * 2) as u32;
+    // SAFETY: `buffer` holds `written` bytes; RRF_RT_REG_SZ makes the call
+    // NUL-terminate the string within that size or fail (a value that grew
+    // between the calls fails with ERROR_MORE_DATA, and is skipped).
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            subkey,
+            value,
+            RRF_RT_REG_SZ,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut written),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+    let units = (written as usize / 2).min(buffer.len());
+    let mut text = &buffer[..units];
+    while let [rest @ .., 0] = text {
+        text = rest;
+    }
+    if text.contains(&0) {
+        return None;
+    }
+    String::from_utf16(text).ok()
+}
+
+/// Opens `path` (a file or a directory, following links: the volume asked
+/// about is the one its data is on) only to read its attributes. Every
+/// later query uses this one handle, so a path retargeted meanwhile can't
+/// mix two volumes' answers. Paths with a NUL are refused by std.
+fn open_for_query(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        // Required to open a directory handle.
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)
+        .with_context(|| format!("could not open {}", path.display()))
+}
+
+fn raw(file: &File) -> HANDLE {
+    HANDLE(file.as_raw_handle())
+}
+
+/// Free space for this user (after quotas), the file system's name, and
+/// whether it is a network share, for the volume holding `path`.
+pub(crate) fn volume(path: &Path) -> Result<Volume> {
+    let file = open_for_query(path)?;
+    let handle = raw(&file);
+
+    let size: FILE_FS_FULL_SIZE_INFORMATION = query_volume(handle, FileFsFullSizeInformation)
+        .with_context(|| format!("could not read free space for {}", path.display()))?;
+    let unit = u64::from(size.SectorsPerAllocationUnit) * u64::from(size.BytesPerSector);
+    let units = u64::try_from(size.CallerAvailableAllocationUnits).ok();
+    let (Some(units), true) = (units, unit > 0) else {
+        bail!(
+            "{} reported an impossible free space ({} units of {unit} bytes)",
+            path.display(),
+            size.CallerAvailableAllocationUnits
+        );
+    };
+    let free_bytes = units
+        .checked_mul(unit)
+        .with_context(|| format!("free space for {} overflows", path.display()))?;
+
+    let device: FILE_FS_DEVICE_INFORMATION = query_volume(handle, FileFsDeviceInformation)
+        .with_context(|| format!("could not read the device of {}", path.display()))?;
+    let network = device.Characteristics & FILE_REMOTE_DEVICE != 0
+        || device.DeviceType == FILE_DEVICE_NETWORK_FILE_SYSTEM
+        || device.DeviceType == FILE_DEVICE_DFS;
+
+    let mut name = [0u16; 261];
+    // SAFETY: live handle; the name buffer's length is passed with it.
+    unsafe { GetVolumeInformationByHandleW(handle, None, None, None, None, Some(&mut name)) }
+        .with_context(|| format!("could not read the file system of {}", path.display()))?;
+    let end = name
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(name.len());
+    let file_system = String::from_utf16_lossy(&name[..end]);
+
+    Ok(Volume {
+        free_bytes,
+        file_system,
+        network,
+    })
+}
+
+/// One fixed-size `FILE_FS_*` record for the volume of an open handle.
+fn query_volume<T: Default>(
+    handle: HANDLE,
+    class: windows::Wdk::Storage::FileSystem::FS_INFORMATION_CLASS,
+) -> Result<T> {
+    let mut info = T::default();
+    let mut io = IO_STATUS_BLOCK::default();
+    // SAFETY: `handle` is a live synchronous handle (std never opens with
+    // FILE_FLAG_OVERLAPPED), so the call completes before returning and
+    // `io` and `info`, on this stack frame, outlive it. `T` is the plain
+    // `repr(C)` record for `class`, with its exact size passed.
+    let status = unsafe {
+        NtQueryVolumeInformationFile(
+            handle,
+            &mut io,
+            (&raw mut info).cast(),
+            size_of::<T>() as u32,
+            class,
+        )
+    };
+    if status.is_err() {
+        return Err(windows::core::Error::from_hresult(status.to_hresult()).into());
+    }
+    Ok(info)
+}
+
+/// Whether two existing paths' data is on the same volume (so share its
+/// free space). Local volumes compare by the mount manager's volume GUID,
+/// found from each open handle. Where either has none (network shares,
+/// some virtual disks), they compare by volume serial number, which can
+/// collide between volumes: "same" is then the cautious answer, as it keeps
+/// a recording's reserve.
+pub(crate) fn same_volume(left: &Path, right: &Path) -> Result<bool> {
+    let left_file = open_for_query(left)?;
+    let right_file = open_for_query(right)?;
+    if let (Some(a), Some(b)) = (volume_guid(&left_file), volume_guid(&right_file)) {
+        return Ok(a.eq_ignore_ascii_case(&b));
+    }
+    Ok(volume_serial(&left_file, left)? == volume_serial(&right_file, right)?)
+}
+
+/// `\\?\Volume{…}` for the volume holding an open file, if it has one.
+fn volume_guid(file: &File) -> Option<String> {
+    let mut buffer = vec![0u16; 512];
+    // A few tries: the file may be renamed to a longer path between calls.
+    let mut tries = 0;
+    loop {
+        // SAFETY: live handle; the slice length is passed with the buffer.
+        let needed =
+            unsafe { GetFinalPathNameByHandleW(raw(file), &mut buffer, VOLUME_NAME_GUID) } as usize;
+        if needed == 0 {
+            return None;
+        }
+        if needed < buffer.len() {
+            // Success: `needed` excludes the terminating NUL.
+            buffer.truncate(needed);
+            break;
+        }
+        // Too small: `needed` is the size required, NUL included.
+        tries += 1;
+        if tries == 3 || needed > MAX_FINAL_PATH {
+            return None;
+        }
+        buffer = vec![0u16; needed];
+    }
+    if buffer.contains(&0) {
+        return None;
+    }
+    let path = String::from_utf16(&buffer).ok()?;
+    let rest = path.strip_prefix(r"\\?\")?;
+    if !rest.get(..7)?.eq_ignore_ascii_case("Volume{") {
+        return None;
+    }
+    let end = rest.find('}')?;
+    Some(path[..4 + end + 1].to_owned())
+}
+
+fn volume_serial(file: &File, path: &Path) -> Result<u32> {
+    let mut serial = 0u32;
+    // SAFETY: live handle and a valid output pointer; no buffers asked for.
+    unsafe { GetVolumeInformationByHandleW(raw(file), None, Some(&mut serial), None, None, None) }
+        .with_context(|| format!("could not read the volume of {}", path.display()))?;
+    Ok(serial)
+}
+
+fn filetime_ticks(time: FILETIME) -> u64 {
+    (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+}
+
+/// User plus kernel CPU seconds used by this process.
+pub(crate) fn process_cpu_seconds() -> Option<f64> {
+    let [mut created, mut exited, mut kernel, mut user] = [FILETIME::default(); 4];
+    // SAFETY: the current-process pseudo-handle needs no closing; all four
+    // outputs are live FILETIMEs.
+    unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    }
+    .ok()?;
+    let ticks = filetime_ticks(kernel).checked_add(filetime_ticks(user))?;
+    Some(ticks as f64 / 10_000_000.0)
+}
+
+/// User plus kernel CPU time used by the calling thread. Windows updates it
+/// at scheduler clock ticks (about 15.6 ms by default), so it is accurate
+/// only summed over many frames.
+pub(crate) fn thread_cpu_time() -> Option<Duration> {
+    let [mut created, mut exited, mut kernel, mut user] = [FILETIME::default(); 4];
+    // SAFETY: the current-thread pseudo-handle needs no closing; all four
+    // outputs are live FILETIMEs.
+    unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    }
+    .ok()?;
+    let ticks = filetime_ticks(kernel).checked_add(filetime_ticks(user))?;
+    Some(Duration::from_nanos(ticks.checked_mul(100)?))
+}
+
+/// This thread's MMCSS registration, reverted on this same thread when it
+/// exits (thread-local destructors run on their own thread).
+enum Mmcss {
+    Unset,
+    /// Held only for its `Drop`, which reverts the registration.
+    Registered {
+        _task: MmcssTask,
+    },
+    /// Tried and refused; not tried again on this thread.
+    Failed,
+}
+
+/// The opaque AVRT handle `AvSetMmThreadCharacteristicsW` returned. It is
+/// not a kernel handle: it is never closed, only reverted, and only on the
+/// thread that registered (the raw pointer and marker keep it !Send/!Sync).
+struct MmcssTask {
+    handle: HANDLE,
+    _thread_bound: PhantomData<*const ()>,
+}
+
+impl Drop for MmcssTask {
+    fn drop(&mut self) {
+        // SAFETY: the handle this thread got from a successful
+        // AvSetMmThreadCharacteristicsW, reverted exactly once, on it.
+        if let Err(error) = unsafe { AvRevertMmThreadCharacteristics(self.handle) } {
+            eprintln!("MMCSS: could not leave the Capture task: {error}");
+        }
+    }
+}
+
+thread_local! {
+    static MMCSS: RefCell<Mmcss> = const { RefCell::new(Mmcss::Unset) };
+}
+
+/// Join the calling thread to MMCSS's "Capture" task, so it is scheduled
+/// ahead of background work. The task's own default priority is kept:
+/// the engine marks many threads (program, frame clocks, audio, mix,
+/// writers), and raising them all would only make them compete with
+/// capture and encoder workers. Idempotent per thread; a failure (MMCSS
+/// service stopped, task missing) is reported once and the thread carries
+/// on at normal priority. Nothing process-wide changes.
+pub(crate) fn real_time_thread() {
+    // `try_with`: a thread already tearing down its locals just skips this.
+    let _ = MMCSS.try_with(|state| {
+        let Ok(mut state) = state.try_borrow_mut() else {
+            return;
+        };
+        if !matches!(*state, Mmcss::Unset) {
+            return;
+        }
+        let mut task_index = 0u32;
+        // SAFETY: a static NUL-terminated task name and a live output index.
+        *state = match unsafe { AvSetMmThreadCharacteristicsW(w!("Capture"), &mut task_index) } {
+            Ok(handle) => Mmcss::Registered {
+                _task: MmcssTask {
+                    handle,
+                    _thread_bound: PhantomData,
+                },
+            },
+            Err(error) => {
+                eprintln!("MMCSS: could not join the Capture task: {error}; normal priority");
+                Mmcss::Failed
+            }
+        };
+    });
+}

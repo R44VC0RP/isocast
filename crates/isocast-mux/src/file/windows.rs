@@ -24,12 +24,13 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_DISPOSITION_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FULL_DIR_INFO, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-    FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
-    FileDispositionInfo, FileFullDirectoryInfo, FileFullDirectoryRestartInfo,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
-    GetFinalPathNameByHandleW, SetFileInformationByHandle, VOLUME_NAME_DOS,
+    FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_TYPE_DISK, FileBasicInfo, FileDispositionInfo, FileFullDirectoryInfo,
+    FileFullDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW,
+    SetFileInformationByHandle, VOLUME_NAME_DOS,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -360,6 +361,121 @@ fn delete_metadata_temp(file: &File) -> io::Result<()> {
     Ok(())
 }
 
+pub(super) fn cancel_empty(
+    directory: &File,
+    file: File,
+    name: &OsStr,
+    expected_header: &[u8],
+) -> Result<()> {
+    if expected_header.is_empty() || expected_header.len() > 256 {
+        bail!("empty media header must contain 1 to 256 bytes");
+    }
+    validate_file(&file).context("created media is not a single regular file")?;
+    validate_empty_header(&file, name, expected_header)
+        .context("created media no longer contains only its initial header")?;
+    let identity = file_identity(&file).context("could not identify created media")?;
+    // The live writer deliberately has no DELETE access and denies delete
+    // sharing so ordinary ffprobe/Python readers work. Close it, but keep the
+    // caller's same Directory lease pinned throughout this closing gap.
+    drop(file);
+    let file = open_child(directory, name, OpenMode::CancelEmpty)
+        .context("could not reopen created media for deletion")?;
+    // open_child rejects reparse points, directories and multiple links. This
+    // new handle denies competing writers/deleters. Never follow the old file
+    // by ID if it moved, or delete a replacement at the original child name.
+    if file_identity(&file).context("could not identify reopened media")? != identity {
+        bail!("media identity changed while reopening for cancellation");
+    }
+    validate_empty_header(&file, name, expected_header)
+        .context("reopened media no longer contains only its initial header")?;
+    let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // SAFETY: this live DELETE handle has been revalidated against the original
+    // owned object and exact empty header. Only this handle is marked; no path
+    // deletion, truncation, POSIX disposition or sharing bypass is used.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            (&info as *const FILE_DISPOSITION_INFO).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error()).context("could not mark empty media for deletion");
+    }
+    // File closes before returning to the caller that owns the folder lease.
+    Ok(())
+}
+
+fn validate_empty_header(file: &File, name: &OsStr, expected: &[u8]) -> Result<()> {
+    // A rename must not turn the original leaf into a short-name/case alias.
+    // Inspect the handle's name only; never reopen using the returned path.
+    if final_path(file)?.file_name() != Some(name) {
+        bail!("media no longer has its original exact file name");
+    }
+    if file.metadata()?.len() != expected.len() as u64 {
+        bail!("media length does not match its initial header");
+    }
+    let mut header = [0u8; 256];
+    let mut read = 0;
+    while read < expected.len() {
+        match read_at(file, &mut header[read..expected.len()], read as u64) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
+            Ok(n) => read += n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if &header[..expected.len()] != expected || file.metadata()?.len() != expected.len() as u64 {
+        bail!("media bytes or length do not match its initial header");
+    }
+    Ok(())
+}
+
+#[derive(PartialEq, Eq)]
+struct FileIdentity {
+    volume: u64,
+    id: [u8; 16],
+    created: i64,
+}
+
+fn file_identity(file: &File) -> io::Result<FileIdentity> {
+    let mut id = FILE_ID_INFO::default();
+    // SAFETY: file is live; id is an aligned, writable structure of this class.
+    // Use the full 128-bit ID (including on ReFS), not a truncated file index.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            (&mut id as *mut FILE_ID_INFO).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let mut basic = FILE_BASIC_INFO::default();
+    // SAFETY: file is live; basic is the correctly sized output for this class.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            (&mut basic as *mut FILE_BASIC_INFO).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // LastWriteTime/ChangeTime can change on closing the writer; neither is
+    // identity. Unsupported identity queries fail closed, without a fallback.
+    Ok(FileIdentity {
+        volume: id.VolumeSerialNumber,
+        id: id.FileId.Identifier,
+        created: basic.CreationTime,
+    })
+}
+
 pub(super) fn open_child(directory: &File, name: &OsStr, mode: OpenMode) -> io::Result<File> {
     let mut wide: Vec<u16> = name.encode_wide().collect();
     let length = wide
@@ -404,6 +520,10 @@ pub(super) fn open_child(directory: &File, name: &OsStr, mode: OpenMode) -> io::
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             FILE_OPEN,
         ),
+        // Cancellation alone needs DELETE, after closing the original writer.
+        // Readers denying delete sharing make this fail closed; do not weaken
+        // the live Create/Repair access or sharing modes to avoid that refusal.
+        OpenMode::CancelEmpty => (FILE_GENERIC_READ | DELETE, FILE_SHARE_READ, FILE_OPEN),
         // Several recordings need to open the same lock for LockFileEx's
         // shared lock. Deny delete sharing, so nobody can replace its name
         // and thereby create an independent folder-lock domain.

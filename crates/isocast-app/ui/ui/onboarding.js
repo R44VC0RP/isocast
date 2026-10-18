@@ -28,6 +28,7 @@ const STATE_LABEL = {
   not_determined: "Not asked yet",
   restricted: "Blocked by a policy",
   not_granted: "Not allowed",
+  unknown: "Unknown",
 };
 
 const LAYOUTS = [
@@ -186,6 +187,7 @@ function PermissionsStep() {
   // What to do, in the app's words (the daemon's next steps are for the
   // command line).
   const guidance = (d, info) => {
+    if (d.state === "unknown") return d.next_step ?? "Access is checked when capture starts.";
     if (d.action === "open_settings") {
       return html`Turn on “${app}” in System Settings → Privacy & Security → ${info.pane}.${d.restart_after_granting
         ? html` Then <button class="link" onClick=${restart}>restart the engine</button>.`
@@ -196,7 +198,9 @@ function PermissionsStep() {
   };
   return html`
     <h1>Let Isocast see and hear</h1>
-    <p class="ob-lead">macOS asks you once for each. You can skip any of them now; your setup leaves out what it can’t use, and you can allow it later.</p>
+    <p class="ob-lead">${details.some((d) => d.state === "unknown")
+      ? "Access is checked when capture starts; no per-app permission prompt is available. See each item for guidance."
+      : "macOS asks you once for each. You can skip any of them now; your setup leaves out what it can’t use, and you can allow it later."}</p>
     <div class="ob-list">
       ${!report && html`<div class="ob-row"><div class="spinner" /><span class="dim">Checking…</span></div>`}
       ${details.map((d) => {
@@ -276,7 +280,7 @@ function DevicesStep({ choices, set }) {
           (d) => html`<${Choice} key=${d.id} on=${choices.display === d.name || (choices.display === "main" && d.main)}
             title=${d.name} meta=${`${d.main ? "Main display · " : ""}${d.width}×${d.height}`} onClick=${() => set({ display: d.main ? "main" : d.name })} />`,
         )}
-        ${devices.displays.length === 0 && html`<div class="ob-row-hint">No displays found${devices.permissions?.screen_recording !== "granted" ? " (screen recording isn’t allowed yet)" : ""}.</div>`}
+        ${devices.displays.length === 0 && html`<div class="ob-row-hint">No displays found${!["granted", "unknown"].includes(devices.permissions?.screen_recording) ? " (screen recording isn’t allowed yet)" : ""}.</div>`}
       </div>
       <div class="ob-group">
         <div class="ob-label">Camera</div>

@@ -3133,6 +3133,7 @@ dependencies = [
  "isocast-obsws",
  "isocast-platform-macos",
  "isocast-platform-stub",
+ "isocast-platform-windows",
  "isocast-protocol",
  "isocast-surfaces",
  "libc",
@@ -3224,6 +3225,7 @@ dependencies = [
  "isocast-engine",
  "isocast-platform-macos",
  "isocast-platform-stub",
+ "isocast-platform-windows",
  "isocast-protocol",
  "serde_json",
  "wgpu",
@@ -3278,6 +3280,23 @@ dependencies = [
  "isocast-surfaces",
  "wgpu",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "isocast-platform-windows"
+version = "0.0.7"
+dependencies = [
+ "anyhow",
+ "cc",
+ "isocast-diagnostics",
+ "isocast-engine",
+ "isocast-mux",
+ "isocast-protocol",
+ "isocast-surfaces",
+ "parking_lot",
+ "wgpu",
+ "windows",
+ "windows-core",
 ]
 
 [[package]]

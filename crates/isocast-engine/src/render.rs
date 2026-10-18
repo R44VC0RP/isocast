@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail};
 
 use isocast_protocol::{Align, Blend, Crop, Fit, ScaleFilter};
 
-use crate::gpu::{Gpu, GpuFrame, Matrix, YCbCr};
+use crate::gpu::{Gpu, GpuFrame, GpuPixels, Matrix, YCbCr};
 
 const SHADER: &str = r#"
 struct Draw {
@@ -1008,6 +1008,19 @@ impl Renderer {
 
     /// The bind group (1) a draw of `frame`'s picture samples.
     pub(crate) fn frame_group(&self, gpu: &Gpu, frame: &GpuFrame) -> wgpu::BindGroup {
+        if let GpuPixels::YCbCrBiPlanar { texture, .. } = &frame.pixels {
+            let luma = texture.create_view(&wgpu::TextureViewDescriptor {
+                format: Some(wgpu::TextureFormat::R8Unorm),
+                aspect: wgpu::TextureAspect::Plane0,
+                ..Default::default()
+            });
+            let chroma = texture.create_view(&wgpu::TextureViewDescriptor {
+                format: Some(wgpu::TextureFormat::Rg8Unorm),
+                aspect: wgpu::TextureAspect::Plane1,
+                ..Default::default()
+            });
+            return views_group(gpu, &self.planes_layout, &luma, &chroma);
+        }
         let (plane0, plane1) = frame.planes();
         planes_group(gpu, &self.planes_layout, plane0, plane1)
     }
@@ -1200,17 +1213,26 @@ fn planes_group(
 ) -> wgpu::BindGroup {
     let view0 = plane0.create_view(&Default::default());
     let view1 = plane1.create_view(&Default::default());
+    views_group(gpu, layout, &view0, &view1)
+}
+
+fn views_group(
+    gpu: &Gpu,
+    layout: &wgpu::BindGroupLayout,
+    view0: &wgpu::TextureView,
+    view1: &wgpu::TextureView,
+) -> wgpu::BindGroup {
     gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("draw planes"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view0),
+                resource: wgpu::BindingResource::TextureView(view0),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(&view1),
+                resource: wgpu::BindingResource::TextureView(view1),
             },
         ],
     })

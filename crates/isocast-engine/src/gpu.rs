@@ -65,8 +65,10 @@ impl Gpu {
             ..Default::default()
         }))
         .context("no GPU found")?;
-        // 10-bit frames arrive as 16-bit planes.
-        let required_features = adapter.features() & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+        // 10-bit frames arrive as 16-bit planes; native Windows cameras use
+        // genuine NV12 allocations with two aspect views of one texture.
+        let required_features = adapter.features()
+            & (wgpu::Features::TEXTURE_FORMAT_16BIT_NORM | wgpu::Features::TEXTURE_FORMAT_NV12);
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("isocast"),
             required_features,
@@ -499,16 +501,20 @@ impl GpuFrame {
             kind: match &self.pixels {
                 GpuPixels::Rgb(_) => TexelKind::Rgb,
                 GpuPixels::Premultiplied(_) => TexelKind::Premultiplied,
-                GpuPixels::YCbCr { coding, .. } => TexelKind::YCbCr(*coding),
+                GpuPixels::YCbCr { coding, .. } | GpuPixels::YCbCrBiPlanar { coding, .. } => {
+                    TexelKind::YCbCr(*coding)
+                }
             },
         }
     }
 
-    /// The textures a draw of it samples (the same twice for one plane).
+    /// Backing textures used as cache identities. A multi-planar allocation
+    /// appears twice; the renderer selects its distinct plane aspects.
     pub(crate) fn planes(&self) -> (&wgpu::Texture, &wgpu::Texture) {
         match &self.pixels {
             GpuPixels::Rgb(texture) | GpuPixels::Premultiplied(texture) => (texture, texture),
             GpuPixels::YCbCr { luma, chroma, .. } => (luma, chroma),
+            GpuPixels::YCbCrBiPlanar { texture, .. } => (texture, texture),
         }
     }
 }
@@ -524,6 +530,12 @@ pub enum GpuPixels {
     YCbCr {
         luma: wgpu::Texture,
         chroma: wgpu::Texture,
+        coding: YCbCr,
+    },
+    /// One real NV12 allocation, sampled through Plane0/R8Unorm and
+    /// Plane1/Rg8Unorm views. Never independently tracked alias textures.
+    YCbCrBiPlanar {
+        texture: wgpu::Texture,
         coding: YCbCr,
     },
 }

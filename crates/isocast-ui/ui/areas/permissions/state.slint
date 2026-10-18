@@ -38,6 +38,8 @@ export global PermissionsArea {
     in-out property <bool> shown;
     // Read from the engine at least once.
     in property <bool> checked;
+    // Access can only be determined by attempting capture, without a prompt.
+    in property <bool> unknown-access;
     in property <[PermissionItem]> items;
     // Every permission that's needed is allowed: Continue.
     in property <bool> ready;

@@ -140,6 +140,23 @@ impl Writer {
         !self.tracks.is_empty()
     }
 
+    pub(crate) fn container(&self) -> Container {
+        self.container
+    }
+
+    /// Cancel only the initial, owned header. No published index or media is
+    /// removed; identity is rechecked through the original directory lease.
+    #[cfg(windows)]
+    pub fn cancel_empty(self) -> Result<()> {
+        ensure!(
+            !self.moov_written && self.sequence == 0,
+            "movie has fragments; retained instead of cancelling"
+        );
+        let mut expected = ftyp(self.container);
+        expected.extend_from_slice(&placeholder());
+        self.file.cancel_empty(&expected)
+    }
+
     /// Empty tracks are omitted from this fragment, but keep their ids.
     /// Durations inside a fragment follow the next DTS, preserving gaps.
     /// A failed I/O poisons this writer; repair uses the surviving bytes.

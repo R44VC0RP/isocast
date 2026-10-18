@@ -505,7 +505,7 @@ impl Daemon {
             .map_or(0.0, |setup| setup.recording.keep_free_gb * 1e9);
         drop(state);
         use isocast_engine::Platform;
-        if !crate::platform::NativePlatform
+        if !crate::platform::native()
             .same_volume(folder, &recording)
             .ok()?
         {
@@ -1113,12 +1113,12 @@ fn short_file_notes(takes: &[TakeFiles], sources: &[String]) -> Vec<String> {
 
 fn join_files(spec: &JoinSpec, progress: OnJoinProgress) -> anyhow::Result<Joined> {
     use isocast_engine::Platform;
-    crate::platform::NativePlatform.join_files(spec, progress)
+    crate::platform::native().join_files(spec, progress)
 }
 
 fn free_bytes(folder: &Path) -> Option<u64> {
     use isocast_engine::Platform;
-    crate::platform::NativePlatform
+    crate::platform::native()
         .volume(folder)
         .ok()
         .map(|v| v.free_bytes)

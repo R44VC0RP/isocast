@@ -1787,6 +1787,55 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   hosted recording; fail clearly
   for unsupported devices/codecs. A synthetic program and ISOs produce
   decodable, aligned files on windows-latest, with honest loss counters.
+  - [ ] **W.4a Platform/FileWriter adapter (agent/windows).** Integrate the
+    capture lane's committed native pieces, not duplicate their implementation.
+    Production WindowsPlatform now integrates writable BGRA output, real
+    Engine compositor/filtered ISOs, native recording-quality policy, MF AAC
+    and WASAPI. Shared native media contracts7/7 pass WITHOUT factory overrides;
+    actual Engine+loopback3takes/9files/540pictures fully decode with2s A/V
+    tracks andzero countedlosses. NativeGPUdebug/blocked-queue lifetime passes.
+    Original WGC GPU-copy stand-in proved1080p60, not full-app performance;
+    real kill preservescommittedvideo/AAC andrepairisbyte-idempotent.4Kthree
+    outputs runhalfrealtime; twofill8pending/refuseISOtick23. Targetsremainunmet.
+    Device/permission/name resolution nowpassesactualown-WGC Engine3takes/
+    9A/Vfiles/1080pictures,full-decode/colors/audio; unknownconsentisreported
+    truthfully,32read-onlydiscoverycycleskeep151handles. WGC helper lifetime
+    nowqualifies below; camera/full-performance/nativeparity gates remain.
+    FinalbranchMacgates nowpass
+    afterthecoordinator freedbuildspace(233unit+1doctest,strictClippy).
+  - [x] **W.4 WGC helper lifetime gate (ready for CI).** ETW attributes retained
+    ports to WindowsGraphicsCapture→COM→RPC, released only at process exit.
+    WindowsPlatform uses a job-owned sibling helper with shared GPU textures,
+    completion fences and acknowledged frame leases, without another pixel
+    copy/readback.20reopens keep parentALPC at5; retained frames survive helper
+    exit/crash/reopen/resize. BlockedGPU32-frame pressure and parent-crash
+    cleanup pass. ActualEngine9A/Vfiles/1080frames and25s4K60program+ISO/AAC
+    3000frames pass full decode withzero reported losses. NativeClippy/81unit,
+    Mac233unit+1doctest and independent review pass. Uncommitted as requested.
+  - [x] **W.4 daemon selection (ready for CI).** Deliberately mergefa061065;
+    WindowsPlatform records real screen+CamLink4K+mic through CLI and app,
+    program+twoISOs. FinalCLI900frames and actualapp1005frames fully decode
+    withzero losses; realkill/restart preserves537video frames plus all
+    observedAAC packets, second recovery byte-idempotent. Camera delivery is
+    explicit sharedMJPG CPUdecode/upload; actualdefaultmic was silent.
+    WGC helper now waits for original presentationPTS beforepublication:
+    resolves UI-only future-frame starvation without rebasing/enlargingqueues.
+    Sharedpreview/playback remainunsupported. Include isocast-capture.exe
+    beside daemon/UI; new work remainsuncommitted forcoordinator.
+  - [ ] **W.4/W.5 Stop and performance targets:** Windows Stop now wakes its
+    coordinator immediately (measured0.06–0.08ms), retaining10msfallback and
+    minimum-take/durablefinish semantics. WholeRPC54–134ms stillNOT<20ms;
+    finalinput tail andmuxsync dominate. Headlessdaemon+helperCPU measured
+    58.90%onecore at1080program /56.85%at4Kprogram, bothwith4Kscreen+1080camISOs.
+    MatchedOBS baselineblockedbyCamLinkresource-busy atbothdefaultNV12and
+    exactexistingMJPG1080p60; protectedbridgeunchanged. Nohalf-OBS/lower-memory
+    claim fromunmatchedworkloads. Future performancework retainsdata/durability.
+  - [x] **W.4 codec boundary gate:** tag/guard encoded codec at the engine
+    boundary before wiring HEVC files. Existing live frame-stream/FLV paths
+    assume H.264 parameter sets; the Windows live factory stays H.264, while
+    the recording factory usesexplicitVideoEncoding andFileWriterchecksactual
+    codec/configuration beforeAAC/video muxing. NativeH264/HEVC8/10full-decode
+    cases passed; this doesnotclaimtrue10bitsourceprecisionfromBGRA8.
 - [ ] **W.5 Capture, audio and encoders.** Windows.Graphics.Capture for
   screens/windows, Media Foundation cameras, WASAPI input/loopback/output,
   NVENC-first, hardware MF (NVENC/QSV/AMF) fallback, software last;
@@ -1801,6 +1850,126 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   at 1080p60 and 4K60 with ISOs: launch-to-first-preview, ready-to-record,
   start-record latency, CPU/GPU/memory and dropped frames. Install isolated
   OBS as a permitted test dependency, never use Ryan's OBS profile.
+  Standing Windows performance gates (Ryan,2026-10-18), matched full-engine
+  program+ISOs at1080p60 and4K60: CPU at most half OBS, memory below OBS at
+  every size, faster launch→first preview and launch→ready-to-record,
+  stop<20ms and zero drops. Profile with WPR/ETW. Native MF AAC, GPU-resident
+  NV12, exclusive-ownership direct NVENC registration where safe, fewer
+  per-frame map/unmap/fences and MMCSS belong in W.5, not a later polish pass.
+  Report timing/durability boundaries and matched settings; do not meet a
+  metric by hiding helper CPU, deferring finalization or violating NVENC's
+  mapped-resource ownership contract.
+  - [x] **W.5a Native capture substrate (agent/windows-capture).** Commit
+    8619c20, Actions39074561618 green. WGC display/HWND capture into bounded,
+    fenced D3D11 BGRA textures; QPC stamps, cursor switch, resize, pressure
+    counts and joined teardown. Six 1080p60/4K60 runs at 59.997–59.998 fps,
+    zero observable pool/rate drops; 32 retained frames force counted drops
+    and resume correctly, retained pixels survive resize. Two simultaneous
+    captures share a device, window-close fallback verified on Windows 19045.
+    ~230 ms device-open-to-first frame; not UI/record readiness. One GPU copy,
+    no CPU readback; wgpu import, encoding and Platform selection still pending.
+    OBS portable installed, matched record/ISO comparisons not yet possible.
+  - [x] **W.5b Zero-copy DX12 input (agent/windows-capture).** Commit267a169,
+    Actions39080080156 green. Same-adapter
+    NT-handle imports and GPU-side waits on wgpu's rendering queue; no extra
+    pixel copy/upload/readback. Cached surfaces and native frame leases keep
+    the pool bounded through GPU work. Real renderer, held-texture pressure,
+    blocked-GPU retention, resize and simultaneous imports verified under
+    D3D12 GPU validation; native build/strict clippy,81 engine tests and full
+    remote Mac gates pass. Final six10s runs:3606 completed renders at1080p/4K,
+    no counted drops; callback→GPU completion0.575/0.878ms median.
+    Reopening also exposed a WinRT factory lifetime crash, fixed by retaining
+    the process MTA; Windows10 RPC handle retention across fresh capture
+    workers remains a measured follow-up before Platform integration.
+    Output pools/NVENC/writer/daemon selection remain separate work.
+  - [x] **W.5c1 Native NVENC H.264 (agent/windows-capture).** Commit692314a,
+    Actions39086165352 green. Asynchronous
+    D3D11 P5/low-latency/High/709-limited encoding, eight bounded private GPU
+    input/output slots, no CPU pixel readback. Native mapping is exclusive,
+    so copy shared frames on GPU before mapping. H.264+mux files decode at
+    1080p60/4K60; red-patch colour, repeated input plus concurrent compositor,
+    rate changes, flush/drain and12-session driver admission verified.
+    First matched single-window/silent-AAC OBS comparison:12 files decode,
+    zero reported losses; prototypeCPU7.0/8.2% vsOBS9.8/12.7% of one core.
+    Not full program/ISO parity: benchmark AAC is an external FFmpeg helper.
+    MF hardware/software fallback, HEVC, GPU output pools, native AAC and
+    engine priority/ISO shedding remain gates before Platform selection.
+  - [x] **W.5c2 H.264 Media Foundation fallback (agent/windows-capture).**
+    Commit7b17f64; Actions39089312953 portable jobs passed; native UI build
+    failed with rustc-LLVM out-of-memory (platform crate compiled).
+    NVENC-first provider selection, observable hardware-MFT/software-MFT
+    fallback, private GPU NV12 conversion and tracked-sample retention.
+    Explicit software download only; bounded admission and timestamp checks.
+    Final low-latency hardware1080p60/4K60, software1080p60 and NVENC
+    regression files decode2400/2400 frames with zero drops;
+    12 occupied NVENC sessions force the software fallback, which records
+    60/60 frames while existing sessions survive and capacity returns.
+    16 real reopens per MF provider have stable native handles. Strict native
+    clippy,81 engine tests, full remote Mac gates and independent review pass.
+    Ready for CI; HEVC/10-bit follows this slice. No WindowsPlatform selection
+    or full recording parity yet.
+  - [x] **W.5c3 HEVC Main/Main10 (agent/windows-capture).** Extend native
+    NVENC and hardware MF without codec/depth downgrade; length-prefixed HEVC
+    packets and truthful hvcC, GPU-resident BGRA8 and actual RGB10 input,
+    P010 conversion and matching DX12 import. Verify real1080p60/4K60 files,
+    decoded10-bit precision, bounded retention/drain and H.264 regressions.
+    NVIDIA HEVC MFT is installed on exon-desk; no software HEVC MFT is present.
+    Final1980/1980-frame matrix, true10-bit precision, concurrency, lifetime
+    and pressure checks pass; native strict clippy/81 engine tests, full
+    remote Mac gates and independent review pass. Ready for CI.
+    Engine codec-tag guard remains required when
+    wiring HEVC to the writer, never the H.264 live/FLV path.
+  - [x] **W.5c4 Recording-quality construction and nonterminal barriers.**
+    Explicit native QP/Quality from VideoTrackSpec, no bitrate inferred from
+    VideoToolbox quality. Packet-acknowledged barrier preserves prefix on
+    failure without EOS; drained sessions start new files with forcedIDR and
+    monotonic inputPTS. Native terminal errors preserve queued valid output.
+    41files/1230decoded frames verify native quality ladder, two-file reuse,
+    callback-error retry and liveCBR regression. Microsoft software quality
+    rounding fails closed; default software recording remains unqualified.
+    Native clippy/81engine tests and read-only review pass; full portable gates
+    blocked on build-host disk floors, not bypassed. No full-engine/perf claim.
+  - [x] **W.5c4a Nearest software MF quality.** Read actual after media-type
+    negotiation; bounded nearest-value selection and truthful actual report.
+    Production64×48 H264 defaultHigh70→72 now records; all101raw qualities
+    and5factory presets pass.115files/711frames including NVIDIA regressions
+    decode;101opens keep454handles. Native strict clippy/81tests/review pass.
+    Uncommitted, ready for CI; full remote portable gates pass233unit+1doctest
+    after m2-b space recovered, no cache cleanup or disk-floor bypass.
+  - [x] **W.5d1 Native AAC and WASAPI capture primitives.** Microsoft raw48k
+    AAC-LC with explicit1024-frame pre-roll, bounded admission, nonterminal
+    polling and terminal trim; event-driven mic/endpoint loopback with native
+    clock/loss accounting and joined teardown.56AAC edge cases plus actual
+    24k/48k devices→AAC→MP4/full decode pass; repeated handles stable. WPR/ETW
+    scoped evidence, not full-engine OBS parity. Endpoint exclusions/playback,
+    absolute A/V alignment and reconnect qualification remain separate gates.
+  - [ ] **W.5d2 GPU Media Foundation cameras.** Correct physical target is
+    **Elgato Cam Link4K** (Ryan corrected the earlier4K S assumption). Prior
+    MF-source4K S results are wrong-target diagnostics, not Cam Link proof.
+    SharedReadOnly FrameServer now supplies realMJPG1080p60 without changing
+    the bridge. WIC decode→BGRA GPU upload is explicit in manifest.delivery;
+    native NV12 retains the GPU-only path.30QPC-matched nonuniform frames,
+    248,832,000exact bytes and discriminatory field-swap/line-double controls
+    pass;180-frame Renderer/NVENC run passes GPU validation and12reopens.
+    Safe own-reader loss/stopped/reopen passes; physical unplug/replug remains
+    blocked by protecting the bridge. Native165tests/strictClippy and portable
+    full233unit+1doc gates pass; fallback Astra review has no blockers for
+    this capture-library slice (ready forCI). Delegator chose
+    sample-flag precedence/default weave: preserve both already-interleaved
+    fields unchanged on GPU. Native capture, genuine NV12 plane-view rendering
+    and source-keyed manifest metadata bridge are implemented;180-frame real
+    capture/render/native-encode and bounded retention/reopen checks now pass
+    on the realCam Link via sharedMJPG. Writer lane owns native Platform camera/metadata
+    hooks and actual-frame ISO input selection. Shared uncompressed formats and
+    single-field pairing remain unsupported; no other app terminated.
+    Optional per-source off/weave/bob setting comes later. No RGB roundtrip
+    for camera/ISO or fake plane textures. Regular reviewer unavailable.
+    - [x] **W.5d2a Native NV12 input slice.** Committed42e2a922 by coordinator.
+      GPU array-slice/crop copies,
+      private NVENC input and MF NV12 copy/P010 code expansion pass exact
+      component checks and7files/210decodedframes. BGRA regression37files/
+      1110frames, native fmt/strict Clippy/81tests pass. Full portable gates
+      now pass onm2-b:233unit+1doctest,1hardware-only ignored; no floor bypass.
 - [ ] **W.6 App, IPC and shared surfaces.** Slint Windows window and native
   integration, same-user named pipes with isolated engines, D3D11/D3D12
   surface hand-over/fences with adapter identity and bounded per-viewer
@@ -1843,6 +2012,111 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 
 ## Log
 
+- W integration (2026-10-18, ready for CI): main1dbb44c9 merged into
+  agent/windows5e2d496b withoutcommit. Retained WindowsBGRA/NV12/helper/camera/
+  rawISO/Stopwake paths with main's canvases, framebudget, masks, self-tuning
+  andfollowups. Windows CI uses main's splitUI/no-gallery memory fix, plus
+  explicit nativepackage forhelper compilation. Macgates pass249unit+1doc,
+  strictClippy/fmt (1existinghardwareignore); Windowsnativeall-targetcheck
+  passesdc58f10e. Independentfallback audit clear; ordinaryreview unavailable.
+  Merge staysuncommitted forcoordinator WindowsCI, no runtime/performanceclaim.
+
+- W.4 (2026-10-18, ready for CI: Windows daemon recording): committedcamera
+  snapshotfa061065 merged deliberately (pendingMERGE_HEAD); native daemon
+  selects sharedWindowsPlatform, rawISO input matchesactualFrameformat.
+  CLI58/58checks, actualapp53/53checks, fullA/Vdecode/zero losses. App's
+  initiallymissing screenISO traced to WGC PTS26msahead; due-time publication
+  changed missing600→0, preservingtimestamps andbounds. NativecleanUIexit
+  now0 afterexplicitcleanup (previousnativeexit-phaseoverride2170).
+  Realdaemonkill/restart37recoverychecks preserveallobservedpackets and
+  exactsecond-recoverybytes. Native190tests/strictClippy andMac233unit+1doc
+  pass; finalnativefixes have explicitfallbackaudits afterreviewservice
+  outages. Stopwakecomponentimproved, butunder20ms/fullperformancetargetsopen.
+
+- W.4 (2026-10-18, ready for CI: WGC helper isolation and lifetime): isolate
+  Windows-owned RPC retention in one disposable helper per capture; preserve
+  GPU allocation ownership with shared textures/fences and per-picture leases.
+  FlatALPC20reopens, post-exit/crash retained-frame encoding, parent-death
+  cleanup,32-frame blockedGPU pressure and640→800→640resize all pass. Real
+  Engine9A/Vfiles/1080frames and4K60program+ISO25s/3000frames fully decode with
+  zero losses. NativeClippy/81unit and Mac233unit+1doctest pass; ordinary review
+  cleared the geometry-cache fix. Helper shutdown max33.05ms measured, not a
+  <20ms record-stop win; post-isolation CPU comparisons must include helpers.
+
+- W.4/W.5 (2026-10-18, scoped memory reduction; uncommitted): NVENC private
+  ring8→4 matches the documented4+B minimum without changing presets/quality
+  or shared-frame ownership. Three actual4K60HEVC program+ISO/AAC takes pass
+  9,000pictures/full decode/zero reported losses. Matched no-preview recorder
+  CPUmedian6.172%onecore versusOBS17.734%; private memory~1,085 versus~1,160MiB.
+  RSS~368 still exceedsOBS~349MiB: overall memory/full-app gates remain open.
+  ModerateCUDAcontention preserves1,200packets, max polled latency30.55ms;
+  single4KH264 remains88.9fps, not an overload fix. Native strictClippy,81unit
+  tests,7native contracts and1080p/HEVC8/10 regression pass; capture unavailable
+  is not full parity. WGC lifetime isolated to method-call ALPC retention;
+  allocation-stack trace precedes user-approved GPU-shared helper containment.
+
+- W.4/W.5 (2026-10-18, profile before tuning): branch4a2063e8 finalMacgates
+  pass(m2-b,233unit+1doctest,oneexistinghardwareignore). Exactold4Kfailure
+  reproducedunderWPRwithzero lostevents. Native-boundarytimingandNVMLshow
+  H264/P5encoderbackpressure,notcopy/map/fileIO:9.223sof10.175sinEncodePicture;
+  isolatedNV12/P5control~86.6fps. RealEngine2×4K60H264alsofails; explicit
+  HEVC/P5comparisonpasses600/600pictures,zero countedlosses,fullA/Vdecode.
+  Noqueueenlargement,presetdowngradeorcodec-switchmasqueradingasH264fix.
+  OBSmatchedconfigurationqualificationandWGCfresh-vs-reusedthreadlifetime
+  experiments are active; allnewwork remainsuncommitted as requested.
+
+- W.4a (2026-10-18, real WGC engine/discovery; still in progress): actual
+  productionWindowsPlatform+Engine resolvesownwindowsbyapp/title andrecords
+  program+2ISOs+WASAPI/MF AAC,3takes9files1080pictures/full-decode/colors/tone
+  checks,zero countedlosses. No copied-compositor/test-policyoverride. Native
+  display/window/micdiscovery, physicalsizes, stablemonitorIDs andUnknown
+  permissions implemented; explicitcaptureworkswhiledoctorwarns/initusesreal
+  devices.32readonlydiscoverycycles151handlesconstant. FixedinitialUnknownUI
+  reportflow afterreview; fullnative/UIstrictClippyand178unittests pass.
+  Finalfullnativecontractprofileis7passed/captureunavailable(Unknownconsent),
+  neverfullparity. FinalMacgatesstilldisk-floorblocked. Daemon
+  remainsstub pendingcapturelifetime/performance/camera/remainingPlatformgates.
+
+- W.4a (2026-10-18, production A/V integration; still in progress): imported
+  qualified native AAC/WASAPI/recording-policy snapshots. ProductionWindows
+  media7/7passesnormal/pressure/ownership/realcommit-killrepairwithtwoAACtracks,
+  measuredsync0 andidempotentrepair. ActualEngine+WASAPI997Hzstimulus+MF AAC+
+  filteredprogram/2ISO3takes9files540picturesfull-decodewith2s tracks,zero
+  countedlosses.20AACedges243checkscovertinyfirst/lastsamples,audio-only
+  cancel/drop,gaps,invalidinput,reservationvalidationfailure. Reviewfound
+  advancing16kcaller starvation; boundedtwo-batchgapfill nowoutpacesit and
+  nativefalse,false,true/tone-placementregressionpasses. Reviewresolved.
+  Windowsdiskprobe no longerdeletesunownedpathname; realcanarypreserved.
+  Nativechecks pass; finalMacgatesblockedbyallbuildhostsbelow40GBfloor.
+  EarlierMacoutputbatch233unit+doctest and19/19e2e+9filteredISO filespass.
+  Daemonstillstub; capture-lifetime/4K performance anddiscovery gatesremain.
+
+- W.4a (2026-10-18, real recording proof; still in progress): retained
+  Session1 probes now record native WGC→NVENC→FileWriter program+2ISOs.
+  640/1080 files each hold300frames/5s; full decode, shared timeline, distinct
+  program/ISO pixels and native HEVC8/10/gap-tail cases pass. Real kill after
+  2.5s leaves150verified frames in each of3files; repair/full decode and byte-
+  idempotent second repair pass.1080CPU single sample4.293%ofonecore, not a
+  matched OBS comparison.4Kthree-output5s media takes10.155s; two outputs
+  reproducibly refuseISO tick23 with8pending/15completed. Their24/23accepted
+  prefixes still finish and full-decode. No queue enlargement, hidden retry,
+  quality downgrade or native-encoder patch. Corrected probe's busy-yield and
+  added real-time verification so file counts cannot hide missed deadlines.
+  All probe/driver sources, tree and executable hashes retained; nativeAPI
+  ownership/AAC coordination remains open. No daemon switch or CI claim.
+
+- W.4a (2026-10-18, in progress): integrated capture lane5d05c5ce locally
+  after GPU fixea67be57; merge remains uncommitted. Added a video-only native
+  FileWriter taking a caller-configured encoder, deferred codec configuration
+  on an owned mux reservation, and identity-checked empty cancellation.
+  Native release build/strict clippy,81 existing engine tests and12 contract
+  verifier tests pass. Empty cancellation, refusal with a hard link or
+  deny-delete reader, nonempty finish/full decode and pinned junction rebound
+  pass. Read-only system queries and64 MMCSS thread lifetimes pass. Native
+  writer recording has NOT run: shared GPU lock timed out before launch.
+  Capture-lane writable-frame/quality/AAC coordination and independent review
+  remain open; two reviewer launches failed at the service endpoint. Not
+  ready for CI/native parity/performance claims. Evidence: windows/scratch/REPORT.md.
 - 0.0.8 follow-ups (2026-10-18, #94 #102 #64): HEVC exports with cuts,
   the .isoprj shutdown flush/"file wins" warning and Vorbis were already on
   main and were re-checked (headless Chrome 154 plays EDITED/VERTICAL/crop
@@ -1960,6 +2234,149 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   W.3b and whole W.3 remain blocked on Mac lifetime investigation and the
   capture lane's Windows Platform/FileWriter adapter. CI additions run only
   the supported core profiles, not a false full-native qualification.
+- W.5d2 (2026-10-18, #105, uncommitted shared camera slice): realCamLink4K
+  concurrent FrameServer MJPG1080p60 capture preserves bridge's mode/process;
+  explicit CPUJPEG decode/GPUupload path, nativeNV12 staysGPU.30QPC-matched
+  frames/248,832,000exactbytes with swap/double-line controls;180frames fully
+  rendered/encoded/decoded,12reopens and safe reader-loss/stopped/reopen pass.
+  Native165tests/strictClippy, fullportable233unit+1doc and fallback review
+  pass. Physical unplug/engineISO integration remain separate gates.
+
+- W.5d2 (2026-10-18, #105, uncommitted): default GPU weave honors sample
+  flags without changing NV12 field rows; true multi-planar GPU import and
+  renderer views, bounded camera metadata reader and optional manifest map.
+  Real180-frame capture/render/native encode passes D3D12 GPU validation;
+  native strict Clippy/165tests and full m2-b portable gates233unit+1doctest
+  pass. Physical nonuniform-content proof is NOT claimed from uniform black;
+  native Platform/ISO integration remains writer-owned. No recording-stop/OBS
+  performance claim from standalone capture Drop or GPU-validation timings.
+
+- W.5d2a (2026-10-18, #105, native qualification): inherited NV12-input slice
+  rechecked on exon-desk under bounded GPU lock: exact345,600component copies/
+  expansion, array/crop/pressure/lease checks;7files210frames full-decode,
+  BGRA regression37files1110frames full-decode. Windows fmt/strict all-target
+  Clippy/81engine tests pass. New portable gates exit69 at38/39/39GiB remote
+  disk floors; reviewer endpoint unavailable. No camera success claimed:
+  actual public API still rejects contradictory interlaced samples. No
+  production source changed during this verification takeover; no commits.
+
+- W.5c4a (2026-10-18, #105, ready for CI): replace exact softwareMF quality
+  rejection with bounded nearest actual-value negotiation AFTER media types;
+  SetValue alone only echoes the request. Preserve native choice on ties,
+  re-pin/recheck and expose requested+actual metadata; factory reports actual.
+  All101software inputs and5production presets at64×48 pass, High70→72;
+  NVIDIA3codecs×3qualities unchanged.115files/711decodedframes, stable454handles,
+  native strict clippy/81tests/read-only fallback review pass. Uncommitted.
+  AAC/WASAPI already committed in59f36cd4; no audio internals changed.
+
+- W.5c4 (2026-10-18, #105, ready for CI): recording factory now selects native
+  CONSTQP/MFQuality, preserving codec/depth and live bitrate behavior. New
+  nonterminal barrier individually acknowledges accepted output; failed
+  callback keeps its packet, segment reuse forcesIDR without resettingPTS.
+  Native finish no longer discards valid prefix on ordinary errors.41native
+  files decode1230/1230frames; ordered quality, duration, reuse and liveCBR
+  checks pass. NVIDIA MF all3codecs qualified at30/70/100; Microsoft software
+  rounded quality30/70 rejected,100verified. Native strict clippy/81engine
+  tests/review pass. Full portable gates externally blocked below40GB on all
+  3Mac hosts. Uncommitted; no adapter/daemon selection or full-engine/OBS claim.
+
+- W.5d1 (2026-10-18, #105): native MF AAC and WASAPI mic/endpoint loopback
+  implemented, uncommitted for coordinator. Real sample-zero loss requires
+  deliberate1024-frame pre-roll; native24k capture positions require SRC-aware
+  clock accounting.56AAC edgecases, real24k/48k capture→AAC→mux/decode, atomic
+  admission, nonterminal continuation and24reopens pass; no growing handles.
+  Explicit stall reports48k loss or stops uncertain24k conversion. WPT26100
+  trace0lostevents, isolated steady2.7%one-core including tone playback; not
+  full-engine/OBS. Native strict clippy/build pass; existing scoped test
+  commands pass with0tests; read-only fallback review clears fixes. Ready for
+  CI with disclosed portable-gate blocker: two attempts exit69 because all
+  Mac build hosts are below40GB disk floor. No bypass or adapter/daemon
+  selection; recording CQ/QP/barriers follow as a separate slice.
+
+- Windows CI memory controls (2026-10-18, #105, ready for CI): merged
+  main49a98729 without commit, retaining W.3a and native Windows package.
+  Stable Cargo timings/PowerShell samples isolate the~69MB generated UI:
+  one compiler peaks~13.5GiB WS/~15GiB private, before the much smaller linker.
+  Native-job-only jobs1/debug-info0 keeps bin/test compilers from overlapping;
+  assertions, overflow checks, compiled Slint and every target remain. Rejected
+  opt1/opt-s/CGU overrides as no useful memory improvement. Exact all-targets
+  nine-package build passes20m19s; strict contract clippy,12verifier tests,
+  stub clock/pool contracts and13UI tests pass. Full remote Mac gates pass
+  233unit+1doctest. Hosted GitHub rerun still required; no native Windows
+  Platform qualification claimed. Standing full-engine OBS CPU/memory/start/
+  stop/drop targets recorded above for the remaining W.5 integration.
+
+- Windows CI investigation (2026-10-18, #105, blocked): Actions39092440023
+  confirms isocast-ui LLVM OOM, not capture/encoder compile failure. Merged
+  W.3a c668d98b without commit, retaining native Windows package and all
+  contract checks. Three bounded12GiB native attempts failed even with one
+  compiler/no debug symbols:8CGUs,256CGUs,256CGUs+UIopt-level1. Stopped at
+  the debugging limit; unqualified workflow edits reverted. Need actual
+  uncapped per-UI compiler peak/phase diagnosis, not more guessed profile
+  changes. Evidence and coordinator question in capture REPORT.md/notes.
+
+- W.5c3 (2026-10-17, #105, ready for CI): HEVC Main/Main10 now encodes
+  through NVENC/MF from GPU BGRA8 or realRGB10; no codec/depth downgrade.
+  hvcC is SPS-derived, hvc1 removes parameter sets and rejects changes after
+  configuration. Final11-file matrix fully decodes1980/1980 frames at1080p60/
+  4K60 with zero observed pool/rate/callback/encoder drops; mux/decode keys
+  match[0,60,90,150]. RGB10 pool/DX12 preserves1024 levels; NVENC/MF decode
+  877limitedY levels with correct endpoints/chroma. Replaced incorrect NVIDIA
+  P010 video-processor output with explicit GPU quantization; four simultaneous
+  colour encoders remain exact. 20MFMain10 opens keep521handles; bounded
+  overload and12-session refusal/recovery pass, no software HEVC installed.
+  Native strict clippy/81 engine tests, full Mac gates232tests+1doctest and
+  review/re-review pass. No writer edits or Platform selection. W.5c2 Actions
+  portable jobs pass but UI compile hit LLVM OOM; coordinator owns CI action.
+  Camera/WASAPI/nativeAAC and codec-safe Platform/writer/priority integration
+  follow, retaining WGC handle and other-GPU qualification gates.
+
+- W.5c2 (2026-10-17, #105, ready for CI): NVENC-first H.264 selection now
+  falls through same-adapter hardware MF to explicitly labelled software MF.
+  Hardware uses GPU BGRA→NV12 conversion and tracked-sample private slots;
+  software alone downloads pixels. Final eight low-latency files fully decode
+  2400/2400 frames at1080p60/4K60 (software1080p), zero counted losses;
+  redYUV63/102/240, keyframes, invalid-PTS recovery and bounded overload pass.
+  12 occupied NVENCs force software60/60; old session survives and capacity
+  returns. Fixed per-open MF runtime14-handle retention and async-credit lag;
+  16 real opens each provider keep stable464/481 handles after warmup. Native
+  strict clippy/81 engine tests and full remote Mac gates232tests+1doctest
+  pass; independent review/re-review approve. Detailed evidence in capture
+  lane REPORT.md. W.5c1 Actions39086165352 green; isolated OBS/credential
+  cleaned. HEVC/10-bit, camera/WASAPI, nativeAAC and Platform/priority wiring
+  follow; Intel/AMD and GPU-less software remain unqualified.
+
+- W.5c1 (2026-10-17, #105, ready for CI): native NVENC now
+  consumes GPU-resident frames and produces aligned H.264 through the W.2
+  packet mux. Driver617.42 admits12 sessions, refuses13 with NVENC21;
+  existing encoding survives and capacity returns after teardown. Real red
+  patch decodes709-limited YUV63/103/240. Three interleaved8s OBS pairs per
+  resolution produce12 decodable files, zero reported losses; scoped results
+  and limitations in capture REPORT. Native strict clippy/81 tests and full
+  remote Mac gates232 tests+1 doctest pass; two read-only reviews clear.
+  Writer d54df54 merged without commit, staged separately from this feature;
+  final integrated1080p/4K records fully decode120frames each. Coordinator
+  owns merge/feature commits and CI. Isolated OBS cleanup needs a human exit
+  after Cua refused process termination; no recording remains active.
+
+- W.5b (2026-10-17, #105, ready for CI): native read-only
+  D3D11→wgpu DX12 import now renders captured textures in place. Shared
+  handle/fence lifetime, GPU completion retention and cache reuse verified
+  on RTX5070; no shared engine/macOS edits. W.5a Actions39074561618 confirmed
+  green. Native build, strict clippy and81 engine tests pass; full remote
+  Mac gates232 unit tests+1 doctest pass. Independent review/re-review clear
+  for this unselected substrate; RPC handle retention gates later Platform
+  selection. Coordinator commits/CI next, no commits made by this lane.
+  Writer e38160a integrated without commit, staged separately; combined
+  capture/mux Windows clippy and full remote Mac gates also pass.
+
+- W.5a (2026-10-17, #105, native qualification): separate Windows capture
+  lane/root and shared GPU lock; new crate's WGC/QPC/D3D11 pool works on RTX
+  5070. Real frames, known pixels, bounded retention/resize, simultaneous
+  capture and closed-window callbacks checked. Windows strict clippy and
+  release build pass; full remote Mac gates pass. Work remains uncommitted
+  for coordinator CI. No daemon platform switch, writer edits, CPU capture
+  fallback or recording/OBS-parity claim; W.4/W.5 remain open.
 
 - W.2b/W.2c (2026-10-17, #105 #28): Windows startup now repairs encoded
   takes and writes truthful manifests through one pinned folder lease.

@@ -8,6 +8,7 @@
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
+import { PermissionsArea } from "../permissions/state.slint";
 import {
     Button, ButtonVariant, Callout, CalloutKind, ControlSize, Dropdown, FocusRing, GroupHint, GroupRow, IconButton,
     Checkbox, NumberField, RowPlace, Segmented, Switch, TextField,
@@ -174,7 +175,9 @@ export component GeneralPage inherits SetPage {
     }
     SetGroup {
         title: "Permissions";
-        hint: "What macOS lets Isocast record. Each is asked for once; what you skipped or turned off can be allowed here.";
+        hint: PermissionsArea.unknown-access
+            ? "Access is checked when capture starts. Review the status and Windows privacy settings here."
+            : "What macOS lets Isocast record. Each is asked for once; what you skipped or turned off can be allowed here.";
         GroupRow {
             label: "Screen, Camera, Microphone";
             place: RowPlace.only;

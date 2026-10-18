@@ -123,6 +123,17 @@ print((vpx / "LICENSE").read_text().rstrip())
 print()
 print((vpx / "PATENTS").read_text().rstrip())
 
+section("NVIDIA encoder interface")
+print("""The Windows encoder uses NVIDIA's public NVENC API header, vendored from
+nv-codec-headers n13.0.19.0 (API 13.0):
+https://github.com/FFmpeg/nv-codec-headers/blob/n13.0.19.0/include/ffnvcodec/nvEncodeAPI.h
+Only the interface header is bundled. NVIDIA's driver is loaded from the
+Windows system directory, not redistributed with Isocast.
+""")
+header = root / "crates/isocast-platform-windows/native/nvEncodeAPI.h"
+notice = header.read_text().split("*/", 1)[0].splitlines()[1:]
+print("\n".join(line.removeprefix(" *").removeprefix(" ") for line in notice).strip())
+
 section(f"Rust crates ({len(rows)})")
 print("Crate, version, licence, link.")
 print()

@@ -322,6 +322,18 @@ fn exit(code: i32) -> ! {
     unsafe {
         libc::_exit(code)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    // SAFETY: the event loop has returned and logs were flushed above;
+    // recording belongs to the separate daemon. Like _exit on Unix, bypass
+    // native exit callbacks after an observed exit-phase status override.
+    unsafe {
+        windows_sys::Win32::System::Threading::TerminateProcess(
+            windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            code as u32,
+        );
+        // Only reached if terminating this process failed.
+        std::process::exit(code)
+    }
+    #[cfg(not(any(unix, windows)))]
     std::process::exit(code)
 }
