@@ -27,9 +27,10 @@ in Rust, MIT or Apache 2.0.
   619–1344 MiB ([how it was measured](docs/benchmarks.md)).
 - **Edit what you recorded.** The editor window lays every ISO file out
   on one timeline: trim, split, switch angles and crop (9:16 too), then
-  export frame-accurately without re-encoding what you didn't change.
-  Each project folder carries an `.isoprj` that reopens your edits
-  anywhere.
+  export frame-accurately without re-encoding what you didn't change,
+  or hand the edit to Final Cut Pro, Premiere Pro or Resolve with every
+  angle on its own track. Each project folder carries an `.isoprj` that
+  reopens your edits anywhere.
 - **Bring your OBS setup.** On first launch Isocast finds your OBS scene
   collections and profiles and imports them; anything that can't come
   over is listed with the reason. Tools that speak obs-websocket (Touch
@@ -48,7 +49,7 @@ in Rust, MIT or Apache 2.0.
 | Each source as its own file (ISO), on one clock | Built in | Not built in (third-party Source Record plugin) |
 | CPU for the same recording ([benchmarks](docs/benchmarks.md)) | About half of OBS's | Baseline |
 | Memory, 1080p60 on a base M2 | 88 MiB | 630 MiB |
-| Edit the ISO files after recording | Built-in editor: trim, split, angles, crop | No, use another editor |
+| Edit the ISO files after recording | Built-in editor (trim, split, angles, crop), and export to Final Cut Pro, Premiere Pro or Resolve | No, use another editor |
 | Control | App, `isocast` CLI, MCP, and obs-websocket v5 (off by default) | App, obs-websocket and scripts |
 | Stream Deck | Through obs-websocket (community plugins, Touch Portal); not Elgato's official OBS actions | Official Elgato plugin |
 | Replay buffer | Yes | Yes |
@@ -56,8 +57,8 @@ in Rust, MIT or Apache 2.0.
 | Several stream destinations at once | Built in (RTMP/RTMPS) | Third-party plugin |
 | Per-app audio | Yes (macOS 14.2+) | Yes |
 | Plugins | Early ([process plugins, WebAssembly audio filters](docs/plugins.md)); no OBS plugins | Large ecosystem |
-| Projectors and multiview | Yes, new in 0.0.6 | Yes |
-| Vertical (9:16) canvas alongside the main one | Built in, new in 0.0.6 | Third-party plugin (Aitum Vertical) |
+| Projectors and multiview | Yes | Yes |
+| Vertical (9:16) canvas alongside the main one | Built in | Third-party plugin (Aitum Vertical) |
 | Track record | New, in alpha | Years of polish |
 
 OBS is the better choice today if you need Windows or Linux, a specific
@@ -75,7 +76,7 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 
 ## Features
 
-**In Isocast 0.0.6 (the current download):**
+**In Isocast 0.0.7 (the current download):**
 
 - Scenes and sources: screens, windows, cameras, microphones, desktop
   audio, one app's audio or everything but some apps (macOS 14.2+),
@@ -96,8 +97,12 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
   takes on one timeline, with trim, split, ripple delete, rolls, per-span
   angles, crops (free, 16:9, 9:16, 1:1, 4:5), waveforms, snapping, zoom,
   undo and frame-accurate export (a 9:16 file too). The takes are never
-  changed. **Open Editor After Recording** in Settings › Output opens it
-  when you stop.
+  changed. Playback has sound, in sync with the picture. **Open Editor
+  After Recording** in Settings › Output opens it when you stop.
+- **Export for Final Cut Pro, Premiere Pro or DaVinci Resolve:** File ›
+  Export writes a project that opens with every angle on its own track,
+  cut like your Isocast edit and pointing at your original files (no
+  re-encoding), with crops, markers and each source's audio.
 - Project files: every project folder has a `<name>.isoprj` with its takes
   and edits. Copy the folder anywhere and double-click the file to reopen
   it in the editor; File › Open and Open Recent.
@@ -106,7 +111,8 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
   multiview with tally (red program, green preview).
 - **Vertical canvas:** a second 9:16 canvas with its own layouts of the
   same sources, recorded and streamed alongside the main one, following
-  the main canvas's scenes or switching on its own.
+  the main canvas's scenes or switching on its own, with its own replay
+  buffer and virtual camera.
 - Audio interfaces: pick a microphone source's inputs (one input records
   as centred mono at full level) and a Mono switch per source. Interfaces
   with more than two inputs record inputs 1 + 2 by default.
@@ -133,12 +139,16 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 
 **Coming next** (not in a release yet; see [coming soon](docs/coming.md)):
 
-- More performance work against OBS: one GPU device per app, a lighter
-  multiview, and tighter memory budgets.
-- Fixes from the 0.0.6 follow-ups: the vertical canvas (replay, virtual
-  camera), the editor (audio while playing, NLE checks) and project files.
-- Later ideas: running real OBS plugins in a helper process, Elgato
-  Stream Deck's own protocol, shader filters and WebAssembly sources.
+- **Isocast tunes itself to your Mac:** a measured machine profile and a
+  live governor that keeps the recording and stream clean on slower or
+  busy machines.
+- **Clear recording targets:** choose next to Record whether a recording
+  starts a new project or adds a take to an existing one.
+- **Windows:** in progress (capture, NVENC and the crash-safe writer
+  already run natively).
+- Later ideas: per-destination canvases, running real OBS plugins in a
+  helper process, Elgato Stream Deck's own protocol, shader filters and
+  WebAssembly sources.
 
 ## A closer look
 
