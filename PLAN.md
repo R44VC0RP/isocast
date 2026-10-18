@@ -1646,13 +1646,12 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
     a Platform implementation and writer. W.5c3 now exports WGC/DX12 and
     NVENC/MF video encoder pieces, but still selects StubPlatform. Do not mark this done from
     a Windows stub or packet-only writer run.
-    Blocked: Windows still has no native Platform adapter. The new Mac
-    early-importer-drop GPU probe retains one pool slot per completed round
-    (32→31→30→29), even after independent render work. Stop after three
-    unsuccessful diagnostic attempts. Independent texture lifetime remains
-    the chosen contract (owned textures must not depend on a live importer);
-    further Mac importer/runtime investigation is a separate Tier-1 change.
-    Keep the failure visible; do not weaken it to obtain a green full run.
+    Windows still needs its native Platform/FileWriter adapter. The Mac
+    early-importer-drop failure was reproduced with CoreVideo alone and fixed
+    by keeping each texture's cache alive until texture teardown (2026-10-18).
+    Strict GPU contract and 256 BGRA/NV12 cross-thread cycles now pass; native
+    M2-b core/media7/7 pass, capture honestly unavailable without permission.
+    Independent lifetime was preserved, not weakened to obtain a green run.
 - [ ] **W.4 Windows synthetic platform.** Add `isocast-platform-windows`:
   clock, bounded BGRA/YUV frames, importer, synthetic sources and W.2 writer.
   Prefer hardware MF/NVENC when available, software only as last resort for
@@ -1714,6 +1713,18 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- W.3 GPU lifetime (2026-10-18, #105): real cache-order retention bug,
+  not premature pixel reuse. Pure CoreVideo control: cache-first teardown
+  loses one pool slot/round, texture-first returns all32 even with identical
+  autorelease scopes. Uncached Metal textures now retain their cache through
+  GPU retirement and release it last, with a retirement autorelease scope.
+  Unchanged strict GPU contract passes;256 cross-thread BGRA/NV12 import/
+  target cycles fully recycle. Cached paths unchanged; three A/B CPU pairs
+  measure+20–29ns per uncached plane, cached medians within 0.3%. Candidate
+  core/media7/7, hosted e2e19/19 and Mac gates 233 unit + 1 doctest pass. 36 ordinary
+  filtered-ISO stop cycles pass on both baseline and candidate; no claim that
+  ordinary recording already failed. Separate Tier1 change before adapter work.
 
 - W integration (2026-10-18, #105 #28 #110 #114): main49e7732 merged into
   agent/windows with profile-aware capacity checks retained, standalone

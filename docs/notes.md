@@ -1745,6 +1745,20 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-18 (#105 W.3): Mac independent texture lifetime is now fixed,
+  not relaxed. `CVMetalTextureCache` must survive the client CVMetalTexture
+  for buffer recycling: raw CoreVideo-only tests with explicit autorelease
+  scopes give32/31/30/29 slots if the cache dies first, all32 if it dies last.
+  `gpu.rs` Keep holds CVMetalTexture, PixelBuffer, then a cloned cache (Rust
+  field drop order); its HAL retirement callback drains a native autorelease
+  scope. No new cache flush, lock, fence, wait or pixel copy; cached IOSurface
+  import/target paths unchanged. Native GPU work-only contract and256 BGRA/
+  NV12 cross-thread lifecycles pass. E2e19/19 and full Mac gates pass. Normal
+  filtered ISO stop loops passed on both baseline/candidate; the failing case
+  specifically requires owned textures surviving their importer. Evidence:
+  windows/scratch/gpu-lifetime. This is a standalone Tier1 fix, no Windows
+  adapter implementation mixed in.
+
 - 2026-10-18 (#105 #110 #114): merge qualification retains main's profile-
   aware CLI capacity_check and estimate::check, not the isolated check or
   check_estimates helper. `isocast record` explicitly sends new_project:true,
@@ -1764,18 +1778,18 @@ each section. Delete entries that stop being true.
   native is unavailable until the capture lane supplies Platform/FileWriter;
   StubPlatform core results never qualify native Windows. Mac normal/pressure
   recordings, A/V, commit/kill/recovery and capture teardown pass, as do the
-  original GPU tests. New stronger early-importer-drop GPU test is blocked:
+  original GPU tests. The stronger early-importer-drop GPU test exposed:
   after three completed command-only rounds, availability is31,30,29 of32.
   Pixel correctness and completion callbacks pass; source-free render and
   empty submission do not restore slots. No production backend edits made.
   Ryan delegated the lifetime decision: retain the independent-lifetime
   contract, because the API returns owned GPU textures. Full qualification
-  remains blocked pending separate Mac importer/runtime investigation; do
-  not convert the failing case into a pass by keeping its importer alive.
+  was blocked pending Mac importer/runtime investigation, resolved by the
+  2026-10-18 cache-ownership fix above without changing the contract.
   Final review finds no source-frame retainer in the test: wgpu-core drops
   its trackers before the completion callback. The correlated boundary is
   CVMetalTexture outliving CVMetalTextureCache; exact native ownership is
-  still unproved. Normal importer-outlives-textures production ordering was
+  was still unproved at this checkpoint. Normal importer-outlives-textures production ordering was
   not shown broken. Evidence: windows/scratch/w3a/gpu-three-rounds/gpu.err.
 - 2026-10-17 (#105 W.3): don't equate capture callback-arrival and presentation
   time. Real ScreenCaptureKit samples were7.5–13.3ms ahead of arrival; the
