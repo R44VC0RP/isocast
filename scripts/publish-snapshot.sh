@@ -106,7 +106,7 @@ else
         range="$ref~50..$ref"
     fi
     trailers="$(git -C "$here" log --no-merges --format='%an <%ae>' "$range" 2>/dev/null |
-        grep -v -F "<$me>" | sort -u | sed 's/^/Co-authored-by: /')"
+        { grep -v -F "<$me>" || true; } | sort -u | sed 's/^/Co-authored-by: /')"
     if [ -n "$trailers" ]; then
         message="$(printf '%s\n\n%s' "$message" "$trailers")"
     fi
