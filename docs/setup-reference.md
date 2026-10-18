@@ -17,6 +17,7 @@ A complete session description.
 | `audio` | [AudioSetup](#audiosetup) | How sources' balance pans them, and where monitored sources play. |
 | `canvas` (required) | [Canvas](#canvas) | The composited output canvas. |
 | `developer` | [DeveloperSettings](#developersettings) | Developer mode: verbose logs and timing traces (the profile's). |
+| `governor` | [GovernorSettings](#governorsettings) | |
 | `hotkeys` | [Config](#config) | Profile hotkeys. Absent/empty keeps legacy profiles unchanged. |
 | `keyframes` | list of [Keyframes](#keyframes) | Keyframe sets, by id, that scene items' `animations` play (CSS's `@keyframes`). |
 | `name` (required) | string | Human-readable name of this setup. |
@@ -64,6 +65,14 @@ The profile's developer mode.
 |---|---|---|
 | `auto_off_hours` | integer | Turn it off by itself this many hours after it was turned on; 0 keeps it on until turned off. Default `24`. |
 | `enabled` | boolean | Log every API call and debug messages from capture, the compositor, encoders, writers, streaming and updates, and trace frame timing each second while recording, into their own log segments (200 MiB budget, separate from the ordinary logs). Default `false`. |
+
+## GovernorSettings
+
+| Field | Type | Description |
+|---|---|---|
+| `allow_iso_thinning` | boolean | The user's explicit choice to let the governor skip ISO pictures under pressure (off by default). Skipped pictures are lost from the file for good. Off, every ISO counts as pinned; the native encoder safety controller still sheds ISO frames on real overload. Default `false`. |
+| `enabled` | boolean |  Default `true`. |
+| `pins` | list of string | Settings the governor must not override. Native overload protection still applies; a pin cannot guarantee that hardware delivers frames. Default `[]`. |
 
 ## Config
 

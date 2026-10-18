@@ -272,7 +272,7 @@ fn run<P: Platform>(
                 }
             }
         }
-        let fps = control.0.fps.load(Ordering::Relaxed);
+        let fps = crate::governor::monitor_fps(control.0.fps.load(Ordering::Relaxed));
         let Source { slot, grid, drawn } = source(fps, max_size)?;
         let again = || ring.as_ref().is_none_or(|ring| ring.fresh);
         let Some((frame, at)) = pace.next(platform, &slot, grid, fps, again) else {

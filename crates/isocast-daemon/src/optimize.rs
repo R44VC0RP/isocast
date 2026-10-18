@@ -311,6 +311,23 @@ impl Daemon {
                 notes.push("Tune measured these files with headroom; keeping its result rather than applying the conservative machine-profile suggestion".into());
             }
         }
+        // ISO frame thinning is the user's choice: Optimize keeps the live
+        // setting, never counts it toward a fit, and only mentions it.
+        result.governor = live.governor.clone();
+        if result.recording.iso.enabled && !result.recording.iso.sources.is_empty() {
+            notes.push(if result.governor.allow_iso_thinning {
+                "ISO frame thinning is allowed in this setup by your choice, so automatic \
+                 quality may skip ISO pictures under pressure (lost for good); Optimize left \
+                 it as it is and didn't count it toward the fit"
+                    .into()
+            } else {
+                format!(
+                    "Automatic quality keeps ISO files at full frame rate. {}; Optimize never \
+                     turns it on",
+                    isocast_engine::estimate::ISO_THINNING_NOTE
+                )
+            });
+        }
         if params.goal.streams() {
             notes.push(
                 "the stream's H.264 encoder isn't part of the benchmark; watch for dropped \

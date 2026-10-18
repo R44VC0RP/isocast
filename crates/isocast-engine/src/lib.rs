@@ -15,6 +15,7 @@ pub mod doctor;
 pub(crate) mod draw_list;
 pub mod estimate;
 pub mod filter;
+pub mod governor;
 pub mod gpu;
 pub mod hotkeys;
 pub mod layout;
@@ -190,6 +191,11 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// Returns what was set, for the profile's notes; `None` where the
     /// platform doesn't lower it.
     fn calibration_priority(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Read the existing sampler's latest non-consuming headroom observation.
+    fn governor_headroom(&self) -> Option<governor::Headroom> {
         None
     }
 
@@ -401,6 +407,12 @@ pub struct ParameterSets {
 /// and come out, in decode order, from [`VideoEncoder::receive`].
 pub trait VideoEncoder: Send {
     type Frame;
+
+    /// Cumulative intentional admission refusals included in `dropped()`.
+    /// They remain losses in public accounting, but aren't new overloads.
+    fn intentional_video_drops(&self) -> u64 {
+        0
+    }
 
     /// Rank the canvas's live output ahead of ISO encodes; main comes first.
     fn prioritize_video(&mut self, _canvas: isocast_protocol::CanvasId) {}
@@ -700,6 +712,12 @@ pub trait FramePool: Send {
 /// tracks, all timed on the master clock.
 pub trait FileWriter: Send {
     type Frame;
+
+    /// Cumulative deliberate admission refusals. Read around append_video
+    /// so a later policy restoration cannot reclassify a refused picture.
+    fn intentional_video_drops(&self) -> u64 {
+        0
+    }
 
     /// Protect this program output ahead of optional ISO encodes when the
     /// platform's shared encoder hardware is overloaded.

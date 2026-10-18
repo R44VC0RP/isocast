@@ -9,7 +9,7 @@
 //! and video by time and hands each batch to every [`Sink`].
 
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
 use std::sync::{Arc, Weak};
 use std::thread::{self, JoinHandle};
@@ -62,7 +62,13 @@ pub struct Encoders(Mutex<Vec<Weak<Hub>>>);
 
 /// One running encoder and its sinks.
 pub(crate) struct Hub {
+    /// What it was started as; never changes, so outputs join (and the
+    /// replay buffer's files match) by what they asked for, whatever the
+    /// governor has the encoder doing now.
     spec: EncoderSpec,
+    /// The video bitrate the encoder has acknowledged: `spec`'s until the
+    /// governor retunes it (see [`crate::governor::stream_bitrate`]).
+    applied_kbps: AtomicU32,
     stop: AtomicBool,
     /// Ended by itself (the program stopped or it failed): new outputs
     /// don't join it.
@@ -233,6 +239,7 @@ impl Encoders {
         let sink_count = u64::from(sink.keeps_encoding());
         let hub = Arc::new(Hub {
             spec: *spec,
+            applied_kbps: AtomicU32::new(spec.video.bitrate_kbps),
             stop: AtomicBool::new(false),
             ended: AtomicBool::new(false),
             ready: AtomicBool::new(false),
@@ -258,7 +265,7 @@ impl Encoders {
                     // Keeps pace with the program, ahead of background work.
                     platform.real_time_thread();
                     let encoded = isocast_diagnostics::contain("program encoder", || {
-                        encode::<P>(video, audio, tap, retapped, program, &hub)
+                        encode::<P>(video, audio, tap, retapped, program, canvas, &hub)
                     });
                     let ended = match encoded {
                         Ok(Ok(ended)) => ended,
@@ -309,6 +316,12 @@ impl Subscription {
         self.hub.sink_count.load(Ordering::SeqCst) > 1
     }
 
+    /// The video bitrate the shared encoder is making now, as it
+    /// acknowledged it (the same for every output of the encoder).
+    pub(crate) fn video_kbps(&self) -> u32 {
+        self.hub.applied_kbps.load(Ordering::Relaxed)
+    }
+
     /// Mix chunks the tap lost since this output joined.
     pub(crate) fn tap_audio_dropped(&self) -> u64 {
         self.hub
@@ -356,9 +369,11 @@ fn encode<P: Platform>(
     tap: ProgramTap<P::Frame>,
     retapped: Receiver<ProgramTap<P::Frame>>,
     program: ProgramTapSource<P>,
+    canvas: CanvasId,
     hub: &Hub,
 ) -> Result<Ended> {
     let spec = &hub.spec;
+    let mut retune = Retune::new(canvas, spec.video.bitrate_kbps);
     let each = |f: &dyn Fn(&dyn Sink)| {
         for (_, sink) in hub.sinks().iter() {
             f(sink.as_ref());
@@ -376,6 +391,7 @@ fn encode<P: Platform>(
     // of the next frame instead.
     let mut keyframe_missed = false;
     let mut encoder_dropped = 0;
+    let mut intentional_dropped = 0;
     let mut config: Option<Arc<Vec<u8>>> = None;
     let mut track = AudioTrack::new(audio.delay());
     let mut order = Interleaver::default();
@@ -435,9 +451,13 @@ fn encode<P: Platform>(
                 if let Some(last) = last_frame.replace(pts) {
                     let ticks = (pts.as_nanos() - last.as_nanos() + frame_ns / 2) / frame_ns;
                     if ticks > 1 {
+                        crate::governor::protected_loss(canvas, ticks as u64 - 1);
                         each(&|sink| sink.missed(ticks as u64 - 1));
                     }
                 }
+                // Between frames, never mid-submission: the session, frame
+                // rate and keyframe grid stay as they are.
+                retune.apply(&mut video, spec.video.fps, &hub.applied_kbps);
                 let forced = hub.want_keyframe.swap(false, Ordering::SeqCst);
                 if forced {
                     // A new connection starts with this frame, and so
@@ -509,13 +529,90 @@ fn encode<P: Platform>(
             });
         }
         let dropped = video.dropped();
+        let intentional = video.intentional_video_drops();
         if dropped > encoder_dropped {
+            if live {
+                crate::governor::protected_loss(
+                    canvas,
+                    (dropped - encoder_dropped)
+                        .saturating_sub(intentional.saturating_sub(intentional_dropped)),
+                );
+            }
             each(&|sink| sink.encoder_dropped(dropped - encoder_dropped));
             encoder_dropped = dropped;
         }
+        intentional_dropped = intentional;
         let ready = order.release();
         if !ready.is_empty() {
             each(&|sink| sink.push(&ready));
+        }
+    }
+}
+
+/// The governor's live bitrate for one shared encoder. A refused change
+/// keeps the rate the encoder had, is reported once for the value asked,
+/// and is tried again only once the governor asks for something else.
+struct Retune {
+    canvas: CanvasId,
+    /// What the outputs asked for (the hub's spec).
+    intended: u32,
+    /// What the encoder acknowledged last.
+    applied: u32,
+    /// The value it last refused.
+    refused: Option<u32>,
+}
+
+impl Retune {
+    fn new(canvas: CanvasId, intended: u32) -> Self {
+        Self {
+            canvas,
+            intended,
+            applied: intended,
+            refused: None,
+        }
+    }
+
+    fn apply<E: VideoEncoder>(&mut self, video: &mut E, fps: u32, applied: &AtomicU32) {
+        let wanted = crate::governor::stream_bitrate(self.canvas, self.intended);
+        if wanted == self.applied {
+            self.refused = None;
+            return;
+        }
+        if self.refused == Some(wanted) {
+            return;
+        }
+        let result = if wanted == 0 {
+            Err(anyhow::anyhow!("0 kb/s is not a video bitrate"))
+        } else {
+            video.set_rate(fps, wanted)
+        };
+        match result {
+            Ok(()) => {
+                isocast_diagnostics::debug!(
+                    "encoder: {:?} program video {} -> {wanted} kb/s (asked {} kb/s)",
+                    self.canvas,
+                    self.applied,
+                    self.intended
+                );
+                self.applied = wanted;
+                self.refused = None;
+                applied.store(wanted, Ordering::Relaxed);
+                crate::governor::stream_rate_result(self.canvas, self.intended, wanted, None);
+            }
+            Err(err) => {
+                let message = format!(
+                    "the program's encoder kept {} kb/s instead of {wanted} kb/s: {err:#}",
+                    self.applied
+                );
+                isocast_diagnostics::diagnostic!("warn"; "{message}");
+                self.refused = Some(wanted);
+                crate::governor::stream_rate_result(
+                    self.canvas,
+                    self.intended,
+                    self.applied,
+                    Some(message),
+                );
+            }
         }
     }
 }

@@ -1358,6 +1358,10 @@ pub enum Event {
         timeline: String,
         editor: bool,
     },
+    /// Automatic-quality policy changed an effective limit or recovery state.
+    GovernorChanged {
+        governor: crate::governor::GovernorStatus,
+    },
     /// Where the next recording goes changed (#114): `record_target`, a
     /// new timeline, or the chosen timeline closed.
     RecordTarget {
@@ -1429,12 +1433,13 @@ pub enum EventKind {
     CanvasSceneChanged,
     CanvasPreviewChanged,
     ProjectOpened,
+    GovernorChanged,
     RecordTarget,
 }
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 34] = [
+    pub const NAMES: [&str; 35] = [
         "setup_changed",
         "started",
         "status",
@@ -1468,6 +1473,7 @@ impl EventKind {
         "canvas_scene_changed",
         "canvas_preview_changed",
         "project_opened",
+        "governor_changed",
         "record_target",
     ];
 
@@ -1513,6 +1519,7 @@ impl Event {
             Self::CanvasSceneChanged { .. } => EventKind::CanvasSceneChanged,
             Self::CanvasPreviewChanged { .. } => EventKind::CanvasPreviewChanged,
             Self::ProjectOpened { .. } => EventKind::ProjectOpened,
+            Self::GovernorChanged { .. } => EventKind::GovernorChanged,
             Self::RecordTarget { .. } => EventKind::RecordTarget,
         }
     }
@@ -1570,6 +1577,8 @@ pub struct LoadWarning {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Status {
     pub state: EngineState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governor: Option<crate::governor::GovernorStatus>,
     /// A compact calibration summary; machine_profile returns the measurements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_profile: Option<crate::machine::MachineStatus>,
@@ -2633,6 +2642,10 @@ pub struct LiveDisk {
     /// dropped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<f64>,
+    /// Governor clock milliseconds when the latest probe completed; a stale
+    /// reading is not evidence that disk headroom returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_at_ms: Option<u64>,
 }
 
 impl LiveDisk {

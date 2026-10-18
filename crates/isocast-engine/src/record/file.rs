@@ -601,6 +601,7 @@ impl<W: FileWriter> OpenFile<W> {
             }
         }
         let submit = crate::trace::on().then(std::time::Instant::now);
+        let intentional_before = self.writer.intentional_video_drops();
         let appended = match frame {
             Some(frame) => self.writer.append_video(frame, pts),
             None => self.writer.skip_video().map(|()| false),
@@ -623,6 +624,19 @@ impl<W: FileWriter> OpenFile<W> {
         // Pictures the encoder took and then discarded on its own are not
         // in the file: they count as dropped, not written.
         let lost = self.writer.lost_frames();
+        if let Some(canvas) = match self.plan.source.as_str() {
+            isocast_protocol::PROGRAM => Some(isocast_protocol::CanvasId::Main),
+            isocast_protocol::VERTICAL_PROGRAM => Some(isocast_protocol::CanvasId::Vertical),
+            _ => None,
+        } {
+            crate::governor::protected_loss(
+                canvas,
+                lost + u64::from(
+                    matches!(appended, Ok(false))
+                        && self.writer.intentional_video_drops() == intentional_before,
+                ),
+            );
+        }
         if lost > 0 {
             self.frames = self.frames.saturating_sub(lost);
         }

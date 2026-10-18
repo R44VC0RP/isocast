@@ -35,6 +35,7 @@ pub(super) struct DiskProbe {
 struct ProbeState {
     at_start: Option<Duration>,
     latest: Option<Duration>,
+    latest_at: Option<u64>,
     wanted: bool,
     done: bool,
 }
@@ -72,10 +73,10 @@ impl DiskProbe {
     }
 
     /// The test write times at the start and lately, in ms.
-    fn latencies(&self) -> (Option<f64>, Option<f64>) {
+    fn latencies(&self) -> (Option<f64>, Option<f64>, Option<u64>) {
         let state = self.state.0.lock();
         let ms = |d: Option<Duration>| d.map(|d| d.as_secs_f64() * 1000.0);
-        (ms(state.at_start), ms(state.latest))
+        (ms(state.at_start), ms(state.latest), state.latest_at)
     }
 }
 
@@ -110,7 +111,11 @@ fn probe<P: Platform>(platform: &P, path: &PathBuf, shared: &(Mutex<ProbeState>,
             guard.wanted = false;
         }
         let latest = measure();
-        state.lock().latest = latest;
+        {
+            let mut state = state.lock();
+            state.latest = latest;
+            state.latest_at = latest.map(|_| crate::governor::clock_ms());
+        }
         thread::sleep(PROBE_INTERVAL);
     }
     let _ = std::fs::remove_file(path);
@@ -146,7 +151,7 @@ impl DiskMeter {
         }
         let (then, before) = self.samples[0];
         let seconds = now.saturating_since(then).as_secs_f64();
-        let (latency_at_start_ms, latency_ms) = probe.latencies();
+        let (latency_at_start_ms, latency_ms, measured_at_ms) = probe.latencies();
         LiveDisk {
             write_bytes_per_second: if seconds > 0.0 {
                 (bytes - before) as f64 / seconds
@@ -155,6 +160,7 @@ impl DiskMeter {
             },
             latency_at_start_ms,
             latency_ms,
+            measured_at_ms,
         }
     }
 }

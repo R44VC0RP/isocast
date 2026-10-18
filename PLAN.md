@@ -655,7 +655,7 @@ Tier 1: build → review → fixes → re-review for each behavior-changing slic
   CLI/MCP/status/Settings; measured capacity/Optimize with unchanged absent-
   profile fallback. AWS M2s and exonbook: compare existing capacity cases
   against real drops, cancel/start races, fresh-machine behavior.
-  - [x] **T.1a Profile foundation (awaiting Tier-1 re-review).** Portable
+  - [x] **T.1a Profile foundation (approved, with follow-ups).** Portable
     measurements, killable idle-only helper, persistence/build invalidation,
     API/CLI/MCP/Settings and covered HEVC capacity/Optimize integration.
     M2s/exonbook recordings, refusal/cancellation/deadline, fallback and full
@@ -663,6 +663,9 @@ Tier 1: build → review → fixes → re-review for each behavior-changing slic
     REPORT.md. Fix round 1 confines automatic calibration to the default
     daemon, unifies capacity checks and preserves exact Optimize passes;
     main integrated, 233 tests and strict e2e 18/18 pass.
+    F4/F8: automatic calibration defers/preempts for preview; offline file
+    checks explicitly say capacity is not checked and never launch a daemon.
+    Both verified on exonbook and included in ca4cc010.
   - [ ] **T.1b Complete coverage and prediction qualification.** Other
     ProRes variants, live-H.264 resource costs, missed 4K60/10-bit cells,
     repeatability under outside load and post-GPU-lane integration. M4
@@ -671,6 +674,25 @@ Tier 1: build → review → fixes → re-review for each behavior-changing slic
 - [ ] **T.2 Live governor.** Fixed reversible degradation order, hysteresis,
   visible reasons and protected-output integrity; qualify against outside
   CPU/GPU/encoder load without changing the established priority contract.
+  - [x] First reversible slice (ca4cc010; review fixes ready for re-review):
+    monitor/vertical ceilings, explicitly opted-in ISO ceilings/hold, upload bitrate,
+    status/events/UI and pins/off. AWS ten-minute CPU/GPU A/B: zero losses
+    and zero governor steps. Foreign-encoder A/B: six bounded changes,
+    recovery without cycling, intact file accounting, but severe load still
+    loses protected video and program audio on both builds. Main257ea057
+    integrated staged/uncommitted:240 tests, strict e2e18/18 and seven native
+    media contracts pass; animated mask/filtered ISO, split during hold and
+    native monitor readback verified. Scratch REPORT.md is authoritative.
+    B1/B2/B3/F1 fixes: owner-local intentional refusal attribution, nonfatal
+    preview retune refusal with per-feed errors, `allow_iso_thinning=false`
+    by default, and pressure/lifecycle-triggered sampling. Real before/after
+    vertical pin/recovery and retune refusal tests pass; idle CPU is about
+    0.01% of one core, indistinguishable from disabled policy. Final gates240
+    and strict e2e18/18 pass; fixes remain uncommitted on7705e90.
+  - [ ] Remaining qualification/steps: safe file-format/effort/software
+    transitions, JPEG/vertical composition reductions, memory-pressure and
+    per-encoder retune failure behavior. No zero-drop promise against foreign
+    workloads that already exhaust protected encoder capacity.
 - [ ] **T.3 Low-end defaults and pins.** Measured 8 GB/base-chip defaults,
   persistent per-setting Automatic/pinned controls, backend-neutral mapping
   to NVENC/QSV/AMF/software with the Windows lane.
@@ -1723,6 +1745,45 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- T.2 review fixes (2026-10-18, #110, uncommitted): intentional admission
+  drops stay attached to their writer/encoder across restoration; delayed
+  totals no longer trigger false ISO holds. Refused preview retunes preserve
+  the feed and last acknowledged settings, with per-feed error ownership.
+  ISO thinning requires explicit opt-in (off by default), surfaced in
+  Settings/Optimize/capacity. Healthy/idle sampling avoids expensive work.
+  Before035640 reproduced both blockers; after043111 passed pin and natural
+  restoration/refusal/lifecycle checks; consent/choice043746+043938 verified.
+  Final full gates240 and strict20261018-05573918/18 pass, zero reported loss.
+  Neither improvement nor non-inferiority proven for foreign encoder load.
+
+- T.2 qualification/main integration (2026-10-18, #110): interrupted
+  jobs162024/195658/195715 never reached hardware. Detached replacements
+  all passed; CPU/GPU competitors caused zero losses/steps, while four UHD60
+  external demands still caused protected loss on main and governor. Six
+  changes without cycling; full preview restored61 s after load ended.
+  Merged main257ea057 with --no-commit, retaining governor admission/caps,
+  mask presentation times and GPU recovery; platform alias corrected.
+  Merged240 tests, strict18/18, seven native contracts and mask/hold/split/
+  recovery job20261018-032243 pass. Merge staged; follow-up notes uncommitted.
+
+- T.2 first slice (2026-10-17, #110, uncommitted): runtime ceilings and
+  pins/off visible through setup/status/events/UI. Review-driven correction:
+  upload losses do not blank ISOs; emergency holds last at most3 seconds,
+  then native admission resumes, rather than a second sticky encoder cap.
+  Exonbook:233 tests, strict e2e18/18 zero drops; ten-minute fitting
+  HD30 program/twoISOs/stream/monitor zero steps and zero losses; real CBR
+  6000→1500→6000 with replay decode intact; encoder-contention A/B and
+  pin/split/off checks. AWS jobs195658/195715 wait behind the release soak;
+  T.2 is not yet qualified/complete. Full evidence is in scratch/REPORT.md.
+
+- T.1a F4/F8 (2026-10-17, #110): file checking never starts a daemon and
+  says capacity is not checked if unavailable. Automatic calibration waits
+  for preview to end; an incoming preview preempts it, but manual calibration
+  remains available. Exonbook: missing/stale socket, 66 preview observations,
+  manual/automatic distinction, 33 ms preemption, 90/90-frame intact recording;
+  full remote gates 233 pass. T.2's M2 baseline was blocked by the release
+  soak; the user subsequently approved exonbook first with AWS still queued.
 
 - W.3 GPU lifetime (2026-10-18, #105): real cache-order retention bug,
   not premature pixel reuse. Pure CoreVideo control: cache-first teardown

@@ -32,7 +32,10 @@ remembered beside the profile, so it retries only on a new build or an
 explicit `machine calibrate`, not every launch. Cancellation is not failure.
 
 On first launch and after a measurement-version/app update, schedule the
-default daemon's helper only while idle. Refuse an explicit request while recording,
+default daemon's helper only while idle, with no live engine previewing or
+starting. An incoming preview cancels an automatic run before opening its
+sources; explicitly requested calibration remains available while previewing.
+Refuse an explicit request while recording,
 streaming, buffering replay, feeding a virtual camera, tuning or exporting.
 An output request always wins over a calibration, including concurrent
 starts: the check and reservation share the daemon's output-start gate.
@@ -97,7 +100,10 @@ coverage is incomplete; `speed_test` remains an explicit, separate network
 operation with its existing no-test-mode restrictions. A recording-only
 Optimize keeps an exact tune pass; a more conservative model gives a note,
 not another setup change. `setup check` and doctor render the daemon's same
-profile-aware estimate, including its tune memory. Calibration alone
+profile-aware estimate, including its tune memory. A file's `setup check`
+connects only to an already running daemon: when none is reachable it says
+capacity was **not checked**, without starting an engine; file validation
+still completes locally. Calibration alone
 never applies a setup patch. New-machine behavior is unchanged until a valid
 profile exists; low-end defaults are T.3, not an unreviewed T.1 side effect.
 
@@ -107,6 +113,37 @@ that workload kept up, not the machine's maximum capacity. Contention and
 thermal episodes never permanently lower an otherwise healthy profile.
 
 ## Live governor (T.2)
+
+The first runtime slice implements monitor refresh, vertical encoder
+admission (only while main is protected), shared-stream bitrate ceilings
+and, only when the user opts in, ISO admission. The governor never
+implicitly lowers main-program or ISO recording quality: codec, size,
+compression quality, audio and frame rate stay as set. File
+size/codec/quality changes and software-backend transitions remain
+unqualified and are not attempted inside a take. The governor says
+when no further safe live reduction is available; it cannot make an external
+application leave enough hardware for the protected outputs.
+
+`[governor] enabled = false` turns off these overrides, not the pre-existing
+native encoder safety controller. ISO temporal shedding by the governor is
+an explicit user choice: `allow_iso_thinning = true` (Settings → Advanced →
+Automatic Quality → "Allow ISO Frame Thinning"), **off by default**. Off,
+every ISO counts as pinned. On, skipped ISO pictures are permanently missing
+from those files; the switch's hint says so. `pins` accepts `preview.fps`,
+`recording.iso.fps`, `recording.iso.sources.<source-id>.fps`, `vertical.fps`
+and `stream.video_bitrate_kbps`; the ISO pins remain overrides when thinning
+is allowed (and are kept, but have no extra effect, while it is off).
+Settings edits the same profile fields through the normal draft/Apply path.
+Pins and the default prevent governor overrides, not physical frame loss or
+native overload protection: the pre-existing native encoder safety
+controller (#41/#60/#68) still sheds ISO pictures on real encoder overload,
+before the program, whatever these settings say.
+
+Optimize, `capacity` suggestions, ISO admission estimates, `setup check` and
+doctor never turn thinning on or count it toward a fit. Optimize's notes
+mention the choice when ISO files are enabled; a strained setup's capacity
+check line also mentions it. Runtime limits are reported in
+`status.governor` and `governor_changed` events, never written over the setup.
 
 Diagnose the bottleneck before selecting a step. CPU starvation is not
 automatically encoder overload: check capture/conversion placement and
@@ -118,9 +155,10 @@ signal, or the controllers can oscillate.
 
 Proposed reversible step order, each requiring evidence of its bottleneck:
 1. Reduce preview/projector refresh (60 → 30 → 15), never recorded fps.
-2. Reduce unpinned ISO work (fps before size); keep audio and frame/drop
-   accounting. A size change requires a new file/segment, never an in-place
-   track-description mutation.
+2. Only with `allow_iso_thinning` opted in: reduce unpinned ISO work (fps
+   before size); keep audio and frame/drop accounting. A size change
+   requires a new file/segment, never an in-place track-description
+   mutation. Without the opt-in this step is skipped.
 3. Lower encoder effort; lower bitrate for measured upload/disk pressure,
    not as an assumed cure for hardware saturation.
 4. Reduce unpinned vertical output work, preserving main program/stream.
@@ -131,18 +169,51 @@ Use queue age, completed-frame latency, compositor deadlines, memory/thermal
 state, and #90's outside-load detector together. Its five-second baseline
 blind period is not evidence of spare capacity. Require sustained pressure
 for 2 seconds, wait at least 5 seconds between ordinary downward steps.
-Protected program loss bypasses this ladder: immediately shed all unpinned
-ISO video work, retaining audio/accounting and the saved intended settings.
-Impending queue/resource exhaustion also bypasses ordinary delays.
+With the opt-in, protected program loss bypasses this ladder: immediately
+shed all unpinned ISO video work, retaining audio/accounting and the saved
+intended settings. Impending queue/resource exhaustion also bypasses
+ordinary delays. The emergency ISO hold is a **non-renewable three-second
+overlay**, rearmed after five quiet seconds. It is not a permanent zero-FPS
+setting. A helpful CPU/GPU/disk hold may leave a proportional ISO ceiling
+(at least 25%) for the slower recovery policy. Without the opt-in neither
+the hold nor the ceiling applies to any ISO. Encoder-only steady shedding
+remains owned by the native controller in either case; a second sticky ISO
+limit was measured to waste pictures without improving protected losses
+and was removed. Required first/split pictures and all audio remain exempt
+from admission thinning.
+
+Transport shedding is not video-production loss. Upload-only pressure never
+holds recording ISOs: it lowers bitrate on congested canvases, including an
+urgent reduction when the one-second send queue is half full. Encoder owners
+apply bitrate changes between frames without replacing the session or FPS;
+all consumers sharing a session see its acknowledged bitrate. A refused
+change is reported and does not terminate the stream/recording.
+An H.264 monitor likewise keeps running after a refused optional retune,
+using its last acknowledged encoder settings while frame selection follows
+the requested ceiling. An unchanged refused request is not retried per frame.
+Errors belong to the affected monitor: another healthy monitor cannot clear
+them, and closing that feed removes its error.
 Restore one step after 30 seconds below 70% measured budget with no losses;
 wait 30 seconds again before restoring another. A failed restoration backs
 off for 2 minutes. These are initial values to qualify, not a zero-drop
 promise against uncooperative external encoders.
+Upload-only pressure does not block recovery of video-work ceilings. The
+native fast admission share remains authoritative beneath every ceiling.
+
+Intentional admission refusals are attributed by the writer/encoder that
+made them, not by inspecting the ceiling when delayed counters arrive.
+They still count as lost pictures in the file/stream report, but restoring
+or pinning vertical cannot turn them into fresh protected-loss events.
+On unchanged, pressure-free ticks the daemon only probes lifecycle/pressure;
+it does not clone setups/status strings or gather full engine statistics.
+Idle native headroom sampling is also skipped. Recovery and settings changes
+still wake the policy; this is effectively zero incremental idle work, not
+a claim that the daemon has no timers or CPU cost.
 
 Every step emits old/new values, reason, scope and restoration state, shown
-in status and a plain-language app notice. Pins are explicit field paths in
-the recording profile, persist across launches, and prohibit automatic
-changes to those fields. Manual edits pin the edited setting until the user
+in status and a plain-language app notice. Pins and `allow_iso_thinning`
+are explicit fields in the recording profile, persist across launches, and
+pins prohibit automatic changes to those fields. Manual edits pin the edited setting until the user
 chooses Automatic. Never silently overwrite a pinned setting; explain when
 the remaining load cannot fit. Governor state is runtime state, separate
 from the saved user's intended setup.

@@ -357,6 +357,7 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
     let setup = Setup {
         virtual_camera: Default::default(),
         developer: Default::default(),
+        governor: Default::default(),
         version: SETUP_VERSION,
         name: options.name.clone().unwrap_or_else(|| "My setup".into()),
         canvas,

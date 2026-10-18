@@ -190,13 +190,18 @@ impl<F: Clone> Routes<F> {
 
     /// Send a frame to every output. One that has fallen behind misses it
     /// rather than holding up the others.
-    pub(crate) fn video(&self, frame: &F, pts: Time) {
+    pub(crate) fn video(&self, frame: &F, pts: Time, canvas: Option<CanvasId>) {
         for route in self.list.read().iter() {
             if pts >= route.from {
                 let sent = route.output.try_send(Packet::Video {
                     frame: frame.clone(),
                     pts,
                 });
+                if matches!(&sent, Err(TrySendError::Full(_)))
+                    && let Some(canvas) = canvas
+                {
+                    crate::governor::protected_loss(canvas, 1);
+                }
                 if let (Err(TrySendError::Full(_)), Some(missed)) = (sent, &route.missed) {
                     missed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -2725,6 +2730,9 @@ fn run_program<P: Platform>(
         // even though a new scene viewer could already obtain a healthy one.
         if compositor.device_lost() {
             output.frames_missed.fetch_add(1, Ordering::Relaxed);
+            if !output.program_video.is_empty() {
+                crate::governor::protected_loss(canvas, 1);
+            }
             if std::time::Instant::now() < retry_gpu {
                 continue;
             }
@@ -2803,6 +2811,9 @@ fn run_program<P: Platform>(
         if now > tick + 3 * frame {
             if outputs || monitored {
                 output.frames_missed.fetch_add(1, Ordering::Relaxed);
+                if outputs {
+                    crate::governor::protected_loss(canvas, 1);
+                }
             }
             continue;
         }
@@ -2857,7 +2868,7 @@ fn run_program<P: Platform>(
                             output.program_rgb.push(rgb, tick);
                         }
                         output.program.push(image.clone(), tick);
-                        output.program_video.video(&image, tick);
+                        output.program_video.video(&image, tick, Some(canvas));
                         output.frames_drawn.fetch_add(1, Ordering::Relaxed);
                         output
                             .timings
@@ -2867,9 +2878,15 @@ fn run_program<P: Platform>(
                 }
                 Ok(None) => {
                     output.frames_missed.fetch_add(1, Ordering::Relaxed);
+                    if outputs {
+                        crate::governor::protected_loss(canvas, 1);
+                    }
                 }
                 Err(err) => {
                     output.frames_missed.fetch_add(1, Ordering::Relaxed);
+                    if outputs {
+                        crate::governor::protected_loss(canvas, 1);
+                    }
                     if !std::mem::replace(&mut warned, true) {
                         inner.event(EngineEvent::Warning(format!(
                             "the {canvas:?} program could not draw a frame: {err:#}"
@@ -3255,6 +3272,7 @@ fn run_iso<P: Platform>(
     let fps = runner.fps;
     let frame = Duration::from_secs(1) / fps;
     let mut last_gpu: Option<Completion> = None;
+    let governor_pin = crate::governor::iso_pin(&runner.id);
     let mut retry_gpu = std::time::Instant::now();
     for n in 0.. {
         let tick = epoch.add_ticks(n, fps);
@@ -3300,7 +3318,10 @@ fn run_iso<P: Platform>(
         // Encoder admission first, so a refused tick is never drawn.
         let mut admitted = false;
         for output in &mut runner.outputs {
-            output.admitted = tick.as_nanos() >= output.wanted.from() || output.credit.admit();
+            output.admitted = tick.as_nanos() >= output.wanted.from()
+                || output
+                    .credit
+                    .admit(crate::governor::iso_ceiling(&governor_pin));
             admitted |= output.admitted;
         }
         let image = if admitted {
@@ -4717,12 +4738,12 @@ mod tests {
         let (quiet, _quiet_rx) = sync_channel(1);
         routes.add(quiet, 0, Time::from_nanos(0), None);
         for n in 0..5 {
-            routes.video(&n, Time::from_nanos(i64::from(n)));
+            routes.video(&n, Time::from_nanos(i64::from(n)), None);
         }
         assert_eq!(missed.load(Ordering::Relaxed), 3);
         assert_eq!(rx.try_iter().count(), 2);
         // Frames from before an output's start aren't missed.
-        routes.video(&9, Time::from_nanos(-1));
+        routes.video(&9, Time::from_nanos(-1), None);
         assert_eq!(missed.load(Ordering::Relaxed), 3);
         // Audio taps use the same non-blocking route and count each chunk.
         let samples: Arc<[f32]> = vec![0.0; 960].into();
@@ -4769,7 +4790,7 @@ mod tests {
                 .find(|frame| Arc::strong_count(frame) == 1)
                 .expect("a stalled stream must leave frames for recording");
             let pts = Time::from_nanos(n);
-            routes.video(frame, pts);
+            routes.video(frame, pts, None);
             audio_routes.audio(&samples, pts);
             assert!(matches!(recorded.try_recv(), Ok(Packet::Video { pts: at, .. }) if at == pts));
         }

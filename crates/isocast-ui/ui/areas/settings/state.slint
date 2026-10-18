@@ -338,6 +338,25 @@ export global SettingsArea {
     in-out property <bool> developer-auto-off;
     // "Turn Off After 24 Hours", or the profile's own hours.
     in-out property <string> developer-auto-off-label: "Turn Off After 24 Hours";
+    // Automatic quality (the setup's `governor`, T.2): on unless turned
+    // off, and what it may never lower (its pins, by field path, changed
+    // through `set-flag("pin:PATH", on)`): the preview's refresh, every
+    // ISO file's frame rate or one source's, the vertical canvas's frame
+    // rate and the stream's bitrate.
+    in-out property <bool> governor-on: true;
+    // The user's explicit choice to let it skip ISO pictures under
+    // pressure (`governor.allow_iso_thinning`, off by default). Off, ISO
+    // files are never thinned by it, so the ISO pins only matter when on.
+    in-out property <bool> iso-thinning;
+    in-out property <bool> pin-preview;
+    in-out property <bool> pin-iso;
+    in-out property <bool> pin-vertical;
+    in-out property <bool> pin-stream;
+    // The ISO files recorded now, each kept at its frame rate when `on`
+    // (`id` is the source's).
+    in-out property <[IsoTrack]> pin-iso-sources;
+    // What it is doing now, in plain words ("" while nothing is lowered).
+    in-out property <string> governor-now;
 
     // ---- Welcome (no setup yet) and the failed state
     // Which choice is working ("obs", "file"; "" for none).

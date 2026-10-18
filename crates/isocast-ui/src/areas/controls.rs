@@ -1348,9 +1348,19 @@ impl Controls {
             line.push_str(" · ");
             line.push_str(&warning.message);
         }
+        // Automatic quality (T.2), after the states and #90's warning, only
+        // while it lowers something or is held back.
+        let governor = s.status.as_ref().and_then(|s| s.governor.as_ref());
+        if let Some(words) = governor.and_then(governor_words) {
+            if !line.is_empty() {
+                line.push_str(" · ");
+            }
+            line.push_str(&words);
+        }
+        let held = governor.is_some_and(|g| g.error.is_some() || g.enabled && g.limited_by_pins);
         area.set_status_line(line.into());
         area.set_status_warn(
-            load_warning.is_some() || (streaming && health != "ok") || vertical_bad,
+            load_warning.is_some() || (streaming && health != "ok") || vertical_bad || held,
         );
 
         // The readouts: the take's drops, else the stream's (with its
@@ -2917,6 +2927,53 @@ fn restart_engine(app: &Rc<App>) {
             &error,
         ),
     });
+}
+
+/// Automatic quality's words (T.2) for the status bar and Settings, while
+/// it is doing something: lowering a rate, finding a bottleneck, or held
+/// back by what the user keeps (pins). None while everything runs as set
+/// (or it is off). The engine's own reason, else what is lowered.
+pub(crate) fn governor_words(
+    governor: &isocast_protocol::governor::GovernorStatus,
+) -> Option<String> {
+    if let Some(error) = &governor.error {
+        return Some(format!("Automatic quality: {error}"));
+    }
+    let lowered = |percent: u32| percent < 100;
+    let active = governor.bottleneck.is_some()
+        || governor.limited_by_pins
+        || governor.preview_fps.is_some()
+        || lowered(governor.iso_percent)
+        || lowered(governor.vertical_percent)
+        || lowered(governor.stream_bitrate_percent);
+    if !governor.enabled || !active {
+        return None;
+    }
+    let reason = governor.reason.trim();
+    if !reason.is_empty() {
+        return Some(reason.to_string());
+    }
+    let mut parts = Vec::new();
+    if let Some(fps) = governor.preview_fps {
+        parts.push(format!("preview at {fps} fps"));
+    }
+    for (what, percent) in [
+        ("ISO video", governor.iso_percent),
+        ("vertical video", governor.vertical_percent),
+        ("stream bitrate", governor.stream_bitrate_percent),
+    ] {
+        if lowered(percent) {
+            parts.push(format!("{what} at {percent}%"));
+        }
+    }
+    if governor.limited_by_pins {
+        parts.push("kept settings stop it lowering more".to_string());
+    }
+    Some(if parts.is_empty() {
+        "Automatic quality is watching this Mac’s load".to_string()
+    } else {
+        format!("Automatic quality: {}", parts.join(", "))
+    })
 }
 
 /// The status bar's words for the vertical canvas (#96), and whether they

@@ -84,6 +84,10 @@ pub struct H264Encoder {
     /// raw pointer to it, so it lives as long as the session (see Drop).
     output: Arc<Output>,
     fps: u32,
+    /// The bitrate the session was last told, and how it holds it (fixed
+    /// when the session starts; a live change keeps it).
+    bitrate_kbps: u32,
+    rate_control: RateControl,
     low_latency: bool,
     force_keyframe: CFRetained<CFDictionary<CFString, CFBoolean>>,
     priority: Option<EncoderPressure>,
@@ -98,6 +102,19 @@ pub struct H264Encoder {
 // SAFETY: VideoToolbox sessions may be used from any thread; this one is
 // used by one thread at a time.
 unsafe impl Send for H264Encoder {}
+
+/// How a session holds its bitrate, chosen when it starts. A live bitrate
+/// change sets the same properties again, never another policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RateControl {
+    /// `ConstantBitRate`: padded to the target every second.
+    Constant,
+    /// `AverageBitRate` capped by a one-second `DataRateLimits` (a stream
+    /// whose encoder refused constant bitrate).
+    Limited,
+    /// `AverageBitRate` alone (a monitor).
+    Average,
+}
 
 struct Output {
     health: Arc<crate::pressure::EncodeHealth>,
@@ -204,7 +221,7 @@ impl H264Encoder {
             }
             Ok(())
         };
-        unsafe {
+        let rate_control = unsafe {
             set(kVTCompressionPropertyKey_RealTime, CFBoolean::new(true))?;
             set(
                 kVTCompressionPropertyKey_ProfileLevel,
@@ -255,6 +272,11 @@ impl H264Encoder {
                 ]);
                 set(kVTCompressionPropertyKey_DataRateLimits, &limits)?;
             }
+            let rate_control = match (constant, spec.low_latency) {
+                (true, _) => RateControl::Constant,
+                (false, false) => RateControl::Limited,
+                (false, true) => RateControl::Average,
+            };
             set(
                 kVTCompressionPropertyKey_MaxKeyFrameInterval,
                 &CFNumber::new_i32(spec.keyframe_interval as i32),
@@ -290,7 +312,8 @@ impl H264Encoder {
                 CFBoolean::new(true),
             );
             session.prepare_to_encode_frames();
-        }
+            rate_control
+        };
         let force_keyframe = unsafe {
             CFDictionary::<CFString, CFBoolean>::from_slices(
                 &[kVTEncodeFrameOptionKey_ForceKeyFrame],
@@ -301,6 +324,8 @@ impl H264Encoder {
             session,
             output,
             fps: spec.fps,
+            bitrate_kbps: spec.bitrate_kbps,
+            rate_control,
             low_latency: spec.low_latency,
             force_keyframe,
             priority: (!spec.low_latency)
@@ -309,6 +334,47 @@ impl H264Encoder {
             start_ticket: None,
             size: (spec.width, spec.height),
         })
+    }
+}
+
+impl H264Encoder {
+    fn set(&self, key: &CFString, value: &CFType) -> Result<()> {
+        let status = unsafe { VTSessionSetProperty(&self.session, key, Some(value)) };
+        if status != 0 {
+            bail!("the H.264 encoder refused {key} (error {status})");
+        }
+        Ok(())
+    }
+
+    /// Tell the session `to_kbps` (it was told `from_kbps`) under its own
+    /// rate control. For [`RateControl::Limited`] the two properties are
+    /// ordered so the average never exceeds the cap in between.
+    fn apply_bitrate(&self, from_kbps: u32, to_kbps: u32) -> Result<()> {
+        let bits = i64::from(to_kbps) * 1000;
+        let average = || unsafe {
+            self.set(
+                kVTCompressionPropertyKey_AverageBitRate,
+                &CFNumber::new_i64(bits),
+            )
+        };
+        let limits = || unsafe {
+            let limits = CFArray::<CFNumber>::from_retained_objects(&[
+                CFNumber::new_i64(bits / 8),
+                CFNumber::new_f64(1.0),
+            ]);
+            self.set(kVTCompressionPropertyKey_DataRateLimits, &limits)
+        };
+        match self.rate_control {
+            RateControl::Constant => unsafe {
+                self.set(
+                    kVTCompressionPropertyKey_ConstantBitRate,
+                    &CFNumber::new_i64(bits),
+                )
+            },
+            RateControl::Average => average(),
+            RateControl::Limited if to_kbps > from_kbps => limits().and_then(|()| average()),
+            RateControl::Limited => average().and_then(|()| limits()),
+        }
     }
 }
 
@@ -337,6 +403,12 @@ impl Drop for H264Encoder {
 
 impl VideoEncoder for H264Encoder {
     type Frame = PixelBuffer;
+
+    fn intentional_video_drops(&self) -> u64 {
+        self.priority
+            .as_ref()
+            .map_or(0, |priority| priority.refused())
+    }
 
     fn prioritize_video(&mut self, canvas: isocast_protocol::CanvasId) {
         self.output.health.protect(canvas.is_main());
@@ -449,25 +521,45 @@ impl VideoEncoder for H264Encoder {
         self.output.dropped.load(Ordering::Relaxed)
     }
 
+    /// Only what changed is set, under the rate control the session started
+    /// with (constant, capped average or average); keyframe settings and the
+    /// session stay. VideoToolbox has no transaction: if a property is
+    /// refused, the ones already set are put back and the error says so; if
+    /// putting them back fails too, the error says the session's rate is
+    /// uncertain. Either way the encoder keeps its previous recorded rate.
     fn set_rate(&mut self, fps: u32, bitrate_kbps: u32) -> Result<()> {
-        let set = |key: &CFString, value: &CFType| -> Result<()> {
-            let status = unsafe { VTSessionSetProperty(&self.session, key, Some(value)) };
-            if status != 0 {
-                bail!("the H.264 encoder refused {key} (error {status})");
-            }
-            Ok(())
-        };
-        unsafe {
-            set(
+        if bitrate_kbps == 0 || fps == 0 {
+            bail!("cannot set the H.264 encoder to {bitrate_kbps} kb/s at {fps} fps");
+        }
+        let (old_fps, old_kbps) = (self.fps, self.bitrate_kbps);
+        let frame_rate = |fps: u32| unsafe {
+            self.set(
                 kVTCompressionPropertyKey_ExpectedFrameRate,
                 &CFNumber::new_i32(fps as i32),
-            )?;
-            set(
-                kVTCompressionPropertyKey_AverageBitRate,
-                &CFNumber::new_i64(i64::from(bitrate_kbps) * 1000),
-            )?;
+            )
+        };
+        if fps != old_fps {
+            frame_rate(fps)?;
+        }
+        if bitrate_kbps != old_kbps
+            && let Err(err) = self.apply_bitrate(old_kbps, bitrate_kbps)
+        {
+            let mut restored = self.apply_bitrate(bitrate_kbps, old_kbps);
+            if fps != old_fps {
+                restored = restored.and_then(|()| frame_rate(old_fps));
+            }
+            return Err(match restored {
+                Ok(()) => err.context(format!(
+                    "kept {old_kbps} kb/s at {old_fps} fps instead of {bitrate_kbps} kb/s"
+                )),
+                Err(again) => err.context(format!(
+                    "could not restore {old_kbps} kb/s at {old_fps} fps either ({again:#}); \
+                     the encoder's rate is uncertain"
+                )),
+            });
         }
         self.fps = fps;
+        self.bitrate_kbps = bitrate_kbps;
         Ok(())
     }
 }

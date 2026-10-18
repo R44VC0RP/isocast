@@ -86,6 +86,13 @@ pub enum MacWriter {
 impl isocast_engine::FileWriter for MacWriter {
     type Frame = PixelBuffer;
 
+    fn intentional_video_drops(&self) -> u64 {
+        match self {
+            Self::Asset(w) => w.intentional_video_drops(),
+            Self::CrashSafe(w) => w.intentional_video_drops(),
+        }
+    }
+
     fn prioritize_video(&mut self, canvas: isocast_protocol::CanvasId) {
         match self {
             Self::Asset(w) => w.prioritize_video(canvas),
@@ -320,6 +327,10 @@ impl Platform for MacPlatform {
         let status =
             unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
         (process == 0 && status == 0).then_some("nice 15, utility quality of service")
+    }
+
+    fn governor_headroom(&self) -> Option<isocast_engine::governor::Headroom> {
+        pressure::headroom()
     }
 
     fn thread_cpu_time(&self) -> Option<std::time::Duration> {

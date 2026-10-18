@@ -690,6 +690,12 @@ impl CrashSafeWriter {
 impl FileWriter for CrashSafeWriter {
     type Frame = PixelBuffer;
 
+    fn intentional_video_drops(&self) -> u64 {
+        self.priority
+            .as_ref()
+            .map_or(0, |priority| priority.refused())
+    }
+
     fn prioritize_video(&mut self, canvas: isocast_protocol::CanvasId) {
         self.video.protect(canvas.is_main());
         self.priority

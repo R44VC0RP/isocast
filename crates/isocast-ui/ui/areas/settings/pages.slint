@@ -1336,6 +1336,69 @@ export component AdvancedPage inherits SetPage {
             }
         }
     }
+    // Automatic quality (the setup's `governor`, T.2): what Isocast may
+    // lower for a while when this Mac can't keep up, and what it must
+    // keep (pins). Never the program recording, a file's size or codec,
+    // and ISO files only when the user allows ISO frame thinning.
+    SetGroup {
+        title: "Automatic Quality";
+        hint: (SettingsArea.governor-now != "" ? "Now: " + SettingsArea.governor-now + "\n" : "")
+            + "When this Mac can't keep up, Isocast lowers the preview's refresh and the vertical frame rate, and the stream's bitrate when the upload falls behind, and puts them back once it can. It never lowers the program recording; ISO files stay at their requested frame rate unless you opt in below. "
+            + "Allowing ISO frame thinning lets it also skip ISO pictures; skipped pictures are gone from those files for good. "
+            + "What you keep is never lowered automatically, but the encoders' own overload protection can still drop frames, ISO first, to protect the program recording.";
+        SwitchRow {
+            label: "Adjust Automatically";
+            place: RowPlace.first;
+            on <=> SettingsArea.governor-on;
+            toggled(on) => { SettingsArea.set-flag("governor", on); }
+        }
+        SwitchRow {
+            label: "Keep Preview Refresh";
+            enabled: SettingsArea.governor-on;
+            on <=> SettingsArea.pin-preview;
+            toggled(on) => { SettingsArea.set-flag("pin:preview.fps", on); }
+        }
+        if SettingsArea.vertical-on: SwitchRow {
+            label: "Keep Vertical Frame Rate";
+            enabled: SettingsArea.governor-on;
+            on <=> SettingsArea.pin-vertical;
+            toggled(on) => { SettingsArea.set-flag("pin:vertical.fps", on); }
+        }
+        if SettingsArea.has-stream: SwitchRow {
+            label: "Keep Stream Bitrate";
+            enabled: SettingsArea.governor-on;
+            on <=> SettingsArea.pin-stream;
+            toggled(on) => { SettingsArea.set-flag("pin:stream.video_bitrate_kbps", on); }
+        }
+        // Off by default: the user's choice, at the cost of ISO pictures.
+        SwitchRow {
+            label: "Allow ISO Frame Thinning";
+            place: SettingsArea.iso-thinning ? RowPlace.middle : RowPlace.last;
+            enabled: SettingsArea.governor-on;
+            on <=> SettingsArea.iso-thinning;
+            toggled(on) => { SettingsArea.set-flag("iso_thinning", on); }
+        }
+        // With thinning allowed, every ISO or chosen ones can still be kept.
+        if SettingsArea.iso-thinning: SwitchRow {
+            label: "Keep ISO Frame Rates";
+            place: !SettingsArea.pin-iso && SettingsArea.pin-iso-sources.length > 0 ? RowPlace.middle : RowPlace.last;
+            enabled: SettingsArea.governor-on;
+            on <=> SettingsArea.pin-iso;
+            toggled(on) => { SettingsArea.set-flag("pin:recording.iso.fps", on); }
+        }
+        // Or one ISO file's, while the others may be lowered.
+        if SettingsArea.iso-thinning && !SettingsArea.pin-iso: VerticalLayout {
+            spacing: 1px;
+            for source[i] in SettingsArea.pin-iso-sources: SwitchRow {
+                label: source.name;
+                indent: Theme.space-4;
+                place: i == SettingsArea.pin-iso-sources.length - 1 ? RowPlace.last : RowPlace.middle;
+                enabled: SettingsArea.governor-on;
+                on: source.on;
+                toggled(on) => { SettingsArea.set-flag("pin:recording.iso.sources." + source.id + ".fps", on); }
+            }
+        }
+    }
     // Developer mode (#47): the profile's; logs stay on this Mac.
     SetGroup {
         title: "Developer";

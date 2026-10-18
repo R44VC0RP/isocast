@@ -221,6 +221,11 @@ pub struct Profile {
         skip_serializing_if = "crate::developer::DeveloperSettings::is_default"
     )]
     pub developer: crate::developer::DeveloperSettings,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::governor::GovernorSettings::is_default"
+    )]
+    pub governor: crate::governor::GovernorSettings,
 }
 
 /// The profile's part of the setup's `vertical`. Unused while the scene
@@ -385,6 +390,7 @@ impl Setup {
             vertical: profile_vertical,
             hotkeys,
             developer,
+            governor,
         } = profile;
         // The collection decides whether there is a vertical canvas; the
         // profile only says how it is put out.
@@ -446,6 +452,7 @@ impl Setup {
             vertical,
             hotkeys,
             developer,
+            governor,
         }
     }
 
@@ -493,6 +500,7 @@ impl Setup {
             vertical,
             hotkeys,
             developer,
+            governor,
         } = self;
         let (collection_vertical, profile_vertical) = match vertical {
             Some(VerticalCanvas {
@@ -566,6 +574,7 @@ impl Setup {
             vertical: profile_vertical,
             hotkeys,
             developer,
+            governor,
         };
         (collection, profile)
     }
@@ -574,6 +583,7 @@ impl Setup {
 /// The setup fields a profile holds; everything else (but `version`) is
 /// the scene collection's.
 const PROFILE_FIELDS: &[&str] = &[
+    "governor",
     "hotkeys",
     "canvas.fps",
     "audio",
@@ -670,6 +680,7 @@ impl Profile {
             vertical: None,
             hotkeys: Default::default(),
             developer: Default::default(),
+            governor: Default::default(),
         }
     }
 }

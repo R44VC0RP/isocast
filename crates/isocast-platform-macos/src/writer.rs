@@ -377,6 +377,12 @@ impl AssetWriter {
 impl FileWriter for AssetWriter {
     type Frame = PixelBuffer;
 
+    fn intentional_video_drops(&self) -> u64 {
+        self.priority
+            .as_ref()
+            .map_or(0, |priority| priority.refused())
+    }
+
     fn prioritize_video(&mut self, canvas: CanvasId) {
         self.priority
             .get_or_insert_with(|| EncoderPressure::new(canvas));

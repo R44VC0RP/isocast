@@ -18,6 +18,7 @@ use isocast_protocol::api::{
 };
 use isocast_protocol::change::{Change, merge_patch};
 use isocast_protocol::devices::{CameraKind, Devices, Permission};
+use isocast_protocol::governor::GovernorSettings;
 use isocast_protocol::init::{InitOptions, Layout};
 use isocast_protocol::stream::{MAIN_DESTINATION, StreamService, StreamState, StreamStatus};
 use isocast_protocol::{CanvasId, EncoderQuality, QualityPreset, Setup};
@@ -116,7 +117,7 @@ const TABS: &[(&str, &str, &str, &str, &str)] = &[
         "Advanced",
         "sheet-sliders",
         "System",
-        "What a stream does when its connection drops, and developer mode.",
+        "Automatic quality, what a stream does when its connection drops, and developer mode.",
     ),
 ];
 
@@ -1048,6 +1049,20 @@ impl Settings {
             "open_editor" => json!({"recording": {"open_editor": on}}),
             "reconnect" => json!({"stream": {"reconnect": {"enabled": on}}}),
             "developer" => json!({"developer": {"enabled": on}}),
+            // Automatic quality (T.2), and what it must keep ("pin:PATH").
+            "governor" => return self.change_governor(app, |g| g.enabled = on),
+            // The user's own choice to let it skip ISO pictures (off by default).
+            "iso_thinning" => return self.change_governor(app, |g| g.allow_iso_thinning = on),
+            _ if field.starts_with("pin:") => {
+                let pin = field["pin:".len()..].to_string();
+                return self.change_governor(app, |g| {
+                    let pins = &mut g.pins;
+                    pins.retain(|p| *p != pin);
+                    if on {
+                        pins.push(pin);
+                    }
+                });
+            }
             // The vertical canvas (#86): back as saved, else 1080×1920
             // following the main canvas's scenes; or none.
             "vertical" if on => {
@@ -1110,6 +1125,30 @@ impl Settings {
             _ => return,
         };
         self.change(app, patch);
+    }
+
+    /// Change the draft's automatic quality (`governor`, T.2): whether it
+    /// is on, whether the user allows ISO frame thinning, and the field
+    /// paths it must never change (its pins). Back at its default (on, no
+    /// ISO thinning, nothing kept) while the setup has none, it is left
+    /// out again, as the setup omits it, so Apply has nothing to send.
+    fn change_governor(&self, app: &Rc<App>, change: impl FnOnce(&mut GovernorSettings)) {
+        if let Some(d) = self.draft.borrow_mut().as_mut() {
+            let mut governor = governor_settings(&d.draft);
+            change(&mut governor);
+            let default = governor.is_default() && d.base["governor"].is_null();
+            if let Some(map) = d.draft.as_object_mut() {
+                if default {
+                    map.remove("governor");
+                } else {
+                    // As the setup serializes it, so an untouched draft
+                    // matches its base.
+                    let value = serde_json::to_value(&governor).unwrap_or_default();
+                    map.insert("governor".into(), value);
+                }
+            }
+        }
+        self.show(app);
     }
 
     /// Developer mode's hours until it turns itself off when the switch is
@@ -1956,6 +1995,36 @@ impl Settings {
         let developer = &draft["developer"];
         area.set_developer_on(developer["enabled"] == json!(true));
         area.set_developer_auto_off(developer["auto_off_hours"] != json!(0));
+        // Automatic quality (T.2): on unless turned off, its pins, and
+        // the ISO files recorded now, each of which can be kept.
+        let governor = governor_settings(draft);
+        let pinned = |pin: &str| governor.pinned(pin);
+        area.set_governor_on(governor.enabled);
+        area.set_iso_thinning(governor.allow_iso_thinning);
+        area.set_pin_preview(pinned(PIN_PREVIEW));
+        area.set_pin_iso(pinned(PIN_ISO));
+        area.set_pin_vertical(pinned(PIN_VERTICAL));
+        area.set_pin_stream(pinned(PIN_STREAM));
+        area.set_pin_iso_sources(model(
+            drafted
+                .iter()
+                .filter(|setup| setup.recording.iso.enabled)
+                .flat_map(|setup| setup.sources.iter())
+                .filter(|source| source.kind.has_video() && chosen.contains(&source.id.as_str()))
+                .map(|source| IsoTrack {
+                    id: source.id.as_str().into(),
+                    name: crate::model::source_name(source).into(),
+                    on: pinned(&iso_pin(source.id.as_str())),
+                }),
+        ));
+        area.set_governor_now(
+            s.status
+                .as_ref()
+                .and_then(|x| x.governor.as_ref())
+                .and_then(super::controls::governor_words)
+                .unwrap_or_default()
+                .into(),
+        );
         let hours = self.auto_off_hours();
         area.set_developer_auto_off_label(
             format!(
@@ -2471,11 +2540,47 @@ fn pick(setup: &Value) -> Value {
     if setup["vertical"].is_object() {
         out["vertical"] = setup["vertical"].clone();
     }
+    // Automatic quality (Advanced, T.2); absent at its default.
+    if setup["governor"].is_object() {
+        out["governor"] = setup["governor"].clone();
+    }
     // Developer mode (Advanced), the profile's; absent while it is off.
     if setup["developer"].is_object() {
         out["developer"] = setup["developer"].clone();
     }
     out
+}
+
+/// Automatic quality's pins (`governor.pins`): the field paths it must
+/// never change.
+const PIN_PREVIEW: &str = "preview.fps";
+const PIN_ISO: &str = "recording.iso.fps";
+const PIN_VERTICAL: &str = "vertical.fps";
+const PIN_STREAM: &str = "stream.video_bitrate_kbps";
+
+/// The pin keeping one source's ISO file at its frame rate.
+fn iso_pin(source: &str) -> String {
+    format!("recording.iso.sources.{source}.fps")
+}
+
+/// A setup's (or draft's) `governor`: on unless turned off, ISO frame
+/// thinning only when the user allowed it, and its pins.
+fn governor_settings(setup: &Value) -> GovernorSettings {
+    let governor = &setup["governor"];
+    let pins = governor["pins"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    GovernorSettings {
+        enabled: governor["enabled"].as_bool() != Some(false),
+        allow_iso_thinning: governor["allow_iso_thinning"].as_bool() == Some(true),
+        pins,
+    }
 }
 
 /// A patch turning object `from` into `to`: changed fields set, missing

@@ -167,33 +167,9 @@ pub fn start(daemon: &Arc<Daemon>) {
                 d.contain("diagnostics sampler", || timeline(Arc::downgrade(&d)));
             }
         });
-    #[cfg(target_os = "macos")]
-    {
-        // Device inventory and disk sampling can block. Headroom must be
-        // checked before a protected encoder exhausts its bounded backlog.
-        let weak = Arc::downgrade(daemon);
-        if let Err(error) = isocast_diagnostics::spawn(
-            "output headroom",
-            move || {
-                let mut monitor = isocast_platform_macos::pressure::LoadMonitor::default();
-                loop {
-                    let Some(daemon) = weak.upgrade() else { return };
-                    if let Some(warning) = monitor.poll() {
-                        daemon.publish(Event::Warning {
-                            message: warning.message,
-                        });
-                    }
-                    drop(daemon);
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            },
-            |_| {},
-        ) {
-            daemon.publish(Event::Warning {
-                message: format!("output headroom monitoring unavailable: {error}"),
-            });
-        }
-    }
+    // One owner consumes native peak counters and immediately evaluates the
+    // quality policy; never create a second LoadMonitor for the governor.
+    crate::governor::start(daemon);
     // Explicit isolated, debug-only fault injection, never a public method.
     if (cfg!(debug_assertions) || std::env::var_os("ISOCAST_SOCKET").is_some())
         && let Ok(seconds) = std::env::var("ISOCAST_DEBUG_PANIC_AFTER")

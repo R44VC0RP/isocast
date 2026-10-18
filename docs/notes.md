@@ -5,6 +5,87 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-18 (#110 review fixes, current): uncommitted on7705e90. The
+  governor NEVER thins ISO implicitly: `governor.allow_iso_thinning` is false
+  by default; explicit opt-in permits it, pins still override it, and opt-out
+  cancels a running hold. Existing native safety may still drop ISO pictures.
+  Settings exposes the choice; Optimize/setup-check mention it without
+  enabling it or assuming it makes the workload fit. Owner-local native
+  intentional-refusal counters prevent false losses after vertical recovery;
+  preview retune refusals are nonfatal with per-feed error lifetime.
+- 2026-10-18 (#110 fix evidence): real pre-fix035640 reproduces vertical
+  pin→false ISO hold and two disconnected previews under injected VT-property
+  refusal. Rejected partial fix041634 proved native admission attribution
+  was also needed. After043111 pin/natural restoration and down/up refusals
+  pass; consent043746 and corrected Optimize/choice043938 pass. Idle CPU
+  medians0.02589%→0.00988% of one core; disabled0.00939%, overlapping noise.
+  Final gates240 pass once; strict05573918/18 passes once, zero reported
+  media loss. Report has the fix-by-fix evidence table and known F2 limits.
+- 2026-10-18 (#110 storage): preserved current binaries on M2-b at
+  `~/isocast-scratch/machine-profile-preserved/review-candidate` (daemon
+  SHA25688ed7bea5fa07ef2), baseline in its sibling`baseline-7705`. Old,
+  completed synthetic directories `/tmp/govab-*`, `mpmerge-spke3bm4`,
+  `govfix-ew539qol`, `govfix-p27wualk` were checksum-relocated to the lane's
+  local `scratch/retained-m2-b/<name>/`, not discarded. This freed enough
+  M2-b space for gates without lowering its40 GiB guard. Never confuse
+  hw-batch's standard pushed old bin-dir with these explicitly executed
+  remote candidate binaries; strict's `binaries.json` verifies them.
+
+- 2026-10-18 (#110 earlier T.2 handoff): ca4cc010 contains the first slice.
+  Main257ea057 (Windows plumbing, GPU lifetime and masks115) was merged as
+  eaf0b6a7; its results were committed as7705e90c by the delegator.
+  Shared-frame conflict keeps monitor cap AND new max-size argument; ISO
+  keeps governor pin AND GPU retry/presentation-time path. Daemon governor
+  now uses main's NativePlatform alias. Merged gates240 pass; strict e2e18/18
+  and seven native media contracts pass; job20261018-032243 verifies animated
+  program/filtered-ISO masks, split during emergency hold, native readback
+  and full recovery. Binaries stay onM2-b in ~/isocast-builds/machine-profile/
+  target/release (local shared volume only4.8 GiB free; no binary/movie fetch).
+- 2026-10-18 (#110 evidence limits):162024/195658/195715 were interrupted
+  before hardware, not governor failures. Detached201445/201446/201447-cmd/
+  e2e all passed. CPU/GPU contention was loss-free with zero policy steps.
+  Severe foreign4×UHD60 demands: main program1498 video/1695 audio dropouts,
+  governor1329/1623; a single pair is not repeatable improvement. ISO audio
+  stayed whole but native admission held ISO pictures for about121 s: only
+  the governor's extra overlay is bounded to3 s, not physical starvation.
+  Six policy changes/no cycling; native share recovered25.6 s and preview
+  61.1 s after foreign load. Custom-job PASS proves decode/accounting, not
+  zero drops. Independent merge-review tool failed twice (endpoint unavailable);
+  coordinator Tier-1 review remains. Full evidence/limits: lane scratch REPORT.md.
+
+- 2026-10-17 (#110 T.2 history): user approved initial exonbook baseline
+  while retaining AWS qualification. Runtime slice later committed ca4cc010: preview,
+  ISO/vertical admission and shared-stream bitrate controls, profile pins/off,
+  status/events/UI. A zero-ISO limit held for30+ seconds failed real A/B and
+  was replaced by a non-renewable3 s emergency overlay, rearmed after5 quiet
+  seconds. Native ISO_SHARE remains the only encoder-sharing controller.
+  Network shedding is not production loss and never triggers ISO blanking.
+  Exonbook strict e2e18/18 and233 tests pass;600 s fitting workload has zero
+  steps/losses. Real CBR/replay6000→1500→6000 verified; severe encoders can
+  still exceed protected capacity. Ten-minute overloaded run has four changes
+  without cycling, but preview cannot restore until remaining load fits.
+  Initial AWS runners were lost; detached replacements and their results are
+  described above. Report/evidence under the lane's scratch folder.
+
+- 2026-10-17 (#110 F4/F8): `setup check` uses only a reachable existing
+  daemon; otherwise its capacity check says "not checked" (validation still
+  succeeds/fails locally). Automatic calibration also defers while the live
+  engine previews/starts. `ensure_engine` holds the start gate and cancels
+  only an automatic helper before source startup; manual calibration remains
+  available during preview. Exonbook job 20261017-161756-machine-profile-cmd:
+  both offline cases and preview/manual/preemption cases pass, 90/90 frames
+  and 3.000 s A/V. Included in ca4cc010; original gates233 pass.
+- 2026-10-17 (#110 T.2 scheduling): the 0.0.7 release soak
+  `20261017-160535-delegator-soak` owns **both** AWS hardware locks for six
+  hours: m2-a records, m2-b receives. `hw-batch now --mac any` says "no test
+  Mac reachable" when both locks are held, even though SSH is reachable.
+  No lock was bypassed. Required competitors-only baseline on main 24bea09d
+  was queued as `20261017-162024-machine-profile-cmd` (later interrupted). The user
+  subsequently approved exonbook as the initial baseline; implementation
+  continued without waiving AWS qualification. The detached replacements
+  completed overnight; no jobs remain waiting. Report/integration map are in
+  `/Volumes/IsocastBuild/machine-profile/scratch/REPORT.md`.
+
 - 2026-10-17 (#105 W.1e): Windows UI now builds with Slint 1.18.1/Skia
   and renders offscreen through RTX 5070/DX12. First native release build
   of daemon/CLI/UI took 14m11s; relinking generated UI after a client change

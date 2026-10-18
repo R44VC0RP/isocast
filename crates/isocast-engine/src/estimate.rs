@@ -625,6 +625,14 @@ fn summary(judgement: &Judgement) -> String {
     }
 }
 
+/// Automatic quality's ISO frame thinning is the user's choice, never part
+/// of a fit: estimates and their suggestions don't count it, and nothing
+/// turns it on for them. Native overload shedding is separate.
+pub const ISO_THINNING_NOTE: &str = "Allowing ISO frame thinning (Settings › Advanced › \
+     Automatic Quality, `governor.allow_iso_thinning`) is your choice, off by default: it lets \
+     automatic quality skip ISO pictures under pressure, lost from those files for good, and \
+     isn't counted as making these files fit";
+
 /// One change to try.
 #[derive(Debug, Clone)]
 struct Option_ {
@@ -1223,6 +1231,11 @@ pub fn check(estimate: &CapacityEstimate) -> Option<isocast_protocol::api::Check
         estimate.encode_engines,
         estimate.basis.split(':').next().unwrap_or("")
     ));
+    if estimate.capacity != Capacity::Fits
+        && estimate.outputs.iter().any(|o| o.kind == OutputKind::Iso)
+    {
+        detail.push_str(&format!(". {ISO_THINNING_NOTE}"));
+    }
     let fix = estimate.suggestions.first().map(|s| match &s.change {
         Some(change) => format!("{}: isocast plan --patch '{change}'", s.description),
         None => s.description.clone(),

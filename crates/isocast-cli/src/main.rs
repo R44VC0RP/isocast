@@ -1890,13 +1890,32 @@ fn check(path: &Path, json: bool) -> Result<ExitCode> {
 /// Use the daemon's estimate, including its profile and exact tune results;
 /// setup validation remains local if the daemon cannot answer.
 fn capacity_check(setup: &Setup) -> Option<isocast_protocol::api::Check> {
-    let estimate: CapacityEstimate = Client::connect_or_launch()
-        .ok()?
-        .call(Method::EstimateCapacity(Box::new(CapacityParams {
+    let not_checked = |reason: String| {
+        Some(isocast_protocol::api::Check {
+            name: "encoder capacity".into(),
+            status: CheckStatus::Warning,
+            detail: format!("not checked: {reason}"),
+            fix: Some(
+                "start Isocast, then check the file again; file validation did not start an engine"
+                    .into(),
+            ),
+        })
+    };
+    let mut client = match Client::connect() {
+        Ok(Some(client)) => client,
+        Ok(None) => return not_checked("isocastd is not running".into()),
+        Err(error) => return not_checked(format!("could not reach isocastd: {error}")),
+    };
+    let estimate: CapacityEstimate =
+        match client.call(Method::EstimateCapacity(Box::new(CapacityParams {
             setup: Some(setup.clone()),
             ..Default::default()
-        })))
-        .ok()?;
+        }))) {
+            Ok(estimate) => estimate,
+            Err(error) => {
+                return not_checked(format!("isocastd could not estimate capacity: {error}"));
+            }
+        };
     isocast_engine::estimate::check(&estimate)
 }
 
@@ -2394,6 +2413,7 @@ fn status(json: bool) -> Result<ExitCode> {
         }
         None => Status {
             state: EngineState::Idle,
+            governor: None,
             machine_profile: None,
             load_warning: None,
             scene: None,
@@ -2437,6 +2457,14 @@ fn status(json: bool) -> Result<ExitCode> {
     }
     if let Some(machine) = &status.machine_profile {
         println!("Machine: {}", machine.summary);
+    }
+    if let Some(governor) = &status.governor
+        && (governor.steps > 0 || governor.bottleneck.is_some() || !governor.enabled)
+    {
+        println!("{}", governor.reason);
+        if let Some(error) = &governor.error {
+            eprintln!("warning: automatic quality: {error}");
+        }
     }
     if let (Some(collection), Some(profile)) = (&status.collection, &status.profile) {
         println!(
@@ -4037,6 +4065,7 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                     }
                 }
             }
+            Event::GovernorChanged { governor } => println!("{}", governor.reason),
             Event::ProjectOpened {
                 path,
                 timeline,

@@ -13,6 +13,16 @@ use objc2_foundation::NSProcessInfo;
 static ENCODERS: Mutex<Vec<Weak<EncodeHealth>>> = Mutex::new(Vec::new());
 static WARNING: Mutex<Option<LoadWarning>> = Mutex::new(None);
 static FAILURES: AtomicU64 = AtomicU64::new(0);
+static HEADROOM: Mutex<Option<(Instant, isocast_engine::governor::Headroom)>> = Mutex::new(None);
+
+pub fn headroom() -> Option<isocast_engine::governor::Headroom> {
+    let value = HEADROOM.lock().unwrap_or_else(|e| e.into_inner());
+    value.as_ref().map(|(at, sample)| {
+        let mut sample = sample.clone();
+        sample.age_ms = at.elapsed().as_secs_f64() * 1000.0;
+        sample
+    })
+}
 
 pub fn warning() -> Option<LoadWarning> {
     WARNING.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -125,6 +135,7 @@ impl Default for LoadMonitor {
 impl Drop for LoadMonitor {
     fn drop(&mut self) {
         *WARNING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *HEADROOM.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
@@ -170,6 +181,7 @@ impl LoadMonitor {
         let mut latency_ns = 0;
         let mut pending = 0;
         let mut active = false;
+        let mut recovery_ratio = 0.0f64;
         for (baseline, encoder) in self.encoders.iter_mut().zip(&encoders) {
             let peak = encoder.peak_ns.swap(0, Ordering::Relaxed);
             if !encoder.protected.load(Ordering::Relaxed) {
@@ -196,6 +208,7 @@ impl LoadMonitor {
             let limit = (baseline.latency_ns * 3 / 2)
                 .max(baseline.latency_ns + encoder.frame_ns * 2)
                 .max(encoder.frame_ns * 8);
+            recovery_ratio = recovery_ratio.max(latency as f64 / limit.max(1) as f64);
             threatened |= ready && latency > limit;
             latency_ns = latency_ns.max(latency);
             pending = pending.max(queued);
@@ -230,6 +243,20 @@ impl LoadMonitor {
         } else {
             None
         };
+        *HEADROOM.lock().unwrap_or_else(|e| e.into_inner()) = Some((
+            now,
+            isocast_engine::governor::Headroom {
+                age_ms: 0.0,
+                ready,
+                // Allocation failures remain warnings. Thinning existing
+                // files does not release an encoder session slot.
+                encoder_threatened: sustained,
+                pending_frames: pending,
+                recovery_ratio,
+                cpu_percent: cpu,
+                thermal_state: thermal as u32,
+            },
+        ));
         let mut warning = WARNING.lock().unwrap_or_else(|e| e.into_inner());
         let mut event = None;
         if let Some((cause, message)) = cause {

@@ -230,8 +230,12 @@ struct Encoding<E> {
     encoder: E,
     input: (u32, u32),
     output: (u32, u32),
-    /// The rate it was told to expect.
+    /// The rate it was told to expect: the last one it accepted.
     fps: u32,
+    /// Don't retry an unchanged refused request on every picture.
+    refused: Option<u32>,
+    /// This encoder's rate status, for the governor.
+    notice: crate::governor::PreviewRate,
     /// The current config record.
     config: Option<Record>,
     last_pts: Option<Time>,
@@ -266,6 +270,7 @@ fn run<P: Platform>(
             }
             continue;
         };
+        let fps = crate::governor::monitor_fps(fps);
         let Source { slot, grid, drawn } = match source(fps) {
             Ok(source) => source,
             Err(why) => return end(streams, key, shared, &why),
@@ -287,13 +292,29 @@ fn run<P: Platform>(
         }
         let encoding = encoding.as_mut().expect("started above");
         // A new rate goes to the running encoder: no new session, no
-        // keyframe.
-        if encoding.fps != fps {
+        // keyframe. One it refuses isn't fatal: it keeps its last rate
+        // while frames are still picked at the new one, and that rate
+        // isn't asked again until the request changes.
+        if encoding.fps == fps && encoding.refused.take().is_some() {
+            encoding.notice.result(None);
+        } else if encoding.fps != fps && encoding.refused != Some(fps) {
             let bitrate = bitrate_kbps(encoding.output, fps);
-            if let Err(err) = encoding.encoder.set_rate(fps, bitrate) {
-                return end(streams, key, shared, &format!("{err:#}"));
+            match encoding.encoder.set_rate(fps, bitrate) {
+                Ok(()) => {
+                    encoding.fps = fps;
+                    encoding.refused = None;
+                    encoding.notice.result(None);
+                }
+                Err(err) => {
+                    let message = format!(
+                        "the {} monitor's last acknowledged encoder rate is {} fps; could not set {fps} fps: {err:#}",
+                        key.target, encoding.fps
+                    );
+                    isocast_diagnostics::diagnostic!("warn"; "{message}");
+                    encoding.refused = Some(fps);
+                    encoding.notice.result(Some(message));
+                }
             }
-            encoding.fps = fps;
         }
         // Frame times must increase, even for a frame sent again.
         let pts = match encoding.last_pts {
@@ -411,6 +432,8 @@ fn start_encoder<P: Platform>(
         input,
         output,
         fps,
+        refused: None,
+        notice: crate::governor::PreviewRate::new(),
         config: None,
         last_pts: None,
         revisions: VecDeque::new(),

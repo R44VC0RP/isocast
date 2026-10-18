@@ -540,6 +540,13 @@ impl App {
             Event::EncoderOverload { .. } => {}
             // The Create area opens the editor on it.
             Event::ProjectOpened { .. } => {}
+            // Automatic quality (T.2): the status bar and Settings show it.
+            Event::GovernorChanged { governor } => {
+                if let Some(status) = self.session.borrow_mut().status.as_mut() {
+                    status.governor = Some(governor.clone());
+                }
+                self.changed(Changed::STATUS);
+            }
             // The Controls area shows where the next recording goes.
             Event::RecordTarget { .. } => {}
         }

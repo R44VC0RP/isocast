@@ -21,6 +21,9 @@ use crate::{Daemon, State, content_size, devices, now, relative_folder};
 
 /// A scene collection or profile in hand.
 #[derive(Debug, Clone)]
+// Administrative I/O only, not a media queue. Keeping these owned documents
+// inline avoids boxing every library read just for the profile's small policy.
+#[allow(clippy::large_enum_variant)]
 enum Document {
     Collection(Collection),
     Profile(Profile),

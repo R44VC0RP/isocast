@@ -301,7 +301,7 @@ pub(super) fn run<P: Platform>(
             }
             // On its own grid, skipping what was missed rather than
             // catching up.
-            let period = Duration::from_secs(1) / (*fps).max(1);
+            let period = Duration::from_secs(1) / crate::governor::monitor_fps(*fps).max(1);
             *due = (*due + period).max(now);
             if feeds.reused(id, tick) {
                 // A scene during a transition is NOT the mixed program.

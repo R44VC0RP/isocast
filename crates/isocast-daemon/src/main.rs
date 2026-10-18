@@ -90,6 +90,7 @@ mod debug;
 mod diagnostics;
 mod edit;
 mod export;
+mod governor;
 mod hotkeys;
 mod isoprj;
 mod library;
@@ -2906,6 +2907,7 @@ impl Daemon {
             .and_then(|session| self.recording_into(&session.takes));
         let mut status = Status {
             state: engine,
+            governor: Some(isocast_engine::governor::status()),
             machine_profile: Some(self.machine_status(false)),
             #[cfg(target_os = "macos")]
             load_warning: isocast_platform_macos::pressure::warning(),
@@ -3730,6 +3732,9 @@ impl Daemon {
     /// other requests carry on; callers asking meanwhile wait for it, and
     /// changes made meanwhile apply once it runs.
     fn ensure_engine(self: &Arc<Self>) -> Result<Arc<dyn LiveEngine>, RpcError> {
+        // A new preview must win over an automatic calibration too. Manual
+        // calibration remains available from Settings while previewing.
+        let _gate = self.starting.read_recursive();
         let mut state = self.state.lock();
         loop {
             if let Some(engine) = &state.engine {
@@ -3815,6 +3820,8 @@ impl Daemon {
         // Callers wait until `starting` clears, so clear it even if
         // starting panics (a GPU error, say) rather than hang them all.
         let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.cancel_background_calibration()
+                .map_err(|error| anyhow::anyhow!(error.message))?;
             start_engine(&setup, control, on_event)
         }))
         .unwrap_or_else(|_| {
