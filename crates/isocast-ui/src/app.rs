@@ -540,6 +540,8 @@ impl App {
             Event::EncoderOverload { .. } => {}
             // The Create area opens the editor on it.
             Event::ProjectOpened { .. } => {}
+            // The Controls area shows where the next recording goes.
+            Event::RecordTarget { .. } => {}
         }
         for area in self.areas() {
             area.event(self, &event);

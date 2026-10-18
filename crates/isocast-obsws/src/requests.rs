@@ -1419,6 +1419,7 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
                     setup: None,
                     folder: None,
                     seconds: None,
+                    ..Default::default()
                 })))?;
             } else {
                 ctx.act(Method::Stop)?;

@@ -19,10 +19,10 @@ use isocast_protocol::isoprj;
 use isocast_protocol::library::slug;
 use isocast_protocol::manifest::{SessionManifest, SessionStatus};
 use isocast_protocol::timeline::{
-    self, Clip, ClipFile, ClipInfo, RemovedReason, RemovedTake, RetakeParams, Retaken,
-    TIMELINE_VERSION, Timeline, TimelineAction, TimelineClosed, TimelineInfo, TimelineList,
-    TimelineMoveParams, TimelineNewParams, TimelineOpenParams, TimelineRemoveParams,
-    TimelineSummary, TimelineTarget,
+    self, Clip, ClipFile, ClipInfo, RecordTarget, RecordTargetParams, RecordingInto, RemovedReason,
+    RemovedTake, RetakeParams, Retaken, TIMELINE_VERSION, Timeline, TimelineAction, TimelineClosed,
+    TimelineInfo, TimelineList, TimelineMoveParams, TimelineNewParams, TimelineOpenParams,
+    TimelineRemoveParams, TimelineSummary, TimelineTarget,
 };
 
 use crate::Daemon;
@@ -59,12 +59,35 @@ pub fn now_text() -> String {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CurrentFile {
     timeline: Option<String>,
+    /// Where the next recording goes (#114). Absent in files from before
+    /// it, when the current timeline took every recording: those are
+    /// migrated to a new project each, with a notice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    record: Option<TargetFile>,
+}
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct TargetFile {
+    /// The timeline the next recording adds a take to; none: a new
+    /// project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    into: Option<String>,
+    /// Shown with the choice until another is made (a migrated current
+    /// timeline).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notice: Option<String>,
+    /// That migrated timeline's id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    migrated: Option<String>,
 }
 
 /// Every timeline, in memory and on disk.
 pub struct Timelines {
     folder: PathBuf,
     current: Option<String>,
+    /// Where the next recording goes (#114): the timeline it adds a take
+    /// to, or none for a new project. Kept in `current.json`.
+    target: TargetFile,
     timelines: BTreeMap<String, Timeline>,
     /// Files that couldn't be read when loading.
     problems: Vec<String>,
@@ -105,10 +128,44 @@ impl Timelines {
                 }
             }
         }
-        let named = std::fs::read_to_string(folder.join(CURRENT))
+        let file = std::fs::read_to_string(folder.join(CURRENT))
             .ok()
-            .and_then(|text| serde_json::from_str::<CurrentFile>(&text).ok())
-            .and_then(|file| file.timeline);
+            .and_then(|text| serde_json::from_str::<CurrentFile>(&text).ok());
+        let (named, target, migrate) = match file {
+            Some(CurrentFile {
+                timeline,
+                record: Some(target),
+            }) => (timeline, target, false),
+            // From before #114: the current timeline took every recording.
+            // It stays current (the editor shows it), but recordings start
+            // new projects again unless it is chosen.
+            Some(CurrentFile {
+                timeline,
+                record: None,
+            }) => {
+                let notice = timeline.as_ref().map(|id| {
+                    let name = timelines
+                        .get(id)
+                        .map_or(id.as_str(), |t: &Timeline| &t.name);
+                    format!(
+                        "timeline {name:?} was current, so every recording was added to it; \
+                         new recordings now start a new project each. To keep adding takes \
+                         to it, choose it next to Record (`isocast record-target {id}`)"
+                    )
+                });
+                let migrated = timeline.clone();
+                (
+                    timeline,
+                    TargetFile {
+                        into: None,
+                        notice,
+                        migrated,
+                    },
+                    true,
+                )
+            }
+            None => (None, TargetFile::default(), false),
+        };
         let current = named.clone().filter(|id| timelines.contains_key(id));
         let current_problem = match (&named, &current) {
             (Some(id), None) => Some(format!(
@@ -126,6 +183,7 @@ impl Timelines {
         let mut loaded = Self {
             folder,
             current,
+            target,
             timelines,
             problems,
             current_problem,
@@ -146,7 +204,94 @@ impl Timelines {
                 let _ = loaded.write(&timeline);
             }
         }
+        if migrate {
+            // Best effort: if it can't be written, it is migrated again.
+            let _ = loaded.write_current();
+        }
         loaded
+    }
+
+    /// `current.json`: the current timeline and the record target.
+    fn write_current(&self) -> Result<(), RpcError> {
+        std::fs::create_dir_all(&self.folder).map_err(|err| {
+            failed(format!(
+                "could not make the timelines folder {}: {err}",
+                self.folder.display()
+            ))
+        })?;
+        let json = serde_json::to_string_pretty(&CurrentFile {
+            timeline: self.current.clone(),
+            record: Some(self.target.clone()),
+        })
+        .map_err(|err| failed(err.to_string()))?;
+        write_atomic(&self.folder.join(CURRENT), &json)
+    }
+
+    /// The timeline the next recording adds a take to (#114), if one was
+    /// chosen and is still here.
+    pub fn target(&self) -> Option<&str> {
+        self.target
+            .into
+            .as_deref()
+            .filter(|id| self.timelines.contains_key(*id))
+    }
+
+    /// Choose where the next recording goes: a timeline (`Some`, which
+    /// must exist), or a new project. Clears a migration notice.
+    pub fn set_target(&mut self, id: Option<String>) -> Result<(), RpcError> {
+        if let Some(id) = &id
+            && !self.timelines.contains_key(id)
+        {
+            return Err(invalid(format!(
+                "target: no timeline {id:?}; give `new` or a timeline's id ({})",
+                self.listing()
+            )));
+        }
+        let before = std::mem::replace(
+            &mut self.target,
+            TargetFile {
+                into: id,
+                notice: None,
+                migrated: None,
+            },
+        );
+        if let Err(err) = self.write_current() {
+            self.target = before;
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Where the next recording goes, as `status` and `record_target`
+    /// say it.
+    pub fn record_target(&self) -> RecordTarget {
+        let mut notes: Vec<String> = self.target.notice.iter().cloned().collect();
+        let Some(id) = self.target() else {
+            if let Some(gone) = &self.target.into {
+                notes.push(format!(
+                    "timeline {gone:?} was chosen for the next recording, but it is gone \
+                     (its file couldn't be read), so the next recording starts a new project"
+                ));
+            }
+            return RecordTarget {
+                notes,
+                migrated: self
+                    .target
+                    .migrated
+                    .clone()
+                    .filter(|id| self.timelines.contains_key(id)),
+                ..RecordTarget::default()
+            };
+        };
+        let timeline = &self.timelines[id];
+        RecordTarget {
+            timeline: Some(id.to_string()),
+            name: Some(timeline.name.clone()),
+            take: Some(timeline.clips.len() + 1),
+            folder: last_take_folder(timeline),
+            notes,
+            migrated: None,
+        }
     }
 
     /// Tell `writer` the take folders of every timeline written from now
@@ -461,43 +606,16 @@ impl Timelines {
         Ok(id)
     }
 
-    /// Make `id` (or no timeline) current. Takes being recorded go with
-    /// it (their `recording` entries): when they finish, they are added to
-    /// the timeline current then.
+    /// Make `id` (or no timeline) current: the one the editor shows and
+    /// edits act on. Takes being recorded stay with their recording's
+    /// timeline (#114: before, they went with the current one).
     pub fn set_current(&mut self, id: Option<String>) -> Result<(), RpcError> {
-        std::fs::create_dir_all(&self.folder).map_err(|err| {
-            failed(format!(
-                "could not make the timelines folder {}: {err}",
-                self.folder.display()
-            ))
-        })?;
-        let json = serde_json::to_string_pretty(&CurrentFile {
-            timeline: id.clone(),
-        })
-        .map_err(|err| failed(err.to_string()))?;
-        write_atomic(&self.folder.join(CURRENT), &json)?;
-        let before = std::mem::replace(&mut self.current, id.clone());
-        self.current_problem = None;
-        if let Some(before) = before.filter(|before| Some(before) != id.as_ref()) {
-            let moving = self
-                .timelines
-                .get(&before)
-                .map(|t| t.recording.clone())
-                .unwrap_or_default();
-            if !moving.is_empty() {
-                // Best effort: these only matter after a crash.
-                let _ = self.change(&before, |t| {
-                    t.recording.clear();
-                    Ok(())
-                });
-                if let Some(id) = &id {
-                    let _ = self.change(id, |t| {
-                        t.recording.extend(moving);
-                        Ok(())
-                    });
-                }
-            }
+        let before = std::mem::replace(&mut self.current, id);
+        if let Err(err) = self.write_current() {
+            self.current = before;
+            return Err(err);
         }
+        self.current_problem = None;
         Ok(())
     }
 
@@ -786,6 +904,17 @@ pub fn unfinished(clip: &str, take: &Path, manifest: &SessionManifest) -> Option
     })
 }
 
+/// The folder of a timeline's last take, if it is still there: where its
+/// next take is written (#114).
+pub fn last_take_folder(timeline: &Timeline) -> Option<PathBuf> {
+    timeline
+        .clips
+        .last()
+        .and_then(|clip| clip.take.parent())
+        .filter(|folder| folder.is_dir())
+        .map(Path::to_path_buf)
+}
+
 pub fn read_manifest(path: &Path) -> Result<SessionManifest, String> {
     let text = std::fs::read_to_string(path).map_err(|err| {
         format!(
@@ -807,6 +936,7 @@ impl Default for Timelines {
         Self {
             folder: PathBuf::new(),
             current: None,
+            target: TargetFile::default(),
             timelines: BTreeMap::new(),
             problems: Vec::new(),
             current_problem: None,
@@ -827,6 +957,34 @@ pub struct SessionTakes {
     begun: Mutex<Vec<(u32, PathBuf)>>,
     /// The last take of the session added to a timeline (its manifest).
     appended: Mutex<Option<PathBuf>>,
+    /// Where the session's takes go (#114), chosen at its start.
+    pub into: Mutex<SessionInto>,
+    /// How many of its takes were added to its timeline.
+    landed: Mutex<usize>,
+}
+
+/// Where a recording session's takes go (#114).
+#[derive(Debug, Clone, Default)]
+pub enum SessionInto {
+    /// Not known yet (the session is starting).
+    #[default]
+    Unset,
+    /// A new project: when its first take begins, a timeline named
+    /// `name` is made for it (or, recording into a project folder that has
+    /// one, the project's newest timeline is used).
+    NewProject { name: String, created: bool },
+    /// This timeline; `new_project` if it was made for this recording.
+    Timeline { id: String, new_project: bool },
+}
+
+impl SessionTakes {
+    /// The timeline the session's takes go to, once known.
+    pub fn timeline(&self) -> Option<String> {
+        match &*self.into.lock() {
+            SessionInto::Timeline { id, .. } => Some(id.clone()),
+            _ => None,
+        }
+    }
 }
 
 /// The take a session records now (or is about to begin).
@@ -1000,17 +1158,125 @@ impl Daemon {
     }
 
     pub(crate) fn timeline_new(&self, params: TimelineNewParams) -> Result<TimelineInfo, RpcError> {
-        let id = self.timelines.lock().create(params.name)?;
+        // A new timeline is made to record into: it is the next
+        // recording's target too (#114), shown next to Record.
+        let id = {
+            let mut timelines = self.timelines.lock();
+            let id = timelines.create(params.name)?;
+            timelines.set_target(Some(id.clone()))?;
+            id
+        };
         self.timeline_changed(&id, TimelineAction::Created, None);
-        let recording = self.state.lock().session.is_some();
-        let notes = match recording {
-            true => vec![
-                "a recording is running: its take is added to this timeline when it finishes"
+        self.publish_target();
+        let running = {
+            let state = self.state.read();
+            state.session.as_ref().map(|session| session.takes.clone())
+        };
+        let notes = match running.and_then(|takes| self.recording_into(&takes)) {
+            Some(into) => vec![format!(
+                "a recording is running: its takes go to timeline {:?} ({}); the next \
+                 recording adds its takes here",
+                into.timeline, into.name
+            )],
+            None => vec![
+                "the next recording adds its takes here (`isocast record-target new` \
+                 starts new projects again)"
                     .into(),
             ],
-            false => Vec::new(),
         };
         self.timeline_info(&id, notes)
+    }
+
+    /// Tell clients where the next recording goes now.
+    pub(crate) fn publish_target(&self) {
+        let target = self.timelines.lock().record_target();
+        self.publish(Event::RecordTarget { target });
+    }
+
+    /// See [`Method::RecordTarget`](isocast_protocol::api::Method::RecordTarget).
+    pub(crate) fn record_target(
+        &self,
+        params: RecordTargetParams,
+    ) -> Result<RecordTarget, RpcError> {
+        let Some(target) = params.target else {
+            return Ok(self.timelines.lock().record_target());
+        };
+        let target = target.trim();
+        {
+            let mut timelines = self.timelines.lock();
+            match target {
+                "new" | "new-project" => timelines.set_target(None)?,
+                "" => {
+                    return Err(invalid(format!(
+                        "target: give `new` or a timeline's id ({})",
+                        timelines.listing()
+                    )));
+                }
+                id => {
+                    timelines.reload(id)?;
+                    timelines.set_target(Some(id.to_string()))?;
+                }
+            }
+        }
+        self.publish_target();
+        let mut target = self.timelines.lock().record_target();
+        let running = self.state.read().session.as_ref().map(|s| s.takes.clone());
+        if let Some(into) = running.and_then(|takes| self.recording_into(&takes)) {
+            target.notes.push(format!(
+                "the recording running keeps adding its takes to timeline {:?} ({}); this is \
+                 for the next one",
+                into.timeline, into.name
+            ));
+        }
+        Ok(target)
+    }
+
+    /// Where a `start` with `params` puts its takes (#114): a timeline's
+    /// id, or none for a new project; with notes for its reply.
+    pub(crate) fn choose_into(
+        &self,
+        params: &StartParams,
+    ) -> Result<(Option<String>, Vec<String>), RpcError> {
+        let mut timelines = self.timelines.lock();
+        match (params.new_project, &params.into) {
+            (true, Some(_)) => Err(invalid(
+                "new_project, into: give one or neither: a new project, or a timeline (its \
+                 id) to add a take to",
+            )),
+            (true, None) => Ok((None, Vec::new())),
+            (false, Some(id)) => {
+                timelines.reload(id)?;
+                match timelines.get(id) {
+                    Some(_) => Ok((Some(id.clone()), Vec::new())),
+                    None => Err(invalid(format!(
+                        "into: no timeline {id:?}; {}",
+                        timelines.listing()
+                    ))),
+                }
+            }
+            (false, None) => {
+                let target = timelines.record_target();
+                Ok((target.timeline, target.notes))
+            }
+        }
+    }
+
+    /// The timeline a session's takes go to, and how many it added.
+    pub(crate) fn recording_into(&self, takes: &SessionTakes) -> Option<RecordingInto> {
+        let (id, new_project) = match &*takes.into.lock() {
+            SessionInto::Timeline { id, new_project } => (id.clone(), *new_project),
+            _ => return None,
+        };
+        let landed = *takes.landed.lock();
+        let timelines = self.timelines.lock();
+        let timeline = timelines.get(&id)?;
+        Some(RecordingInto {
+            timeline: id,
+            name: timeline.name.clone(),
+            new_project,
+            takes: landed,
+            clips: timeline.clips.len(),
+        })
     }
 
     pub(crate) fn timeline_get(&self, target: TimelineTarget) -> Result<TimelineInfo, RpcError> {
@@ -1038,14 +1304,23 @@ impl Daemon {
     }
 
     pub(crate) fn timeline_close(&self) -> Result<TimelineClosed, RpcError> {
-        let closed = {
+        let (closed, untargeted) = {
             let mut timelines = self.timelines.lock();
             let closed = timelines.current().map(str::to_string);
             timelines.set_current(None)?;
-            closed
+            // Closing the chosen timeline: recordings start new projects
+            // again (#114).
+            let untargeted = closed.is_some() && timelines.target() == closed.as_deref();
+            if untargeted {
+                timelines.set_target(None)?;
+            }
+            (closed, untargeted)
         };
         if let Some(id) = &closed {
             self.timeline_changed(id, TimelineAction::Closed, None);
+        }
+        if untargeted {
+            self.publish_target();
         }
         Ok(TimelineClosed { closed })
     }
@@ -1100,15 +1375,79 @@ impl Daemon {
     /// finishes, so a crash meanwhile leaves a trace there.
     pub(crate) fn take_began(&self, takes: &SessionTakes, number: u32, manifest: &Path) {
         takes.begun.lock().push((number, manifest.to_path_buf()));
+        let mut changed = Vec::new();
         let mut timelines = self.timelines.lock();
-        let Some(id) = timelines.current().map(str::to_string) else {
+        let id = {
+            let mut into = takes.into.lock();
+            match &*into {
+                SessionInto::Timeline { id, .. } => Some(id.clone()),
+                SessionInto::Unset => None,
+                // A new project's first take: its timeline is made now
+                // (#114), or, recording into a project folder that has
+                // timelines, its newest is used.
+                SessionInto::NewProject { name, created } => {
+                    let joined = match created {
+                        true => None,
+                        false => manifest.parent().and_then(|folder| {
+                            timelines
+                                .using_folder(folder)
+                                .into_iter()
+                                .max_by(|a, b| a.created_at.cmp(&b.created_at))
+                                .map(|t| t.id)
+                        }),
+                    };
+                    let made = match joined {
+                        Some(id) => Ok((id, false)),
+                        None => {
+                            let name: String = name.chars().take(120).collect();
+                            timelines.create(Some(name)).map(|id| (id, true))
+                        }
+                    };
+                    match made {
+                        Ok((id, new_project)) => {
+                            if new_project {
+                                changed.push((id.clone(), TimelineAction::Created));
+                            }
+                            *into = SessionInto::Timeline {
+                                id: id.clone(),
+                                new_project,
+                            };
+                            Some(id)
+                        }
+                        Err(err) => {
+                            drop(into);
+                            drop(timelines);
+                            self.publish(Event::Warning {
+                                message: format!(
+                                    "the new project's timeline couldn't be made, so its takes \
+                                     are only recorded (they are in {}): {}",
+                                    manifest.parent().unwrap_or(Path::new("")).display(),
+                                    err.message
+                                ),
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+        };
+        let Some(id) = id else {
             return;
         };
+        // The recording's timeline is the one the editor shows.
+        if timelines.current() != Some(id.as_str())
+            && timelines.set_current(Some(id.clone())).is_ok()
+        {
+            changed.push((id.clone(), TimelineAction::Opened));
+        }
         let noted = timelines.change(&id, |timeline| {
             timeline.recording.push(manifest.to_path_buf());
             Ok(())
         });
         drop(timelines);
+        for (id, action) in changed {
+            self.timeline_changed(&id, action, None);
+        }
         if let Err(err) = noted {
             self.publish(Event::Warning {
                 message: format!(
@@ -1152,8 +1491,8 @@ impl Daemon {
         }
         let (id, action) = match dropped {
             Some(id) => (id, TimelineAction::Dropped),
-            None => match timelines.current() {
-                Some(id) => (id.to_string(), TimelineAction::Appended),
+            None => match takes.timeline() {
+                Some(id) => (id, TimelineAction::Appended),
                 None => return,
             },
         };
@@ -1176,6 +1515,7 @@ impl Daemon {
             Ok(clip) => {
                 if clip.is_some() {
                     *takes.appended.lock() = Some(path.to_path_buf());
+                    *takes.landed.lock() += 1;
                 }
                 self.timeline_changed(&id, action, clip);
             }
@@ -1238,7 +1578,6 @@ impl Daemon {
         // One at a time: a second retake waits for the first, then finds
         // its new take not begun yet (or begun, and drops that).
         let _one = self.retaking.lock();
-        let id = self.timelines.lock().resolve(None)?;
         let running = {
             let state = self.state.read();
             state.session.as_ref().map(|session| {
@@ -1248,6 +1587,12 @@ impl Daemon {
                     session.takes.clone(),
                 )
             })
+        };
+        // A recording's retake acts on its own timeline (#114); else the
+        // current one's last clip is recorded again, into that timeline.
+        let id = match running.as_ref().and_then(|(_, _, takes)| takes.timeline()) {
+            Some(id) => id,
+            None => self.timelines.lock().resolve(None)?,
         };
         let Some((session, stopping, takes)) = running else {
             return self.retake_idle(id, params, Vec::new(), TakeOff::Last);
@@ -1397,9 +1742,10 @@ impl Daemon {
         });
         let started = self.start_as(
             StartParams {
-                setup: None,
                 folder,
                 seconds: params.seconds,
+                into: Some(id.clone()),
+                ..StartParams::default()
             },
             TakeCause::Retake,
         );

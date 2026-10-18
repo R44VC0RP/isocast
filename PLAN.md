@@ -494,6 +494,16 @@ come later (clips already carry in/out points on their take).
   at the takes' own files, every ISO on its own track with the program on
   top, the clip's angle the one on, crops, markers, audio per file.
 
+- [x] **C.6 Where a recording goes (#114).** Ryan, 2026-10-17: three
+  separate recordings landed as takes of one old "current" timeline.
+  Each recording now starts a new project with its own timeline unless a
+  record target was chosen (`record_target`, CLI `isocast record-target
+  new|ID`, `start --new-project|--into ID`, MCP `record_target`,
+  obs-websocket StartRecord and hotkeys follow it); splits and retakes
+  stay with their recording; an old current timeline is migrated (shown,
+  not used). App: the target next to Start Recording with its menu, the
+  status bar, the editor's Record Next Take Here, "Saved as …" toasts.
+
 ### S. Stress testing and performance (Ryan, 2026-10-13)
 
 - [ ] **S.1 Head-to-head with OBS.** A repeatable benchmark that runs the
@@ -1590,6 +1600,14 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- C.6 #114 (2026-10-17): recordings start a new project each unless a
+  timeline is chosen as the record target; the app shows and changes the
+  choice next to Start Recording, in the status bar and in the editor.
+  Verified with e2e `timeline` (three default recordings → three projects
+  and timelines; a chosen timeline gets take 2 in its folder; split and
+  retake stay together; an old current.json migrated), `projects`, `edit`,
+  offscreen snapshots and the layout audit.
 
 - S.3 #111 fix round 1 (2026-10-17): keep scene compositors across reuse,
   clear an old scene's reuse when its publisher switches, debounce raster

@@ -1700,6 +1700,28 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-17 (#114): **A recording goes to a new project unless one was
+  chosen.** The current timeline used to take every finished take, and it
+  never ended, so separate recordings became takes of one edit. Now the
+  engine keeps a record target (`current.json`'s `record`): none (each
+  recording makes a new project folder and, when its first take begins, a
+  timeline named like the folder) or a timeline (the take goes into the
+  folder of its last take). A session keeps the timeline it started with
+  (splits and retakes too); `timeline open`/`project open` only change
+  the current timeline (what the editor shows); `timeline new` also
+  chooses the new one; idle `retake` records into the timeline it retakes.
+  A `current.json` without `record` is migrated once: target none, a notice
+  (`record_target.notes`, `migrated`) until a choice is made.
+  App, two designs tried offscreen (`record-target/scratch/shots`): A, a
+  quiet full-width row under Start Recording ("New project" / "Take 4 ·
+  Untitled", with a menu); B, a square button beside it (folder or stack
+  icon, lit when adding to a timeline). Picked A because the words are
+  visible where you press Record; a dock too short for one more row (a
+  window under about 1000 px tall) shows B instead, and a squeezed one
+  says "Record" beside it (#108's pattern). The status bar always names
+  the target; the stop toast says where it went and replaces "Recording
+  saved" (its Show in Finder action became Open in Editor).
+
 - 2026-10-17 (#111 F1–F4): **A recent publication isn't evidence that a
   scene is still on air.** Keeping tile compositors avoided pipeline churn
   but left the 100 ms reuse lease's cut hitch. Track program and preview
@@ -6148,6 +6170,11 @@ each section. Delete entries that stop being true.
   starts at 900 because the window's minimum width is 900.
 
 ## Gotchas
+
+- 2026-10-17 (#114): **A `self.x.lock()` temporary in a struct literal
+  lives to the end of the `let`.** Two `self.timelines.lock()` calls as
+  fields of `Status { … }` deadlocked `status` (parking_lot isn't
+  reentrant): read everything under one guard in a block first.
 
 - 2026-10-17 (#104): **Driving DaVinci Resolve (free) on a test Mac**:
   only Studio takes external scripts, its Scripts menu lists Lua only

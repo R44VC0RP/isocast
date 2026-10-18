@@ -80,6 +80,7 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
 - [`isocast devices`](#isocast-devices)
 - [`isocast record`](#isocast-record)
 - [`isocast start`](#isocast-start)
+- [`isocast record-target`](#isocast-record-target)
 - [`isocast stop`](#isocast-stop)
 - [`isocast pause`](#isocast-pause)
 - [`isocast resume`](#isocast-resume)
@@ -152,56 +153,57 @@ Isocast: scene-based recording with per-source ISO files, controlled from the co
 Usage: isocast <COMMAND>
 
 Commands:
-  report-file  Read a bounded page from a redacted report preview
-  report       Create a private, redacted bug-report zip. Nothing is uploaded unless you pass --submit
-  logs         Read structured logs (also works when the daemon is stopped)
-  hotkeys      Customize profile hotkeys, including global keys and push-to-talk
-  encoders     List recording codecs and the containers each supports
-  setup        Work with setup files
-  collection   Scene collections, as in OBS: named sets of scenes, sources, transitions and the canvas size, swapped as a whole. The one in use is the live setup's (with the profile in use)
-  profile      Profiles, as in OBS: named frame rate, recording, stream and audio settings, swapped as a whole. The one in use is the live setup's (with the scene collection in use)
-  plugin       Plugins: folders with an isocast-plugin.toml, installed from a local folder. A plugin's process runs sandboxed and may only call the methods it was granted
-  data         The data store: values by key (like `score.home`) that text in scenes shows (`data = "score.home"` on a text source or text content), set by you, scripts, agents and plugins without changing the setup
-  timeline     Timelines: takes in order, joined into one file by `export`. While one is current, every take that finishes (`stop`, or a `split`) is added to its end; `retake` records the last one again
-  project      Recording projects: a folder per recording session (`<date> <time> Untitled` in the recordings folder) with every take's files, manifests and exports
-  retake       Record the last take again. Not recording (or while a stop is finishing, once it has): take the current timeline's last clip off (its files stay) and start recording. Recording: drop the take being recorded from the timeline (its files stay) and begin a new take about a quarter second later, without stopping any device; returns once it has begun
-  devices      List displays, windows, cameras, microphones and audio outputs (for monitoring), with their ids and formats, and the permissions recording them needs
-  record       Record a setup's ISO sources, each to its own file, until --seconds runs out or Ctrl-C. Without a setup file, record --source specs
-  start        Start recording in the background (in isocastd, launched if needed) and return once every file is created. Same options as `record`; with neither a setup nor --source, records the live setup. A setup or --source given here becomes the live setup
-  stop         Stop the background recording and print its report
-  pause        Pause this take without closing its files; streaming continues
-  resume       Resume the paused take into the same files
-  status       Show whether isocastd is recording, with live counters
-  split        Split the background recording into a new take at the next whole second, without stopping any device
-  marker       Mark this moment in the background recording, with a label
-  refresh      Reload a browser source's page in the background recording, bypassing the cache
-  scene        Put a scene on air, by id, with its transition (the scene's, else the setup's) unless --cut, --fade MS or --transition is given. While recording, the switch goes into the manifest's scene timeline
-  preview      Stage a scene in preview, by id, to put on air with `take`
-  take         Put the preview scene on air (with its transition unless --cut, --fade MS or --transition is given); the scene that was on air moves to preview
-  doctor       Check this Mac and a setup: permissions, hardware encoders, whether the setup's devices are connected, and the recording disk's space and speed. Exits with an error if anything would stop a recording
-  tune         Benchmark the encoders on a setup's files (the live setup if none is given), all at once as in a recording, and say whether this Mac keeps up (fits, keeps up with no margin, or can't keep up). If it doesn't fit, try changes closest first (a smaller program file, a lower quality preset, half the frame rate, one ISO file fewer) and recommend the closest that fits, as a patch for `plan` and `apply`. `start` warns when a setup exceeds what this measured. Runs in isocastd
-  capacity     Predict, instantly and without benchmarking, whether a setup's files (the live setup's, at its sources' live formats, if none is given) fit this Mac's video encoders, from measured per-chip data, and list the closest changes that fit as patches for `plan` and `apply`. `tune` measures instead. Runs in isocastd
-  optimize     Optimize the live setup for recording, streaming or both, like OBS's Auto-Configuration Wizard: recording favours quality and ISO files; streaming sets the service and a bitrate from the upload speed (tested unless --upload-kbps is given; a custom server only with `isocast stream speed-test`). Then `tune` benchmarks this Mac and steps down where it can't keep up. Prints a one-line summary and the changes; --apply makes them. Runs in isocastd
-  snapshot     Save one frame as a PNG: of a video source (an id of the live setup, or a quick source like `screen` or `camera:NAME`), of --scene ID, of --preview, or with none of them the program (while recording, the exact frame it recorded last). Runs in isocastd
-  audio        Change an audio source's program mix in the live setup: gain in dB, mute, sync offset in ms (positive is later), balance (-1 left to 1 right) and monitoring (hearing it through `audio.monitoring_device`). A running recording follows all but the offset at once
-  iso-audio    Choose the audio sources an ISO file carries, in the live setup: `isocast iso-audio camera mic` gives the camera's ISO file the mic only, --none no audio, --default back to recording.iso.audio (or, without it, the source's own sound). Without a source, list each video source's ISO tracks
-  restart      Restart isocastd, for example after granting it screen recording permission. Refused, atomically by isocastd, while it records, streams, exports or feeds the virtual camera
-  permissions  Show the screen recording, camera, microphone and system audio recording permissions and what to do about each that isn't granted; with --request, ask macOS for the ones not decided yet (its prompts appear; --request camera asks for that one only) and wait up to a minute for the answers; with --open, open the System Settings pane where one is turned on
-  get          Print the live setup (TOML, or JSON with --json) and its revision; with --resolved, also where layout put every item (each item's rect in its parent and its box on the canvas)
-  plan         Show what a change to the live setup would do, without doing it: a whole setup FILE, or --patch with a JSON merge patch (lists of sources, scenes and items merge by id)
-  apply        Make a change to the live setup, if it is still at --revision (from `plan` or `get`; 0 when there is no live setup yet)
-  stream       Stream the program live over RTMP or RTMPS to the live setup's [stream] service, and keep its stream key in the Keychain
-  replay       The replay buffer: keep the last seconds of the program in memory, and save them to a file on demand
-  websocket    The obs-websocket v5 server, so OBS tools (Stream Deck, Touch Portal, Streamer.bot, scripts) drive Isocast. Off until enabled
-  projector    Projectors: the program, the preview, a scene, a source or a multiview grid, full screen on a display or in a window (the app shows them)
-  vcam         Feed a picture to Isocast Virtual Camera (extension approval required once)
-  debug        Developer mode, for testing a build locally: verbose logs of every API call and component, and frame timing traces while recording
-  watch        Print events from isocastd as they happen, until Ctrl-C
-  frame        Save the live engine's newest frame of the program (the default), studio mode's preview, or a video source as a JPEG. Starts the engine if it isn't running
-  frames       Record what a monitor shows: the live engine's low-latency H.264 stream of the program (the default), studio mode's preview or a video source, saved as an H.264 elementary stream (Annex B, which ffprobe and ffplay read). Starts the engine if it isn't running
-  engine       Keep the live engine running (`start`), or let it stop once nothing needs it (`stop`). It runs the live setup's sources, program and mix all the time, so recording starts at once; it also runs while recording or while a client shows frames
-  mcp          Serve the control API to agents over MCP, on stdin and stdout
-  help         Print this message or the help of the given subcommand(s)
+  report-file    Read a bounded page from a redacted report preview
+  report         Create a private, redacted bug-report zip. Nothing is uploaded unless you pass --submit
+  logs           Read structured logs (also works when the daemon is stopped)
+  hotkeys        Customize profile hotkeys, including global keys and push-to-talk
+  encoders       List recording codecs and the containers each supports
+  setup          Work with setup files
+  collection     Scene collections, as in OBS: named sets of scenes, sources, transitions and the canvas size, swapped as a whole. The one in use is the live setup's (with the profile in use)
+  profile        Profiles, as in OBS: named frame rate, recording, stream and audio settings, swapped as a whole. The one in use is the live setup's (with the scene collection in use)
+  plugin         Plugins: folders with an isocast-plugin.toml, installed from a local folder. A plugin's process runs sandboxed and may only call the methods it was granted
+  data           The data store: values by key (like `score.home`) that text in scenes shows (`data = "score.home"` on a text source or text content), set by you, scripts, agents and plugins without changing the setup
+  timeline       Timelines: takes in order, joined into one file by `export`. Each recording starts a new project with its own timeline unless `isocast record-target` (or `timeline new`) chose one to add its takes to; `retake` records the last one again
+  project        Recording projects: a folder per recording session (`<date> <time> Untitled` in the recordings folder) with every take's files, manifests and exports
+  retake         Record the last take again. Not recording (or while a stop is finishing, once it has): take the current timeline's last clip off (its files stay) and start recording. Recording: drop the take being recorded from the timeline (its files stay) and begin a new take about a quarter second later, without stopping any device; returns once it has begun
+  devices        List displays, windows, cameras, microphones and audio outputs (for monitoring), with their ids and formats, and the permissions recording them needs
+  record         Record a setup's ISO sources, each to its own file, until --seconds runs out or Ctrl-C. Without a setup file, record --source specs
+  start          Start recording in the background (in isocastd, launched if needed) and return once every file is created. Same options as `record`; with neither a setup nor --source, records the live setup. A setup or --source given here becomes the live setup
+  record-target  Where the next recording goes, or choose it: `new` (each recording starts a new project with its own timeline; the default) or a timeline's id (its next take). Kept across restarts; a recording running keeps its own
+  stop           Stop the background recording and print its report
+  pause          Pause this take without closing its files; streaming continues
+  resume         Resume the paused take into the same files
+  status         Show whether isocastd is recording, with live counters
+  split          Split the background recording into a new take at the next whole second, without stopping any device
+  marker         Mark this moment in the background recording, with a label
+  refresh        Reload a browser source's page in the background recording, bypassing the cache
+  scene          Put a scene on air, by id, with its transition (the scene's, else the setup's) unless --cut, --fade MS or --transition is given. While recording, the switch goes into the manifest's scene timeline
+  preview        Stage a scene in preview, by id, to put on air with `take`
+  take           Put the preview scene on air (with its transition unless --cut, --fade MS or --transition is given); the scene that was on air moves to preview
+  doctor         Check this Mac and a setup: permissions, hardware encoders, whether the setup's devices are connected, and the recording disk's space and speed. Exits with an error if anything would stop a recording
+  tune           Benchmark the encoders on a setup's files (the live setup if none is given), all at once as in a recording, and say whether this Mac keeps up (fits, keeps up with no margin, or can't keep up). If it doesn't fit, try changes closest first (a smaller program file, a lower quality preset, half the frame rate, one ISO file fewer) and recommend the closest that fits, as a patch for `plan` and `apply`. `start` warns when a setup exceeds what this measured. Runs in isocastd
+  capacity       Predict, instantly and without benchmarking, whether a setup's files (the live setup's, at its sources' live formats, if none is given) fit this Mac's video encoders, from measured per-chip data, and list the closest changes that fit as patches for `plan` and `apply`. `tune` measures instead. Runs in isocastd
+  optimize       Optimize the live setup for recording, streaming or both, like OBS's Auto-Configuration Wizard: recording favours quality and ISO files; streaming sets the service and a bitrate from the upload speed (tested unless --upload-kbps is given; a custom server only with `isocast stream speed-test`). Then `tune` benchmarks this Mac and steps down where it can't keep up. Prints a one-line summary and the changes; --apply makes them. Runs in isocastd
+  snapshot       Save one frame as a PNG: of a video source (an id of the live setup, or a quick source like `screen` or `camera:NAME`), of --scene ID, of --preview, or with none of them the program (while recording, the exact frame it recorded last). Runs in isocastd
+  audio          Change an audio source's program mix in the live setup: gain in dB, mute, sync offset in ms (positive is later), balance (-1 left to 1 right) and monitoring (hearing it through `audio.monitoring_device`). A running recording follows all but the offset at once
+  iso-audio      Choose the audio sources an ISO file carries, in the live setup: `isocast iso-audio camera mic` gives the camera's ISO file the mic only, --none no audio, --default back to recording.iso.audio (or, without it, the source's own sound). Without a source, list each video source's ISO tracks
+  restart        Restart isocastd, for example after granting it screen recording permission. Refused, atomically by isocastd, while it records, streams, exports or feeds the virtual camera
+  permissions    Show the screen recording, camera, microphone and system audio recording permissions and what to do about each that isn't granted; with --request, ask macOS for the ones not decided yet (its prompts appear; --request camera asks for that one only) and wait up to a minute for the answers; with --open, open the System Settings pane where one is turned on
+  get            Print the live setup (TOML, or JSON with --json) and its revision; with --resolved, also where layout put every item (each item's rect in its parent and its box on the canvas)
+  plan           Show what a change to the live setup would do, without doing it: a whole setup FILE, or --patch with a JSON merge patch (lists of sources, scenes and items merge by id)
+  apply          Make a change to the live setup, if it is still at --revision (from `plan` or `get`; 0 when there is no live setup yet)
+  stream         Stream the program live over RTMP or RTMPS to the live setup's [stream] service, and keep its stream key in the Keychain
+  replay         The replay buffer: keep the last seconds of the program in memory, and save them to a file on demand
+  websocket      The obs-websocket v5 server, so OBS tools (Stream Deck, Touch Portal, Streamer.bot, scripts) drive Isocast. Off until enabled
+  projector      Projectors: the program, the preview, a scene, a source or a multiview grid, full screen on a display or in a window (the app shows them)
+  vcam           Feed a picture to Isocast Virtual Camera (extension approval required once)
+  debug          Developer mode, for testing a build locally: verbose logs of every API call and component, and frame timing traces while recording
+  watch          Print events from isocastd as they happen, until Ctrl-C
+  frame          Save the live engine's newest frame of the program (the default), studio mode's preview, or a video source as a JPEG. Starts the engine if it isn't running
+  frames         Record what a monitor shows: the live engine's low-latency H.264 stream of the program (the default), studio mode's preview or a video source, saved as an H.264 elementary stream (Annex B, which ffprobe and ffplay read). Starts the engine if it isn't running
+  engine         Keep the live engine running (`start`), or let it stop once nothing needs it (`stop`). It runs the live setup's sources, program and mix all the time, so recording starts at once; it also runs while recording or while a client shows frames
+  mcp            Serve the control API to agents over MCP, on stdin and stdout
+  help           Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help
@@ -949,15 +951,15 @@ Options:
 ## isocast timeline
 
 ```text
-Timelines: takes in order, joined into one file by `export`. While one is current, every take that finishes (`stop`, or a `split`) is added to its end; `retake` records the last one again
+Timelines: takes in order, joined into one file by `export`. Each recording starts a new project with its own timeline unless `isocast record-target` (or `timeline new`) chose one to add its takes to; `retake` records the last one again
 
 Usage: isocast timeline <COMMAND>
 
 Commands:
-  new     Make a timeline and make it current: from now on every take that finishes (`stop`, or a `split`) is added to its end
+  new     Make a timeline, make it current and choose it for the next recording: from then on every recording adds its takes to its end (`isocast record-target new` starts new projects again)
   list    List the timelines, and which is current
-  open    Make a timeline current (by id), so finished takes are added to it
-  close   Make no timeline current: takes are only recorded
+  open    Make a timeline current (by id): the one the editor shows and timeline commands act on. Recordings go where `isocast record-target` says
+  close   Make no timeline current. If it was chosen for the next recording, recordings start new projects again
   show    Show a timeline (the current one unless an id is given): its clips in order, each with its take and files, and the takes taken off it
   remove  Take a clip off the timeline (by id, like c2). Its take's files stay where they are
   move    Move a clip (by id) to POSITION, counting from 1 (the first)
@@ -980,7 +982,7 @@ Options:
 ## isocast timeline new
 
 ```text
-Make a timeline and make it current: from now on every take that finishes (`stop`, or a `split`) is added to its end
+Make a timeline, make it current and choose it for the next recording: from then on every recording adds its takes to its end (`isocast record-target new` starts new projects again)
 
 Usage: isocast timeline new [OPTIONS] [NAME]
 
@@ -1007,7 +1009,7 @@ Options:
 ## isocast timeline open
 
 ```text
-Make a timeline current (by id), so finished takes are added to it
+Make a timeline current (by id): the one the editor shows and timeline commands act on. Recordings go where `isocast record-target` says
 
 Usage: isocast timeline open [OPTIONS] <TIMELINE>
 
@@ -1022,7 +1024,7 @@ Options:
 ## isocast timeline close
 
 ```text
-Make no timeline current: takes are only recorded
+Make no timeline current. If it was chosen for the next recording, recordings start new projects again
 
 Usage: isocast timeline close [OPTIONS]
 
@@ -1388,19 +1390,52 @@ Options:
 ## isocast start
 
 ```text
-Start recording in the background (in isocastd, launched if needed) and return once every file is created. Same options as `record`; with neither a setup nor --source, records the live setup. A setup or --source given here becomes the live setup
+Start recording in the background (in isocastd, launched if needed) and return once every file is created. Same options as `record`; with neither a setup nor --source, records the live setup. A setup or --source given here becomes the live setup.
+
+Its takes go where `isocast record-target` says (a new project with its own timeline, unless a timeline was chosen); --new-project or --into choose for this recording only.
 
 Usage: isocast start [OPTIONS] [SETUP]
 
 Arguments:
-  [SETUP]  
+  [SETUP]
+          
 
 Options:
-      --source <SPEC>      
-      --seconds <SECONDS>  Stop on its own after this many seconds
-      --folder <FOLDER>    
-      --json               
-  -h, --help               Print help
+      --source <SPEC>
+          
+
+      --seconds <SECONDS>
+          Stop on its own after this many seconds
+
+      --folder <FOLDER>
+          
+
+      --new-project
+          Start a new project with its own timeline
+
+      --into <TIMELINE>
+          Add a take to this timeline (an id from `isocast timeline list`), in the folder of its last take
+
+      --json
+          
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+## isocast record-target
+
+```text
+Where the next recording goes, or choose it: `new` (each recording starts a new project with its own timeline; the default) or a timeline's id (its next take). Kept across restarts; a recording running keeps its own
+
+Usage: isocast record-target [OPTIONS] [TARGET]
+
+Arguments:
+  [TARGET]  `new`, or a timeline's id; absent: show the choice
+
+Options:
+      --json  
+  -h, --help  Print help
 ```
 
 ## isocast stop

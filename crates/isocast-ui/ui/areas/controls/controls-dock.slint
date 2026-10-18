@@ -26,11 +26,11 @@
 // words in its tooltip, usable while the buffer runs.
 
 import { Theme } from "../../theme.slint";
-import { Icons } from "../../icons.slint";
+import { Icon, Icons } from "../../icons.slint";
 import { Ui } from "../../state.slint";
 import {
     Button, ButtonVariant, ControlSize, Dock, Dropdown, GroupHeading, GroupHint, GroupRow, IconButton, Popover,
-    PopoverPlacement, RowGroup, RowPlace, Viewport,
+    PopoverPlacement, RowGroup, RowPlace, Viewport, Menus,
 } from "../../kit.slint";
 import { ControlsArea } from "state.slint";
 
@@ -256,7 +256,7 @@ export component ControlsDock inherits Dock {
     // the window, not this dock's layout, so it can't loop).
     property <length> row-height: Ui.docks-height > 0 ? Ui.docks-height : round(min(320px, max(224px, Viewport.height * 4 / 15)) / 1px) * 1px;
     // Exit beside Settings below this; the rows closer together below 240px.
-    property <bool> exit-beside: root.row-height < 272px;
+    property <bool> exit-beside: root.target-row ? root.row-height < 300px : root.row-height < 272px;
     property <bool> tight: root.row-height < 240px;
     // A dock squeezed below the width "Replay Buffer" and "Virtual Camera"
     // need beside their square buttons (a window about 1000px wide or
@@ -266,6 +266,18 @@ export component ControlsDock inherits Dock {
     // dock's own width would loop through its buttons' labels).
     property <bool> short-words: Ui.controls-width < 200px || Viewport.width < Ui.scenes-width + Ui.sources-width + Ui.transitions-width + Ui.controls-width + 232px;
     changed vcam-serial => { vcam-details.show(); }
+    // The record target's row under Start Recording (#114).
+    // A row of its own under it when the dock has room for one more
+    // (a window about 1000px tall or more), else a square button beside
+    // Start Recording (#114, docs/notes.md).
+    property <bool> target-row: root.row-height >= 268px;
+    // Beside that square button, a squeezed dock says "Record" (the
+    // whole words in its tooltip), as Replay and Virtual Cam do (#108).
+    property <bool> record-short: !root.target-row && root.short-words;
+    property <int> target-serial: ControlsArea.target-menu-serial;
+    changed target-serial => {
+        Menus.request("controls:record-target", record-row.absolute-position.x, record-row.absolute-position.y, record-row.width, record-row.height + (root.target-row ? Theme.space-1 + Theme.control-h-sm : 0px));
+    }
 
     title: "Controls";
 
@@ -285,26 +297,36 @@ export component ControlsDock inherits Dock {
             enabled: Ui.has-setup && !ControlsArea.busy-stream;
             clicked => { ControlsArea.toggle-stream(); }
         }
-        HorizontalLayout {
+        record-row := HorizontalLayout {
             spacing: Theme.space-1;
             DockButton {
                 horizontal-stretch: 1;
                 shrinks: true;
                 // Its whole words for screen readers and as a tooltip
                 // when they are shortened.
-                tooltip: root.recording ? "Stop Recording" : "";
-                accessible-name: root.recording ? "Stop Recording" : "";
+                tooltip: root.recording ? "Stop Recording" : root.record-short ? "Start Recording" : "";
+                accessible-name: root.recording ? "Stop Recording" : root.record-short ? "Start Recording" : "";
                 // Beside Pause and Marker the whole words need the dock
                 // 224px wide (its width as set, when the window has room for
                 // every dock at theirs: read from the layout settings, not
                 // this dock, which would loop); else it says "Stop", red
                 // with its light, rather than "Stop R…".
-                text: ControlsArea.record-state == "starting" ? "Starting…" : ControlsArea.record-state == "stopping" ? "Stopping…" : root.recording ? (root.room-for-words ? "Stop Recording" : "Stop") : "Start Recording";
+                text: ControlsArea.record-state == "starting" ? "Starting…" : ControlsArea.record-state == "stopping" ? "Stopping…" : root.recording ? (root.room-for-words ? "Stop Recording" : "Stop") : root.record-short ? "Record" : "Start Recording";
                 // Recording: the button is red, so its light goes bone.
                 dot: root.recording || ControlsArea.record-state == "starting" ? Theme.bone : Theme.danger;
                 variant: root.recording || ControlsArea.record-state == "starting" ? ButtonVariant.live : ButtonVariant.secondary;
                 enabled: Ui.has-setup && !ControlsArea.busy-record;
                 clicked => { ControlsArea.toggle-record(); }
+            }
+            if !root.target-row && !root.recording: Button {
+                width: Theme.control-h;
+                inset: 0px;
+                icon: ControlsArea.target-notice ? Icons.warning : ControlsArea.target-new ? Icons.folder : Icons.stack;
+                checked: !ControlsArea.target-new;
+                accessible-name: "Next recording: " + ControlsArea.target-label;
+                tooltip: ControlsArea.target-tooltip;
+                menu-open: Menus.open && Menus.owner == "controls:record-target";
+                clicked => { Menus.request("controls:record-target", self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
             }
             if root.recording: Button {
                 width: Theme.control-h;
@@ -324,6 +346,32 @@ export component ControlsDock inherits Dock {
                 accessible-name: "Marker";
                 tooltip: "Add a marker at this moment";
                 clicked => { ControlsArea.marker(""); }
+            }
+        }
+        // Where the next recording goes (#114): a new project, or a take
+        // on a chosen timeline; its menu chooses.
+        if root.target-row: Rectangle {
+            height: Theme.control-h-sm;
+            DockButton {
+                width: parent.width;
+                height: parent.height;
+                size: ControlSize.small;
+                variant: ButtonVariant.quiet;
+                shrinks: true;
+                inset-end: 24px;
+                icon: ControlsArea.target-notice ? Icons.warning : ControlsArea.target-new ? Icons.folder : Icons.stack;
+                text: ControlsArea.target-label;
+                tooltip: ControlsArea.target-tooltip;
+                accessible-name: "Next recording: " + ControlsArea.target-label;
+                menu-open: Menus.open && Menus.owner == "controls:record-target";
+                clicked => { Menus.request("controls:record-target", self.absolute-position.x, self.absolute-position.y, self.width, self.height); }
+            }
+            Icon {
+                x: parent.width - 8px - self.width;
+                y: (parent.height - self.height) / 2;
+                size: 12px;
+                path: Icons.chevron-down;
+                color: Theme.text-3;
             }
         }
         HorizontalLayout {

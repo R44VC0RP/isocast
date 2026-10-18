@@ -179,9 +179,10 @@ enum Command {
         #[command(subcommand)]
         command: data::DataCommand,
     },
-    /// Timelines: takes in order, joined into one file by `export`. While
-    /// one is current, every take that finishes (`stop`, or a `split`) is
-    /// added to its end; `retake` records the last one again.
+    /// Timelines: takes in order, joined into one file by `export`. Each
+    /// recording starts a new project with its own timeline unless
+    /// `isocast record-target` (or `timeline new`) chose one to add its
+    /// takes to; `retake` records the last one again.
     Timeline {
         #[command(subcommand)]
         command: timeline::TimelineCommand,
@@ -245,6 +246,10 @@ enum Command {
     /// and return once every file is created. Same options as `record`;
     /// with neither a setup nor --source, records the live setup. A setup
     /// or --source given here becomes the live setup.
+    ///
+    /// Its takes go where `isocast record-target` says (a new project with
+    /// its own timeline, unless a timeline was chosen); --new-project or
+    /// --into choose for this recording only.
     Start {
         setup: Option<PathBuf>,
         #[arg(long = "source", value_name = "SPEC")]
@@ -254,6 +259,23 @@ enum Command {
         seconds: Option<f64>,
         #[arg(long)]
         folder: Option<PathBuf>,
+        /// Start a new project with its own timeline.
+        #[arg(long, conflicts_with = "into")]
+        new_project: bool,
+        /// Add a take to this timeline (an id from `isocast timeline
+        /// list`), in the folder of its last take.
+        #[arg(long, value_name = "TIMELINE")]
+        into: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Where the next recording goes, or choose it: `new` (each recording
+    /// starts a new project with its own timeline; the default) or a
+    /// timeline's id (its next take). Kept across restarts; a recording
+    /// running keeps its own.
+    RecordTarget {
+        /// `new`, or a timeline's id; absent: show the choice.
+        target: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1285,8 +1307,18 @@ fn run(cli: Cli) -> Result<ExitCode> {
             sources,
             seconds,
             folder,
+            new_project,
+            into,
             json,
-        } => start(setup.as_deref(), &sources, seconds, folder, json),
+        } => start(
+            setup.as_deref(),
+            &sources,
+            seconds,
+            folder,
+            (new_project, into),
+            json,
+        ),
+        Command::RecordTarget { target, json } => timeline::record_target(target, json),
         Command::Stop { json } => stop(json),
         Command::Pause { json } => pause(true, json),
         Command::Resume { json } => pause(false, json),
@@ -2256,6 +2288,7 @@ fn start(
     sources: &[String],
     seconds: Option<f64>,
     folder: Option<PathBuf>,
+    (new_project, into): (bool, Option<String>),
     json: bool,
 ) -> Result<ExitCode> {
     // Neither a setup nor sources: record the live setup.
@@ -2272,6 +2305,8 @@ fn start(
         setup,
         folder,
         seconds,
+        new_project,
+        into,
     })))?;
     if json {
         println!("{}", serde_json::to_string_pretty(&started)?);
@@ -2372,6 +2407,8 @@ fn status(json: bool) -> Result<ExitCode> {
             interrupted: Vec::new(),
             timeline: None,
             timeline_problem: None,
+            record_target: None,
+            recording_into: None,
             export: None,
             virtual_camera: None,
             replay: None,
@@ -2431,13 +2468,39 @@ fn status(json: bool) -> Result<ExitCode> {
     }
     if let Some(timeline) = &status.timeline {
         println!(
-            "Timeline: {:?} ({}), {} clip{}, {:.2} s; finished takes are added to it",
+            "Timeline: {:?} ({}), {} clip{}, {:.2} s (current)",
             timeline.name,
             timeline.id,
             timeline.clips,
             if timeline.clips == 1 { "" } else { "s" },
             timeline.duration_seconds
         );
+    }
+    if let Some(into) = &status.recording_into {
+        println!(
+            "Recording into: {}",
+            match into.new_project {
+                true => format!(
+                    "a new project, timeline {:?} ({})",
+                    into.name, into.timeline
+                ),
+                false => format!(
+                    "take {} of {:?} ({})",
+                    into.clips + 1,
+                    into.name,
+                    into.timeline
+                ),
+            }
+        );
+    }
+    if let Some(target) = &status.record_target {
+        println!(
+            "Next recording: {} (`isocast record-target` changes it)",
+            timeline::target_words(target)
+        );
+        for note in &target.notes {
+            println!("note: {note}");
+        }
     }
     if let Some(problem) = &status.timeline_problem {
         println!("warning: {problem}");
@@ -3782,11 +3845,25 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                 time_seconds,
                 ..
             } => println!("marker {label:?} at {time_seconds:.2} s in take {take}"),
-            Event::Stopped { report, error, .. } => match (report, error) {
+            Event::Stopped {
+                report,
+                error,
+                timeline,
+                ..
+            } => match (report, error) {
                 (Some(report), _) => println!(
-                    "recording stopped after {:.2} s; manifest {}",
+                    "recording stopped after {:.2} s; manifest {}{}",
                     report.duration_seconds,
-                    report.manifest.display()
+                    report.manifest.display(),
+                    timeline
+                        .map(|into| format!(
+                            "; {} take{} on timeline {} ({} clips)",
+                            into.takes,
+                            if into.takes == 1 { "" } else { "s" },
+                            into.timeline,
+                            into.clips
+                        ))
+                        .unwrap_or_default()
                 ),
                 (None, Some(error)) => println!("recording failed: {error}"),
                 (None, None) => println!("recording stopped"),
@@ -3960,6 +4037,9 @@ fn watch(levels: bool, kinds: &[String], except: &[String], json: bool) -> Resul
                 path.display(),
                 if editor { " (in the editor)" } else { "" }
             ),
+            Event::RecordTarget { target } => {
+                println!("next recording: {}", timeline::target_words(&target))
+            }
         }
     }
     // Events end only when isocastd hangs up; a watcher must not mistake

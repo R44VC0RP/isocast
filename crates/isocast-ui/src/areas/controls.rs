@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use isocast_protocol::api::{Capacity, EngineState, Event, LiveFile, Method, Overload};
 use isocast_protocol::replay::{ReplaySaved, ReplayState, ReplayStatus};
 use isocast_protocol::stream::{StreamService, StreamState, StreamStatus};
+use isocast_protocol::timeline::{RecordTarget, RecordTargetParams, RecordingInto};
 use isocast_protocol::virtual_camera::{
     SIZES as VCAM_SIZES, Target as VcamTarget, VirtualCameraState, VirtualCameraStatus,
 };
@@ -21,7 +22,7 @@ use slint::{ComponentHandle, SharedString};
 use super::{Area, Changed};
 use crate::app::App;
 use crate::form::{self, Context, FormEvent, FormModel, Outcome, Target};
-use crate::kit::{self, model};
+use crate::kit::{self, MenuBuilder, model};
 use crate::session::EditOptions;
 use crate::toasts::Toast;
 use crate::{AppWindow, ControlsArea, FileRow, ToastKind, ToastRow};
@@ -46,6 +47,9 @@ pub const STATES: &[&str] = &[
     "replay[:running|failed|saved]",
     "pause",
     "resume",
+    "record-target:new|last|TIMELINE (choose where the next recording goes)",
+    "record-target-menu (open the menu next to Start Recording)",
+    "toast-saved:new|take|takes (the toast a stopped recording shows)",
 ];
 
 /// The transition kinds, in the web app's order and words.
@@ -326,6 +330,25 @@ impl Area for Controls {
         true
     }
 
+    fn context_menu(&self, app: &Rc<App>, owner: &str) -> Option<MenuBuilder> {
+        (owner == TARGET_MENU).then(|| target_menu(app))
+    }
+
+    fn menu_chosen(&self, app: &Rc<App>, owner: &str, id: &str) -> bool {
+        if owner != TARGET_MENU {
+            return false;
+        }
+        match id {
+            "new" => choose_target(app, "new"),
+            id => {
+                if let Some(timeline) = id.strip_prefix("timeline:") {
+                    choose_target(app, timeline);
+                }
+            }
+        }
+        true
+    }
+
     fn dialog_opened(&self, app: &Rc<App>, kind: &str, arg: &str) {
         if kind != "transition" {
             self.dialog.replace(None);
@@ -382,9 +405,24 @@ impl Area for Controls {
                 }
                 self.stream_on.set(on);
             }
+            Event::Stopped {
+                report: Some(report),
+                timeline,
+                ..
+            } => {
+                self.drops_stopped(app);
+                self.apply_pending_fix(app);
+                saved_toast(app, report, timeline.as_ref());
+            }
             Event::Stopped { .. } => {
                 self.drops_stopped(app);
                 self.apply_pending_fix(app);
+            }
+            Event::RecordTarget { target } => {
+                if let Some(status) = app.session.borrow_mut().status.as_mut() {
+                    status.record_target = Some(target.clone());
+                }
+                app.changed(Changed::STATUS);
             }
             _ => {}
         }
@@ -510,6 +548,57 @@ impl Area for Controls {
             "details" => {
                 app.flush();
                 open_details(app, arg);
+            }
+            // Where the next recording goes, as the menu next to Start
+            // Recording chooses it (it changes the engine's choice).
+            "record-target" => {
+                let id = match arg {
+                    "" => "new".to_string(),
+                    // The newest timeline (a recording's own, made just
+                    // before).
+                    "last" => match app
+                        .create
+                        .timelines()
+                        .into_iter()
+                        .max_by(|a, b| a.created_at.cmp(&b.created_at))
+                    {
+                        Some(t) => t.id,
+                        None => {
+                            return Some(Err(anyhow::anyhow!("no timelines yet (record first)")));
+                        }
+                    },
+                    id => id.to_string(),
+                };
+                choose_target(app, &id);
+            }
+            "record-target-menu" => {
+                app.flush();
+                if let Some(window) = app.window() {
+                    let area = window.global::<ControlsArea>();
+                    area.set_target_menu_serial(area.get_target_menu_serial() + 1);
+                }
+            }
+            "toast-saved" => {
+                let into = RecordingInto {
+                    timeline: "my-video".into(),
+                    name: match arg {
+                        "new" => "2026-10-17 19-27-03 Untitled".into(),
+                        _ => "My Video".into(),
+                    },
+                    new_project: arg == "new",
+                    takes: if arg == "takes" { 3 } else { 1 },
+                    clips: if arg == "new" { 1 } else { 4 },
+                };
+                let report: isocast_protocol::api::Report = match serde_json::from_value(json!({
+                    "folder": "/Users/you/Movies/Isocast/2026-10-17 19-27-03 Untitled",
+                    "manifest": "/Users/you/Movies/Isocast/2026-10-17 19-27-03 Untitled/2026-10-17 19-27-03.session.json",
+                    "duration_seconds": 12.0,
+                    "files": [],
+                })) {
+                    Ok(report) => report,
+                    Err(error) => return Some(Err(error.into())),
+                };
+                saved_toast(app, &report, Some(&into));
             }
             // Pause or resume the recording through the Controls dock.
             "pause" | "resume" => {
@@ -903,6 +992,7 @@ impl Controls {
     /// REC, CPU and FPS in the status bar, the REC details' files, and the
     /// Controls dock's recording state.
     fn show_recording(&self, app: &Rc<App>, area: &ControlsArea) {
+        show_target(app, area);
         let s = app.session.borrow();
         let state = s.status.as_ref().map(|x| x.state);
         let recording = state == Some(EngineState::Recording);
@@ -1197,11 +1287,15 @@ impl Controls {
             )
         } else if recording && streaming {
             format!(
-                "Recording to {folder}{isos} · streaming for {}",
+                "Recording {}{isos} · streaming for {}",
+                into_words(s.status.as_ref().and_then(|x| x.recording_into.as_ref())),
                 clock(self.streaming.seconds())
             )
         } else if recording {
-            format!("Recording to {folder}{isos}")
+            format!(
+                "Recording {}{isos}",
+                into_words(s.status.as_ref().and_then(|x| x.recording_into.as_ref()))
+            )
         } else if state == Some(EngineState::Starting) {
             "Starting the recording…".to_string()
         } else if streaming && s.streams.len() > 1 {
@@ -1226,7 +1320,11 @@ impl Controls {
         } else if stream.is_some_and(|x| x.state == StreamState::Connecting) {
             "Connecting the stream…".to_string()
         } else if setup.is_some() {
-            format!("Records to {folder}{isos}")
+            let target = s.status.as_ref().and_then(|x| x.record_target.as_ref());
+            format!(
+                "Next recording: {} · records to {folder}{isos}",
+                next_words(target)
+            )
         } else if s.status.is_some() {
             // Paper's Welcome board, beside the IDLE badge.
             "No setup loaded".to_string()
@@ -2089,25 +2187,9 @@ fn toggle_recording(app: &Rc<App>) {
     if recording {
         app.call(Method::Stop, move |app, result| {
             match result {
-                Ok(report) => {
-                    let files = report["files"].as_array().map_or(0, Vec::len);
-                    let folder = report["folder"].as_str().unwrap_or_default().to_string();
-                    let shown = report["manifest"]
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| folder.clone());
-                    app.show_toast(
-                        Toast::new(
-                            ToastKind::Success,
-                            "Recording saved",
-                            format!(
-                                "{files} file{} in {folder}",
-                                if files == 1 { "" } else { "s" }
-                            ),
-                        )
-                        .action("Show in Finder", move |_| reveal(&shown)),
-                    );
-                }
+                // The `stopped` event's toast says where it went (#114),
+                // for this window's stop and any other alike.
+                Ok(_) => {}
                 Err(error) => app.failed("Couldn’t stop recording", &error),
             }
             done(app);
@@ -2118,6 +2200,7 @@ fn toggle_recording(app: &Rc<App>) {
                 setup: None,
                 folder: None,
                 seconds: None,
+                ..Default::default()
             })),
             move |app, result| {
                 if let Err(error) = result {
@@ -2979,6 +3062,278 @@ fn sample_streams(which: &str) -> anyhow::Result<Vec<StreamStatus>> {
         .collect()
 }
 
+/// The owner of the menu next to Start Recording (#114).
+const TARGET_MENU: &str = "controls:record-target";
+
+/// A timeline's name as the app shows it (#114). A new project's timeline
+/// is named like its folder, "2026-10-17 19-27-03 Untitled": that shows as
+/// "Untitled · Oct 17 19:27".
+pub fn timeline_label(name: &str) -> String {
+    match stamped(name) {
+        Some((rest, when)) => format!("{rest} · {when}"),
+        None => name.to_string(),
+    }
+}
+
+/// A timeline's name without a new project's date and time
+/// ("Untitled"), for the Controls dock's narrow row.
+fn timeline_short(name: &str) -> &str {
+    stamped(name).map_or(name, |(rest, _)| rest)
+}
+
+/// A name that begins with a project folder's date and time: the rest,
+/// and when ("Oct 17 19:27").
+fn stamped(name: &str) -> Option<(&str, String)> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let b = name.as_bytes();
+    let digits = |r: std::ops::Range<usize>| {
+        b.get(r.clone())
+            .is_some_and(|d| d.iter().all(u8::is_ascii_digit))
+    };
+    let stamped = b.len() > 20
+        && digits(0..4)
+        && b[4] == b'-'
+        && digits(5..7)
+        && b[7] == b'-'
+        && digits(8..10)
+        && b[10] == b' '
+        && digits(11..13)
+        && b[13] == b'-'
+        && digits(14..16)
+        && b[16] == b'-'
+        && digits(17..19)
+        && b[19] == b' ';
+    let month = name.get(5..7).and_then(|m| m.parse::<usize>().ok());
+    match (stamped, month) {
+        (true, Some(m @ 1..=12)) => Some((
+            &name[20..],
+            format!(
+                "{} {} {}:{}",
+                MONTHS[m - 1],
+                name[8..10].trim_start_matches('0'),
+                &name[11..13],
+                &name[14..16]
+            ),
+        )),
+        _ => None,
+    }
+}
+
+/// "New project" or "Take 4 · My Video": where the next recording goes.
+pub fn target_label(target: Option<&RecordTarget>) -> String {
+    match target.and_then(|t| Some((t.take.unwrap_or(1), t.name.as_deref()?))) {
+        Some((take, name)) => format!("Take {take} · {}", timeline_short(name)),
+        None => "New project".into(),
+    }
+}
+
+/// The status bar's words for the next recording: "a new project" or
+/// "take 4 of My Video".
+fn next_words(target: Option<&RecordTarget>) -> String {
+    match target.and_then(|t| Some((t.take.unwrap_or(1), t.name.as_deref()?))) {
+        Some((take, name)) => format!("take {take} of {}", timeline_label(name)),
+        None => "a new project".into(),
+    }
+}
+
+/// The status bar's words for the recording running: "a new project
+/// (Untitled · Oct 17 19:27)" or "take 4 of My Video".
+fn into_words(into: Option<&RecordingInto>) -> String {
+    match into {
+        Some(into) if into.new_project => {
+            format!("a new project ({})", timeline_label(&into.name))
+        }
+        Some(into) => format!("take {} of {}", into.clips + 1, timeline_label(&into.name)),
+        None => "a new project".into(),
+    }
+}
+
+/// The record target control next to Start Recording.
+fn show_target(app: &Rc<App>, area: &ControlsArea) {
+    let s = app.session.borrow();
+    let target = s.status.as_ref().and_then(|x| x.record_target.as_ref());
+    let chosen = target.is_some_and(|t| t.timeline.is_some());
+    area.set_target_new(!chosen);
+    area.set_target_label(target_label(target).into());
+    let mut tooltip = match target.filter(|_| chosen) {
+        Some(t) => format!(
+            "Next recording: take {} of {}{}. Choose where it goes.",
+            t.take.unwrap_or(1),
+            timeline_label(t.name.as_deref().unwrap_or_default()),
+            t.folder
+                .as_ref()
+                .map(|f| format!(
+                    ", in “{}”",
+                    f.file_name().unwrap_or_default().to_string_lossy()
+                ))
+                .unwrap_or_default()
+        ),
+        None => "Next recording: a new project, with its own timeline. Choose to add it to a \
+                 project instead."
+            .into(),
+    };
+    if let Some(note) = target.and_then(|t| t.notes.first()) {
+        tooltip.push('\n');
+        tooltip.push_str(&sentence_case(note));
+    }
+    area.set_target_tooltip(tooltip.into());
+    area.set_target_notice(target.is_some_and(|t| !t.notes.is_empty()));
+}
+
+fn sentence_case(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => {
+            let mut out: String = first.to_uppercase().collect();
+            out.push_str(chars.as_str());
+            if !out.ends_with('.') {
+                out.push('.');
+            }
+            out
+        }
+        None => String::new(),
+    }
+}
+
+/// The menu next to Start Recording: New Project, the timeline open in the
+/// editor, and the newest timelines, the chosen one checked.
+fn target_menu(app: &Rc<App>) -> MenuBuilder {
+    let (target, migrated) = {
+        let s = app.session.borrow();
+        let target = s.status.as_ref().and_then(|x| x.record_target.as_ref());
+        (
+            target.and_then(|t| t.timeline.clone()),
+            target.and_then(|t| t.migrated.clone()),
+        )
+    };
+    let mut menu = MenuBuilder::new()
+        .heading("Next Recording")
+        .item("new", "New Project")
+        .hint("its own timeline")
+        .checked(target.is_none())
+        .separator()
+        .heading("Add a Take To");
+    let list = app.create.timelines();
+    let editor = app
+        .create
+        .editor_open()
+        .then(|| list.iter().find(|t| t.current).cloned())
+        .flatten();
+    let mut newest: Vec<_> = list
+        .iter()
+        .filter(|t| editor.as_ref().is_none_or(|e| e.id != t.id))
+        .collect();
+    newest.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let mut shown = 0;
+    if let Some(t) = &editor {
+        menu = menu
+            .item(&format!("timeline:{}", t.id), &timeline_label(&t.name))
+            .hint(&format!("in the editor · take {}", t.clips + 1))
+            .checked(target.as_deref() == Some(t.id.as_str()));
+        shown += 1;
+    }
+    // The chosen one and a migrated one are always listed.
+    let keep = |id: &str| target.as_deref() == Some(id) || migrated.as_deref() == Some(id);
+    for t in newest
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| *i < 6 || keep(&t.id))
+        .map(|(_, t)| t)
+    {
+        menu = menu
+            .item(&format!("timeline:{}", t.id), &timeline_label(&t.name))
+            .hint(&format!("take {}", t.clips + 1))
+            .checked(target.as_deref() == Some(t.id.as_str()));
+        shown += 1;
+    }
+    if shown == 0 {
+        menu = menu.item("none", "No projects yet").disabled(true);
+    }
+    menu
+}
+
+/// Choose where the next recording goes: "new" or a timeline's id.
+pub fn choose_target(app: &Rc<App>, target: &str) {
+    app.call_as::<RecordTarget>(
+        Method::RecordTarget(Some(RecordTargetParams {
+            target: Some(target.to_string()),
+        })),
+        |app, result| match result {
+            Ok(target) => {
+                if let Some(status) = app.session.borrow_mut().status.as_mut() {
+                    status.record_target = Some(target);
+                }
+                app.changed(Changed::STATUS);
+            }
+            Err(error) => app.failed("Couldn’t choose where the next recording goes", &error),
+        },
+    );
+}
+
+/// The toast a stopped recording shows: where its takes went (#114), with
+/// its files.
+fn saved_toast(
+    app: &Rc<App>,
+    report: &isocast_protocol::api::Report,
+    into: Option<&RecordingInto>,
+) {
+    let files = report.files.len();
+    let folder = home_short(&report.folder.display().to_string());
+    let files = format!(
+        "{files} file{} in {folder}",
+        if files == 1 { "" } else { "s" }
+    );
+    let Some(into) = into.filter(|into| into.takes > 0) else {
+        let shown = report.manifest.display().to_string();
+        app.show_toast(
+            Toast::new(ToastKind::Success, "Recording saved", files)
+                .key("recording-saved")
+                .action("Show in Finder", move |_| reveal(&shown)),
+        );
+        return;
+    };
+    let name = timeline_label(&into.name);
+    let first = into.clips + 1 - into.takes.min(into.clips);
+    let title = match (into.new_project, into.takes) {
+        (true, _) => "Saved as a new project".to_string(),
+        (false, 1) => format!("Saved as take {} of {name}", into.clips),
+        (false, _) => format!("Saved as takes {first}–{} of {name}", into.clips),
+    };
+    let message = match (into.new_project, into.takes) {
+        (true, 1) => format!("{name}, with its own timeline · {files}"),
+        (true, n) => format!("{name}: {n} takes on its own timeline · {files}"),
+        (false, _) => files,
+    };
+    let id = into.timeline.clone();
+    app.show_toast(
+        Toast::new(ToastKind::Success, title, message)
+            .key("recording-saved")
+            .action("Open in Editor", move |app| open_in_editor(app, &id)),
+    );
+}
+
+/// Make `timeline` current and show the editor on it.
+fn open_in_editor(app: &Rc<App>, timeline: &str) {
+    app.call(
+        Method::TimelineOpen(isocast_protocol::timeline::TimelineOpenParams {
+            timeline: timeline.to_string(),
+        }),
+        |app, result| match result {
+            Ok(_) => {
+                if let Err(error) = app
+                    .create
+                    .open_editor_as(app, super::projects::Raise::Focus)
+                {
+                    isocast_diagnostics::diagnostic!("editor: {error:#}");
+                }
+            }
+            Err(error) => app.failed("Couldn’t open the timeline", &error),
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2996,6 +3351,21 @@ mod tests {
             Some(40)
         );
         assert_eq!(stream_drops("the stream reconnected"), None);
+    }
+
+    #[test]
+    fn new_project_timelines_read_by_name_and_time() {
+        assert_eq!(
+            timeline_label("2026-10-07 09-05-03 Untitled"),
+            "Untitled · Oct 7 09:05"
+        );
+        assert_eq!(timeline_short("2026-10-07 09-05-03 My Talk"), "My Talk");
+        assert_eq!(timeline_label("My Video"), "My Video");
+        assert_eq!(
+            timeline_label("2026-13-07 09-05-03 X"),
+            "2026-13-07 09-05-03 X"
+        );
+        assert_eq!(target_label(None), "New project");
     }
 
     #[test]

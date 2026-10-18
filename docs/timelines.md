@@ -4,27 +4,63 @@ A timeline puts takes in order and joins them into one video, like a clip
 bar: record take 1, then take 2 lands after it; retake a bad one; remove or
 reorder takes; export one file at the end.
 
-## Record into a timeline
+## Where a recording goes
+
+By default every recording starts a new project folder with a timeline of
+its own: record three times and you get three projects, each with one take.
+To add a recording to an existing project instead, choose its timeline as
+the **record target**; the take is written into the folder of the
+timeline's last take and lands at the end of it ("take 4 of My Video").
 
 ```sh
-isocast timeline new "My video"   # make one and make it current
-isocast start                     # take 1
+isocast record-target             # where the next recording goes
+isocast record-target my-video    # the next recording is take N+1 of my-video
+isocast record-target new         # back to a new project each time (the default)
+isocast start --into my-video     # this recording only
+isocast start --new-project       # this recording only, whatever the choice
+```
+
+The choice is kept across restarts and shown in `isocast status` ("Next
+recording: …") and in the app: next to Start Recording in the Controls dock
+(a row under it, "New project" or "Take 4 · My Video", or in a short dock a
+square button beside it) with a menu of the newest projects and the one
+open in the editor, in the status bar, and in the editor as **Record Next
+Take Here**. When a recording stops, a toast says where it went ("Saved as
+take 2 of My Video", "Saved as a new project"). The obs-websocket
+`StartRecord` and the `recording.start` hotkey follow the same choice.
+Over MCP: `record_target`, and `start_recording`'s `new_project` and `into`.
+
+A recording keeps its timeline to the end: its splits and its retakes stay
+on it, and choosing another target while it records is for the next
+recording. When its first take begins, its timeline becomes current (the
+one the editor shows and the timeline commands act on).
+
+```sh
+isocast timeline new "My video"   # make one, make it current and the record target
+isocast start                     # take 1 (in a new project folder)
 isocast stop                      # take 1 lands on the timeline
-isocast start                     # take 2
+isocast start                     # take 2, in the same folder
 isocast split                     # take 2 ends here, take 3 starts at once
 isocast stop
 ```
 
-While a timeline is current, every take that finishes (by `stop` or by a
-`split`) is added to its end. `isocast timeline close` stops that; takes are
-then only recorded, as without timelines.
+`isocast timeline open ID` and opening a project (`isocast project open`)
+only make a timeline current; they never change where recordings go.
+`isocast timeline close` makes none current, and if it was the record
+target, recordings start new projects again.
+
+Before 0.0.8 the current timeline took every recording until it was closed.
+A current timeline from then is migrated once: it stays current (the editor
+shows it), but recordings start new projects again, and `status` (and the
+app, with a warning sign next to Start Recording) says so until you choose:
+`isocast record-target ID` keeps adding to it.
 
 ## Retake
 
 `isocast retake` records the last take again:
 
-- not recording: it takes the last clip off the timeline and starts
-  recording;
+- not recording: it takes the current timeline's last clip off and starts
+  recording into that timeline (and that take's folder);
 - recording: it drops the take in progress from the timeline and begins a
   new take about a quarter second later, without stopping any device.
 
@@ -240,8 +276,10 @@ written into that folder and it doesn't become a project.
 
 Opening a project makes one of its timelines current (the one named with
 `--timeline`, else the current one if it is the project's, else its
-newest; a project without one gets a timeline of its takes in order), so
-from then on takes are added to it, as with `timeline open`.
+newest; a project without one gets a timeline of its takes in order), as
+with `timeline open`. It doesn't change where the next recording goes:
+choose it with **Record Next Take Here** in the editor (or `isocast
+record-target ID`).
 
 The file is written by the engine in the background, a moment after a
 change, never into a folder while a recording writes into it (it is

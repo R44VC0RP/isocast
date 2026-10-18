@@ -759,6 +759,61 @@ pub struct TimelineSummary {
     pub duration_seconds: f64,
 }
 
+/// Where the next recording goes (#114): a new project with its own
+/// timeline (the default), or another take on a timeline the user chose.
+/// `status` (`record_target`) and `record_target` give it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RecordTarget {
+    /// The timeline the next recording's takes are added to; absent: each
+    /// recording starts a new project folder with a timeline of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<String>,
+    /// That timeline's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The take the next recording becomes on it (its clips, plus one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take: Option<usize>,
+    /// The project folder its take is written into: the folder of the
+    /// timeline's last take (absent: a new project folder).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<PathBuf>,
+    /// Why the choice is what it is (a timeline that was current before
+    /// 0.0.8, or a chosen timeline that is gone).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// The timeline that was current before 0.0.8 and took every
+    /// recording, until a choice is made: no longer used unless chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migrated: Option<String>,
+}
+
+/// Parameters of `record_target`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RecordTargetParams {
+    /// `new` (each recording starts a new project with its own timeline)
+    /// or a timeline's id (`timeline_list` has them): its next take. Absent:
+    /// the choice is only read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+/// The timeline a recording's takes go to (#114), in `status`
+/// (`recording_into`) while it records and in its `stopped` event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RecordingInto {
+    pub timeline: String,
+    pub name: String,
+    /// The recording started a new project, and this is its timeline.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_project: bool,
+    /// The recording's takes added to the timeline so far.
+    pub takes: usize,
+    /// The timeline's clips now (its last `takes` are this recording's).
+    pub clips: usize,
+}
+
 /// What `timeline_close` returns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TimelineClosed {

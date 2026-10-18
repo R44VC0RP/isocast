@@ -32,6 +32,18 @@ export global ControlsArea {
     in property <string> pause-time: "00:00:00";
     in property <[ToastRow]> pauses;
 
+    // ---- Where the next recording goes (#114): a new project (the
+    // default) or a take on a chosen timeline. "New project" or "Take 4 ·
+    // My Video"; its tooltip says it in words (and any note, like a
+    // timeline that was current before 0.0.8); `target-notice` marks such a
+    // note. The menu (owner "controls:record-target") opens next to Start
+    // Recording; Rust opens it by bumping `target-menu-serial`.
+    in property <string> target-label: "New project";
+    in property <bool> target-new: true;
+    in property <string> target-tooltip;
+    in property <bool> target-notice;
+    in-out property <int> target-menu-serial;
+
     // ---- The virtual camera (G.1): stopped, starting, running, stopping,
     // failed. Its output (the setup's `virtual_camera`) is chosen in its
     // popover beside the Controls dock's button.

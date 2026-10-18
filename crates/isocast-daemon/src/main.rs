@@ -1449,6 +1449,7 @@ impl Daemon {
                     begins_at: Some(timeline::split_text(&split)),
                     files: split.files,
                     notes: split.notes,
+                    timeline: None,
                 })
                 .map_err(|failed| failed.error)
                 .and_then(to_json),
@@ -1601,6 +1602,9 @@ impl Daemon {
             Method::TimelineList => to_json(self.timeline_list()),
             Method::TimelineOpen(params) => self.timeline_open(params).and_then(to_json),
             Method::TimelineClose => self.timeline_close().and_then(to_json),
+            Method::RecordTarget(params) => self
+                .record_target(params.unwrap_or_default())
+                .and_then(to_json),
             Method::TimelineRemove(params) => self.timeline_remove(params).and_then(to_json),
             Method::TimelineMove(params) => self.timeline_move(params).and_then(to_json),
             Method::Retake(params) => self.retake(params.unwrap_or_default()).and_then(to_json),
@@ -2820,6 +2824,20 @@ impl Daemon {
                 setup.recording.folder.as_str()
             }),
         ));
+        // Each read under one lock, taken and let go here: a guard kept to
+        // the end of the `Status` below would deadlock the next.
+        let (timeline, timeline_problem, record_target) = {
+            let timelines = self.timelines.lock();
+            (
+                timelines.current().and_then(|id| timelines.summary(id)),
+                timelines.current_problem().map(str::to_string),
+                timelines.record_target(),
+            )
+        };
+        let recording_into = state
+            .session
+            .as_ref()
+            .and_then(|session| self.recording_into(&session.takes));
         let mut status = Status {
             state: engine,
             #[cfg(target_os = "macos")]
@@ -2845,11 +2863,10 @@ impl Daemon {
             data: Some(self.data.status()),
             diagnostics: Some(isocast_diagnostics::health()),
             interrupted: self.interrupted.lock().clone(),
-            timeline: {
-                let timelines = self.timelines.lock();
-                timelines.current().and_then(|id| timelines.summary(id))
-            },
-            timeline_problem: self.timelines.lock().current_problem().map(str::to_string),
+            timeline,
+            timeline_problem,
+            record_target: Some(record_target),
+            recording_into,
             export: self.export_running(),
             virtual_camera: Some(state.camera.status_for(state.setup.as_ref())),
             replay: Some(state.replay.status_for(state.setup.as_ref())),
@@ -3012,9 +3029,21 @@ impl Daemon {
     /// Start recording; `cause` says why, for the `started` event.
     pub(crate) fn start_as(
         self: &Arc<Self>,
-        params: StartParams,
+        mut params: StartParams,
         cause: TakeCause,
     ) -> Result<Started, RpcError> {
+        // Where its takes go (#114): a new project, or a chosen timeline,
+        // written into the folder of that timeline's last take.
+        let (into, into_notes) = self.choose_into(&params)?;
+        if params.folder.is_none()
+            && let Some(id) = &into
+        {
+            params.folder = self
+                .timelines
+                .lock()
+                .get(id)
+                .and_then(timeline::last_take_folder);
+        }
         check_folder(params.folder.as_deref())?;
         if let Some(folder) = &params.folder {
             plugin_folder_refusal(
@@ -3061,7 +3090,7 @@ impl Daemon {
         }
         // A setup given with the request becomes the live setup; say so if
         // it replaces another, since that one is only kept in the .bak.
-        let mut notes = Vec::new();
+        let mut notes = into_notes;
         if let Some(setup) = params.setup {
             let (revision, replaced) = {
                 let state = self.state.read();
@@ -3182,13 +3211,30 @@ impl Daemon {
             picked
         };
         let project = match picked {
-            Ok(project) => project,
+            Ok(project) => {
+                *options.3.into.lock() = match &into {
+                    Some(id) => timeline::SessionInto::Timeline {
+                        id: id.clone(),
+                        new_project: false,
+                    },
+                    None => timeline::SessionInto::NewProject {
+                        name: project
+                            .folder
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| project.id.clone()),
+                        created: project.created,
+                    },
+                };
+                project
+            }
             Err(err) => {
                 self.publish(Event::Stopped {
                     report: None,
                     error: Some(err.message.clone()),
                     project: None,
                     folder: None,
+                    timeline: None,
                 });
                 self.ended(id, Err(err.message.clone()));
                 return Err(err);
@@ -3222,6 +3268,7 @@ impl Daemon {
                     error: Some(err.message.clone()),
                     project: None,
                     folder: None,
+                    timeline: None,
                 });
                 self.ended(id, Err(err.message.clone()));
                 return Err(err);
@@ -3230,6 +3277,7 @@ impl Daemon {
 
         let daemon = self.clone();
         let recording = engine.clone();
+        let session_takes = options.3.clone();
         thread::spawn(move || {
             let (stop, files, live, takes) = options;
             let on_start = |paths: &[PathBuf], manifest: &Path| {
@@ -3312,6 +3360,7 @@ impl Daemon {
                 // Unless the folder went again (it held nothing).
                 project: project.folder.exists().then(|| project.id.clone()),
                 folder: project.folder.exists().then(|| project.folder.clone()),
+                timeline: daemon.recording_into(&takes),
             });
             let error = ended.as_ref().err().cloned();
             daemon.ended(id, ended);
@@ -3331,10 +3380,26 @@ impl Daemon {
                     });
                     notes.push(message);
                 }
+                let timeline = self.recording_into(&session_takes);
+                if let Some(into) = &timeline {
+                    notes.push(match into.new_project {
+                        true => format!(
+                            "a new project, with its own timeline {:?} ({})",
+                            into.timeline, into.name
+                        ),
+                        false => format!(
+                            "take {} of timeline {:?} ({})",
+                            into.clips + 1,
+                            into.timeline,
+                            into.name
+                        ),
+                    });
+                }
                 Ok(Started {
                     files,
                     begins_at: None,
                     notes,
+                    timeline,
                 })
             }
             Ok(Err(message)) => Err(RpcError {

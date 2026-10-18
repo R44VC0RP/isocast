@@ -20,14 +20,16 @@ use isocast_protocol::timeline::{
     TimelineOpenParams, TimelineRemoveParams, TimelineTarget,
 };
 use isocast_protocol::timeline::{NleApp, NleExported, NleFormat, TimelineExportNleParams};
+use isocast_protocol::timeline::{RecordTarget, RecordTargetParams};
 use serde::Serialize;
 
 use crate::client::Client;
 
 #[derive(Subcommand)]
 pub enum TimelineCommand {
-    /// Make a timeline and make it current: from now on every take that
-    /// finishes (`stop`, or a `split`) is added to its end.
+    /// Make a timeline, make it current and choose it for the next
+    /// recording: from then on every recording adds its takes to its end
+    /// (`isocast record-target new` starts new projects again).
     New {
         /// Its name ("Timeline N" if absent); its id is made from it.
         name: Option<String>,
@@ -39,13 +41,16 @@ pub enum TimelineCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Make a timeline current (by id), so finished takes are added to it.
+    /// Make a timeline current (by id): the one the editor shows and
+    /// timeline commands act on. Recordings go where `isocast
+    /// record-target` says.
     Open {
         timeline: String,
         #[arg(long)]
         json: bool,
     },
-    /// Make no timeline current: takes are only recorded.
+    /// Make no timeline current. If it was chosen for the next recording,
+    /// recordings start new projects again.
     Close {
         #[arg(long)]
         json: bool,
@@ -285,8 +290,8 @@ pub fn run(command: TimelineCommand) -> Result<ExitCode> {
                 print(&info)?;
             } else {
                 println!(
-                    "Made timeline {:?} ({}); it is current: every take that finishes is added \
-                     to it.",
+                    "Made timeline {:?} ({}); it is current, and the next recording adds its \
+                     takes to it.",
                     info.name, info.id
                 );
                 print_notes(&info.notes);
@@ -317,8 +322,7 @@ pub fn run(command: TimelineCommand) -> Result<ExitCode> {
             } else {
                 match closed.closed {
                     Some(id) => println!(
-                        "Closed timeline {id}: takes are only recorded now (`isocast timeline \
-                         open {id}` resumes it)."
+                        "Closed timeline {id} (`isocast timeline open {id}` shows it again)."
                     ),
                     None => println!("No timeline was current."),
                 }
@@ -825,5 +829,43 @@ pub fn retake(folder: Option<PathBuf>, seconds: Option<f64>, json: bool) -> Resu
         println!("  {}", file.display());
     }
     print_notes(&retaken.notes);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The words for where the next recording goes (#114), as `record-target`
+/// and `status` say it.
+pub fn target_words(target: &RecordTarget) -> String {
+    match (&target.timeline, &target.name) {
+        (Some(id), Some(name)) => format!(
+            "take {} of {name:?} ({id}){}",
+            target.take.unwrap_or(1),
+            target
+                .folder
+                .as_ref()
+                .map(|folder| format!(", in {}", folder.display()))
+                .unwrap_or_default()
+        ),
+        _ => "a new project, with its own timeline".into(),
+    }
+}
+
+/// `isocast record-target [new|TIMELINE]`.
+pub fn record_target(target: Option<String>, json: bool) -> Result<ExitCode> {
+    let mut client = Client::connect_or_launch()?;
+    let chose = target.is_some();
+    let target: RecordTarget =
+        client.call(Method::RecordTarget(Some(RecordTargetParams { target })))?;
+    if json {
+        print(&target)?;
+    } else {
+        println!("Next recording: {}.", target_words(&target));
+        if !chose {
+            println!(
+                "Choose with `isocast record-target new` or `isocast record-target ID` (`isocast \
+                 timeline list` has the ids)."
+            );
+        }
+        print_notes(&target.notes);
+    }
     Ok(ExitCode::SUCCESS)
 }

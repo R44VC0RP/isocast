@@ -184,6 +184,12 @@ export global CreateArea {
     callback move-clip(string, int);
     callback remove-selected();
     callback retake();
+    // #114: this timeline is where the next recording goes (its take
+    // `record-take`); `record-here(true)` chooses it, false goes back to
+    // new projects.
+    in property <bool> record-here;
+    in property <int> record-take: 1;
+    callback record-here-chosen(bool);
     callback export();
     // Export › For Final Cut Pro / Premiere Pro / DaVinci Resolve… and
     // OpenTimelineIO… (#104): "final_cut", "premiere", "resolve", "otio".

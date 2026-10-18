@@ -812,6 +812,114 @@ def scenario_timeline(e, cfg, evidence):
         require(row["frames"] == frames, "export lost decoded pictures at a join")
         evidence["joined"].append(row)
     evidence.update(timeline=timeline, retake=retaken)
+    record_targets(e, evidence)
+
+
+def timeline_of(e, manifest):
+    """The timelines whose clips include `manifest`."""
+    found = []
+    for summary in e.rpc("timeline_list")["timelines"]:
+        info = e.rpc("timeline_get", {"timeline": summary["id"]})
+        if any(Path(c["take"]).resolve() == Path(manifest).resolve() for c in info["clips"]):
+            found.append(info)
+    return found
+
+
+def record_targets(e, evidence):
+    """#114: each recording starts a new project with its own timeline
+    unless a timeline was chosen; a chosen one gets the take in its last
+    take's folder; a split and a retake stay with their recording; a
+    current timeline from before 0.0.8 is migrated, shown and not used."""
+    out = evidence["record_target"] = {}
+    # `timeline_new` chose "E2E" above; back to new projects.
+    e2e_clips = e.rpc("timeline_get", {"timeline": "e2e"})["clips"]
+    chose = e.rpc("record_target", {"target": "new"})
+    require(chose.get("timeline") is None, f"record_target new: {chose}")
+    folders, timelines = [], []
+    for _ in range(3):
+        path, _ = take(e, 1)
+        on = timeline_of(e, path)
+        require(len(on) == 1 and len(on[0]["clips"]) == 1,
+                f"a default recording's take is not alone on one timeline: {[t['id'] for t in on]}")
+        folders.append(path.parent)
+        timelines.append(on[0]["id"])
+    require(len(set(folders)) == 3 and len(set(timelines)) == 3 and "e2e" not in timelines,
+            f"three default recordings share a project or timeline: {folders} {timelines}")
+    require(e.rpc("timeline_get", {"timeline": "e2e"})["clips"] == e2e_clips,
+            "the E2E timeline changed")
+    out["new_projects"] = {"folders": [str(f) for f in folders], "timelines": timelines}
+    # Choose the first new project: the next take is its take 2, in its folder.
+    target = e.rpc("record_target", {"target": timelines[0]})
+    require(target["timeline"] == timelines[0] and target["take"] == 2
+            and Path(target["folder"]) == folders[0], f"record_target: {target}")
+    require(e.rpc("status")["record_target"]["timeline"] == timelines[0], "status lacks the target")
+    path, _ = take(e, 1)
+    chosen = e.rpc("timeline_get", {"timeline": timelines[0]})
+    require(path.parent == folders[0] and len(chosen["clips"]) == 2
+            and Path(chosen["clips"][1]["take"]).resolve() == path.resolve(),
+            f"a take into the chosen timeline did not land as its take 2: {path}")
+    # `into` for one recording; `new_project` overrides the choice.
+    started = e.rpc("start", {"seconds": 1, "into": timelines[1]})
+    until(lambda: finished(started["manifest"]), 40)
+    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
+    path = Path(started["manifest"])
+    require(path.parent == folders[1] and len(e.rpc("timeline_get", {"timeline": timelines[1]})["clips"]) == 2,
+            "start into did not add a take to that timeline")
+    started = e.rpc("start", {"seconds": 1, "new_project": True})
+    require(started.get("timeline", {}).get("new_project"), f"start new_project: {started}")
+    until(lambda: finished(started["manifest"]), 40)
+    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
+    require(Path(started["manifest"]).parent not in folders, "new_project reused a project folder")
+    require(e.rpc("record_target")["timeline"] == timelines[0], "a one-off start changed the choice")
+    for bad in ({"into": "nope"}, {"into": timelines[0], "new_project": True}):
+        try:
+            e.rpc("start", bad)
+            e.rpc("stop")
+            raise Failure(f"start accepted {bad}")
+        except RpcError as exc:
+            field = "into" if "nope" in str(bad) else "new_project"
+            require(field in exc.error["message"], f"start {bad}: {exc.error}")
+    # A split and a retake while recording stay on the recording's own
+    # (new) timeline.
+    e.rpc("record_target", {"target": "new"})
+    watch = Watch(e, ["stopped"])
+    first = e.rpc("start", {})
+    time.sleep(1.5)
+    second = e.rpc("split")
+    time.sleep(1.5)
+    e.rpc("retake")
+    time.sleep(1.5)
+    e.rpc("stop")
+    until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
+    until(lambda: watch.of("stopped"), 10, "stopped event")
+    watch.close()
+    into = watch.of("stopped")[0].get("timeline") or {}
+    session = e.rpc("timeline_get", {"timeline": into.get("timeline", "")}) if into else {}
+    require(into.get("new_project") and len(session.get("clips", [])) == 2
+            and Path(session["clips"][0]["take"]) == Path(first["manifest"])
+            and Path(session["clips"][1]["take"]).parent == Path(first["manifest"]).parent
+            and any(Path(r["take"]) == Path(second["manifest"]) for r in session["removed"]),
+            f"split and retake did not stay together: {into} {session.get('clips')}")
+    require(into["takes"] == 2 and into["clips"] == 2, f"stopped event timeline: {into}")
+    out["split_retake"] = {"timeline": into, "clips": [c["take"] for c in session["clips"]]}
+    # A current timeline from before #114: migrated, shown, never used.
+    e.stop()
+    write_json(e.root / "timelines" / "current.json", {"timeline": "e2e"})
+    e.start()
+    status = e.rpc("status")
+    target = status.get("record_target", {})
+    require(status["timeline"]["id"] == "e2e" and target.get("timeline") is None
+            and any("e2e" in n and "new project" in n for n in target.get("notes", [])),
+            f"old current timeline not migrated visibly: {status.get('timeline')} {target}")
+    before = len(e.rpc("timeline_get", {"timeline": "e2e"})["clips"])
+    path, _ = take(e, 1)
+    require(len(e.rpc("timeline_get", {"timeline": "e2e"})["clips"]) == before
+            and len(timeline_of(e, path)) == 1, "a migrated current timeline was used")
+    require(read_json(e.root / "timelines" / "current.json").get("record") is not None,
+            "the migration was not written")
+    e.rpc("record_target", {"target": "new"})
+    require(not e.rpc("record_target").get("notes"), "the migration notice outlived a choice")
+    out["migrated"] = target
 
 
 # Gray levels that split the test pattern's 75% bars into bright (white to
@@ -1727,7 +1835,11 @@ def scenario_projects(e, cfg, evidence):
     finder.rename(killed)
     # Clips from before project ids: healed by file name, and given the
     # id (#56).
-    timelines = [t for t in (e.root / "timelines").glob("*.json") if "clips" in read_json(t)]
+    # The project's timeline (#114: the take before it has a timeline of
+    # its own, in another project).
+    timelines = [t for t in (e.root / "timelines").glob("*.json") if "clips" in read_json(t)
+                 and any(Path(c["take"]).parent == finder for c in read_json(t)["clips"])]
+    require(timelines, "no timeline names the renamed project's takes")
     for path in timelines:
         saved = read_json(path)
         for clip in saved["clips"]:

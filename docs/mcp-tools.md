@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-101 tools. Arguments marked required must be given; ids, not names,
+102 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -98,7 +98,7 @@ Close a projector by `id` (from list_projectors), or every one with `all`. Where
 
 ## close_timeline
 
-Make no timeline current: takes are only recorded, as without timelines. Returns the id of the timeline that was current.
+Make no timeline current; if it was chosen for the next recording, recordings start new projects again. Returns the id of the timeline that was current.
 
 ## create_collection_or_profile
 
@@ -376,7 +376,7 @@ The recording projects, newest first: each recording session writes into its own
 
 ## list_timelines
 
-Every timeline (id, name, clips, length) and which is current (the one finished takes are added to).
+Every timeline (id, name, clips, length) and which is current (the one the editor shows and timeline edits act on).
 
 ## live_engine
 
@@ -408,7 +408,7 @@ Move a clip (by id) to another place on a timeline: `index` counts from 0 (the f
 
 ## new_timeline
 
-Make a timeline (optional `name`) and make it current: from now on every take that finishes (stop_recording, or split_take) is added to its end as a clip. A timeline is takes in order, like a clip bar: retake records the last one again, remove_clip and move_clip edit the order, and export_timeline joins them into one file. Returns the timeline.
+Make a timeline (optional `name`), make it current and choose it for the next recording (record_target): from then on every take that finishes (stop_recording, or split_take) is added to its end as a clip, until record_target says `new`. A timeline is takes in order, like a clip bar: retake records the last one again, remove_clip and move_clip edit the order, and export_timeline joins them into one file. Returns the timeline.
 
 | Argument | Type | Description |
 |---|---|---|
@@ -450,7 +450,7 @@ Open a projector: the program, studio mode's preview, a scene (`scene` id), a vi
 
 ## open_timeline
 
-Make a timeline current (by id), so finished takes are added to it.
+Make a timeline current (by id): the one the editor shows and timeline edits act on. Recordings go where record_target says.
 
 | Argument | Type | Description |
 |---|---|---|
@@ -520,6 +520,14 @@ The project files opened lately (File › Open Recent), newest first, each with 
 | Argument | Type | Description |
 |---|---|---|
 | `clear` | boolean | Forget them all (File › Open Recent › Clear Menu). |
+
+## record_target
+
+Where the next recording goes, and with `target`, choose it: `new` (the default: each recording starts a new project folder with its own timeline) or a timeline's id (list_timelines), whose next take it then is, written into the folder of its last take. Kept across restarts and shown in get_status (record_target); a recording running keeps its own. Returns the choice: the timeline, its name and the take it would be.
+
+| Argument | Type | Description |
+|---|---|---|
+| `target` | string (optional) | `new` (each recording starts a new project with its own timeline) or a timeline's id (`timeline_list` has them): its next take. Absent: the choice is only read. |
 
 ## redo_edit
 
@@ -705,11 +713,13 @@ Split the recording into a new take at the next whole second without stopping an
 
 ## start_recording
 
-Start recording the live setup (or the given setup, which then replaces the live setup): the program and every ISO source, each to its own file. Returns once every file is created.
+Start recording the live setup (or the given setup, which then replaces the live setup): the program and every ISO source, each to its own file. Its takes go where record_target says: a new project folder with its own timeline unless a timeline was chosen (`new_project` or `into` choose for this recording only). Returns once every file is created, with the timeline its takes go to.
 
 | Argument | Type | Description |
 |---|---|---|
 | `folder` | string (optional) | Absolute folder for the files instead of the setup's recording.folder. |
+| `into` | string (optional) | Add this recording's takes to this timeline (an id from list_timelines), in the folder of its last take. Not with `new_project`. Neither: record_target's choice (a new project unless a timeline was chosen). |
+| `new_project` | boolean | Start a new project with its own timeline, whatever record_target says. Not with `into`. |
 | `seconds` | number (optional) | Stop on its own after this many seconds. |
 | `setup` | object (optional) | The setup to record; the live setup if absent (the shape get_setup returns; get_setup_schema has its JSON Schema). |
 

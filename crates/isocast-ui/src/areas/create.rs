@@ -748,6 +748,20 @@ impl Create {
         let n = timeline.as_ref().map_or(0, |t| t.clips.len());
 
         area.set_has_timeline(timeline.is_some());
+        // #114: whether the next recording adds a take here.
+        let target = app
+            .session
+            .borrow()
+            .status
+            .as_ref()
+            .and_then(|s| s.record_target.as_ref())
+            .and_then(|t| t.timeline.clone());
+        area.set_record_here(
+            timeline
+                .as_ref()
+                .is_some_and(|t| target.as_deref() == Some(t.id.as_str())),
+        );
+        area.set_record_take(n as i32 + 1);
         area.set_timeline_name(
             timeline
                 .as_ref()
@@ -1285,6 +1299,16 @@ impl Create {
             }
         });
         let weak = Rc::downgrade(app);
+        area.on_record_here_chosen(move |here| {
+            if let Some(app) = weak.upgrade() {
+                let id = app.create.timeline.borrow().as_ref().map(|t| t.id.clone());
+                match (here, id) {
+                    (true, Some(id)) => super::controls::choose_target(&app, &id),
+                    _ => super::controls::choose_target(&app, "new"),
+                }
+            }
+        });
+        let weak = Rc::downgrade(app);
         area.on_export(move || {
             if let Some(app) = weak.upgrade() {
                 app.create.export(&app, false);
@@ -1786,6 +1810,15 @@ impl Create {
             }),
             "Couldn’t trim the clip",
         );
+    }
+
+    /// Every timeline as last read (the record target's menu, #114).
+    pub fn timelines(&self) -> Vec<isocast_protocol::timeline::TimelineSummary> {
+        self.list
+            .borrow()
+            .as_ref()
+            .map(|list| list.timelines.clone())
+            .unwrap_or_default()
     }
 
     /// Whether the editor window is open (offscreen snapshots draw it).

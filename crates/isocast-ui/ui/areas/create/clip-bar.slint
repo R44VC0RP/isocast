@@ -764,6 +764,22 @@ export component ClipBar inherits Rectangle {
                         }
                     }
                 }
+                // The editor's timeline as the next recording's place
+                // (#114): its next take, or back to new projects.
+                if root.editor && CreateArea.has-timeline: VerticalLayout {
+                    alignment: center;
+                    PillGroup {
+                        PillItem {
+                            icon: Icons.record;
+                            text: CreateArea.record-here ? "Next Take Here · Take " + CreateArea.record-take : "Record Next Take Here";
+                            tint: CreateArea.record-here ? Theme.accent-text : Theme.text-2;
+                            tooltip: CreateArea.record-here
+                                ? "The next recording is take " + CreateArea.record-take + " of " + CreateArea.timeline-name + ". Click to start new projects again."
+                                : "Add the next recording to " + CreateArea.timeline-name + " as take " + CreateArea.record-take + " (it starts a new project otherwise)";
+                            clicked => { CreateArea.record-here-chosen(!CreateArea.record-here); }
+                        }
+                    }
+                }
                 VerticalLayout {
                     alignment: center;
                     export-pill := PillGroup {
@@ -1400,7 +1416,9 @@ export component ClipBar inherits Rectangle {
             x: 16px;
             y: root.ruler-h + root.lane-h + 14px;
             width: min(460px, parent.width - 32px);
-            text: "Every take you record lands here, in order: press Record, and when you stop (or split) the take is added to the end of " + CreateArea.timeline-name + ". Retake records the last one again; drag a clip to move it.";
+            text: CreateArea.record-here
+                ? "The next recording lands here: when you stop (or split), its take is added to the end of " + CreateArea.timeline-name + ". Retake records the last one again; drag a clip to move it."
+                : "No takes yet. Choose " + CreateArea.timeline-name + " next to Start Recording (or Record Next Take Here in the editor) to add the next recording here; otherwise each recording starts a new project.";
             color: Theme.text-3;
             font-size: Theme.fs-sm;
             wrap: word-wrap;

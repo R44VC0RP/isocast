@@ -206,6 +206,13 @@ VIEWS = [
      "recording details popover open (files, sizes, dropped frames)", {}),
     ("paused", ["record", "wait:1000", "pause"], MAIN + "; a paused recording: the controls show "
      "Paused and resume", {}),
+    ("record-target", ["record", "wait:1500", "stop-record", "wait:2500", "record-target:last",
+                       "wait:800"], MAIN + "; next to Start Recording, where the next recording "
+     "goes (\"Take 2 · Untitled\", a row under it or a square button beside it), and the status bar "
+     "says \"Next recording: take 2 of …\"; a \"Saved as a new project\" toast", {}),
+    ("record-target-menu", ["record", "wait:1500", "stop-record", "wait:2500", "record-target-menu",
+                            "wait:300"], MAIN + "; the menu of where the next recording goes is "
+     "open next to Start Recording: Next Recording, New Project, Add a Take To and a timeline", {}),
     ("streaming", ["stream:live"], MAIN + "; streaming live: the Go Live control shows live with a "
      "timer and the status bar shows the stream's health", {}),
     ("streaming-details", ["stream:live", "details:live"], MAIN + "; streaming, with the stream "

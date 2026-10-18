@@ -34,11 +34,11 @@ use isocast_protocol::project::{
 };
 use isocast_protocol::stream::StreamService;
 use isocast_protocol::timeline::{
-    ExportStarted, NleExported, RetakeParams, Retaken, TimelineAngleParams, TimelineClosed,
-    TimelineCropParams, TimelineExportNleParams, TimelineExportParams, TimelineInfo, TimelineList,
-    TimelineMoveParams, TimelineNewParams, TimelineOpenParams, TimelineRangeParams,
-    TimelineRelinkParams, TimelineRemoveParams, TimelineRollParams, TimelineSplitParams,
-    TimelineTarget, TimelineTrimParams,
+    ExportStarted, NleExported, RecordTarget, RecordTargetParams, RetakeParams, Retaken,
+    TimelineAngleParams, TimelineClosed, TimelineCropParams, TimelineExportNleParams,
+    TimelineExportParams, TimelineInfo, TimelineList, TimelineMoveParams, TimelineNewParams,
+    TimelineOpenParams, TimelineRangeParams, TimelineRelinkParams, TimelineRemoveParams,
+    TimelineRollParams, TimelineSplitParams, TimelineTarget, TimelineTrimParams,
 };
 use isocast_protocol::{CanvasId, Setup, Transition};
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -133,6 +133,15 @@ struct StartRecordingParams {
     folder: Option<String>,
     /// Stop on its own after this many seconds.
     seconds: Option<f64>,
+    /// Start a new project with its own timeline, whatever
+    /// record_target says. Not with `into`.
+    #[serde(default)]
+    new_project: bool,
+    /// Add this recording's takes to this timeline (an id from
+    /// list_timelines), in the folder of its last take. Not with
+    /// `new_project`. Neither: record_target's choice (a new project
+    /// unless a timeline was chosen).
+    into: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -743,9 +752,10 @@ impl Isocast {
     }
 
     #[tool(
-        description = "Make a timeline (optional `name`) and make it current: from now on every \
-                       take that finishes (stop_recording, or split_take) is added to its end as \
-                       a clip. A timeline is takes in order, like a clip bar: retake records the \
+        description = "Make a timeline (optional `name`), make it current and choose it for the \
+                       next recording (record_target): from then on every take that finishes \
+                       (stop_recording, or split_take) is added to its end as a clip, until \
+                       record_target says `new`. A timeline is takes in order, like a clip bar: retake records the \
                        last one again, remove_clip and move_clip edit the order, and \
                        export_timeline joins them into one file. Returns the timeline.",
         annotations(
@@ -777,7 +787,7 @@ impl Isocast {
 
     #[tool(
         description = "Every timeline (id, name, clips, length) and which is current (the one \
-                       finished takes are added to).",
+                       the editor shows and timeline edits act on).",
         annotations(read_only_hint = true)
     )]
     async fn list_timelines(&self) -> Result<Json<TimelineList>, String> {
@@ -785,7 +795,8 @@ impl Isocast {
     }
 
     #[tool(
-        description = "Make a timeline current (by id), so finished takes are added to it.",
+        description = "Make a timeline current (by id): the one the editor shows and timeline \
+                       edits act on. Recordings go where record_target says.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -800,8 +811,9 @@ impl Isocast {
     }
 
     #[tool(
-        description = "Make no timeline current: takes are only recorded, as without \
-                       timelines. Returns the id of the timeline that was current.",
+        description = "Make no timeline current; if it was chosen for the next recording, \
+                       recordings start new projects again. Returns the id of the timeline that \
+                       was current.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -810,6 +822,26 @@ impl Isocast {
     )]
     async fn close_timeline(&self) -> Result<Json<TimelineClosed>, String> {
         self.call(Method::TimelineClose).await
+    }
+
+    #[tool(
+        description = "Where the next recording goes, and with `target`, choose it: `new` (the \
+                       default: each recording starts a new project folder with its own \
+                       timeline) or a timeline's id (list_timelines), whose next take it then \
+                       is, written into the folder of its last take. Kept across restarts and \
+                       shown in get_status (record_target); a recording running keeps its own. \
+                       Returns the choice: the timeline, its name and the take it would be.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn record_target(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<RecordTargetParams>>,
+    ) -> Result<Json<RecordTarget>, String> {
+        self.call(Method::RecordTarget(Some(params))).await
     }
 
     #[tool(
@@ -2072,7 +2104,10 @@ impl Isocast {
     #[tool(
         description = "Start recording the live setup (or the given setup, which then replaces \
                        the live setup): the program and every ISO source, each to its own file. \
-                       Returns once every file is created.",
+                       Its takes go where record_target says: a new project folder with its own \
+                       timeline unless a timeline was chosen (`new_project` or `into` choose for \
+                       this recording only). Returns once every file is created, with the \
+                       timeline its takes go to.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2087,6 +2122,8 @@ impl Isocast {
             setup: parse_setup(params.setup)?,
             folder: params.folder.map(Into::into),
             seconds: params.seconds,
+            new_project: params.new_project,
+            into: params.into,
         })))
         .await
     }
@@ -2350,8 +2387,8 @@ Plugins (local folders with an isocast-plugin.toml) are installed with add_plugi
 exactly the permissions they ask for, and listed with list_plugins. \
 Text in scenes can show a data key (`data = \"score.home\"`); set_data changes it live \
 (get_data reads it), with no setup change. \
-Timelines line takes up like a clip bar: new_timeline makes one current, and every take that \
-finishes is added to it; retake records the last one again, remove_clip and move_clip edit \
+Timelines line takes up like a clip bar: each recording starts a new project with its own \
+timeline unless record_target (or new_timeline) chose one to add takes to; retake records the last one again, remove_clip and move_clip edit \
 it, trim_clip, split_clip, delete_range, roll_cut, set_angle and crop_clip cut it (undo_edit, \
 redo_edit; takes' files are never touched), export_timeline joins it into one file, and \
 export_timeline_nle writes it as a Final Cut Pro, Premiere Pro or Resolve project. \

@@ -298,7 +298,8 @@ pub enum Method {
     Logs(crate::diagnostics::LogsParams),
     /// Bounded read of a file from a redacted bug-report preview.
     ReportFile(crate::diagnostics::ReportFileParams),
-    /// Make a timeline and make it current: from now on every take that
+    /// Make a timeline, make it current and choose it for the next
+    /// recording (`record_target`): from then on every take that
     /// finishes (a stop or a split) is added to its end. Its params are
     /// optional (`name`). Returns
     /// [`TimelineInfo`](crate::timeline::TimelineInfo).
@@ -310,11 +311,12 @@ pub enum Method {
     /// Every timeline, and which is current. Returns
     /// [`TimelineList`](crate::timeline::TimelineList).
     TimelineList,
-    /// Make a timeline current, so finished takes are added to it. Returns
+    /// Make a timeline current: the one the editor shows and edits act on
+    /// (recordings go where `record_target` says). Returns
     /// [`TimelineInfo`](crate::timeline::TimelineInfo).
     TimelineOpen(TimelineOpenParams),
-    /// Make no timeline current: takes are only recorded, as without
-    /// timelines. Returns [`TimelineClosed`](crate::timeline::TimelineClosed).
+    /// Make no timeline current; if it was the record target, recordings
+    /// start new projects again. Returns [`TimelineClosed`](crate::timeline::TimelineClosed).
     TimelineClose,
     /// Take a clip off a timeline. Its take's files stay where they are,
     /// listed under the timeline's `removed`. Returns
@@ -550,6 +552,13 @@ pub enum Method {
     /// encoded, copied or changed). Returns
     /// [`NleExported`](crate::timeline::NleExported).
     TimelineExportNle(crate::timeline::TimelineExportNleParams),
+    /// Where the next recording goes (#114), and with `target`, choose it:
+    /// `new` (the default: each recording starts a new project folder with
+    /// its own timeline) or a timeline's id (its next take, written into
+    /// the folder of its last take). The choice is kept across restarts and
+    /// shown in `status` (`record_target`); a running recording keeps its
+    /// own. Returns [`RecordTarget`](crate::timeline::RecordTarget).
+    RecordTarget(Option<crate::timeline::RecordTargetParams>),
 }
 
 /// Every method's name, as requests and plugin grants spell it
@@ -706,7 +715,7 @@ pub struct StreamKey {
     pub key_set: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StartParams {
     /// The setup to record; the live setup if absent.
@@ -720,6 +729,16 @@ pub struct StartParams {
     /// Stop on its own after this many seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<f64>,
+    /// Start a new project with its own timeline, whatever
+    /// `record_target` says (#114). Not with `into`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_project: bool,
+    /// Add this recording's takes to this timeline (an id), in the folder
+    /// of its last take, whatever `record_target` says. Not with
+    /// `new_project`. Neither: `record_target`'s choice (a new project
+    /// unless one was chosen).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1174,6 +1193,9 @@ pub enum Event {
         /// The project's folder.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         folder: Option<PathBuf>,
+        /// The timeline its takes went to (#114).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeline: Option<crate::timeline::RecordingInto>,
     },
     /// Every audio source's and the program mix's level (`program`), about
     /// 20 times a second while the live engine runs.
@@ -1330,6 +1352,11 @@ pub enum Event {
         timeline: String,
         editor: bool,
     },
+    /// Where the next recording goes changed (#114): `record_target`, a
+    /// new timeline, or the chosen timeline closed.
+    RecordTarget {
+        target: crate::timeline::RecordTarget,
+    },
 }
 
 /// What began a take, in `started` events.
@@ -1396,11 +1423,12 @@ pub enum EventKind {
     CanvasSceneChanged,
     CanvasPreviewChanged,
     ProjectOpened,
+    RecordTarget,
 }
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 33] = [
+    pub const NAMES: [&str; 34] = [
         "setup_changed",
         "started",
         "status",
@@ -1434,6 +1462,7 @@ impl EventKind {
         "canvas_scene_changed",
         "canvas_preview_changed",
         "project_opened",
+        "record_target",
     ];
 
     /// The kind's name, as events and `watch` spell it.
@@ -1478,6 +1507,7 @@ impl Event {
             Self::CanvasSceneChanged { .. } => EventKind::CanvasSceneChanged,
             Self::CanvasPreviewChanged { .. } => EventKind::CanvasPreviewChanged,
             Self::ProjectOpened { .. } => EventKind::ProjectOpened,
+            Self::RecordTarget { .. } => EventKind::RecordTarget,
         }
     }
 }
@@ -1512,6 +1542,10 @@ pub struct Started {
     /// setup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// The timeline its takes go to (#114): a new project's own, or the
+    /// one chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<crate::timeline::RecordingInto>,
 }
 
 /// A warning about current headroom, not the setup's estimated capacity.
@@ -1607,6 +1641,13 @@ pub struct Status {
     /// The current timeline, which finished takes are added to, if one is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline: Option<TimelineSummary>,
+    /// Where the next recording goes (#114): a new project, or a take on
+    /// a chosen timeline (`record_target`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_target: Option<crate::timeline::RecordTarget>,
+    /// The timeline the running recording's takes go to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_into: Option<crate::timeline::RecordingInto>,
     /// Why no timeline is current although one was: its file couldn't be
     /// read when isocastd started, so takes aren't being added to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
