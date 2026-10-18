@@ -370,16 +370,7 @@ fn collect_report(
         .rev()
         .filter(|path| {
             let name = path.file_name().unwrap().to_string_lossy().to_lowercase();
-            [
-                "isocastd-",
-                "isocast-",
-                "isocast-app-",
-                "isocast-ui-",
-                "isocast_",
-                "isocastd_",
-            ]
-            .iter()
-            .any(|p| name.starts_with(p))
+            CRASH_PREFIXES.iter().any(|p| name.starts_with(p))
         })
         .take(10)
     {
@@ -399,6 +390,8 @@ fn collect_report(
             &mut omitted,
         );
     }
+    #[cfg(target_os = "linux")]
+    collect_coredumps(&mut contents, &mut redactor, &mut omitted);
     let mut manifests = manifest_folders
         .iter()
         .flat_map(|dir| files(dir))
@@ -449,6 +442,14 @@ fn collect_report(
                     native_crashes.push(summary);
                 }
             }
+        }
+        if name.starts_with("linux-crashes/") {
+            let field = |key: &str| {
+                text.lines()
+                    .find_map(|line| line.trim_start().strip_prefix(key))
+                    .map(str::trim)
+            };
+            native_crashes.push(json!({"file":name,"pid":field("PID:"),"process":field("Executable:"),"capture_time":field("Timestamp:"),"signal":field("Signal:")}));
         }
         if name.ends_with(".crash.json") {
             let mut crash =
@@ -517,7 +518,7 @@ fn collect_report(
         "crash_signature":crash.map(signature),
         "retained_rust_crashes":crashes.iter().rev().take(3).map(signature).collect::<Vec<_>>(),
         "native_crashes":native_crashes.iter().rev().take(3).collect::<Vec<_>>(),
-        "abnormal_cause":if latest_abnormal.is_null() {Value::Null} else if crash.is_some() {json!("Rust panic; see matching launch crash file")} else {json!("No clean-exit marker or matching Rust crash file; SIGKILL, power loss or a native crash are possible. See macos-crashes and that launch's final log records.")},
+        "abnormal_cause":if latest_abnormal.is_null() {Value::Null} else if crash.is_some() {json!("Rust panic; see matching launch crash file")} else {json!("No clean-exit marker or matching Rust crash file; SIGKILL, power loss or a native crash are possible. See macos-crashes or linux-crashes and that launch's final log records.")},
         "last_error":snapshot["status"]["last_error"].as_str().map(|s|s.chars().take(2000).collect::<String>()),"last_warning_or_error":warnings.last(),
         "timeline":warnings,"previous_abnormal":snapshot["diagnostics"]["previous_abnormal"],
         "what_was_running":{"state":snapshot["status"]["state"],"scene":snapshot["status"]["scene"],"stream":snapshot["status"]["stream"]},
@@ -692,6 +693,101 @@ fn incident_summary(record: &Value) -> Value {
         "stream_dropped_frames":fields["stream"]["dropped_frames"],"stream_audio_dropouts":fields["stream"]["audio_dropouts"],"process":fields["system"]["process"]})
 }
 
+/// File-name prefixes of Isocast's own crash reports.
+const CRASH_PREFIXES: [&str; 6] = [
+    "isocastd-",
+    "isocast-",
+    "isocast-app-",
+    "isocast-ui-",
+    "isocast_",
+    "isocastd_",
+];
+
+/// `coredumpctl info` fields that identify the person or machine (user and
+/// host names, machine and boot ids, session units), left out of reports.
+#[cfg(target_os = "linux")]
+const COREDUMP_PRIVATE: [&str; 11] = [
+    "UID:",
+    "GID:",
+    "Owner UID:",
+    "Hostname:",
+    "Machine ID:",
+    "Boot ID:",
+    "Storage:",
+    "Control Group:",
+    "Unit:",
+    "User Unit:",
+    "Slice:",
+];
+
+/// The newest ten of this user's systemd-coredump records for Isocast
+/// executables, as `coredumpctl info` prints them (with a backtrace when
+/// symbols are available), under `linux-crashes/`. Nothing when
+/// `coredumpctl` is missing or fails.
+#[cfg(target_os = "linux")]
+fn collect_coredumps(
+    contents: &mut BTreeMap<String, String>,
+    redactor: &mut Redactor,
+    omitted: &mut Vec<String>,
+) {
+    use std::process::Command;
+    let run = |args: &[&str]| {
+        Command::new("coredumpctl")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let Some(list) = run(&["list", "--no-pager", "--json=short"]) else {
+        return;
+    };
+    let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&list) else {
+        return;
+    };
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = u64::from(unsafe { libc::getuid() });
+    let mut ours = entries
+        .iter()
+        .filter_map(|entry| {
+            let exe = Path::new(entry["exe"].as_str()?).file_name()?;
+            let exe = exe.to_string_lossy().to_lowercase();
+            let name = format!("{exe}-");
+            (entry["uid"].as_u64() == Some(uid)
+                && CRASH_PREFIXES.iter().any(|p| name.starts_with(p)))
+            .then_some((entry["time"].as_u64()?, entry["pid"].as_u64()?, exe))
+        })
+        .collect::<Vec<_>>();
+    ours.sort();
+    for (time, pid, exe) in ours.into_iter().rev().take(10) {
+        let name = format!("linux-crashes/{time}-{pid}-{exe}.txt");
+        let current: usize = contents.values().map(String::len).sum();
+        let Some(info) = run(&["info", "--no-pager", &pid.to_string()]) else {
+            omitted.push(format!("{name}: coredumpctl info failed"));
+            continue;
+        };
+        if info.len() as u64 > MAX_FILE || current.saturating_add(info.len()) > MAX_BUNDLE {
+            omitted.push(format!("{name}: size/type limit"));
+            continue;
+        }
+        contents.insert(name, coredump_text(&info, redactor));
+    }
+}
+
+/// `coredumpctl info` output without [`COREDUMP_PRIVATE`] lines, redacted.
+#[cfg(target_os = "linux")]
+fn coredump_text(info: &str, redactor: &mut Redactor) -> String {
+    info.lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            !COREDUMP_PRIVATE.iter().any(|key| line.starts_with(key))
+        })
+        .map(|line| redactor.text(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
 fn collect(
     path: &Path,
     name: String,
@@ -790,5 +886,32 @@ mod tests {
             ))
             .is_none()
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+
+    #[test]
+    fn coredump_text_leaves_out_identifying_fields() {
+        let info = "           PID: 4242 (isocastd)\n           UID: 1000 (mat)\n      Hostname: tanner\n    Machine ID: 0123abcd\n       Boot ID: 4567ef01\n        Signal: 6 (ABRT)\n     Executable: /usr/bin/isocastd\n Control Group: /user.slice/user-1000.slice\n          Unit: user@1000.service\n     User Unit: app.slice\n         Slice: user-1000.slice\n       Storage: /var/lib/systemd/coredump/core.isocastd.zst (present)\n";
+        let text = coredump_text(info, &mut Redactor::default());
+        assert!(text.contains("PID: 4242 (isocastd)"));
+        assert!(text.contains("Signal: 6 (ABRT)"));
+        assert!(text.contains("Executable: /usr/bin/isocastd"));
+        for private in [
+            "UID:",
+            "Hostname:",
+            "tanner",
+            "Machine ID:",
+            "Boot ID:",
+            "Control Group:",
+            "Unit:",
+            "Slice:",
+            "Storage:",
+        ] {
+            assert!(!text.contains(private), "{private} left in {text}");
+        }
     }
 }

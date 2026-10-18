@@ -371,7 +371,8 @@ fn overlay(
     (rows, outputs, note)
 }
 
-/// This process's memory as Activity Monitor shows it (its footprint).
+/// This process's memory as Activity Monitor shows it (its footprint); its
+/// resident memory on Linux.
 fn memory_bytes() -> Option<u64> {
     #[cfg(target_os = "macos")]
     {
@@ -382,7 +383,11 @@ fn memory_bytes() -> Option<u64> {
         };
         (result == 0).then(|| unsafe { value.assume_init() }.ri_phys_footprint)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        isocast_diagnostics::resident_bytes()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     None
 }
 
