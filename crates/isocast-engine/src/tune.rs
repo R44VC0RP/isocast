@@ -45,8 +45,10 @@ const MAX_VARIANTS: usize = 8;
 const HOPELESS: f64 = 0.9;
 /// How far frames' windows into the texture shift.
 const TEXTURE_MARGIN: usize = 64;
-/// Distinct frames each stream cycles through.
-const CYCLE: usize = 16;
+/// Distinct frames each stream cycles through. Each one holds a
+/// production permit for the whole benchmark, so this stays under the frame
+/// budget's production reserve (8 per pool), with room for the encoder.
+const CYCLE: usize = 6;
 /// The program file sizes tried, by their short side, when the setup
 /// doesn't fit.
 const PROGRAM_SIDES: [u32; 3] = [1440, 1080, 720];
