@@ -80,7 +80,9 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "timeline", 
              "plugin_files", "replay", "vertical",
              # The frame oracle (#124), defined below.
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_edit", "oracle_masks",
-             "oracle_canvases", "oracle_replay", "oracle_governor")
+             "oracle_canvases", "oracle_replay", "oracle_governor",
+             # The same model on the engine's test pattern (Windows has no media files yet).
+             "win_record", "win_takes", "win_scenes")
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -94,6 +96,11 @@ class Failure(Exception):
 
 class Skip(Exception):
     pass
+
+
+class Pending(Skip):
+    """Something this platform doesn't do yet (Windows: previews,
+    streaming): reported PENDING, never as a pass."""
 
 
 class RpcError(Failure):
@@ -141,6 +148,13 @@ def write_json(path, value):
 def capabilities():
     """Actually create an encoder, forbidding FFmpeg's software fallback."""
     result = {"system": platform.platform(), "machine": platform.machine()}
+    if WINDOWS:
+        # The engine encodes with NVENC or Media Foundation itself; whether
+        # it can is what the scenarios find out. Nothing here streams yet.
+        result.update(cores=os.cpu_count(), virtual_machine=0, gpus=[], hevc=True, h264=True,
+                      record_codec="hevc", platform="windows",
+                      pending=["previews (scene feeds, snapshots)", "streaming", "replay buffer"])
+        return result
     for label, key in (("chip", "machdep.cpu.brand_string"), ("cores", "hw.logicalcpu"),
                        ("physical_cores", "hw.physicalcpu"), ("memory_bytes", "hw.memsize"),
                        ("virtual_machine", "kern.hv_vmm_present")):
@@ -207,6 +221,110 @@ def keep_under(root, work, report):
     return dest
 
 
+WINDOWS = sys.platform == "win32"
+
+
+def windows_pipe(path):
+    """The named pipe isocastd listens on for the logical socket `path` on
+    Windows, computed as isocast-ipc does (crates/isocast-ipc/src/windows/
+    name.rs): sha256 of a versioned header, this user's binary SID and the
+    invariant-uppercased path (its parent canonicalised as Rust's
+    std::fs::canonicalize does, with the \\\\?\\ prefix), length-delimited."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    H = wintypes.HANDLE
+    k32.CreateFileW.restype = H
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                wintypes.DWORD, wintypes.DWORD, H]
+    k32.GetFinalPathNameByHandleW.argtypes = [H, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    k32.CloseHandle.argtypes = [H]
+    k32.GetCurrentProcess.restype = H
+    k32.LCMapStringEx.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPCWSTR, ctypes.c_int,
+                                  wintypes.LPWSTR, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    adv.OpenProcessToken.argtypes = [H, wintypes.DWORD, ctypes.POINTER(H)]
+    adv.GetTokenInformation.argtypes = [H, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                        ctypes.POINTER(wintypes.DWORD)]
+    absolute = os.path.abspath(path)
+    parent, name = os.path.split(absolute)
+    handle = k32.CreateFileW(parent, 0, 7, None, 3, 0x02000000, None)  # FILE_FLAG_BACKUP_SEMANTICS
+    require(handle not in (None, ctypes.c_void_p(-1).value), f"can't open {parent}: {ctypes.get_last_error()}")
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        require(k32.GetFinalPathNameByHandleW(handle, buf, 32768, 0), "GetFinalPathNameByHandleW failed")
+    finally:
+        k32.CloseHandle(handle)
+    normalized = buf.value.rstrip("\\") + "\\" + name
+    out = ctypes.create_unicode_buffer(len(normalized) * 2 + 2)
+    written = k32.LCMapStringEx("", 0x200, normalized, len(normalized), out, len(out), None, None, 0)
+    require(written, f"LCMapStringEx failed: {ctypes.get_last_error()}")
+    folded = out[:written].encode("utf-16-le")
+    token = wintypes.HANDLE()
+    require(adv.OpenProcessToken(k32.GetCurrentProcess(), 0x0008, ctypes.byref(token)), "OpenProcessToken failed")
+    try:
+        size = wintypes.DWORD()
+        adv.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))  # TokenUser
+        info = ctypes.create_string_buffer(size.value)
+        require(adv.GetTokenInformation(token, 1, info, size, ctypes.byref(size)), "GetTokenInformation failed")
+    finally:
+        k32.CloseHandle(token)
+    sid_ptr = ctypes.cast(info, ctypes.POINTER(ctypes.c_void_p))[0]
+    adv.GetLengthSid.argtypes = [ctypes.c_void_p]
+    sid = ctypes.string_at(sid_ptr, adv.GetLengthSid(sid_ptr))
+    digest = hashlib.sha256(b"isocast.local-pipe\0v2\0" + len(sid).to_bytes(8, "little") + sid
+                            + len(folded).to_bytes(8, "little") + folded).hexdigest()
+    return "\\\\.\\pipe\\isocast-" + digest
+
+
+class PipeConnection:
+    """A named-pipe client with the socket calls the harness uses."""
+
+    def __init__(self, name, timeout):
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                self.file = open(name, "r+b", buffering=0)
+                break
+            except OSError:  # busy (ERROR_PIPE_BUSY) or not listening yet
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.02)
+
+    def settimeout(self, _):
+        pass  # the worker's own timeout bounds a stuck read
+
+    def sendall(self, data):
+        self.file.write(data)
+
+    def makefile(self, _mode):
+        import io
+        return io.BufferedReader(self.file)
+
+    def close(self):
+        try:
+            self.file.close()
+        except OSError:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
+def engine_connection(sock_path, timeout=30):
+    """A connection to the engine at its logical socket path: a Unix socket
+    on macOS, the named pipe isocast-ipc derives from it on Windows."""
+    if WINDOWS:
+        return PipeConnection(windows_pipe(sock_path), timeout)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    sock.connect(str(sock_path))
+    return sock
+
+
 ENGINE_ENV = {}  # --engine-env
 
 
@@ -214,31 +332,42 @@ class Engine:
     def __init__(self, root, daemon):
         self.root = root
         self.sock = root / "d.sock"
-        require(len(os.fsencode(self.sock)) < 104,
-                "--work path too long for a macOS Unix socket; use a shorter path")
-        self.app = root / "Dev.app"
-        binary = self.app / "Contents/MacOS/isocastd"
-        binary.parent.mkdir(parents=True)
-        shutil.copy2(daemon, binary)
-        shutil.copy2(REPO / "crates/isocast-daemon/Info.plist", self.app / "Contents/Info.plist")
-        command(["codesign", "--force", "--sign", "-", self.app])
-        command(["codesign", "--verify", self.app])
+        if WINDOWS:
+            # No app bundle or signing; the logical socket names a pipe.
+            root.mkdir(parents=True, exist_ok=True)
+            self.app = None
+            self.binary = Path(daemon)
+        else:
+            require(len(os.fsencode(self.sock)) < 104,
+                    "--work path too long for a macOS Unix socket; use a shorter path")
+            self.app = root / "Dev.app"
+            binary = self.app / "Contents/MacOS/isocastd"
+            binary.parent.mkdir(parents=True)
+            shutil.copy2(daemon, binary)
+            shutil.copy2(REPO / "crates/isocast-daemon/Info.plist", self.app / "Contents/Info.plist")
+            command(["codesign", "--force", "--sign", "-", self.app])
+            command(["codesign", "--verify", self.app])
+            self.binary = binary
         # Drop inherited Isocast overrides (including any user's stream key).
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("ISOCAST_")}
         self.env.update(ENGINE_ENV)
         self.env.update(ISOCAST_CALIBRATION="off", ISOCAST_SOCKET=str(self.sock), ISOCAST_SETUP=str(root / "setup.toml"),
-                        ISOCAST_DEV_APP=str(self.app), ISOCAST_PLUGINS=str(root / "plugins"),
+                        ISOCAST_PLUGINS=str(root / "plugins"),
                         ISOCAST_TIMELINES=str(root / "timelines"), ISOCAST_MONITOR_SILENT="1",
                         ISOCAST_STREAM_KEY="e2e", ISOCAST_LOG_DIR=str(root / "logs"),
                         # Never the real report service: bug_report's submit fails cleanly.
                         ISOCAST_REPORT_ENDPOINT="http://127.0.0.1:9/reports")
+        if self.app:
+            self.env["ISOCAST_DEV_APP"] = str(self.app)
         self.log = open(root / "daemon.log", "ab", buffering=0)
         self.process = None
         self.start()
 
     def start(self):
-        self.process = subprocess.Popen([str(self.app / "Contents/MacOS/isocastd")],
-                                        env=self.env, stdout=self.log, stderr=self.log)
+        # Its own folder as the working directory: anything it (or a tool it
+        # starts) writes to a relative path stays in the scenario's folder.
+        self.process = subprocess.Popen([str(self.binary)], env=self.env, stdout=self.log, stderr=self.log,
+                                        cwd=str(self.root))
 
         def ready():
             require(self.process.poll() is None, "daemon exited at startup; see daemon.log")
@@ -252,9 +381,7 @@ class Engine:
         request = {"jsonrpc": "2.0", "id": 1, "method": method}
         if params is not None:
             request["params"] = params
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(timeout)
-            sock.connect(str(self.sock))
+        with engine_connection(self.sock, timeout) as sock:
             sock.sendall((json.dumps(request) + "\n").encode())
             with sock.makefile("rb") as reader:
                 reply = json.loads(reader.readline(16 * 1024 * 1024))
@@ -621,6 +748,8 @@ def scenario_scenes(e, cfg, evidence):
 
 
 def scenario_stream(e, cfg, evidence):
+    if WINDOWS:
+        raise Pending("streaming / the replay buffer: not on Windows yet")
     width, height, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
     if not evidence["capabilities"]["h264"]:
         raise Skip("no hardware encoder on this runner (H.264 streaming)")
@@ -714,6 +843,8 @@ def scenario_stream(e, cfg, evidence):
 
 
 def scenario_vertical(e, cfg, evidence):
+    if WINDOWS:
+        raise Pending("streaming / the replay buffer: not on Windows yet")
     if not evidence["capabilities"]["h264"]:
         raise Skip("no hardware encoder on this runner (vertical H.264 streaming)")
     # Two HD programs and one HD stream, at a rate the base M2 can protect.
@@ -1690,8 +1821,7 @@ class Watch:
     def __init__(self, engine, kinds):
         import threading
         self.events = []
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(str(engine.sock))
+        self.sock = engine_connection(engine.sock)
         self.sock.sendall((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "watch",
                                        "params": {"kinds": kinds}}) + "\n").encode())
         self.reader = self.sock.makefile("rb")
@@ -2137,6 +2267,8 @@ def scenario_replay(e, cfg, evidence):
     stream without it, then with it and saves during them. Every output
     keeps the loss bar in both; each save is checked. (ISOs stay off: with
     a stream they shed pictures by design while #41 stands.)"""
+    if WINDOWS:
+        raise Pending("streaming / the replay buffer: not on Windows yet")
     width, height, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
     if not evidence["capabilities"]["h264"]:
         raise Skip("no hardware encoder on this runner (H.264 replay buffer)")
@@ -2368,6 +2500,9 @@ def oracle_fixture(folder, tag, fps, seconds=ORACLE_SECONDS):
 def oracle_base(root, cfg, sources, fps):
     """`cfg` with fixture media sources {id: (tag name, restart, speed)}
     in place of the synthetic ones; returns (cfg, the clips' frame count)."""
+    if WINDOWS:
+        raise Pending("media files (the block-code fixtures) don't play on Windows yet; the win_* scenarios "
+                      "check the same model on the engine's test pattern")
     folder = root.parent / "fixtures"
     cfg["sources"] = []
     for sid, (tag, restart, speed) in sources.items():
@@ -2498,7 +2633,8 @@ def region_level(pixels, w, h, rect):
 
 def describe(value):
     if isinstance(value, tuple) and value and value[0] == "id":
-        tag = next((k for k, v in ORACLE_TAGS.items() if v == value[1]), value[1])
+        tag = next((k for k, v in list(ORACLE_TAGS.items()) + [("bars", 11), ("bars2", 12)] if v == value[1]),
+                   value[1])
         return f"{tag}:{value[2]}"
     if isinstance(value, tuple):
         return value[0] if len(value) == 1 else f"{value[0]} {value[1]}"
@@ -3265,7 +3401,12 @@ def scenario_oracle_masks(e, cfg, evidence):
     drawn, not half a frame ahead (B4), and a fit = none scene mask keeps
     its size in a reduced scene feed (B5)."""
     w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
-    cfg, count = oracle_base(e.root, cfg, {"m": ("m", True, 1)}, fps)
+    if WINDOWS:  # no media files on Windows yet: B1's mask-only clip can't play
+        cfg["sources"] = [{"id": "tone", "kind": "tone"}]
+        cfg["recording"]["iso"].update(sources=[], audio=[])
+        count = 0
+    else:
+        cfg, count = oracle_base(e.root, cfg, {"m": ("m", True, 1)}, fps)
     fw, fh = ORACLE_SIZE
     cfg["sources"] += [{"id": i, "kind": "color", "color": "#ffffff", "width": fw, "height": fh}
                        for i in ("fill1", "fill2", "fill3", "fill4", "fill5")]
@@ -3285,6 +3426,8 @@ def scenario_oracle_masks(e, cfg, evidence):
                    "animations": [{"duration_ms": 60000, "easing": "linear", "start": "clock",
                                    "frames": [{"at": 0, "width": 0.2}, {"at": 1, "width": 0.8}]}]}],
         "fill5": [{"kind": "source_mask", "mask_scene": "whitescene", "fit": "none", "scale": 1.0}]}
+    if WINDOWS:
+        filters["fill1"] = []
     for s in cfg["sources"]:
         if s["id"] in filters:
             s["filters"] = filters[s["id"]]
@@ -3298,12 +3441,13 @@ def scenario_oracle_masks(e, cfg, evidence):
              "easing": "linear", "start": "clock"}])]},
         {"id": "whitescene", "name": "white", "items": [item("white", (0, 0, 1, 1), (w, h))]},
         {"id": "b5scene", "name": "b5", "items": [item("fill5", (0.25, 0.25, 0.5, 0.5), (w, h))]}]
-    cfg["recording"]["program"]["audio"] = ["m"]
-    cfg["recording"]["iso"].update(enabled=True, sources=["fill4"], audio=["m"], filtered=True)
+    sound = "tone" if WINDOWS else "m"
+    cfg["recording"]["program"]["audio"] = [sound]
+    cfg["recording"]["iso"].update(enabled=True, sources=["fill4"], audio=[sound], filtered=True)
     e.apply(cfg)
     problems, feed = {}, None
     cli = os.environ.get("ISOCAST_E2E_CLI")
-    if cli and Path(cli).is_file():
+    if cli and Path(cli).is_file() and not WINDOWS:  # scene feeds are previews: none on Windows yet
         feed = subprocess.Popen([cli, "frames", "scene:b5scene", "--width", "384", "--fps", "30",
                                  "--seconds", "4", "--output", str(e.root / "b5.h264"), "--json"],
                                 env=e.env, stdout=open(e.root / "b5.json", "w"), stderr=open(e.root / "b5.err", "w"))
@@ -3313,9 +3457,11 @@ def scenario_oracle_masks(e, cfg, evidence):
     w2, h2, frames = gray_frames(program, side=960)
     # B1: the mask-only clip plays a frame a slot, so its code shows through.
     b1 = {"name": "b1", "tag": 4, "rect": rects["b1"], "quads": list(ORACLE_QUADS)}
-    decoded = [(round(t * fps), t, oracle_read(p, w2, h2, b1)) for t, p in frames]
+    decoded = [] if WINDOWS else [(round(t * fps), t, oracle_read(p, w2, h2, b1)) for t, p in frames]
     ids = [(s, g[2]) for s, _, g in decoded if g[0] == "id"]
-    if not ids:
+    if WINDOWS:
+        pass
+    elif not ids:
         problems["B1"] = f"no mask frame shows through fill1 (first picture: {describe(decoded[0][2])})"
     else:
         votes = {}
@@ -3376,16 +3522,26 @@ def scenario_oracle_masks(e, cfg, evidence):
                                   f"picture (grey level {visible:.0f}, expected white)")
     else:
         evidence["b5"] = "skipped: no isocast CLI (ISOCAST_E2E_CLI)"
-    evidence["mask_checks"] = {k: problems.get(k, "PASS" if k != "B5" or feed else "SKIP")
+    pending = {"B1": "media files", "B5": "previews (it reads a scene feed)"} if WINDOWS else {}
+    evidence["mask_checks"] = {k: problems.get(k, f"PENDING: {pending[k]}" if k in pending else
+                                                "PASS" if k != "B5" or feed else "SKIP")
                                for k in ("B1", "B2", "B3", "B4", "B5")}
     evidence["b4_gaps_px"] = gaps[:10]
     require(not problems, "masks: " + "; ".join(f"{k}: {v}" for k, v in sorted(problems.items())))
+    if WINDOWS:
+        raise Pending("B2, B3, B4 verified; B1 pending (media files) and B5 pending (previews): "
+                      "Windows has neither yet")
 
 
 def scenario_oracle_canvases(e, cfg, evidence):
     """Per-destination canvases (#84): each canvas's recording is the
     oracle's, and each live encoder is warmed once as a recording starts
     (a68b6f3f warmed every one twice)."""
+    if WINDOWS:
+        # Its sources are media files and its check needs stream encoders:
+        # neither on Windows yet. win_record checks every canvas's recording.
+        raise Pending("the encoder warm-once check needs streaming (and media files): not on Windows yet; "
+                      "the canvases' recordings are checked by win_record")
     if not evidence["capabilities"]["h264"]:
         raise Skip("no hardware encoder on this runner (stream encoders)")
     fps = cfg["canvas"]["fps"]
@@ -3436,6 +3592,8 @@ def scenario_oracle_canvases(e, cfg, evidence):
 def scenario_oracle_replay(e, cfg, evidence):
     """The replay buffer: a save is consecutive frames of the program, the
     same ones a recording beside it has, ending at the save."""
+    if WINDOWS:
+        raise Pending("the replay buffer: not on Windows yet")
     if not evidence["capabilities"]["h264"]:
         raise Skip("no hardware encoder on this runner (replay buffer)")
     fps = cfg["canvas"]["fps"]
@@ -3665,6 +3823,317 @@ def oracle_selftest(work):
     return {"encoders": encoders, "cases": results, "caught": caught, "rules": rules}
 
 
+# ---------------------------------------------------------------------------
+# The frame oracle on the engine's own test pattern (Windows, #124 follow-up).
+#
+# Windows can't play media files yet, so the block-code fixtures can't be
+# sources there. The engine's test pattern names its frame instead: frame n's
+# bars are shifted floor(n * width / (4 s * fps)) pixels (unique for 4 s) and
+# its label's fifth character is lit for "BARS2", dark for "BARS". Like a
+# media source playing from the engine's start, a test pattern draws frame n
+# at the engine's tick n, so the same model holds: the take's slot j shows
+# frame T0 + j (mod 4 s of frames); T0 is fitted once per take and predicts
+# every other output of it, its split and its pause.
+
+PATTERN_TAGS = {"bars": 11, "bars2": 12}
+PATTERN_NAMES = {v: k for k, v in PATTERN_TAGS.items()}
+
+
+def pattern_period(fps):
+    return 4 * fps
+
+
+def pattern_shift(n, width, fps):
+    return n * width // pattern_period(fps) % width
+
+
+def pattern_samples(path, specs, src_w, src_h):
+    """Per decoded picture and per spec: (pts, {name: (bars row, label cell
+    level, band level)}). A spec is (name, (x, y, w, h) where the source's
+    picture sits in the output, in output pixels, the fraction of the
+    source's height the row is read at, (x0, x1) the band's share of the
+    source's width): the row is scaled back to the source's width."""
+    s = max(src_h // 120, 1)
+    graph, outs = [f"[0:v]format=gray,split={3 * len(specs)}" + "".join(f"[i{k}]" for k in range(3 * len(specs))) + ";"], []
+    for k, (name, (x, y, w, h), row, band) in enumerate(specs):
+        sx, sy = w / src_w, h / src_h
+        ry = int(y + row * h)
+        graph.append(f"[i{3 * k}]crop={max(1, int(w))}:1:{int(x)}:{ry},scale={src_w}:1:flags=bicubic[r{k}];")
+        cx, cy, cw, ch = x + 30 * s * sx, y + 6 * s * sy, max(1, 5 * s * sx), max(1, 7 * s * sy)
+        graph.append(f"[i{3 * k + 1}]crop={max(1, int(cw))}:{max(1, int(ch))}:{int(cx)}:{int(cy)},"
+                     f"scale={src_w}:1:flags=area[c{k}];")
+        bx0, bx1 = band
+        graph.append(f"[i{3 * k + 2}]crop={max(1, int(w * (bx1 - bx0)))}:{max(1, int(h / 4))}:"
+                     f"{int(x + w * bx0)}:{int(y + h * 0.75)},scale={src_w}:1:flags=area[b{k}];")
+        outs += [f"[r{k}]", f"[c{k}]", f"[b{k}]"]
+    graph.append("".join(outs) + f"vstack={len(outs)}[out]")
+    raw = ffmpeg("-i", path, "-filter_complex", "".join(graph), "-map", "[out]", "-fps_mode", "passthrough",
+                 "-pix_fmt", "gray", "-f", "rawvideo", "-", timeout=300).stdout
+    times = video_times(path)
+    size = src_w * 3 * len(specs)
+    require(len(raw) == len(times) * size, f"{Path(path).name}: decoded pictures and timestamps disagree")
+    rows = []
+    for i, t in enumerate(times):
+        picture = raw[i * size:(i + 1) * size]
+        row = {}
+        for k, (name, *_rest) in enumerate(specs):
+            base = 3 * k * src_w
+            bars = picture[base:base + src_w]
+            cell = sum(picture[base + src_w:base + 2 * src_w]) / src_w
+            band = sum(picture[base + 2 * src_w:base + 3 * src_w]) / src_w
+            row[name] = (bars, cell, band)
+        rows.append((t, row))
+    return rows
+
+
+def pattern_value(bars, cell, width, fps):
+    """("id", tag, frame mod 4 s) for a sampled source, or ("garbled",)."""
+    bits = bars.translate(BAR_LEVELS)
+    rise, fall = bits.find(b"01"), bits.find(b"10")
+    if 2 < rise < width - 4:
+        shift = (width - rise - 1) % width
+    elif 2 < fall < width - 4:
+        shift = (width // 2 - fall - 1) % width
+    else:
+        return ("garbled",)
+    period = pattern_period(fps)
+    guess = round(shift * period / width)
+    best = min(range(guess - 2, guess + 3), key=lambda n: min(abs(pattern_shift(n % period, width, fps) - shift),
+                                                             width - abs(pattern_shift(n % period, width, fps) - shift)))
+    apart = abs(pattern_shift(best % period, width, fps) - shift)
+    if min(apart, width - apart) > max(2, width / period / 3):
+        return ("garbled",)
+    return ("id", PATTERN_TAGS["bars2" if cell > 50 else "bars"], best % period)
+
+
+def pattern_rows(path, specs, src, fps):
+    """[(slot, pts, {name: ("id", tag, frame) or ("garbled",)})] of `path`,
+    the test pattern read at `specs` (see pattern_samples)."""
+    rows = []
+    for t, sampled in pattern_samples(path, specs, *src):
+        slot = round(t * fps)
+        require(abs(t * fps - slot) < 0.02, f"{Path(path).name}: a picture at {t:.5f} s is off the frame grid")
+        rows.append((slot, t, {n: pattern_value(b, c, src[0], fps) for n, (b, c, _) in sampled.items()}))
+    return rows
+
+
+def pattern_fit(rows, name, period):
+    votes = {}
+    for slot, _, row in rows:
+        got = row.get(name)
+        if got and got[0] == "id":
+            votes[(got[2] - slot) % period] = votes.get((got[2] - slot) % period, 0) + 1
+    require(votes, f"no picture of {name} could be read: nothing to anchor the take on")
+    return max(votes, key=votes.get)
+
+
+def win_setup(e, cfg, pip=True):
+    """bars on the whole canvas and bars2 in the lower-right quarter, the
+    tone in the program and ISOs; returns the layout as source rects."""
+    w, h = cfg["canvas"]["width"], cfg["canvas"]["height"]
+    layout = [("bars", (0, 0, 1, 1))] + ([("bars2", (0.5, 0.5, 0.5, 0.5))] if pip else [])
+    cfg["scenes"] = [{"id": "main", "name": "Main", "items": [item(s, r, (w, h)) for s, r in layout]}]
+    cfg["recording"]["program"]["audio"] = ["tone"]
+    cfg["recording"]["iso"].update(enabled=True, sources=["bars", "bars2"], audio=["tone"])
+    return layout
+
+
+def pattern_specs(layout, out_w, out_h, place=(0, 0, 1, 1)):
+    """Read specs for a picture of `layout` (canvas fractions) shown at
+    `place` in an out_w x out_h output: bars read 40% down
+    (clear of the label and of a lower-right picture-in-picture), the band
+    on the left half."""
+    px, py, pw, ph = place
+    specs = []
+    for name, (x, y, w, h) in layout:
+        rect = ((px + x * pw) * out_w, (py + y * ph) * out_h, w * pw * out_w, h * ph * out_h)
+        covered = any(other != name for other, _ in layout[layout.index((name, (x, y, w, h))) + 1:])
+        # Below the label (the top ~26%), above a lower-right picture-in-picture.
+        specs.append((name, rect, 0.4 if covered else 0.5, (0, 0.5) if covered else (0, 1)))
+    return specs
+
+
+def check_pattern_take(e, path, manifest, cfg, layout, evidence, t0=None, label="take", vertical=None):
+    """Every output of a test-pattern take against the oracle; returns T0."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    period = pattern_period(fps)
+    pauses = [(round(p["time_seconds"] * fps), round((p["end_seconds"] - p["start_seconds"]) * fps))
+              for p in manifest.get("pauses", []) if p.get("end_seconds") is not None]
+
+    def take_slot(slot, offset):
+        slot += offset
+        return slot + sum(n for at, n in pauses if slot >= at)
+
+    def expected(offset):
+        return lambda slot, name: ("id", PATTERN_TAGS[name], (t0 + take_slot(slot, offset)) % period)
+    outputs = [("program", layout, (0, 0, 1, 1))]
+    outputs += [(s, [(s, (0, 0, 1, 1))], (0, 0, 1, 1)) for s in ("bars", "bars2")
+                if any(f["source"] == s for f in manifest["files"])]
+    for f in manifest["files"]:
+        if f["source"] == "vertical-program" and vertical:
+            outputs.append((f["source"], vertical, (0, 0, 1, 1)))
+        elif f.get("kind") == "program" and f["source"] not in ("program", "vertical-program"):
+            outputs.append((f["source"], layout, fit_rect((w, h), (f["width"], f["height"]))))
+    for source, items, place in outputs:
+        file, f = manifest_file(path, manifest, source)
+        specs = pattern_specs(items, f["width"], f["height"], place)
+        offset = round((f.get("start_offset_seconds") or 0) * fps)
+        rows = pattern_rows(file, specs, (w, h), fps)
+        if t0 is None:
+            t0 = (pattern_fit(rows, "bars", period) - offset) % period
+        oracle_check_rows(f"{label} {source}", file, rows, expected(offset), e.root, evidence,
+                          live=lambda slot, o=offset: take_slot(slot, o) - take_slot(slot - 1, o) == 1)
+        if f.get("audio") and source in ("program", "bars", "bars2") and not pauses:
+            # The tone beeps with every flash of the band (the bottom quarter
+            # of the program and ISO pictures; a pause breaks the cadence).
+            evidence.setdefault("sync", []).append(dict(sync_check(file, fps), output=file.name))
+    return t0
+
+
+def scenario_win_record(e, cfg, evidence):
+    """The test pattern recorded into the program (bars, bars2 in a corner),
+    both ISOs, the vertical canvas's own arrangement and a square canvas's
+    letterboxed picture: every picture of every file is the frame the oracle
+    expects, and every flash has its beep."""
+    w, h = cfg["canvas"]["width"], cfg["canvas"]["height"]
+    layout = win_setup(e, cfg)
+    vw, vh = h, w
+    band = vw * 9 / 16 / vh
+    vertical = [("bars2", (0, 0, 1, band)), ("bars", (0, band, 1, band))]
+    enc = {"encoder": dict(cfg["recording"]["program"]["encoder"], container="mov")}
+    cfg["vertical"] = {"width": vw, "height": vh, "fps": cfg["canvas"]["fps"], "follow_main": True, "recording": enc}
+    cfg["canvases"] = [{"id": "square", "width": h, "height": h, "fps": cfg["canvas"]["fps"], "follow_main": True,
+                        "recording": copy.deepcopy(enc)}]
+    cfg["scenes"][0]["vertical"] = {"items": [item(s, r, (vw, vh)) for s, r in vertical]}
+    e.apply(cfg)
+    path, manifest = take(e, 5)
+    evidence["files"] = check_take(path, manifest, 5, evidence=evidence)
+    require(len(manifest["files"]) == 5, f"files: {[f['source'] for f in manifest['files']]}, expected program, "
+                                         f"bars, bars2, vertical-program and square")
+    evidence["t0"] = check_pattern_take(e, path, manifest, cfg, layout, evidence, vertical=vertical)
+
+
+def scenario_win_takes(e, cfg, evidence):
+    """A split and a pause on the test pattern: the second take starts with
+    the frame after the first's last; the pause cuts out exactly its frames."""
+    layout = win_setup(e, cfg)
+    e.apply(cfg)
+    first = e.rpc("start", {})
+    time.sleep(1.5)
+    second = e.rpc("split")
+    begins = datetime.datetime.fromisoformat(second["begins_at"]).timestamp()
+    time.sleep(max(0, begins - time.time()) + 1.0)
+    e.rpc("pause")
+    time.sleep(0.8)
+    e.rpc("resume")
+    time.sleep(1.2)
+    e.rpc("stop")
+    takes = []
+    for started in (first, second):
+        path = Path(started["manifest"])
+        manifest = until(lambda: finished(path), description="split take")
+        evidence.setdefault("files", []).extend(check_take(path, manifest, evidence=evidence))
+        takes.append((path, manifest))
+    require(takes[1][1].get("pauses"), "the pause is missing from the second take's manifest")
+    t0 = check_pattern_take(e, *takes[0], cfg, layout, evidence, label="take 1")
+    program = next(f for f in takes[0][1]["files"] if f["source"] == "program")
+    slots = program["frames"] + program["dropped_frames"] - (program.get("repeated_frames") or 0)
+    check_pattern_take(e, *takes[1], cfg, layout, evidence, t0=(t0 + slots) % pattern_period(cfg["canvas"]["fps"]),
+                       label="take 2 (split)")
+    evidence.update(t0=t0, first_take_slots=slots)
+
+
+def scenario_win_scenes(e, cfg, evidence):
+    """Cut, fade and slide between a scene of bars and one of bars2 (test
+    patterns: both run all along): each steady picture is the right source
+    at the right frame; a fade's pictures show the incoming scene's share
+    (its label cell's level) rising linearly; a slide (left) shows the
+    incoming scene's label cell moving in from the right at the model's
+    offset."""
+    w, h, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
+    period = pattern_period(fps)
+    cfg["scenes"] = [{"id": s, "name": s, "items": [item(s, (0, 0, 1, 1), (w, h))]} for s in ("bars", "bars2")]
+    cfg["recording"]["program"]["audio"] = ["tone"]
+    cfg["recording"]["iso"].update(enabled=False)
+    e.apply(cfg)
+    plan = (("bars2", {"kind": "cut"}), ("bars", {"kind": "fade", "duration_ms": 500}),
+            ("bars2", {"kind": "slide", "duration_ms": 500, "easing": "linear"}), ("bars", {"kind": "cut"}))
+    start = e.rpc("start", {})
+    switches = []
+    for scene, transition in plan:
+        time.sleep(1)
+        switches.append(e.rpc("switch_scene", {"scene": scene, "transition": transition}))
+    time.sleep(1)
+    e.rpc("stop")
+    path = Path(start["manifest"])
+    manifest = until(lambda: finished(path), description="scenes take")
+    evidence["files"] = check_take(path, manifest, evidence=evidence)
+    program, _ = manifest_file(path, manifest, "program")
+    spans = [(math.ceil(s["time_seconds"] * fps - 1e-6), scene, tr["kind"], round(tr.get("duration_ms", 0) * fps / 1000))
+             for s, (scene, tr) in zip(switches, plan)]
+
+    def state(slot):
+        scene, mixing = "bars", None
+        for first, to, kind, length in spans:
+            if slot < first:
+                break
+            mixing = (scene, first, kind, length) if kind != "cut" and slot < first + length else None
+            scene = to
+        return scene, mixing
+    specs = [("picture", (0, 0, w, h), 0.5, (0, 1))]
+    rows = [(round(t * fps), t, sampled["picture"]) for t, sampled in pattern_samples(program, specs, w, h)]
+    decoded = [(slot, t, {"picture": pattern_value(b, c, w, fps)}) for slot, t, (b, c, _) in rows]
+    t0 = pattern_fit([d for d in decoded if d[1] < switches[0]["time_seconds"] - 0.1], "picture", period)
+    lit = statistics.median([c for (slot, t, (_, c, _)) in rows if state(slot) == ("bars2", None)] or [255])
+    dark = statistics.median([c for (slot, t, (_, c, _)) in rows if state(slot) == ("bars", None)] or [0])
+    oracle = Oracle("scenes program", program, e.root, evidence)
+    # The bars' look (not their timing): a steady picture's row, at its frame.
+    j0 = next(i for i, (slot, t, row) in enumerate(decoded) if state(slot)[1] is None and row["picture"][0] == "id")
+    template, n0 = rows[j0][2][0].translate(BAR_LEVELS), decoded[j0][2]["picture"][2]
+
+    def bars_bits(n, x):  # what column x of a picture of frame n shows
+        return template[(x + pattern_shift(n, w, fps) - pattern_shift(n0, w, fps)) % w]
+    seen = {}
+    for index, ((slot, t, row), (_, _, (bars, cell, _))) in enumerate(zip(decoded, rows)):
+        scene, mixing = state(slot)
+        if not mixing:
+            oracle.expect(index, t, f"scene {scene}", ("id", PATTERN_TAGS[scene], (t0 + slot) % period),
+                          row["picture"])
+            before = state(slot - 1)
+            if slot > 0 and before == (scene, None):
+                oracle.previous[index] = {f"scene {scene}": ("id", PATTERN_TAGS[scene], (t0 + slot - 1) % period)}
+            continue
+        old, first, kind, length = mixing
+        k = slot - first
+        lows, highs = k / length, (k + 1) / length
+        n = (t0 + slot) % period
+        if kind == "fade":  # bars2's share: (cell - dark) / (lit - dark); into bars, 1 - that
+            share2 = (cell - dark) / max(1, lit - dark)
+            share = share2 if scene == "bars2" else 1 - share2
+            ok = lows - 0.1 <= share <= highs + 0.1
+            seen.setdefault("fade", []).append((k, round(share, 3)))
+            got = f"share {share:.2f}"
+        else:  # slide left: the old scene pushed p of the width left, the new in from the right
+            bits = bars.translate(BAR_LEVELS)
+            best = (0.0, None)
+            for p in [lows + (highs - lows) * i / 8 for i in range(9)]:
+                o = round((1 - p) * w)
+                want_bits = bytes(bars_bits(n, x + round(p * w)) if x < o else bars_bits(n, x - o) for x in range(w))
+                score = sum(a == b for a, b in zip(bits, want_bits)) / w
+                best = max(best, (score, p))
+            ok = best[0] >= 0.95
+            seen.setdefault("slide", []).append((k, round(best[1], 3), round(best[0], 3)))
+            got = f"best match {best[0]:.0%} of the row at {best[1]:.2f} of the way"
+        want = f"{kind} into {scene}, {lows:.2f}-{highs:.2f} of the way"
+        oracle.expect(index, t, f"{kind} {old}->{scene}, slot {k + 1} of {length}", want, want if ok else got)
+    for first, scene, kind, length in spans:
+        if kind != "cut":
+            require(len(seen.get(kind, [])) >= length, f"scenes: the {kind} into {scene} has "
+                                                       f"{len(seen.get(kind, []))} pictures, {length} expected")
+    oracle.verdict()
+    evidence.update(t0=t0, switch_slots=spans, transitions=seen, label_levels=(dark, lit))
+
+
 def worker(args):
     root = args.worker_root
     evidence = {"capabilities": read_json(root.parent / "capabilities.json")}
@@ -3681,6 +4150,8 @@ def worker(args):
         codec = evidence["capabilities"]["record_codec"]
         cfg = setup(root, codec, **evidence["capabilities"].get("profile", {}))
         globals()["scenario_" + args.worker](engine, cfg, evidence)
+    except Pending as exc:
+        status, reason = "PENDING", str(exc)
     except Skip as exc:
         status, reason = "SKIP", str(exc)
     except Exception as exc:
@@ -3706,6 +4177,13 @@ def worker(args):
 
 def kill_group(process):
     # The group includes workers, encoders and the engine, never other test jobs.
+    if WINDOWS:
+        # The worker's own process tree only (by its PID), never anyone else's.
+        if process.poll() is None:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, timeout=60)
+        process.wait(timeout=30)
+        return
+
     def send(sig):
         try:
             os.killpg(process.pid, sig)
@@ -3740,7 +4218,9 @@ def run_case(args, root, name):
                                     "--worker-root", str(case), "--daemon", str(args.daemon.resolve()),
                                     *(["--cli", str(args.cli.resolve())] if args.cli else []),
                                     *(x for kv in args.engine_env for x in ("--engine-env", kv))],
-                                   stdout=log, stderr=log, start_new_session=True)
+                                   stdout=log, stderr=log, cwd=str(case),
+                                   **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                                                               if WINDOWS else {"start_new_session": True}))
         try:
             process.wait(timeout=args.timeout)
             if (case / "result.json").exists():
@@ -3885,14 +4365,15 @@ def main():
                           "scenarios": list(args.only or SCENARIOS)}}
     root = None
     try:
-        require(sys.platform == "darwin", "macOS is required")
-        for tool in ("ffmpeg", "ffprobe", "codesign"):
+        require(sys.platform == "darwin" or WINDOWS, "macOS or Windows is required")
+        for tool in ("ffmpeg", "ffprobe") + (() if WINDOWS else ("codesign",)):
             require(shutil.which(tool), f"missing required tool: {tool}")
         require(args.timeout > 0, "--timeout must be positive")
         scratch.mkdir(parents=True, exist_ok=True)
         with open(scratch / ".bench.lock", "a") as lock:
-            print("e2e: waiting for benchmark lock", file=sys.stderr)
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            if fcntl:  # on Windows the runner holds exon-desk's gpu.lock
+                print("e2e: waiting for benchmark lock", file=sys.stderr)
+                fcntl.flock(lock, fcntl.LOCK_EX)
             if args.capabilities_from:
                 require(args.hosted, "--capabilities-from requires --hosted; local runs always have a zero-drop limit")
                 saved = read_json(args.capabilities_from)
@@ -3923,7 +4404,7 @@ def main():
             require(args.daemon.is_file(), f"daemon not found: {args.daemon}; build release first")
             args.work.mkdir(parents=True, exist_ok=True)
             root = Path(tempfile.mkdtemp(prefix="run-", dir=args.work)).resolve()
-            if len(os.fsencode(root)) > SHORT_ROOT:
+            if not WINDOWS and len(os.fsencode(root)) > SHORT_ROOT:
                 # macOS caps Unix socket paths at 104 bytes, and the deepest
                 # socket (a plugin's, ROOT/plugin_files/plugins/<id>/socket)
                 # needs ~60 of them: a deep --work (hw-batch's, a lane with
@@ -3969,7 +4450,7 @@ def main():
         except Exception as exc:
             report["cleanup_error"] = str(exc)
         report["totals"] = {status: sum(r["status"] == status for r in report["scenarios"])
-                            for status in ("PASS", "FAIL", "SKIP")}
+                            for status in ("PASS", "FAIL", "SKIP", "PENDING")}
         args.report.parent.mkdir(parents=True, exist_ok=True)
         write_json(args.report, report)
     if args.json:

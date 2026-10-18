@@ -6912,6 +6912,24 @@ each section. Delete entries that stop being true.
   behind it and the "KNOWN ISSUE #126" marking are gone from
   scripts/e2e.py, merge-branch.sh and agent-rules.md. Any oracle mismatch
   fails with a contact sheet; don't rerun to green, read the sheet.
+- 2026-10-18 (#124 follow-up, Windows engine scenarios): **e2e.py drives
+  isocastd on Windows over its named pipe.** `windows_pipe()` derives the
+  pipe name exactly as isocast-ipc does (sha256 of "isocast.local-pipe\0v2\0",
+  the user's binary SID and the invariant-uppercased path whose parent is
+  canonicalised with the \\?\ prefix, length-delimited); the engine runs
+  unsigned from its build, in the scenario's folder; workers are killed by
+  their own process tree (taskkill /T on the worker PID). Windows can't play
+  media files yet, so the block-code fixtures can't be sources there: the
+  win_record/win_takes/win_scenes scenarios apply the same model (T0 + slot,
+  one T0 per take) to the engine's test pattern, whose bars name the frame
+  (mod 4 s) and whose label tells bars from bars2; fades are checked by the
+  label cell's share, slides by the bars row against the model's offsets.
+  What Windows lacks (previews: masks B5; streaming: the canvases' warm-once
+  check and the replay buffer; media files: masks B1 and the block-code
+  scenarios) raises Pending: reported PENDING, never PASS.
+  `scripts/oracle-windows.sh --engine [REF]` builds REF natively in our own
+  lane root `C:\isocast-dev\lanes\oracle` with REF's windows-remote.sh and
+  runs the scenarios through its `run` under the shared GPU lock.
 
 ## Gotchas
 
@@ -9284,6 +9302,13 @@ each section. Delete entries that stop being true.
   `require(cond, f"...{xs[0]}")` is evaluated even when cond holds, so a
   message that indexes a list raises IndexError on success: build it only
   when failing.
+
+- 2026-10-18 (#124 follow-up): windows-remote.sh refuses to sync a src
+  folder with files it didn't put there; a run once left
+  `src\Microsoft\Windows\PowerShell\ModuleAnalysisCache` in our lane's
+  src (a PowerShell started with src as its working directory), and the
+  next build stopped. e2e.py now starts engines and workers in their own
+  folders, and oracle-windows.sh removes that one stray folder after a run.
 
 ## Verification recipes
 

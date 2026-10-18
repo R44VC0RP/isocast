@@ -4905,3 +4905,12 @@ One line per finished task, newest last.
   Verified: each blocker's case fails in a real run or the rules
   self-test; pre-fix commits and the injected cut still fail; quick and
   full pass on main; A/A false-fail rate measured (REPORT).
+- #124 follow-up, the oracle on Windows (2026-10-18): e2e.py drives
+  isocastd.exe over its named pipe; win_record/win_takes/win_scenes apply
+  the oracle's model to the test pattern (no media files on Windows yet);
+  unsupported parts report PENDING; `scripts/oracle-windows.sh --engine`
+  builds agent/windows natively in its own lane root and runs record, iso,
+  split, scenes, win_* and the canvases/masks oracle scenarios under the GPU
+  lock. Verified at agent/windows 0c47af4c: 7 PASS, 2 PENDING, 0 FAIL;
+  the pattern oracle fails a Windows program shifted one frame or with one
+  frame missing; macOS VM quick and win_* PASS.
