@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::devices::Devices;
-use crate::stream::{AUDIO_BITRATES, StreamSettings};
+use crate::stream::{AUDIO_BITRATES, StreamService, StreamSettings};
 use crate::*;
 
 /// What [`import`] made of a scene collection.
@@ -111,6 +111,36 @@ pub struct Profile {
     /// Hotkeys with keys bound: the action and its keys, like
     /// `("OBSBasic.StartRecording", "F16")`.
     pub hotkeys: Vec<(String, String)>,
+    /// Aitum Multistream's extra outputs for this profile
+    /// (`plugin_config/aitum-multistream/config.json`), without keys.
+    pub multistream: Vec<PluginOutput>,
+    /// Aitum Vertical Canvas's canvases
+    /// (`plugin_config/vertical-canvas/config.json`), without keys.
+    pub plugin_canvases: Vec<PluginCanvas>,
+}
+
+/// A stream output of an OBS plugin (Aitum Multistream, Vertical Canvas),
+/// without its key.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PluginOutput {
+    pub name: String,
+    pub server: String,
+    pub enabled: bool,
+    pub video_kbps: Option<u32>,
+    /// Its own size (Multistream's "scale").
+    pub size: Option<(u32, u32)>,
+}
+
+/// One of Aitum Vertical Canvas's canvases.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PluginCanvas {
+    pub width: u32,
+    pub height: u32,
+    pub video_kbps: Option<u32>,
+    pub audio_kbps: Option<u32>,
+    /// Its scenes, by name (the plugin's own; not imported).
+    pub scenes: usize,
+    pub outputs: Vec<PluginOutput>,
 }
 
 /// An OBS profile's stream settings, without the key.
@@ -131,6 +161,7 @@ impl Profile {
     /// (`streamEncoder.json`). The stream key in `service.json` is not
     /// kept.
     fn read_stream(&mut self, folder: &Path) {
+        self.read_plugins(folder);
         let read = |name: &str| -> Option<Value> {
             serde_json::from_str(&std::fs::read_to_string(folder.join(name)).ok()?).ok()
         };
@@ -153,6 +184,115 @@ impl Profile {
             video_kbps: video,
             audio_kbps: self.stream_audio_kbps,
         });
+    }
+
+    /// Aitum Multistream's outputs for this profile and Vertical Canvas's
+    /// canvases (#84), from OBS's `plugin_config` (three folders above the
+    /// profile's: `basic/profiles/<name>`). Keys are never kept.
+    fn read_plugins(&mut self, folder: &Path) {
+        let Some(root) = folder
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+        else {
+            return;
+        };
+        let read = |path: &str| -> Option<Value> {
+            serde_json::from_str(&std::fs::read_to_string(root.join(path)).ok()?).ok()
+        };
+        let kbps = |value: &Value, key: &str| {
+            int(value, key)
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n > 0)
+        };
+        let output = |item: &Value| -> Option<PluginOutput> {
+            let server = text(item, "stream_server")?.trim().to_string();
+            if server.is_empty() {
+                return None;
+            }
+            let advanced = item.get("advanced").and_then(Value::as_bool) == Some(true);
+            let size = (item.get("scale").and_then(Value::as_bool) == Some(true))
+                .then(|| {
+                    let w = u32::try_from(int(item, "width")?).ok()?;
+                    let h = u32::try_from(int(item, "height")?).ok()?;
+                    Some((w, h))
+                })
+                .flatten();
+            Some(PluginOutput {
+                name: text(item, "name").unwrap_or_default().to_string(),
+                server,
+                enabled: item.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+                video_kbps: advanced
+                    .then(|| kbps(item.get("video_encoder_settings")?, "bitrate"))
+                    .flatten(),
+                size,
+            })
+        };
+        let dir = folder
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if let Some(config) = read("plugin_config/aitum-multistream/config.json") {
+            let name = self.name.clone();
+            let profile = config
+                .get("profiles")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|p| text(p, "name").is_some_and(|n| n == name || n == dir));
+            self.multistream = profile
+                .and_then(|p| p.get("outputs")?.as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(output)
+                .collect();
+        }
+        if let Some(config) = read("plugin_config/vertical-canvas/config.json") {
+            for canvas in config
+                .get("canvas")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let (Some(width), Some(height)) = (
+                    int(canvas, "width").and_then(|n| u32::try_from(n).ok()),
+                    int(canvas, "height").and_then(|n| u32::try_from(n).ok()),
+                ) else {
+                    continue;
+                };
+                let mut outputs: Vec<PluginOutput> = canvas
+                    .get("stream_outputs")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(output)
+                    .collect();
+                // Before stream_outputs: one server of its own.
+                if outputs.is_empty()
+                    && let Some(single) = output(canvas)
+                {
+                    outputs.push(PluginOutput {
+                        name: "main".into(),
+                        video_kbps: None,
+                        size: None,
+                        ..single
+                    });
+                }
+                self.plugin_canvases.push(PluginCanvas {
+                    width,
+                    height,
+                    video_kbps: kbps(canvas, "streaming_video_bitrate")
+                        .or_else(|| kbps(canvas, "video_bitrate")),
+                    audio_kbps: kbps(canvas, "audio_bitrate"),
+                    scenes: canvas
+                        .get("scenes")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len),
+                    outputs,
+                });
+            }
+        }
     }
 
     /// Read a profile's `basic.ini`.
@@ -261,6 +401,8 @@ impl Profile {
             filename: get("Output", "FilenameFormatting"),
             tracks,
             stream: None,
+            multistream: Vec::new(),
+            plugin_canvases: Vec::new(),
             stream_video_kbps,
             stream_audio_kbps,
             reconnect,
@@ -481,6 +623,192 @@ fn stream_settings(profile: &Profile, findings: &mut Findings) -> Option<StreamS
     Some(stream)
 }
 
+/// A plugin output's service and server: a preset when its server is one
+/// of the services' (Twitch, YouTube, Kick, Facebook), else custom. None
+/// for what isn't RTMP or RTMPS (WHIP, SRT).
+fn plugin_service(server: &str) -> Option<(StreamService, Option<String>)> {
+    let lower = server.to_ascii_lowercase();
+    if !(lower.starts_with("rtmp://") || lower.starts_with("rtmps://")) {
+        return None;
+    }
+    Some(
+        if lower.contains("twitch.tv") || lower.contains("live-video.net") {
+            (StreamService::Twitch, None)
+        } else if lower.contains("youtube.com") {
+            (StreamService::Youtube, None)
+        } else if lower.contains("facebook.com") {
+            (StreamService::Facebook, None)
+        } else if lower.contains("kick") {
+            (StreamService::Kick, Some(server.to_string()))
+        } else {
+            (StreamService::Custom, Some(server.to_string()))
+        },
+    )
+}
+
+/// Plugin outputs as destinations of `stream` (made, with the first as
+/// its main destination, if there is none): Aitum Multistream's onto
+/// the main canvas's `[stream]`, Vertical Canvas's onto a canvas's.
+/// `what` names them in findings. Keys stay in OBS.
+fn plugin_destinations(
+    outputs: &[PluginOutput],
+    stream: &mut Option<StreamSettings>,
+    defaults: (Option<u32>, Option<u32>),
+    what: &str,
+    findings: &mut Findings,
+) {
+    use crate::stream::{MAX_DESTINATIONS, StreamDestination};
+    let mut imported = 0;
+    for output in outputs {
+        let Some((service, server)) = plugin_service(&output.server) else {
+            findings.unsupported(
+                format!("{what} output {:?}", output.name),
+                "stream_server",
+                "only RTMP and RTMPS outputs are available (not WHIP or SRT)",
+            );
+            continue;
+        };
+        let size = output.size.filter(|(w, h)| {
+            (16..=4096).contains(w)
+                && (16..=4096).contains(h)
+                && w.is_multiple_of(2)
+                && h.is_multiple_of(2)
+        });
+        let kbps = output
+            .video_kbps
+            .or(defaults.0)
+            .filter(|k| (200..=50_000).contains(k));
+        match stream {
+            None => {
+                let mut settings = serde_json::json!({ "service": service.id() });
+                if let Some(server) = &server {
+                    settings["server"] = server.as_str().into();
+                }
+                if let Some(kbps) = kbps {
+                    settings["video_bitrate_kbps"] = kbps.into();
+                }
+                if let Some(kbps) = defaults.1.filter(|k| AUDIO_BITRATES.contains(k)) {
+                    settings["audio_bitrate_kbps"] = kbps.into();
+                }
+                if let Some((w, h)) = size {
+                    settings["width"] = w.into();
+                    settings["height"] = h.into();
+                }
+                let Ok(mut made) = serde_json::from_value::<StreamSettings>(settings) else {
+                    continue;
+                };
+                made.enabled = output.enabled;
+                *stream = Some(made);
+                imported += 1;
+            }
+            Some(stream) => {
+                if stream.destinations.len() + 1 >= MAX_DESTINATIONS {
+                    findings.unsupported(
+                        format!("{what} output {:?}", output.name),
+                        "outputs",
+                        format!("at most {MAX_DESTINATIONS} destinations per canvas"),
+                    );
+                    continue;
+                }
+                let taken = stream.destination_ids();
+                let base = crate::library::slug(&output.name, service.id());
+                let base = if base == crate::stream::MAIN_DESTINATION {
+                    format!("{base}-2")
+                } else {
+                    base
+                };
+                let id = (1..)
+                    .map(|n| {
+                        if n == 1 {
+                            base.clone()
+                        } else {
+                            format!("{base}-{n}")
+                        }
+                    })
+                    .find(|id| !taken.contains(id))
+                    .expect("a free id");
+                stream.destinations.push(StreamDestination {
+                    id,
+                    service,
+                    server,
+                    enabled: output.enabled,
+                    video_bitrate_kbps: output.video_kbps.filter(|k| (200..=50_000).contains(k)),
+                    width: size.map(|s| s.0),
+                    height: size.map(|s| s.1),
+                    rate_control: None,
+                    keyframe_interval_seconds: None,
+                    audio_bitrate_kbps: None,
+                });
+                imported += 1;
+            }
+        }
+    }
+    if imported > 0 {
+        findings.notes.push(format!(
+            "{what}'s {imported} output(s) became stream destinations; their keys stay in OBS: \
+             set each with `isocast stream key set --destination ID` (MCP: set_stream_key)"
+        ));
+    }
+}
+
+/// Aitum Vertical Canvas's canvases as Isocast canvases: the first as
+/// `[vertical]`, more as `[[canvases]]` (`vertical-2`…), each following
+/// the main scene (letterboxed until scenes get arrangements for it) with
+/// its outputs as its stream destinations.
+fn plugin_canvases(
+    profile: &Profile,
+    findings: &mut Findings,
+) -> (Option<crate::VerticalCanvas>, Vec<crate::VerticalCanvas>) {
+    let mut vertical = None;
+    let mut canvases = Vec::new();
+    for (i, plugin) in profile.plugin_canvases.iter().enumerate() {
+        let even = |n: u32| (16..=8192).contains(&n) && n.is_multiple_of(2);
+        if !even(plugin.width) || !even(plugin.height) {
+            findings.unsupported(
+                format!("Vertical Canvas {}", i + 1),
+                "width",
+                format!(
+                    "{}×{} isn't an even size from 16 to 8192",
+                    plugin.width, plugin.height
+                ),
+            );
+            continue;
+        }
+        let mut canvas = if i == 0 {
+            crate::VerticalCanvas::default()
+        } else {
+            crate::VerticalCanvas::with_id(&format!("vertical-{}", i + 1))
+        };
+        canvas.width = plugin.width;
+        canvas.height = plugin.height;
+        let what = format!("Vertical Canvas {}", i + 1);
+        plugin_destinations(
+            &plugin.outputs,
+            &mut canvas.stream,
+            (plugin.video_kbps, plugin.audio_kbps),
+            &what,
+            findings,
+        );
+        if plugin.scenes > 0 {
+            findings.unsupported(
+                format!("{what} scenes"),
+                "scenes",
+                format!(
+                    "its {} scene(s) of its own aren't imported: the canvas follows the main \
+                     scenes, letterboxed, until each gets an arrangement for it",
+                    plugin.scenes
+                ),
+            );
+        }
+        if i == 0 {
+            vertical = Some(canvas);
+        } else {
+            canvases.push(canvas);
+        }
+    }
+    (vertical, canvases)
+}
+
 /// A profile's reconnect settings (onto `stream`, if it streams) and
 /// monitoring device.
 fn profile_extras(
@@ -551,6 +879,32 @@ fn profile_from(
     let mut stream = stream_settings(obs, &mut findings);
     let mut audio = AudioSetup::default();
     profile_extras(obs, &mut stream, &mut audio, &mut findings);
+    plugin_destinations(
+        &obs.multistream,
+        &mut stream,
+        (None, None),
+        "Aitum Multistream",
+        &mut findings,
+    );
+    // Vertical Canvas: the profile keeps the outputs; the scene collection
+    // decides whether the canvases are there.
+    let (vertical, canvases) = plugin_canvases(obs, &mut findings);
+    let split = |canvas: crate::VerticalCanvas| crate::library::ProfileVertical {
+        id: canvas.id,
+        fps: canvas.fps,
+        recording: canvas.recording,
+        stream: canvas.stream,
+    };
+    if vertical.is_some() {
+        findings.notes.push(
+            "Vertical Canvas's outputs are the profile's; a scene collection without its \
+             canvases gets them with `isocast canvas add vertical --size WxH` (MCP: canvas_add)"
+                .into(),
+        );
+    }
+    let profile_vertical = vertical.map(split);
+    let profile_canvases: Vec<crate::library::ProfileVertical> =
+        canvases.into_iter().map(split).collect();
     let tracks = obs.tracks.max(1);
     if tracks.count_ones() > 1 {
         let numbers: Vec<String> = (0..6)
@@ -617,7 +971,8 @@ fn profile_from(
             open_editor: false,
         },
         stream,
-        vertical: None,
+        vertical: profile_vertical,
+        canvases: profile_canvases,
     };
     (profile, findings)
 }
@@ -1478,6 +1833,7 @@ impl<'a, 'v> Importer<'a, 'v> {
                 items: Vec::new(),
                 transition: None,
                 vertical: None,
+                canvases: Default::default(),
             });
         }
     }
@@ -3438,6 +3794,13 @@ impl<'a, 'v> Importer<'a, 'v> {
         };
         let mut stream = stream_settings(profile, &mut self.profile);
         profile_extras(profile, &mut stream, &mut audio, &mut self.profile);
+        plugin_destinations(
+            &profile.multistream,
+            &mut stream,
+            (None, None),
+            "Aitum Multistream",
+            &mut self.profile,
+        );
         (stream, audio)
     }
 
@@ -3445,6 +3808,10 @@ impl<'a, 'v> Importer<'a, 'v> {
         let transition = self.transition();
         let recording = self.recording();
         let (stream, audio) = self.stream_and_audio();
+        let (vertical, canvases) = match self.options.profile {
+            Some(profile) => plugin_canvases(profile, &mut self.profile),
+            None => (None, Vec::new()),
+        };
         if self
             .collection
             .get("canvases")
@@ -3454,7 +3821,8 @@ impl<'a, 'v> Importer<'a, 'v> {
             self.unsupported(
                 "canvases",
                 "canvas",
-                "extra canvases (like a vertical one) aren't available yet",
+                "OBS's own extra canvases aren't imported; Aitum Vertical Canvas's are (with \
+                 the profile), or add one with `isocast canvas add ID --size WxH`",
             );
         }
         // A setup starts on its first scene; OBS kept the one on air.
@@ -3495,7 +3863,8 @@ impl<'a, 'v> Importer<'a, 'v> {
             audio,
             recording,
             stream,
-            vertical: None,
+            vertical,
+            canvases,
             hotkeys: Default::default(),
         };
         self.counts.scenes = setup.scenes.len();

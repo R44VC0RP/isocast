@@ -35,6 +35,9 @@ pub const SUPPORTED: &[&str] = &[
     "SetCurrentProfile",
     "GetVideoSettings",
     "GetRecordDirectory",
+    // Canvases (#84)
+    "GetCanvasList",
+    "CallVendorRequest",
     // Scenes
     "GetSceneList",
     "GetGroupList",
@@ -759,6 +762,38 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
                 "outputHeight": setup.canvas.height,
             }))
         }
+        // Every canvas (#84): main, `vertical` and `[[canvases]]`, its id
+        // as the canvas's UUID.
+        "GetCanvasList" => {
+            let world = World::new(ctx.live()?, None);
+            let setup = world.setup.as_ref().ok_or_else(no_setup)?;
+            let canvases: Vec<Value> = setup
+                .canvas_ids()
+                .into_iter()
+                .filter_map(|id| {
+                    let canvas = setup.canvas_of(id)?;
+                    let name = match setup.extra_canvas(id) {
+                        Some(extra) => extra.label().to_string(),
+                        None => "Main".to_string(),
+                    };
+                    Some(json!({
+                        "canvasName": name,
+                        "canvasUuid": id.as_str(),
+                        "canvasFlags": {
+                            "MAIN": id.is_main(), "ACTIVATE": true, "MIX_AUDIO": id.is_main(),
+                            "SCENE_REF": !id.is_main(), "EPHEMERAL": false,
+                        },
+                        "canvasVideoSettings": {
+                            "fpsNumerator": canvas.fps, "fpsDenominator": 1,
+                            "baseWidth": canvas.width, "baseHeight": canvas.height,
+                            "outputWidth": canvas.width, "outputHeight": canvas.height,
+                        },
+                    }))
+                })
+                .collect();
+            Ok(json!({ "canvases": canvases }))
+        }
+        "CallVendorRequest" => vendor_request(ctx, &d),
         "GetRecordDirectory" => {
             let world = World::new(ctx.live()?, None);
             let setup = world.setup.as_ref().ok_or_else(no_setup)?;
@@ -1965,6 +2000,200 @@ fn open_projector(ctx: &Ctx, d: &Data, mut params: OpenParams) -> Answer {
     Ok(Value::Null)
 }
 
+/// `CallVendorRequest` for Aitum Vertical Canvas (`aitum-vertical-canvas`,
+/// #84), shaped as the plugin answers (its `vertical-canvas.cpp`): a
+/// request's `width`/`height`, when given (non-zero), pick the first of the
+/// setup's other canvases (`[vertical]`, then `[[canvases]]`) of that
+/// size; none matching is `success: false`, as is a canvas-less setup.
+/// Isocast differences: `switch_scene` switches every canvas that picks
+/// its own scenes (one following the main scene keeps following it) and
+/// refuses a scene it doesn't have; recording, pausing and chapters of a
+/// single canvas aren't separate in Isocast (a recording takes every
+/// recorded canvas), so those answer `success: false` with why.
+fn vendor_request(ctx: &Ctx, d: &Data) -> Answer {
+    let vendor = d.need_str("vendorName")?;
+    let request = d.need_str("requestType")?;
+    if vendor != "aitum-vertical-canvas" {
+        return Err(Fail::new(
+            code::RESOURCE_NOT_FOUND,
+            format!(
+                "No vendor was found by the name `{vendor}`; Isocast answers aitum-vertical-canvas."
+            ),
+        ));
+    }
+    let empty = Value::Null;
+    let data = d.0.get("requestData").unwrap_or(&empty);
+    let reply = |data: Value| {
+        Ok(json!({ "vendorName": vendor, "requestType": request, "responseData": data }))
+    };
+    let refuse = |error: &str| reply(json!({ "success": false, "error": error }));
+    if request == "version" {
+        return reply(json!({ "version": env!("CARGO_PKG_VERSION"), "success": true }));
+    }
+    let world = World::new(ctx.live()?, None);
+    let Some(setup) = world.setup.as_ref() else {
+        return refuse("no setup");
+    };
+    // 0 or absent: any (the plugin's `obs_data_get_int` of a missing key).
+    let want = |key: &str| data.get(key).and_then(Value::as_u64).filter(|n| *n > 0);
+    let (width, height) = (want("width"), want("height"));
+    let matching: Vec<isocast_protocol::CanvasId> = setup
+        .extra_canvas_ids()
+        .into_iter()
+        .filter(|id| {
+            setup.canvas_of(*id).is_some_and(|c| {
+                width.is_none_or(|w| u64::from(c.width) == w)
+                    && height.is_none_or(|h| u64::from(c.height) == h)
+            })
+        })
+        .collect();
+    let act = |method: Method| match ctx.act(method) {
+        Ok(_) => reply(json!({ "success": true })),
+        Err(fail) => reply(json!({ "success": false, "error": fail.comment })),
+    };
+    match request {
+        "switch_scene" => {
+            let Some(name) = data
+                .get("scene")
+                .and_then(Value::as_str)
+                .filter(|n| !n.is_empty())
+            else {
+                return refuse("'scene' not set");
+            };
+            let Some(scene) = world.find_scene(Some(name), None) else {
+                return refuse("scene not found");
+            };
+            for canvas in setup.extra_canvas_ids() {
+                if setup.extra_canvas(canvas).is_some_and(|c| !c.follow_main) {
+                    ctx.act(Method::SwitchScene {
+                        scene: scene.id.clone(),
+                        transition: None,
+                        canvas,
+                    })?;
+                }
+            }
+            reply(json!({ "success": true }))
+        }
+        "get_scenes" => {
+            // Isocast's canvases share the setup's scenes.
+            let scenes: Vec<Value> = if matching.is_empty() {
+                Vec::new()
+            } else {
+                world
+                    .scenes()
+                    .iter()
+                    .map(|s| json!({ "name": world.scene_name(&s.id) }))
+                    .collect()
+            };
+            reply(json!({ "scenes": scenes, "success": true }))
+        }
+        _ => {
+            let Some(&canvas) = matching.first() else {
+                return reply(json!({ "success": false }));
+            };
+            let status = ctx.status()?;
+            let extra = status.canvases.iter().find(|c| c.id == canvas);
+            let index = data.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let destination = || {
+                setup
+                    .stream_of(canvas)
+                    .map(|s| s.destination_ids())
+                    .unwrap_or_default()
+                    .get(index)
+                    .cloned()
+            };
+            let replay = isocast_protocol::replay::ReplayParams::of(canvas);
+            let stream = Some(isocast_protocol::api::StreamStartParams {
+                canvas,
+                ..Default::default()
+            });
+            let streaming = extra.is_some_and(|c| c.streams.iter().any(StreamStatus::is_active));
+            match request {
+                "current_scene" => {
+                    let scene = extra.and_then(|c| c.scene.as_deref());
+                    let (name, _) = world.scene_ref(scene);
+                    reply(json!({ "scene": name.as_str().unwrap_or(""), "success": true }))
+                }
+                "status" => {
+                    let recording =
+                        extra.is_some_and(|c| c.recorded) && status.state == EngineState::Recording;
+                    let backtrack = extra
+                        .and_then(|c| c.replay.as_ref())
+                        .is_some_and(|r| r.state == ReplayState::Running);
+                    reply(json!({
+                        "streaming": streaming, "recording": recording, "backtrack": backtrack,
+                        "virtual_camera": false, "success": true,
+                    }))
+                }
+                "start_streaming" => act(Method::StreamStart(stream)),
+                "stop_streaming" => act(Method::StreamStop(stream)),
+                "toggle_streaming" => act(if streaming {
+                    Method::StreamStop(stream)
+                } else {
+                    Method::StreamStart(stream)
+                }),
+                "start_backtrack" => act(Method::ReplayStart(replay)),
+                "stop_backtrack" => act(Method::ReplayStop(replay)),
+                "save_backtrack" => act(Method::ReplaySave(replay)),
+                "update_stream_key" => {
+                    let Some(key) = data
+                        .get("stream_key")
+                        .and_then(Value::as_str)
+                        .filter(|k| !k.is_empty())
+                    else {
+                        return refuse("'stream_key' not set");
+                    };
+                    let Some(id) = destination() else {
+                        return reply(json!({ "success": false }));
+                    };
+                    act(Method::StreamKeySet(Box::new(
+                        isocast_protocol::api::StreamKeyParams {
+                            key: key.to_string(),
+                            target: isocast_protocol::api::StreamKeyTarget {
+                                destination: Some(id),
+                                canvas,
+                                ..Default::default()
+                            },
+                        },
+                    )))
+                }
+                "update_stream_server" => {
+                    let Some(server) = data
+                        .get("stream_server")
+                        .and_then(Value::as_str)
+                        .filter(|k| !k.is_empty())
+                    else {
+                        return refuse("'stream_server' not set");
+                    };
+                    let Some(id) = destination() else {
+                        return reply(json!({ "success": false }));
+                    };
+                    act(Method::StreamDestinationSet(Box::new(
+                        isocast_protocol::api::StreamDestinationParams {
+                            id: Some(id),
+                            server: Some(server.to_string()),
+                            canvas,
+                            ..Default::default()
+                        },
+                    )))
+                }
+                "start_recording" | "stop_recording" | "toggle_recording" | "pause_recording"
+                | "unpause_recording" | "add_chapter" => refuse(
+                    "Isocast records every recorded canvas with the main recording: use \
+                     StartRecord/StopRecord/PauseRecord (and CreateRecordChapter)",
+                ),
+                "start_virtual_camera" | "stop_virtual_camera" => refuse(
+                    "Isocast's virtual camera shows one output; set its target to this canvas",
+                ),
+                other => Err(Fail::new(
+                    code::RESOURCE_NOT_FOUND,
+                    format!("aitum-vertical-canvas has no request {other:?}."),
+                )),
+            }
+        }
+    }
+}
+
 /// An input's settings: its kind's own fields.
 pub fn settings_of(source: &Source) -> Value {
     let value = serde_json::to_value(source).unwrap_or_default();
@@ -1982,7 +2211,6 @@ pub fn settings_of(source: &Source) -> Value {
 /// Every request obs-websocket 5.x has, so those Isocast doesn't map get a
 /// clear "not supported" comment rather than "not valid".
 const KNOWN: &[&str] = &[
-    "GetCanvasList",
     "GetPersistentData",
     "SetPersistentData",
     "CreateSceneCollection",
@@ -1996,7 +2224,6 @@ const KNOWN: &[&str] = &[
     "SetRecordDirectory",
     "SetSourceFilterName",
     "SetSourceFilterIndex",
-    "CallVendorRequest",
     "GetHotkeyList",
     "TriggerHotkeyByName",
     "TriggerHotkeyByKeySequence",

@@ -231,6 +231,18 @@ pub enum Method {
     /// Change a stream destination (`id` required; `main` changes the
     /// `[stream]` section itself). Returns [`StreamDestinations`].
     StreamDestinationSet(Box<StreamDestinationParams>),
+    /// Add a canvas to the live setup (#84): `vertical` turns on its
+    /// `[vertical]` canvas, any other id adds a `[[canvases]]` entry
+    /// (1080×1920 at the main frame rate, following the main scene, unless
+    /// the params say otherwise). Returns [`Canvases`].
+    CanvasAdd(Box<CanvasParams>),
+    /// Change a canvas of the live setup (`vertical` or a `[[canvases]]`
+    /// id). Returns [`Canvases`].
+    CanvasSet(Box<CanvasParams>),
+    /// Remove a canvas from the live setup, with its arrangements, stream
+    /// and recording (not while it records or streams). Returns
+    /// [`Canvases`].
+    CanvasRemove { canvas: CanvasId },
     /// The scene collections and profiles (the two parts the live setup is
     /// kept in, as in OBS) and which are current. Returns
     /// [`Library`](crate::library::Library).
@@ -686,19 +698,80 @@ pub struct StreamDestinationParams {
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
-    /// Fields to reset: `server` (to the service's), `video_bitrate_kbps`
-    /// and `size` (to the main destination's; for `main`, the defaults).
+    /// Its own rate control (#84); the main destination's if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_control: Option<crate::stream::RateControl>,
+    /// Its own seconds between keyframes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyframe_interval_seconds: Option<u32>,
+    /// Its own AAC bitrate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_bitrate_kbps: Option<u32>,
+    /// Fields to reset: `server` (to the service's), `video_bitrate_kbps`,
+    /// `size`, `rate_control`, `keyframe_interval_seconds` and
+    /// `audio_bitrate_kbps` (to the main destination's; for `main`, the
+    /// defaults).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clear: Vec<String>,
-    /// Which canvas's destinations: `main` (the default, `[stream]`) or
-    /// `vertical` (`[vertical.stream]`, in a `[vertical]` canvas the live
-    /// setup must have).
+    /// Which canvas's destinations: `main` (the default, `[stream]`),
+    /// `vertical` (`[vertical.stream]`) or a `[[canvases]]` id (its
+    /// `stream`), a canvas the live setup must have.
     #[serde(default, skip_serializing_if = "CanvasId::is_main")]
     pub canvas: CanvasId,
 }
 
+/// A canvas to add or change (`canvas_add`, `canvas_set`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CanvasParams {
+    /// Which canvas: `vertical`, or a `[[canvases]]` id (lowercase letters,
+    /// digits and dashes).
+    pub canvas: CanvasId,
+    /// Display label, like "YouTube Shorts".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Size: give both (each even, 16 to 8192).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// Its own frame rate; the main canvas's if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<u32>,
+    /// Show the main canvas's scene (true), or pick its own (false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_main: Option<bool>,
+    /// Record its program with each recording (true: a `recording` with
+    /// default settings unless it has one; false: none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<bool>,
+    /// Fields to reset: `name`, `fps` (to the main canvas's) and `stream`
+    /// (no stream of its own).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clear: Vec<String>,
+}
+
+/// The fields `CanvasParams::clear` takes.
+pub const CANVAS_CLEARABLE: [&str; 3] = ["name", "fps", "stream"];
+
+/// The live setup's canvases after a change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Canvases {
+    /// The new live revision.
+    pub revision: u64,
+    /// Every canvas besides the main one.
+    pub canvases: Vec<CanvasStatus>,
+}
+
 /// The fields `StreamDestinationParams::clear` takes.
-pub const DESTINATION_CLEARABLE: [&str; 3] = ["server", "video_bitrate_kbps", "size"];
+pub const DESTINATION_CLEARABLE: [&str; 6] = [
+    "server",
+    "video_bitrate_kbps",
+    "size",
+    "rate_control",
+    "keyframe_interval_seconds",
+    "audio_bitrate_kbps",
+];
 
 /// The live setup's stream destinations after a change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1700,6 +1773,36 @@ pub struct Status {
     /// `replay` so clients of the main canvas see only its buffer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical_replay: Option<crate::replay::ReplayStatus>,
+    /// Every canvas besides the main one (`[vertical]` first, then
+    /// `[[canvases]]`, #84): its size, scene, preview, streams, replay
+    /// buffer and recording. The `vertical_*` fields above stay for clients
+    /// of the vertical canvas alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canvases: Vec<CanvasStatus>,
+}
+
+/// One extra canvas in [`Status::canvases`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CanvasStatus {
+    pub id: CanvasId,
+    /// Its display label.
+    pub name: String,
+    pub canvas: Canvas,
+    /// Whether it shows the main canvas's scene.
+    pub follow_main: bool,
+    /// The scene on air on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<String>,
+    /// The scene staged in its preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    /// Whether a recording writes its program.
+    pub recorded: bool,
+    /// Its stream destinations, the main one first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<StreamStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<crate::replay::ReplayStatus>,
 }
 
 /// An isocastd build: `version` is the product version (`0.0.2`), `build`
@@ -2362,6 +2465,10 @@ pub struct EngineInfo {
     /// The second canvas, only while it is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical: Option<CanvasEngineInfo>,
+    /// Every extra canvas while it is enabled, the vertical one included
+    /// (#84), each with its `id`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canvases: Vec<CanvasEngineInfo>,
     /// Active media clocks, including per-source generators and ISO outputs.
     #[serde(default)]
     pub clocks: Vec<ClockPacingInfo>,
@@ -2396,6 +2503,9 @@ pub struct EngineInfo {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CanvasEngineInfo {
+    /// Which canvas (in `EngineInfo.canvases`).
+    #[serde(default, skip_serializing_if = "CanvasId::is_main")]
+    pub id: CanvasId,
     pub canvas: Canvas,
     pub program_frames: u64,
     pub missed_frames: u64,

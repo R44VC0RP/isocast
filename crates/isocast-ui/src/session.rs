@@ -179,6 +179,9 @@ pub struct Session {
     /// The vertical canvas's stream destinations (#86), kept apart so the
     /// main canvas's stream shows only its own.
     pub vertical_streams: Vec<StreamStatus>,
+    /// Every canvas besides the main one (#84), as status has them; their
+    /// streams kept up to date by stream events.
+    pub canvases: Vec<isocast_protocol::api::CanvasStatus>,
     /// Starting or stopping the vertical canvas's stream.
     pub busy_vertical_stream: bool,
     pub devices: Option<Devices>,
@@ -292,16 +295,16 @@ impl Session {
     /// The scene on air on the canvas whose scenes are switched.
     pub fn on_air(&self) -> Option<&String> {
         match self.scene_canvas() {
-            CanvasId::Vertical => self.vertical_scene.as_ref(),
             CanvasId::Main => self.scene.as_ref(),
+            _ => self.vertical_scene.as_ref(),
         }
     }
 
     /// The scene in its preview (Studio Mode).
     pub fn staged(&self) -> Option<&String> {
         match self.scene_canvas() {
-            CanvasId::Vertical => self.vertical_preview.as_ref(),
             CanvasId::Main => self.preview.as_ref(),
+            _ => self.vertical_preview.as_ref(),
         }
     }
 
@@ -478,6 +481,15 @@ impl Session {
     /// One destination's status changed (a `stream` event).
     pub fn set_stream(&mut self, status: StreamStatus) {
         if !status.canvas.is_main() {
+            if let Some(canvas) = self.canvases.iter_mut().find(|c| c.id == status.canvas) {
+                match canvas.streams.iter_mut().find(|s| s.id == status.id) {
+                    Some(slot) => *slot = status.clone(),
+                    None => canvas.streams.push(status.clone()),
+                }
+            }
+            if !status.canvas.is_vertical() {
+                return;
+            }
             match self.vertical_streams.iter_mut().find(|s| s.id == status.id) {
                 Some(slot) => *slot = status,
                 None => self.vertical_streams.push(status),

@@ -786,10 +786,20 @@ pub fn write(target: &Target, setup: &Setup, parts: Parts) -> Result<()> {
     // profile's vertical frame rate, recording and stream are kept while
     // the live one has none (a collection without one, or one turned off),
     // so switching back finds them again.
-    if setup.vertical.is_none()
-        && let Some(existing) = existing
-    {
-        profile.vertical = existing.vertical;
+    if let Some(existing) = existing {
+        if setup.vertical.is_none() {
+            profile.vertical = existing.vertical;
+        }
+        // The same for `[[canvases]]` (#84): a saved canvas's outputs stay
+        // in the profile while the live collection doesn't have it.
+        for saved in existing.canvases {
+            if saved.id.is_some() && !profile.canvases.iter().any(|p| p.id == saved.id) {
+                let live = setup.canvases.iter().any(|c| c.id == saved.id);
+                if !live {
+                    profile.canvases.push(saved);
+                }
+            }
+        }
     }
     if parts.collection {
         write_document(&target.collection, &collection, COLLECTION_HEADER)?;

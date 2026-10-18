@@ -1141,6 +1141,17 @@ native app; each verified against OBS's behaviour on a test Mac.
   stack with `combine` (intersect, add, subtract) and animate with stops
   of their own. Setup schema/CLI/MCP, obs-websocket filter requests, OBS
   import of Advanced Masks filters, and handles on the Filters picture.
+- [x] **G.12 Per-destination canvases (#84).** Canvases are first-class
+  (`CanvasId` by id): `[vertical]` plus `[[canvases]]` (id, name, size,
+  fps, follow_main or own scenes, `scenes[].canvases.<id>` arrangements,
+  optional recording, own `stream` destinations with per-destination
+  bitrate/size/rate control/keyframes/audio; equal formats share one hub).
+  Engine/daemon generalise the vertical canvas to N outputs; capacity and
+  Optimize count every canvas. `canvas_add|set|remove` on API/CLI/MCP,
+  obs-websocket GetCanvasList and Aitum Vertical Canvas vendor requests,
+  OBS import of Aitum Multistream and Vertical Canvas, Settings › Video ›
+  Canvases and Stream › Streams of every canvas.
+  - [ ] Tier-1 review and coordinator commit.
 - [x] **G.10 Multistream (#73).** `[stream]` is the main destination,
   `[[stream.destinations]]` more (service, server, enabled, own key, own
   bitrate/size); one Stream each, matching formats share one encoder, a
@@ -4720,3 +4731,19 @@ One line per finished task, newest last.
   none scene masks keep their size in small monitors; each reproduced on
   the reviewed build and fixed, in recorded takes on isocast-m2-a; 28/28
   pixel checks.
+- G.12 / #84 (2026-10-18): per-destination canvases. Real take on
+  isocast-m2-a: main 1920×1080@30 and `[[canvases]]` shorts 1080×1920@60
+  streamed to two local RTMP receivers (751/1501 frames, 0 dropped, 0
+  audio dropouts; ffprobe 30/1 and 60/1, largest packet gap one frame),
+  program 1920×1080@30 and square 1080×1080@24 HEVC recorded, 0 drops;
+  pixel checks of each received layout (arrangement, then letterbox after
+  a main switch) and the square's own scene. Bench A/B single canvas
+  41.9% vs 41.8% CPU, 0 drops; layout audit 40/40.
+  canvases/scratch/REPORT.md.
+- G.12 / #84 review fixes (2026-10-18): merged main (#110 governor);
+  governor per canvas (congested `[[canvases]]` stream retuned 5000 →
+  1250 kb/s while main held 6000 with 0 drops, isocast-m2-a), inline
+  `CanvasId`, `recording = {}` named by canvas id (TOML take with three
+  recorded extra canvases), Aitum vendor requests in the plugin's shapes,
+  extra-canvas replay warm, engine canvas cap refused at apply. Gates, VM
+  e2e 19/19, strict e2e 18/18. canvases/scratch/REPORT.md.

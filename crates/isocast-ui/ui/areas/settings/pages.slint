@@ -202,8 +202,8 @@ component ChooseService inherits VerticalLayout {
         title: SettingsArea.adding-destination ? "Add Destination" : "Service";
         hint: SettingsArea.adding-destination
             ? "The program goes to this service too, at the same time, with its own key."
-            : SettingsArea.stream-canvas == "vertical"
-            ? "The vertical canvas’s program goes out live, with the program mix, as H.264 and AAC over RTMP or RTMPS, to destinations of its own."
+            : SettingsArea.stream-canvas != "main"
+            ? "This canvas’s program goes out live, with the program mix, as H.264 and AAC over RTMP or RTMPS, to destinations of its own."
             : "The program goes out live: the canvas and the program mix, as H.264 and AAC over RTMP or RTMPS.";
         for service[i] in SettingsArea.services: GroupRow {
             label: service.label;
@@ -329,14 +329,14 @@ export component StreamPage inherits SetPage {
     // Which canvas's streams the page shows (#96), with a vertical canvas.
     if SettingsArea.stream-canvas-choice && SettingsArea.needs-server == "": SetGroup {
         title: "Canvas";
-        hint: "Each canvas streams its own program, to destinations and keys of its own. Start Streaming starts both once both are set up.";
+        hint: "Each canvas streams its own program, to destinations and keys of its own. Start Streaming starts every canvas that’s set up.";
         GroupRow {
             label: "Streams of";
             place: RowPlace.only;
             Centred {
                 Segmented {
                     small: true;
-                    options: [{ value: "main", label: "Main Canvas" }, { value: "vertical", label: "Vertical Canvas" }];
+                    options: SettingsArea.stream-canvas-options;
                     value: SettingsArea.stream-canvas;
                     label: "Streams of";
                     selected(value) => { SettingsArea.set-text("stream_canvas", value); }
@@ -363,7 +363,7 @@ export component StreamPage inherits SetPage {
     if !SettingsArea.has-stream || SettingsArea.adding-destination: ChooseService { }
     if SettingsArea.has-stream && !SettingsArea.adding-destination: SetGroup {
         title: "Destinations";
-        hint: (SettingsArea.stream-canvas == "vertical" ? "The vertical canvas’s destinations and keys are its own. " : "") + "Start Streaming sends the program to every destination that’s on, each with its own key and connection; one failing never stops the others. Those with the same bitrate and size share one encoder. " + SettingsArea.server-hint + " " + (SettingsArea.key-problem != "" ? "Once the old Keychain item is deleted, paste the key from your service’s dashboard and press Save Key." : SettingsArea.key-saved ? "The key is saved in the Keychain; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.");
+        hint: (SettingsArea.stream-canvas != "main" ? "This canvas’s destinations and keys are its own. " : "") + "Start Streaming sends the program to every destination that’s on, each with its own key and connection; one failing never stops the others. Those with the same bitrate and size share one encoder. " + SettingsArea.server-hint + " " + (SettingsArea.key-problem != "" ? "Once the old Keychain item is deleted, paste the key from your service’s dashboard and press Save Key." : SettingsArea.key-saved ? "The key is saved in the Keychain; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.");
         for d[i] in SettingsArea.destinations: VerticalLayout {
             spacing: 1px;
             GroupRow {
@@ -1101,60 +1101,123 @@ export component VideoPage inherits SetPage {
             }
         }
     }
+    // Canvases besides the main one (#84): each a disclosure row with its
+    // size, rate and outputs; the open one's settings under it (as Stream's
+    // destinations).
     SetGroup {
-        title: "Vertical Canvas";
-        hint: SettingsArea.vertical-on
-            ? "A second, upright canvas, using the main frame rate unless overridden in the setup. Each scene reuses its main layout until you edit its vertical layout (View › Vertical Canvas › Edit Vertical Canvas)." + (SettingsArea.recording ? " Follow Main Scenes stays as it is while recording: each take keeps one scene timeline per canvas, so change it after you stop." : "")
-            : "A second, upright canvas for phones, recorded and streamed beside the main one.";
-        SwitchRow {
-            label: "Vertical Canvas";
-            place: SettingsArea.vertical-on ? RowPlace.first : RowPlace.only;
-            on <=> SettingsArea.vertical-on;
-            toggled(on) => { SettingsArea.set-flag("vertical", on); }
-        }
-        if SettingsArea.vertical-on: GroupRow {
-            label: "Resolution";
-            place: RowPlace.middle;
-            Centred {
-                NumberField {
-                    width: Theme.field-xs;
-                    small: true;
-                    prefix: "W";
-                    value: SettingsArea.vertical-width;
-                    minimum: 16;
-                    maximum: 8192;
-                    step: 2;
-                    label: "Vertical canvas width";
-                    changed(value) => { SettingsArea.set-number("vertical_width", value); }
+        title: "Canvases";
+        hint: SettingsArea.canvas-rows.length == 0
+            ? "More canvases go out beside the main one, each its own shape: 9:16 for Shorts, Reels and TikTok, 1:1 or 4:5 for feeds. Each records and streams on its own (Stream › Streams of)."
+            : "Each canvas shows the main scene laid out for its shape (letterboxed until you edit its layout), or scenes of its own, and records and streams on its own: Stream › Streams of." + (SettingsArea.recording ? " Follow Main Scenes stays as it is while recording, so change it after you stop." : "");
+        for row[i] in SettingsArea.canvas-rows: VerticalLayout {
+            spacing: 1px;
+            GroupRow {
+                label: row.label;
+                place: i == 0 ? RowPlace.first : RowPlace.middle;
+                clickable: true;
+                lead-icon: row.value == SettingsArea.edit-canvas ? Icons.chevron-down : Icons.chevron-right;
+                expandable: true;
+                expanded: row.value == SettingsArea.edit-canvas;
+                description: row.detail;
+                trailing-pad: Theme.space-3;
+                clicked => { SettingsArea.set-text("canvas_pick", row.value == SettingsArea.edit-canvas ? "" : row.value); }
+                Text {
+                    text: row.detail;
+                    color: Theme.text-3;
+                    font-size: Theme.fs-sm;
+                    letter-spacing: Theme.tracking-sm;
+                    vertical-alignment: center;
+                    accessible-role: none;
                 }
             }
-            Centred {
-                NumberField {
-                    width: Theme.field-xs;
-                    small: true;
-                    prefix: "H";
-                    value: SettingsArea.vertical-height;
-                    minimum: 16;
-                    maximum: 8192;
-                    step: 2;
-                    label: "Vertical canvas height";
-                    changed(value) => { SettingsArea.set-number("vertical_height", value); }
+            if row.value == SettingsArea.edit-canvas: GroupRow {
+                label: "Resolution";
+                indent: Theme.space-4;
+                Centred {
+                    NumberField {
+                        width: Theme.field-xs;
+                        small: true;
+                        prefix: "W";
+                        value: SettingsArea.vertical-width;
+                        minimum: 16;
+                        maximum: 8192;
+                        step: 2;
+                        label: "Canvas width";
+                        changed(value) => { SettingsArea.set-number("vertical_width", value); }
+                    }
+                }
+                Centred {
+                    NumberField {
+                        width: Theme.field-xs;
+                        small: true;
+                        prefix: "H";
+                        value: SettingsArea.vertical-height;
+                        minimum: 16;
+                        maximum: 8192;
+                        step: 2;
+                        label: "Canvas height";
+                        changed(value) => { SettingsArea.set-number("vertical_height", value); }
+                    }
+                }
+            }
+            if row.value == SettingsArea.edit-canvas: GroupRow {
+                label: "Frame Rate";
+                indent: Theme.space-4;
+                Centred {
+                    Dropdown {
+                        width: Theme.field-s;
+                        on-control: true;
+                        options: SettingsArea.canvas-fps-options;
+                        value <=> SettingsArea.canvas-fps;
+                        label: "Frame Rate";
+                        selected(value) => { SettingsArea.set-text("canvas_fps", value); }
+                    }
+                }
+            }
+            if row.value == SettingsArea.edit-canvas: SwitchRow {
+                label: "Follow Main Scenes";
+                indent: Theme.space-4;
+                enabled: !SettingsArea.recording;
+                description: SettingsArea.recording ? "Changes once the recording stops" : "";
+                on <=> SettingsArea.vertical-follow;
+                toggled(on) => { SettingsArea.set-flag("vertical_follow", on); }
+            }
+            if row.value == SettingsArea.edit-canvas: SwitchRow {
+                label: "Record This Canvas";
+                indent: Theme.space-4;
+                on <=> SettingsArea.vertical-record;
+                toggled(on) => { SettingsArea.set-flag("vertical_record", on); }
+            }
+            if row.value == SettingsArea.edit-canvas: GroupRow {
+                label: "Remove This Canvas";
+                indent: Theme.space-4;
+                Centred {
+                    Button {
+                        text: "Remove";
+                        size: ControlSize.small;
+                        on-control: true;
+                        enabled: !SettingsArea.recording;
+                        clicked => { SettingsArea.set-text("canvas_remove", row.value); }
+                    }
                 }
             }
         }
-        if SettingsArea.vertical-on: SwitchRow {
-            label: "Follow Main Scenes";
-            place: RowPlace.middle;
-            enabled: !SettingsArea.recording;
-            description: SettingsArea.recording ? "Changes once the recording stops" : "";
-            on <=> SettingsArea.vertical-follow;
-            toggled(on) => { SettingsArea.set-flag("vertical_follow", on); }
-        }
-        if SettingsArea.vertical-on: SwitchRow {
-            label: "Record Vertical Program";
-            place: RowPlace.last;
-            on <=> SettingsArea.vertical-record;
-            toggled(on) => { SettingsArea.set-flag("vertical_record", on); }
+        GroupRow {
+            label: "Add a Canvas";
+            place: SettingsArea.canvas-rows.length == 0 ? RowPlace.only : RowPlace.last;
+            lead-icon: Icons.plus;
+            Centred {
+                Dropdown {
+                    width: Theme.field-m;
+                    on-control: true;
+                    show-detail: true;
+                    options: SettingsArea.canvas-presets;
+                    value: "";
+                    placeholder: "Choose a shape…";
+                    label: "Add a canvas";
+                    selected(value) => { SettingsArea.set-text("canvas_add", value); }
+                }
+            }
         }
     }
 }

@@ -139,11 +139,9 @@ impl StreamSpec {
             return Ok(Self::of(engine, settings));
         }
         let setup = engine.setup();
-        let vertical = setup
-            .vertical
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("vertical: canvas is not enabled"))?;
-        let canvas = vertical.canvas(&setup.canvas);
+        let canvas = setup
+            .canvas_of(canvas)
+            .ok_or_else(|| anyhow::anyhow!("{}", crate::record::canvas_off(canvas)))?;
         let (width, height) = settings.output_size((canvas.width, canvas.height));
         Ok(Self {
             settings,
@@ -189,40 +187,50 @@ pub(crate) fn warm_destinations<P: Platform>(
     out
 }
 
-/// Vertical destinations cannot share a main-canvas encode even at equal
-/// dimensions: they contain different pictures. Place their own format groups
-/// before either program writer, with the same parking policy as main.
+/// Other canvases' destinations (`[vertical]`'s, `[[canvases]]`') cannot
+/// share a main-canvas encode even at equal dimensions: they contain
+/// different pictures. Place each canvas's own format groups before any
+/// program writer, with the same parking policy as main.
 pub(crate) fn warm_vertical<P: Platform>(
     engine: &Engine<P>,
     setup: &isocast_protocol::Setup,
     stop: &AtomicBool,
     warnings: &mut Vec<String>,
 ) -> Vec<Subscription> {
-    let Some(stream) = setup.vertical.as_ref().and_then(|v| v.stream.as_ref()) else {
-        return Vec::new();
-    };
-    let mut placed = Vec::new();
     let mut out = Vec::new();
-    for destination in stream.resolve().into_iter().filter(|d| d.enabled) {
-        let result = (|| {
-            let spec =
-                StreamSpec::of_canvas(engine, CanvasId::Vertical, destination.settings)?.encoder();
-            if placed.contains(&spec) {
-                return Ok(None);
+    for canvas in setup.extra_canvas_ids() {
+        let Some(stream) = setup.stream_of(canvas) else {
+            continue;
+        };
+        let mut placed = Vec::new();
+        for destination in stream.resolve().into_iter().filter(|d| d.enabled) {
+            let result = (|| {
+                let spec = StreamSpec::of_canvas(engine, canvas, destination.settings)?.encoder();
+                if placed.contains(&spec) {
+                    return Ok(None);
+                }
+                placed.push(spec);
+                engine
+                    .canvas_encoders(canvas)?
+                    .warm_canvas(engine, canvas, &spec, stop)
+                    .map(Some)
+            })();
+            match result {
+                Ok(Some(subscription)) => out.push(subscription),
+                Ok(None) => {}
+                Err(error) => warnings.push(match canvas {
+                    CanvasId::Vertical => format!(
+                        "could not prepare vertical stream destination {} before recording: \
+                         {error:#}",
+                        destination.id
+                    ),
+                    other => format!(
+                        "could not prepare canvas {other:?}'s stream destination {} before \
+                         recording: {error:#}",
+                        destination.id
+                    ),
+                }),
             }
-            placed.push(spec);
-            engine
-                .canvas_encoders(CanvasId::Vertical)?
-                .warm_canvas(engine, CanvasId::Vertical, &spec, stop)
-                .map(Some)
-        })();
-        match result {
-            Ok(Some(subscription)) => out.push(subscription),
-            Ok(None) => {}
-            Err(error) => warnings.push(format!(
-                "could not prepare vertical stream destination {} before recording: {error:#}",
-                destination.id
-            )),
         }
     }
     out

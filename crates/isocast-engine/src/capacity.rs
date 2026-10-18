@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use isocast_protocol::api::{Capacity, Machine};
-use isocast_protocol::{CanvasId, Codec, Encoder, Setup};
+use isocast_protocol::{Codec, Encoder, Setup};
 use serde::{Deserialize, Serialize};
 
 /// Measurements kept; the oldest go first.
@@ -84,7 +84,13 @@ pub fn workload(
             &program.encoder,
         ));
     }
-    if let Some(vertical) = setup.for_canvas(CanvasId::Vertical) {
+    // Every other canvas that records (`[vertical]`, `[[canvases]]`), at
+    // its own size and rate.
+    for vertical in setup
+        .extra_canvas_ids()
+        .into_iter()
+        .filter_map(|canvas| setup.for_canvas(canvas))
+    {
         let program = &vertical.recording.program;
         if program.enabled {
             let (width, height) = program.size(&vertical.canvas);

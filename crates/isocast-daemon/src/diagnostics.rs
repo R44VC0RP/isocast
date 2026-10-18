@@ -389,12 +389,15 @@ pub fn bug_report(daemon: &Daemon, params: &BugReportParams) -> Result<BugReport
                 .chain(
                     profile
                         .vertical
-                        .as_ref()
-                        .and_then(|vertical| vertical.stream.as_ref())
-                        .into_iter()
-                        .flat_map(|stream| {
-                            stream.resolve_canvas(isocast_protocol::CanvasId::Vertical)
-                        })
+                        .iter()
+                        .map(|vertical| (isocast_protocol::CanvasId::Vertical, vertical))
+                        .chain(profile.canvases.iter().filter_map(|canvas| {
+                            let id =
+                                isocast_protocol::CanvasId::parse(canvas.id.as_deref()?).ok()?;
+                            Some((id, canvas))
+                        }))
+                        .filter_map(|(id, canvas)| Some((id, canvas.stream.as_ref()?)))
+                        .flat_map(|(id, stream)| stream.resolve_canvas(id))
                         .map(|destination| destination.key_account),
                 );
             // This build's key and an old one it may still read (#63).

@@ -315,7 +315,7 @@ fn new_item(app: &Rc<App>, scene: &str, fields: Value, visible: bool) -> Value {
 fn canvas_setup(s: &crate::session::Session, canvas: CanvasId) -> Option<Rc<Setup>> {
     match canvas {
         CanvasId::Main => s.setup.clone(),
-        CanvasId::Vertical => s.vertical.clone(),
+        _ => s.vertical.clone(),
     }
 }
 

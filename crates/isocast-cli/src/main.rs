@@ -598,6 +598,13 @@ enum Command {
         #[command(subcommand)]
         command: StreamCommand,
     },
+    /// Canvases besides the main one (#84): the vertical canvas and
+    /// `[[canvases]]`, each with its own size, frame rate, scene (or the
+    /// main one's), recording and stream destinations.
+    Canvas {
+        #[command(subcommand)]
+        command: CanvasCommand,
+    },
     /// The replay buffer: keep the last seconds of the program in memory,
     /// and save them to a file on demand.
     Replay {
@@ -805,6 +812,125 @@ enum StreamCommand {
 }
 
 #[derive(Subcommand)]
+enum CanvasCommand {
+    /// Every canvas: size, frame rate, scene, recording and streams.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a canvas: `vertical` (the [vertical] canvas) or a new id
+    /// (lowercase letters, digits and dashes), 1080×1920 following the main
+    /// scene unless said otherwise. Add its streams next: `isocast stream
+    /// destination add SERVICE --canvas ID`.
+    Add {
+        canvas: String,
+        #[command(flatten)]
+        fields: CanvasFields,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change a canvas.
+    Set {
+        canvas: String,
+        #[command(flatten)]
+        fields: CanvasFields,
+        /// Reset a field: name, fps (to the main canvas's) or stream (no
+        /// stream of its own). Repeat for several.
+        #[arg(long, value_name = "FIELD")]
+        clear: Vec<String>,
+        /// Shorthand for --clear stream.
+        #[arg(long)]
+        no_stream: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a canvas with its arrangements, recording and streams (not
+    /// while it records or streams).
+    Remove {
+        canvas: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Args)]
+struct CanvasFields {
+    /// Display label, like "YouTube Shorts".
+    #[arg(long)]
+    name: Option<String>,
+    /// Size as WIDTHxHEIGHT, optionally @FPS (1080x1920, 1080x1080@30).
+    #[arg(long)]
+    size: Option<String>,
+    /// Its own frame rate (else the main canvas's).
+    #[arg(long)]
+    fps: Option<u32>,
+    /// Show the main canvas's scene (true) or pick its own (false).
+    #[arg(long)]
+    follow_main: Option<bool>,
+    /// Record its program with each recording (true or false).
+    #[arg(long)]
+    record: Option<bool>,
+}
+
+impl CanvasFields {
+    fn params(self, canvas: &str) -> Result<isocast_protocol::api::CanvasParams> {
+        let canvas = CanvasId::parse(canvas).map_err(anyhow::Error::msg)?;
+        let (width, height, fps) = parse_canvas_size(self.size.as_deref())?;
+        Ok(isocast_protocol::api::CanvasParams {
+            canvas,
+            name: self.name,
+            width,
+            height,
+            fps: self.fps.or(fps),
+            follow_main: self.follow_main,
+            record: self.record,
+            clear: Vec::new(),
+        })
+    }
+}
+
+/// What `canvas list` and the changes print.
+fn print_canvases(
+    canvases: &[isocast_protocol::api::CanvasStatus],
+    main: Option<&isocast_protocol::Canvas>,
+) {
+    if let Some(main) = main {
+        println!(
+            "main      {}×{} at {} fps",
+            main.width, main.height, main.fps
+        );
+    }
+    if canvases.is_empty() {
+        println!("no other canvases; add one with `isocast canvas add ID --size 1080x1920`");
+    }
+    for canvas in canvases {
+        let live = canvas.streams.iter().filter(|s| s.is_active()).count();
+        println!(
+            "{:<9} {}×{} at {} fps, {}{}{}{}",
+            canvas.id.as_str(),
+            canvas.canvas.width,
+            canvas.canvas.height,
+            canvas.canvas.fps,
+            if canvas.follow_main {
+                "follows main".to_string()
+            } else {
+                format!("own scene {}", canvas.scene.as_deref().unwrap_or("-"))
+            },
+            if canvas.recorded { ", recorded" } else { "" },
+            match canvas.streams.len() {
+                0 => String::new(),
+                n => format!(", {n} destination(s), {live} live"),
+            },
+            if canvas.name != canvas.id.as_str() {
+                format!(" ({})", canvas.name)
+            } else {
+                String::new()
+            }
+        );
+    }
+}
+
+#[derive(Subcommand)]
 enum DestinationCommand {
     /// Add a destination (the first makes the setup's [stream] section,
     /// id main). Set its key next: `isocast stream key set --destination ID`.
@@ -847,7 +973,8 @@ enum DestinationCommand {
         /// Turn it on or off for `stream start`.
         #[arg(long)]
         enabled: Option<bool>,
-        /// Reset a field: server, video_bitrate_kbps or size (a destination
+        /// Reset a field: server, video_bitrate_kbps, size, rate_control,
+        /// keyframe_interval_seconds or audio_bitrate_kbps (a destination
         /// then uses main's; main the defaults). Repeat for several.
         #[arg(long, value_name = "FIELD")]
         clear: Vec<String>,
@@ -876,6 +1003,15 @@ struct DestinationFields {
     /// Its own height sent (with --width).
     #[arg(long, requires = "width")]
     height: Option<u32>,
+    /// Its own rate control: constant or average (else main's).
+    #[arg(long, value_parser = parse_rate_control)]
+    rate_control: Option<isocast_protocol::stream::RateControl>,
+    /// Its own seconds between keyframes (else main's).
+    #[arg(long)]
+    keyframe_interval_seconds: Option<u32>,
+    /// Its own AAC bitrate in kb/s (else main's).
+    #[arg(long)]
+    audio_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -937,31 +1073,31 @@ fn parse_service(text: &str) -> Result<StreamService, String> {
     StreamService::from_id(text)
 }
 
-/// A canvas, as `--canvas` names it: main or vertical.
+/// A canvas, as `--canvas` names it: main, vertical or a `[[canvases]]`
+/// id (whether the live setup has it, the engine says).
 fn parse_canvas(text: &str) -> Result<CanvasId, String> {
+    CanvasId::parse(text)
+}
+
+fn parse_rate_control(text: &str) -> Result<isocast_protocol::stream::RateControl, String> {
     serde_json::from_value(serde_json::Value::String(text.to_string()))
-        .map_err(|_| format!("{text:?} is not a canvas; canvases: main, vertical"))
+        .map_err(|_| format!("{text:?} is not a rate control; use constant or average"))
 }
 
 /// The monitor target `--canvas` means: the target itself on the main
 /// canvas; on the vertical one, its program or preview. Sources are shared.
 fn canvas_target(canvas: CanvasId, target: String) -> Result<String> {
-    if canvas.is_main()
-        || matches!(
-            target.as_str(),
-            isocast_protocol::VERTICAL_PROGRAM | "vertical-preview"
-        )
-    {
+    if canvas.is_main() || target == canvas.program_target() || target == canvas.preview_target() {
         return Ok(target);
     }
     if target == isocast_protocol::PROGRAM {
-        return Ok(isocast_protocol::VERTICAL_PROGRAM.to_string());
+        return Ok(canvas.program_target().to_string());
     }
     if target == "preview" {
-        return Ok("vertical-preview".to_string());
+        return Ok(canvas.preview_target());
     }
     bail!(
-        "--canvas vertical: give `program` (the default) or `preview`, or watch source {target:?} without --canvas"
+        "--canvas {canvas}: give `program` (the default) or `preview`, or watch source {target:?} without --canvas"
     )
 }
 
@@ -1615,6 +1751,56 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Replay { command } => replay::run(command),
         Command::Websocket { command } => websocket::run(command),
         Command::Debug { command } => debug::run(command),
+        Command::Canvas { command } => {
+            use isocast_protocol::api::Canvases;
+            let mut client = Client::connect_or_launch()?;
+            let (method, json) = match command {
+                CanvasCommand::List { json } => {
+                    let status: Status = client.call(Method::Status)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&status.canvases)?);
+                    } else {
+                        let main = status.engine.as_ref().map(|engine| &engine.canvas);
+                        print_canvases(&status.canvases, main);
+                    }
+                    return Ok(ExitCode::SUCCESS);
+                }
+                CanvasCommand::Add {
+                    canvas,
+                    fields,
+                    json,
+                } => (Method::CanvasAdd(Box::new(fields.params(&canvas)?)), json),
+                CanvasCommand::Set {
+                    canvas,
+                    fields,
+                    mut clear,
+                    no_stream,
+                    json,
+                } => {
+                    if no_stream {
+                        clear.push("stream".into());
+                    }
+                    let params = isocast_protocol::api::CanvasParams {
+                        clear,
+                        ..fields.params(&canvas)?
+                    };
+                    (Method::CanvasSet(Box::new(params)), json)
+                }
+                CanvasCommand::Remove { canvas, json } => (
+                    Method::CanvasRemove {
+                        canvas: CanvasId::parse(&canvas).map_err(anyhow::Error::msg)?,
+                    },
+                    json,
+                ),
+            };
+            let changed: Canvases = client.call(method)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&changed)?);
+            } else {
+                print_canvases(&changed.canvases, None);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Stream { command } => match command {
             StreamCommand::SpeedTest {
                 target,
@@ -2443,6 +2629,7 @@ fn status(json: bool) -> Result<ExitCode> {
             program_bytes_per_second: None,
             daemon: None,
             vertical_replay: None,
+            canvases: Vec::new(),
             vertical_scene: None,
             vertical_preview: None,
             vertical_streams: Vec::new(),
@@ -4175,6 +4362,9 @@ impl DestinationFields {
             video_bitrate_kbps: self.video_bitrate_kbps,
             width: self.width,
             height: self.height,
+            rate_control: self.rate_control,
+            keyframe_interval_seconds: self.keyframe_interval_seconds,
+            audio_bitrate_kbps: self.audio_bitrate_kbps,
             ..Default::default()
         }
     }

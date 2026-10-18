@@ -2,8 +2,9 @@
 use crate::{Daemon, streams::Output};
 #[cfg(target_os = "macos")]
 use isocast_engine::Platform;
+use isocast_engine::governor::canvas_slot;
 use isocast_engine::governor::{Controller, Sample};
-use isocast_protocol::{CanvasId, PROGRAM, VERTICAL_PROGRAM, api::Event, stream::StreamState};
+use isocast_protocol::{CanvasId, PROGRAM, api::Event, stream::StreamState};
 use std::collections::HashMap;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::{Duration, Instant};
@@ -13,7 +14,8 @@ struct Previous {
     session: Option<u64>,
     record_frames: u64,
     main: (bool, u64, u64),
-    vertical: (bool, u64, u64),
+    /// Every other canvas's (protected, drawn, missed), by canvas.
+    canvases: HashMap<CanvasId, (bool, u64, u64)>,
     streams: HashMap<String, (Option<String>, u64)>,
     stalls: u64,
     progressed: Option<Instant>,
@@ -55,10 +57,7 @@ fn activity(daemon: &Daemon) -> (Activity, bool) {
             .is_some_and(|session| session.files.lock().is_some()),
         paused: false,
         streams: [[0; 3]; 2],
-        replay: [
-            state.replay.active_on(CanvasId::Main),
-            state.replay.active_on(CanvasId::Vertical),
-        ],
+        replay: [state.replay.active_on(CanvasId::Main), extra_replay(&state)],
     };
     let mut pressure = false;
     if let Some(session) = &state.session
@@ -78,12 +77,24 @@ fn activity(daemon: &Daemon) -> (Activity, bool) {
             StreamState::Reconnecting => 2,
             _ => continue,
         };
-        activity.streams[usize::from(id.starts_with("vertical:"))][index] += 1;
+        let main = crate::streams::slot_canvas(id).0.is_main();
+        activity.streams[usize::from(!main)][index] += 1;
         if activity.enabled && stream_state == StreamState::Live {
             pressure |= stream.governor_congestion() >= 0.25;
         }
     }
     (activity, pressure)
+}
+
+/// A replay buffer of a canvas besides main runs.
+fn extra_replay(state: &crate::State) -> bool {
+    state
+        .setup
+        .as_ref()
+        .map(|setup| setup.extra_canvas_ids())
+        .unwrap_or_default()
+        .into_iter()
+        .any(|canvas| state.replay.active_on(canvas))
 }
 
 pub(super) fn start(daemon: &Arc<Daemon>) {
@@ -182,10 +193,7 @@ fn sample(
                 .is_some_and(|s| s.files.lock().is_some()),
             state.session.as_ref().and_then(|s| s.live.lock().clone()),
             streams,
-            [
-                state.replay.active_on(CanvasId::Main),
-                state.replay.active_on(CanvasId::Vertical),
-            ],
+            [state.replay.active_on(CanvasId::Main), extra_replay(&state)],
             state
                 .wanted_at
                 .is_some_and(|at| at.elapsed() < Duration::from_secs(3)),
@@ -219,16 +227,32 @@ fn sample(
             || setup.as_ref().is_some_and(|s| s.recording.program.enabled),
             |live| live.files.iter().any(|f| f.source == PROGRAM),
         );
+    // Every canvas besides main (#84): `[vertical]` and `[[canvases]]`,
+    // with their program files' names (never ISO files).
+    let extras: Vec<CanvasId> = setup
+        .as_ref()
+        .map(|s| s.extra_canvas_ids())
+        .unwrap_or_default();
+    let programs: Vec<String> = std::iter::once(PROGRAM.to_string())
+        .chain(extras.iter().map(|c| c.program()))
+        .collect();
+    let is_program = |source: &str| programs.iter().any(|p| p == source);
     sample.vertical_protected = recording
         && live.as_ref().map_or_else(
             || {
-                setup
-                    .as_ref()
-                    .and_then(|s| s.vertical.as_ref())
-                    .and_then(|v| v.recording.as_ref())
-                    .is_some_and(|p| p.enabled)
+                setup.as_ref().is_some_and(|s| {
+                    extras.iter().any(|c| {
+                        s.extra_canvas(*c)
+                            .and_then(|v| v.recording.as_ref())
+                            .is_some_and(|p| p.enabled)
+                    })
+                })
             },
-            |live| live.files.iter().any(|f| f.source == VERTICAL_PROGRAM),
+            |live| {
+                live.files
+                    .iter()
+                    .any(|f| f.source != PROGRAM && is_program(&f.source))
+            },
         );
     sample.has_isos = recording
         && live.as_ref().map_or_else(
@@ -237,11 +261,7 @@ fn sample(
                     .as_ref()
                     .is_some_and(|s| s.recording.iso.enabled && !s.recording.iso.sources.is_empty())
             },
-            |live| {
-                live.files
-                    .iter()
-                    .any(|f| f.source != PROGRAM && f.source != VERTICAL_PROGRAM)
-            },
+            |live| live.files.iter().any(|f| !is_program(&f.source)),
         );
     let mut progressed = false;
     sample.has_stream = !streams.is_empty();
@@ -250,8 +270,11 @@ fn sample(
         .streams
         .retain(|id, _| streams.iter().any(|(key, ..)| key == id));
     for (id, status, congestion) in &streams {
-        let vertical = id.starts_with("vertical:");
-        let canvas_bit = if vertical { 2 } else { 1 };
+        // One bit per canvas (#84): an extra canvas's congestion retunes
+        // only that canvas's encoders, never main's.
+        let canvas = crate::streams::slot_canvas(id).0;
+        let vertical = !canvas.is_main();
+        let canvas_bit = 1u32 << canvas_slot(canvas);
         sample.stream_canvases |= canvas_bit;
         // Connecting is not upload saturation; don't reduce a normal cold start.
         if status.state == StreamState::Live {
@@ -308,26 +331,36 @@ fn sample(
             info.program_frames,
             info.missed_frames,
         );
-        let vertical = info
-            .vertical
-            .as_ref()
-            .map(|v| (sample.vertical_protected, v.program_frames, v.missed_frames))
-            .unwrap_or_default();
-        for (current, last) in [
-            (main, &mut previous.main),
-            (vertical, &mut previous.vertical),
-        ] {
-            if current.0 && last.0 {
+        if main.0 && previous.main.0 {
+            sample.protected_loss |= main.2 > previous.main.2;
+            progressed |= main.1 > previous.main.1;
+        }
+        previous.main = main;
+        // Every other canvas's program (`info.canvases`, the vertical one
+        // included).
+        previous
+            .canvases
+            .retain(|id, _| info.canvases.iter().any(|c| c.id == *id));
+        for canvas in &info.canvases {
+            let current = (
+                sample.vertical_protected,
+                canvas.program_frames,
+                canvas.missed_frames,
+            );
+            if let Some(last) = previous.canvases.get(&canvas.id)
+                && current.0
+                && last.0
+            {
                 sample.protected_loss |= current.2 > last.2;
                 progressed |= current.1 > last.1;
             }
-            *last = current;
+            previous.canvases.insert(canvas.id, current);
         }
         let budget = 1_000_000.0 / f64::from(info.canvas.fps.max(1));
         sample.gpu_late = sample.protected_loss && info.compositor.gpu_wait_us.p99 > budget;
         sample.cpu_late = info.clocks.iter().any(|c| {
             (c.id == PROGRAM && sample.main_protected
-                || c.id == VERTICAL_PROGRAM && sample.vertical_protected)
+                || c.id != PROGRAM && is_program(&c.id) && sample.vertical_protected)
                 && c.wake_lateness_us.p99 > c.period_ms * 1500.0
         });
         // Async GPU latency may exceed one frame while throughput still fits.
@@ -335,7 +368,7 @@ fn sample(
     } else {
         sample.gpu_headroom = true;
         previous.main.0 = false;
-        previous.vertical.0 = false;
+        previous.canvases.clear();
     }
     if progressed {
         previous.progressed = Some(Instant::now());

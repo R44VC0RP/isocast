@@ -37,6 +37,10 @@ pub struct SessionManifest {
     /// Scene switches on the second canvas, on the same recording clock.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vertical_scenes: Vec<SceneChange>,
+    /// Scene switches on each other recorded canvas (`[[canvases]]`, #84),
+    /// by canvas id, on the same recording clock.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub canvas_scenes: std::collections::BTreeMap<String, Vec<SceneChange>>,
     /// Spans cut out of this take. Old manifests have no pauses.
     #[serde(default)]
     pub pauses: Vec<Pause>,

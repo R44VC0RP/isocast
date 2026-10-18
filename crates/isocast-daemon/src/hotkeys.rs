@@ -903,7 +903,7 @@ impl Daemon {
             if canvas.is_main() {
                 state.preview.is_some()
             } else {
-                state.vertical_preview.is_some()
+                state.canvas_previews.contains_key(&canvas)
             }
         };
         if action.starts_with("scene.preview") || staged {

@@ -16,6 +16,7 @@ A complete session description.
 |---|---|---|
 | `audio` | [AudioSetup](#audiosetup) | How sources' balance pans them, and where monitored sources play. |
 | `canvas` (required) | [Canvas](#canvas) | The composited output canvas. |
+| `canvases` | list of [VerticalCanvas](#verticalcanvas) | More canvases, each with its own id, size, frame rate, scene (or the main one's, laid out its own way), recording and streams, for streaming one show to several platforms in their own shapes (#84): `[[canvases]]` with an `id`, otherwise as `[vertical]`. |
 | `developer` | [DeveloperSettings](#developersettings) | Developer mode: verbose logs and timing traces (the profile's). |
 | `governor` | [GovernorSettings](#governorsettings) | |
 | `hotkeys` | [Config](#config) | Profile hotkeys. Absent/empty keeps legacy profiles unchanged. |
@@ -56,6 +57,128 @@ One of:
 | `fps` (required) | integer | Frames per second, from 1 to 240. |
 | `height` (required) | integer | An even number of pixels from 16 to 8192. |
 | `width` (required) | integer | An even number of pixels from 16 to 8192. |
+
+## VerticalCanvas
+
+Another canvas, upright by default, that shows the setup's scenes: the `[vertical]` canvas or one of `[[canvases]]`. A scene is laid out on it by its arrangement for it (`vertical`, or `canvases.<id>`) if it has one, else it shows the main picture fitted inside this canvas and centred (letterboxed; items placed by `layout` are laid out again on this canvas's size). Its program has the same audio mix as the main one (`recording.program.audio`).
+
+| Field | Type | Description |
+|---|---|---|
+| `follow_main` | boolean | Show the scene the main canvas has on air, switching with it. False lets the vertical canvas put its own scene on air. |
+| `fps` | integer (optional) | Frames per second, from 1 to 240; the main canvas's if absent. |
+| `height` | integer | An even number of pixels from 16 to 8192. Default `1920`. |
+| `id` | string (optional) | Its id in `[[canvases]]` (lowercase letters, digits and dashes, at most 32; not `main` or `vertical`), as requests' `canvas` names it. Absent on `[vertical]`, whose id is `vertical`. |
+| `name` | string (optional) | Display label, like "YouTube Shorts". Defaults to the id. |
+| `recording` | [VerticalRecording](#verticalrecording) (optional) | The vertical program recording. Absent: not recorded. |
+| `stream` | [StreamSettings](#streamsettings) (optional) | Live streaming of the vertical program, if set up (its own service; the key stays in the Keychain). |
+| `width` | integer | An even number of pixels from 16 to 8192. Default `1080`. |
+
+## VerticalRecording
+
+How the vertical program is recorded, in `recording.folder` alongside the main program. Its sound is the main program's mix (`recording.program.audio`): both canvases share one audio mix.
+
+| Field | Type | Description |
+|---|---|---|
+| `audio` | list of string | Must be empty: the vertical program has the main program's audio mix (`recording.program.audio`). |
+| `enabled` | boolean |  Default `true`. |
+| `encoder` | [Encoder](#encoder) |  Default `{"bit_depth": 8, "codec": "hevc", "container": "mov", "quality": "high"}`. |
+| `filename` | string | File name without extension. Tokens: {date}, {time}. Must differ from `recording.program.filename`. Default `"{date} {time} vertical"`. |
+| `height` | integer (optional) | |
+| `width` | integer (optional) | The file's size, if not the vertical canvas's (each side even, from 16 up to the vertical canvas's). |
+
+## Encoder
+
+| Field | Type | Description |
+|---|---|---|
+| `bit_depth` | integer | 8 or 10. 10-bit HEVC uses the Main 10 profile and captures displays in 10 bits, which avoids banding in gradients. ProRes is always 10-bit; H.264 can only be 8-bit. The incredible HEVC preset promotes 8 to 10, including the display capture format. Default `8`. Max 255. |
+| `codec` (required) | [Codec](#codec) | |
+| `container` | [Container](#container) |  Default `"mov"`. |
+| `quality` | [EncoderQuality](#encoderquality) | A named quality preset, or the original 1–100 constant quality. Ignored by ProRes, which is constant quality. Default `"high"`. |
+
+## Codec
+
+One of: `"h264"`, `"hevc"`, `"prores422_proxy"`, `"prores422_lt"`, `"prores422"`, `"prores422_hq"`, `"prores4444"`.
+
+## Container
+
+One of: `"mov"`, `"mp4"`.
+
+## EncoderQuality
+
+Numbers stay numbers and preset names stay names in setup files and API replies. See docs/recording.md for the measured preset ladder.
+
+One of:
+
+- [QualityPreset](#qualitypreset)
+- integer
+
+## QualityPreset
+
+One of: `"low"`, `"medium"`, `"high"`, `"very_high"`, `"incredible"`.
+
+## StreamSettings
+
+Streaming the program (the canvas and the program mix) to a service over RTMP or RTMPS, as H.264 and AAC.
+
+| Field | Type | Description |
+|---|---|---|
+| `audio_bitrate_kbps` | integer | AAC audio bitrate in kb/s, held constant (silence too, as services expect): 64, 96, 128, 160, 192, 256 or 320. Default `160`. |
+| `destinations` | list of [StreamDestination](#streamdestination) | More places to stream the same program to at once, each with its own key, state and reconnects. A destination with the same encode settings as another shares its encoder; one with its own `video_bitrate_kbps` or size gets an encoder of its own if this Mac's encoders have room. |
+| `enabled` | boolean | Whether `stream start` (without `only`) streams to this section's own service, the main destination (id `main`). Its encode settings stay the other destinations' defaults while it is off. |
+| `height` | integer (optional) | |
+| `keyframe_interval_seconds` | integer | Seconds between keyframes. Twitch and YouTube ask for 2. Default `2`. |
+| `rate_control` | [RateControl](#ratecontrol) (optional) | How the encoder keeps to `video_bitrate_kbps`: `constant` (the default: the full rate every second, padding still scenes, as YouTube's and Twitch's guidelines ask) or `average` (fewer bits when the picture is still, overshooting very busy scenes a little less). |
+| `reconnect` | [Reconnect](#reconnect) | Connect again after the connection drops. |
+| `server` | string (optional) | The ingest server without the stream key: `rtmp://host[:port]/app` or `rtmps://host[:port]/app`. Required for `custom` and `kick` (each Kick channel has its own); for the other services it replaces their default server (for example a nearer Twitch ingest). |
+| `service` (required) | [StreamService](#streamservice) | Where to stream. A service fills in its ingest server; `custom` needs `server`. |
+| `video_bitrate_kbps` | integer | Video bitrate in kb/s, held near constant as services ask. Default `6000`. |
+| `width` | integer (optional) | The size sent, if not the canvas's: the encoder scales the program to it. Without it, a canvas larger than 1920×1080 (1080×1920 upright) is scaled down to fit, as most services take 1080p at most. Each side is an even number from 16 to 4096. |
+
+## StreamDestination
+
+Another place to stream the program to (see [`StreamSettings::destinations`]). What it doesn't set comes from the `[stream]` section; reconnecting always does.
+
+| Field | Type | Description |
+|---|---|---|
+| `audio_bitrate_kbps` | integer (optional) | Its own AAC bitrate; `[stream]`'s if absent. |
+| `enabled` | boolean | Whether `stream start` (without `only`) streams here. |
+| `height` | integer (optional) | |
+| `id` (required) | string | Its id (lowercase letters, digits and dashes; not `main`), as `isocast stream start --only` and the key commands name it. |
+| `keyframe_interval_seconds` | integer (optional) | Its own seconds between keyframes; `[stream]`'s if absent. |
+| `rate_control` | [RateControl](#ratecontrol) (optional) | Its own rate control; `[stream]`'s if absent. |
+| `server` | string (optional) | The ingest server without the stream key, as for `[stream]`. |
+| `service` (required) | [StreamService](#streamservice) | |
+| `video_bitrate_kbps` | integer (optional) | Its own video bitrate; `[stream]`'s if absent. |
+| `width` | integer (optional) | Its own size sent; `[stream]`'s if absent. Give both or neither. |
+
+## RateControl
+
+How a stream's encoder keeps to its bitrate.
+
+One of:
+
+- `"average"`: About the bitrate on average: fewer bits for still pictures.
+- `"constant"`: The bitrate every second, still pictures padded.
+
+## StreamService
+
+A streaming service. Presets use the service's documented RTMPS ingest (see `docs/streaming.md`).
+
+One of:
+
+- `"twitch"` \| `"youtube"` \| `"facebook"`
+- `"custom"`: Any RTMP or RTMPS server, given as `server`.
+- `"kick"`: Kick: give your channel's Stream URL (Creator Dashboard → Channel → Stream URL and Key) as `server`.
+
+## Reconnect
+
+Reconnecting after the connection to the server drops.
+
+| Field | Type | Description |
+|---|---|---|
+| `delay_seconds` | integer | Seconds to wait before each attempt. Default `2`. |
+| `enabled` | boolean |  Default `true`. |
+| `max_retries` | integer | Attempts before giving up (the stream then shows `failed`). Default `25`. |
 
 ## DeveloperSettings
 
@@ -226,36 +349,6 @@ ISO ("isolated") recording: each listed source is written to its own file at its
 | `source_audio` | map of list of string | Audio sources for one ISO file, by its video source's id, instead of `audio`: `{ camera = ["mic"], screen = ["desktop"] }`. An empty list records that file without audio. Sources not listed follow `audio`; a source's audio.iso still adds or drops its own sound. |
 | `sources` | list of string | Video sources to record separately. Default `[]`. |
 
-## Encoder
-
-| Field | Type | Description |
-|---|---|---|
-| `bit_depth` | integer | 8 or 10. 10-bit HEVC uses the Main 10 profile and captures displays in 10 bits, which avoids banding in gradients. ProRes is always 10-bit; H.264 can only be 8-bit. The incredible HEVC preset promotes 8 to 10, including the display capture format. Default `8`. Max 255. |
-| `codec` (required) | [Codec](#codec) | |
-| `container` | [Container](#container) |  Default `"mov"`. |
-| `quality` | [EncoderQuality](#encoderquality) | A named quality preset, or the original 1–100 constant quality. Ignored by ProRes, which is constant quality. Default `"high"`. |
-
-## Codec
-
-One of: `"h264"`, `"hevc"`, `"prores422_proxy"`, `"prores422_lt"`, `"prores422"`, `"prores422_hq"`, `"prores4444"`.
-
-## Container
-
-One of: `"mov"`, `"mp4"`.
-
-## EncoderQuality
-
-Numbers stay numbers and preset names stay names in setup files and API replies. See docs/recording.md for the measured preset ladder.
-
-One of:
-
-- [QualityPreset](#qualitypreset)
-- integer
-
-## QualityPreset
-
-One of: `"low"`, `"medium"`, `"high"`, `"very_high"`, `"incredible"`.
-
 ## ProgramRecording
 
 | Field | Type | Description |
@@ -279,12 +372,22 @@ One of: `"low"`, `"medium"`, `"high"`, `"very_high"`, `"incredible"`.
 
 | Field | Type | Description |
 |---|---|---|
+| `canvases` | map of [SceneLayout](#scenelayout) | Its arrangements on the setup's `[[canvases]]`, by canvas id, as `vertical` is on the vertical canvas. |
 | `id` (required) | string | |
 | `items` | list of [SceneItem](#sceneitem) | Items drawn back to front. Default `[]`. |
 | `layout` | [Layout](#layout) (optional) | How its items with a `layout` are laid out: the scene is their root container, the size of the canvas (CSS block layout if absent). Only the fields for children apply. |
 | `name` | string (optional) | |
 | `transition` | [Transition](#transition) (optional) | How the program changes to this scene, in place of the setup's transition, unless a switch names its own (OBS's transition override). |
 | `vertical` | [SceneLayout](#scenelayout) (optional) | Its arrangement on the setup's vertical canvas, in place of `layout` and `items`. Absent: the main picture fitted inside the vertical canvas and centred (letterboxed): items placed by `rect` are scaled and centred with it, items placed by `layout` are laid out again on the vertical canvas's size. |
+
+## SceneLayout
+
+How a scene is arranged on the vertical canvas, in place of its own `layout` and `items`.
+
+| Field | Type | Description |
+|---|---|---|
+| `items` | list of [SceneItem](#sceneitem) | Items drawn back to front, in vertical canvas pixels. Default `[]`. |
+| `layout` | [Layout](#layout) (optional) | How its items with a `layout` are laid out, as the scene's `layout`. |
 
 ## SceneItem
 
@@ -754,15 +857,6 @@ One of:
 | Field | Type | Description |
 |---|---|---|
 | `easing` | [Easing](#easing) |  Default `"ease_in_out"`. |
-
-## SceneLayout
-
-How a scene is arranged on the vertical canvas, in place of its own `layout` and `items`.
-
-| Field | Type | Description |
-|---|---|---|
-| `items` | list of [SceneItem](#sceneitem) | Items drawn back to front, in vertical canvas pixels. Default `[]`. |
-| `layout` | [Layout](#layout) (optional) | How its items with a `layout` are laid out, as the scene's `layout`. |
 
 ## Source
 
@@ -1415,93 +1509,6 @@ Synthetic stereo audio that needs no permissions: a 100 ms beep at every whole s
 | Field | Type | Description |
 |---|---|---|
 | `frequency` | integer | Beep pitch in Hz. Default `1000`. |
-
-## StreamSettings
-
-Streaming the program (the canvas and the program mix) to a service over RTMP or RTMPS, as H.264 and AAC.
-
-| Field | Type | Description |
-|---|---|---|
-| `audio_bitrate_kbps` | integer | AAC audio bitrate in kb/s, held constant (silence too, as services expect): 64, 96, 128, 160, 192, 256 or 320. Default `160`. |
-| `destinations` | list of [StreamDestination](#streamdestination) | More places to stream the same program to at once, each with its own key, state and reconnects. A destination with the same encode settings as another shares its encoder; one with its own `video_bitrate_kbps` or size gets an encoder of its own if this Mac's encoders have room. |
-| `enabled` | boolean | Whether `stream start` (without `only`) streams to this section's own service, the main destination (id `main`). Its encode settings stay the other destinations' defaults while it is off. |
-| `height` | integer (optional) | |
-| `keyframe_interval_seconds` | integer | Seconds between keyframes. Twitch and YouTube ask for 2. Default `2`. |
-| `rate_control` | [RateControl](#ratecontrol) (optional) | How the encoder keeps to `video_bitrate_kbps`: `constant` (the default: the full rate every second, padding still scenes, as YouTube's and Twitch's guidelines ask) or `average` (fewer bits when the picture is still, overshooting very busy scenes a little less). |
-| `reconnect` | [Reconnect](#reconnect) | Connect again after the connection drops. |
-| `server` | string (optional) | The ingest server without the stream key: `rtmp://host[:port]/app` or `rtmps://host[:port]/app`. Required for `custom` and `kick` (each Kick channel has its own); for the other services it replaces their default server (for example a nearer Twitch ingest). |
-| `service` (required) | [StreamService](#streamservice) | Where to stream. A service fills in its ingest server; `custom` needs `server`. |
-| `video_bitrate_kbps` | integer | Video bitrate in kb/s, held near constant as services ask. Default `6000`. |
-| `width` | integer (optional) | The size sent, if not the canvas's: the encoder scales the program to it. Without it, a canvas larger than 1920×1080 (1080×1920 upright) is scaled down to fit, as most services take 1080p at most. Each side is an even number from 16 to 4096. |
-
-## StreamDestination
-
-Another place to stream the program to (see [`StreamSettings::destinations`]). What it doesn't set comes from the `[stream]` section: rate control, keyframes, audio and reconnecting always do.
-
-| Field | Type | Description |
-|---|---|---|
-| `enabled` | boolean | Whether `stream start` (without `only`) streams here. |
-| `height` | integer (optional) | |
-| `id` (required) | string | Its id (lowercase letters, digits and dashes; not `main`), as `isocast stream start --only` and the key commands name it. |
-| `server` | string (optional) | The ingest server without the stream key, as for `[stream]`. |
-| `service` (required) | [StreamService](#streamservice) | |
-| `video_bitrate_kbps` | integer (optional) | Its own video bitrate; `[stream]`'s if absent. |
-| `width` | integer (optional) | Its own size sent; `[stream]`'s if absent. Give both or neither. |
-
-## StreamService
-
-A streaming service. Presets use the service's documented RTMPS ingest (see `docs/streaming.md`).
-
-One of:
-
-- `"twitch"` \| `"youtube"` \| `"facebook"`
-- `"custom"`: Any RTMP or RTMPS server, given as `server`.
-- `"kick"`: Kick: give your channel's Stream URL (Creator Dashboard → Channel → Stream URL and Key) as `server`.
-
-## RateControl
-
-How a stream's encoder keeps to its bitrate.
-
-One of:
-
-- `"average"`: About the bitrate on average: fewer bits for still pictures.
-- `"constant"`: The bitrate every second, still pictures padded.
-
-## Reconnect
-
-Reconnecting after the connection to the server drops.
-
-| Field | Type | Description |
-|---|---|---|
-| `delay_seconds` | integer | Seconds to wait before each attempt. Default `2`. |
-| `enabled` | boolean |  Default `true`. |
-| `max_retries` | integer | Attempts before giving up (the stream then shows `failed`). Default `25`. |
-
-## VerticalCanvas
-
-A second canvas, upright by default, that shows the setup's scenes. A scene is laid out on it by its `vertical` arrangement if it has one, else it shows the main picture fitted inside this canvas and centred (letterboxed; items placed by `layout` are laid out again on this canvas's size). Its program has the same audio mix as the main one (`recording.program.audio`).
-
-| Field | Type | Description |
-|---|---|---|
-| `follow_main` | boolean | Show the scene the main canvas has on air, switching with it. False lets the vertical canvas put its own scene on air. |
-| `fps` | integer (optional) | Frames per second, from 1 to 240; the main canvas's if absent. |
-| `height` | integer | An even number of pixels from 16 to 8192. Default `1920`. |
-| `recording` | [VerticalRecording](#verticalrecording) (optional) | The vertical program recording. Absent: not recorded. |
-| `stream` | [StreamSettings](#streamsettings) (optional) | Live streaming of the vertical program, if set up (its own service; the key stays in the Keychain). |
-| `width` | integer | An even number of pixels from 16 to 8192. Default `1080`. |
-
-## VerticalRecording
-
-How the vertical program is recorded, in `recording.folder` alongside the main program. Its sound is the main program's mix (`recording.program.audio`): both canvases share one audio mix.
-
-| Field | Type | Description |
-|---|---|---|
-| `audio` | list of string | Must be empty: the vertical program has the main program's audio mix (`recording.program.audio`). |
-| `enabled` | boolean |  Default `true`. |
-| `encoder` | [Encoder](#encoder) |  Default `{"bit_depth": 8, "codec": "hevc", "container": "mov", "quality": "high"}`. |
-| `filename` | string | File name without extension. Tokens: {date}, {time}. Must differ from `recording.program.filename`. Default `"{date} {time} vertical"`. |
-| `height` | integer (optional) | |
-| `width` | integer (optional) | The file's size, if not the vertical canvas's (each side even, from 16 up to the vertical canvas's). |
 
 ## VirtualCameraSettings
 

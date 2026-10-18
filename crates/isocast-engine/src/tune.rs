@@ -13,7 +13,6 @@ use isocast_protocol::api::{Candidate, Capacity, TunedStream, Tuning, Variant};
 use isocast_protocol::change::merge_patch;
 use isocast_protocol::{
     CanvasId, Codec, Encoder, EncoderQuality, PROGRAM, QualityPreset, Setup, SourceKind,
-    VERTICAL_PROGRAM,
 };
 use serde_json::{Value, json};
 
@@ -273,13 +272,16 @@ fn setup_loads<P: Platform>(
     }
     // The vertical program too, drawn at the vertical canvas's size and
     // rate.
-    if let Some(vertical) = setup.for_canvas(CanvasId::Vertical) {
+    for canvas in setup.extra_canvas_ids() {
+        let Some(vertical) = setup.for_canvas(canvas) else {
+            continue;
+        };
         let program = &vertical.recording.program;
         if program.enabled {
             let (width, height) = program.size(&vertical.canvas);
             loads.push(Load {
                 stream: TunedStream {
-                    source: VERTICAL_PROGRAM.to_string(),
+                    source: canvas.program().to_string(),
                     width,
                     height,
                     fps: vertical.canvas.fps,
@@ -579,7 +581,12 @@ impl<P: Platform> Tuner<'_, P> {
         let disk_before = space::write_speed(folder)?;
         self.free = self.platform.volume(folder)?.free_bytes;
         let current = setup.recording.iso.encoder.clone();
-        let program = |source: &str| source == PROGRAM || source == VERTICAL_PROGRAM;
+        let programs: Vec<String> = setup
+            .canvas_ids()
+            .into_iter()
+            .map(CanvasId::program)
+            .collect();
+        let program = |source: &str| programs.iter().any(|p| p == source);
         let has_iso = loads.iter().any(|l| !program(&l.stream.source));
         let encoders = if has_iso {
             iso_encoders(&current)
@@ -591,7 +598,7 @@ impl<P: Platform> Tuner<'_, P> {
             loads
                 .iter()
                 .map(|load| match load.stream.source.as_str() {
-                    PROGRAM | VERTICAL_PROGRAM => load.clone(),
+                    source if program(source) => load.clone(),
                     _ => Load {
                         encoder: encoder.clone(),
                         ..load.clone()

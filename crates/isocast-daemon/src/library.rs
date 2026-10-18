@@ -731,7 +731,7 @@ impl Daemon {
             }
         }
         .restore(&setup);
-        let vertical_before = crate::vertical_link(&state);
+        let vertical_before = crate::canvas_links(&state);
         // The live engine runs the new pair from its next frame: sources
         // open and close as for any change.
         if let Some(engine) = &state.engine {
@@ -763,7 +763,8 @@ impl Daemon {
         let preview = state.preview.clone();
         // A new collection's vertical canvas starts from its restored main
         // scene and preview: ids the one before chose may mean other scenes.
-        let vertical_events = crate::sync_vertical(&mut state, vertical_before, collection_changed);
+        let vertical_events =
+            crate::sync_canvases(&mut state, &vertical_before, collection_changed);
         drop(state);
         {
             let _files = self.saved.lock();

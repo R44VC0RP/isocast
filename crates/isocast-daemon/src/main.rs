@@ -7,7 +7,7 @@
 
 use isocast_ipc::{Listener as UnixListener, Stream as UnixStream};
 use parking_lot::{Condvar, Mutex};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -85,6 +85,7 @@ const MAX_REQUEST: usize = 16 << 20;
 
 use platform::NativePlatform;
 
+mod canvases;
 mod data;
 mod debug;
 mod diagnostics;
@@ -962,12 +963,13 @@ struct State {
     scene: Option<String>,
     /// The scene staged for `take`.
     preview: Option<String>,
-    /// The scene last put on air on the vertical canvas, while it doesn't
-    /// follow the main one (the engine starts it there).
-    vertical_scene: Option<String>,
-    /// The scene staged in the vertical canvas's own preview, while it
+    /// The scene last put on air on each extra canvas (`[vertical]`,
+    /// `[[canvases]]`), while it doesn't follow the main one (the engine
+    /// starts it there).
+    canvas_scenes: BTreeMap<CanvasId, String>,
+    /// The scene staged in each extra canvas's own preview, while it
     /// doesn't follow the main one.
-    vertical_preview: Option<String>,
+    canvas_previews: BTreeMap<CanvasId, String>,
     /// A `tune` benchmark is running; it and a recording would compete for
     /// the encoders.
     tuning: bool,
@@ -1295,15 +1297,16 @@ fn resolved(
 /// [`resolved`] does for the main one; none without a vertical canvas.
 fn resolved_vertical(
     setup: &Setup,
+    canvas: CanvasId,
     revision: u64,
     engine: Option<Arc<dyn LiveEngine>>,
     data: &isocast_engine::data::DataStore,
 ) -> Option<Resolved> {
-    let view = setup.for_canvas(CanvasId::Vertical)?;
+    let view = setup.for_canvas(canvas)?;
     if let Some(engine) = engine {
         let deadline = std::time::Instant::now() + Duration::from_millis(250);
         loop {
-            match engine.resolved_canvas(CanvasId::Vertical) {
+            match engine.resolved_canvas(canvas) {
                 Some(resolved) if resolved.revision >= revision => return Some(resolved),
                 _ if std::time::Instant::now() >= deadline => break,
                 _ => std::thread::sleep(Duration::from_millis(1)),
@@ -1405,12 +1408,11 @@ impl Daemon {
                 "streaming; stop it first (`isocast stream stop`, or MCP's stop_stream)".into(),
             );
         }
-        if state.streaming() {
-            return Some(
-                "streaming the vertical canvas; stop it first (`isocast stream stop --canvas \
-                 vertical`, or MCP's stop_stream with canvas \"vertical\")"
-                    .into(),
-            );
+        if let Some(canvas) = state.streaming_canvas() {
+            return Some(format!(
+                "streaming the {canvas} canvas; stop it first (`isocast stream stop --canvas \
+                 {canvas}`, or MCP's stop_stream with canvas \"{canvas}\")"
+            ));
         }
         if state.camera.active() {
             return Some(
@@ -1584,6 +1586,9 @@ impl Daemon {
             Method::StreamDestinationSet(params) => {
                 self.stream_destination_set(*params).and_then(to_json)
             }
+            Method::CanvasAdd(params) => self.canvas_add(*params).and_then(to_json),
+            Method::CanvasSet(params) => self.canvas_set(*params).and_then(to_json),
+            Method::CanvasRemove { canvas } => self.canvas_remove(canvas).and_then(to_json),
             Method::VirtualCameraStart => self.virtual_camera_start().and_then(to_json),
             Method::VirtualCameraStop => to_json(self.virtual_camera_stop()),
             Method::VirtualCameraStatus => to_json(self.virtual_camera_status()),
@@ -1816,15 +1821,12 @@ impl Daemon {
 
     fn get(&self, params: GetParams) -> Result<Live, RpcError> {
         let state = self.state.read();
-        if !params.canvas.is_main()
-            && state
-                .setup
-                .as_ref()
-                .is_some_and(|setup| setup.vertical.is_none())
+        if let Some(setup) = state.setup.as_ref()
+            && !setup.has_canvas(params.canvas)
         {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
-                message: streams::NO_VERTICAL.into(),
+                message: streams::no_canvas(setup, params.canvas),
             });
         }
         let (collection, profile) = state.file.current_names(state.setup.as_ref());
@@ -1847,7 +1849,13 @@ impl Daemon {
             live.resolved = if params.canvas.is_main() {
                 Some(resolved(setup, live.revision, engine, &self.data.store))
             } else {
-                resolved_vertical(setup, live.revision, engine, &self.data.store)
+                resolved_vertical(
+                    setup,
+                    params.canvas,
+                    live.revision,
+                    engine,
+                    &self.data.store,
+                )
             };
         }
         Ok(live)
@@ -1890,7 +1898,7 @@ impl Daemon {
                 state.revision = first_revision();
                 // An unlinked vertical canvas starts from the main canvas's
                 // scene and preview (no engine or watchers yet).
-                let _ = sync_vertical(&mut state, None, true);
+                let _ = sync_canvases(&mut state, &[], true);
                 // Sources renamed off reserved ids (#94): written now, so
                 // it happens once.
                 if state.file.renamed() {
@@ -2011,7 +2019,7 @@ impl Daemon {
             )?;
         }
         // Whether the vertical canvas was there, and linked, before.
-        let vertical_before = vertical_link(&state);
+        let vertical_before = canvas_links(&state);
         // The live engine runs it from the next frame (or refuses, like a
         // canvas change while recording).
         if let (Some(engine), Some(setup)) = (&state.engine, &plan.setup) {
@@ -2053,7 +2061,7 @@ impl Daemon {
                 engine.set_preview(None);
             }
         }
-        let vertical_events = sync_vertical(&mut state, vertical_before, false);
+        let vertical_events = sync_canvases(&mut state, &vertical_before, false);
         let revision = state.revision;
         drop(state);
         self.publish(Event::SetupChanged { revision });
@@ -2359,13 +2367,7 @@ impl Daemon {
         let (control, stop, id, epoch) = {
             let state = self.state.read();
             if !paused
-                && state.setup.as_ref().is_some_and(|s| {
-                    s.recording.program.enabled
-                        || s.vertical
-                            .as_ref()
-                            .and_then(|v| v.recording.as_ref())
-                            .is_some_and(|r| r.enabled)
-                })
+                && state.setup.as_ref().is_some_and(|s| s.records_a_program())
                 && let Some(reason) = state.engine.as_ref().and_then(|e| e.program_failure())
             {
                 return Err(wrong(reason));
@@ -2410,13 +2412,7 @@ impl Daemon {
             return Err(wrong("recording: stopped during pause/resume".into()));
         }
         if !paused
-            && state.setup.as_ref().is_some_and(|s| {
-                s.recording.program.enabled
-                    || s.vertical
-                        .as_ref()
-                        .and_then(|v| v.recording.as_ref())
-                        .is_some_and(|r| r.enabled)
-            })
+            && state.setup.as_ref().is_some_and(|s| s.records_a_program())
             && let Some(reason) = state.engine.as_ref().and_then(|e| e.program_failure())
         {
             return Err(wrong(reason));
@@ -2596,7 +2592,7 @@ impl Daemon {
         transition: Option<Transition>,
         swap: bool,
     ) -> Result<Switched, RpcError> {
-        let setup = independent_vertical(&state, "switch scenes on")?;
+        let setup = independent_canvas(&state, canvas, "switch scenes on")?;
         // The switch's own transition, else the scene's, else the setup's.
         let transition = transition.unwrap_or_else(|| {
             setup
@@ -2621,21 +2617,24 @@ impl Daemon {
                 .prepare(&mut transition)
                 .map_err(|err| failed(anyhow::anyhow!("{err}")))?;
         }
-        let was = vertical_scene(&state);
+        let was = canvas_scene(&state, canvas);
         let placed = match &state.engine {
             Some(engine) => engine
                 .switch_canvas_scene(canvas, now(), scene.clone(), transition.clone())
                 .map_err(|err| failed(anyhow::anyhow!("{err}")))?,
             None => None,
         };
-        state.vertical_scene = Some(scene.clone());
+        state.canvas_scenes.insert(canvas, scene.clone());
         let swapped = swap && was.is_some();
         if swapped {
-            state.vertical_preview = was.clone();
+            match &was {
+                Some(was) => state.canvas_previews.insert(canvas, was.clone()),
+                None => state.canvas_previews.remove(&canvas),
+            };
             if let Some(engine) = &state.engine
                 && let Err(message) = engine.set_canvas_preview(canvas, was.clone())
             {
-                isocast_diagnostics::diagnostic!("warn"; "isocastd: vertical preview: {message}");
+                isocast_diagnostics::diagnostic!("warn"; "isocastd: {canvas} preview: {message}");
             }
         }
         // Placed on the recording's timeline only while recording.
@@ -2644,7 +2643,7 @@ impl Daemon {
             .as_ref()
             .map(|_| placed.unwrap_or((1, 0.0)))
             .filter(|_| state.engine.is_some());
-        let preview = state.vertical_preview.clone();
+        let preview = state.canvas_previews.get(&canvas).cloned();
         drop(state);
         let (take, time_seconds) = placed.unzip();
         let transition = (!transition.is_cut()).then_some(transition);
@@ -2676,14 +2675,14 @@ impl Daemon {
         let mut state = self.state.lock();
         check_scene(&state, &scene)?;
         if !canvas.is_main() {
-            independent_vertical(&state, "stage a preview on")?;
+            independent_canvas(&state, canvas, "stage a preview on")?;
             if let Some(engine) = &state.engine {
                 engine
                     .set_canvas_preview(canvas, Some(scene.clone()))
                     .map_err(|err| failed(anyhow::anyhow!("{err}")))?;
             }
-            state.vertical_preview = Some(scene.clone());
-            let on_air = vertical_scene(&state).unwrap_or_default();
+            state.canvas_previews.insert(canvas, scene.clone());
+            let on_air = canvas_scene(&state, canvas).unwrap_or_default();
             drop(state);
             self.publish(Event::CanvasPreviewChanged {
                 canvas,
@@ -2742,14 +2741,14 @@ impl Daemon {
             return Ok(self.clear_preview());
         }
         let mut state = self.state.lock();
-        independent_vertical(&state, "clear the preview of")?;
+        independent_canvas(&state, canvas, "clear the preview of")?;
         if let Some(engine) = &state.engine {
             engine
                 .set_canvas_preview(canvas, None)
                 .map_err(|err| failed(anyhow::anyhow!("{err}")))?;
         }
-        state.vertical_preview = None;
-        let scene = vertical_scene(&state).unwrap_or_default();
+        state.canvas_previews.remove(&canvas);
+        let scene = canvas_scene(&state, canvas).unwrap_or_default();
         drop(state);
         self.publish(Event::CanvasPreviewChanged {
             canvas,
@@ -2770,14 +2769,15 @@ impl Daemon {
     fn take(&self, transition: Option<Transition>, canvas: CanvasId) -> Result<Switched, RpcError> {
         let state = self.state.lock();
         if !canvas.is_main() {
-            independent_vertical(&state, "take a preview on")?;
-            let Some(scene) = chosen_vertical_preview(&state) else {
+            independent_canvas(&state, canvas, "take a preview on")?;
+            let Some(scene) = chosen_canvas_preview(&state, canvas) else {
                 return Err(RpcError {
                     code: RpcError::WRONG_STATE,
-                    message: "nothing in the vertical canvas's preview; stage a scene first \
-                              (`isocast preview SCENE --canvas vertical`, or preview with canvas \
-                              \"vertical\")"
-                        .into(),
+                    message: format!(
+                        "nothing in the {canvas} canvas's preview; stage a scene first \
+                         (`isocast preview SCENE --canvas {canvas}`, or preview with canvas \
+                         \"{canvas}\")"
+                    ),
                 });
             };
             return self.canvas_on_air(state, canvas, scene, transition, true);
@@ -2925,8 +2925,8 @@ impl Daemon {
             profile,
             stream: stream_status(&state),
             streams: streams::stream_statuses(&state),
-            vertical_scene: vertical_scene(&state),
-            vertical_preview: vertical_preview(&state),
+            vertical_scene: canvas_scene(&state, CanvasId::Vertical),
+            vertical_preview: canvas_preview(&state, CanvasId::Vertical),
             vertical_streams: streams::canvas_statuses(&state, CanvasId::Vertical),
             cpu_percent: self.cpu.lock().read(),
             data: Some(self.data.status()),
@@ -2947,6 +2947,7 @@ impl Daemon {
                 .filter(|rate| *rate > 0.0),
             daemon: Some(daemon_build()),
             vertical_replay: state.replay.vertical_status(state.setup.as_ref()),
+            canvases: canvas_statuses(&state),
         };
         // Measured without the lock (a slow disk can't hold up the rest).
         drop(state);
@@ -3035,7 +3036,11 @@ impl Daemon {
             let Some(settings) = &live else {
                 return Err(failed(anyhow::anyhow!(
                     "destination: the live setup has no {}stream destinations",
-                    if canvas.is_main() { "" } else { "vertical " }
+                    if canvas.is_main() {
+                        String::new()
+                    } else {
+                        format!("{canvas} ")
+                    }
                 )));
             };
             let Some(destination) = settings
@@ -3136,13 +3141,7 @@ impl Daemon {
                 .setup
                 .as_ref()
                 .or(state.setup.as_ref())
-                .is_some_and(|s| {
-                    s.recording.program.enabled
-                        || s.vertical
-                            .as_ref()
-                            .and_then(|v| v.recording.as_ref())
-                            .is_some_and(|r| r.enabled)
-                })
+                .is_some_and(|s| s.records_a_program())
                 && let Some(reason) = state.engine.as_ref().and_then(|e| e.program_failure())
             {
                 return Err(RpcError {
@@ -3513,10 +3512,7 @@ impl Daemon {
         // (#66): only when it can't keep up, so a fitting setup never nags.
         let streaming = {
             let state = self.state.lock();
-            [
-                state.streaming_on(CanvasId::Main),
-                state.streaming_on(CanvasId::Vertical),
-            ]
+            [state.streaming_on(CanvasId::Main), state.streaming_extra()]
         };
         let estimate =
             estimate_capacity(&setup, Some(engine), streaming, true, &memory, None).ok()?;
@@ -3544,20 +3540,20 @@ impl Daemon {
             let Some(setup) = params.setup.or_else(|| state.setup.clone()) else {
                 return Err(state.no_setup("no setup to judge (or give one)"));
             };
-            let streaming = [CanvasId::Main, CanvasId::Vertical].map(|canvas| {
-                params.stream.unwrap_or_else(|| {
-                    if live {
-                        state.streaming_on(canvas)
-                    } else {
-                        match canvas {
-                            CanvasId::Main => setup.stream.is_some(),
-                            CanvasId::Vertical => {
-                                setup.vertical.as_ref().is_some_and(|v| v.stream.is_some())
-                            }
-                        }
-                    }
-                })
-            });
+            // [main, every other canvas] (#84).
+            let on = |canvas: CanvasId| {
+                if live {
+                    state.streaming_on(canvas)
+                } else {
+                    setup.stream_of(canvas).is_some()
+                }
+            };
+            let streaming = [
+                params.stream.unwrap_or_else(|| on(CanvasId::Main)),
+                params
+                    .stream
+                    .unwrap_or_else(|| setup.extra_canvas_ids().into_iter().any(on)),
+            ];
             let recording = live && state.session.is_some();
             let engine = state.engine.clone().filter(|_| live);
             let memory = capacity::memory_path(state.file.legacy());
@@ -3673,12 +3669,19 @@ impl Daemon {
 
     fn publish_overload(&self, take: u32, elapsed_seconds: f64, mut dropping: Vec<OverloadedFile>) {
         dropping.sort_by(|a, b| b.percent.total_cmp(&a.percent));
-        let protected_dropping = dropping.iter().any(|f| {
-            matches!(
-                f.output.as_str(),
-                PROGRAM | isocast_protocol::VERTICAL_PROGRAM
-            )
-        });
+        // Every canvas's program file (`program`, `vertical-program`,
+        // `<id>-program`).
+        let programs: Vec<String> = self
+            .state
+            .read()
+            .setup
+            .as_ref()
+            .map(|setup| setup.canvas_ids())
+            .unwrap_or_else(|| vec![CanvasId::Main])
+            .into_iter()
+            .map(CanvasId::program)
+            .collect();
+        let protected_dropping = dropping.iter().any(|f| programs.contains(&f.output));
         let estimate = self.estimate_capacity(CapacityParams::default()).ok();
         let names: Vec<String> = dropping
             .iter()
@@ -3703,7 +3706,7 @@ impl Daemon {
                 names.join(", ")
             )
         };
-        reason.push_str("; ISO encodes yield first, then vertical outputs to protect main; main can still lose frames if its own workload is too high");
+        reason.push_str("; ISO encodes yield first, then other canvases' outputs to protect main; main can still lose frames if its own workload is too high");
         if let Some(fix) = estimate.as_ref().and_then(|e| e.suggestions.first()) {
             reason.push_str(&format!("; to fit, {}", fix.description));
             if fix.after_take {
@@ -3786,19 +3789,16 @@ impl Daemon {
                                 daemon.fail_streams(&why);
                             })
                         });
-                    } else if matches!(name.as_str(), "compositor" | "vertical compositor") {
+                    } else if let Some(canvas) = isocast_engine::record::compositor_canvas(&name) {
                         // A compositor owns only its canvas's picture; the
-                        // other canvas still has healthy video and audio.
-                        let canvas = if name == "compositor" {
-                            CanvasId::Main
-                        } else {
-                            CanvasId::Vertical
-                        };
+                        // other canvases still have healthy video and audio.
                         let daemon = daemon.clone();
-                        let why = if canvas.is_main() {
-                            message.clone()
-                        } else {
-                            format!("the vertical canvas stopped: {message}")
+                        let why = match canvas {
+                            CanvasId::Main => message.clone(),
+                            CanvasId::Vertical => {
+                                format!("the vertical canvas stopped: {message}")
+                            }
+                            other => format!("canvas {other:?} stopped: {message}"),
                         };
                         thread::spawn(move || {
                             daemon.contain("failed canvas program output", || {
@@ -3848,17 +3848,19 @@ impl Daemon {
                 .switch_scene(now(), scene.clone(), Transition::default());
         }
         engine.set_preview(state.preview.clone());
-        // The vertical canvas starts on the scene it had on air.
-        if let Some(scene) = chosen_vertical_scene(&state)
-            && let Err(message) =
-                engine.switch_canvas_scene(CanvasId::Vertical, now(), scene, Transition::default())
-        {
-            isocast_diagnostics::diagnostic!("warn"; "isocastd: vertical canvas: {message}");
-        }
-        if let Some(scene) = chosen_vertical_preview(&state)
-            && let Err(message) = engine.set_canvas_preview(CanvasId::Vertical, Some(scene))
-        {
-            isocast_diagnostics::diagnostic!("warn"; "isocastd: vertical preview: {message}");
+        // Each other canvas starts on the scene it had on air.
+        for (canvas, _) in canvas_links(&state) {
+            if let Some(scene) = chosen_canvas_scene(&state, canvas)
+                && let Err(message) =
+                    engine.switch_canvas_scene(canvas, now(), scene, Transition::default())
+            {
+                isocast_diagnostics::diagnostic!("warn"; "isocastd: {canvas} canvas: {message}");
+            }
+            if let Some(scene) = chosen_canvas_preview(&state, canvas)
+                && let Err(message) = engine.set_canvas_preview(canvas, Some(scene))
+            {
+                isocast_diagnostics::diagnostic!("warn"; "isocastd: {canvas} preview: {message}");
+            }
         }
         state.engine = Some(engine.clone());
         drop(state);
@@ -4325,24 +4327,82 @@ fn stream_settings(state: &State) -> Option<StreamSettings> {
     state.setup.as_ref().and_then(|setup| setup.stream.clone())
 }
 
-/// The live setup's vertical canvas: absent, or whether it follows the
-/// main canvas.
-fn vertical_link(state: &State) -> Option<bool> {
+/// Every extra canvas's status (`Status::canvases`).
+fn canvas_statuses(state: &State) -> Vec<isocast_protocol::api::CanvasStatus> {
+    let Some(setup) = state.setup.as_ref() else {
+        return Vec::new();
+    };
+    setup
+        .extra_canvas_ids()
+        .into_iter()
+        .filter_map(|id| {
+            let extra = setup.extra_canvas(id)?;
+            Some(isocast_protocol::api::CanvasStatus {
+                id,
+                name: extra.label().to_string(),
+                canvas: extra.canvas(&setup.canvas),
+                follow_main: extra.follow_main,
+                scene: canvas_scene(state, id),
+                preview: canvas_preview(state, id),
+                recorded: extra.recording.as_ref().is_some_and(|r| r.enabled),
+                streams: streams::canvas_statuses(state, id),
+                replay: state.replay.canvas_status(id, Some(setup)),
+            })
+        })
+        .collect()
+}
+
+/// The live setup's extra canvases (`[vertical]`, `[[canvases]]`), each
+/// with whether it follows the main canvas.
+fn canvas_links(state: &State) -> Vec<(CanvasId, bool)> {
+    let Some(setup) = state.setup.as_ref() else {
+        return Vec::new();
+    };
+    setup
+        .extra_canvas_ids()
+        .into_iter()
+        .filter_map(|canvas| Some((canvas, setup.extra_canvas(canvas)?.follow_main)))
+        .collect()
+}
+
+/// Extra canvas `canvas` of the live setup: absent, or whether it follows
+/// the main canvas.
+fn canvas_link(state: &State, canvas: CanvasId) -> Option<bool> {
     state
         .setup
         .as_ref()?
-        .vertical
-        .as_ref()
-        .map(|vertical| vertical.follow_main)
+        .extra_canvas(canvas)
+        .map(|extra| extra.follow_main)
 }
 
-/// Bring the vertical canvas's own scene and preview in line with the live
+/// [`sync_canvas`] for every extra canvas the live setup has or had
+/// (`before`, from [`canvas_links`]).
+fn sync_canvases(state: &mut State, before: &[(CanvasId, bool)], reset: bool) -> Vec<Event> {
+    let mut canvases: Vec<CanvasId> = before.iter().map(|(canvas, _)| *canvas).collect();
+    for (canvas, _) in canvas_links(state) {
+        if !canvases.contains(&canvas) {
+            canvases.push(canvas);
+        }
+    }
+    // Choices kept for canvases no longer there go too.
+    let mut events = Vec::new();
+    for canvas in canvases {
+        let was = before
+            .iter()
+            .find(|(other, _)| *other == canvas)
+            .map(|(_, follows)| *follows);
+        events.extend(sync_canvas(state, canvas, was, reset));
+    }
+    events
+}
+
+/// Bring an extra canvas's own scene and preview in line with the live
 /// setup after it changed, given whether it was there and linked before
-/// (`vertical_link`), so status, the engine and a later engine start agree
-/// (#86):
+/// (`canvas_link`), so status, the engine and a later engine start agree
+/// (#86, #84):
 /// - removed: no choices of its own are kept;
 /// - linked (`follow_main`): it shows the main canvas's, and the engine's
-///   vertical preview is set to the main preview once it becomes linked
+///   preview of it is set to the main preview once it becomes linked
 ///   (dropping an unlinked one it had);
 /// - becoming unlinked (added, unlinked, or `reset` for a new scene
 ///   collection): it starts from the main canvas's current scene and
@@ -4352,24 +4412,32 @@ fn vertical_link(state: &State) -> Option<bool> {
 ///
 /// Called with the state held, as the main canvas's scene and preview are
 /// updated; returns the events to publish once it is released.
-fn sync_vertical(state: &mut State, before: Option<bool>, reset: bool) -> Vec<Event> {
+fn sync_canvas(
+    state: &mut State,
+    canvas: CanvasId,
+    before: Option<bool>,
+    reset: bool,
+) -> Vec<Event> {
     let mut events = Vec::new();
     let engine = state.engine.clone();
-    let canvas = CanvasId::Vertical;
+    let name = match canvas {
+        CanvasId::Vertical => "vertical".to_string(),
+        other => format!("canvas {other}"),
+    };
     let warn = |what: &str, message: String| {
-        isocast_diagnostics::diagnostic!("warn"; "isocastd: vertical {what}: {message}");
+        isocast_diagnostics::diagnostic!("warn"; "isocastd: {name} {what}: {message}");
         Event::Warning {
-            message: format!("vertical {what}: {message}"),
+            message: format!("{name} {what}: {message}"),
         }
     };
-    match vertical_link(state) {
+    match canvas_link(state, canvas) {
         None => {
-            state.vertical_scene = None;
-            state.vertical_preview = None;
+            state.canvas_scenes.remove(&canvas);
+            state.canvas_previews.remove(&canvas);
         }
         Some(true) => {
-            state.vertical_scene = None;
-            state.vertical_preview = None;
+            state.canvas_scenes.remove(&canvas);
+            state.canvas_previews.remove(&canvas);
             if (reset || before != Some(true))
                 && let Some(engine) = &engine
                 && let Err(message) = engine.set_canvas_preview(canvas, state.preview.clone())
@@ -4381,38 +4449,46 @@ fn sync_vertical(state: &mut State, before: Option<bool>, reset: bool) -> Vec<Ev
             let ids = state.scene_ids();
             let fresh = reset || before != Some(false);
             let scene_gone = state
-                .vertical_scene
-                .as_ref()
+                .canvas_scenes
+                .get(&canvas)
                 .is_some_and(|scene| !ids.contains(scene));
             if fresh || scene_gone {
-                state.vertical_scene = state.scene.clone();
-                if let Some(scene) = state.vertical_scene.clone() {
-                    if let Some(engine) = &engine
-                        && let Err(message) = engine.switch_canvas_scene(
+                match state.scene.clone() {
+                    Some(scene) => {
+                        state.canvas_scenes.insert(canvas, scene.clone());
+                        if let Some(engine) = &engine
+                            && let Err(message) = engine.switch_canvas_scene(
+                                canvas,
+                                now(),
+                                scene.clone(),
+                                Transition::default(),
+                            )
+                        {
+                            events.push(warn("canvas", message));
+                        }
+                        events.push(Event::CanvasSceneChanged {
                             canvas,
-                            now(),
-                            scene.clone(),
-                            Transition::default(),
-                        )
-                    {
-                        events.push(warn("canvas", message));
+                            scene,
+                            take: None,
+                            time_seconds: None,
+                            transition: None,
+                        });
                     }
-                    events.push(Event::CanvasSceneChanged {
-                        canvas,
-                        scene,
-                        take: None,
-                        time_seconds: None,
-                        transition: None,
-                    });
+                    None => {
+                        state.canvas_scenes.remove(&canvas);
+                    }
                 }
             }
             let preview_gone = state
-                .vertical_preview
-                .as_ref()
+                .canvas_previews
+                .get(&canvas)
                 .is_some_and(|scene| !ids.contains(scene));
             if fresh || preview_gone {
                 let preview = if fresh { state.preview.clone() } else { None };
-                state.vertical_preview = preview.clone();
+                match &preview {
+                    Some(scene) => state.canvas_previews.insert(canvas, scene.clone()),
+                    None => state.canvas_previews.remove(&canvas),
+                };
                 if let Some(engine) = &engine
                     && let Err(message) = engine.set_canvas_preview(canvas, preview.clone())
                 {
@@ -4428,80 +4504,88 @@ fn sync_vertical(state: &mut State, before: Option<bool>, reset: bool) -> Vec<Ev
     events
 }
 
-/// The scene the vertical canvas was switched to that it should show:
+/// The scene extra canvas `canvas` was switched to that it should show:
 /// while it doesn't follow the main canvas and the setup still has it.
-fn chosen_vertical_scene(state: &State) -> Option<String> {
-    let vertical = state.setup.as_ref()?.vertical.as_ref()?;
-    if vertical.follow_main {
+fn chosen_canvas_scene(state: &State, canvas: CanvasId) -> Option<String> {
+    let extra = state.setup.as_ref()?.extra_canvas(canvas)?;
+    if extra.follow_main {
         return None;
     }
-    let scene = state.vertical_scene.clone()?;
+    let scene = state.canvas_scenes.get(&canvas).cloned()?;
     state.scene_ids().contains(&scene).then_some(scene)
 }
 
-/// The scene staged in the vertical canvas's own preview that it should
+/// The scene staged in extra canvas `canvas`'s own preview that it should
 /// show: while it doesn't follow the main canvas and the setup still has
 /// it.
-fn chosen_vertical_preview(state: &State) -> Option<String> {
-    let vertical = state.setup.as_ref()?.vertical.as_ref()?;
-    if vertical.follow_main {
+fn chosen_canvas_preview(state: &State, canvas: CanvasId) -> Option<String> {
+    let extra = state.setup.as_ref()?.extra_canvas(canvas)?;
+    if extra.follow_main {
         return None;
     }
-    let scene = state.vertical_preview.clone()?;
+    let scene = state.canvas_previews.get(&canvas).cloned()?;
     state.scene_ids().contains(&scene).then_some(scene)
 }
 
-/// What `status.vertical_preview` says: the main preview while the
-/// vertical canvas follows the main one, else its own.
-fn vertical_preview(state: &State) -> Option<String> {
-    let vertical = state.setup.as_ref()?.vertical.as_ref()?;
-    if vertical.follow_main {
+/// What status says is staged in extra canvas `canvas`'s preview: the
+/// main preview while it follows the main one, else its own.
+fn canvas_preview(state: &State, canvas: CanvasId) -> Option<String> {
+    let extra = state.setup.as_ref()?.extra_canvas(canvas)?;
+    if extra.follow_main {
         return state.preview.clone();
     }
-    chosen_vertical_preview(state)
+    chosen_canvas_preview(state, canvas)
 }
 
-/// The live setup, if it has a vertical canvas that doesn't follow the
-/// main one, so `what` ("switch scenes on") can happen on it; else why
+/// The live setup, if it has extra canvas `canvas` and it doesn't follow
+/// the main one, so `what` ("switch scenes on") can happen on it; else why
 /// not.
-fn independent_vertical<'a>(state: &'a State, what: &str) -> Result<&'a Setup, RpcError> {
+fn independent_canvas<'a>(
+    state: &'a State,
+    canvas: CanvasId,
+    what: &str,
+) -> Result<&'a Setup, RpcError> {
     let Some(setup) = state.setup.as_ref() else {
-        return Err(state.no_setup(&format!("no vertical canvas to {what}")));
+        return Err(state.no_setup(&format!("no {canvas} canvas to {what}")));
     };
-    let Some(vertical) = setup.vertical.as_ref() else {
+    let Some(extra) = setup.extra_canvas(canvas) else {
         return Err(RpcError {
             code: RpcError::WRONG_STATE,
-            message: streams::NO_VERTICAL.into(),
+            message: streams::no_canvas(setup, canvas),
         });
     };
-    if vertical.follow_main {
+    if extra.follow_main {
+        let field = setup.canvas_field(canvas);
+        let patch = match canvas {
+            CanvasId::Vertical => "the patch {\"vertical\": {\"follow_main\": false}}".to_string(),
+            other => format!("`isocast canvas set {other} --follow-main false`"),
+        };
         return Err(RpcError {
             code: RpcError::WRONG_STATE,
             message: format!(
-                "canvas: the vertical canvas follows the main one (vertical.follow_main), so it \
+                "canvas: the {canvas} canvas follows the main one ({field}.follow_main), so it \
                  shows the main canvas's scenes and preview; to {what} it, use the main canvas, or \
-                 let the vertical canvas pick its own scenes with the patch \
-                 {{\"vertical\": {{\"follow_main\": false}}}}"
+                 let it pick its own scenes with {patch}"
             ),
         });
     }
     Ok(setup)
 }
 
-/// What `status.vertical_scene` says: the engine's, while it runs; else
-/// the main scene while the vertical canvas follows it, or the one it was
-/// switched to (the main scene if none).
-fn vertical_scene(state: &State) -> Option<String> {
-    let vertical = state.setup.as_ref()?.vertical.as_ref()?;
+/// What status says is on air on extra canvas `canvas`: the engine's,
+/// while it runs; else the main scene while it follows it, or the one it
+/// was switched to (the main scene if none).
+fn canvas_scene(state: &State, canvas: CanvasId) -> Option<String> {
+    let extra = state.setup.as_ref()?.extra_canvas(canvas)?;
     if let Some(engine) = &state.engine
-        && let Some(scene) = engine.canvas_scene(CanvasId::Vertical)
+        && let Some(scene) = engine.canvas_scene(canvas)
     {
         return Some(scene);
     }
-    if vertical.follow_main {
+    if extra.follow_main {
         return state.scene.clone();
     }
-    chosen_vertical_scene(state).or_else(|| state.scene.clone())
+    chosen_canvas_scene(state, canvas).or_else(|| state.scene.clone())
 }
 
 use streams::stream_status;
@@ -4736,6 +4820,28 @@ fn plan(state: &State, change: Change, plugins: &plugins::Registry) -> Result<Pl
              vertical`, then `isocast stream start --canvas vertical`)"
                 .into(),
         );
+    }
+    // `[[canvases]]` (#84): a change to a canvas's entry while it streams.
+    let streaming_extras: Vec<CanvasId> = state
+        .setup
+        .as_ref()
+        .map(|setup| setup.extra_canvas_ids())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|canvas| !canvas.is_vertical() && state.streaming_on(*canvas))
+        .collect();
+    if !streaming_extras.is_empty()
+        && changes
+            .iter()
+            .any(|change| change.path == "canvases" || change.path.starts_with("canvases["))
+    {
+        let names: Vec<String> = streaming_extras.iter().map(|c| c.to_string()).collect();
+        notes.push(format!(
+            "canvas streams are running ({}): each keeps its current stream settings until it \
+             stops; the changes take effect at its next start (`isocast stream stop --canvas \
+             ID`, then `isocast stream start --canvas ID`)",
+            names.join(", ")
+        ));
     }
     if state.streaming_on(CanvasId::Main)
         && changes

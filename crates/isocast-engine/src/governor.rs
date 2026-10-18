@@ -25,9 +25,38 @@ static HOLD_UNTIL: AtomicU64 = AtomicU64::new(0);
 static HOLD_ARMED: AtomicBool = AtomicBool::new(true);
 static VERTICAL: AtomicU32 = AtomicU32::new(100);
 static STREAM: AtomicU32 = AtomicU32::new(100);
+/// Which canvases' streams the stream limit retunes, one bit per canvas
+/// slot ([`canvas_slot`]): main is bit 0, so another canvas's congestion
+/// never lowers main's bitrate (#84).
 static STREAM_TARGETS: AtomicU32 = AtomicU32::new(0);
-static STREAM_APPLIED: [AtomicU32; 2] = [AtomicU32::new(100), AtomicU32::new(100)];
-static RATE_FAILED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+static STREAM_APPLIED: [AtomicU32; CANVAS_SLOTS] = [const { AtomicU32::new(100) }; CANVAS_SLOTS];
+static RATE_FAILED: [AtomicBool; CANVAS_SLOTS] = [const { AtomicBool::new(false) }; CANVAS_SLOTS];
+
+/// Per-canvas governor slots: main 0, vertical 1, then each other canvas
+/// in the order the process first sees it. Past the last slot, canvases
+/// share it (never main's), so the worst case retunes two extra canvases
+/// together.
+pub const CANVAS_SLOTS: usize = 32;
+
+/// The governor slot of `canvas` (see [`CANVAS_SLOTS`]).
+pub fn canvas_slot(canvas: CanvasId) -> usize {
+    static SLOTS: OnceLock<Mutex<Vec<CanvasId>>> = OnceLock::new();
+    match canvas {
+        CanvasId::Main => 0,
+        CanvasId::Vertical => 1,
+        other => {
+            let mut slots = SLOTS.get_or_init(Mutex::default).lock();
+            match slots.iter().position(|c| *c == other) {
+                Some(i) => (i + 2).min(CANVAS_SLOTS - 1),
+                None if slots.len() + 2 < CANVAS_SLOTS => {
+                    slots.push(other);
+                    slots.len() + 1
+                }
+                None => CANVAS_SLOTS - 1,
+            }
+        }
+    }
+}
 static ISO_PINNED: AtomicBool = AtomicBool::new(false);
 static UNPINNED_ISO: AtomicBool = AtomicBool::new(false);
 static LOSSES: AtomicU64 = AtomicU64::new(0);
@@ -107,7 +136,7 @@ pub fn vertical_ceiling() -> u32 {
     }
 }
 pub fn stream_bitrate(canvas: CanvasId, intended_kbps: u32) -> u32 {
-    let index = usize::from(!canvas.is_main());
+    let index = canvas_slot(canvas);
     if !ENABLED.load(Ordering::Relaxed)
         || RATE_FAILED[index].load(Ordering::Acquire)
         || STREAM_TARGETS.load(Ordering::Relaxed) & (1 << index) == 0
@@ -118,7 +147,7 @@ pub fn stream_bitrate(canvas: CanvasId, intended_kbps: u32) -> u32 {
 }
 /// Called on the encoder owner. No blocking lock in the failure path.
 pub fn stream_rate_result(canvas: CanvasId, intended: u32, applied: u32, error: Option<String>) {
-    let index = usize::from(!canvas.is_main());
+    let index = canvas_slot(canvas);
     STREAM_APPLIED[index].store(
         applied.saturating_mul(100) / intended.max(1),
         Ordering::Relaxed,
@@ -213,6 +242,8 @@ pub struct Headroom {
 pub struct Sample {
     pub active: bool,
     pub main_protected: bool,
+    /// Any canvas besides main has a protected output (its program file,
+    /// stream or replay).
     pub vertical_protected: bool,
     pub paused: bool,
     pub progressed: bool,
@@ -226,6 +257,7 @@ pub struct Sample {
     /// None means the disk probe is stale, not that the disk recovered.
     pub disk_behind: Option<bool>,
     pub upload_congestion: f64,
+    /// Canvases streaming / congested, one bit per [`canvas_slot`].
     pub stream_canvases: u32,
     pub congested_canvases: u32,
     pub has_isos: bool,
@@ -400,7 +432,7 @@ impl Controller {
             }
             state.rate_error = None;
         }
-        for i in 0..2 {
+        for i in 0..CANVAS_SLOTS {
             if sample.stream_canvases & (1 << i) == 0 {
                 STREAM_APPLIED[i].store(100, Ordering::Relaxed);
                 RATE_FAILED[i].store(false, Ordering::Relaxed);
@@ -432,7 +464,7 @@ impl Controller {
             .last_loss
             .is_some_and(|at| now.duration_since(at) < Duration::from_secs(5));
         let upload = sample.upload_congestion >= 0.25;
-        let retunable = (0..2).any(|i| {
+        let retunable = (0..CANVAS_SLOTS).any(|i| {
             sample.congested_canvases & (1 << i) != 0 && !RATE_FAILED[i].load(Ordering::Acquire)
         });
         let cause = if self.disk_bad {
@@ -723,7 +755,7 @@ impl Controller {
             iso_percent: if held { 0 } else { limits.iso },
             vertical_percent: limits.vertical,
             stream_bitrate_percent: if sample.has_stream {
-                (0..2)
+                (0..CANVAS_SLOTS)
                     .filter(|i| sample.stream_canvases & (1 << i) != 0)
                     .map(|i| STREAM_APPLIED[i].load(Ordering::Relaxed))
                     .min()

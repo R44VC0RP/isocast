@@ -1826,6 +1826,71 @@ each section. Delete entries that stop being true.
 
 ## Decisions
 
+- 2026-10-18 (#84 review fixes): **Governor per canvas; inline ids.**
+  The live governor (#110) classifies stream slots by canvas
+  (`streams::slot_canvas`), with one bit per canvas
+  (`governor::canvas_slot`: main 0, vertical 1, the rest in first-seen
+  order, capped at 32): a congested extra canvas retunes only its own
+  encoders (verified: shorts 5000 → 2500 → 1250 kb/s while main stayed
+  6000 with 0 drops). Every canvas's program file is protected, not an
+  ISO; `info.canvases` is sampled; protected loss routes per program file
+  (`record::program_canvas`). `CanvasId` now stores its id inline (≤ 32
+  bytes, `Copy`), replacing the interner: requests can't exhaust
+  anything, and `program()` (a `String`) can't fall back to `program`. A
+  `[[canvases]]` `recording = {}` (file name left at the vertical
+  default) records as "{date} {time} <id>" (`filename_for`). The engine
+  refuses a setup whose new canvas ids don't fit its 16 lifetime output
+  slots (apply/plan, with the field path) instead of skipping them. Every
+  extra canvas's replay encoder is placed before the writers (#68).
+  Aitum vendor requests follow the plugin's `vertical-canvas.cpp`
+  (`current_scene`, size matching with `success: false`, `switch_scene`
+  on every independent canvas). `<id>-preview` is reserved as a source
+  id too.
+- 2026-10-18 (#84): **Canvases are ids; `[vertical]` is one of them.**
+  `CanvasId` went from a two-variant enum to an id (`Copy`, stored
+  inline since the review fixes, ≤ 32 chars; `CanvasId::Main`/`Vertical`
+  stay as constants usable in patterns), so every existing vertical path
+  generalised by compiler error rather than a parallel copy. More canvases
+  are `[[canvases]]`: the same `VerticalCanvas` type with an `id` (and
+  `name`), arrangements under `scenes[].canvases.<id>`; `[vertical]` keeps
+  its file shape (existing setups unchanged, byte for byte). Program
+  names `<id>-program`, monitor targets `<id>-program`, `<id>-preview`,
+  `<id>-scene:ID`, stream slots `<id>:<dest>`, Keychain accounts
+  `canvas:<id>:<dest>:<account>` (vertical's unchanged); at most 8 extra
+  canvases. Engine: `ExtraOutputs` is an insert-only array of `OnceLock`
+  slots (as the vertical OnceLock was: a canvas turned off keeps its
+  output, disabled), compositors in a map, worker names `<id>
+  compositor`; recording plans one program file per recorded canvas, the
+  manifest's `canvas_scenes.<id>` for independent `[[canvases]]` (vertical
+  keeps `vertical_scenes`). Every extra canvas's program file shares the
+  "vertical" writer priority (protected, after main). A canvas follows the
+  main scene (its own layout, or letterboxed) or switches its own
+  (`follow_main = false`), as vertical did. Destinations stay nested in
+  their canvas's `stream` (binding = nesting); a destination may now set
+  its own rate control, keyframe interval and audio bitrate, and equal
+  formats share one encoder hub per canvas (a different audio bitrate is
+  its own encode). Recording a canvas is opt-in (`record`). Capacity /
+  Optimize: every canvas's program and stream encodes count; the live
+  estimate's second flag means "any non-main canvas streams"; Optimize
+  patches `[[canvases]]` entries by id (the setup merge is by id).
+  Method table: `canvas_add|set|remove` (API, CLI `isocast canvas`, MCP),
+  `status.canvases` and `engine.canvases` (the `vertical*` fields stay).
+  obs-websocket: GetCanvasList, and CallVendorRequest for Aitum Vertical
+  Canvas's `aitum-vertical-canvas` (version, switch_scene, get_scene,
+  get_scenes, status, start/stop_streaming). OBS import: Aitum
+  Multistream outputs → main destinations (own bitrate/size), Vertical
+  Canvas canvases → `[vertical]` + `[[canvases]]` `vertical-N` with their
+  outputs; their own scenes and WHIP/SRT outputs are reported, keys never
+  read. App: Settings › Video › Canvases (list of disclosure rows, the open
+  canvas's size/rate/follow/record/remove, Add with shape presets), picked
+  over a segmented picker + editor (scales to 8, shows each canvas's
+  summary, matches Stream's destination rows); Stream › Streams of lists
+  every canvas; Start Streaming starts every canvas whose destinations
+  have keys. Not done (follow-ups): replay for `[[canvases]]` in the app,
+  projectors/monitors and the editor for `[[canvases]]` in the app (the
+  engine serves their targets), virtual camera target for them, live
+  scene linking during a take (as #96).
+
 - 2026-10-18 (#105 W.3): Mac independent texture lifetime is now fixed,
   not relaxed. `CVMetalTextureCache` must survive the client CVMetalTexture
   for buffer recycling: raw CoreVideo-only tests with explicit autorelease

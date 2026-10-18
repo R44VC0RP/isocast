@@ -34,6 +34,15 @@ Isocast runs on Apple silicon Macs only (aarch64-apple-darwin).
 | NDI (plugin in OBS) | — | Later |
 | Isocast only: test pattern, tone | `test_pattern`, `tone` | done (1.1) |
 
+## Multistreaming and canvases (#84)
+
+| OBS (plugin) | Isocast | Status |
+|---|---|---|
+| Aitum Multistream: more outputs, own server/key/bitrate/resolution | `[[stream.destinations]]` (own bitrate, size, rate control, keyframes, audio) | done (G.10, G.12); imported from OBS |
+| Aitum Vertical Canvas: a vertical canvas with its own scenes and outputs | `[vertical]` / `[[canvases]]` with `scenes[].canvases.<id>` and own `stream` | done (G.12); imported (its own scenes aren't) |
+| Aitum Stream Suite / OBS 31 extra canvases | `[[canvases]]` (up to 8) | done (G.12); OBS's own canvases aren't imported |
+| obs-websocket GetCanvasList; Vertical Canvas vendor requests | mapped in the plugin's shapes; per-canvas recording, pause, chapters and virtual camera answer `success: false` (one recording takes every canvas) | done (G.12) |
+
 ## Effect filters (video), task 4.9 (`filters` on a source)
 
 Run on the GPU in each source's own filter chain, in order, before the

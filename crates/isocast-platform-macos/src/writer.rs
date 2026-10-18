@@ -120,7 +120,7 @@ pub(crate) fn encoder_start_rank(canvas: Option<CanvasId>, width: u32, height: u
     (
         match canvas {
             Some(CanvasId::Main) => 0,
-            Some(CanvasId::Vertical) => 1,
+            Some(_) => 1,
             None => 2,
         },
         u32::MAX - width.saturating_mul(height),

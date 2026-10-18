@@ -20,7 +20,6 @@ use isocast_protocol::manifest::{
 };
 use isocast_protocol::{
     AudioSettings, CanvasId, Container, Filter, PROGRAM, PanLaw, Setup, Transition, TransitionKind,
-    VERTICAL_PROGRAM,
 };
 
 pub use isocast_protocol::api::{
@@ -47,8 +46,9 @@ mod timings;
 mod virtual_camera;
 pub use virtual_camera::{CameraSink, OnCameraChange, VirtualCamera};
 
-pub(crate) use engine::ProgramTapSource;
 pub use engine::{Engine, EngineEvent, JpegFrame, OnEngineEvent, ProgramTap};
+pub(crate) use engine::{ProgramTapSource, canvas_off};
+pub use engine::{compositor_canvas, compositor_worker};
 pub use frame_stream::{FeedRate, FrameFeed};
 pub use shared_frames::{DEFAULT_SLOTS, SharedControl, SharedEvent, SharedFeed};
 
@@ -917,9 +917,11 @@ pub fn record<P: Platform>(platform: &P, setup: &Setup, options: &RecordOptions)
     let iso = &setup.recording.iso;
     if !(iso.enabled && !iso.sources.is_empty())
         && !setup.recording.program.enabled
-        && !setup
-            .for_canvas(CanvasId::Vertical)
-            .is_some_and(|s| s.recording.program.enabled)
+        && !setup.extra_canvas_ids().into_iter().any(|canvas| {
+            setup
+                .for_canvas(canvas)
+                .is_some_and(|s| s.recording.program.enabled)
+        })
     {
         bail!(
             "nothing to record: set recording.program.enabled = true, or set \
@@ -1062,18 +1064,23 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
             program_audio.clone(),
         ));
     }
-    let vertical = setup.for_canvas(CanvasId::Vertical);
-    if let Some(vertical) = &vertical {
-        let program = &vertical.recording.program;
+    // Every recorded extra canvas's program (`[vertical]`, `[[canvases]]`).
+    let extras: Vec<(CanvasId, Setup)> = setup
+        .extra_canvas_ids()
+        .into_iter()
+        .filter_map(|canvas| Some((canvas, setup.for_canvas(canvas)?)))
+        .collect();
+    for (canvas, extra) in &extras {
+        let program = &extra.recording.program;
         if program.enabled {
-            let (width, height) = program.size(&vertical.canvas);
+            let (width, height) = program.size(&extra.canvas);
             files.push((
-                file_name(&program.filename, VERTICAL_PROGRAM, &now),
-                VERTICAL_PROGRAM.to_string(),
+                file_name(&program.filename, &canvas.program(), &now),
+                canvas.program().to_string(),
                 PROGRAM,
-                (width, height, vertical.canvas.fps),
+                (width, height, extra.canvas.fps),
                 &program.encoder,
-                program_audio,
+                program_audio.clone(),
             ));
         }
     }
@@ -1154,10 +1161,11 @@ fn create_writers<P: Platform>(platform: &P, plans: &[Arc<FilePlan>]) -> Result<
     for plan in plans {
         match platform.create_writer(&plan.spec) {
             Ok(mut writer) => {
-                if is_program(&plan.source) {
+                if is_program(plan) {
                     writer.prioritize_video(if plan.source == PROGRAM {
                         isocast_protocol::CanvasId::Main
                     } else {
+                        // Every extra canvas's program: protected, after main's.
                         isocast_protocol::CanvasId::Vertical
                     });
                 }
@@ -1172,8 +1180,20 @@ fn create_writers<P: Platform>(platform: &P, plans: &[Arc<FilePlan>]) -> Result<
     Ok(writers)
 }
 
-fn is_program(id: &str) -> bool {
-    matches!(id, PROGRAM | VERTICAL_PROGRAM)
+/// Whether `plan` writes a canvas's program (not an ISO source).
+fn is_program(plan: &FilePlan) -> bool {
+    plan.kind == PROGRAM
+}
+
+/// The canvas whose program `plan` writes, if it writes one.
+fn program_canvas(plan: &FilePlan) -> Option<CanvasId> {
+    if !is_program(plan) {
+        return None;
+    }
+    match plan.source.as_str() {
+        PROGRAM => Some(CanvasId::Main),
+        source => CanvasId::parse(source.strip_suffix("-program")?).ok(),
+    }
 }
 
 /// Live counters for every file. A frame counts as dropped once a newer
@@ -1236,7 +1256,7 @@ fn take_manifest<P: Platform>(
     errors: &[String],
     stops: &[AudioStopped],
     control: Option<&SessionControl>,
-    vertical_control: Option<&SessionControl>,
+    canvas_controls: &[(CanvasId, &SessionControl)],
 ) -> SessionManifest {
     let finished = status != SessionStatus::Recording;
     let mapped = |at| control.map_or(at, |c| c.recording_time(at));
@@ -1333,11 +1353,26 @@ fn take_manifest<P: Platform>(
             .flatten(),
         markers,
         scenes,
-        vertical_scenes: vertical_control.map_or_else(Vec::new, |control| {
-            control
-                .timeline(take.epoch, take.end.unwrap_or(Time::MAX))
-                .1
-        }),
+        vertical_scenes: canvas_controls
+            .iter()
+            .find(|(canvas, _)| canvas.is_vertical())
+            .map_or_else(Vec::new, |(_, control)| {
+                control
+                    .timeline(take.epoch, take.end.unwrap_or(Time::MAX))
+                    .1
+            }),
+        canvas_scenes: canvas_controls
+            .iter()
+            .filter(|(canvas, _)| !canvas.is_main() && !canvas.is_vertical())
+            .map(|(canvas, control)| {
+                (
+                    canvas.to_string(),
+                    control
+                        .timeline(take.epoch, take.end.unwrap_or(Time::MAX))
+                        .1,
+                )
+            })
+            .collect(),
         pauses: control.map_or_else(Vec::new, |c| {
             let state = c.state.lock();
             state.clock.as_ref().map_or_else(Vec::new, |clock| {

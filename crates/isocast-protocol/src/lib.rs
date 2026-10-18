@@ -93,6 +93,12 @@ pub struct Setup {
     /// same scenes, with its own recording and stream. Absent: none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical: Option<VerticalCanvas>,
+    /// More canvases, each with its own id, size, frame rate, scene (or
+    /// the main one's, laid out its own way), recording and streams, for
+    /// streaming one show to several platforms in their own shapes (#84):
+    /// `[[canvases]]` with an `id`, otherwise as `[vertical]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canvases: Vec<VerticalCanvas>,
     /// Profile hotkeys. Absent/empty keeps legacy profiles unchanged.
     #[serde(default, skip_serializing_if = "hotkeys::Config::is_absent")]
     pub hotkeys: hotkeys::Config,
@@ -194,41 +200,213 @@ pub struct Canvas {
     pub fps: u32,
 }
 
-/// Which canvas: the main one, or the setup's vertical one.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CanvasId {
-    /// The setup's `canvas`.
-    #[default]
-    Main,
-    /// The setup's `vertical` canvas.
-    Vertical,
+/// Which canvas, by id: `main` (the setup's `canvas`), `vertical` (its
+/// `[vertical]` canvas) or the id of one of its `[[canvases]]` (#84).
+///
+/// The id is stored inline (at most [`MAX_CANVAS_ID_LEN`] bytes), so a
+/// `CanvasId` is `Copy`, compares by value and needs no interning: an id
+/// a request names costs nothing until it is used, and one that names no
+/// canvas of the live setup is refused there, with the setup's canvases
+/// listed. `CanvasId::Main` and `CanvasId::Vertical` are constants, usable
+/// in patterns.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CanvasId {
+    len: u8,
+    bytes: [u8; MAX_CANVAS_ID_LEN],
 }
+
+/// A canvas id from text already known to be valid.
+const fn fixed_id(text: &str) -> CanvasId {
+    let from = text.as_bytes();
+    let mut bytes = [0u8; MAX_CANVAS_ID_LEN];
+    let mut i = 0;
+    while i < from.len() {
+        bytes[i] = from[i];
+        i += 1;
+    }
+    CanvasId {
+        len: from.len() as u8,
+        bytes,
+    }
+}
+
+#[allow(non_upper_case_globals)]
+impl CanvasId {
+    /// The setup's `canvas`.
+    pub const Main: CanvasId = fixed_id("main");
+    /// The setup's `[vertical]` canvas.
+    pub const Vertical: CanvasId = fixed_id("vertical");
+}
+
+impl Default for CanvasId {
+    fn default() -> Self {
+        Self::Main
+    }
+}
+
+impl std::fmt::Debug for CanvasId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::fmt::Display for CanvasId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The longest canvas id.
+pub const MAX_CANVAS_ID_LEN: usize = 32;
+
+/// The most canvases a setup may have besides the main one (the vertical
+/// one included).
+pub const MAX_EXTRA_CANVASES: usize = 8;
 
 impl CanvasId {
     pub fn is_main(&self) -> bool {
         *self == Self::Main
     }
 
+    /// Whether this is the `[vertical]` canvas.
+    pub fn is_vertical(&self) -> bool {
+        *self == Self::Vertical
+    }
+
+    /// The id as written in setups and requests.
+    pub fn as_str(&self) -> &str {
+        // Only `parse` and `fixed_id` make one, from ASCII.
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or_default()
+    }
+
+    /// The canvas `id`, or why it can't be one: lowercase letters, digits
+    /// and dashes, at most [`MAX_CANVAS_ID_LEN`].
+    pub fn parse(id: &str) -> Result<Self, String> {
+        let id = id.trim();
+        if !is_valid_id(id) || id.len() > MAX_CANVAS_ID_LEN {
+            return Err(format!(
+                "canvas {id:?}: a canvas id uses lowercase letters, digits and dashes, at \
+                 most {MAX_CANVAS_ID_LEN}"
+            ));
+        }
+        Ok(fixed_id(id))
+    }
+
     /// The reserved source name of this canvas's program recording in
-    /// manifests and reports: [`PROGRAM`] or [`VERTICAL_PROGRAM`].
-    pub fn program(self) -> &'static str {
+    /// manifests and reports: [`PROGRAM`], [`VERTICAL_PROGRAM`] or
+    /// `<id>-program`. Never another canvas's.
+    pub fn program(self) -> String {
         match self {
-            Self::Main => PROGRAM,
-            Self::Vertical => VERTICAL_PROGRAM,
+            Self::Main => PROGRAM.into(),
+            Self::Vertical => VERTICAL_PROGRAM.into(),
+            other => format!("{other}-program"),
+        }
+    }
+
+    /// The monitor target of this canvas's program (`program`,
+    /// `vertical-program`, `<id>-program`): the same as [`program`](Self::program).
+    pub fn program_target(self) -> String {
+        self.program()
+    }
+
+    /// The monitor target of this canvas's Studio Mode preview
+    /// (`preview`, `vertical-preview`, `<id>-preview`).
+    pub fn preview_target(self) -> String {
+        match self {
+            Self::Main => "preview".into(),
+            other => format!("{other}-preview"),
+        }
+    }
+
+    /// The canvas a program or preview monitor target (as
+    /// [`program_target`](Self::program_target) and
+    /// [`preview_target`](Self::preview_target) make) shows, and whether it
+    /// is the preview.
+    pub fn from_target(target: &str) -> Option<(CanvasId, bool)> {
+        match target {
+            PROGRAM => return Some((Self::Main, false)),
+            "preview" => return Some((Self::Main, true)),
+            _ => {}
+        }
+        let (id, preview) = if let Some(id) = target.strip_suffix("-program") {
+            (id, false)
+        } else {
+            (target.strip_suffix("-preview")?, true)
+        };
+        if id == "main" {
+            return None;
+        }
+        Some((Self::parse(id).ok()?, preview))
+    }
+
+    /// The canvas and scene id of a scene monitor target (`scene:ID`,
+    /// `vertical-scene:ID`, `<canvas>-scene:ID`).
+    pub fn from_scene_target(target: &str) -> Option<(CanvasId, &str)> {
+        if let Some(id) = target.strip_prefix("scene:") {
+            return Some((Self::Main, id));
+        }
+        let (canvas, id) = target.split_once("-scene:")?;
+        if canvas == "main" {
+            return None;
+        }
+        Some((Self::parse(canvas).ok()?, id))
+    }
+
+    /// The prefix of this canvas's scene monitor targets (`scene:`,
+    /// `vertical-scene:`, `<id>-scene:`).
+    pub fn scene_prefix(self) -> String {
+        match self {
+            Self::Main => "scene:".into(),
+            other => format!("{other}-scene:"),
         }
     }
 }
 
-/// A second canvas, upright by default, that shows the setup's scenes. A
-/// scene is laid out on it by its `vertical` arrangement if it has one,
-/// else it shows the main picture fitted inside this canvas and centred
-/// (letterboxed; items placed by `layout` are laid out again on this
-/// canvas's size). Its program has the same audio mix as the main one
-/// (`recording.program.audio`).
+impl Serialize for CanvasId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CanvasId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let id = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
+        CanvasId::parse(&id).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for CanvasId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CanvasId".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A canvas id: `main`, `vertical` or one of the setup's `[[canvases]]`.",
+            "pattern": "^[a-z0-9-]{1,32}$",
+        })
+    }
+}
+
+/// Another canvas, upright by default, that shows the setup's scenes: the
+/// `[vertical]` canvas or one of `[[canvases]]`. A scene is laid out on it
+/// by its arrangement for it (`vertical`, or `canvases.<id>`) if it has
+/// one, else it shows the main picture fitted inside this canvas and
+/// centred (letterboxed; items placed by `layout` are laid out again on
+/// this canvas's size). Its program has the same audio mix as the main
+/// one (`recording.program.audio`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VerticalCanvas {
+    /// Its id in `[[canvases]]` (lowercase letters, digits and dashes, at
+    /// most 32; not `main` or `vertical`), as requests' `canvas` names it.
+    /// Absent on `[vertical]`, whose id is `vertical`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Display label, like "YouTube Shorts". Defaults to the id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// An even number of pixels from 16 to 8192.
     #[serde(default = "default_vertical_width")]
     pub width: u32,
@@ -262,6 +440,8 @@ fn default_vertical_height() -> u32 {
 impl Default for VerticalCanvas {
     fn default() -> Self {
         Self {
+            id: None,
+            name: None,
             width: default_vertical_width(),
             height: default_vertical_height(),
             fps: None,
@@ -569,6 +749,27 @@ impl VerticalCanvas {
             fps: self.fps.unwrap_or(main.fps),
         }
     }
+
+    /// A `[[canvases]]` entry `id` with default settings.
+    pub fn with_id(id: &str) -> Self {
+        Self {
+            id: Some(id.to_string()),
+            ..Self::default()
+        }
+    }
+
+    /// Its display label: `name`, else its id (`vertical` without one).
+    pub fn label(&self) -> &str {
+        self.name
+            .as_deref()
+            .or(self.id.as_deref())
+            .unwrap_or("vertical")
+    }
+}
+
+/// The default program file name of the extra canvas `canvas`.
+pub fn canvas_filename(canvas: CanvasId) -> String {
+    format!("{{date}} {{time}} {canvas}")
 }
 
 /// How the vertical program is recorded, in `recording.folder` alongside
@@ -595,6 +796,23 @@ pub struct VerticalRecording {
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+}
+
+impl VerticalRecording {
+    /// The file name canvas `canvas` records with: `filename`, except that
+    /// a `[[canvases]]` entry left at the default (`recording = {}` in
+    /// TOML gives "{date} {time} vertical") uses its own id, so two
+    /// canvases never share a name (#84).
+    pub fn filename_for(&self, canvas: CanvasId) -> String {
+        if !canvas.is_vertical()
+            && !canvas.is_main()
+            && self.filename == default_vertical_filename()
+        {
+            canvas_filename(canvas)
+        } else {
+            self.filename.clone()
+        }
+    }
 }
 
 fn default_vertical_filename() -> String {
@@ -765,20 +983,61 @@ pub struct Scene {
     /// the vertical canvas's size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical: Option<SceneLayout>,
+    /// Its arrangements on the setup's `[[canvases]]`, by canvas id, as
+    /// `vertical` is on the vertical canvas.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub canvases: BTreeMap<String, SceneLayout>,
 }
 
 impl Scene {
+    /// Its arrangement for the extra canvas `canvas`, if it has one
+    /// (`vertical`, or `canvases.<id>`). None for the main canvas.
+    pub fn arrangement(&self, canvas: CanvasId) -> Option<&SceneLayout> {
+        match canvas {
+            CanvasId::Main => None,
+            CanvasId::Vertical => self.vertical.as_ref(),
+            other => self.canvases.get(other.as_str()),
+        }
+    }
+
+    /// Set (or with None, remove) its arrangement for the extra canvas
+    /// `canvas`. Does nothing for the main canvas.
+    pub fn set_arrangement(&mut self, canvas: CanvasId, layout: Option<SceneLayout>) {
+        match (canvas, layout) {
+            (CanvasId::Main, _) => {}
+            (CanvasId::Vertical, layout) => self.vertical = layout,
+            (other, Some(layout)) => {
+                self.canvases.insert(other.as_str().to_string(), layout);
+            }
+            (other, None) => {
+                self.canvases.remove(other.as_str());
+            }
+        }
+    }
+
+    /// Whether it has an arrangement for any extra canvas.
+    pub fn has_arrangements(&self) -> bool {
+        self.vertical.is_some() || !self.canvases.is_empty()
+    }
+
     /// Whether the vertical canvas draws it as the main picture fitted and
     /// centred (letterboxed, #109): it has no vertical arrangement and
     /// nothing in it is placed by `layout`, which lays it out again on the
     /// vertical canvas instead.
     pub fn letterboxed(&self) -> bool {
+        self.letterboxed_on(CanvasId::Vertical)
+    }
+
+    /// Whether the extra canvas `canvas` draws it as the main picture
+    /// fitted and centred, as [`letterboxed`](Self::letterboxed) says for
+    /// the vertical one.
+    pub fn letterboxed_on(&self, canvas: CanvasId) -> bool {
         fn any_layout(items: &[SceneItem]) -> bool {
             items
                 .iter()
                 .any(|item| item.layout.is_some() || any_layout(&item.children))
         }
-        self.vertical.is_none() && self.layout.is_none() && !any_layout(&self.items)
+        self.arrangement(canvas).is_none() && self.layout.is_none() && !any_layout(&self.items)
     }
 
     /// The video sources its visible items show, and those of the scenes
@@ -2030,6 +2289,7 @@ impl Setup {
             },
             stream: None,
             vertical: None,
+            canvases: Default::default(),
             hotkeys: Default::default(),
             virtual_camera: Default::default(),
             developer: Default::default(),
@@ -2048,19 +2308,20 @@ impl Setup {
     /// has no `vertical` of its own. Clones the
     /// whole setup: call it off the frame thread.
     pub fn for_canvas(&self, canvas: CanvasId) -> Option<Setup> {
-        let vertical = match canvas {
-            CanvasId::Main => return Some(self.clone()),
-            CanvasId::Vertical => self.vertical.as_ref()?,
-        };
+        if canvas.is_main() {
+            return Some(self.clone());
+        }
+        let vertical = self.extra_canvas(canvas)?;
         let mut setup = self.clone();
         setup.vertical = None;
+        setup.canvases.clear();
         setup.canvas = vertical.canvas(&self.canvas);
         let from = (self.canvas.width, self.canvas.height);
         let to = (setup.canvas.width, setup.canvas.height);
         let letterboxed: HashSet<&str> = self
             .scenes
             .iter()
-            .filter(|scene| scene.letterboxed())
+            .filter(|scene| scene.letterboxed_on(canvas))
             .map(|scene| scene.id.as_str())
             .collect();
         let letterboxed = |id: &str| letterboxed.contains(id);
@@ -2099,7 +2360,10 @@ impl Setup {
             animation.keyframes = id;
         };
         for scene in &mut setup.scenes {
-            if let Some(SceneLayout { layout, items }) = scene.vertical.take() {
+            let arrangement = scene.arrangement(canvas).cloned();
+            scene.vertical = None;
+            scene.canvases.clear();
+            if let Some(SceneLayout { layout, items }) = arrangement {
                 scene.layout = layout;
                 scene.items = items;
             } else if let Some(canvas) = fit {
@@ -2124,7 +2388,7 @@ impl Setup {
         setup.recording.program = match &vertical.recording {
             Some(recording) => ProgramRecording {
                 enabled: recording.enabled,
-                filename: recording.filename.clone(),
+                filename: recording.filename_for(canvas),
                 encoder: recording.encoder.clone(),
                 audio: main.audio.clone(),
                 width: recording.width,
@@ -2132,7 +2396,7 @@ impl Setup {
             },
             None => ProgramRecording {
                 enabled: false,
-                filename: default_vertical_filename(),
+                filename: canvas_filename(canvas),
                 encoder: main.encoder.clone(),
                 audio: main.audio.clone(),
                 width: None,
@@ -2144,6 +2408,117 @@ impl Setup {
         setup.stream = vertical.stream.clone();
         setup.virtual_camera = Default::default();
         Some(setup)
+    }
+
+    /// The extra canvas `canvas` (`vertical`, or one of `canvases`), if
+    /// the setup has it. None for the main canvas.
+    pub fn extra_canvas(&self, canvas: CanvasId) -> Option<&VerticalCanvas> {
+        match canvas {
+            CanvasId::Main => None,
+            CanvasId::Vertical => self.vertical.as_ref(),
+            other => self
+                .canvases
+                .iter()
+                .find(|c| c.id.as_deref() == Some(other.as_str())),
+        }
+    }
+
+    /// As [`extra_canvas`](Self::extra_canvas), to change it.
+    pub fn extra_canvas_mut(&mut self, canvas: CanvasId) -> Option<&mut VerticalCanvas> {
+        match canvas {
+            CanvasId::Main => None,
+            CanvasId::Vertical => self.vertical.as_mut(),
+            other => self
+                .canvases
+                .iter_mut()
+                .find(|c| c.id.as_deref() == Some(other.as_str())),
+        }
+    }
+
+    /// Every extra canvas's id, the vertical one first, then `canvases` in
+    /// order (those with a valid id).
+    pub fn extra_canvas_ids(&self) -> Vec<CanvasId> {
+        self.vertical
+            .iter()
+            .map(|_| CanvasId::Vertical)
+            .chain(
+                self.canvases
+                    .iter()
+                    .filter_map(|c| CanvasId::parse(c.id.as_deref()?).ok()),
+            )
+            .collect()
+    }
+
+    /// Every canvas's id, `main` first.
+    pub fn canvas_ids(&self) -> Vec<CanvasId> {
+        std::iter::once(CanvasId::Main)
+            .chain(self.extra_canvas_ids())
+            .collect()
+    }
+
+    /// Whether a recording writes any canvas's program file.
+    pub fn records_a_program(&self) -> bool {
+        self.recording.program.enabled
+            || self.extra_canvas_ids().into_iter().any(|canvas| {
+                self.extra_canvas(canvas)
+                    .and_then(|c| c.recording.as_ref())
+                    .is_some_and(|r| r.enabled)
+            })
+    }
+
+    /// Whether the setup has the canvas `canvas`.
+    pub fn has_canvas(&self, canvas: CanvasId) -> bool {
+        canvas.is_main() || self.extra_canvas(canvas).is_some()
+    }
+
+    /// The size and frame rate of canvas `canvas`, if the setup has it.
+    pub fn canvas_of(&self, canvas: CanvasId) -> Option<Canvas> {
+        match canvas {
+            CanvasId::Main => Some(self.canvas.clone()),
+            other => Some(self.extra_canvas(other)?.canvas(&self.canvas)),
+        }
+    }
+
+    /// The stream section of canvas `canvas` (`[stream]`, `[vertical.stream]`
+    /// or a `[[canvases]]` entry's `stream`), if it has one.
+    pub fn stream_of(&self, canvas: CanvasId) -> Option<&stream::StreamSettings> {
+        match canvas {
+            CanvasId::Main => self.stream.as_ref(),
+            other => self.extra_canvas(other)?.stream.as_ref(),
+        }
+    }
+
+    /// Why `canvas` can't be used here: the setup has no such canvas;
+    /// lists those it has. `field` is the request's field (`canvas`).
+    pub fn unknown_canvas(&self, field: &str, canvas: CanvasId) -> String {
+        let ids: Vec<String> = self.canvas_ids().iter().map(|c| c.to_string()).collect();
+        if canvas.is_vertical() {
+            return format!(
+                "{field}: the vertical canvas is not enabled; add [vertical] (canvases: {})",
+                ids.join(", ")
+            );
+        }
+        format!(
+            "{field}: the setup has no canvas {canvas:?}; canvases: {}",
+            ids.join(", ")
+        )
+    }
+
+    /// The setup field an extra canvas's settings are under: `vertical`, or
+    /// `canvases[i]`.
+    pub fn canvas_field(&self, canvas: CanvasId) -> String {
+        match canvas {
+            CanvasId::Main => "canvas".into(),
+            CanvasId::Vertical => "vertical".into(),
+            other => match self
+                .canvases
+                .iter()
+                .position(|c| c.id.as_deref() == Some(other.as_str()))
+            {
+                Some(i) => format!("canvases[{i}]"),
+                None => format!("canvases[id={other}]"),
+            },
+        }
     }
 
     /// Check references and values the type system cannot express. An empty
@@ -2312,7 +2687,30 @@ impl Setup {
                      or remove this",
                 );
             }
+            for id in scene.canvases.keys() {
+                let known = self.canvases.iter().any(|c| c.id.as_deref() == Some(id));
+                if !known {
+                    let ids: Vec<&str> = self
+                        .canvases
+                        .iter()
+                        .filter_map(|c| c.id.as_deref())
+                        .collect();
+                    issues.add(
+                        format!("scenes[{i}].canvases.{id}"),
+                        format!(
+                            "an arrangement for canvas {id:?}, which [[canvases]] doesn't have; \
+                             canvases: {}",
+                            if ids.is_empty() {
+                                "none".to_string()
+                            } else {
+                                ids.join(", ")
+                            }
+                        ),
+                    );
+                }
+            }
         }
+        self.check_canvases(&mut issues);
 
         let video = self.source_ids(SourceKind::has_video);
         let audio = self.source_ids(SourceKind::has_audio);
@@ -2510,26 +2908,136 @@ impl Setup {
             self.identify_source_issue(issue);
         }
         if let Some(vertical) = &self.vertical {
-            self.validate_vertical(vertical, &mut issues);
+            self.validate_vertical(CanvasId::Vertical, vertical, &mut issues);
+        }
+        let mut seen = HashSet::new();
+        for canvas in &self.canvases {
+            let Some(id) = canvas.id.as_deref().and_then(|id| CanvasId::parse(id).ok()) else {
+                continue;
+            };
+            if id.is_main() || id.is_vertical() || !seen.insert(id) {
+                continue;
+            }
+            self.validate_vertical(id, canvas, &mut issues);
         }
         issues.0
+    }
+
+    /// `[[canvases]]`'s own problems: ids, how many, and names a program
+    /// file or source would share.
+    fn check_canvases(&self, issues: &mut Issues) {
+        if self.canvases.len() + usize::from(self.vertical.is_some()) > MAX_EXTRA_CANVASES {
+            issues.add(
+                "canvases",
+                format!(
+                    "{} canvases besides the main one; at most {MAX_EXTRA_CANVASES} (the vertical \
+                     one included)",
+                    self.canvases.len() + usize::from(self.vertical.is_some())
+                ),
+            );
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (i, canvas) in self.canvases.iter().enumerate() {
+            let path = format!("canvases[{i}].id");
+            let Some(id) = canvas.id.as_deref() else {
+                issues.add(path, "each [[canvases]] entry needs an id, like \"shorts\"");
+                continue;
+            };
+            if let Err(err) = CanvasId::parse(id) {
+                issues.add(path, err);
+                continue;
+            }
+            if id == "main" || id == "vertical" {
+                issues.add(
+                    path,
+                    format!(
+                        "{id:?} is reserved: `main` is the setup's canvas and `vertical` its \
+                         [vertical] one; pick another id"
+                    ),
+                );
+                continue;
+            }
+            if !seen.insert(id) {
+                issues.add(path, format!("{id:?} is used by another canvas"));
+                continue;
+            }
+            // Its program recording's name, and its monitor targets.
+            for reserved in [format!("{id}-program"), format!("{id}-preview")] {
+                if let Some(j) = self.sources.iter().position(|s| s.id == reserved) {
+                    issues.add(
+                        format!("sources[{j}].id"),
+                        format!(
+                            "{reserved:?} is reserved for canvas {id:?}'s program and preview; \
+                             pick another id"
+                        ),
+                    );
+                }
+            }
+        }
+        if self
+            .vertical
+            .as_ref()
+            .is_some_and(|v| v.id.as_deref().is_some_and(|id| id != "vertical"))
+        {
+            issues.add(
+                "vertical.id",
+                "[vertical]'s id is always `vertical`; leave it out, or move this canvas to \
+                 [[canvases]]",
+            );
+        }
+        // Program files are all written to recording.folder.
+        let mut files: Vec<(String, String)> = Vec::new();
+        if self.recording.program.enabled {
+            files.push((
+                "recording.program.filename".into(),
+                self.recording.program.filename.clone(),
+            ));
+        }
+        for canvas in self.extra_canvas_ids() {
+            let field = self.canvas_field(canvas);
+            if let Some(recording) = self.extra_canvas(canvas).and_then(|c| c.recording.as_ref())
+                && recording.enabled
+            {
+                let path = format!("{field}.recording.filename");
+                let filename = recording.filename_for(canvas);
+                if let Some((other, _)) = files.iter().find(|(_, f)| *f == filename)
+                    && !(canvas.is_vertical() && other == "recording.program.filename")
+                {
+                    {
+                        issues.add(
+                            path.clone(),
+                            format!(
+                                "{:?} is {other} too, and every program is written to \
+                                 recording.folder; give this canvas's file its own name, like \
+                                 \"{}\"",
+                                filename,
+                                canvas_filename(canvas)
+                            ),
+                        );
+                    }
+                }
+                files.push((path, filename));
+            }
+        }
     }
 
     /// The vertical canvas's problems: its own fields, then everything the
     /// setup it sees ([`Setup::for_canvas`]) adds to the main canvas's
     /// problems, under the vertical fields they come from (`vertical.width`,
     /// `vertical.recording.encoder`, `scenes[2].vertical.items[0].rect`…).
-    fn validate_vertical(&self, vertical: &VerticalCanvas, issues: &mut Issues) {
+    fn validate_vertical(&self, canvas: CanvasId, vertical: &VerticalCanvas, issues: &mut Issues) {
+        let field = self.canvas_field(canvas);
         if let Some(recording) = &vertical.recording {
             if !recording.audio.is_empty() {
                 issues.add(
-                    "vertical.recording.audio",
-                    "the vertical program has the main program's audio mix: both canvases \
+                    format!("{field}.recording.audio"),
+                    "this canvas's program has the main program's audio mix: both canvases \
                      share one mix, so leave this empty and list the audio sources in \
                      recording.program.audio",
                 );
             }
-            if recording.enabled
+            if canvas.is_vertical()
+                && recording.enabled
                 && self.recording.program.enabled
                 && recording.filename == self.recording.program.filename
             {
@@ -2544,7 +3052,7 @@ impl Setup {
                 );
             }
         }
-        let Some(setup) = self.for_canvas(CanvasId::Vertical) else {
+        let Some(setup) = self.for_canvas(canvas) else {
             return;
         };
         let main: HashSet<(String, String)> = issues
@@ -2553,14 +3061,17 @@ impl Setup {
             .map(|issue| (issue.path.clone(), issue.message.clone()))
             .collect();
         for mut issue in setup.validate() {
-            match self.vertical_path(vertical, &issue.path) {
+            match self.vertical_path(canvas, vertical, &issue.path) {
                 VerticalPath::Own(path) => issue.path = path,
                 VerticalPath::Main => continue,
                 VerticalPath::Shared => {
                     if main.contains(&(issue.path.clone(), issue.message.clone())) {
                         continue;
                     }
-                    issue.message = format!("on the vertical canvas: {}", issue.message);
+                    issue.message = match canvas {
+                        CanvasId::Vertical => format!("on the vertical canvas: {}", issue.message),
+                        other => format!("on canvas {other:?}: {}", issue.message),
+                    };
                 }
             }
             issues.0.push(issue);
@@ -2569,18 +3080,24 @@ impl Setup {
 
     /// Where a problem of the vertical canvas's setup (`path` in it) is in
     /// this setup.
-    fn vertical_path(&self, vertical: &VerticalCanvas, path: &str) -> VerticalPath {
+    fn vertical_path(
+        &self,
+        canvas: CanvasId,
+        vertical: &VerticalCanvas,
+        path: &str,
+    ) -> VerticalPath {
+        let field = self.canvas_field(canvas);
         let under = |field: &str| {
             path.strip_prefix(field)
                 .filter(|rest| rest.is_empty() || rest.starts_with(['.', '[']))
         };
         if let Some(rest) = under("canvas.width").or(under("canvas.height")) {
             let field = &path["canvas.".len()..path.len() - rest.len()];
-            return VerticalPath::Own(format!("vertical.{field}{rest}"));
+            return VerticalPath::Own(format!("{}.{field}{rest}", self.canvas_field(canvas)));
         }
         if let Some(rest) = under("canvas.fps") {
             return match vertical.fps {
-                Some(_) => VerticalPath::Own(format!("vertical.fps{rest}")),
+                Some(_) => VerticalPath::Own(format!("{field}.fps{rest}")),
                 // Inherited: the main canvas reports it.
                 None => VerticalPath::Main,
             };
@@ -2591,13 +3108,13 @@ impl Setup {
         }
         if let Some(rest) = under("recording.program") {
             return match vertical.recording {
-                Some(_) => VerticalPath::Own(format!("vertical.recording{rest}")),
+                Some(_) => VerticalPath::Own(format!("{field}.recording{rest}")),
                 // Disabled stand-in with the main encoder: nothing of its own.
                 None => VerticalPath::Main,
             };
         }
         if let Some(rest) = under("stream") {
-            return VerticalPath::Own(format!("vertical.stream{rest}"));
+            return VerticalPath::Own(format!("{field}.stream{rest}"));
         }
         if let Some(rest) = path.strip_prefix("keyframes[")
             && let Some((index, _)) = rest.split_once(']')
@@ -2612,10 +3129,14 @@ impl Setup {
         if let Some(rest) = path.strip_prefix("scenes[")
             && let Some((index, rest)) = rest.split_once(']')
             && let Some(scene) = index.parse::<usize>().ok().and_then(|i| self.scenes.get(i))
-            && scene.vertical.is_some()
+            && scene.arrangement(canvas).is_some()
             && (rest.is_empty() || rest.starts_with(".layout") || rest.starts_with(".items"))
         {
-            return VerticalPath::Own(format!("scenes[{index}].vertical{rest}"));
+            let arrangement = match canvas {
+                CanvasId::Vertical => "vertical".to_string(),
+                other => format!("canvases.{other}"),
+            };
+            return VerticalPath::Own(format!("scenes[{index}].{arrangement}{rest}"));
         }
         VerticalPath::Shared
     }

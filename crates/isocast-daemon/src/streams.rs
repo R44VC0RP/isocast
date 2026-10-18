@@ -59,48 +59,54 @@ fn invalid(message: impl Into<String>) -> RpcError {
     }
 }
 
-/// How a vertical destination's stream is keyed in the daemon's state.
-const VERTICAL_SLOT: &str = "vertical:";
-
-/// Where `canvas`'s destination `id` is kept in the daemon's state.
+/// Where `canvas`'s destination `id` is kept in the daemon's state: the
+/// id for the main canvas, `<canvas>:<id>` for the others (`vertical:…`;
+/// ids have no colons, so never a main one's).
 pub(crate) fn slot(canvas: CanvasId, id: &str) -> String {
     if canvas.is_main() {
         id.to_string()
     } else {
-        format!("{VERTICAL_SLOT}{id}")
+        format!("{canvas}:{id}")
     }
 }
 
 /// The canvas and destination id a state slot holds.
 pub(crate) fn slot_canvas(slot: &str) -> (CanvasId, &str) {
-    match slot.strip_prefix(VERTICAL_SLOT) {
-        Some(id) => (CanvasId::Vertical, id),
+    match slot
+        .split_once(':')
+        .and_then(|(canvas, id)| Some((CanvasId::parse(canvas).ok()?, id)))
+    {
+        Some((canvas, id)) => (canvas, id),
         None => (CanvasId::Main, slot),
     }
 }
 
-/// "the vertical canvas's " for `canvas` vertical, else nothing, before
-/// "stream".
-fn canvas_words(canvas: CanvasId) -> &'static str {
-    if canvas.is_main() { "" } else { "vertical " }
-}
-
-/// ` --canvas vertical` for commands about the vertical canvas.
-fn canvas_flag(canvas: CanvasId) -> &'static str {
-    if canvas.is_main() {
-        ""
-    } else {
-        " --canvas vertical"
+/// "vertical " for the vertical canvas, "canvas \"x\" " for another, else
+/// nothing, before "stream".
+fn canvas_words(canvas: CanvasId) -> String {
+    match canvas {
+        CanvasId::Main => String::new(),
+        CanvasId::Vertical => "vertical ".into(),
+        other => format!("{other} "),
     }
 }
 
-/// The live setup's stream settings for `canvas`: `[stream]`, or the
-/// vertical canvas's `[vertical.stream]`.
+/// ` --canvas <id>` for commands about a canvas other than the main one.
+fn canvas_flag(canvas: CanvasId) -> String {
+    if canvas.is_main() {
+        String::new()
+    } else {
+        format!(" --canvas {canvas}")
+    }
+}
+
+/// The live setup's stream settings for `canvas`: `[stream]`, the
+/// vertical canvas's `[vertical.stream]` or a `[[canvases]]` entry's.
 pub(crate) fn canvas_stream_settings(state: &State, canvas: CanvasId) -> Option<StreamSettings> {
     if canvas.is_main() {
         stream_settings(state)
     } else {
-        state.setup.as_ref()?.vertical.as_ref()?.stream.clone()
+        state.setup.as_ref()?.stream_of(canvas).cloned()
     }
 }
 
@@ -235,6 +241,19 @@ impl State {
         self.streams.iter().any(|(_, output)| output.is_active())
     }
 
+    /// A canvas other than the main one streams, the first such.
+    pub(crate) fn streaming_canvas(&self) -> Option<CanvasId> {
+        self.streams
+            .iter()
+            .find(|(key, output)| !slot_canvas(key).0.is_main() && output.is_active())
+            .map(|(key, _)| slot_canvas(key).0)
+    }
+
+    /// Any canvas other than the main one streams.
+    pub(crate) fn streaming_extra(&self) -> bool {
+        self.streaming_canvas().is_some()
+    }
+
     /// A stream of `canvas` is running (or reconnecting).
     pub(crate) fn streaming_on(&self, canvas: CanvasId) -> bool {
         self.streams
@@ -263,7 +282,7 @@ impl Daemon {
                      the key (`isocast stream key set`, or MCP's set_stream_key)",
                 ));
             }
-            None => return Err(no_vertical_stream(&state)),
+            None => return Err(no_vertical_stream(&state, canvas)),
         };
         let chosen = choose(&settings, canvas, &params.only)?;
         // This canvas's destinations already streaming, by id.
@@ -287,7 +306,10 @@ impl Daemon {
         let mut problems = Vec::new();
         for destination in &starting {
             if let Err(err) = destination.settings.server() {
-                let prefix = if canvas.is_main() { "" } else { "vertical." };
+                let prefix = match &state.setup {
+                    Some(setup) if !canvas.is_main() => format!("{}.", setup.canvas_field(canvas)),
+                    _ => String::new(),
+                };
                 problems.push(if destination.id == MAIN_DESTINATION {
                     format!("{prefix}{err}")
                 } else {
@@ -333,12 +355,19 @@ impl Daemon {
                 || reason.contains("scene worker has broken state")
             {
                 "restart the engine once recording and streaming stop"
-            } else {
+            } else if canvas.is_vertical() {
                 "after recording stops, turn the vertical canvas off and on again (Settings › Video, \
                  or apply {\"vertical\": null} and then its settings again), or restart the engine"
+            } else {
+                "after recording stops, turn the canvas off and on again (Settings › Canvases), \
+                 or restart the engine"
+            };
+            let whose = match canvas {
+                CanvasId::Vertical => "the vertical canvas".to_string(),
+                other => format!("canvas {other:?}"),
             };
             return Err(wrong(format!(
-                "the vertical canvas stopped ({reason}), so it can't stream; {recovery}"
+                "{whose} stopped ({reason}), so it can't stream; {recovery}"
             )));
         }
         let mut started = Vec::new();
@@ -393,21 +422,28 @@ impl Daemon {
         }
         // The main canvas's first, each canvas's main destination first, as
         // the setups list them.
-        let main_order = stream_settings(&state)
-            .map(|s| s.destination_ids())
-            .unwrap_or_default();
-        let vertical_order = canvas_stream_settings(&state, CanvasId::Vertical)
-            .map(|s| s.destination_ids())
-            .unwrap_or_default();
+        let canvases = state
+            .setup
+            .as_ref()
+            .map(|setup| setup.canvas_ids())
+            .unwrap_or_else(|| vec![CanvasId::Main]);
+        let orders: Vec<Vec<String>> = canvases
+            .iter()
+            .map(|&canvas| {
+                canvas_stream_settings(&state, canvas)
+                    .map(|s| s.destination_ids())
+                    .unwrap_or_default()
+            })
+            .collect();
         state.streams.sort_by_key(|(key, _)| {
             let (other, id) = slot_canvas(key);
-            let order = if other.is_main() {
-                &main_order
-            } else {
-                &vertical_order
-            };
+            let place = canvases
+                .iter()
+                .position(|c| *c == other)
+                .unwrap_or(usize::MAX);
+            let order = orders.get(place).map_or(&[][..], |o| &o[..]);
             (
-                !other.is_main(),
+                place,
                 order.iter().position(|o| o == id).unwrap_or(usize::MAX),
             )
         });
@@ -520,15 +556,19 @@ impl Daemon {
         {
             candidate.stream = None;
         }
-        if let Some(vertical) = candidate.vertical.as_mut() {
-            let size = (vertical.width, vertical.height);
-            if let Some(stream) = vertical.stream.as_mut() {
-                switch(stream, CanvasId::Vertical);
+        // Every other canvas (`[vertical]`, `[[canvases]]`, #84).
+        for other in setup.extra_canvas_ids() {
+            let Some(extra) = candidate.extra_canvas_mut(other) else {
+                continue;
+            };
+            let size = (extra.width, extra.height);
+            if let Some(stream) = extra.stream.as_mut() {
+                switch(stream, other);
                 let made = stream.encodes(size);
                 if made.is_empty() {
-                    vertical.stream = None;
+                    extra.stream = None;
                 }
-                encodes.extend(made.into_iter().map(|e| (CanvasId::Vertical, e)));
+                encodes.extend(made.into_iter().map(|e| (other, e)));
             }
         }
         if encodes.len() <= 1 {
@@ -541,6 +581,9 @@ impl Daemon {
             candidate.recording.iso.enabled = false;
             if let Some(vertical) = candidate.vertical.as_mut() {
                 vertical.recording = None;
+            }
+            for extra in &mut candidate.canvases {
+                extra.recording = None;
             }
         }
         let memory = capacity::memory_path(state.file.legacy());
@@ -563,7 +606,7 @@ impl Daemon {
             if other.is_main() {
                 id.to_string()
             } else {
-                format!("{id} (vertical)")
+                format!("{id} ({other})")
             }
         };
         let own: Vec<String> = encodes[1..]
@@ -576,10 +619,11 @@ impl Daemon {
         let one = own.len() <= 1;
         let flag = canvas_flag(canvas);
         Err(failed(format!(
-            "not streaming: {} {} an H.264 encoder of {} own, as {} canvas, bitrate or size \
-             differs from {}'s {}×{} at {} kb/s; with {} encodes at once{}, {}. Give {} the \
-             same video_bitrate_kbps and size to share one encoder (`isocast stream destination \
-             set ID{flag} --clear video_bitrate_kbps --clear size`), stop the other canvas's \
+            "not streaming: {} {} an H.264 encoder of {} own, as {} canvas, bitrate, size, \
+             rate control, keyframe interval or audio bitrate differs from {}'s {}×{} at {} kb/s; \
+             with {} encodes at once{}, {}. Give {} the same settings to share one encoder \
+             (`isocast stream destination set ID{flag} --clear video_bitrate_kbps --clear size \
+             --clear rate_control --clear keyframe_interval_seconds --clear audio_bitrate_kbps`), stop the other canvas's \
              streams, or start without {} (`isocast stream start{flag} --only …`)",
             if own.is_empty() {
                 "these destinations".to_string()
@@ -646,7 +690,7 @@ impl Daemon {
             // A contained canvas failure may have ended the stream since
             // the app's last status poll. Stop is already satisfied; keep
             // its failed status/reason visible rather than toasting an error.
-            if canvas == CanvasId::Vertical {
+            if !canvas.is_main() {
                 let destinations = canvas_statuses(&state, canvas);
                 if let Some(stream) = destinations
                     .iter()
@@ -687,10 +731,10 @@ impl Daemon {
                 match params.only.as_slice() {
                     [] => format!(
                         "not streaming{}",
-                        if canvas.is_main() {
-                            ""
-                        } else {
-                            " the vertical canvas"
+                        match canvas {
+                            CanvasId::Main => String::new(),
+                            CanvasId::Vertical => " the vertical canvas".into(),
+                            other => format!(" canvas {other:?}"),
                         }
                     ),
                     only => format!("not streaming {what}to {}", only.join(", ")),
@@ -888,6 +932,13 @@ impl Daemon {
                     stream.video_bitrate_kbps = kbps;
                 }
                 (stream.width, stream.height) = (params.width, params.height);
+                stream.rate_control = params.rate_control;
+                if let Some(seconds) = params.keyframe_interval_seconds {
+                    stream.keyframe_interval_seconds = seconds;
+                }
+                if let Some(kbps) = params.audio_bitrate_kbps {
+                    stream.audio_bitrate_kbps = kbps;
+                }
                 *section = Some(stream);
                 MAIN_DESTINATION.to_string()
             }
@@ -930,6 +981,9 @@ impl Daemon {
                     video_bitrate_kbps: params.video_bitrate_kbps,
                     width: params.width,
                     height: params.height,
+                    rate_control: params.rate_control,
+                    keyframe_interval_seconds: params.keyframe_interval_seconds,
+                    audio_bitrate_kbps: params.audio_bitrate_kbps,
                 });
                 id
             }
@@ -958,12 +1012,19 @@ impl Daemon {
                  stream destination set main --enabled false`), or remove the whole stream with \
                  the patch {\"stream\": null}"
                     .to_string()
-            } else {
+            } else if canvas.is_vertical() {
                 format!(
                     "id: \"main\" is the [vertical.stream] section itself; turn it off instead \
                      (`isocast stream destination set main{flag} --enabled false`), or remove \
                      the vertical canvas's whole stream with the patch \
                      {{\"vertical\": {{\"stream\": null}}}}"
+                )
+            } else {
+                format!(
+                    "id: \"main\" is {} itself; turn it off instead (`isocast stream \
+                     destination set main{flag} --enabled false`), or remove the canvas's whole \
+                     stream with `isocast canvas set {canvas} --no-stream`",
+                    section_name(canvas)
                 )
             }));
         }
@@ -1056,6 +1117,24 @@ impl Daemon {
             if params.width.is_some() || params.height.is_some() {
                 (stream.width, stream.height) = (params.width, params.height);
             }
+            if clears("rate_control") {
+                stream.rate_control = None;
+            }
+            if params.rate_control.is_some() {
+                stream.rate_control = params.rate_control;
+            }
+            if clears("keyframe_interval_seconds") {
+                stream.keyframe_interval_seconds = 2;
+            }
+            if let Some(seconds) = params.keyframe_interval_seconds {
+                stream.keyframe_interval_seconds = seconds;
+            }
+            if clears("audio_bitrate_kbps") {
+                stream.audio_bitrate_kbps = 160;
+            }
+            if let Some(kbps) = params.audio_bitrate_kbps {
+                stream.audio_bitrate_kbps = kbps;
+            }
         } else {
             let ids = stream.destination_ids();
             let Some(extra) = stream.destinations.iter_mut().find(|d| d.id == id) else {
@@ -1087,6 +1166,24 @@ impl Daemon {
             }
             if params.width.is_some() || params.height.is_some() {
                 (extra.width, extra.height) = (params.width, params.height);
+            }
+            if clears("rate_control") {
+                extra.rate_control = None;
+            }
+            if params.rate_control.is_some() {
+                extra.rate_control = params.rate_control;
+            }
+            if clears("keyframe_interval_seconds") {
+                extra.keyframe_interval_seconds = None;
+            }
+            if params.keyframe_interval_seconds.is_some() {
+                extra.keyframe_interval_seconds = params.keyframe_interval_seconds;
+            }
+            if clears("audio_bitrate_kbps") {
+                extra.audio_bitrate_kbps = None;
+            }
+            if params.audio_bitrate_kbps.is_some() {
+                extra.audio_bitrate_kbps = params.audio_bitrate_kbps;
             }
         }
         self.apply_destinations(revision, setup, canvas, Some(id))
@@ -1122,11 +1219,11 @@ impl Daemon {
 }
 
 /// How the setup names `canvas`'s stream section.
-fn section_name(canvas: CanvasId) -> &'static str {
-    if canvas.is_main() {
-        "[stream]"
-    } else {
-        "[vertical.stream]"
+fn section_name(canvas: CanvasId) -> String {
+    match canvas {
+        CanvasId::Main => "[stream]".into(),
+        CanvasId::Vertical => "[vertical.stream]".into(),
+        other => format!("canvas {other:?}'s stream"),
     }
 }
 
@@ -1139,9 +1236,21 @@ fn stream_section(
     if canvas.is_main() {
         return Ok(&mut setup.stream);
     }
-    match setup.vertical.as_mut() {
-        Some(vertical) => Ok(&mut vertical.stream),
-        None => Err(wrong(NO_VERTICAL)),
+    if !setup.has_canvas(canvas) {
+        return Err(wrong(no_canvas(setup, canvas)));
+    }
+    Ok(&mut setup.extra_canvas_mut(canvas).expect("checked").stream)
+}
+
+/// Why `canvas` can't do something: the live setup doesn't have it.
+pub(crate) fn no_canvas(setup: &isocast_protocol::Setup, canvas: CanvasId) -> String {
+    if canvas.is_vertical() {
+        NO_VERTICAL.to_string()
+    } else {
+        format!(
+            "{}; add it with `isocast canvas add {canvas}` (or MCP's canvas_add)",
+            setup.unknown_canvas("canvas", canvas)
+        )
     }
 }
 
@@ -1152,16 +1261,21 @@ pub(crate) const NO_VERTICAL: &str = "canvas: the live setup has no vertical can
 
 /// Why the vertical canvas can't stream: no `[vertical]`, or no
 /// `[vertical.stream]` in it.
-fn no_vertical_stream(state: &State) -> RpcError {
-    let has_vertical = state.setup.as_ref().is_some_and(|s| s.vertical.is_some());
-    if !has_vertical {
-        return wrong(NO_VERTICAL);
+fn no_vertical_stream(state: &State, canvas: CanvasId) -> RpcError {
+    if let Some(setup) = &state.setup
+        && !setup.has_canvas(canvas)
+    {
+        return wrong(no_canvas(setup, canvas));
     }
-    wrong(
-        "canvas: the vertical canvas has no stream; add one (`isocast stream destination add twitch \
-         --canvas vertical`, or MCP's stream_destination_add with canvas \"vertical\"), then \
-         set its key (`isocast stream key set --canvas vertical`)",
-    )
+    let whose = match canvas {
+        CanvasId::Vertical => "the vertical canvas".to_string(),
+        other => format!("canvas {other:?}"),
+    };
+    wrong(format!(
+        "canvas: {whose} has no stream; add one (`isocast stream destination add twitch \
+         --canvas {canvas}`, or MCP's stream_destination_add with canvas \"{canvas}\"), then \
+         set its key (`isocast stream key set --canvas {canvas}`)"
+    ))
 }
 
 /// `canvas`'s destinations streaming (or reconnecting), by id.
@@ -1244,9 +1358,10 @@ fn destination_key(destination: &Destination, canvas: CanvasId) -> Result<String
             destination.id
         )),
         Ok(None) => Err(format!(
-            "no stream key is set for the vertical canvas's destination {} ({}; its keys are \
+            "no stream key is set for the {} canvas's destination {} ({}; its keys are \
              its own, not the main canvas's); run `isocast stream key set{flag} --destination \
-             {}`, or MCP's set_stream_key with canvas \"vertical\"",
+             {}`, or MCP's set_stream_key with canvas \"{canvas}\"",
+            canvas,
             destination.id,
             destination.settings.service.id(),
             destination.id

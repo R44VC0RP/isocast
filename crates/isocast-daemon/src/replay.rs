@@ -6,6 +6,7 @@
 use super::*;
 use isocast_engine::replay::{OnChange as OnReplayChange, ReplayBuffer};
 use isocast_protocol::replay::{ReplaySaved, ReplayState, ReplayStatus};
+use std::collections::BTreeMap;
 
 fn wrong(message: impl Into<String>) -> RpcError {
     RpcError {
@@ -15,31 +16,46 @@ fn wrong(message: impl Into<String>) -> RpcError {
 }
 
 /// How messages name `canvas`'s buffer.
-fn what(canvas: CanvasId) -> &'static str {
+fn what(canvas: CanvasId) -> String {
     match canvas {
-        CanvasId::Main => "the replay buffer",
-        CanvasId::Vertical => "the vertical replay buffer",
+        CanvasId::Main => "the replay buffer".into(),
+        CanvasId::Vertical => "the vertical replay buffer".into(),
+        other => format!("canvas {other:?}'s replay buffer"),
     }
 }
 
 /// The CLI flag that picks `canvas`, and MCP's argument.
-fn flag(canvas: CanvasId) -> &'static str {
+fn flag(canvas: CanvasId) -> String {
     match canvas {
-        CanvasId::Main => "",
-        CanvasId::Vertical => " --canvas vertical",
+        CanvasId::Main => String::new(),
+        other => format!(" --canvas {other}"),
     }
 }
 
-fn mcp_arg(canvas: CanvasId) -> &'static str {
+fn mcp_arg(canvas: CanvasId) -> String {
     match canvas {
-        CanvasId::Main => "",
-        CanvasId::Vertical => " with canvas \"vertical\"",
+        CanvasId::Main => String::new(),
+        other => format!(" with canvas \"{other}\""),
     }
 }
 
-const NO_VERTICAL: &str = "canvas: the live setup has no vertical canvas; add one with the patch \
-     {\"vertical\": {}} (`isocast apply --patch`, or MCP's apply_change), then start its replay \
-     buffer";
+/// Why `canvas`'s buffer can't start: the live setup doesn't have it.
+fn no_canvas(setup: &Setup, canvas: CanvasId) -> String {
+    match canvas {
+        CanvasId::Vertical => "canvas: the live setup has no vertical canvas; add one with the \
+             patch {\"vertical\": {}} (`isocast apply --patch`, or MCP's apply_change), then \
+             start its replay buffer"
+            .into(),
+        other => setup.unknown_canvas("canvas", other),
+    }
+}
+
+/// An empty slot, for canvases whose buffer never ran.
+static NO_SLOT: ReplaySlot = ReplaySlot {
+    buffer: None,
+    starting: false,
+    drops_reported: 0,
+};
 
 /// One canvas's replay buffer: the running one, or the last (kept for its
 /// final status).
@@ -62,28 +78,29 @@ impl ReplaySlot {
 #[derive(Default)]
 pub(super) struct ReplayOutput {
     main: ReplaySlot,
-    vertical: ReplaySlot,
+    /// The other canvases' (`[vertical]`, `[[canvases]]`), by canvas.
+    extras: BTreeMap<CanvasId, ReplaySlot>,
 }
 
 impl ReplayOutput {
     fn slot(&self, canvas: CanvasId) -> &ReplaySlot {
         match canvas {
             CanvasId::Main => &self.main,
-            CanvasId::Vertical => &self.vertical,
+            other => self.extras.get(&other).unwrap_or(&NO_SLOT),
         }
     }
 
     fn slot_mut(&mut self, canvas: CanvasId) -> &mut ReplaySlot {
         match canvas {
             CanvasId::Main => &mut self.main,
-            CanvasId::Vertical => &mut self.vertical,
+            other => self.extras.entry(other).or_default(),
         }
     }
 
-    /// A buffer (of either canvas) keeps its program now (or is about to),
+    /// A buffer (of any canvas) keeps its program now (or is about to),
     /// so the engine is needed.
     pub(super) fn active(&self) -> bool {
-        self.main.active() || self.vertical.active()
+        self.main.active() || self.extras.values().any(ReplaySlot::active)
     }
 
     /// `canvas`'s buffer keeps its program now (or is about to).
@@ -94,8 +111,8 @@ impl ReplayOutput {
     /// How to stop the running buffers, for messages refusing something
     /// while they run.
     pub(super) fn stop_hint(&self) -> String {
-        let running: Vec<_> = [CanvasId::Main, CanvasId::Vertical]
-            .into_iter()
+        let running: Vec<_> = std::iter::once(CanvasId::Main)
+            .chain(self.extras.keys().copied())
             .filter(|&canvas| self.active_on(canvas))
             .collect();
         let cli: Vec<_> = running
@@ -132,9 +149,18 @@ impl ReplayOutput {
     /// The vertical canvas's buffer's status, while the setup has that
     /// canvas or its buffer ran.
     pub(super) fn vertical_status(&self, setup: Option<&Setup>) -> Option<ReplayStatus> {
-        let has_vertical = setup.is_some_and(|setup| setup.vertical.is_some());
-        (has_vertical || self.vertical.buffer.is_some())
-            .then(|| self.status_on(CanvasId::Vertical, setup))
+        self.canvas_status(CanvasId::Vertical, setup)
+    }
+
+    /// Extra canvas `canvas`'s buffer's status, while the setup has that
+    /// canvas or its buffer ran.
+    pub(super) fn canvas_status(
+        &self,
+        canvas: CanvasId,
+        setup: Option<&Setup>,
+    ) -> Option<ReplayStatus> {
+        let has = setup.is_some_and(|setup| setup.has_canvas(canvas));
+        (has || self.slot(canvas).buffer.is_some()).then(|| self.status_on(canvas, setup))
     }
 }
 
@@ -162,13 +188,10 @@ impl Daemon {
             if state.setup.is_none() {
                 return Err(state.no_setup("no program to keep"));
             }
-            if !canvas.is_main()
-                && state
-                    .setup
-                    .as_ref()
-                    .is_some_and(|setup| setup.vertical.is_none())
+            if let Some(setup) = state.setup.as_ref()
+                && !setup.has_canvas(canvas)
             {
-                return Err(wrong(NO_VERTICAL));
+                return Err(wrong(no_canvas(setup, canvas)));
             }
             if state.tuning {
                 return Err(wrong("wait for tune to finish"));
@@ -186,9 +209,9 @@ impl Daemon {
         };
         let stream = match canvas {
             CanvasId::Main => setup.stream.as_ref(),
-            CanvasId::Vertical => {
-                let Some(vertical) = &setup.vertical else {
-                    return Err(wrong(NO_VERTICAL));
+            other => {
+                let Some(vertical) = setup.extra_canvas(other) else {
+                    return Err(wrong(no_canvas(&setup, other)));
                 };
                 // A canvas whose compositor failed has no picture to keep.
                 // Checked under the lock that adds the buffer, so a
@@ -199,12 +222,15 @@ impl Daemon {
                     {
                         "restart the engine once recording and streaming stop"
                     } else {
-                        "after recording stops, turn the vertical canvas off and on again \
+                        "after recording stops, turn the canvas off and on again \
                          (Settings › Video), or restart the engine"
                     };
+                    let whose = match canvas {
+                        CanvasId::Vertical => "the vertical canvas".to_string(),
+                        other => format!("canvas {other:?}"),
+                    };
                     return Err(wrong(format!(
-                        "the vertical canvas stopped ({reason}), so its replay buffer can't \
-                         start; {recovery}"
+                        "{whose} stopped ({reason}), so its replay buffer can't start; {recovery}"
                     )));
                 }
                 vertical.stream.as_ref()
@@ -315,8 +341,8 @@ impl Daemon {
             "Replay {}{}",
             chrono::Local::now().format("%Y-%m-%d %H-%M-%S"),
             match canvas {
-                CanvasId::Main => "",
-                CanvasId::Vertical => " vertical",
+                CanvasId::Main => String::new(),
+                other => format!(" {other}"),
             }
         );
         let room = |bytes: u64| -> Result<()> {
@@ -358,7 +384,7 @@ impl Daemon {
             drop(state);
             let unaffected = match canvas {
                 CanvasId::Main => "The program, recordings and stream are unaffected",
-                CanvasId::Vertical => "The programs, recordings and streams are unaffected",
+                _ => "The programs, recordings and streams are unaffected",
             };
             self.publish(Event::Warning {
                 message: format!(

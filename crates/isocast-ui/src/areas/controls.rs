@@ -2817,6 +2817,56 @@ fn toggle_vertical_alongside(app: &Rc<App>, start: bool) {
     });
 }
 
+/// Start or stop the `[[canvases]]`' streams alongside the main one's
+/// (#84): on start, each canvas whose enabled destinations all have keys
+/// and none streams; on stop, each that streams. The vertical canvas has
+/// its own path (`toggle_vertical_alongside`).
+fn toggle_canvases_alongside(app: &Rc<App>, start: bool) {
+    let canvases: Vec<isocast_protocol::CanvasId> = app
+        .session
+        .borrow()
+        .canvases
+        .iter()
+        .filter(|c| !c.id.is_vertical())
+        .filter(|c| {
+            let active = c.streams.iter().any(StreamStatus::is_active);
+            let enabled: Vec<&StreamStatus> = c.streams.iter().filter(|x| x.enabled).collect();
+            if start {
+                !active
+                    && !enabled.is_empty()
+                    && enabled.iter().all(|x| x.key_set && x.key_problem.is_none())
+            } else {
+                active
+            }
+        })
+        .map(|c| c.id)
+        .collect();
+    for canvas in canvases {
+        let params = isocast_protocol::api::StreamStartParams {
+            canvas,
+            ..Default::default()
+        };
+        let method = if start {
+            Method::StreamStart(Some(params))
+        } else {
+            Method::StreamStop(Some(params))
+        };
+        app.call_as::<isocast_protocol::api::Streaming>(method, move |app, result| {
+            if let Err(error) = result {
+                app.failed(
+                    &if start {
+                        format!("Canvas {canvas} didn’t go live")
+                    } else {
+                        format!("Couldn’t stop canvas {canvas}’s stream")
+                    },
+                    &error,
+                );
+            }
+            app.refresh_status(true);
+        });
+    }
+}
+
 fn toggle_stream(app: &Rc<App>) {
     let (vertical_on, vertical_ready, vertical_problem) =
         vertical_stream_state(&app.session.borrow());
@@ -2847,6 +2897,8 @@ fn toggle_stream(app: &Rc<App>) {
         app.open_dialog("settings", &format!("stream:{missing}"));
         return;
     }
+    // The other canvases' streams go with the main one's (#84).
+    toggle_canvases_alongside(app, !on);
     // The vertical canvas's streams go with the main one's: started when
     // they are set up (else why not, with a way there), stopped with it.
     if on && vertical_on {

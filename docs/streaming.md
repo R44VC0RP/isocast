@@ -142,6 +142,59 @@ to Settings), and stops them with the main one's; the vertical monitor's
 menu starts or stops them alone. The status bar adds the vertical
 canvas's state (`vertical live for 00:12:34`, `vertical reconnecting`).
 
+## More canvases: a shape per platform (#84)
+
+Beside the main canvas and `[vertical]`, a setup can have up to seven
+more canvases (eight with the vertical one), each with its own id, size,
+frame rate, scene and destinations: 16:9 to Twitch from the main canvas,
+9:16 to YouTube Shorts and TikTok, 1:1 to a feed, at once.
+
+```toml
+[[canvases]]
+id = "shorts"
+name = "YouTube Shorts"
+width = 1080
+height = 1920
+fps = 60                 # the main canvas's if absent
+follow_main = true       # false: it switches its own scenes
+recording = {}           # record its program too ("{date} {time} shorts")
+
+[canvases.stream]
+service = "youtube"
+video_bitrate_kbps = 5000
+
+[[canvases.stream.destinations]]
+id = "tiktok"
+service = "custom"
+server = "rtmps://push.example/live"
+keyframe_interval_seconds = 1   # each destination may set its own
+audio_bitrate_kbps = 128        # rate_control, keyframes and audio too
+```
+
+A scene is drawn on a canvas by its arrangement for it,
+`[scenes.canvases.shorts]` (`layout`, `items` in that canvas's pixels),
+else the main picture letterboxed. Destinations of one canvas with the
+same format share one encoder. The CLI has `isocast canvas list|add|set|
+remove`, and every stream command takes `--canvas ID`; MCP has
+`canvas_add`, `canvas_set`, `canvas_remove` and `canvas` on the stream
+tools; Settings › Video › Canvases and Stream › Streams of do the same.
+Keys are each canvas's own (`canvas:<id>:<destination>:<account>`).
+obs-websocket's `GetCanvasList` lists every canvas. Aitum Vertical
+Canvas's vendor requests (`aitum-vertical-canvas`) answer in the plugin's
+shapes: `width`/`height` pick the first canvas of that size (none
+matching is `success: false`); `version`, `current_scene`, `get_scenes`,
+`status`, `start|stop|toggle_streaming`, `start|stop|save_backtrack`
+(that canvas's replay buffer), `update_stream_key` and
+`update_stream_server` (by destination `index`) work; `switch_scene`
+switches every canvas that picks its own scenes (one following the main
+scene keeps following it). A canvas isn't recorded, paused or given
+chapters on its own (the main recording takes every recorded canvas), so
+those requests and the virtual camera ones answer `success: false` with
+why.
+Importing an OBS profile brings Aitum Multistream's outputs (as
+destinations) and Vertical Canvas's canvases and outputs; their keys stay
+in OBS.
+
 ## Service presets
 
 Each preset fills in the service's documented ingest server, RTMPS where

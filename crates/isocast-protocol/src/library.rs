@@ -107,6 +107,10 @@ pub struct Collection {
     /// are the profile's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical: Option<CollectionVertical>,
+    /// More canvases (`[[canvases]]`, #84): each one's id, label, size and
+    /// whether it follows the main scene. Their outputs are the profile's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canvases: Vec<CollectionVertical>,
     #[serde(
         default,
         skip_serializing_if = "crate::virtual_camera::VirtualCameraSettings::is_default"
@@ -125,9 +129,15 @@ pub struct CollectionCanvas {
 
 /// The collection's part of the setup's `vertical`: its size, and whether
 /// it follows the main canvas's scene.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CollectionVertical {
+    /// The canvas's id (`[[canvases]]` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Display label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// An even number of pixels from 16 to 8192.
     #[serde(default = "default_vertical_width")]
     pub width: u32,
@@ -214,6 +224,10 @@ pub struct Profile {
     /// one: its frame rate, recording and stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical: Option<ProfileVertical>,
+    /// How the collection's `[[canvases]]` are put out, by id. An entry
+    /// whose canvas the collection doesn't have is kept, unused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub canvases: Vec<ProfileVertical>,
     #[serde(default, skip_serializing_if = "crate::hotkeys::Config::is_absent")]
     pub hotkeys: crate::hotkeys::Config,
     #[serde(
@@ -233,6 +247,9 @@ pub struct Profile {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileVertical {
+    /// The canvas's id (`[[canvases]]` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// Frames per second, from 1 to 240; the profile's `canvas.fps` if
     /// absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -358,6 +375,7 @@ impl Setup {
                         },
                 },
             vertical: collection_vertical,
+            canvases: collection_canvases,
         } = collection;
         let Profile {
             version: _,
@@ -388,33 +406,49 @@ impl Setup {
                 },
             stream,
             vertical: profile_vertical,
+            canvases: mut profile_canvases,
             hotkeys,
             developer,
             governor,
         } = profile;
         // The collection decides whether there is a vertical canvas; the
         // profile only says how it is put out.
-        let vertical = collection_vertical.map(
-            |CollectionVertical {
-                 width,
-                 height,
-                 follow_main,
-             }| {
-                let ProfileVertical {
-                    fps,
-                    recording,
-                    stream,
-                } = profile_vertical.unwrap_or_default();
-                VerticalCanvas {
-                    width,
-                    height,
-                    fps,
-                    follow_main,
-                    recording,
-                    stream,
-                }
-            },
-        );
+        let join = |CollectionVertical {
+                        id,
+                        name,
+                        width,
+                        height,
+                        follow_main,
+                    }: CollectionVertical,
+                    output: Option<ProfileVertical>| {
+            let ProfileVertical {
+                id: _,
+                fps,
+                recording,
+                stream,
+            } = output.unwrap_or_default();
+            VerticalCanvas {
+                id,
+                name,
+                width,
+                height,
+                fps,
+                follow_main,
+                recording,
+                stream,
+            }
+        };
+        let vertical = collection_vertical.map(|vertical| join(vertical, profile_vertical));
+        let canvases = collection_canvases
+            .into_iter()
+            .map(|canvas| {
+                let output = profile_canvases
+                    .iter()
+                    .position(|p| p.id.is_some() && p.id == canvas.id)
+                    .map(|i| profile_canvases.remove(i));
+                join(canvas, output)
+            })
+            .collect();
         Setup {
             virtual_camera,
             version,
@@ -450,6 +484,7 @@ impl Setup {
             },
             stream,
             vertical,
+            canvases,
             hotkeys,
             developer,
             governor,
@@ -498,33 +533,49 @@ impl Setup {
                 },
             stream,
             vertical,
+            canvases,
             hotkeys,
             developer,
             governor,
         } = self;
-        let (collection_vertical, profile_vertical) = match vertical {
-            Some(VerticalCanvas {
-                width,
-                height,
-                fps,
-                follow_main,
-                recording,
-                stream,
-            }) => (
-                Some(CollectionVertical {
+        let split = |VerticalCanvas {
+                         id,
+                         name,
+                         width,
+                         height,
+                         fps,
+                         follow_main,
+                         recording,
+                         stream,
+                     }: VerticalCanvas| {
+            (
+                CollectionVertical {
+                    id: id.clone(),
+                    name,
                     width,
                     height,
                     follow_main,
-                }),
-                Some(ProfileVertical {
+                },
+                ProfileVertical {
+                    id,
                     fps,
                     recording,
                     stream,
-                })
-                .filter(|vertical| !vertical.is_empty()),
-            ),
+                },
+            )
+        };
+        let (collection_vertical, profile_vertical) = match vertical.map(split) {
+            Some((collection, profile)) => {
+                (Some(collection), Some(profile).filter(|v| !v.is_empty()))
+            }
             None => (None, None),
         };
+        let (collection_canvases, profile_canvases): (Vec<_>, Vec<_>) =
+            canvases.into_iter().map(split).unzip();
+        let profile_canvases = profile_canvases
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .collect();
         let collection = Collection {
             virtual_camera,
             version,
@@ -545,6 +596,7 @@ impl Setup {
                 },
             },
             vertical: collection_vertical,
+            canvases: collection_canvases,
         };
         let profile = Profile {
             version,
@@ -572,6 +624,7 @@ impl Setup {
             },
             stream,
             vertical: profile_vertical,
+            canvases: profile_canvases,
             hotkeys,
             developer,
             governor,
@@ -591,6 +644,9 @@ const PROFILE_FIELDS: &[&str] = &[
     "vertical.fps",
     "vertical.recording",
     "vertical.stream",
+    "canvases[].fps",
+    "canvases[].recording",
+    "canvases[].stream",
     "recording.folder",
     "recording.keep_free_gb",
     "recording.replay",
@@ -609,6 +665,18 @@ const PROFILE_FIELDS: &[&str] = &[
 /// `recording.program.width` or `sources[0].id`) is kept in. None for
 /// `version`, which both have.
 pub fn part_of(path: &str) -> Option<LibraryKind> {
+    // `canvases[2].stream` is under `canvases[].stream`.
+    let normalized;
+    let path = match path
+        .strip_prefix("canvases[")
+        .and_then(|rest| rest.split_once(']'))
+    {
+        Some((_, rest)) => {
+            normalized = format!("canvases[]{rest}");
+            normalized.as_str()
+        }
+        None => path,
+    };
     let under = |field: &str| {
         path == field
             || path
@@ -639,12 +707,14 @@ impl Collection {
                 items: Vec::new(),
                 transition: None,
                 vertical: None,
+                canvases: Default::default(),
             }],
             keyframes: Vec::new(),
             // OBS's default transition.
             transition: Transition::fade(300),
             recording: CollectionRecording::default(),
             vertical: None,
+            canvases: Default::default(),
             virtual_camera: Default::default(),
         }
     }
@@ -678,6 +748,7 @@ impl Profile {
             },
             stream: None,
             vertical: None,
+            canvases: Default::default(),
             hotkeys: Default::default(),
             developer: Default::default(),
             governor: Default::default(),
@@ -998,7 +1069,24 @@ mod tests {
             stream: Some(
                 serde_json::from_value(serde_json::json!({"service": "youtube"})).unwrap(),
             ),
+            ..Default::default()
         });
+        // And a third canvas (#84), split by id the same way.
+        vertical.canvases.push(crate::VerticalCanvas {
+            name: Some("Square".into()),
+            width: 1080,
+            height: 1080,
+            stream: Some(serde_json::from_value(serde_json::json!({"service": "twitch"})).unwrap()),
+            ..crate::VerticalCanvas::with_id("square")
+        });
+        let items = vertical.scenes[0].items.clone();
+        vertical.scenes[0].canvases.insert(
+            "square".into(),
+            crate::SceneLayout {
+                layout: None,
+                items,
+            },
+        );
         vertical.scenes[0].vertical = Some(crate::SceneLayout {
             layout: None,
             items: vertical.scenes[0].items.clone(),

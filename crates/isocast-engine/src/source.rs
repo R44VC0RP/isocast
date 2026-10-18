@@ -45,7 +45,9 @@ pub(crate) struct Timeline {
     /// Source ids on air in the program and when each came on air; `None`
     /// when there is no program, so every source counts as on air from the
     /// start.
-    on_air: Mutex<Option<HashMap<String, (Time, u8)>>>,
+    on_air: Mutex<Option<HashMap<String, (Time, u64)>>>,
+    /// Which bit of an on-air entry each canvas has (#84), main first.
+    canvas_bits: Mutex<Vec<isocast_protocol::CanvasId>>,
     /// The program has said what it shows at least once.
     published: AtomicBool,
 }
@@ -90,9 +92,24 @@ impl Timeline {
             return;
         };
         let now: HashSet<&str> = sources.into_iter().collect();
-        let bit = match canvas {
-            isocast_protocol::CanvasId::Main => 1,
-            isocast_protocol::CanvasId::Vertical => 2,
+        let bit = {
+            let mut bits = self.canvas_bits.lock();
+            if bits.is_empty() {
+                bits.extend([
+                    isocast_protocol::CanvasId::Main,
+                    isocast_protocol::CanvasId::Vertical,
+                ]);
+            }
+            let index = match bits.iter().position(|c| *c == canvas) {
+                Some(index) => index,
+                None => {
+                    bits.push(canvas);
+                    bits.len() - 1
+                }
+            };
+            // An engine has at most 17 canvases in its life; past 64 they
+            // share the last bit, which only keeps a source on air longer.
+            1u64 << index.min(63)
         };
         on_air.retain(|id, (_, shown)| {
             if !now.contains(id.as_str()) {

@@ -402,6 +402,14 @@ struct StreamKeyToolParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct CanvasIdParams {
+    /// The canvas: "vertical" or a [[canvases]] id, from get_status's
+    /// canvases.
+    canvas: CanvasId,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct DestinationIdParams {
     /// The destination's id, from get_status's streams (or
     /// vertical_streams, with canvas "vertical").
@@ -1209,10 +1217,75 @@ impl Isocast {
     }
 
     #[tool(
+        description = "Add a canvas (#84) to stream or record another shape of the show at \
+                       once, like 9:16 for Shorts/TikTok beside a 16:9 main canvas: canvas \
+                       \"vertical\" turns on the [vertical] canvas, any other id adds a \
+                       [[canvases]] entry. Optional name, width/height (default 1080x1920), \
+                       fps (else main's), follow_main (default true: shows the main scene, \
+                       letterboxed unless a scene has an arrangement for it under \
+                       scenes[].canvases.<id>; false: it switches its own scenes with \
+                       switch_scene/preview/take and canvas), record. Then add its stream \
+                       destinations with stream_destination_add and canvas set to its id \
+                       (each destination its own key, bitrate, size, rate control, keyframes \
+                       and audio bitrate; equal ones share one encoder). Returns every canvas.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn canvas_add(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<isocast_protocol::api::CanvasParams>>,
+    ) -> Result<Json<isocast_protocol::api::Canvases>, String> {
+        self.call(Method::CanvasAdd(Box::new(params))).await
+    }
+
+    #[tool(
+        description = "Change a canvas (\"vertical\" or a [[canvases]] id): name, \
+                       width/height, fps, follow_main, record, or `clear` some of name, fps, \
+                       stream. Size and frame rate wait while it records or streams. Returns \
+                       every canvas.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn canvas_set(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<isocast_protocol::api::CanvasParams>>,
+    ) -> Result<Json<isocast_protocol::api::Canvases>, String> {
+        self.call(Method::CanvasSet(Box::new(params))).await
+    }
+
+    #[tool(
+        description = "Remove a canvas with its scene arrangements, recording and stream \
+                       destinations (not while it records or streams; its keys stay in the \
+                       Keychain). Returns every canvas left.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false
+        )
+    )]
+    async fn canvas_remove(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<CanvasIdParams>>,
+    ) -> Result<Json<isocast_protocol::api::Canvases>, String> {
+        self.call(Method::CanvasRemove {
+            canvas: params.canvas,
+        })
+        .await
+    }
+
+    #[tool(
         description = "Change a stream destination by id (main is the [stream] section): \
-                       service, server, enabled, video_bitrate_kbps, width/height, or `clear` \
-                       some of server, video_bitrate_kbps, size. Takes effect at its next \
-                       start. Returns every destination's status.",
+                       service, server, enabled, video_bitrate_kbps, width/height, \
+                       rate_control, keyframe_interval_seconds, audio_bitrate_kbps, or `clear` \
+                       some of those. With canvas, that canvas's destinations (vertical or a \
+                       [[canvases]] id). Takes effect at its next start. Returns every \
+                       destination's status.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,

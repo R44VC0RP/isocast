@@ -1145,6 +1145,7 @@ impl App {
                     }
                     if !s.busy_vertical_stream {
                         s.vertical_streams = status.vertical_streams.clone();
+                        s.canvases = status.canvases.clone();
                     }
                     if fresh {
                         s.vertical_scene = status.vertical_scene.clone();
@@ -1210,8 +1211,8 @@ impl App {
             let slot = match (studio, canvas) {
                 (true, CanvasId::Main) => &mut s.preview,
                 (false, CanvasId::Main) => &mut s.scene,
-                (true, CanvasId::Vertical) => &mut s.vertical_preview,
-                (false, CanvasId::Vertical) => &mut s.vertical_scene,
+                (true, _) => &mut s.vertical_preview,
+                (false, _) => &mut s.vertical_scene,
             };
             *slot = Some(id.to_string());
             (studio, canvas)
@@ -1258,7 +1259,7 @@ impl App {
                     let on_air = s.scene.replace(preview);
                     s.preview = on_air;
                 }
-                CanvasId::Vertical => {
+                _ => {
                     let on_air = s.vertical_scene.replace(preview);
                     s.vertical_preview = on_air;
                 }

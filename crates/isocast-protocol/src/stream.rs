@@ -73,8 +73,7 @@ pub const MAX_DESTINATIONS: usize = 8;
 
 /// Another place to stream the program to (see
 /// [`StreamSettings::destinations`]). What it doesn't set comes from the
-/// `[stream]` section: rate control, keyframes, audio and reconnecting
-/// always do.
+/// `[stream]` section; reconnecting always does.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StreamDestination {
@@ -96,6 +95,15 @@ pub struct StreamDestination {
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// Its own rate control; `[stream]`'s if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_control: Option<RateControl>,
+    /// Its own seconds between keyframes; `[stream]`'s if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyframe_interval_seconds: Option<u32>,
+    /// Its own AAC bitrate; `[stream]`'s if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_bitrate_kbps: Option<u32>,
 }
 
 /// A destination with everything it streams with filled in (see
@@ -118,6 +126,31 @@ pub struct StreamEncode {
     pub width: u32,
     pub height: u32,
     pub video_bitrate_kbps: u32,
+    /// The rest of what the encode makes, shared by its destinations.
+    pub rate_control: RateControl,
+    pub keyframe_interval_seconds: u32,
+    pub audio_bitrate_kbps: u32,
+}
+
+impl StreamEncode {
+    /// Whether `other` makes the same stream (its destinations aside).
+    pub fn same_format(&self, other: &StreamEncode) -> bool {
+        (
+            self.width,
+            self.height,
+            self.video_bitrate_kbps,
+            self.rate_control,
+            self.keyframe_interval_seconds,
+            self.audio_bitrate_kbps,
+        ) == (
+            other.width,
+            other.height,
+            other.video_bitrate_kbps,
+            other.rate_control,
+            other.keyframe_interval_seconds,
+            other.audio_bitrate_kbps,
+        )
+    }
 }
 
 fn is_true(value: &bool) -> bool {
@@ -294,6 +327,11 @@ impl StreamSettings {
                 service: extra.service,
                 server: extra.server.clone(),
                 video_bitrate_kbps: extra.video_bitrate_kbps.unwrap_or(base.video_bitrate_kbps),
+                rate_control: extra.rate_control.or(base.rate_control),
+                keyframe_interval_seconds: extra
+                    .keyframe_interval_seconds
+                    .unwrap_or(base.keyframe_interval_seconds),
+                audio_bitrate_kbps: extra.audio_bitrate_kbps.unwrap_or(base.audio_bitrate_kbps),
                 ..base.clone()
             };
             if extra.width.is_some() || extra.height.is_some() {
@@ -315,24 +353,27 @@ impl StreamSettings {
     }
 
     /// The H.264 encodes the enabled destinations need: those sending the
-    /// same size at the same video bitrate share one (everything else
-    /// they encode with is the main destination's), the main one's
-    /// first.
+    /// same size with the same encoder settings (video bitrate, rate
+    /// control, keyframes, audio bitrate) share one, the main one's first.
     pub fn encodes(&self, canvas: (u32, u32)) -> Vec<StreamEncode> {
         let mut out: Vec<StreamEncode> = Vec::new();
         for destination in self.resolve().into_iter().filter(|d| d.enabled) {
-            let (width, height) = destination.settings.output_size(canvas);
-            let kbps = destination.settings.video_bitrate_kbps;
-            match out
-                .iter_mut()
-                .find(|e| (e.width, e.height, e.video_bitrate_kbps) == (width, height, kbps))
-            {
+            let settings = &destination.settings;
+            let (width, height) = settings.output_size(canvas);
+            let wanted = StreamEncode {
+                ids: Vec::new(),
+                width,
+                height,
+                video_bitrate_kbps: settings.video_bitrate_kbps,
+                rate_control: settings.rate_control(),
+                keyframe_interval_seconds: settings.keyframe_interval_seconds,
+                audio_bitrate_kbps: settings.audio_bitrate_kbps,
+            };
+            match out.iter_mut().find(|e| e.same_format(&wanted)) {
                 Some(encode) => encode.ids.push(destination.id),
                 None => out.push(StreamEncode {
                     ids: vec![destination.id],
-                    width,
-                    height,
-                    video_bitrate_kbps: kbps,
+                    ..wanted
                 }),
             }
         }
@@ -477,6 +518,26 @@ impl StreamSettings {
             if let Some(kbps) = extra.video_bitrate_kbps {
                 check_video_bitrate(&path, kbps, issues);
             }
+            if let Some(seconds) = extra.keyframe_interval_seconds
+                && !(1..=10).contains(&seconds)
+            {
+                issues.add(
+                    format!("{path}.keyframe_interval_seconds"),
+                    format!("{seconds} is outside 1 to 10 seconds; services ask for 2"),
+                );
+            }
+            if let Some(kbps) = extra.audio_bitrate_kbps
+                && !AUDIO_BITRATES.contains(&kbps)
+            {
+                let options: Vec<String> = AUDIO_BITRATES.iter().map(u32::to_string).collect();
+                issues.add(
+                    format!("{path}.audio_bitrate_kbps"),
+                    format!(
+                        "{kbps} is not an AAC bitrate this encoder offers; use one of {}",
+                        options.join(", ")
+                    ),
+                );
+            }
         }
     }
 
@@ -606,7 +667,7 @@ pub fn canvas_key_account(
         return destination_key_account(id, service, server);
     }
     let base = key_account(service, server);
-    format!("canvas:vertical:{id}:{base}")
+    format!("canvas:{canvas}:{id}:{base}")
 }
 
 /// A size sent, given as `{prefix}.width` and `.height`.

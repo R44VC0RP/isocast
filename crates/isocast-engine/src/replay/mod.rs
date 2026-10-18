@@ -91,7 +91,7 @@ pub fn canvas_encoder_spec<P: Platform>(
     let setup = engine
         .setup()
         .for_canvas(canvas)
-        .context("vertical: canvas is not enabled")?;
+        .with_context(|| crate::record::canvas_off(canvas))?;
     let (width, height) = setup.recording.program.size(&setup.canvas);
     Ok(own_spec(settings, width, height, setup.canvas.fps))
 }
@@ -518,8 +518,8 @@ impl ReplayBuffer {
         loop {
             if shared.subscription.lock().is_none() {
                 let flag = match shared.status.lock().canvas {
-                    CanvasId::Main => "",
-                    CanvasId::Vertical => " --canvas vertical",
+                    CanvasId::Main => String::new(),
+                    other => format!(" --canvas {other}"),
                 };
                 bail!("the replay buffer is stopped; start it with `isocast replay start{flag}`");
             }

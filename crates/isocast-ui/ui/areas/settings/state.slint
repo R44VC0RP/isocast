@@ -7,7 +7,7 @@
 // `set-number` or `set-flag` with the field's name (settings.rs maps the
 // names to the setup). Apply (or OK) sends what changed as one patch.
 
-import { DropdownOption, NavTab } from "../../kit.slint";
+import { DropdownOption, NavTab, Segment } from "../../kit.slint";
 
 // A streaming service to choose (Stream, before streaming is set up).
 export struct ServiceChoice {
@@ -166,6 +166,9 @@ export global SettingsArea {
     // the choice shows only with a vertical canvas.
     in-out property <string> stream-canvas: "main";
     in-out property <bool> stream-canvas-choice;
+    // Every canvas whose streams the Stream page can show (#84): main,
+    // vertical and the setup's [[canvases]].
+    in-out property <[Segment]> stream-canvas-options: [{ value: "main", label: "Main Canvas" }, { value: "vertical", label: "Vertical Canvas" }];
     in-out property <bool> has-stream;
     in-out property <[ServiceChoice]> services;
     // Custom and Kick need a server first: which one is asking ("" for
@@ -285,6 +288,16 @@ export global SettingsArea {
     in-out property <float> vertical-height: 1920;
     in-out property <bool> vertical-follow: true;
     in-out property <bool> vertical-record;
+    // Canvases besides the main one (#84): the vertical canvas and the
+    // setup's [[canvases]], as rows (id, label, summary). `edit-canvas` is
+    // the open one (its id; "" for none); the vertical-* fields above are
+    // its.
+    in-out property <[DropdownOption]> canvas-rows;
+    in-out property <string> edit-canvas;
+    in-out property <string> canvas-fps: "main";
+    in-out property <[DropdownOption]> canvas-fps-options;
+    in-out property <[DropdownOption]> canvas-presets;
+
     // Recording now: scene linking keeps until it stops (#96).
     in-out property <bool> recording;
 

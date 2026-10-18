@@ -331,6 +331,11 @@ struct Draft {
     /// vertical canvas's `[vertical.stream]` (its own destinations and
     /// Keychain keys).
     canvas: CanvasId,
+    /// The canvas besides the main one Video › Canvases edits (#84), if
+    /// one was picked; else the first.
+    edit_canvas: Option<CanvasId>,
+    /// Every canvas row is closed (its open one was clicked).
+    canvas_closed: bool,
     applying: bool,
     /// Why the daemon refused the last Apply/OK ("" if it didn't).
     refused: String,
@@ -694,7 +699,7 @@ impl Area for Settings {
                 ..Draft::default()
             });
         }
-        if canvas == CanvasId::Vertical
+        if !canvas.is_main()
             && let Some(d) = self.draft.borrow_mut().as_mut()
         {
             d.canvas = canvas;
@@ -914,12 +919,71 @@ impl Settings {
             "destination_size" => {
                 return self.change_destination(app, json!({"width": null, "height": null}));
             }
-            "stream_canvas" => {
-                let canvas = if value == "vertical" {
-                    CanvasId::Vertical
-                } else {
-                    CanvasId::Main
+            "canvas_pick" => {
+                if let Some(d) = self.draft.borrow_mut().as_mut() {
+                    // "" closes the open one.
+                    d.edit_canvas = CanvasId::parse(value).ok();
+                    d.canvas_closed = d.edit_canvas.is_none();
+                }
+                return self.show(app);
+            }
+            "canvas_add" => {
+                let Some((patch, canvas)) = self.add_canvas(value) else {
+                    return;
                 };
+                if let Some(d) = self.draft.borrow_mut().as_mut() {
+                    d.edit_canvas = Some(canvas);
+                    d.canvas_closed = false;
+                }
+                patch
+            }
+            "canvas_remove" => {
+                let Ok(canvas) = CanvasId::parse(value) else {
+                    return;
+                };
+                if canvas.is_vertical() {
+                    return self.set_flag(app, "vertical", false);
+                }
+                // Never drops scenes' own layouts for it (the setup would
+                // refuse that): say which.
+                let own: Vec<String> = app
+                    .session
+                    .borrow()
+                    .setup
+                    .as_ref()
+                    .map(|setup| {
+                        setup
+                            .scenes
+                            .iter()
+                            .filter(|scene| scene.arrangement(canvas).is_some())
+                            .map(|scene| format!("“{}”", crate::model::scene_name(scene)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !own.is_empty() {
+                    if let Some(d) = self.draft.borrow_mut().as_mut() {
+                        d.refused = format!(
+                            "The canvas stays: {} {} a layout of {} own for it. Remove it with \
+                             `isocast canvas remove {canvas}`, which removes those too.",
+                            own.join(", "),
+                            if own.len() == 1 { "has" } else { "have" },
+                            if own.len() == 1 { "its" } else { "their" },
+                        );
+                    }
+                    return self.show(app);
+                }
+                if let Some(d) = self.draft.borrow_mut().as_mut() {
+                    d.refused.clear();
+                    d.edit_canvas = None;
+                }
+                json!({"canvases": [{"id": canvas.as_str(), "remove": true}]})
+            }
+            "canvas_fps" => {
+                let fps = value.parse::<u32>().ok().map_or(Value::Null, Value::from);
+                self.edit_patch(json!({"fps": fps}))
+            }
+            "stream_canvas" => {
+                let canvas = CanvasId::parse(value).unwrap_or(CanvasId::Main);
                 if let Some(d) = self.draft.borrow_mut().as_mut()
                     && d.canvas != canvas
                 {
@@ -1025,8 +1089,8 @@ impl Settings {
             }
             "canvas_width" => json!({"canvas": {"width": whole}}),
             "canvas_height" => json!({"canvas": {"height": whole}}),
-            "vertical_width" => json!({"vertical": {"width": whole}}),
-            "vertical_height" => json!({"vertical": {"height": whole}}),
+            "vertical_width" => self.edit_patch(json!({"width": whole})),
+            "vertical_height" => self.edit_patch(json!({"height": whole})),
             "reconnect_delay" => json!({"stream": {"reconnect": {"delay_seconds": whole}}}),
             "reconnect_retries" => json!({"stream": {"reconnect": {"max_retries": whole}}}),
             _ => return,
@@ -1039,10 +1103,7 @@ impl Settings {
             "snapping" => return self.set_prefs(app, |p| p.snapping = on),
             "auto_updates" => return self.set_prefs(app, |p| p.auto_updates = on),
             // Turn off streaming (the shown canvas's).
-            "stream" if !on => match self.stream_canvas() {
-                CanvasId::Main => json!({"stream": null}),
-                CanvasId::Vertical => json!({"vertical": {"stream": null}}),
-            },
+            "stream" if !on => self.stream_patch(Value::Null),
             "program" => json!({"recording": {"program": {"enabled": on}}}),
             "iso" => json!({"recording": {"iso": {"enabled": on}}}),
             "iso_filtered" => json!({"recording": {"iso": {"filtered": on}}}),
@@ -1113,9 +1174,22 @@ impl Settings {
                 }
                 json!({"vertical": null})
             }
-            "vertical_follow" => json!({"vertical": {"follow_main": on}}),
+            "vertical_follow" => self.edit_patch(json!({"follow_main": on})),
             // Kept when off, with its file name and encoder.
-            "vertical_record" => json!({"vertical": {"recording": {"enabled": on}}}),
+            "vertical_record" => {
+                let canvas = self.edit_canvas();
+                let filename = isocast_protocol::canvas_filename(canvas);
+                let has = self
+                    .draft
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|d| draft_canvas(&d.draft, canvas)["recording"].is_object());
+                if has || canvas.is_vertical() {
+                    self.edit_patch(json!({"recording": {"enabled": on}}))
+                } else {
+                    self.edit_patch(json!({"recording": {"enabled": on, "filename": filename}}))
+                }
+            }
             // Back on: the hours it had (a custom `auto_off_hours` too).
             "developer_auto_off" => json!({"developer": {"auto_off_hours": if on {
                 self.auto_off_hours()
@@ -1212,12 +1286,81 @@ impl Settings {
 
     /// The canvas whose streams Stream shows: the vertical one only while
     /// the draft has a vertical canvas.
+    /// The canvas Video › Canvases edits: the one picked, if the draft has
+    /// it, else the first extra canvas (main if there is none).
+    fn edit_canvas(&self) -> CanvasId {
+        let guard = self.draft.borrow();
+        let Some(d) = guard.as_ref() else {
+            return CanvasId::Main;
+        };
+        d.edit_canvas
+            .filter(|c| draft_canvas(&d.draft, *c).is_object())
+            .or_else(|| {
+                draft_canvases(&d.draft)
+                    .first()
+                    .and_then(|(id, _)| CanvasId::parse(id).ok())
+            })
+            .unwrap_or(CanvasId::Main)
+    }
+
+    /// A patch making `change` to the edited canvas.
+    fn edit_patch(&self, change: Value) -> Value {
+        let canvas = self.edit_canvas();
+        if canvas.is_main() {
+            return json!({});
+        }
+        canvas_patch(&Value::Null, canvas, change)
+    }
+
+    /// The patch adding a canvas of preset `preset` (`WxH`), and its id:
+    /// the vertical canvas for the first upright one, else a
+    /// `[[canvases]]` entry named after its shape.
+    fn add_canvas(&self, preset: &str) -> Option<(Value, CanvasId)> {
+        let (w, h) = preset.split_once('x')?;
+        let (width, height): (u32, u32) = (w.parse().ok()?, h.parse().ok()?);
+        let guard = self.draft.borrow();
+        let draft = &guard.as_ref()?.draft;
+        if height > width && !draft["vertical"].is_object() {
+            let saved = guard.as_ref()?.base["vertical"].clone();
+            let mut vertical = if saved.is_object() {
+                saved
+            } else {
+                json!({"follow_main": true})
+            };
+            vertical["width"] = width.into();
+            vertical["height"] = height.into();
+            return Some((json!({"vertical": vertical}), CanvasId::Vertical));
+        }
+        let (base, name) = match (width, height) {
+            (w, h) if w == h => ("square", "Square"),
+            (w, h) if h > w && h * 4 == w * 5 => ("portrait", "Portrait 4:5"),
+            (w, h) if h > w => ("shorts", "Vertical"),
+            _ => ("landscape", "Landscape"),
+        };
+        let taken: Vec<String> = draft_canvases(draft)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let id = (1..)
+            .map(|n| {
+                if n == 1 {
+                    base.to_string()
+                } else {
+                    format!("{base}-{n}")
+                }
+            })
+            .find(|id| !taken.contains(id))?;
+        let canvas = CanvasId::parse(&id).ok()?;
+        Some((
+            json!({"canvases": [{"id": id, "name": name, "width": width, "height": height}]}),
+            canvas,
+        ))
+    }
+
     fn stream_canvas(&self) -> CanvasId {
         let guard = self.draft.borrow();
         match guard.as_ref() {
-            Some(d) if d.canvas == CanvasId::Vertical && d.draft["vertical"].is_object() => {
-                CanvasId::Vertical
-            }
+            Some(d) if draft_canvas(&d.draft, d.canvas).is_object() => d.canvas,
             _ => CanvasId::Main,
         }
     }
@@ -1225,20 +1368,29 @@ impl Settings {
     /// A merge patch setting `fields` in the shown canvas's stream
     /// settings: `[stream]` or `[vertical.stream]`.
     fn stream_patch(&self, fields: Value) -> Value {
-        match self.stream_canvas() {
-            CanvasId::Main => json!({ "stream": fields }),
-            CanvasId::Vertical => json!({ "vertical": { "stream": fields } }),
+        let canvas = self.stream_canvas();
+        if canvas.is_main() {
+            return json!({ "stream": fields });
         }
+        let guard = self.draft.borrow();
+        let draft = guard.as_ref().map_or(&Value::Null, |d| &d.draft);
+        canvas_patch(draft, canvas, json!({ "stream": fields }))
     }
 
     /// The shown canvas's stream settings in the draft, at `path`.
     fn stream_value(&self, path: &[&str]) -> Option<Value> {
-        let mut full: Vec<&str> = match self.stream_canvas() {
-            CanvasId::Main => vec!["stream"],
-            CanvasId::Vertical => vec!["vertical", "stream"],
+        let canvas = self.stream_canvas();
+        let guard = self.draft.borrow();
+        let draft = &guard.as_ref()?.draft;
+        let mut at = if canvas.is_main() {
+            &draft["stream"]
+        } else {
+            &draft_canvas(draft, canvas)["stream"]
         };
-        full.extend_from_slice(path);
-        self.draft_value(&full)
+        for key in path {
+            at = at.get(key)?;
+        }
+        (!at.is_null()).then(|| at.clone())
     }
 
     /// The open destination, as the draft has it: `[stream]` itself for
@@ -1638,36 +1790,50 @@ impl Settings {
         // Stream: the destinations, and the open one's service, server
         // and key (#73), of the canvas chosen (#96).
         let has_vertical = draft["vertical"].is_object();
-        let canvas = if d.canvas == CanvasId::Vertical && has_vertical {
-            CanvasId::Vertical
+        let canvas = if draft_canvas(draft, d.canvas).is_object() {
+            d.canvas
         } else {
             CanvasId::Main
         };
-        area.set_stream_canvas_choice(has_vertical);
-        area.set_stream_canvas(
-            match canvas {
-                CanvasId::Main => "main",
-                CanvasId::Vertical => "vertical",
-            }
-            .into(),
-        );
-        let stream = match canvas {
-            CanvasId::Main => &draft["stream"],
-            CanvasId::Vertical => &draft["vertical"]["stream"],
+        // Every canvas besides the main one (#84), for the Streams of
+        // choice.
+        let extras = draft_canvases(draft);
+        area.set_stream_canvas_choice(has_vertical || !extras.is_empty());
+        area.set_stream_canvas(canvas.as_str().into());
+        area.set_stream_canvas_options(slint::ModelRc::new(slint::VecModel::from(
+            std::iter::once(("main".to_string(), "Main Canvas".to_string()))
+                .chain(extras.iter().cloned())
+                .map(|(id, label)| crate::Segment {
+                    value: id.into(),
+                    label: label.into(),
+                    disabled: false,
+                })
+                .collect::<Vec<_>>(),
+        )));
+        let stream = if canvas.is_main() {
+            &draft["stream"]
+        } else {
+            &draft_canvas(draft, canvas)["stream"]
         };
         let has_stream = stream.is_object();
+        let canvas_streams: Vec<StreamStatus> = s
+            .canvases
+            .iter()
+            .find(|c| c.id == canvas)
+            .map(|c| c.streams.clone())
+            .unwrap_or_default();
         let statuses = match canvas {
             CanvasId::Main => &s.streams,
             CanvasId::Vertical => &s.vertical_streams,
+            _ => &canvas_streams,
         };
         // The canvas's stream as one: its main destination's status.
         let summary = match canvas {
             CanvasId::Main => s.stream.as_ref(),
-            CanvasId::Vertical => s
-                .vertical_streams
+            _ => statuses
                 .iter()
                 .find(|x| x.id == MAIN_DESTINATION)
-                .or(s.vertical_streams.first()),
+                .or(statuses.first()),
         };
         let open_id = {
             let known = stream["destinations"]
@@ -1766,7 +1932,7 @@ impl Settings {
                     StreamState::Live | StreamState::Connecting | StreamState::Reconnecting
                 )
             }),
-            CanvasId::Vertical => s.vertical_streams.iter().any(StreamStatus::is_active),
+            _ => statuses.iter().any(StreamStatus::is_active),
         });
         let preset = preset_server(&service);
         area.set_service(service.as_str().into());
@@ -1970,7 +2136,73 @@ impl Settings {
             kit::option(&f, &f, "")
         })));
         area.set_fps(fps.to_string().into());
-        let vertical = &draft["vertical"];
+        // Canvases (#84): every one besides main, the edited one's
+        // settings in the vertical-* fields.
+        let extras = draft_canvases(draft);
+        let edit = d
+            .edit_canvas
+            .filter(|c| draft_canvas(draft, *c).is_object())
+            .or_else(|| extras.first().and_then(|(id, _)| CanvasId::parse(id).ok()))
+            .filter(|_| !d.canvas_closed);
+        let main_fps = draft["canvas"]["fps"].as_u64().unwrap_or(30);
+        area.set_canvas_rows(model(extras.iter().map(|(id, label)| {
+            let c = CanvasId::parse(id)
+                .map(|c| draft_canvas(draft, c).clone())
+                .unwrap_or_default();
+            let fps = c["fps"].as_u64().unwrap_or(main_fps);
+            let mut detail = format!(
+                "{}×{} · {fps} fps · {}",
+                c["width"].as_u64().unwrap_or(1080),
+                c["height"].as_u64().unwrap_or(1920),
+                if c["follow_main"].as_bool() == Some(false) {
+                    "own scenes"
+                } else {
+                    "main scenes"
+                }
+            );
+            if c["recording"].is_object() && c["recording"]["enabled"].as_bool() != Some(false) {
+                detail.push_str(" · recorded");
+            }
+            let streams = c["stream"]["destinations"].as_array().map_or(0, Vec::len)
+                + usize::from(c["stream"].is_object());
+            if streams > 0 {
+                detail.push_str(&format!(
+                    " · {streams} stream{}",
+                    if streams == 1 { "" } else { "s" }
+                ));
+            }
+            kit::option(id, label, &detail)
+        })));
+        area.set_edit_canvas(edit.map_or("".into(), |c| c.as_str().into()));
+        let vertical = edit.map_or(&Value::Null, |c| draft_canvas(draft, c));
+        area.set_canvas_fps(
+            vertical["fps"]
+                .as_u64()
+                .map_or("main".to_string(), |f| f.to_string())
+                .into(),
+        );
+        area.set_canvas_fps_options(model(
+            std::iter::once(kit::option("main", &format!("Main ({main_fps})"), "")).chain(
+                [24u32, 25, 30, 50, 60].iter().map(|f| {
+                    let f = f.to_string();
+                    kit::option(&f, &f, "")
+                }),
+            ),
+        ));
+        area.set_canvas_presets(model(
+            [
+                (
+                    "1080x1920",
+                    "9:16 Vertical",
+                    "1080×1920 · Shorts, Reels, TikTok",
+                ),
+                ("1080x1080", "1:1 Square", "1080×1080"),
+                ("1080x1350", "4:5 Portrait", "1080×1350 · feeds"),
+                ("1280x720", "16:9 Landscape", "1280×720"),
+            ]
+            .iter()
+            .map(|(v, l, d)| kit::option(v, l, d)),
+        ));
         area.set_vertical_on(vertical.is_object());
         area.set_vertical_width(vertical["width"].as_u64().unwrap_or(1080) as f32);
         area.set_vertical_height(vertical["height"].as_u64().unwrap_or(1920) as f32);
@@ -2540,6 +2772,12 @@ fn pick(setup: &Value) -> Value {
     if setup["vertical"].is_object() {
         out["vertical"] = setup["vertical"].clone();
     }
+    // More canvases (#84), as a list (empty without any).
+    out["canvases"] = if setup["canvases"].is_array() {
+        setup["canvases"].clone()
+    } else {
+        json!([])
+    };
     // Automatic quality (Advanced, T.2); absent at its default.
     if setup["governor"].is_object() {
         out["governor"] = setup["governor"].clone();
@@ -2597,6 +2835,15 @@ fn object_patch(from: &Value, to: &Value) -> Map<String, Value> {
         }
     }
     for (key, value) in to {
+        // `[[canvases]]` (#84): the daemon merges it by id, so each entry
+        // changed, added or removed (`{"id": …, "remove": true}`).
+        if key == "canvases" {
+            let list = canvases_patch(from.get(key).unwrap_or(&Value::Null), value);
+            if !list.is_empty() {
+                out.insert(key.clone(), Value::Array(list));
+            }
+            continue;
+        }
         match from.get(key) {
             Some(old) if old.is_object() && value.is_object() => {
                 let inner = object_patch(old, value);
@@ -2608,6 +2855,32 @@ fn object_patch(from: &Value, to: &Value) -> Map<String, Value> {
                 out.insert(key.clone(), value.clone());
             }
             _ => {}
+        }
+    }
+    out
+}
+
+/// The `canvases` list patch turning `from` into `to`, entry by id.
+fn canvases_patch(from: &Value, to: &Value) -> Vec<Value> {
+    let empty = Vec::new();
+    let from = from.as_array().unwrap_or(&empty);
+    let to = to.as_array().unwrap_or(&empty);
+    let mut out = Vec::new();
+    for old in from {
+        if !to.iter().any(|new| new["id"] == old["id"]) {
+            out.push(json!({ "id": old["id"], "remove": true }));
+        }
+    }
+    for new in to {
+        match from.iter().find(|old| old["id"] == new["id"]) {
+            Some(old) => {
+                let mut inner = object_patch(old, new);
+                if !inner.is_empty() {
+                    inner.insert("id".into(), new["id"].clone());
+                    out.push(Value::Object(inner));
+                }
+            }
+            None => out.push(new.clone()),
         }
     }
     out
@@ -2808,4 +3081,46 @@ fn service_label(service: &str) -> &'static str {
         "custom" => "Custom server",
         _ => "Stream",
     }
+}
+
+/// Extra canvas `canvas`'s settings in a setup draft: `vertical`, or its
+/// `canvases` entry (#84); null if the draft hasn't it (or it is main).
+fn draft_canvas(draft: &Value, canvas: CanvasId) -> &Value {
+    match canvas {
+        CanvasId::Main => &Value::Null,
+        CanvasId::Vertical => &draft["vertical"],
+        other => draft["canvases"]
+            .as_array()
+            .and_then(|list| list.iter().find(|c| c["id"] == other.as_str()))
+            .unwrap_or(&Value::Null),
+    }
+}
+
+/// Every extra canvas in a draft, `(id, label)`: the vertical one first.
+fn draft_canvases(draft: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if draft["vertical"].is_object() {
+        out.push(("vertical".to_string(), "Vertical Canvas".to_string()));
+    }
+    for canvas in draft["canvases"].as_array().into_iter().flatten() {
+        if let Some(id) = canvas["id"].as_str() {
+            let label = canvas["name"].as_str().unwrap_or(id).to_string();
+            out.push((id.to_string(), label));
+        }
+    }
+    out
+}
+
+/// A merge patch making `change` to extra canvas `canvas`'s settings:
+/// under `vertical`, or its `canvases` entry (the daemon merges that list
+/// by id).
+fn canvas_patch(_draft: &Value, canvas: CanvasId, change: Value) -> Value {
+    if canvas.is_vertical() {
+        return json!({ "vertical": change });
+    }
+    let mut entry = change;
+    if let Some(object) = entry.as_object_mut() {
+        object.insert("id".into(), canvas.as_str().into());
+    }
+    json!({ "canvases": [entry] })
 }

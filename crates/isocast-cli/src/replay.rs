@@ -54,10 +54,11 @@ impl CanvasArg {
 }
 
 /// How messages name `canvas`'s buffer.
-fn what(canvas: CanvasId) -> &'static str {
+fn what(canvas: CanvasId) -> String {
     match canvas {
-        CanvasId::Main => "the replay buffer",
-        CanvasId::Vertical => "the vertical replay buffer",
+        CanvasId::Main => "the replay buffer".into(),
+        CanvasId::Vertical => "the vertical replay buffer".into(),
+        other => format!("canvas {other:?}'s replay buffer"),
     }
 }
 
@@ -170,10 +171,11 @@ pub fn print(status: &ReplayStatus) {
 }
 
 /// "Vertical " before the vertical canvas's buffer's lines.
-fn label(canvas: CanvasId) -> &'static str {
+fn label(canvas: CanvasId) -> String {
     match canvas {
-        CanvasId::Main => "",
-        CanvasId::Vertical => "Vertical ",
+        CanvasId::Main => String::new(),
+        CanvasId::Vertical => "Vertical ".into(),
+        other => format!("Canvas {other:?} "),
     }
 }
 
