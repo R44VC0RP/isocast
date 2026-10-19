@@ -5,6 +5,51 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-18 (Windows GUI, live-qualified): `scripts/windows-gui.sh --host
+  vm|desk COMMAND` runs in the interactive desktop, not SSH session 0.
+  Per-call UUID tasks/folders live under `C:\isocast-dev\scratch\windows-gui`;
+  a separate worker timeout plus SYSTEM watchdog cover UIA hangs/SSH loss.
+  A hidden-at-creation WScript launcher and CreateNoWindow worker are necessary:
+  PowerShell's own `-WindowStyle Hidden` briefly stole focus and broke Ctrl+A
+  between calls. Compressed stdin frames avoid observed large-frame stalls;
+  raw asynchronous pipe reads time out after 30s even before task registration
+  (withheld-input probe exited in 33.74s including SSH startup). No passwords
+  are used by GUI calls. Launch uses the running Explorer desktop dispatch,
+  not in-process Shell.Application, so installers outlive the helper and use
+  the user's TEMP. Close sends WM_CLOSE only to titled windows, not Slint's
+  untitled message-pump HWNDs; it reports a request, not process termination.
+  `tree` reports sparse trees, omits password values, caps at 2000 nodes and
+  accepts depth 0..20. PNGs use real DPI-aware pixels and stay outside Git under
+  scratch. Window PrintWindow can be blank for GPU-only surfaces; full virtual
+  desktop screenshots are VM-only. Isocast previews can contain private content.
+  Desk requires 120s idle even for reads; own input resets this gate too.
+  Foreground changes fail closed; no ALT-tap focus workaround. Desk was active
+  (2s), so its read-only listing/refusal checks were skipped without force.
+  VM .802 installer, named Install/Finish clicks, explicit Isocast launch,
+  window/full screenshots (inspected), 125-node tree, UIA Invoke, pixel/double
+  click, Ctrl+A + exact typed field value, scroll, window/process/text waits,
+  timeout, concurrent readers and graceful window close all passed. Final
+  normal/error checks: zero GUI tasks and per-call directories. Evidence and
+  screenshots: `/Volumes/IsocastBuild/windows-gui/scratch/REPORT.md`.
+
+- 2026-10-18 (Windows VM desktop baseline, Ryan approved):
+  `scripts/windows-vm.sh ensure-desktop` starts the guest, configures packager
+  autologon once through LsaStorePrivateData, disables that user's screensaver
+  and workstation locking. If configuration or a missing/locked desktop needs
+  a restart, it refuses unless `--restart` is explicitly supplied (make sure
+  other lanes are not using the VM). It then waits for real Explorer in
+  session 1. Credential stays in the guest's LSA secret; never a plaintext
+  Winlogon DefaultPassword value. Repeats do not rotate/retrieve the password;
+  first setup refuses an already-installed Isocast account. Do not reuse the
+  old plaintext-registry autologon preparation. `up` remains start-only.
+  Replacement offline `clean` (72dfd346-3473-4238-9a33-94d7f772897e) derives
+  from the old clean, not the packaging test state: no Isocast, no Inno,
+  no cached answer XML, same SSH public host key and standard/non-admin
+  packager. Only desktop/account configuration and first-logon OS state changed.
+  Original clean is `clean-prev` (0bb765b6-b101-464d-b403-88c217311467).
+  Prior installed state is preserved separately as `windows-gui-before-desktop`
+  (dffa9c8f-57b3-4925-88c7-d3411d63b6d9); no checkpoint was deleted.
+
 - 2026-10-18 (#105, REVIEW-W6 B1): NVENC now retains attempted source leases
   before its private GPU copy, including failed mapping. Four preallocated
   EVENT queries prove completion before release/reuse; unprovable copies retain
