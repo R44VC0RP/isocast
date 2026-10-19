@@ -37,6 +37,9 @@ if [ "$keep" = 1 ]; then
 else
     steps='sh "$ISOCAST_SCRATCH/docs-shots/remote.sh" all'
 fi
+# SHOTS_PREBUILT=1 uses the binaries already pushed (scripts/testmac.sh push)
+# instead of building the app on the test Mac.
+[ -n "${SHOTS_PREBUILT:-}" ] && steps="export SHOTS_PREBUILT=1; $steps"
 "$here/scripts/testmac.sh" gui "$steps"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/isocast-shots.XXXXXX")"

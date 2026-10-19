@@ -5,15 +5,14 @@ be on the API, the CLI and MCP, as well as in the app.
 
 ## Next
 
-- **Steadier under heavy load.** An engine hardening pass (frame pools,
-  locks that can't poison, a lock-free monitor, writers that drain on
-  errors), one GPU device per process, and a stream that starts without
-  drops on a busy Mac.
+- **Windows.** Recording already works end to end in testing: screen,
+  camera and microphone to the program and ISO files, with previews,
+  crash-safe files and an installer with signed updates. Next: streaming,
+  media playback, a faster start, the matched OBS comparison and an alpha.
 - **Faster.** More rounds of [benchmarks against OBS](benchmarks.md) and
   the fixes they point to.
-- **0.0.5 follow-ups.** Fixes for [plugins](plugins.md),
-  [streaming](streaming.md), the [virtual camera](virtual-camera.md),
-  developer mode and automatic updates.
+- **Follow-ups** for canvases (a separate audio mix per canvas, importing
+  OBS 31 canvases), masks and automatic quality.
 
 ## Ideas
 
@@ -24,12 +23,9 @@ be on the API, the CLI and MCP, as well as in the app.
 - [Scenes as code](scenes-as-code.md): keyframes, shaders, TSX and live
   data; WGSL shader filters and WebAssembly sources for
   [plugins](plugins.md).
-- A second (vertical) canvas for shorts.
-- Projectors and a multiview grid, themes.
-- Later: SRT and WHIP streaming, NDI, Syphon, Audio Unit plugins, Windows.
+- Later: SRT and WHIP streaming, NDI, Syphon, Audio Unit plugins, Linux.
 
-Shipped in 0.0.5: OBS import and Optimize on first launch, the replay
-buffer, the virtual camera in the app, ISO capacity warnings, crash-safe
-takes on by default, the editor window, obs-websocket v5, several stream
-destinations at once, per-ISO audio, per-app audio and VP8 stingers. See
-the [README](../README.md#features).
+Shipped in 0.0.8: a canvas for every destination, advanced masks,
+automatic quality and recording targets. Earlier: projectors and
+multiview, the vertical canvas, the editor, OBS import, the replay buffer,
+the virtual camera and obs-websocket. See the [README](../README.md#features).

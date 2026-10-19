@@ -7,8 +7,15 @@ while [ ! -e "$S/demo.done" ] && [ $waited -lt 60 ]; do sleep 1; waited=$((waite
 log "the CLI demo ran (${waited}s)"
 sleep 3
 
+# The status output has outgrown 32 rows (the machine profile, the project and
+# next-recording lines): a taller window for this one shot shows the marker
+# above it, then the window goes back to the size the Screen scene shows.
+frame Terminal 32 60 896 620 cli.command
+sleep 2
 front Terminal cli.command
 grab cli Terminal cli.command
+frame Terminal 32 60 896 504 cli.command
+sleep 2
 
 # The replay buffer running beside the take (its button lit).
 "$isocast" replay start >/dev/null || log "couldn't start the replay buffer"

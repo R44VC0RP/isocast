@@ -58,7 +58,9 @@ in Rust, MIT or Apache 2.0.
 | Per-app audio | Yes (macOS 14.2+) | Yes |
 | Plugins | Early ([process plugins, WebAssembly audio filters](docs/plugins.md)); no OBS plugins | Large ecosystem |
 | Projectors and multiview | Yes | Yes |
-| Vertical (9:16) canvas alongside the main one | Built in | Third-party plugin (Aitum Vertical) |
+| Extra canvases (9:16, square…), each with its own scenes and destinations | Built in | Third-party plugins (Aitum Vertical, Multistream) |
+| Shape, gradient and video masks | Built in | Third-party plugin (Advanced Masks) |
+| Adjusts quality live when the machine falls behind | Built in (never the recording) | No |
 | Track record | New, in alpha | Years of polish |
 
 OBS is the better choice today if you need Windows or Linux, a specific
@@ -76,7 +78,7 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 
 ## Features
 
-**In Isocast 0.0.7 (the current download):**
+**In Isocast 0.0.8 (the current download):**
 
 - Scenes and sources: screens, windows, cameras, microphones, desktop
   audio, one app's audio or everything but some apps (macOS 14.2+),
@@ -109,10 +111,15 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 - **Projectors and multiview:** the program, preview, any scene or any
   source full screen on another display or in a window, and an OBS-style
   multiview with tally (red program, green preview).
-- **Vertical canvas:** a second 9:16 canvas with its own layouts of the
-  same sources, recorded and streamed alongside the main one, following
-  the main canvas's scenes or switching on its own, with its own replay
-  buffer and virtual camera.
+- **A canvas for every destination:** up to eight canvases besides the
+  main one (a 9:16 vertical, a square, a story), each with its own size,
+  frame rate, scene layouts, recording and stream destinations, so 16:9
+  goes to Twitch while 9:16 goes to Shorts. Each has its own replay buffer,
+  virtual camera, projectors and multiview tiles.
+- **Advanced masks:** shape masks (rounded rectangle, circle, polygon,
+  star, heart) with soft edges and handles on the picture, gradient masks,
+  and source masks that use any source or scene, a video included, as a
+  live mask. They stack and animate.
 - Audio interfaces: pick a microphone source's inputs (one input records
   as centred mono at full level) and a Mono switch per source. Interfaces
   with more than two inputs record inputs 1 + 2 by default.
@@ -126,7 +133,13 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
   Starting a stream during a recording no longer drops ISO frames.
 - First launch finds your OBS scene collections and offers to import them,
   then **Optimize** picks settings this Mac can keep up with, for
-  recording, streaming or both.
+  recording, streaming or both, from a measured profile of this Mac.
+- **Automatic quality:** while you record or stream, a governor steps down
+  streams, previews and extra canvases when the Mac falls behind and back
+  up when it recovers, never your program or ISO files. Settings you pin
+  stay put.
+- **Recording targets:** next to Record, choose whether a recording starts
+  a new project or adds a take to the current timeline.
 - obs-websocket v5 compatibility (`isocast websocket enable`), so OBS
   remotes, Touch Portal, community Stream Deck plugins and obs-websocket
   scripts (obs-cmd, obsws-python) can drive Isocast.
@@ -139,14 +152,10 @@ Synthetic sources, not real capture: see [docs/benchmarks.md](docs/benchmarks.md
 
 **Coming next** (not in a release yet; see [coming soon](docs/coming.md)):
 
-- **Isocast tunes itself to your Mac:** a measured machine profile and a
-  live governor that keeps the recording and stream clean on slower or
-  busy machines.
-- **Clear recording targets:** choose next to Record whether a recording
-  starts a new project or adds a take to an existing one.
-- **Windows:** in progress (capture, NVENC and the crash-safe writer
-  already run natively).
-- Later ideas: per-destination canvases, running real OBS plugins in a
+- **Windows:** recording works end to end in testing (screen, camera and
+  microphone to the program and ISO files, with previews); streaming,
+  media playback and an installer release come next.
+- Later ideas: running real OBS plugins in a
   helper process, Elgato Stream Deck's own protocol, shader filters and
   WebAssembly sources.
 
@@ -172,6 +181,23 @@ with a red tally on what's on air and green on what's next.
 
 ![The main window with the Screen scene in its 16:9 monitor and, to its right, the Vertical monitor showing the same scene arranged at 1080×1920: the terminal on top, the landscape photo below it and the lower-third title over the photo](docs/images/vertical.png)
 
+**More canvases, one per platform.** Beyond the vertical one, add canvases
+for Shorts, a square feed or anything else, each with its own size, frame
+rate, scenes and stream destinations. The canvas monitor's menu switches
+between them, and Settings › Video › Canvases sets them up.
+
+![The main window with the Screen scene in its 16:9 monitor and, at the right, the canvas monitor labelled YouTube Shorts with its menu open: the YouTube Shorts and Feed canvases, Show Canvas Monitor, Edit Main Canvas, Edit YouTube Shorts Canvas, Record, Set Up Stream, Replay Buffer and Canvas Settings for the canvas](docs/images/canvases-menu.png)
+
+![Settings, Video page, Canvases: the YouTube Shorts canvas opened at 1080×1920 and 60 fps with Follow Main Scenes on, Record This Canvas and Remove, a Feed canvas at 1080×1080 and 30 fps below it, and Add a Canvas with a shape to choose](docs/images/canvases-settings.png)
+
+**Masks.** Show a source inside a shape (a circle, star, heart, polygon or
+rounded rectangle) with handles on the picture to move, size and turn it,
+or let another source's live picture, such as a video, decide what shows.
+
+![The Filters dialog for the Host picture with a circle shape mask: its box with move, size and rotate handles over the picture, and below it the Shape, X, Y, Width, Height, Rotation, Combine and Feather fields](docs/images/masks-shape.png)
+
+![The Filters dialog for the Reveal picture with a source mask: its Mask source is a looping video called swirl, the channel is Luminance, and Combine and Fit are set below](docs/images/masks-source.png)
+
 **Edit every angle.** The editor window shows a track per ISO source
 under the program; trim, split, pick the angle for each stretch, crop it
 (9:16 too) and export.
@@ -194,6 +220,15 @@ keep up with.
 ![The first-launch sheet, Bring your scenes from OBS: three OBS scene collections found on this Mac, each with its profile's size, frame rate, codec and stream settings, ready to import](docs/images/obs-import.png)
 
 ![Optimize summary, ready to apply: 1440p60, HEVC High, 3 ISO files, stepped down to fit a base M2, with each change from the current setup](docs/images/optimize.png)
+
+**Tuned to your Mac.** Isocast measures this Mac once, quietly, and
+Optimize uses that machine profile to choose settings it can keep up with.
+While you record or stream, **Automatic Quality** lowers only what you
+allow (the preview's refresh, the vertical canvas's frame rate, a stream's
+bitrate) when this Mac falls behind, says why in Settings, and puts it all
+back once the load passes.
+
+![Settings, Advanced page, Automatic Quality: Now: GPU pressure, preview limited to 30 fps, then the switches Adjust Automatically, Keep Preview Refresh and Allow ISO Frame Thinning](docs/images/governor.png)
 
 **Script it.** The `isocast` command drives the same engine as the app.
 

@@ -10050,6 +10050,20 @@ each section. Delete entries that stop being true.
   message that indexes a list raises IndexError on success: build it only
   when failing.
 
+- 2026-10-18 (README 0.0.8, #122): README shots retaken from a 0.0.8
+  build (main 7df7983b, version bumped only in the build copy) on m2-b with
+  `SHOTS_PREBUILT=1` (take.sh/remote.sh bundle the pushed isocast-ui
+  instead of building on the Mac), after `scripts/testmac.sh push`. remote.sh
+  runs `machine calibrate` before the take so status shows a profile; the
+  CLI shot uses a 620 pt tall Terminal (status outgrew 32 rows), put back to
+  504 pt for the Screen scene. New shots (masks, canvases, Automatic Quality)
+  were driven by hand with cua-driver drags (a 1 px drag is the click) and
+  `isocast apply --patch`; governor.png needs real load (16 busy loops, 6
+  recorded 4K canvases on an M2 → "preview limited to 30 fps"). Offscreen
+  (snapshot.sh, 0.0.8 binaries): editor, stream (with canvases/destinations
+  in a scratch offscreen.toml), optimize (measured on m2-b after calibrate;
+  `tune` needed CYCLE 8 for the 0.0.8 frame budget: "could not draw
+  benchmark frames" with 16, see Questions). obs-import is unchanged.
 - 2026-10-18 (#124 follow-up): windows-remote.sh refuses to sync a src
   folder with files it didn't put there; a run once left
   `src\Microsoft\Windows\PowerShell\ModuleAnalysisCache` in our lane's

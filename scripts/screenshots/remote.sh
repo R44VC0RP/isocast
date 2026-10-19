@@ -162,8 +162,20 @@ for w in json.load(sys.stdin)["windows"]:
     # The isolated engine with the screenshot setup.
     "$isocast" apply --revision 0 "$E/setup.toml" >/dev/null || return 1
     "$isocast" engine start >/dev/null || return 1
+    # The silent machine self-test (#110), so Optimize and the status show a
+    # measured profile; a recording would refuse it, so it runs before the take.
+    "$isocast" machine calibrate >/dev/null 2>&1 || log "couldn't start the machine self-test"
+    waited=0
+    while [ $waited -lt 60 ] && ! "$isocast" machine show 2>/dev/null | grep -q calibrated; do sleep 2; waited=$((waited + 2)); done
+    log "machine profile after ${waited}s: $("$isocast" machine show 2>&1 | head -1)"
     touch "$S/demo.go"
     # The app, as a bundle so macOS calls it Isocast.
+    # SHOTS_PREBUILT=1: the pushed isocast-ui is bundled as it is (a no-op
+    # cargo first on PATH), instead of a build of more than 10 minutes here.
+    if [ -n "${SHOTS_PREBUILT:-}" ]; then
+        mkdir -p "$S/nocargo" && printf '#!/bin/sh\nexit 0\n' >"$S/nocargo/cargo" && chmod +x "$S/nocargo/cargo"
+        PATH="$S/nocargo:$PATH"
+    fi
     ISOCAST_UI_APP="$app" sh scripts/ui-dev.sh --release >/dev/null 2>&1 || {
         log "ui-dev.sh failed"; return 1; }
     env ISOCAST_SOCKET="$ISOCAST_SOCKET" "$app/Contents/MacOS/isocast-ui" >"$S/app.log" 2>&1 &
