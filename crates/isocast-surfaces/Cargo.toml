@@ -16,6 +16,17 @@ anyhow = "1.0.104"
 # Pinned like the engine's: textures are wrapped through wgpu-hal.
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "metal", "wgsl"], optional = true }
 
+[target.'cfg(windows)'.dependencies]
+isocast-ipc = { path = "../isocast-ipc" }
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Security",
+    "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Threading",
+    "Win32_System_Performance", "Win32_System_RemoteDesktop",
+] }
+wgpu = { version = "=30.0.1", default-features = false, features = ["dx12"], optional = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 mach2 = "0.6.0"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFNumber", "CFString"] }

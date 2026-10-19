@@ -62,7 +62,7 @@ impl MenuBuilder {
 
     /// The last item's shortcut, shown on the right ("⌘C").
     pub fn hint(self, hint: &str) -> Self {
-        self.with(|e| e.hint = hint.into())
+        self.with(|e| e.hint = crate::keys::ui_shortcut(hint).into())
     }
 
     /// The last item's icon, by name ("camera": `Icons.named` in

@@ -89,6 +89,34 @@ pub fn connect() -> anyhow::Result<Client> {
     }
 }
 
+/// Start the preview's existing engine path while the window opens its GPU.
+/// The short-lived subscription is deliberately not an `engine` hold: it
+/// cannot leave capture pinned if the app exits or window creation fails.
+#[cfg(windows)]
+pub fn prewarm_preview() {
+    let _ = thread::Builder::new()
+        .name("preview preparation".into())
+        .spawn(|| {
+            let result = connect().and_then(|client| {
+                client.shared_frames(isocast_protocol::api::SharedFramesParams {
+                    target: "program".into(),
+                    max_width: Some(1),
+                    max_height: Some(1),
+                    fps: Some(1),
+                    slots: Some(2),
+                    filtered: false,
+                })
+            });
+            // No pixels are fetched or read. Dropping the stream closes its
+            // pipe; normal preview subscribers take over, or the engine idles.
+            if let Err(error) = result {
+                isocast_diagnostics::diagnostic!("debug";
+                    "preview preparation: {error:#}"
+                );
+            }
+        });
+}
+
 pub fn start(deliver: impl Fn(Update) + Send + Clone + 'static) -> Sender<Request> {
     let (tx, rx) = channel();
     let worker_deliver = deliver.clone();

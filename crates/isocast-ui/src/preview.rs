@@ -386,8 +386,14 @@ impl Preview {
                 canvas.set_waiting(waiting);
                 canvas.set_picture_error(error.into());
             }
-            Role::Program => canvas.set_program_waiting(waiting),
-            Role::Extra => canvas.set_extra_waiting(waiting),
+            Role::Program => {
+                canvas.set_program_waiting(waiting);
+                canvas.set_program_error("".into());
+            }
+            Role::Extra => {
+                canvas.set_extra_waiting(waiting);
+                canvas.set_extra_error("".into());
+            }
         }
     }
 
@@ -442,6 +448,24 @@ impl Preview {
             self.set_waiting(&app, false, &format!("No picture: {why}"));
         }
         self.stats.last_lost = Some(why);
+    }
+
+    /// This engine can't share its pictures here: say so plainly on the
+    /// monitor, once, instead of a broken picture (it isn't asked again
+    /// until the target changes).
+    pub fn unavailable(&mut self) {
+        self.lost("preview not available".into());
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        let text = "Preview not available\nThis engine can’t show its picture here. Recording \
+                    and streaming aren’t affected.";
+        let canvas = app.global::<CanvasArea>();
+        match self.role {
+            Role::Editor => canvas.set_picture_error(text.into()),
+            Role::Program => canvas.set_program_error(text.into()),
+            Role::Extra => canvas.set_extra_error(text.into()),
+        }
     }
 
     /// The items' boxes (by path) in scene `scene` at setup `revision`:
@@ -645,10 +669,12 @@ impl Preview {
         if self.check && self.role == Role::Editor {
             self.check_frame(&app, &frame, rect.map(|b| b.rect));
         }
+        if !self.put(&app, Some(&frame), rect) {
+            return;
+        }
         if self.showing.is_none() {
             self.set_waiting(&app, false, "");
         }
-        self.put(&app, Some(&frame), rect);
         self.stats.shown += 1;
         let now = crate::clock::now();
         if let Some(last) = self.last_shown_at.replace(now) {
@@ -657,7 +683,12 @@ impl Preview {
         self.previous = self.showing.replace(frame);
     }
 
-    fn put(&mut self, app: &AppWindow, frame: Option<&SharedFrame>, rect: Option<BoxShape>) {
+    fn put(
+        &mut self,
+        app: &AppWindow,
+        frame: Option<&SharedFrame>,
+        rect: Option<BoxShape>,
+    ) -> bool {
         match &self.output {
             #[cfg(target_os = "macos")]
             Output::Layers(layers) => {
@@ -672,7 +703,7 @@ impl Preview {
             Output::Image(device) => {
                 let canvas = app.global::<CanvasArea>();
                 if let Some(frame) = frame {
-                    let key = frame.slot();
+                    let key = frame.cache_key();
                     if !self.images.contains_key(&key) {
                         // A new ring: the old one's images go.
                         self.images
@@ -688,7 +719,7 @@ impl Preview {
                                 isocast_diagnostics::diagnostic!("warn";
                                     "preview: can't show a shared frame: {error:#}"
                                 );
-                                return;
+                                return false;
                             }
                         }
                     }
@@ -714,6 +745,7 @@ impl Preview {
                 }
             }
         }
+        true
     }
 
     /// `--check`: read the frame's surface (a few rows and a grid) for a

@@ -63,12 +63,30 @@ pub fn run(options: Options) -> Result<ExitCode> {
         slots: options.slots,
         filtered: options.filtered,
     };
-    let mut frames = Client::connect_or_launch()?.shared_frames(params)?;
+    let client = Client::connect_or_launch()?;
+    #[cfg(windows)]
+    let client = {
+        let mut client = client;
+        if options.check {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::DX12,
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+            // Pin the process-wide selection before Gpu::new (or its cache)
+            // is used. Query on this connection before it becomes a stream.
+            isocast_client::shared::adapter(&mut client, &instance)?;
+        }
+        client
+    };
+    let mut frames = client.shared_frames(params)?;
     let gpu = if options.check {
         Some(Gpu::new().context("this process could not open the GPU to read frames back")?)
     } else {
         None
     };
+    if let Some(gpu) = &gpu {
+        isocast_client::shared::register_gpu(&gpu.device, &gpu.queue)?;
+    }
     let started = Instant::now();
     let length = Duration::try_from_secs_f64(options.seconds.max(0.0)).unwrap_or(Duration::ZERO);
     let mut stats = Stats::default();

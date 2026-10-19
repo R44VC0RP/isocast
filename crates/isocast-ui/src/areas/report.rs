@@ -428,7 +428,10 @@ fn issue_url(
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let attach = format!("Attach {zip} here (Isocast showed it in the Finder).");
+    let attach = format!(
+        "Attach {zip} here (Isocast showed it in the {}).",
+        isocast_protocol::platform_text::FILE_MANAGER
+    );
     let mut fields = vec![
         ("template", "bug_report.yml".to_string()),
         ("labels", "bug".to_string()),

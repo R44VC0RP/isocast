@@ -10,7 +10,7 @@
 
 import { Theme } from "theme.slint";
 import { Icons } from "icons.slint";
-import { Ui, ConnectionState, ExtraCanvas } from "state.slint";
+import { Ui, ConnectionState, ExtraCanvas, PlatformText } from "state.slint";
 import {
     ColumnSplitter, EditCommands, MenuHost, Menus, RowSplitter, SettingsForms, Toasts, ToastStack, Viewport,
 } from "kit.slint";
@@ -51,6 +51,7 @@ import { ProjectorsArea } from "areas/projectors/projector.slint";
 
 // What Rust sees: the globals and the structs in their models.
 export { Theme, Ui, ConnectionState, ExtraCanvas, Menus, Toasts, EditCommands, SettingsForms }
+export { PlatformText }
 export { CanvasArea, SourcesArea, MixerArea, ControlsArea, SettingsArea, LibraryArea }
 export { CreateArea }
 export { DeveloperArea }
@@ -491,12 +492,16 @@ export component AppWindow inherits Window {
             MenuSeparator { }
             MenuItem { title: "Settings…"; shortcut: @keys(Control + ","); activated => { Ui.menu("settings"); } }
             MenuSeparator { }
-            MenuItem { title: "Close Window"; shortcut: @keys(Control + W); activated => { Ui.quit(); } }
+            if !PlatformText.windows: MenuItem { title: "Close Window"; shortcut: @keys(Control + W); activated => { Ui.quit(); } }
+            // Windows apps end File with Exit, Alt+F4.
+            if PlatformText.windows: MenuItem { title: "Exit"; shortcut: @keys(Alt + F4); activated => { Ui.quit(); } }
         }
         Menu {
             title: "Edit";
             MenuItem { title: "Undo"; shortcut: @keys(Control + Z); activated => { root.edit("undo"); } }
-            MenuItem { title: "Redo"; shortcut: @keys(Control + Shift + Z); activated => { root.edit("redo"); } }
+            // Windows' redo is Ctrl+Y (the keys below still take Ctrl+Shift+Z).
+            if !PlatformText.windows: MenuItem { title: "Redo"; shortcut: @keys(Control + Shift + Z); activated => { root.edit("redo"); } }
+            if PlatformText.windows: MenuItem { title: "Redo"; shortcut: @keys(Control + Y); activated => { root.edit("redo"); } }
             MenuSeparator { }
             MenuItem { title: "Cut"; shortcut: @keys(Control + X); activated => { root.edit("cut"); } }
             MenuItem { title: "Copy"; shortcut: @keys(Control + C); activated => { root.edit("copy"); } }
@@ -629,7 +634,7 @@ export component AppWindow inherits Window {
         Menu {
             title: "Tools";
             MenuItem { title: "Auto-Configuration Wizard…"; activated => { Ui.menu("auto_config"); } }
-            MenuItem { title: "Set Up from This Mac…"; activated => { Ui.menu("start_over"); } }
+            MenuItem { title: "Set Up from This " + PlatformText.machine + "…"; activated => { Ui.menu("start_over"); } }
         }
         // Developer mode (#47, src/areas/developer.rs): only while the
         // profile has it on.
@@ -646,13 +651,16 @@ export component AppWindow inherits Window {
         Menu {
             title: "Window";
             MenuItem { title: "Minimize"; shortcut: @keys(Control + M); activated => { Ui.menu("minimize"); } }
-            MenuItem { title: "Zoom"; activated => { Ui.menu("zoom"); } }
+            if !PlatformText.windows: MenuItem { title: "Zoom"; activated => { Ui.menu("zoom"); } }
+            if PlatformText.windows: MenuItem { title: Ui.window-maximized ? "Restore" : "Maximize"; activated => { Ui.menu("zoom"); } }
             // ⌃⌘F (Slint's Meta is Control on macOS, Control is ⌘);
-            // again leaves full screen.
-            MenuItem { title: "Enter Full Screen"; shortcut: @keys(Meta + Control + F); activated => { Ui.menu("fullscreen"); } }
+            // again leaves full screen. F11 on Windows.
+            if !PlatformText.windows: MenuItem { title: "Enter Full Screen"; shortcut: @keys(Meta + Control + F); activated => { Ui.menu("fullscreen"); } }
+            if PlatformText.windows: MenuItem { title: Ui.window-fullscreen ? "Exit Full Screen" : "Full Screen"; shortcut: @keys(F11); activated => { Ui.menu("fullscreen"); } }
             MenuSeparator { }
             MenuItem { title: "Editor"; shortcut: @keys(Control + E); activated => { Ui.menu("editor"); } }
-            MenuItem { title: "Bring All to Front"; activated => { Ui.menu("bring_all_to_front"); } }
+            // macOS only: Windows has no such command.
+            if !PlatformText.windows: MenuItem { title: "Bring All to Front"; activated => { Ui.menu("bring_all_to_front"); } }
         }
         Menu {
             title: "Help";
@@ -671,6 +679,17 @@ export component AppWindow inherits Window {
         property <int> canvas-pressed: CanvasArea.press-serial;
         changed canvas-pressed => { self.focus(); }
         key-pressed(event) => {
+            // Windows: F11 leaves full screen, where the menu bar (and its
+            // F11) is hidden.
+            if PlatformText.windows && event.text == Key.F11 && !root.native-menu {
+                Ui.menu("fullscreen");
+                return accept;
+            }
+            // Windows' Redo is Ctrl+Y; Ctrl+Shift+Z redoes too, as it did.
+            if PlatformText.windows && event.modifiers.control && event.modifiers.shift && !event.modifiers.alt && (event.text == "z" || event.text == "Z") && Ui.dialog == "" {
+                root.edit("redo");
+                return accept;
+            }
             if event.modifiers.control || event.modifiers.meta || event.modifiers.alt || Ui.dialog != "" {
                 return reject;
             }
@@ -863,6 +882,11 @@ export component EditorWindow inherits Window {
                 } else {
                     CreateArea.undo();
                 }
+                return accept;
+            }
+            // Windows' redo, Ctrl+Y, too.
+            if PlatformText.windows && event.modifiers.control && !event.modifiers.shift && (event.text == "y" || event.text == "Y") {
+                CreateArea.redo();
                 return accept;
             }
             if event.modifiers.control && (event.text == "=" || event.text == "+") { view.zoom-by(0.1); return accept; }

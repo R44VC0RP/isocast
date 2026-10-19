@@ -101,6 +101,13 @@ impl Document {
     }
 }
 
+/// The home folder as text, so OBS paths inside it are written `~/...`:
+/// HOME on Unix, the user profile on Windows (where HOME is unset).
+pub(crate) fn home_text() -> Option<String> {
+    let home = isocast_protocol::api::home_folder();
+    (!home.as_os_str().is_empty()).then(|| home.to_string_lossy().into_owned())
+}
+
 fn invalid(message: impl Into<String>) -> RpcError {
     RpcError {
         code: RpcError::INVALID_PARAMS,
@@ -997,7 +1004,7 @@ impl Daemon {
                 ));
             }
         };
-        let home = std::env::var("HOME").ok();
+        let home = home_text();
         let mut documents = Vec::new();
         let mut unsupported = Vec::new();
         let mut notes = Vec::new();

@@ -17,3 +17,8 @@ toml = "1.1.8"
 [target.'cfg(not(unix))'.dependencies]
 # Timeline identities use OS randomness on Windows as well (already locked).
 getrandom = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+# Known folders (profile, AppData, Videos) when variables are unset or a
+# library folder moved; already locked through the client and UI.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }

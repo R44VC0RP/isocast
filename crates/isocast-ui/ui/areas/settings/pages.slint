@@ -7,7 +7,7 @@
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
-import { Ui } from "../../state.slint";
+import { Ui, PlatformText } from "../../state.slint";
 import { PermissionsArea } from "../permissions/state.slint";
 import {
     Button, ButtonVariant, Callout, CalloutKind, ControlSize, Dropdown, FocusRing, GroupHint, GroupRow, IconButton,
@@ -90,7 +90,7 @@ export component GeneralPage inherits SetPage {
     }
     SetGroup {
         title: "Snapping";
-        hint: "Edges and centres snap to the canvas and to other sources; hold ⌘ while dragging to place freely.";
+        hint: "Edges and centres snap to the canvas and to other sources; hold " + PlatformText.primary-key + " while dragging to place freely.";
         SwitchRow {
             label: "Enable";
             place: RowPlace.first;
@@ -141,6 +141,9 @@ export component GeneralPage inherits SetPage {
                     text: SettingsArea.machine-calibrating ? "Cancel" : "Calibrate";
                     size: ControlSize.small;
                     on-control: true;
+                    // The engine measures only on macOS so far.
+                    enabled: !PlatformText.windows;
+                    tooltip: PlatformText.windows ? "Not available on Windows yet: Isocast uses its built-in capacity table." : "";
                     clicked => { Ui.menu(SettingsArea.machine-calibrating ? "machine_cancel" : "machine_calibrate"); }
                 }
             }
@@ -149,12 +152,14 @@ export component GeneralPage inherits SetPage {
     SetGroup {
         title: "Updates";
         hint: SettingsArea.updates-available
-            ? "Isocast checks once a day and asks before installing. An update never installs during a recording or stream; it waits until they stop."
+            ? (SettingsArea.automatic-updates-available
+                ? "Isocast checks once a day and asks before installing. An update never installs during a recording or stream; it waits until they stop."
+                : "Use Check for Updates when you're ready. Automatic notifications are disabled so they cannot appear in a recording or stream. Installation requires the engine to be idle.")
             : "This build doesn't update itself. Released copies of Isocast check for updates.";
         SwitchRow {
             label: "Check Automatically";
             place: RowPlace.first;
-            enabled: SettingsArea.updates-available;
+            enabled: SettingsArea.automatic-updates-available;
             on <=> SettingsArea.auto-updates;
             toggled(on) => { SettingsArea.set-flag("auto_updates", on); }
         }
@@ -175,11 +180,12 @@ export component GeneralPage inherits SetPage {
     }
     SetGroup {
         title: "Permissions";
-        hint: PermissionsArea.unknown-access
+        hint: PlatformText.windows ? "Windows asks no permission for screens and what this PC plays. Its privacy settings can turn off the camera and microphone for desktop apps; Review shows whether they do."
+            : PermissionsArea.unknown-access
             ? "Access is checked when capture starts. Review the status and Windows privacy settings here."
             : "What macOS lets Isocast record. Each is asked for once; what you skipped or turned off can be allowed here.";
         GroupRow {
-            label: "Screen, Camera, Microphone";
+            label: PlatformText.windows ? "Camera, Microphone" : "Screen, Camera, Microphone";
             place: RowPlace.only;
             trailing-pad: Theme.space-2;
             Centred {
@@ -366,7 +372,7 @@ export component StreamPage inherits SetPage {
     if !SettingsArea.has-stream || SettingsArea.adding-destination: ChooseService { }
     if SettingsArea.has-stream && !SettingsArea.adding-destination: SetGroup {
         title: "Destinations";
-        hint: (SettingsArea.stream-canvas != "main" ? "This canvas’s destinations and keys are its own. " : "") + "Start Streaming sends the program to every destination that’s on, each with its own key and connection; one failing never stops the others. Those with the same bitrate and size share one encoder. " + SettingsArea.server-hint + " " + (SettingsArea.key-problem != "" ? "Once the old Keychain item is deleted, paste the key from your service’s dashboard and press Save Key." : SettingsArea.key-saved ? "The key is saved in the Keychain; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the Keychain (saved at once), never in the setup or logs.");
+        hint: (SettingsArea.stream-canvas != "main" ? "This canvas’s destinations and keys are its own. " : "") + "Start Streaming sends the program to every destination that’s on, each with its own key and connection; one failing never stops the others. Those with the same bitrate and size share one encoder. " + SettingsArea.server-hint + " " + (SettingsArea.key-problem != "" ? "Once the old " + PlatformText.credential-store + " item is deleted, paste the key from your service’s dashboard and press Save Key." : SettingsArea.key-saved ? "The key is saved in the " + PlatformText.credential-store + "; paste a new one to replace it." : "The key comes from your service’s dashboard. It’s kept in the " + PlatformText.credential-store + " (saved at once), never in the setup or logs.");
         for d[i] in SettingsArea.destinations: VerticalLayout {
             spacing: 1px;
             GroupRow {
@@ -1302,7 +1308,7 @@ component ChordField inherits Rectangle {
 
 export component HotkeysPage inherits SetPage {
     GroupHint {
-        text: SettingsArea.bindings-note != "" ? SettingsArea.bindings-note : "Click a shortcut and type the keys: they work everywhere (or, when macOS keeps a key for itself, while Isocast is in front). Changes apply at once to this profile.";
+        text: SettingsArea.bindings-note != "" ? SettingsArea.bindings-note : PlatformText.windows ? "Click a shortcut and type the keys. Windows or another app may reserve a shortcut; unavailable bindings are reported below. Changes apply at once to this profile." : "Click a shortcut and type the keys: they work everywhere (or, when macOS keeps a key for itself, while Isocast is in front). Changes apply at once to this profile.";
     }
     for warning in SettingsArea.bindings-warnings: Callout {
         kind: CalloutKind.info;
@@ -1409,7 +1415,7 @@ export component AdvancedPage inherits SetPage {
     SetGroup {
         title: "Automatic Quality";
         hint: (SettingsArea.governor-now != "" ? "Now: " + SettingsArea.governor-now + "\n" : "")
-            + "When this Mac can't keep up, Isocast lowers the preview's refresh and the vertical frame rate, and the stream's bitrate when the upload falls behind, and puts them back once it can. It never lowers the program recording; ISO files stay at their requested frame rate unless you opt in below. "
+            + "When this " + PlatformText.machine + " can't keep up, Isocast lowers the preview's refresh and the vertical frame rate, and the stream's bitrate when the upload falls behind, and puts them back once it can. It never lowers the program recording; ISO files stay at their requested frame rate unless you opt in below. "
             + "Allowing ISO frame thinning lets it also skip ISO pictures; skipped pictures are gone from those files for good. "
             + "What you keep is never lowered automatically, but the encoders' own overload protection can still drop frames, ISO first, to protect the program recording.";
         SwitchRow {
@@ -1468,7 +1474,7 @@ export component AdvancedPage inherits SetPage {
     // Developer mode (#47): the profile's; logs stay on this Mac.
     SetGroup {
         title: "Developer";
-        hint: "Logs every engine call and debug messages, and frame timing each second while recording, in logs of their own (up to 200 MB) on this Mac. Adds the Developer menu and the stats overlay.";
+        hint: "Logs every engine call and debug messages, and frame timing each second while recording, in logs of their own (up to 200 MB) on this " + PlatformText.machine + ". Adds the Developer menu and the stats overlay.";
         SwitchRow {
             label: "Developer Mode";
             place: RowPlace.first;

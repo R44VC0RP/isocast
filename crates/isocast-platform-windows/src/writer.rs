@@ -21,6 +21,12 @@ const FRAME_DURATION: u32 = 2000;
 // MF admits at most eight pictures; NVENC admits four. Keep our timestamp
 // bookkeeping bounded independently of either provider's admission limit.
 const MAX_PENDING: usize = 8;
+// File routes already buffer input. Absorb a brief encoder completion stall
+// there instead of turning retryable admission pressure into a permanent
+// timestamp gap. After waiting, leave a cooldown to drain queued input without
+// more waits: a slower-than-real-time provider must not accumulate audio/video
+// in the route until that queue overflows.
+const ADMISSION_WAIT: Duration = Duration::from_millis(100);
 // Admission/no-output retry limit, not a deadline around native COM calls or
 // worker joins; those can block in the provider.
 const DRAIN_WAIT: Duration = Duration::from_secs(5);
@@ -46,6 +52,7 @@ pub struct VideoWriter {
     start: Option<Time>,
     pending: VecDeque<Pending>,
     last_video: Option<(Frame, Time)>,
+    admission_wait_until: Option<Instant>,
     accepted: u64,
     accepted_originals: u64,
     completed: u64,
@@ -121,6 +128,7 @@ impl VideoWriter {
             start: None,
             pending: VecDeque::new(),
             last_video: None,
+            admission_wait_until: None,
             accepted: 0,
             accepted_originals: 0,
             completed: 0,
@@ -491,13 +499,50 @@ impl VideoWriter {
             }
         }
         self.check_budget(self.accepted + 1, None, !repeated)?;
-        if self.pending.len() == MAX_PENDING {
-            return Ok(false);
-        }
-        if !self.encoder.try_encode(frame, pts, self.accepted == 0)? {
-            // Do not call VideoEncoder::encode: it counts a retryable refusal
-            // as a drop. The engine already accounts for this false return.
-            return Ok(false);
+        let now = Instant::now();
+        // Audio arrives in 10 ms chunks per track. Files with many tracks
+        // leave less room in the bounded route for a stalled video append.
+        let wait = if self.audio.len() <= 2 {
+            ADMISSION_WAIT
+        } else {
+            Duration::from_millis(20)
+        };
+        // Share one wait window across the queued frames catching up after
+        // a stall. Once it ends, allow an equally long window without waits;
+        // successful appends never reset either deadline.
+        let deadline = self
+            .admission_wait_until
+            .filter(|until| now < *until + wait)
+            .unwrap_or(now + wait);
+        loop {
+            if self.pending.len() < MAX_PENDING
+                && self.encoder.try_encode(frame, pts, self.accepted == 0)?
+            {
+                break;
+            }
+            // Do not call VideoEncoder::encode: it counts retryable refusals
+            // as drops. Only a refusal after our bounded wait reaches the
+            // engine's loss counter. Live/streaming admission is unchanged.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(false);
+            }
+            self.admission_wait_until = Some(deadline);
+            if let Some(packet) = self
+                .encoder
+                .receive_timeout(remaining.min(Duration::from_millis(5)))?
+            {
+                self.collect(packet)?;
+                self.drain_ready()?;
+            } else {
+                // Synchronous MFTs may report NEED_MORE_INPUT immediately;
+                // retry busy admission without spinning or moving the deadline.
+                std::thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(1)),
+                );
+            }
         }
         self.pending.push_back(Pending { pts, repeated });
         self.accepted += 1;
@@ -831,11 +876,17 @@ impl VideoWriter {
             0
         };
         for index in 0..self.audio.len() {
-            if requested_audio_end.is_some_and(|end| self.audio[index].input_frames > end) {
+            // Raw capture can admit a chunk before Stop establishes its cut.
+            // Keep that accepted PCM within the same one-AAC-packet tolerance
+            // as the media contracts, measured from the rounded video end.
+            // This is not encoder padding/priming; those are verified below.
+            let tail = self.audio[index].input_frames.saturating_sub(target);
+            if requested_audio_end.is_some() && tail > audio::BLOCK {
                 note_error(
                     &mut failure,
                     anyhow!(
-                        "audio[{index}].end: precedes accepted input; complete audio is retained, not trimmed"
+                        "audio[{index}].end: precedes accepted input by {tail} sample frames (maximum AAC tail is {}); complete audio is retained, not trimmed",
+                        audio::BLOCK
                     ),
                 );
             }

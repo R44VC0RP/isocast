@@ -20,7 +20,7 @@
 
 import { Theme, Motion } from "../../theme.slint";
 import { Icons, Icon, SvgPath } from "../../icons.slint";
-import { Ui } from "../../state.slint";
+import { Ui, PlatformText } from "../../state.slint";
 import { FocusRing, Menus, Segment, Segmented, Slider, Tip } from "../../kit.slint";
 import { ControlsArea } from "../controls/state.slint";
 import { CreateArea, ClipRow, SegmentRow, TrackRow } from "state.slint";
@@ -597,7 +597,7 @@ export component ClipBar inherits Rectangle {
                     RecordButton {
                         active: root.recording || ControlsArea.record-state == "starting";
                         enabled: Ui.has-setup && !ControlsArea.busy-record;
-                        label: root.recording ? "Stop Recording" : "Start Recording";
+                        label: ControlsArea.record-state == "stopping" ? "Finishing…" : ControlsArea.record-state == "starting" ? "Starting…" : root.recording ? "Stop Recording" : "Start Recording";
                         clicked => { ControlsArea.toggle-record(); }
                     }
                 }
@@ -655,7 +655,7 @@ export component ClipBar inherits Rectangle {
                             text: "";
                             accessible-label: "Undo Edit";
                             enabled: CreateArea.can-undo;
-                            tooltip: "Undo the last edit (⌘Z)";
+                            tooltip: "Undo the last edit (" + PlatformText.primary + "Z)";
                             clicked => { CreateArea.undo(); }
                         }
                         PillItem {
@@ -663,7 +663,7 @@ export component ClipBar inherits Rectangle {
                             text: "";
                             accessible-label: "Redo Edit";
                             enabled: CreateArea.can-redo;
-                            tooltip: "Redo (⇧⌘Z)";
+                            tooltip: "Redo (" + PlatformText.shift-primary + "Z)";
                             clicked => { CreateArea.redo(); }
                         }
                         PillDivider { }
@@ -802,9 +802,9 @@ export component ClipBar inherits Rectangle {
                         if CreateArea.export-path != "": PillDivider { }
                         if CreateArea.export-path != "": PillItem {
                             icon: Icons.folder-open;
-                            text: root.width >= 1100px ? "Show in Finder" : "";
-                            tooltip: "Show the exported file in the Finder";
-                            accessible-label: "Show in Finder";
+                            text: root.width >= 1100px ? "Show in " + PlatformText.file-manager : "";
+                            tooltip: "Show the exported file in the " + PlatformText.file-manager;
+                            accessible-label: "Show in " + PlatformText.file-manager;
                             clicked => { CreateArea.reveal-export(); }
                         }
                     }
@@ -1370,7 +1370,7 @@ export component ClipBar inherits Rectangle {
             Text {
                 x: 7px;
                 y: 3px;
-                text: CreateArea.retaking ? "Retake" : "Recording";
+                text: ControlsArea.record-state == "stopping" ? "Finishing…" : CreateArea.retaking ? "Retake" : "Recording";
                 color: Theme.danger-text;
                 font-size: Theme.fs-xs;
                 font-weight: Theme.weight-semibold;
@@ -1511,7 +1511,7 @@ export component ClipBar inherits Rectangle {
                 border-radius: 4px;
                 background: Theme.danger-fill;
                 Text {
-                    text: "REC";
+                    text: ControlsArea.record-state == "stopping" ? "…" : "REC";
                     color: Theme.bone;
                     font-size: Theme.fs-micro;
                     font-weight: Theme.weight-semibold;

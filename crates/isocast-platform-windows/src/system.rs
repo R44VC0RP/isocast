@@ -24,12 +24,12 @@ use windows::Wdk::System::SystemServices::{
 };
 use windows::Win32::Foundation::{ERROR_SUCCESS, FILETIME, HANDLE};
 use windows::Win32::Storage::FileSystem::{
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, GetFinalPathNameByHandleW,
-    GetVolumeInformationByHandleW, VOLUME_NAME_GUID,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, GetDiskFreeSpaceExW,
+    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, VOLUME_NAME_GUID,
 };
 use windows::Win32::System::IO::IO_STATUS_BLOCK;
 use windows::Win32::System::Ioctl::{FILE_DEVICE_DFS, FILE_DEVICE_NETWORK_FILE_SYSTEM};
-use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+use windows::Win32::System::Registry::{HKEY, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
 use windows::Win32::System::SystemInformation::{
     GlobalMemoryStatusEx, MEMORYSTATUSEX, OSVERSIONINFOEXW, OSVERSIONINFOW,
 };
@@ -126,11 +126,17 @@ fn os_version() -> Option<String> {
 /// key for writing. `None` if missing, not a string, too long, or holding
 /// a NUL inside it.
 fn registry_string(subkey: PCWSTR, value: PCWSTR) -> Option<String> {
+    registry_string_in(HKEY_LOCAL_MACHINE, subkey, value)
+}
+
+/// [`registry_string`] under `root` (`HKEY_CURRENT_USER` for this user's
+/// settings).
+pub(crate) fn registry_string_in(root: HKEY, subkey: PCWSTR, value: PCWSTR) -> Option<String> {
     let mut bytes = 0u32;
     // SAFETY: a size query (no buffer) into a live u32.
     let status = unsafe {
         RegGetValueW(
-            HKEY_LOCAL_MACHINE,
+            root,
             subkey,
             value,
             RRF_RT_REG_SZ,
@@ -149,7 +155,7 @@ fn registry_string(subkey: PCWSTR, value: PCWSTR) -> Option<String> {
     // between the calls fails with ERROR_MORE_DATA, and is skipped).
     let status = unsafe {
         RegGetValueW(
-            HKEY_LOCAL_MACHINE,
+            root,
             subkey,
             value,
             RRF_RT_REG_SZ,
@@ -195,20 +201,35 @@ pub(crate) fn volume(path: &Path) -> Result<Volume> {
     let file = open_for_query(path)?;
     let handle = raw(&file);
 
-    let size: FILE_FS_FULL_SIZE_INFORMATION = query_volume(handle, FileFsFullSizeInformation)
-        .with_context(|| format!("could not read free space for {}", path.display()))?;
-    let unit = u64::from(size.SectorsPerAllocationUnit) * u64::from(size.BytesPerSector);
-    let units = u64::try_from(size.CallerAvailableAllocationUnits).ok();
-    let (Some(units), true) = (units, unit > 0) else {
-        bail!(
-            "{} reported an impossible free space ({} units of {unit} bytes)",
-            path.display(),
-            size.CallerAvailableAllocationUnits
-        );
+    let free_bytes = if let Some(guid) = volume_guid(&file) {
+        // This root came from the open handle, not a drive letter or a path
+        // that could have been retargeted. Ask for caller-available (quota)
+        // bytes, not the volume's total free space.
+        let root: Vec<u16> = guid.encode_utf16().chain([u16::from(b'\\'), 0]).collect();
+        let mut free = 0;
+        // SAFETY: NUL-terminated volume root and a live u64 output.
+        unsafe { GetDiskFreeSpaceExW(PCWSTR(root.as_ptr()), Some(&mut free), None, None) }
+            .with_context(|| format!("could not read free space for {}", path.display()))?;
+        free
+    } else {
+        // Shares/virtual filesystems may have no local volume GUID. Retain
+        // the handle-based quota query rather than guessing their root.
+        let size: FILE_FS_FULL_SIZE_INFORMATION =
+            query_volume(handle, FileFsFullSizeInformation)
+                .with_context(|| format!("could not read free space for {}", path.display()))?;
+        let unit = u64::from(size.SectorsPerAllocationUnit) * u64::from(size.BytesPerSector);
+        let units = u64::try_from(size.CallerAvailableAllocationUnits).ok();
+        let (Some(units), true) = (units, unit > 0) else {
+            bail!(
+                "{} reported an impossible free space ({} units of {unit} bytes)",
+                path.display(),
+                size.CallerAvailableAllocationUnits
+            );
+        };
+        units
+            .checked_mul(unit)
+            .with_context(|| format!("free space for {} overflows", path.display()))?
     };
-    let free_bytes = units
-        .checked_mul(unit)
-        .with_context(|| format!("free space for {} overflows", path.display()))?;
 
     let device: FILE_FS_DEVICE_INFORMATION = query_volume(handle, FileFsDeviceInformation)
         .with_context(|| format!("could not read the device of {}", path.display()))?;

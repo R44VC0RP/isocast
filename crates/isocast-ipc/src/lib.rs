@@ -14,7 +14,7 @@ pub use std::os::unix::net::{UnixListener as Listener, UnixStream as Stream};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{Incoming, Listener, Stream, hung_up, peer_pid};
+pub use windows::{Incoming, Listener, Stream, hung_up, peer_pid, readable};
 
 /// Whether the peer closed, without consuming any data.
 #[cfg(unix)]

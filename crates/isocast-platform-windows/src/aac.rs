@@ -71,11 +71,22 @@ pub struct MfAacEncoder {
     worker: Option<JoinHandle<()>>,
     spec: LiveAudioSpec,
     config: [u8; 2],
+    /// Only the byte-oriented live path pads; packet consumers never see it.
+    padding: Option<Padding>,
 }
 
 impl MfAacEncoder {
     pub fn new(spec: &LiveAudioSpec) -> Result<Self> {
         Self::with_thread_start(spec, || {})
+    }
+
+    /// Live variant for the byte-oriented AudioEncoder path: each packet is
+    /// prefixed with AAC fill elements so the stream averages the nominal
+    /// bitrate. The Microsoft encoder is not constant-bitrate on simple audio.
+    pub fn streaming(spec: &LiveAudioSpec, thread_start: fn()) -> Result<Self> {
+        let mut encoder = Self::with_thread_start(spec, thread_start)?;
+        encoder.padding = Some(Padding::default());
+        Ok(encoder)
     }
 
     /// Run the platform's thread-local scheduling hook once on this worker,
@@ -133,6 +144,7 @@ impl MfAacEncoder {
             worker: Some(worker),
             spec: *spec,
             config,
+            padding: None,
         })
     }
 
@@ -235,7 +247,16 @@ impl AudioEncoder for MfAacEncoder {
         // Do not remove valid output before a possible native failure: packet
         // callers can still retrieve the entire valid prefix on the error path.
         self.drain_ready()?;
-        self.call(|session| Ok(session.ready.drain(..).map(|packet| packet.data).collect()))
+        let packets: Vec<Vec<u8>> =
+            self.call(|session| Ok(session.ready.drain(..).map(|packet| packet.data).collect()))?;
+        let Some(padding) = &mut self.padding else {
+            return Ok(packets);
+        };
+        let kbps = self.spec.bitrate_kbps;
+        packets
+            .into_iter()
+            .map(|packet| padding.pad(kbps, packet))
+            .collect()
     }
 
     fn delay(&self) -> u32 {
@@ -249,6 +270,49 @@ impl Drop for MfAacEncoder {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+/// Cumulative byte budget for live streams. The count is of native packets,
+/// not elapsed time, so a parked encoder never banks credit. A packet over its
+/// share is never truncated; later packets pay it back by padding less.
+#[derive(Default)]
+struct Padding {
+    packets: u64,
+    emitted: u64,
+}
+
+impl Padding {
+    fn pad(&mut self, kbps: u32, mut packet: Vec<u8>) -> Result<Vec<u8>> {
+        let rate = u128::from(BLOCK) * u128::from(kbps) * 1000;
+        let frame = u64::try_from(rate.div_ceil(u128::from(RATE * 8)))?;
+        self.packets = self
+            .packets
+            .checked_add(1)
+            .context("audio.mf: packet count overflow")?;
+        let budget = u64::try_from(rate * u128::from(self.packets) / u128::from(RATE * 8))
+            .context("audio.mf: byte budget overflow")?;
+        let size = u64::try_from(packet.len())?;
+        let wanted = budget.saturating_sub(self.emitted).saturating_sub(size);
+        // A fill prefix is at least 7 bytes; a smaller shortfall carries over.
+        // Earlier packets leave under 7 bytes unpaid, so more than a frame
+        // plus that carry means the accounting is broken.
+        if wanted > frame + 7 {
+            bail!("audio.mf: padding request of {wanted} bytes exceeds one {frame}-byte frame");
+        }
+        let padded = if wanted < 7 {
+            size
+        } else {
+            let mut prefix = fill_prefix(usize::try_from(wanted)?)?;
+            prefix.append(&mut packet);
+            packet = prefix;
+            size + wanted
+        };
+        self.emitted = self
+            .emitted
+            .checked_add(padded)
+            .context("audio.mf: byte count overflow")?;
+        Ok(packet)
     }
 }
 
@@ -606,6 +670,56 @@ fn terminal_frames(frames: u64) -> Result<u64> {
         .max(2)
         .checked_mul(BLOCK)
         .context("audio.samples: padded frame count overflow")
+}
+
+/// Exactly `bytes` (at least 7) of eight ISO/IEC 14496-3 fill elements, to
+/// precede the first element of a raw_data_block. Each is a 3-bit ID_FIL, a
+/// 4-bit count (15 adds an 8-bit esc_count, so `cnt = 14 + esc_count`) and `cnt`
+/// bytes of extension_payload: EXT_FILL, a zero fill nibble, then 0xA5 bytes.
+/// Eight elements are 56 header bits, so the block's own bytes stay aligned
+/// for its end-of-block byte_align() and any byte_alignment() inside it.
+fn fill_prefix(bytes: usize) -> Result<Vec<u8>> {
+    let mut left = bytes
+        .checked_sub(7)
+        .context("audio.mf: fill prefix needs at least 7 bytes")?;
+    let mut out = Vec::with_capacity(bytes);
+    let (mut acc, mut held) = (0u32, 0u32);
+    let mut put = |value: u32, bits: u32| {
+        acc = acc << bits | value;
+        held += bits;
+        while held >= 8 {
+            out.push((acc >> (held - 8)) as u8);
+            held -= 8;
+        }
+        acc &= (1 << held) - 1;
+    };
+    for _ in 0..8 {
+        // A count costs its payload bytes, plus the escape byte from 15 up;
+        // 15 bytes in one element is unrepresentable, so leave one over.
+        let mut used = left.min(270);
+        if used == 15 {
+            used = 14;
+        }
+        left -= used;
+        let count = if used >= 16 { used - 1 } else { used } as u32;
+        put(0b110, 3);
+        if count >= 15 {
+            put(15, 4);
+            put(count - 14, 8);
+        } else {
+            put(count, 4);
+        }
+        if count > 0 {
+            put(0, 8);
+            for _ in 1..count {
+                put(0xA5, 8);
+            }
+        }
+    }
+    if left != 0 || held != 0 || out.len() != bytes {
+        bail!("audio.mf: cannot build a {bytes}-byte fill prefix");
+    }
+    Ok(out)
 }
 
 fn timestamp(frames: u64) -> Result<i64> {

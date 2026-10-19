@@ -42,4 +42,7 @@ wgpu = { version = "=30.0.1", default-features = false, features = ["metal"] }
 
 [target.'cfg(windows)'.dependencies]
 isocast-mux = { path = "../isocast-mux" }
+isocast-surfaces = { path = "../isocast-surfaces", features = ["wgpu"] }
 wgpu = { version = "=30.0.1", default-features = false, features = ["dx12"] }
+# Already locked by the Windows muxer; read-only volume identity queries.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

@@ -8,7 +8,7 @@
 
 import { Theme } from "../../theme.slint";
 import { Icons } from "../../icons.slint";
-import { Ui } from "../../state.slint";
+import { Ui, PlatformText } from "../../state.slint";
 import { Dialog, GroupHeading, GroupHint, ScrollArea, TextField } from "../../kit.slint";
 import { SettingsArea } from "state.slint";
 
@@ -26,13 +26,13 @@ export component BugReportDialog inherits Dialog {
     property <bool> saved: SettingsArea.report-archive != "";
     property <bool> sent: SettingsArea.report-issue-url != "";
     title: "Report a Bug";
-    subtitle: root.sent ? "Sent. The issue is public on GitHub; the zip went privately to the maintainers." : SettingsArea.report-copied ? "Triage block copied: paste it into the issue’s Triage field (⌘V), then attach the zip." : root.saved ? "Saved: attach the zip to the issue. Nothing was sent." : "Made on this Mac: you see all of it before anything is sent.";
+    subtitle: root.sent ? "Sent. The issue is public on GitHub; the zip went privately to the maintainers." : SettingsArea.report-copied ? "Triage block copied: paste it into the issue’s Triage field (" + PlatformText.primary + "V), then attach the zip." : root.saved ? "Saved: attach the zip to the issue. Nothing was sent." : "Made on this " + PlatformText.machine + ": you see all of it before anything is sent.";
     icon: Icons.alert;
     dialog-width: 640px;
     dialog-height: 620px;
     ok-text: root.sent ? "Open Issue" : root.saved ? "Open GitHub Issue" : "Send Report";
     ok-enabled: !SettingsArea.report-busy;
-    apply-text: root.saved ? "Show in Finder" : "Save Zip Only";
+    apply-text: root.saved ? "Show in " + PlatformText.file-manager : "Save Zip Only";
     apply-enabled: !SettingsArea.report-busy;
     extra-text: root.saved ? "" : "Update Preview";
     extra-enabled: !SettingsArea.report-busy;

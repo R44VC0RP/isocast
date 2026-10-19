@@ -21,7 +21,7 @@ isocast-diagnostics = { path = "../isocast-diagnostics" }
 isocast-engine = { path = "../isocast-engine" }
 isocast-mux = { path = "../isocast-mux" }
 isocast-protocol = { path = "../isocast-protocol" }
-isocast-surfaces = { path = "../isocast-surfaces" }
+isocast-surfaces = { path = "../isocast-surfaces", features = ["wgpu"] }
 parking_lot = "0.12"
 wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
 # The COM lease attached to an imported resource uses the implementation
@@ -33,6 +33,7 @@ windows = { version = "0.62.2", features = [
     "Foundation",
     "Graphics_Capture",
     "Graphics_DirectX_Direct3D11",
+    "Graphics_Imaging",
     "Media_Capture_Frames",
     "Media_MediaProperties",
     "Storage_Streams",
@@ -54,6 +55,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Media_MediaFoundation",
     "Win32_Media_Multimedia",
     "Win32_Security",
+    "Win32_Security_Credentials",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",

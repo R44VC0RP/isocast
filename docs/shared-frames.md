@@ -238,35 +238,29 @@ it. Moving the swatch with a live apply mid-run: every frame labelled with
 the old revision showed it in the old place, every frame with the new one
 in the new place. 90 short sessions left the daemon's memory flat.
 
-## Windows (design only)
+## Windows
 
-The same protocol, with D3D12 shared resources instead of IOSurfaces and
-the control connection on a named pipe:
+`d3d12-named-pipe` uses the same ring/frame/release protocol. The daemon
+renders RGBA8 simultaneous-access shared D3D12 textures. One-time offers
+hand over fresh random NT names and descriptors over authenticated local
+pipes; the named allocations have owner-only ACLs. No duplicated remote
+handle numbers or pixels cross the pipe. The client must be in the same
+Windows login session and use the exact adapter LUID; mismatches fail
+without CPU or cross-adapter fallback. Existing D3D11 capture imports stay
+upstream of the daemon's D3D12 render pass.
 
-- **Surfaces.** The daemon creates the ring as committed `ID3D12Resource`
-  textures (`DXGI_FORMAT_R8G8B8A8_UNORM`, render target,
-  `D3D12_HEAP_FLAG_SHARED`), and one shared `ID3D12Fence`
-  (`D3D12_FENCE_FLAG_SHARED`). `ID3D12Device::CreateSharedHandle` makes an
-  NT handle for each.
-- **Hand-over.** The client sends its process id with `shared_frames`; the
-  daemon opens the client (`OpenProcess(PROCESS_DUP_HANDLE)`, allowed for
-  the same user at the same integrity level) and `DuplicateHandle`s each
-  handle into it, then sends the duplicated handle values in the `ring`
-  line (`transport: "d3d12-handle"`, no token or service needed). The
-  client opens them with `ID3D12Device::OpenSharedHandle` and closes the
-  handles. Both must use the same adapter (the reply names its LUID; the
-  client creates its device, or Slint's, on that adapter).
-- **Synchronisation on the GPU.** The daemon's queue signals the shared
-  fence after drawing a slot, and the `frame` line carries that fence
-  value; the client's queue `Wait`s for it before sampling, so neither CPU
-  waits. Releases can stay as lines (the daemon then knows the slot is
-  free once the client's own fence, also shared, passes the value the
-  client signalled after its last read).
-- **wgpu.** `wgpu::hal::dx12::Device::texture_from_raw` wraps the
-  opened resource; the app must run Slint's wgpu 30 on the DX12 back end
-  (not Vulkan) to share it. The fence wait needs raw `ID3D12CommandQueue`
-  access through `as_hal`.
-- **Code.** A `windows` module in `isocast-surfaces` beside `mac.rs` with
-  the same `Surface`/`Exporter`/`fetch` shape (fetch becomes "open these
-  handles"), and the platform crate's `shared_surface`; the engine's
-  viewer thread and the protocol stay as they are.
+Publication follows the producer's GPU completion. Before opening a stream,
+wgpu clients call `isocast_client::shared::register_gpu(&device, &queue)`
+with the renderer's actual DX12 queue. Keep each `SharedFrame` alive until
+no future render can use its image. Its drop signals that queue (including
+Slint/Skia's native submissions); a bounded background worker acknowledges
+the slot only after the fence completes. A failed wait closes the viewer
+and requires a client restart, never an early release. The production path
+has no CPU pixel readback; CLI `--check` is deliberately a diagnostic readback.
+
+Each viewer has at most its current ring and one retired ring. Further
+resizes coalesce until old reads are acknowledged; a stalled viewer cannot
+reuse recording surfaces. Per-process bounds are 128 retained allocations,
+an estimated 512 MiB, 32 fetch workers and 256 retirement jobs. Closing the
+stream shuts down its pipe even when images remain retained. UI image-cache
+keys are unique across stream reconnects, not just wire generation numbers.

@@ -150,10 +150,12 @@ def capabilities():
     result = {"system": platform.platform(), "machine": platform.machine()}
     if WINDOWS:
         # The engine encodes with NVENC or Media Foundation itself; whether
-        # it can is what the scenarios find out. Nothing here streams yet.
+        # it can is what the scenarios find out. Matching-size streaming is
+        # exercised by stream/vertical; scaled inputs and admission are separate.
         result.update(cores=os.cpu_count(), virtual_machine=0, gpus=[], hevc=True, h264=True,
                       record_codec="hevc", platform="windows",
-                      pending=["previews (scene feeds, snapshots)", "streaming", "replay buffer"])
+                      pending=["previews (scene feeds, snapshots)",
+                               "scaled streaming / recording budget integration", "replay buffer"])
         return result
     for label, key in (("chip", "machdep.cpu.brand_string"), ("cores", "hw.logicalcpu"),
                        ("physical_cores", "hw.physicalcpu"), ("memory_bytes", "hw.memsize"),
@@ -534,9 +536,13 @@ def sync_check(path, fps=FPS):
         else:
             quiet += 1
     # Exclude only pulses cut by either edge of the file, not missing interior pulses.
+    # Put the margin between frame ticks: a flash at exactly 0.15 s and
+    # its sine beep's first nonzero sample one audio sample later must not
+    # land on opposite sides of the filter. Keep this off-grid at any fps.
     end = values[-1][0] + 1 / fps
-    f = [t for t in flashes if 0.15 < t < end - 0.15]
-    b = [t for t in beeps if 0.15 < t < end - 0.15]
+    edge = (math.floor(0.15 * fps) + 0.5) / fps
+    f = [t for t in flashes if edge < t < end - edge]
+    b = [t for t in beeps if edge < t < end - edge]
     require(len(f) >= int(end) - 1 and len(f) == len(b),
             f"{path.name}: missing pulses ({len(f)} flashes / {len(b)} beeps in {end:.3f}s)")
     offsets = [abs(x - y) for x, y in zip(f, b)]
@@ -748,8 +754,6 @@ def scenario_scenes(e, cfg, evidence):
 
 
 def scenario_stream(e, cfg, evidence):
-    if WINDOWS:
-        raise Pending("streaming / the replay buffer: not on Windows yet")
     width, height, fps = (cfg["canvas"][k] for k in ("width", "height", "fps"))
     if not evidence["capabilities"]["h264"]:
         raise Skip("no hardware encoder on this runner (H.264 streaming)")
@@ -843,8 +847,6 @@ def scenario_stream(e, cfg, evidence):
 
 
 def scenario_vertical(e, cfg, evidence):
-    if WINDOWS:
-        raise Pending("streaming / the replay buffer: not on Windows yet")
     if not evidence["capabilities"]["h264"]:
         raise Skip("no hardware encoder on this runner (vertical H.264 streaming)")
     # Two HD programs and one HD stream, at a rate the base M2 can protect.

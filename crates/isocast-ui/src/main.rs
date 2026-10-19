@@ -27,11 +27,20 @@
 //!                                    offscreen and check each frame
 //!                                    (src/motion, docs/motion-testing.md)
 //! ```
+//!
+//! On Windows it is a GUI program, so starting it (the Start menu, Explorer,
+//! the installer) opens no console window. Run from a terminal with
+//! arguments, it writes to that terminal (see `attach_console`).
+
+// No console window for the app; development modes attach to the caller's.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod a11y;
 mod app;
 mod areas;
 mod background;
+#[cfg(windows)]
+mod chrome_windows;
 mod clock;
 mod daemon;
 mod documents;
@@ -247,7 +256,82 @@ fn parse() -> Result<Options> {
     Ok(options)
 }
 
+/// A GUI program has no console, so `isocast-ui --help`, `--snapshot` and
+/// the other development modes run from a terminal would print nowhere:
+/// with arguments, and when the output isn't already redirected (a pipe or
+/// file, as CI and packaging use), write to the terminal it was started
+/// from. Started from the Start menu there is none, and nothing happens.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+        SetStdHandle,
+    };
+    if std::env::args_os().len() < 2 {
+        return;
+    }
+    let missing = |which| {
+        // SAFETY: plain queries of this process's standard handles.
+        let handle = unsafe { GetStdHandle(which) };
+        handle.is_null() || handle == INVALID_HANDLE_VALUE
+    };
+    let (out, err) = (missing(STD_OUTPUT_HANDLE), missing(STD_ERROR_HANDLE));
+    // SAFETY: attaching fails harmlessly when the parent has no console.
+    if !(out || err) || unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } == 0 {
+        return;
+    }
+    let name: Vec<u16> = "CONOUT$".encode_utf16().chain(Some(0)).collect();
+    // SAFETY: a NUL-terminated name; the handle is kept for the process's
+    // life as its standard output and error (std reads them on each write).
+    let console = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if console == INVALID_HANDLE_VALUE {
+        return;
+    }
+    for (which, set) in [(STD_OUTPUT_HANDLE, out), (STD_ERROR_HANDLE, err)] {
+        if set {
+            // SAFETY: a valid console handle for an unset standard handle.
+            unsafe { SetStdHandle(which, console) };
+        }
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    attach_console();
+    // A Windows VM can have only Microsoft's CPU/WARP adapter. Our device
+    // selection already permits that fallback, but Slint otherwise rejects
+    // it before opening any window. Permit CPU adapters, not force them: a
+    // hardware adapter remains preferred on ordinary PCs.
+    #[cfg(windows)]
+    if std::env::var_os("SLINT_WGPU_CPU").is_none() {
+        // SAFETY: the first operation in main, before logging, updater or
+        // worker threads start. The setting is process-local, not persisted.
+        unsafe { std::env::set_var("SLINT_WGPU_CPU", "1") };
+    }
+    #[cfg(windows)]
+    if let Some(result) = update::command_line(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        match result {
+            Ok(()) => exit(0),
+            Err(error) => {
+                eprintln!("updates: {error:#}");
+                exit(1);
+            }
+        }
+    }
     let _logs = isocast_diagnostics::init("isocast-ui", true);
     if std::env::args().nth(1).as_deref() == Some("--motion") {
         exit(match motion::main(std::env::args().skip(1).collect()) {

@@ -77,6 +77,10 @@ export global CanvasArea {
     in property <bool> waiting;
     in property <string> picture-error;
     in property <bool> program-waiting;
+    // Why Studio Mode's program and the extra canvas's monitor have no
+    // picture, when asking again won't help ("" otherwise).
+    in property <string> program-error;
+    in property <string> extra-error;
     // The chosen extra canvas's monitor beside the others (#86, #120):
     // its picture, no frame yet, what it says instead of one, the scene on
     // air on it, and whether it is recorded and live.

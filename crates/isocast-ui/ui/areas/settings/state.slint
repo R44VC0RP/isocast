@@ -8,6 +8,7 @@
 // names to the setup). Apply (or OK) sends what changed as one patch.
 
 import { DropdownOption, NavTab, Segment } from "../../kit.slint";
+import { PlatformText } from "../../state.slint";
 
 // A streaming service to choose (Stream, before streaming is set up).
 export struct ServiceChoice {
@@ -158,6 +159,7 @@ export global SettingsArea {
     in-out property <bool> machine-calibrating;
     // App updates (Sparkle, src/update.rs): only a released app has them.
     in-out property <bool> updates-available;
+    in-out property <bool> automatic-updates-available;
     in-out property <bool> auto-updates;
 
     // ---- Stream
@@ -381,6 +383,9 @@ export global SettingsArea {
 
     // ---- The first run (Ui.onboarding shows it)
     in-out property <int> step;
+    // The first step (permissions) is part of this run: always on macOS;
+    // on Windows only when a privacy switch blocks the camera or mic.
+    in-out property <bool> ob-access: true;
     // A live setup exists: the first run can be closed.
     in-out property <bool> can-close;
     in-out property <bool> creating;
@@ -398,7 +403,7 @@ export global SettingsArea {
     in-out property <string> layout: "bottom_right";
     in-out property <string> ob-canvas: "1920x1080";
     in-out property <string> ob-fps: "60";
-    in-out property <string> ob-folder: "~/Movies/Isocast";
+    in-out property <string> ob-folder: PlatformText.windows ? "~/Videos/Isocast" : "~/Movies/Isocast";
     in-out property <string> ob-name: "My setup";
     callback ob-close();
     callback ob-back();

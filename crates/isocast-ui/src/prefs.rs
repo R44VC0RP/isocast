@@ -16,13 +16,10 @@ fn path() -> PathBuf {
     if let Some(path) = std::env::var_os("ISOCAST_UI_PREFS") {
         return PathBuf::from(path);
     }
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let folder = if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/Isocast")
-    } else {
-        home.join(".isocast")
-    };
-    folder.join("isocast-ui.json")
+    // Beside the engine's own files: ~/Library/Application Support/Isocast
+    // on macOS, %LOCALAPPDATA%\Isocast on Windows (which has no HOME, so a
+    // HOME-based path was relative to the install folder), ~/.isocast else.
+    isocast_protocol::api::support_folder().join("isocast-ui.json")
 }
 
 /// Put the saved layout on the window (anything missing keeps its default).

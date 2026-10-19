@@ -27,7 +27,7 @@
 
 import { Theme } from "../../theme.slint";
 import { Icon, Icons } from "../../icons.slint";
-import { Ui } from "../../state.slint";
+import { Ui, PlatformText } from "../../state.slint";
 import {
     Button, ButtonVariant, ControlSize, Dock, Dropdown, GroupHeading, GroupHint, GroupRow, IconButton, Popover,
     PopoverPlacement, RowGroup, RowPlace, Viewport, Menus,
@@ -52,7 +52,11 @@ component VirtualCameraDetails inherits VerticalLayout {
     padding: Theme.space-2;
     spacing: 0;
 
-    if ControlsArea.vcam-approval: VerticalLayout {
+    if PlatformText.windows && (ControlsArea.vcam-approval || ControlsArea.vcam-missing): GroupHint {
+        text: "Windows virtual camera installation is not available in this build.";
+    }
+
+    if ControlsArea.vcam-approval && !PlatformText.windows: VerticalLayout {
         spacing: 0;
         GroupHeading { title: "Allow in System Settings"; }
         Rectangle {
@@ -83,7 +87,7 @@ component VirtualCameraDetails inherits VerticalLayout {
         }
     }
 
-    if ControlsArea.vcam-missing: VerticalLayout {
+    if ControlsArea.vcam-missing && !PlatformText.windows: VerticalLayout {
         spacing: 0;
         GroupHeading { title: "Not installed"; }
         // Wrapped to the popover's width (a layout sizes a wrapped Text's
@@ -212,7 +216,7 @@ component VirtualCameraDetails inherits VerticalLayout {
     }
 
     // Deleting Isocast leaves its camera in macOS: take it out first (#69).
-    if ControlsArea.vcam-removable: VerticalLayout {
+    if ControlsArea.vcam-removable && !PlatformText.windows: VerticalLayout {
         spacing: 0;
         GroupHeading { title: "Remove"; }
         Rectangle {
@@ -311,7 +315,7 @@ export component ControlsDock inherits Dock {
                 // every dock at theirs: read from the layout settings, not
                 // this dock, which would loop); else it says "Stop", red
                 // with its light, rather than "Stop R…".
-                text: ControlsArea.record-state == "starting" ? "Starting…" : ControlsArea.record-state == "stopping" ? "Stopping…" : root.recording ? (root.room-for-words ? "Stop Recording" : "Stop") : root.record-short ? "Record" : "Start Recording";
+                text: ControlsArea.record-state == "starting" ? "Starting…" : ControlsArea.record-state == "stopping" ? "Finishing…" : root.recording ? (root.room-for-words ? "Stop Recording" : "Stop") : root.record-short ? "Record" : "Start Recording";
                 // Recording: the button is red, so its light goes bone.
                 dot: root.recording || ControlsArea.record-state == "starting" ? Theme.bone : Theme.danger;
                 variant: root.recording || ControlsArea.record-state == "starting" ? ButtonVariant.live : ButtonVariant.secondary;
@@ -408,7 +412,7 @@ export component ControlsDock inherits Dock {
                 // OBS's words don't fit beside the gear in a 172px dock, so
                 // it is a toggle named as Studio Mode is (lit while on);
                 // screen readers and the tooltip get OBS's words.
-                tooltip: ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed: see how to install it" : ControlsArea.vcam-approval ? "Allow Isocast Virtual Camera in System Settings, then it starts" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
+                tooltip: PlatformText.windows && (ControlsArea.vcam-missing || ControlsArea.vcam-approval) ? "Windows virtual camera installation is not available in this build" : ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed: see how to install it" : ControlsArea.vcam-approval ? "Allow Isocast Virtual Camera in System Settings, then it starts" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
                 accessible-name: ControlsArea.vcam-missing ? "Virtual Camera (not installed)" : ControlsArea.vcam-approval ? "Virtual Camera (waiting for approval)" : root.vcam-on ? "Stop Virtual Camera" : "Start Virtual Camera";
                 text: ControlsArea.vcam-state == "starting" ? "Starting…" : ControlsArea.vcam-state == "stopping" ? "Stopping…" : root.short-words ? "Virtual Cam" : "Virtual Camera";
                 // The short words take the end padding too (172px dock).
@@ -430,7 +434,7 @@ export component ControlsDock inherits Dock {
                 inset: 0px;
                 icon: ControlsArea.vcam-missing || ControlsArea.vcam-approval ? Icons.warning : Icons.settings;
                 accessible-name: "Virtual Camera Settings";
-                tooltip: ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed" : ControlsArea.vcam-approval ? "Allow Isocast Virtual Camera in System Settings" : "What the virtual camera shows, and its size";
+                tooltip: PlatformText.windows && (ControlsArea.vcam-missing || ControlsArea.vcam-approval) ? "Windows virtual camera installation is not available in this build" : ControlsArea.vcam-missing ? "Isocast Virtual Camera isn’t installed" : ControlsArea.vcam-approval ? "Allow Isocast Virtual Camera in System Settings" : "What the virtual camera shows, and its size";
                 menu-open: vcam-details.open;
                 enabled: Ui.has-setup;
                 clicked => { vcam-details.show(); }
@@ -466,7 +470,7 @@ export component ControlsDock inherits Dock {
                 icon: Icons.log-out;
                 variant: ButtonVariant.quiet;
                 accessible-name: "Exit";
-                tooltip: "Exit (⌘Q)";
+                tooltip: PlatformText.windows ? "Exit (Alt+F4)" : "Exit (⌘Q)";
                 clicked => { Ui.quit(); }
             }
         }

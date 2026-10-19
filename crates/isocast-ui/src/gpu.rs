@@ -23,9 +23,17 @@ impl Gpu {
         // The platform's own API only: Metal on macOS, DX12 on Windows,
         // Vulkan elsewhere (never GL).
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            backends: if cfg!(windows) {
+                wgpu::Backends::DX12
+            } else {
+                wgpu::Backends::PRIMARY
+            },
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
+        #[cfg(windows)]
+        let adapter = isocast_client::shared::adapter(&mut crate::daemon::connect()?, &instance)
+            .context("could not select the daemon's preview adapter")?;
+        #[cfg(not(windows))]
         let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
             ..Default::default()
@@ -36,6 +44,7 @@ impl Gpu {
             ..Default::default()
         }))
         .context("could not open the GPU")?;
+        isocast_client::shared::register_gpu(&device, &queue)?;
         Ok(Self {
             instance,
             adapter,

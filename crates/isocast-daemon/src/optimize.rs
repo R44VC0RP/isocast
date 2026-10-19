@@ -51,13 +51,17 @@ impl Daemon {
         let folder = match params.and_then(|p| p.folder) {
             Some(folder) if !folder.trim().is_empty() => PathBuf::from(folder),
             _ => {
-                let home = std::env::var_os("HOME").map(PathBuf::from);
+                // The home folder as this OS has it (USERPROFILE or the
+                // profile known folder on Windows, where HOME is unset).
+                let home = Some(isocast_protocol::api::home_folder())
+                    .filter(|home| !home.as_os_str().is_empty());
                 match (std::env::var_os(obs::FOLDER_ENV), home) {
                     (Some(folder), _) if !folder.is_empty() => PathBuf::from(folder),
                     (_, Some(home)) => obs::obs_folder(&home),
                     _ => {
                         return Err(failed(
-                            "folder: isocastd has no HOME, so give OBS's settings folder",
+                            "folder: isocastd can't find this user's home folder, so give \
+                             OBS's settings folder",
                         ));
                     }
                 }
@@ -274,6 +278,18 @@ impl Daemon {
             return Err(failed(format!(
                 "the benchmark could not run, so nothing was optimized: {reason}"
             )));
+        }
+        // A source that couldn't be opened is a warning of its own, first:
+        // the rest was still optimized.
+        for (at, skip) in tuning.skipped.iter().enumerate() {
+            notes.insert(
+                at,
+                format!(
+                    "Source {:?} couldn't be opened, so its ISO file was left out of the \
+                     benchmark and the rest was optimized without it: {}",
+                    skip.source, skip.reason
+                ),
+            );
         }
         let to_json =
             |setup: &Setup| serde_json::to_value(setup).map_err(|e| failed(e.to_string()));

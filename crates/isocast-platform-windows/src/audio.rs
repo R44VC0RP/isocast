@@ -9,23 +9,24 @@ use anyhow::{Context, Result, anyhow, bail};
 use isocast_engine::{AudioSink, SAMPLE_RATE, Time};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{
-    E_INVALIDARG, ERROR_NOT_FOUND, PROPERTYKEY, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    E_INVALIDARG, ERROR_NOT_FOUND, PROPERTYKEY, WAIT_FAILED, WAIT_OBJECT_0,
 };
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
     AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-    AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE,
-    DEVICE_STATE_ACTIVE, EDataFlow, ERole, IAudioCaptureClient, IAudioClient, IMMDevice,
-    IMMDeviceEnumerator, IMMEndpoint, IMMNotificationClient, IMMNotificationClient_Impl,
-    MMDeviceEnumerator, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0, eCapture,
-    eConsole, eRender,
+    AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+    AudioSessionDisconnectReason, AudioSessionState, DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow,
+    ERole, IAudioCaptureClient, IAudioClient, IAudioSessionControl, IAudioSessionEvents,
+    IAudioSessionEvents_Impl, IMMDevice, IMMDeviceEnumerator, IMMEndpoint, IMMNotificationClient,
+    IMMNotificationClient_Impl, MMDeviceEnumerator, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+    WAVEFORMATEXTENSIBLE_0, eCapture, eConsole, eRender,
 };
 use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
 use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree, STGM_READ};
-use windows::Win32::System::Threading::WaitForMultipleObjects;
-use windows::core::{BSTR, HRESULT, Interface, PCWSTR, PWSTR, implement};
+use windows::Win32::System::Threading::{INFINITE, WaitForMultipleObjects};
+use windows::core::{BOOL, BSTR, GUID, HRESULT, Interface, PCWSTR, PWSTR, implement};
 
 use crate::native::{Apartment, Event};
 
@@ -80,7 +81,8 @@ impl State {
         match self.invalidated.load(Ordering::Acquire) {
             0 => Ok(()),
             1 => bail!("selected audio endpoint was removed or became inactive"),
-            _ => bail!("default eConsole audio endpoint changed; reopen capture explicitly"),
+            2 => bail!("default eConsole audio endpoint changed; reopen capture explicitly"),
+            _ => bail!("audio capture session disconnected; reopen capture explicitly"),
         }
     }
 
@@ -175,6 +177,53 @@ pub fn audio_devices() -> Result<Vec<AudioDevice>> {
         .map_err(anyhow::Error::msg)
 }
 
+/// Resolve only the selected microphone and validate its channel selection.
+/// Returns native mix metadata and the channel count capture would deliver.
+/// No stream is initialized/started and no permission request is made. This
+/// is not a permission grant or a guarantee that a later capture will start.
+pub fn probe_microphone(device: &str, channels: Option<&[u32]>) -> Result<(AudioDevice, u32)> {
+    validate_channel_count(channels)?;
+    probe_audio(device, channels.map(<[u32]>::to_vec), eCapture)
+}
+
+/// Query the default eConsole render endpoint and its stereo loopback delivery.
+/// Like `probe_microphone`, this reads metadata only, without starting audio.
+pub fn probe_loopback() -> Result<(AudioDevice, u32)> {
+    probe_audio("default", None, eRender)
+}
+
+fn probe_audio(
+    query: &str,
+    channels: Option<Vec<u32>>,
+    flow: EDataFlow,
+) -> Result<(AudioDevice, u32)> {
+    let query = query.to_owned();
+    thread::Builder::new()
+        .name("Windows audio probe".into())
+        .spawn(move || {
+            let _apartment = Apartment::new().map_err(|error| format!("{error:#}"))?;
+            let result = (|| -> Result<_> {
+                let enumerator = enumerator()?;
+                let endpoint = selected_endpoint(&enumerator, flow, &query)?;
+                let (_, pick) = channel_selection(&endpoint.device, channels.as_deref())?;
+                Ok((endpoint.device, pick.len() as u32))
+            })();
+            // Format/drop even native error-info interfaces before leaving
+            // this apartment; only owned metadata or text crosses the thread.
+            result.map_err(|error| format!("Windows audio probe: {error:#}"))
+        })?
+        .join()
+        .map_err(|_| anyhow!("Windows audio probe panicked"))?
+        .map_err(anyhow::Error::msg)
+}
+
+fn validate_channel_count(channels: Option<&[u32]>) -> Result<()> {
+    if channels.is_some_and(|channels| channels.is_empty() || channels.len() > 2) {
+        bail!("microphone.channels: select one or two distinct 1-based input channels");
+    }
+    Ok(())
+}
+
 /// Select one or two 1-based microphone channels, defaulting to the first two
 /// (or its single mono channel). The returned count is the delivered count.
 pub fn capture_microphone(
@@ -183,9 +232,7 @@ pub fn capture_microphone(
     sink: AudioSink,
     thread_start: fn(),
 ) -> Result<(AudioCapture, u32)> {
-    if channels.is_some_and(|channels| channels.is_empty() || channels.len() > 2) {
-        bail!("microphone.channels: select one or two distinct 1-based input channels");
-    }
+    validate_channel_count(channels)?;
     capture(
         device,
         channels.map(<[u32]>::to_vec),
@@ -250,11 +297,7 @@ fn capture(
                         let _apartment = Apartment::new()?;
                         thread_start();
                         let enumerator = enumerator()?;
-                        let identity = resolve(&enumerator, flow, &query)?;
-                        let is_default = query.eq_ignore_ascii_case("default")
-                            || reported_default_id(&enumerator, flow).as_deref()
-                                == Some(identity.id.as_str());
-                        let endpoint = open_endpoint(identity, flow, is_default)?;
+                        let endpoint = selected_endpoint(&enumerator, flow, &query)?;
                         let _notifications = Notifications::new(
                             enumerator,
                             &endpoint,
@@ -488,6 +531,17 @@ struct Endpoint {
     mask: u32,
 }
 
+fn selected_endpoint(
+    enumerator: &IMMDeviceEnumerator,
+    flow: EDataFlow,
+    query: &str,
+) -> Result<Endpoint> {
+    let identity = resolve(enumerator, flow, query)?;
+    let is_default = query.eq_ignore_ascii_case("default")
+        || reported_default_id(enumerator, flow).as_deref() == Some(identity.id.as_str());
+    open_endpoint(identity, flow, is_default)
+}
+
 fn open_endpoint(identity: EndpointIdentity, flow: EDataFlow, default: bool) -> Result<Endpoint> {
     let EndpointIdentity { raw, id, name } = identity;
     let client: IAudioClient = unsafe { raw.Activate(CLSCTX_ALL, None) }.with_context(|| {
@@ -534,7 +588,94 @@ fn open_endpoint(identity: EndpointIdentity, flow: EDataFlow, default: bool) -> 
     })
 }
 
+fn channel_selection(device: &AudioDevice, channels: Option<&[u32]>) -> Result<(u32, Vec<usize>)> {
+    validate_channel_count(channels)?;
+    let count = if device.input { device.channels } else { 2 };
+    if !(1..=MAX_CHANNELS).contains(&count) {
+        bail!(
+            "audio endpoint {:?}: {count} capture channels; supported range: 1..={MAX_CHANNELS}",
+            device.name
+        );
+    }
+    if channels.is_some_and(|channels| {
+        channels
+            .iter()
+            .any(|channel| !(1..=count).contains(channel))
+            || (channels.len() == 2 && channels[0] == channels[1])
+    }) {
+        bail!(
+            "microphone.channels: {channels:?}; choose one or two distinct channels in 1..={count} for {:?}",
+            device.name
+        );
+    }
+    let pick = channels.map_or_else(
+        || (0..count.min(2) as usize).collect(),
+        |channels| {
+            channels
+                .iter()
+                .map(|&channel| (channel - 1) as usize)
+                .collect()
+        },
+    );
+    Ok((count, pick))
+}
+
+#[implement(IAudioSessionEvents)]
+struct SessionEvents {
+    state: Arc<State>,
+}
+
+impl IAudioSessionEvents_Impl for SessionEvents_Impl {
+    fn OnDisplayNameChanged(&self, _: &PCWSTR, _: *const GUID) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnIconPathChanged(&self, _: &PCWSTR, _: *const GUID) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnSimpleVolumeChanged(&self, _: f32, _: BOOL, _: *const GUID) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnChannelVolumeChanged(
+        &self,
+        _: u32,
+        _: *const f32,
+        _: u32,
+        _: *const GUID,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnGroupingParamChanged(&self, _: *const GUID, _: *const GUID) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnStateChanged(&self, _: AudioSessionState) -> windows::core::Result<()> {
+        // Inactive is legitimate for idle loopback, not a lost session.
+        Ok(())
+    }
+    fn OnSessionDisconnected(&self, _: AudioSessionDisconnectReason) -> windows::core::Result<()> {
+        // Format changes/service shutdown need not change endpoint identity
+        // or produce another buffer event. Wake an otherwise infinite wait.
+        self.state.invalidate(3);
+        Ok(())
+    }
+}
+
+struct SessionNotifications {
+    control: IAudioSessionControl,
+    events: IAudioSessionEvents,
+}
+
+impl Drop for SessionNotifications {
+    fn drop(&mut self) {
+        let _ = unsafe {
+            self.control
+                .UnregisterAudioSessionNotification(&self.events)
+        };
+    }
+}
+
 struct Session {
+    // Unregister before releasing the client; callbacks retain only State.
+    _notifications: SessionNotifications,
     client: IAudioClient,
     capture: IAudioCaptureClient,
     channels: usize,
@@ -544,35 +685,9 @@ struct Session {
 }
 
 impl Session {
-    fn new(endpoint: &Endpoint, channels: Option<&[u32]>, state: &State) -> Result<Self> {
+    fn new(endpoint: &Endpoint, channels: Option<&[u32]>, state: &Arc<State>) -> Result<Self> {
         let input = endpoint.device.input;
-        let count = if input { endpoint.device.channels } else { 2 };
-        if !(1..=MAX_CHANNELS).contains(&count) {
-            bail!(
-                "audio endpoint {:?}: {count} capture channels; supported range: 1..={MAX_CHANNELS}",
-                endpoint.device.name
-            );
-        }
-        if channels.is_some_and(|channels| {
-            channels
-                .iter()
-                .any(|channel| !(1..=count).contains(channel))
-                || (channels.len() == 2 && channels[0] == channels[1])
-        }) {
-            bail!(
-                "microphone.channels: {channels:?}; choose one or two distinct channels in 1..={count} for {:?}",
-                endpoint.device.name
-            );
-        }
-        let pick = channels.map_or_else(
-            || (0..count.min(2) as usize).collect(),
-            |channels| {
-                channels
-                    .iter()
-                    .map(|&channel| (channel - 1) as usize)
-                    .collect()
-            },
-        );
+        let (count, pick) = channel_selection(&endpoint.device, channels)?;
         let format = WAVEFORMATEXTENSIBLE {
             Format: WAVEFORMATEX {
                 wFormatTag: WAVE_FORMAT_EXTENSIBLE as u16,
@@ -610,7 +725,21 @@ impl Session {
         }
         unsafe { client.SetEventHandle(state.data.handle()) }.context("WASAPI SetEventHandle")?;
         let capture = unsafe { client.GetService() }.context("WASAPI capture service")?;
+        let notifications = SessionNotifications {
+            control: unsafe { client.GetService() }.context("WASAPI session control")?,
+            events: SessionEvents {
+                state: state.clone(),
+            }
+            .into(),
+        };
+        unsafe {
+            notifications
+                .control
+                .RegisterAudioSessionNotification(&notifications.events)
+        }
+        .context("WASAPI session-disconnection notifications")?;
         Ok(Self {
+            _notifications: notifications,
             client,
             capture,
             channels: count as usize,
@@ -628,8 +757,11 @@ impl Session {
                 return Ok(());
             }
             state.check_device()?;
+            // Windows 10 1703+ loopback and capture signal the event for data.
+            // Endpoint changes signal `data` too, and Drop signals `stop`;
+            // an idle render endpoint needs no periodic GetNextPacketSize.
             let wait = unsafe {
-                WaitForMultipleObjects(&[state.stop.handle(), state.data.handle()], false, 250)
+                WaitForMultipleObjects(&[state.stop.handle(), state.data.handle()], false, INFINITE)
             };
             if wait == WAIT_OBJECT_0 {
                 return Ok(());
@@ -637,7 +769,7 @@ impl Session {
             if wait == WAIT_FAILED {
                 return Err(windows::core::Error::from_thread()).context("WASAPI wait");
             }
-            if wait.0 != WAIT_OBJECT_0.0 + 1 && wait != WAIT_TIMEOUT {
+            if wait.0 != WAIT_OBJECT_0.0 + 1 {
                 bail!("unexpected WASAPI wait result: {}", wait.0);
             }
             loop {

@@ -588,7 +588,7 @@ def make_editor_seed(bin_dir, root, log):
     for _ in range(3):
         eng.cli("start", timeout=60, log=log)
         time.sleep(2.5)
-        eng.cli("stop", timeout=60, log=log)
+        eng.cli("stop", "--wait", timeout=60, log=log)
     log.write(eng.cli("timeline", "show"))
     eng.stop(keep=True)
     return eng.dir

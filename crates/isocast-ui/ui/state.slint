@@ -16,6 +16,18 @@ export struct ExtraCanvas {
 
 export enum ConnectionState { connecting, connected, disconnected, failed }
 
+// Set once by App on both native and offscreen paths. Mac defaults preserve
+// the existing kit/gallery too; these are labels, never key-binding values.
+export global PlatformText {
+    in property <bool> windows;
+    out property <string> machine: root.windows ? "PC" : "Mac";
+    out property <string> credential-store: root.windows ? "Credential Manager" : "Keychain";
+    out property <string> file-manager: root.windows ? "Explorer" : "Finder";
+    out property <string> primary: root.windows ? "Ctrl+" : "⌘";
+    out property <string> shift-primary: root.windows ? "Ctrl+Shift+" : "⇧⌘";
+    out property <string> primary-key: root.windows ? "Ctrl" : "⌘";
+}
+
 export global Ui {
     // ---- The engine
     in property <ConnectionState> connection: ConnectionState.connecting;
@@ -59,6 +71,10 @@ export global Ui {
     in property <string> preview-scene;
     in property <string> editing-scene;
     in-out property <bool> studio;
+    // The studio window maximized or full screen (Windows' Window menu
+    // says Restore and Exit Full Screen then).
+    in property <bool> window-maximized;
+    in property <bool> window-fullscreen;
 
     // ---- The selected scene item (in `editing-scene`), by its key path
     // ("" for none). Areas select through `select`.

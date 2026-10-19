@@ -20,11 +20,12 @@ use windows_sys::Win32::Globalization::{
     CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_UNICODE_ENVIRONMENT,
-    CreateProcessW, DETACHED_PROCESS, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+    CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
+    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
+    EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, INFINITE,
+    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 use crate::isolated::SpawnOptions;
@@ -152,6 +153,9 @@ pub(super) fn spawn_daemon_with(
     let mut process = PROCESS_INFORMATION::default();
     // Break away from the CLI's console AND job (including SSH). Never silently
     // retry attached to a job which could kill a recording when its caller exits.
+    // CREATE_NO_WINDOW gives the engine a console of its own that is never
+    // shown (not DETACHED_PROCESS: a console program it starts would then
+    // open a visible console window of its own).
     // SAFETY: all strings, stdio handles, attribute storage and outputs are live
     // for the synchronous call. Only the reader and log are inheritable; the
     // ownership pipe's writer remains private and is never in HANDLE_LIST.
@@ -162,7 +166,7 @@ pub(super) fn spawn_daemon_with(
             null(),
             null(),
             1,
-            DETACHED_PROCESS
+            CREATE_NO_WINDOW
                 | CREATE_NEW_PROCESS_GROUP
                 | CREATE_BREAKAWAY_FROM_JOB
                 | CREATE_UNICODE_ENVIRONMENT

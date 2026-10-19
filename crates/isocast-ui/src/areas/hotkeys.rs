@@ -280,7 +280,7 @@ impl HotkeysPage {
             ]),
             configured: Default::default(),
             warnings: vec![
-                "hotkeys.media-play: media keys need Input Monitoring for Isocast’s engine (System Settings › Privacy & Security › Input Monitoring); they work while Isocast is in front meanwhile".into(),
+                isocast_protocol::platform_text::select("hotkeys.media-play: media keys need Input Monitoring for Isocast’s engine (System Settings › Privacy & Security › Input Monitoring); they work while Isocast is in front meanwhile", "hotkeys.media-play: this Windows build cannot register this media key globally; choose another shortcut").into(),
             ],
             pending: false,
             registrations: vec![isocast_protocol::hotkeys::Registration {
@@ -373,7 +373,13 @@ impl HotkeysPage {
             .map(|w| banner_warning(w, &label_of).into())
             .collect();
         if current.pending {
-            warnings.push("macOS is still taking the new keys; they work in a moment.".into());
+            warnings.push(
+                isocast_protocol::platform_text::select(
+                    "macOS is still taking the new keys; they work in a moment.",
+                    "Windows is still registering the new shortcuts; they work in a moment.",
+                )
+                .into(),
+            );
         }
         area.set_bindings_warnings(model(warnings));
         area.set_bindings(model(groups.into_iter().map(|(title, rows)| {

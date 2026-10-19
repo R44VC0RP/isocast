@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-108 tools. Arguments marked required must be given; ids, not names,
+111 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -300,6 +300,10 @@ A timeline (the current one unless `timeline` gives an id): its clips in order, 
 | Argument | Type | Description |
 |---|---|---|
 | `timeline` | string (optional) | A timeline's id (`timeline_list` has them); the current one if absent. |
+
+## gpu_adapter
+
+Select/return the daemon's graphics adapter without starting capture: Windows DX12 LUID [low, high], or null on other platforms. Shared-preview clients must use this adapter.
 
 ## hotkeys_actions
 
@@ -659,6 +663,10 @@ Ask macOS for screen recording, camera and microphone access where it hasn't bee
 |---|---|---|
 | `permission` | PermissionKind | Only this one: screen_recording, camera, microphone or system_audio (all not decided yet if left out). |
 
+## request_stop_recording
+
+Ask the recording to stop and return at once, while the files are still being finished. Returns the session id, `finalizing` and the files known so far (provisional): not a finished recording. get_status says `finalizing` until the files are done (a new recording is refused until then); then `last` (or `last_error`) and the `stopped` event give the report. Asking again while finalizing returns the same; use stop_recording to wait for the report instead.
+
 ## restart_isocastd
 
 Restart isocastd, which only sees a permission granted in System Settings (screen recording, above all) once restarted; the live setup is kept. Refused, atomically by isocastd, while it records, streams, exports or feeds the virtual camera.
@@ -748,6 +756,10 @@ Keep a stream key in the macOS Keychain for a streaming service (the live setup'
 | `key` (required) | string | The stream key from the service's dashboard. It goes into the Keychain and is never shown again; prefer `isocast stream key set` in a terminal, which keeps it out of this conversation. |
 | `server` | string (optional) | For "custom": the server it belongs to (rtmp://host/app). |
 | `service` | StreamService | The service it is for; the live setup's [stream] service if absent. |
+
+## shutdown_idle_daemon
+
+Shut down the recording daemon only if its atomic idle check permits it. Refuses active recording, streaming, exports, replay or camera work; cancels an idle calibration. Never launches or force-terminates a daemon; use before updating or uninstalling after closing the app.
 
 ## split_clip
 

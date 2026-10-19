@@ -653,11 +653,23 @@ mod other {
 
     impl Helper {
         pub fn show(_app: &Path, _text: &str, _returned: impl Fn() + 'static) -> Result<Helper> {
-            bail!("the permission helper is macOS's")
+            bail!(
+                "{}",
+                isocast_protocol::platform_text::select(
+                    "the permission helper is macOS's",
+                    "Windows uses Settings access for desktop apps; there is no draggable permission helper"
+                )
+            )
         }
     }
 
     pub fn render_png(_app: &Path, _text: &str, _out: &Path, _scale: f32) -> Result<()> {
-        bail!("the permission helper is macOS's")
+        bail!(
+            "{}",
+            isocast_protocol::platform_text::select(
+                "the permission helper is macOS's",
+                "Windows uses Settings access for desktop apps; there is no draggable permission helper"
+            )
+        )
     }
 }

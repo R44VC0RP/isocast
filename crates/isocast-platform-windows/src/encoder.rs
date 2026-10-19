@@ -9,6 +9,7 @@ use isocast_engine::{
 };
 use isocast_protocol::{Codec, EncoderQuality, QualityPreset};
 
+use crate::nvenc::{NvencAccounted, NvencAdmission, NvencClosing, NvencReservation};
 use crate::{EncodeStats, Frame, GraphicsDevice, MfEncoder, MfMode, NvencEncoder, PixelFormat};
 use crate::{h264, hevc};
 
@@ -90,6 +91,80 @@ impl Parameters {
     }
 }
 
+/// NVENC's codecs as last found (never probed while this process encodes,
+/// so a check can't take a session a recording needs).
+static NVENC_FOUND: parking_lot::Mutex<Option<Vec<String>>> = parking_lot::Mutex::new(None);
+
+fn codec_label(encoding: VideoEncoding) -> &'static str {
+    match encoding {
+        VideoEncoding::H264 => "H.264",
+        VideoEncoding::Hevc => "HEVC",
+        VideoEncoding::Hevc10 => "HEVC Main10",
+    }
+}
+
+/// The video encoders a recording here can use, as `WindowsVideoEncoder`
+/// tries them: NVENC on the recording's GPU (each codec opened briefly,
+/// with the recording's NV12 input and quality mode), then that GPU's
+/// Media Foundation hardware encoders, then software ones (the CPU).
+pub fn video_encoders(device: Option<&GraphicsDevice>) -> isocast_engine::VideoEncoders {
+    let mut found = isocast_engine::VideoEncoders::default();
+    let all = [
+        VideoEncoding::H264,
+        VideoEncoding::Hevc,
+        VideoEncoding::Hevc10,
+    ];
+    if let Some(device) = device {
+        let cached = NVENC_FOUND.lock().clone();
+        let nvenc = match cached {
+            Some(nvenc) => nvenc,
+            None if NvencEncoder::active_sessions() > 0 => {
+                vec!["NVENC (in use by this engine, not checked again)".into()]
+            }
+            None => {
+                let spec = LiveVideoSpec {
+                    width: 1280,
+                    height: 720,
+                    fps: 30,
+                    bitrate_kbps: 0,
+                    constant_bitrate: false,
+                    keyframe_interval: 60,
+                    low_latency: true,
+                };
+                let nvenc: Vec<String> = all
+                    .into_iter()
+                    .filter(|&encoding| {
+                        NvencEncoder::with_quantizer(device, &spec, encoding, PixelFormat::Nv12, 23)
+                            .is_ok()
+                    })
+                    .map(|encoding| format!("NVENC {} ({})", codec_label(encoding), device.name()))
+                    .collect();
+                *NVENC_FOUND.lock() = Some(nvenc.clone());
+                nvenc
+            }
+        };
+        found.hardware.extend(nvenc);
+        if let Ok(names) = crate::mf::encoder_names(true, Some(device.adapter_luid()), &all[..2]) {
+            found
+                .hardware
+                .extend(names.into_iter().map(|(encoding, name)| {
+                    format!("Media Foundation {} ({name})", codec_label(encoding))
+                }));
+        }
+    }
+    if let Ok(names) = crate::mf::encoder_names(false, None, &all[..2]) {
+        found
+            .software
+            .extend(names.into_iter().map(|(encoding, name)| {
+                format!(
+                    "Media Foundation {} ({name}, software)",
+                    codec_label(encoding)
+                )
+            }));
+    }
+    found
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncoderBackend {
     Nvenc,
@@ -143,12 +218,56 @@ impl RecordingQuality {
     }
 }
 
+/// Who owns an accounted encoder session, and what it is fed.
+#[derive(Clone)]
+pub(crate) struct NvencOwner {
+    pub recording: u64,
+    pub take: u32,
+    pub output: String,
+    pub size: (u32, u32, u32),
+    pub input: PixelFormat,
+    pub planned: bool,
+}
+
+impl NvencOwner {
+    /// The ledger entry for a native NVENC session of this configuration,
+    /// also used to price an open before its native session exists.
+    pub(crate) fn candidate(
+        self,
+        codec: Codec,
+        bit_depth: u8,
+        preset: Option<u32>,
+        qp: Option<u32>,
+    ) -> NvencAccounted {
+        let (width, height, fps) = self.size;
+        NvencAccounted {
+            recording: self.recording,
+            take: self.take,
+            output: self.output,
+            codec,
+            bit_depth,
+            width,
+            height,
+            fps,
+            preset,
+            native: true,
+            qp,
+            input: self.input,
+            planned: self.planned,
+        }
+    }
+}
+
 enum Encoder {
     Nvenc(NvencEncoder),
     Mf(MfEncoder),
 }
 
 pub struct WindowsVideoEncoder {
+    /// Process-wide NVENC accounting. Declared first: dropping marks the
+    /// session closing before `encoder` closes it, so admission waits
+    /// rather than reading a half-closed count.
+    budget_closing: Option<NvencClosing>,
     encoder: Encoder,
     backend: EncoderBackend,
     fallback_reasons: Vec<String>,
@@ -158,6 +277,14 @@ pub struct WindowsVideoEncoder {
     held: Option<EncodedVideo>,
     force_idr: bool,
     terminal: bool,
+    /// The device a live session's rate increases are priced on.
+    budget_device: Option<GraphicsDevice>,
+    /// Admission refused a live rate increase: the caller may keep feeding
+    /// the new rate, so every later input is refused until it reopens.
+    rate_refused: Option<String>,
+    /// Process-wide NVENC accounting. Declared last: it is released only
+    /// after `encoder`, and so its native session, has been dropped.
+    budget: Option<NvencReservation>,
 }
 
 impl WindowsVideoEncoder {
@@ -171,11 +298,28 @@ impl WindowsVideoEncoder {
         encoding: VideoEncoding,
         input: PixelFormat,
     ) -> Result<Self> {
+        Self::live_policy(device, spec, encoding, input, true)
+    }
+
+    /// Live H.264 from BGRA8 on NVENC's fixed P5 only, for an open priced by
+    /// encoder admission: no other provider's throughput was priced.
+    pub fn new_nvenc_only(device: &GraphicsDevice, spec: &LiveVideoSpec) -> Result<Self> {
+        Self::live_policy(device, spec, VideoEncoding::H264, PixelFormat::Bgra8, false)
+    }
+
+    fn live_policy(
+        device: &GraphicsDevice,
+        spec: &LiveVideoSpec,
+        encoding: VideoEncoding,
+        input: PixelFormat,
+        fallback: bool,
+    ) -> Result<Self> {
         encoding.validate(input)?;
         let mut reasons = Vec::new();
         match NvencEncoder::with_format(device, spec, encoding, input) {
             Ok(encoder) => {
                 return Ok(Self {
+                    budget_closing: None,
                     encoder: Encoder::Nvenc(encoder),
                     backend: EncoderBackend::Nvenc,
                     fallback_reasons: reasons,
@@ -185,9 +329,18 @@ impl WindowsVideoEncoder {
                     held: None,
                     force_idr: false,
                     terminal: false,
+                    budget: None,
+                    budget_device: None,
+                    rate_refused: None,
                 });
             }
             Err(error) => reasons.push(format!("NVENC: {error:#}")),
+        }
+        if !fallback {
+            bail!(
+                "encoder.budget: admitted NVENC live encoder could not open; no other provider was priced: {}",
+                reasons.join("; ")
+            );
         }
         for mode in [MfMode::Hardware, MfMode::Software] {
             match MfEncoder::with_format(device, spec, mode, encoding, input) {
@@ -198,6 +351,7 @@ impl WindowsVideoEncoder {
                         MfMode::Software => EncoderBackend::MediaFoundationSoftware(name),
                     };
                     return Ok(Self {
+                        budget_closing: None,
                         encoder: Encoder::Mf(encoder),
                         backend,
                         fallback_reasons: reasons,
@@ -207,6 +361,9 @@ impl WindowsVideoEncoder {
                         held: None,
                         force_idr: false,
                         terminal: false,
+                        budget: None,
+                        budget_device: None,
+                        rate_refused: None,
                     });
                 }
                 Err(error) => reasons.push(format!("MF {mode:?}: {error:#}")),
@@ -224,6 +381,27 @@ impl WindowsVideoEncoder {
         device: &GraphicsDevice,
         spec: &VideoTrackSpec,
         input: PixelFormat,
+    ) -> Result<Self> {
+        Self::recording_policy(device, spec, input, None)
+    }
+
+    /// Open an output from an aggregate NVENC budget plan. Unlike the default
+    /// constructor, this cannot silently fall back to another provider: that
+    /// provider's throughput was not covered by the pre-open admission plan.
+    pub fn recording_with_preset(
+        device: &GraphicsDevice,
+        spec: &VideoTrackSpec,
+        input: PixelFormat,
+        preset: u32,
+    ) -> Result<Self> {
+        Self::recording_policy(device, spec, input, Some(preset))
+    }
+
+    fn recording_policy(
+        device: &GraphicsDevice,
+        spec: &VideoTrackSpec,
+        input: PixelFormat,
+        preset: Option<u32>,
     ) -> Result<Self> {
         let depth = spec.encoder.effective_bit_depth();
         let encoding = match (spec.encoder.codec, depth) {
@@ -249,9 +427,17 @@ impl WindowsVideoEncoder {
             low_latency: true,
         };
         let mut reasons = Vec::new();
-        match NvencEncoder::with_quantizer(device, &settings, encoding, input, quality.nvenc_qp) {
+        match NvencEncoder::with_quantizer_preset(
+            device,
+            &settings,
+            encoding,
+            input,
+            quality.nvenc_qp,
+            preset.unwrap_or(5),
+        ) {
             Ok(encoder) => {
                 return Ok(Self {
+                    budget_closing: None,
                     encoder: Encoder::Nvenc(encoder),
                     backend: EncoderBackend::Nvenc,
                     fallback_reasons: reasons,
@@ -261,9 +447,18 @@ impl WindowsVideoEncoder {
                     held: None,
                     force_idr: true,
                     terminal: false,
+                    budget: None,
+                    budget_device: None,
+                    rate_refused: None,
                 });
             }
             Err(error) => reasons.push(format!("NVENC recording QP: {error:#}")),
+        }
+        if preset.is_some() {
+            bail!(
+                "encoder.budget: planned NVENC output could not open; replan before choosing a different provider: {}",
+                reasons.join("; ")
+            );
         }
         for mode in [MfMode::Hardware, MfMode::Software] {
             match MfEncoder::with_quality(
@@ -287,6 +482,7 @@ impl WindowsVideoEncoder {
                         MfMode::Software => EncoderBackend::MediaFoundationSoftware(name),
                     };
                     return Ok(Self {
+                        budget_closing: None,
                         encoder: Encoder::Mf(encoder),
                         backend,
                         fallback_reasons: reasons,
@@ -296,6 +492,9 @@ impl WindowsVideoEncoder {
                         held: None,
                         force_idr: true,
                         terminal: false,
+                        budget: None,
+                        budget_device: None,
+                        rate_refused: None,
                     });
                 }
                 Err(error) => reasons.push(format!("MF {mode:?} recording quality: {error:#}")),
@@ -315,6 +514,56 @@ impl WindowsVideoEncoder {
         self.quality
     }
 
+    pub fn nvenc_preset(&self) -> Option<u32> {
+        match &self.encoder {
+            Encoder::Nvenc(encoder) => Some(encoder.preset()),
+            Encoder::Mf(_) => None,
+        }
+    }
+
+    /// Account this open session in the process-wide NVENC ledger with the
+    /// configuration its native session was opened and validated with. MF
+    /// hardware sessions are accounted without a preset (unpriceable, so
+    /// planned work fails closed beside them); MF software sessions do not
+    /// use NVENC and are not accounted.
+    pub(crate) fn account(
+        &mut self,
+        admission: &NvencAdmission,
+        device: &GraphicsDevice,
+        owner: NvencOwner,
+    ) {
+        let (native, preset) = match (&self.encoder, &self.backend) {
+            (Encoder::Nvenc(encoder), _) => (true, Some(encoder.preset())),
+            (Encoder::Mf(_), EncoderBackend::MediaFoundationHardware(_)) => (false, None),
+            _ => return,
+        };
+        let qp = match (&self.encoder, self.quality) {
+            (Encoder::Nvenc(_), Some(quality)) => Some(quality.nvenc_qp),
+            _ => None,
+        };
+        let mut accounted = owner.candidate(
+            match self.encoding {
+                VideoEncoding::H264 => Codec::H264,
+                VideoEncoding::Hevc | VideoEncoding::Hevc10 => Codec::Hevc,
+            },
+            self.encoding.bit_depth(),
+            preset,
+            qp,
+        );
+        accounted.native = native;
+        let (closing, reservation) = admission.reserve(accounted);
+        self.budget_closing = Some(closing);
+        self.budget = Some(reservation);
+        self.budget_device = Some(device.clone());
+    }
+
+    fn input_refused(&self) -> Result<()> {
+        match &self.rate_refused {
+            Some(refused) => bail!("{refused}"),
+            None => Ok(()),
+        }
+    }
+
     pub fn backend(&self) -> &EncoderBackend {
         &self.backend
     }
@@ -331,6 +580,7 @@ impl WindowsVideoEncoder {
         }
     }
     pub fn try_encode(&mut self, frame: &Frame, pts: Time, keyframe: bool) -> Result<bool> {
+        self.input_refused()?;
         let keyframe = keyframe || self.force_idr;
         let accepted = match &mut self.encoder {
             Encoder::Nvenc(encoder) => encoder.try_encode(frame, pts, keyframe)?,
@@ -432,6 +682,7 @@ impl VideoEncoder for WindowsVideoEncoder {
         }
     }
     fn encode(&mut self, frame: &Frame, pts: Time, keyframe: bool) -> Result<()> {
+        self.input_refused()?;
         let before = if self.force_idr {
             Some(self.stats()?.accepted)
         } else {
@@ -471,6 +722,25 @@ impl VideoEncoder for WindowsVideoEncoder {
         }
     }
     fn set_rate(&mut self, fps: u32, bitrate_kbps: u32) -> Result<()> {
+        self.input_refused()?;
+        // A live accounted session: reserve the new ceiling before the
+        // native change, holding admission through it. The ceiling is not
+        // rolled back if the setter fails: the caller may still feed `fps`.
+        // Recording sessions keep the native fixed-rate error unchanged.
+        let _admission = match (&self.budget, &self.budget_device, self.quality) {
+            (Some(reservation), Some(device), None) => {
+                let admission = NvencAdmission::begin();
+                if let Err(error) = admission.raise_fps(device, reservation, fps) {
+                    let message = format!(
+                        "encoder.budget: admission denied rate increase to {fps} fps; stream must reopen: {error:#}"
+                    );
+                    self.rate_refused = Some(message.clone());
+                    bail!("{message}");
+                }
+                Some(admission)
+            }
+            _ => None,
+        };
         match &mut self.encoder {
             Encoder::Nvenc(encoder) => encoder.set_rate(fps, bitrate_kbps),
             Encoder::Mf(encoder) => encoder.set_rate(fps, bitrate_kbps),

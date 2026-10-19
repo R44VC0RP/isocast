@@ -229,9 +229,29 @@ pub struct Session {
     /// When this window last switched scenes itself (a status read just
     /// after may predate the switch).
     pub(crate) switched_at: Option<Instant>,
+    /// Counts this window's record requests and the engine's `started`
+    /// and `stopped` events: a status read asked before the latest says
+    /// nothing newer about the recording (see `App::refresh_status`).
+    pub(crate) record_epoch: u64,
+    /// Request time of the newest applied status reply. Concurrent reads can
+    /// finish out of order even within one recording epoch.
+    pub(crate) status_applied_from: Option<Instant>,
 }
 
 impl Session {
+    /// The recording is finishing its files after a stop (from Status, or
+    /// this window's own stop until its status says otherwise).
+    pub fn finalizing(&self) -> bool {
+        self.status.as_ref().is_some_and(|x| x.finalizing)
+    }
+
+    /// Recording can't be started, stopped, paused, split or retaken
+    /// just now: a record request is on its way or the files are being
+    /// finished.
+    pub fn record_busy(&self) -> bool {
+        self.busy_record || self.finalizing()
+    }
+
     /// Whether edits are waiting to reach the daemon.
     pub fn editing(&self) -> bool {
         !self.inflight.is_empty() || !self.retry.is_empty() || !self.queue.is_empty()

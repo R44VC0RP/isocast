@@ -38,10 +38,10 @@ one the editor shows and the timeline commands act on).
 ```sh
 isocast timeline new "My video"   # make one, make it current and the record target
 isocast start                     # take 1 (in a new project folder)
-isocast stop                      # take 1 lands on the timeline
+isocast stop --wait               # take 1 lands on the timeline
 isocast start                     # take 2, in the same folder
 isocast split                     # take 2 ends here, take 3 starts at once
-isocast stop
+isocast stop --wait
 ```
 
 `isocast timeline open ID` and opening a project (`isocast project open`)

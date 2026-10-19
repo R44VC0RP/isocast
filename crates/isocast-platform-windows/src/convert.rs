@@ -1,7 +1,8 @@
 //! GPU-only BGRA8/RGB10 conversion or qualified NV12 copy/expansion to
 //! limited-range Rec.709 NV12/P010 for the MF worker.
 //! Ten-bit output is SDR, not HDR. Only an explicitly selected software
-//! encoder may call `readback`.
+//! encoder may call `readback`; its BGRA8 path copies RGB and converts on
+//! the CPU so it does not require a hardware video processor.
 
 use std::mem::ManuallyDrop;
 use std::time::{Duration, Instant};
@@ -58,12 +59,37 @@ impl Converter {
         input: PixelFormat,
         bit_depth: u8,
     ) -> Result<Self> {
+        Self::open(device, width, height, fps, input, bit_depth, false)
+    }
+
+    pub(crate) fn for_software(
+        device: &GraphicsDevice,
+        width: u32,
+        height: u32,
+        fps: u32,
+        input: PixelFormat,
+        bit_depth: u8,
+    ) -> Result<Self> {
+        Self::open(device, width, height, fps, input, bit_depth, true)
+    }
+
+    fn open(
+        device: &GraphicsDevice,
+        width: u32,
+        height: u32,
+        fps: u32,
+        input: PixelFormat,
+        bit_depth: u8,
+        software: bool,
+    ) -> Result<Self> {
         let input_format = match input {
             PixelFormat::Bgra8 => DXGI_FORMAT_B8G8R8A8_UNORM,
             PixelFormat::Rgba10 => DXGI_FORMAT_R10G10B10A2_UNORM,
             PixelFormat::Nv12 => DXGI_FORMAT_NV12,
         };
+        let software_rgb = software && input == PixelFormat::Bgra8 && bit_depth == 8;
         let output_format = match bit_depth {
+            8 if software_rgb => DXGI_FORMAT_B8G8R8A8_UNORM,
             8 => DXGI_FORMAT_NV12,
             10 => DXGI_FORMAT_P010,
             _ => bail!("video.bit_depth: valid values are 8 and 10"),
@@ -82,10 +108,19 @@ impl Converter {
             bail!("video.fps: valid range is 1..=240");
         }
         unsafe {
-            let context: ID3D11DeviceContext4 = device.raw().GetImmediateContext()?.cast()?;
-            let video = if bit_depth == 8 && input != PixelFormat::Nv12 {
-                let video: ID3D11VideoDevice = device.raw().cast()?;
-                let video_context: ID3D11VideoContext1 = context.cast()?;
+            let context: ID3D11DeviceContext4 = device
+                .raw()
+                .GetImmediateContext()?
+                .cast()
+                .context("converter: query ID3D11DeviceContext4")?;
+            let video = if bit_depth == 8 && input != PixelFormat::Nv12 && !software_rgb {
+                let video: ID3D11VideoDevice = device
+                    .raw()
+                    .cast()
+                    .context("converter: query ID3D11VideoDevice for RGB to NV12")?;
+                let video_context: ID3D11VideoContext1 = context
+                    .cast()
+                    .context("converter: query ID3D11VideoContext1 for RGB to NV12")?;
                 let rate = DXGI_RATIONAL {
                     Numerator: fps,
                     Denominator: 1,
@@ -238,11 +273,11 @@ impl Converter {
         }
         self.texture_desc(frame.texture(), self.input_format, false)?;
         self.texture_desc(target, self.output_format, true)?;
-        if self.input_format == DXGI_FORMAT_NV12 && self.output_format == DXGI_FORMAT_NV12 {
+        if self.input_format == self.output_format {
             self.retain(Some(frame.clone()), frame.texture(), target)?;
             self.check(
                 unsafe { self.context.Wait(frame.fence(), frame.ready_value()) },
-                "wait for captured NV12",
+                "wait for captured conversion source",
             )?;
             unsafe { self.context.CopyResource(target, frame.texture()) };
             return self.finish();
@@ -344,13 +379,18 @@ impl Converter {
             "create YUV readback texture",
         )?;
         let staging = staging.context("D3D11 returned no readback texture")?;
+        let software_rgb = self.output_format == DXGI_FORMAT_B8G8R8A8_UNORM;
         let row_bytes = self.width as usize
-            * if self.output_format == DXGI_FORMAT_P010 {
-                2
-            } else {
-                1
+            * match self.output_format {
+                DXGI_FORMAT_B8G8R8A8_UNORM => 4,
+                DXGI_FORMAT_P010 => 2,
+                _ => 1,
             };
-        let rows = (self.height + self.height / 2) as usize;
+        let rows = if software_rgb {
+            self.height
+        } else {
+            self.height + self.height / 2
+        } as usize;
         let mut bytes = vec![0; row_bytes * rows];
         self.retain(None, target, &staging)?;
         unsafe { self.context.CopyResource(&staging, target) };
@@ -389,9 +429,8 @@ impl Converter {
                 .checked_mul(rows)
                 .is_some_and(|size| size <= isize::MAX as usize);
         if valid {
-            // NV12/P010 have height Y rows followed by height/2 interleaved
-            // UV rows, both with RowPitch. P010 stores each sample in the high
-            // ten bits of a 16-bit word. Copy pixels only, never padding.
+            // Copy pixels only, never row padding. NV12/P010 have height Y
+            // rows followed by height/2 UV rows, with the same RowPitch.
             for (row, dest) in bytes.chunks_exact_mut(row_bytes).enumerate() {
                 unsafe {
                     std::ptr::copy_nonoverlapping(
@@ -406,7 +445,15 @@ impl Converter {
         if !valid {
             bail!("D3D11 YUV readback returned a null pointer or invalid row pitch");
         }
-        Ok(bytes)
+        if software_rgb {
+            Ok(bgra_to_nv12(
+                &bytes,
+                self.width as usize,
+                self.height as usize,
+            ))
+        } else {
+            Ok(bytes)
+        }
     }
 
     fn idle(&self) -> Result<()> {
@@ -518,6 +565,39 @@ impl Converter {
         }
         result.context(operation)
     }
+}
+
+/// Full-range RGB to limited-range Rec.709, with left-sited 4:2:0 chroma
+/// (horizontal [1,2,1]/4 and a two-row average), matching the P010 shader.
+/// Fixed-point coefficients include the 219/255 and 224/255 range scales.
+fn bgra_to_nv12(bgra: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let mut nv12 = vec![0; width * height * 3 / 2];
+    let (luma, chroma) = nv12.split_at_mut(width * height);
+    for (rgb, y) in bgra.as_chunks::<4>().0.iter().zip(luma.iter_mut()) {
+        let value =
+            11966 * i32::from(rgb[2]) + 40254 * i32::from(rgb[1]) + 4064 * i32::from(rgb[0]);
+        *y = (16 + ((value + 32768) >> 16)).clamp(16, 235) as u8;
+    }
+    for y in (0..height).step_by(2) {
+        for x in (0..width).step_by(2) {
+            let mut rgb = [0i32; 3];
+            for row in [y, y + 1] {
+                for (col, weight) in [(x.saturating_sub(1), 1), (x, 2), (x + 1, 1)] {
+                    let at = (row * width + col) * 4;
+                    for channel in 0..3 {
+                        rgb[channel] += i32::from(bgra[at + 2 - channel]) * weight;
+                    }
+                }
+            }
+            let [r, g, b] = rgb;
+            let cb = -6596 * r - 22189 * g + 28784 * b;
+            let cr = 28784 * r - 26145 * g - 2639 * b;
+            let at = y / 2 * width + x;
+            chroma[at] = (128 + ((cb + 262144) >> 19)).clamp(16, 240) as u8;
+            chroma[at + 1] = (128 + ((cr + 262144) >> 19)).clamp(16, 240) as u8;
+        }
+    }
+    nv12
 }
 
 impl Drop for Converter {

@@ -4,13 +4,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use parking_lot::Mutex;
-use windows::Win32::Foundation::{GENERIC_ALL, HANDLE, HMODULE};
+use windows::Win32::Foundation::{GENERIC_ALL, HANDLE, HMODULE, LUID};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, DXGI_SHARED_RESOURCE_READ,
-    DXGI_SHARED_RESOURCE_WRITE, IDXGIAdapter1, IDXGIFactory6, IDXGIResource1,
+    CreateDXGIFactory1, DXGI_SHARED_RESOURCE_READ, DXGI_SHARED_RESOURCE_WRITE, IDXGIAdapter1,
+    IDXGIFactory4, IDXGIResource1,
 };
 use windows::core::{Interface, PCWSTR};
 
@@ -33,8 +33,8 @@ pub enum PixelFormat {
 }
 
 /// A D3D11 device with a GPU timeline shared by its captures and uploads.
-/// No software adapter fallback: this path promises native GPU surfaces,
-/// not CPU pixels.
+/// Capture, compositor and encoders use the same DX12-compatible adapter;
+/// there is no cross-adapter copy or readback fallback.
 #[derive(Clone)]
 pub struct GraphicsDevice(Arc<Device>);
 
@@ -54,10 +54,25 @@ struct Submit {
 
 impl GraphicsDevice {
     pub fn new() -> Result<Self> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::DX12,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = isocast_surfaces::dx12_adapter(&instance, None)?;
+        Self::on_adapter(isocast_surfaces::dx12_adapter_luid(&adapter)?)
+    }
+
+    /// Open the exact adapter selected by the parent, never reselect by index
+    /// or power preference in the capture helper process.
+    pub(crate) fn on_adapter(luid: (u32, i32)) -> Result<Self> {
         unsafe {
-            let factory: IDXGIFactory6 = CreateDXGIFactory1()?;
-            let adapter: IDXGIAdapter1 =
-                factory.EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE)?;
+            let factory: IDXGIFactory4 = CreateDXGIFactory1()?;
+            let adapter: IDXGIAdapter1 = factory
+                .EnumAdapterByLuid(LUID {
+                    LowPart: luid.0,
+                    HighPart: luid.1,
+                })
+                .with_context(|| format!("capture adapter {luid:?} is unavailable"))?;
             let desc = adapter.GetDesc1()?;
             let name = String::from_utf16_lossy(
                 &desc.Description[..desc
@@ -357,7 +372,7 @@ impl Frame {
         if !self.is_output() {
             bail!("captured Windows frames are read-only");
         }
-        let slot = Arc::get_mut(&mut self.slot).context("output frame is still in use")?;
+        let slot = &self.slot;
         let stride = slot
             .width
             .checked_mul(4)
@@ -368,23 +383,40 @@ impl Frame {
         if bytes.len() != len {
             bail!("output upload requires {len} tightly packed BGRA bytes");
         }
+        self.render(|context, target| {
+            unsafe { context.UpdateSubresource(target, 0, None, bytes.as_ptr().cast(), stride, 0) };
+            Ok(())
+        })
+    }
+
+    /// One native GPU write transaction into an exclusively owned output.
+    /// The device lock also excludes other immediate-context users while
+    /// shader state is bound. A failed call poisons the caller's output pool.
+    pub(crate) fn render(
+        &mut self,
+        draw: impl FnOnce(&ID3D11DeviceContext4, &ID3D11Texture2D) -> Result<()>,
+    ) -> Result<()> {
+        if !self.is_output() {
+            bail!("captured Windows frames are read-only");
+        }
+        let slot = Arc::get_mut(&mut self.slot).context("output frame is still in use")?;
         let mut submit = self.device.0.submit.lock();
+        let multithread: ID3D11Multithread = submit.context.cast()?;
+        unsafe { multithread.Enter() };
+        struct Locked(ID3D11Multithread);
+        impl Drop for Locked {
+            fn drop(&mut self) {
+                unsafe { self.0.Leave() };
+            }
+        }
+        let _locked = Locked(multithread);
         let value = submit.next;
         submit.next = value
             .checked_add(1)
             .context("D3D11 output fence exhausted")?;
         slot.ready.store(value, Ordering::Release);
+        draw(&submit.context, &slot.texture)?;
         unsafe {
-            // UpdateSubresource copies the CPU bytes before returning. Only
-            // its GPU write is asynchronous, so one staging Vec is enough.
-            submit.context.UpdateSubresource(
-                &slot.texture,
-                0,
-                None,
-                bytes.as_ptr().cast(),
-                stride,
-                0,
-            );
             submit
                 .context
                 .Signal(&self.device.0.fence, value)
@@ -433,6 +465,73 @@ impl TexturePool {
         }
     }
 
+    /// Preserve CPU-delivered NV12 with one upload, without RGB conversion.
+    /// Rows are top-down; UV starts at pitch*height, with the same pitch.
+    pub(crate) fn upload_nv12(
+        &mut self,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+        pitch: u32,
+    ) -> Result<Option<Frame>> {
+        if width == 0
+            || height == 0
+            || width > 16384
+            || height > 16384
+            || !width.is_multiple_of(2)
+            || !height.is_multiple_of(2)
+            || pitch < width
+            || u64::from(pitch) * u64::from(height + height / 2) > bytes.len() as u64
+        {
+            bail!("camera.frame: invalid NV12 dimensions, pitch or byte length");
+        }
+        let completed = self.device.completed()?;
+        self.slots.retain(|slot| {
+            (slot.width == width && slot.height == height && slot.format == PixelFormat::Nv12)
+                || Arc::strong_count(slot) > 1
+                || slot.ready.load(Ordering::Acquire) > completed
+        });
+        let slot = self.slots.iter().find(|slot| {
+            slot.width == width
+                && slot.height == height
+                && slot.format == PixelFormat::Nv12
+                && Arc::strong_count(slot) == 1
+                && slot.ready.load(Ordering::Acquire) <= completed
+        });
+        let slot = match slot {
+            Some(slot) => slot.clone(),
+            None if self.slots.len() == MAX_POOL_FRAMES => return Ok(None),
+            None => {
+                let slot = Slot::new(&self.device, width, height, PixelFormat::Nv12, false)?;
+                self.slots.push(slot.clone());
+                slot
+            }
+        };
+        let mut submit = self.device.0.submit.lock();
+        let value = submit.next;
+        submit.next = value
+            .checked_add(1)
+            .context("D3D11 camera upload fence exhausted")?;
+        slot.ready.store(value, Ordering::Release);
+        unsafe {
+            submit.context.UpdateSubresource(
+                &slot.texture,
+                0,
+                None,
+                bytes.as_ptr().cast(),
+                pitch,
+                0,
+            );
+            submit.context.Signal(&self.device.0.fence, value)?;
+            submit.context.Flush();
+            self.device.raw().GetDeviceRemovedReason()?;
+        }
+        Ok(Some(Frame {
+            slot,
+            device: self.device.clone(),
+        }))
+    }
+
     /// Copy the top-left `width` by `height` region of subresource zero without
     /// CPU readback. See `copy_subresource` for source and lifetime requirements.
     pub fn copy(
@@ -465,6 +564,22 @@ impl TexturePool {
         subresource: u32,
         width: u32,
         height: u32,
+    ) -> Result<Option<Frame>> {
+        self.copy_with(source, subresource, width, height, |_, _| Ok(()))
+    }
+
+    /// Finish a capture write BEFORE publishing its Frame and signaling ready.
+    /// The destination is reserved here, never supplied by a caller: only an
+    /// idle slot owned exclusively by this pool is writable. Consumer-held or
+    /// foreign Frames cannot enter this path. On error retire the whole pool
+    /// and quarantine the source, since GPU work may precede a failed Signal.
+    pub(crate) fn copy_with(
+        &mut self,
+        source: &ID3D11Texture2D,
+        subresource: u32,
+        width: u32,
+        height: u32,
+        finish: impl FnOnce(&ID3D11DeviceContext4, &ID3D11Texture2D) -> Result<()>,
     ) -> Result<Option<Frame>> {
         let owner: ID3D11Device5 = unsafe { source.GetDevice() }?.cast()?;
         let mut source_desc = D3D11_TEXTURE2D_DESC::default();
@@ -551,6 +666,7 @@ impl TexturePool {
                 subresource,
                 Some(&bounds),
             );
+            finish(&submit.context, &slot.texture)?;
             submit.context.Signal(&self.device.0.fence, value)?;
             submit.context.Flush();
         }

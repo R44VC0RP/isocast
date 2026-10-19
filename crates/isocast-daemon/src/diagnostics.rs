@@ -56,6 +56,9 @@ impl ApiCall {
     }
     pub fn value(&mut self, value: Value) {
         let error = value.get("error").is_some_and(|e| !e.is_null());
+        // Something this engine can't do here at all is an answer, not a
+        // failure (logged as info, as the client does).
+        let unsupported = value["error"]["code"].as_i64() == Some(RpcError::UNSUPPORTED);
         let value = match self.request["method"].as_str() {
             // The bundle and log reader already contain diagnostics; logging
             // their payload would recursively copy all previous logs.
@@ -81,7 +84,11 @@ impl ApiCall {
             return;
         }
         emit(
-            if error { "error" } else { "info" },
+            if error && !unsupported {
+                "error"
+            } else {
+                "info"
+            },
             "api",
             "request completed",
             json!({"request":self.request,"response":value,"duration_ms":self.started.elapsed().as_secs_f64()*1000.0,"client":self.client}),

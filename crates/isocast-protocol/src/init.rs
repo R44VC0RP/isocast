@@ -96,7 +96,8 @@ pub struct Initialized {
 }
 
 /// Recording folder when none is given.
-pub const DEFAULT_FOLDER: &str = "~/Movies/Isocast";
+pub const DEFAULT_FOLDER: &str =
+    crate::platform_text::select("~/Movies/Isocast", "~/Videos/Isocast");
 
 /// Conservative starting cadence for a new setup/profile, never an edit to
 /// an existing one. Memory and CPU counts are portable; they don't pretend
@@ -246,8 +247,8 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
                 iso.push("camera".to_string());
                 if permissions.camera == Permission::NotDetermined {
                     notes.push(
-                        "macOS asks for camera access the first time the camera is used; \
-                         `isocast permissions --request` asks now."
+                        crate::platform_text::select("macOS asks for camera access the first time the camera is used; \
+                         `isocast permissions --request` asks now.", "Windows Camera privacy settings must allow desktop apps. isocastd.exe is the recording engine; `isocast permissions` reports access.")
                             .into(),
                     );
                 }
@@ -324,8 +325,8 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
             });
             if permissions.microphone == Permission::NotDetermined {
                 notes.push(
-                    "macOS asks for microphone access the first time it is used; `isocast \
-                     permissions --request` asks now."
+                    crate::platform_text::select("macOS asks for microphone access the first time it is used; `isocast \
+                     permissions --request` asks now.", "Windows Microphone privacy settings must allow desktop apps. isocastd.exe is the recording engine; `isocast permissions` reports access.")
                         .into(),
                 );
             }
@@ -356,7 +357,10 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
             "Desktop Audio",
             SourceKind::SystemAudio(SystemAudioSource::default()),
         ));
-        notes.push("Desktop audio: what this Mac plays, in the program.".into());
+        notes.push(format!(
+            "Desktop audio: what this {} plays, in the program.",
+            crate::platform_text::MACHINE
+        ));
     }
     let program_audio: Vec<String> = sources
         .iter()

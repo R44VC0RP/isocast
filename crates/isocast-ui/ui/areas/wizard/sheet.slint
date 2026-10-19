@@ -12,6 +12,7 @@ import {
     IconButton, RowGroup, RowPlace, ScrollArea, Segmented, Spinner, Switch, Tag, TextField,
 } from "../../kit.slint";
 import { WizardArea } from "state.slint";
+import { PlatformText } from "../../state.slint";
 
 component StepItem inherits HorizontalLayout {
     in property <int> index;
@@ -172,7 +173,7 @@ component ObsStep inherits VerticalLayout {
     alignment: start;
     StepTitle {
         title: WizardArea.collections.length == 1 ? "Import “" + WizardArea.collections[0].name + "” from OBS?" : "Bring your scenes from OBS";
-        lead: WizardArea.collections.length == 0 ? "" : "Isocast found OBS on this Mac. Each scene collection comes in with its profile's canvas, frame rate, recording and stream settings. OBS itself is left as it is.";
+        lead: WizardArea.collections.length == 0 ? "" : "Isocast found OBS on this " + PlatformText.machine + ". Each scene collection comes in with its profile's canvas, frame rate, recording and stream settings. OBS itself is left as it is.";
     }
     if WizardArea.discovering: HorizontalLayout {
         spacing: Theme.space-2;
@@ -183,10 +184,10 @@ component ObsStep inherits VerticalLayout {
     if !WizardArea.discovering && WizardArea.collections.length == 0: VerticalLayout {
         spacing: Theme.space-2;
         Text {
-            text: "No OBS scene collections on this Mac.";
+            text: "No OBS scene collections on this " + PlatformText.machine + ".";
             color: Theme.text-2;
         }
-        Dim { text: "Looked in " + WizardArea.obs-folder + ". Continue to set up from this Mac instead."; }
+        Dim { text: "Looked in " + WizardArea.obs-folder + ". Continue to set up from this " + PlatformText.machine + " instead."; }
     }
     if WizardArea.collections.length > 0: Rectangle {
         height: 1px;
@@ -213,7 +214,7 @@ component ObsStep inherits VerticalLayout {
             alignment: start;
             Switch {
                 on: WizardArea.move-key;
-                label: "Move the stream key to the Keychain";
+                label: "Move the stream key to the " + PlatformText.credential-store;
                 toggled(on) => { WizardArea.set("move_key", on ? "true" : "false"); }
             }
         }
@@ -221,7 +222,7 @@ component ObsStep inherits VerticalLayout {
             horizontal-stretch: 1;
             spacing: 2px;
             Text {
-                text: "Move the stream key to the Keychain";
+                text: "Move the stream key to the " + PlatformText.credential-store;
                 color: Theme.text-2;
                 font-size: Theme.fs-sm;
                 letter-spacing: Theme.tracking-sm;
@@ -339,7 +340,7 @@ component GoalStep inherits VerticalLayout {
     alignment: start;
     StepTitle {
         title: "What is this setup for?";
-        lead: "Isocast picks the settings, then benchmarks this Mac's encoders and steps down only where it has to.";
+        lead: "Isocast picks the settings, then benchmarks this " + PlatformText.machine + "'s encoders and steps down only where it has to.";
     }
     HorizontalLayout {
         spacing: Theme.space-3;
@@ -450,7 +451,7 @@ component SummaryStep inherits VerticalLayout {
     if WizardArea.optimizing: VerticalLayout {
         spacing: Theme.space-4;
         StepTitle {
-            title: "Measuring this Mac…";
+            title: "Measuring this " + PlatformText.machine + "…";
             lead: "Isocast encodes busy test pictures with the settings it picked, all files at once, as a recording would. It takes about a minute.";
         }
         HorizontalLayout {

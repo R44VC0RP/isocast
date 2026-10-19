@@ -537,6 +537,13 @@ def draft_release(output, metadata, files, replace=False, verify_tag=False):
     releases = all_releases()  # A failed/auth-denied read aborts; never assume absence.
     release = lookup()
     existed = release is not None
+    # The Mac-only replacement stage cannot verify or replace Windows assets.
+    # In particular, its obsolete-asset cleanup must never delete them. Finish
+    # this stage before the release operator attaches the verified Windows set.
+    require(not release or not any(
+        "windows" in asset["name"].lower() for asset in release["assets"]
+    ), "Windows assets are already attached; the Mac-only finalizer refuses this draft. "
+       "Finish the Mac draft before attaching verified Windows assets.")
     body = release_body(notes, tag, releases)
     # Sparkle's feed beside the DMG: what the published release's
     # releases/latest/download/appcast.xml serves to installed apps.
@@ -572,7 +579,12 @@ def draft_release(output, metadata, files, replace=False, verify_tag=False):
     print("Verified draft:", release["html_url"], flush=True)
 
 
-def published_release(tag, names):
+def windows_asset_names(version):
+    installer = f"Isocast-{version}-windows-x64-setup.exe"
+    return {installer, installer + ".sha256", installer + ".ed25519", "appcast-windows.xml"}
+
+
+def published_release(tag, names, allow_windows=False):
     """The PUBLISHED release for exactly this tag, with exactly these assets.
     releases/tags/TAG serves published releases only: a draft is a 404."""
     try:
@@ -582,7 +594,11 @@ def published_release(tag, names):
     require(release.get("tag_name") == tag and release.get("draft") is False,
             f"{tag} is not a published release; refusing (drafts are refreshed by the Release workflow)")
     assets = {a["name"]: a for a in release["assets"]}
-    require(set(assets) == names, f"{tag} assets are {sorted(assets)}, expected {sorted(names)}; refusing")
+    allowed = [names]
+    if allow_windows:
+        allowed.append(names | windows_asset_names(tag.removeprefix("v")))
+    require(set(assets) in allowed, f"{tag} assets are {sorted(assets)}, expected {sorted(names)} "
+            "(optionally the complete Windows set); refusing")
     return release, assets
 
 
@@ -626,11 +642,14 @@ def refresh_appcast(output, version, dry_run=False):
     tag, dmg_name = "v" + version, f"Isocast-{version}-arm64.dmg"
     names = {dmg_name, dmg_name + ".sha256", "appcast.xml"}
     prefix = f"https://github.com/{REPO}/releases/download/{tag}/"
-    release, assets = published_release(tag, names)
+    release, assets = published_release(tag, names, allow_windows=True)
+    # Preserve and verify the digest of every asset, including Windows. Later
+    # reads require this exact set so an addition/removal during refresh fails.
+    names = set(assets)
     print(f"{tag}: published {release.get('published_at')}, assets {sorted(names)}; "
           f"notes {RELEASES}/{version}.md ({len(notes)} characters)", flush=True)
     if dry_run:
-        print("Download the three assets; check their GitHub digests and the DMG's .sha256.")
+        print("Download the assets; check every GitHub digest and the DMG's .sha256. Preserve Windows assets unchanged.")
         print("Mount the DMG read-only: its app's version, CFBundleVersion and SUPublicEDKey.")
         print("Verify the published appcast: one item for this DMG, EdDSA signature against SUPublicEDKey, feed signed.")
         print("generate_appcast on the same DMG with the notes embedded (key: SPARKLE_ED_PRIVATE_KEY on stdin only).")

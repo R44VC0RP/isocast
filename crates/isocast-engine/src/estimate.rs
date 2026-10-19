@@ -11,6 +11,7 @@ use isocast_protocol::api::{
     OutputKind,
 };
 use isocast_protocol::change::merge_patch;
+use isocast_protocol::platform_text::MACHINE;
 use isocast_protocol::{CanvasId, Codec, PROGRAM, Setup, SourceKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -866,6 +867,11 @@ fn prores_resources(
             2,
         );
     }
+    // Use the recording path on Windows too: its home normally comes from
+    // USERPROFILE, not HOME. Otherwise a valid volume calibration is ignored.
+    #[cfg(windows)]
+    let folder = Some(crate::record::expand_home(&setup.recording.folder));
+    #[cfg(not(windows))]
     let folder = if let Some(rest) = setup.recording.folder.strip_prefix("~/") {
         std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(rest))
     } else {
@@ -1010,10 +1016,10 @@ fn summary(judgement: &Judgement) -> String {
     });
     match judgement.capacity {
         Capacity::Fits => format!(
-            "this Mac's encoders keep up with these files (the busiest engine at about {busiest})"
+            "this {MACHINE}'s encoders keep up with these files (the busiest engine at about {busiest})"
         ),
         Capacity::NoMargin => format!(
-            "this Mac's encoders are predicted to keep up with these files with no margin \
+            "this {MACHINE}'s encoders are predicted to keep up with these files with no margin \
              (the busiest engine at about {busiest}): anything else using them, like a stream \
              or a video call, may cost frames"
         ),
@@ -1026,7 +1032,7 @@ fn summary(judgement: &Judgement) -> String {
             };
             if iso {
                 format!(
-                    "this Mac's encoders can't keep up with these files (the busiest engine at \
+                    "this {MACHINE}'s encoders can't keep up with these files (the busiest engine at \
                      about {busiest}): ISO files are shed first (estimated {:.0}% frame loss) \
                      to prioritize program recordings and streams; {priority}",
                     judgement.iso_drop.max(1.0)
@@ -1038,7 +1044,7 @@ fn summary(judgement: &Judgement) -> String {
                     "the program and stream will drop frames"
                 };
                 format!(
-                    "this Mac's encoders can't keep up with these files (the busiest engine at \
+                    "this {MACHINE}'s encoders can't keep up with these files (the busiest engine at \
                      about {busiest}): {priority}"
                 )
             }
@@ -1533,7 +1539,7 @@ fn admission(
         summary(&full)
     } else {
         format!(
-            "at full size, this Mac's encoders can't keep up with it beside the other files (the \
+            "at full size, this {MACHINE}'s encoders can't keep up with it beside the other files (the \
          busiest engine at about {})",
             percent(full.load)
         )

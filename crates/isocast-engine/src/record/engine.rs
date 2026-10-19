@@ -43,8 +43,8 @@ use super::{
     OnAir, Output, Packet, QUEUE_DEPTH, RecordOptions, Report, SPACE_CHECK_INTERVAL, SPEED_MARGIN,
     SPLIT_LEAD, SPLIT_SOON_LEAD, STALL_AFTER, START_DELAY, STATUS_INTERVAL, SessionControl, Shared,
     Slots, SourceFilters, SplitRefused, SplitTake, SplitTiming, Take, WriterInputs, create_writers,
-    expand_home, interrupted_note, interrupted_sessions, is_program, live_status, plan_take,
-    sidechain_sources, take_manifest, wait_for_frame,
+    expand_home, interrupted_note, interrupted_sessions, is_program, live_status, next_recording,
+    plan_take, sidechain_sources, take_manifest, wait_for_frame,
 };
 use super::{AudioStopped, audio_stop_errors, file_audio_stops};
 #[cfg(not(windows))]
@@ -1979,7 +1979,7 @@ fn reconcile<P: Platform>(inner: &Arc<Inner<P>>, setup: Arc<Setup>) {
         } else {
             SourceRun::Opening
         };
-        pending.error = permission.as_ref().map(|p| format!("waiting for permission: {p}; check macOS Privacy & Security or its permission prompt"));
+        pending.error = permission.as_ref().map(|p| format!("waiting for permission: {p}; {}", isocast_protocol::platform_text::select("check macOS Privacy & Security or its permission prompt", "check Windows Settings › Privacy & security (Privacy on Windows 10); Camera and Microphone must allow desktop apps (isocastd.exe)")));
         let event = pending.status(&id);
         let old = {
             let mut state = inner.state.lock();
@@ -2238,7 +2238,7 @@ impl<F: Clone + Send + 'static> AudioRun<F> {
             let id = id.to_string();
             move || {
                 let failure = fault_inner.worker(&format!("audio source {id}"), || {
-                    platform.real_time_thread();
+                    platform.audio_thread();
                     let frame_samples = channels.max(1) as usize;
                     while !stop.load(Ordering::SeqCst) {
                         match audio.chunks.recv_timeout(Duration::from_millis(10)) {
@@ -2467,7 +2467,7 @@ fn ensure_mixer<P: Platform>(inner: &Arc<Inner<P>>, state: &mut State<P>) {
             let outputs = inner.program_audio.clone();
             let shared = shared.clone();
             move || {
-                platform.real_time_thread();
+                platform.audio_thread();
                 let _ = fault_inner.worker("mixer", || {
                     mixer.run(&platform, &shared, from, Some(&control), &outputs)
                 });
@@ -3078,7 +3078,12 @@ fn run_program<P: Platform>(
         compositor.protect_inputs(output.program_video.has_recording());
         let monitored = program_rates.any(now);
         let preview_wanted = preview_rates.any(now);
-        if now > tick + 3 * frame {
+        let obsolete = if platform.prefers_deadline_timer() {
+            now >= epoch.add_ticks(n + 1, fps) + frame
+        } else {
+            now > tick + 3 * frame
+        };
+        if obsolete {
             if outputs || monitored {
                 output.frames_missed.fetch_add(1, Ordering::Relaxed);
                 if outputs {
@@ -3576,7 +3581,13 @@ fn run_iso<P: Platform>(
                 runner.id
             );
         }
-        if platform.now() > tick + 3 * frame {
+        let now = platform.now();
+        let obsolete = if platform.prefers_deadline_timer() {
+            now >= epoch.add_ticks(n + 1, fps) + frame
+        } else {
+            now > tick + 3 * frame
+        };
+        if obsolete {
             continue;
         }
         let Some(image) = runner.slot.newest_until(tick + frame / 2) else {
@@ -3886,6 +3897,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         thread::sleep(Duration::from_millis(20));
     }
 
+    let _recording_activity = platform.recording_activity()?;
+
     // Sources whose ISO files are filtered.
     let filtered: Vec<&str> = match iso.filtered {
         true => setup
@@ -3901,6 +3914,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         video: BTreeMap::new(),
         audio: BTreeMap::new(),
         cameras: BTreeMap::new(),
+        recording: next_recording(),
     };
     let mut slots: BTreeMap<String, Arc<FrameSlot<P::Frame>>> = BTreeMap::new();
     let mut readers: BTreeMap<String, Arc<Routes<P::Frame>>> = BTreeMap::new();
@@ -4171,7 +4185,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             .collect(),
         false => WriterInputs::new(),
     };
-    let writers = create_writers(platform, plans, &writer_inputs)?;
+    let (writers, admission_notes) = create_writers(platform, plans, &writer_inputs)?;
 
     // The recording starts on a program frame, at least a moment from now
     // so every file is ready for it.
@@ -4291,7 +4305,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         .collect();
     if let Some(on_start) = options.on_start {
         let paths: Vec<PathBuf> = plans.iter().map(|p| p.spec.path.clone()).collect();
-        on_start(&paths, &first.manifest_path);
+        on_start(&paths, &first.manifest_path, &admission_notes);
     }
     let started_at = Local::now() + epoch.saturating_since(platform.now());
     let mut takes = vec![Take::begin(first, epoch, started_at)];
@@ -4566,7 +4580,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                             busy: false,
                             message: format!("split refused; the current take continues: {err:#}"),
                         })
-                        .and_then(|(writers, plan)| {
+                        .and_then(|((writers, admission_notes), plan)| {
                             // Timed once the files exist, so none of them misses
                             // the start.
                             let now = platform.now();
@@ -4588,15 +4602,15 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                                             .into(),
                                 });
                             }
-                            Ok((plan, writers, at, now))
+                            Ok((plan, writers, at, now, admission_notes))
                         });
                     match next {
-                        Ok((plan, writers, at, now)) => {
+                        Ok((plan, writers, at, now, admission_notes)) => {
                             let mut files = Vec::new();
                             let manifest = plan.manifest_path.clone();
                             let index = takes.len();
                             let mut gone = Vec::new();
-                            let mut notes = Vec::new();
+                            let mut notes = admission_notes;
                             let current = takes.last().expect("a take");
                             for (i, (((split, demand), writer), file)) in split_senders
                                 .iter()

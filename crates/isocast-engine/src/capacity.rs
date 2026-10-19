@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use isocast_protocol::api::{Capacity, Machine};
+use isocast_protocol::platform_text::MACHINE;
 use isocast_protocol::{Codec, Encoder, Setup};
 use serde::{Deserialize, Serialize};
 
@@ -263,7 +264,7 @@ pub fn start_warning(memory: &Path, machine: &str, workload: &Workload) -> Optio
     let short = (1.0 - measured.realtime_factor).clamp(0.0, 1.0) * 100.0;
     let mut text = if exact {
         format!(
-            "this Mac's encoders can't keep up with this recording: `isocast tune` measured \
+            "this {MACHINE}'s encoders can't keep up with this recording: `isocast tune` measured \
              {:.2}× real time for its files on {when}, so expect about {short:.0}% of frames \
              dropped",
             measured.realtime_factor

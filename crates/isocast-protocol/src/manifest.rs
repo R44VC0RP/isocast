@@ -78,10 +78,23 @@ pub struct CameraCaptureMetadata {
     /// lossy.
     #[serde(default)]
     pub field_handling: String,
-    /// Native delivery path. Windows distinguishes GPU NV12 copies from
-    /// shared MJPEG software decoding followed by a BGRA GPU upload.
+    /// Observed delivery paths: native GPU copy/upload or GPU conversion,
+    /// with an optional Media Foundation MJPEG decoding stage.
     #[serde(default)]
     pub delivery: String,
+    /// Negotiated camera subtype, e.g. NV12, YUY2, RGB24 or MJPG.
+    #[serde(default)]
+    pub native_format: String,
+    /// Media Foundation decoder output subtype (empty without decoding).
+    #[serde(default)]
+    pub decoded_format: String,
+    /// Exact native frame-rate ratio; the recording clock can use a nominal rate.
+    #[serde(default)]
+    pub native_frame_rate: String,
+    /// Effective upload/conversion colour interpretation; unspecified SDR
+    /// cameras default to limited BT.709 for HD and BT.601 for SD.
+    #[serde(default)]
+    pub color_space: String,
     /// Distinct "interlaced" sample flags seen.
     #[serde(default)]
     pub sample_interlaced: Vec<Option<bool>>,
@@ -181,6 +194,42 @@ pub struct ManifestFile {
     /// when none did, and in manifests written before it existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audio_stops: Vec<AudioStop>,
+    /// How the platform admitted this file's video encoder against a
+    /// shared hardware encoder budget (Windows NVENC). Absent where the
+    /// platform doesn't admit encoders that way, and in older manifests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder: Option<ManifestEncoder>,
+}
+
+/// One file's encoder admission, as decided before any file of its take
+/// opened.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ManifestEncoder {
+    /// `planned` (its preset was selected by the budget before opening) or
+    /// `unplanned` (an adapter without an encoder profile; see `reason`).
+    pub admission: String,
+    /// Where the throughput figures came from: `calibrated` or `reference`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub calibrated: bool,
+    /// The adapter/driver key the figures belong to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_preset: Option<u32>,
+    /// The preset the native session was opened and validated with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_preset: Option<u32>,
+    /// The provider that opened, like `Nvenc`.
+    pub backend: String,
+    /// The take's estimated share of the encoder, including sessions
+    /// already open beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_load: Option<f64>,
+    /// Why measured figures were not applied, or why it is unplanned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// An audio source that stopped while recording, in one file's track.

@@ -1,7 +1,8 @@
 //! Per-media-clock waits, with measured stretching shared across the process.
 //!
 //! Ordinary sleeps are cheap and sufficient in normal user launch contexts.
-//! Only measured stretching selects the platform's critical deadline timer.
+//! Measured stretching selects the platform's critical deadline timer unless
+//! the platform explicitly prefers that timer from its first media tick.
 //! Subsequent clocks inherit that evidence instead of relearning it while
 //! a take is already starting. Keep the evidence until process exit: healthy
 //! critical wakes do not prove ordinary sleeps have recovered. This changes
@@ -38,6 +39,7 @@ impl Clocks {
             period,
             critical: AtomicBool::new(inherited_critical),
             inherited_critical: AtomicBool::new(inherited_critical),
+            escalated: AtomicBool::new(false),
             wakes: AtomicU64::new(0),
             late_wakes: AtomicU64::new(0),
             max_ns: AtomicU64::new(0),
@@ -67,6 +69,7 @@ struct Stats {
     period: Duration,
     critical: AtomicBool,
     inherited_critical: AtomicBool,
+    escalated: AtomicBool,
     wakes: AtomicU64,
     late_wakes: AtomicU64,
     max_ns: AtomicU64,
@@ -114,7 +117,7 @@ impl Stats {
                 PacingMode::Ordinary
             },
             inherited_critical,
-            escalations: u64::from(critical && !inherited_critical),
+            escalations: u64::from(self.escalated.load(Ordering::Relaxed)),
             wakes,
             late_wakes: self.late_wakes.load(Ordering::Relaxed),
             wake_max_us: self.max_ns.load(Ordering::Relaxed) as f64 / 1000.0,
@@ -158,7 +161,7 @@ impl MediaClock {
     pub(crate) fn sleep_until<P: Platform>(&mut self, platform: &P, at: Time) {
         let mut now = platform.now();
         while now < at {
-            self.adopt_process_evidence();
+            self.select_timer(platform.prefers_deadline_timer());
             let deadline = if self.probes > 0 && !self.critical {
                 at.min(now + Duration::from_millis(20))
             } else {
@@ -189,7 +192,7 @@ impl MediaClock {
     ) -> Result<(), E> {
         let mut now = platform.now();
         while now < at {
-            self.adopt_process_evidence();
+            self.select_timer(platform.prefers_deadline_timer());
             let approach = if self.critical {
                 at - CRITICAL_APPROACH
             } else {
@@ -214,10 +217,12 @@ impl MediaClock {
         Ok(())
     }
 
-    fn adopt_process_evidence(&mut self) {
-        if !self.critical && PROCESS_STRETCHED.load(Ordering::Acquire) {
+    fn select_timer(&mut self, preferred: bool) {
+        if !self.critical && (preferred || PROCESS_STRETCHED.load(Ordering::Acquire)) {
             self.critical = true;
-            self.stats.inherited_critical.store(true, Ordering::Relaxed);
+            self.stats
+                .inherited_critical
+                .store(!preferred, Ordering::Relaxed);
             self.stats.critical.store(true, Ordering::Release);
         }
     }
@@ -240,6 +245,7 @@ impl MediaClock {
         {
             PROCESS_STRETCHED.store(true, Ordering::Release);
             self.critical = true;
+            self.stats.escalated.store(true, Ordering::Relaxed);
             self.stats.critical.store(true, Ordering::Release);
         }
         self.probes = self.probes.saturating_sub(1);

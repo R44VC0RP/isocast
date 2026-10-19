@@ -28,6 +28,7 @@ pub mod manifest;
 mod mask;
 pub mod obs;
 pub mod optimize;
+pub mod platform_text;
 pub mod plugin;
 pub mod project;
 pub mod projector;
@@ -2589,8 +2590,11 @@ impl Setup {
             {
                 issues.add(
                     format!("sources[{i}].audio.monitor"),
-                    "system audio is everything this Mac plays, monitoring included, so \
+                    format!(
+                        "system audio is everything this {} plays, monitoring included, so \
                      monitoring it would feed back; use \"off\"",
+                        platform_text::MACHINE
+                    ),
                 );
             }
             if !(-1.0..=1.0).contains(&audio.balance) {

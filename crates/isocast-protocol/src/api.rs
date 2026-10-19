@@ -73,6 +73,14 @@ pub enum Method {
     /// Stop recording and finish the files. Returns the session's
     /// [`Report`].
     Stop,
+    /// Ask the running session to stop (or cancel one still starting) and
+    /// answer at once, without waiting for its files to be finished.
+    /// Returns [`StopAccepted`]: an acknowledgement, not a finished
+    /// recording. Until the files are done, `status` says `finalizing`
+    /// and a new `start` is refused; the [`Event::Stopped`] event (and
+    /// `status`'s `last` or `last_error`) then gives the outcome. Asking
+    /// again while finalizing answers the same way; refused when idle.
+    RequestStop,
     /// Split the running recording into a new take at the next whole
     /// second, without stopping any device: the current files end there and
     /// new ones (with their own manifest) begin. Returns the new take's
@@ -577,6 +585,10 @@ pub enum Method {
     /// shown in `status` (`record_target`); a running recording keeps its
     /// own. Returns [`RecordTarget`](crate::timeline::RecordTarget).
     RecordTarget(Option<crate::timeline::RecordTargetParams>),
+    /// Select/return the daemon's graphics adapter before opening a client
+    /// renderer. Windows returns its DX12 LUID as [low: u32, high: i32];
+    /// other platforms return null. Does not start capture or recording.
+    GpuAdapter,
 }
 
 /// Every method's name, as requests and plugin grants spell it
@@ -1616,6 +1628,21 @@ impl Notification {
     }
 }
 
+/// [`Method::RequestStop`]'s answer: the stop was asked for, nothing more.
+/// The files are still being finished; wait for [`Event::Stopped`] (or a
+/// `status` no longer `finalizing`) to learn whether they were.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct StopAccepted {
+    /// The session asked to stop (this isocastd's own count).
+    pub session_id: u64,
+    /// The session was finishing its files when the request was taken (a
+    /// snapshot: it may have finished since).
+    pub finalizing: bool,
+    /// The files it was writing, as known then (empty while still
+    /// starting); provisional until it has stopped.
+    pub files: Vec<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Started {
     pub files: Vec<PathBuf>,
@@ -1650,6 +1677,14 @@ pub struct LoadWarning {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Status {
     pub state: EngineState,
+    /// A stop has been requested for the running session (or its start
+    /// cancelled) and it hasn't ended yet. This says the request was
+    /// accepted, not where the files were cut or that they are on disk.
+    /// Until it ends, `start`, `pause`, `resume` and `split` are refused;
+    /// then `last` (or `last_error`) and the `stopped` event give the
+    /// outcome.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub finalizing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub governor: Option<crate::governor::GovernorStatus>,
     /// A compact calibration summary; machine_profile returns the measurements.
@@ -1930,31 +1965,152 @@ pub fn timelines_path() -> PathBuf {
 }
 
 /// The user's home folder. Windows does not normally set `HOME` outside a
-/// Unix-like shell; its native applications use `USERPROFILE`.
+/// Unix-like shell: there it is `USERPROFILE`, else the profile known
+/// folder (an app started by Explorer or a service may have neither
+/// variable set the way a shell does).
 pub fn home_folder() -> PathBuf {
     #[cfg(windows)]
     let home = std::env::var_os("USERPROFILE")
         .filter(|home| !home.is_empty())
-        .or_else(|| std::env::var_os("HOME"));
+        .map(PathBuf::from)
+        .or_else(|| known_folder::path(known_folder::Folder::Profile))
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
     #[cfg(not(windows))]
-    let home = std::env::var_os("HOME");
-    PathBuf::from(home.unwrap_or_default())
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    home.unwrap_or_default()
 }
 
 /// `~/Library/Application Support/Isocast` on macOS, `%LOCALAPPDATA%/Isocast`
-/// on Windows, `~/.isocast` elsewhere.
+/// on Windows (the LocalAppData known folder when the variable is unset),
+/// `~/.isocast` elsewhere.
 pub fn support_folder() -> PathBuf {
     let home = home_folder();
     if cfg!(target_os = "macos") {
         home.join("Library/Application Support/Isocast")
     } else if cfg!(windows) {
-        std::env::var_os("LOCALAPPDATA")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("AppData/Local"))
-            .join("Isocast")
+        windows_folder("LOCALAPPDATA", "AppData/Local").join("Isocast")
     } else {
         home.join(".isocast")
+    }
+}
+
+/// A per-user Windows folder: its environment variable when set (so
+/// isolated engines and tests can point it elsewhere), else the known
+/// folder, else `home`/`fallback`. Only meaningful on Windows.
+pub fn windows_folder(variable: &str, fallback: &str) -> PathBuf {
+    if let Some(path) = std::env::var_os(variable).filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
+    #[cfg(windows)]
+    {
+        let folder = match variable {
+            "APPDATA" => Some(known_folder::Folder::RoamingAppData),
+            "LOCALAPPDATA" => Some(known_folder::Folder::LocalAppData),
+            _ => None,
+        };
+        if let Some(path) = folder.and_then(known_folder::path) {
+            return path;
+        }
+    }
+    home_folder().join(fallback)
+}
+
+/// `~/rest` as a path. On Windows a library folder (`~/Videos`,
+/// `~/Documents`, `~/Desktop`…) is its known folder, wherever it was moved
+/// (another drive, OneDrive), as long as `~` is the real profile: an
+/// isolated engine whose USERPROFILE points elsewhere keeps its own.
+pub fn home_join(rest: &str) -> PathBuf {
+    let home = home_folder();
+    #[cfg(windows)]
+    {
+        let mut parts = rest.splitn(2, ['/', '\\']);
+        let first = parts.next().unwrap_or_default();
+        let tail = parts.next().unwrap_or_default();
+        if let Some(folder) = known_folder::Folder::library(first)
+            && known_folder::path(known_folder::Folder::Profile)
+                .is_some_and(|profile| profile.as_os_str().eq_ignore_ascii_case(home.as_os_str()))
+            && let Some(path) = known_folder::path(folder)
+        {
+            return if tail.is_empty() {
+                path
+            } else {
+                path.join(tail)
+            };
+        }
+    }
+    home.join(rest)
+}
+
+/// Windows known folders (`SHGetKnownFolderPath`), as their current paths.
+#[cfg(windows)]
+pub mod known_folder {
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::PathBuf;
+
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{
+        FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_LocalAppData,
+        FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Profile, FOLDERID_RoamingAppData,
+        FOLDERID_Videos, SHGetKnownFolderPath,
+    };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Folder {
+        Profile,
+        LocalAppData,
+        RoamingAppData,
+        Videos,
+        Documents,
+        Desktop,
+        Downloads,
+        Music,
+        Pictures,
+    }
+
+    impl Folder {
+        /// The library folder a profile subfolder's name stands for
+        /// (`Videos`, any case).
+        pub fn library(name: &str) -> Option<Self> {
+            [
+                ("Videos", Self::Videos),
+                ("Documents", Self::Documents),
+                ("Desktop", Self::Desktop),
+                ("Downloads", Self::Downloads),
+                ("Music", Self::Music),
+                ("Pictures", Self::Pictures),
+            ]
+            .into_iter()
+            .find(|(known, _)| known.eq_ignore_ascii_case(name))
+            .map(|(_, folder)| folder)
+        }
+    }
+
+    /// The folder's path for this user, if Windows has one.
+    pub fn path(folder: Folder) -> Option<PathBuf> {
+        let id = match folder {
+            Folder::Profile => &FOLDERID_Profile,
+            Folder::LocalAppData => &FOLDERID_LocalAppData,
+            Folder::RoamingAppData => &FOLDERID_RoamingAppData,
+            Folder::Videos => &FOLDERID_Videos,
+            Folder::Documents => &FOLDERID_Documents,
+            Folder::Desktop => &FOLDERID_Desktop,
+            Folder::Downloads => &FOLDERID_Downloads,
+            Folder::Music => &FOLDERID_Music,
+            Folder::Pictures => &FOLDERID_Pictures,
+        };
+        let mut path = std::ptr::null_mut();
+        // SAFETY: a valid folder id, default flags and no token (this user);
+        // the returned string is freed with CoTaskMemFree even on failure.
+        let status = unsafe { SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut path) };
+        let result = (status >= 0 && !path.is_null()).then(|| {
+            // SAFETY: a NUL-terminated wide string from the shell.
+            let len = (0..).take_while(|&i| unsafe { *path.add(i) } != 0).count();
+            PathBuf::from(std::ffi::OsString::from_wide(unsafe {
+                std::slice::from_raw_parts(path, len)
+            }))
+        });
+        unsafe { CoTaskMemFree(path.cast()) };
+        result.filter(|path| !path.as_os_str().is_empty())
     }
 }
 
@@ -2085,6 +2241,9 @@ impl RpcError {
     /// Not permitted: a plugin called a method it wasn't granted, or a
     /// plugin's permissions weren't granted; the message says which.
     pub const NOT_PERMITTED: i64 = -32002;
+    /// This engine can't do it on this platform (or build) at all, so
+    /// asking again won't help; the message says what to use instead.
+    pub const UNSUPPORTED: i64 = -32003;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -3043,6 +3202,19 @@ pub struct Tuning {
     /// differs from the setup.
     pub change: Option<serde_json::Value>,
     pub notes: Vec<String>,
+    /// ISO sources that couldn't be opened, so their files weren't in the
+    /// benchmark (the rest were measured): each with why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedSource>,
+}
+
+/// A source `tune` couldn't open to learn its format.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SkippedSource {
+    /// Its id.
+    pub source: String,
+    /// Why it couldn't be opened.
+    pub reason: String,
 }
 
 /// Whether the hardware encoders keep up with a set of streams, judged on

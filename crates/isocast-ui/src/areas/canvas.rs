@@ -398,6 +398,7 @@ impl Canvas {
             match incoming {
                 Incoming::Frame(frame) => preview.frame(frame),
                 Incoming::Lost(why) => preview.lost(why),
+                Incoming::Unavailable(_) => preview.unavailable(),
             }
         }
     }
@@ -2135,7 +2136,7 @@ pub(crate) fn stopped(s: &crate::session::Session, canvas: CanvasId) -> Option<&
 
 /// Recording, or starting or stopping it.
 fn recording(s: &crate::session::Session) -> bool {
-    s.busy_record
+    s.record_busy()
         || s.status
             .as_ref()
             .is_some_and(|x| x.state == EngineState::Recording)

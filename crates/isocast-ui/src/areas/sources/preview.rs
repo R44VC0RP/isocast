@@ -86,6 +86,10 @@ impl SourcePreview {
         self.timer.stop();
         if let Some(w) = self.watching.borrow_mut().take() {
             w.stop.store(true, Ordering::Relaxed);
+            #[cfg(windows)]
+            if let Some(frame) = w.showing.as_ref().or(w.previous.as_ref()) {
+                frame.close_stream();
+            }
         }
     }
 
@@ -106,7 +110,7 @@ fn tick(
         let Some(frame) = w.newest.lock().ok().and_then(|mut f| f.take()) else {
             return;
         };
-        let key = frame.slot();
+        let key = frame.cache_key();
         if !w.images.contains_key(&key) {
             // A new ring: the old one's images go.
             w.images.retain(|(generation, _), _| *generation == key.0);
@@ -155,8 +159,11 @@ fn receive(target: &str, stop: &AtomicBool, newest: &Slot) {
             }
             Ok(())
         });
-        if result.is_ok() {
-            break;
+        // Ended, or this engine can't share pictures here (the preview
+        // stays empty rather than asking every few seconds).
+        match result {
+            Err(error) if !crate::frames::unsupported(&error) => {}
+            _ => break,
         }
         thread::sleep(delay);
         delay = (delay * 2).min(Duration::from_secs(5));

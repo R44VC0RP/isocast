@@ -751,7 +751,7 @@ encoder = {{ codec = "hevc", quality = 95 }}
             for probe in probes:
                 probe.wait(timeout=30)
             if args.record:
-                out = run([cli, "stop", "--json"], test_env, check=False)
+                out = run([cli, "stop", "--wait", "--json"], test_env, check=False)
                 (work / "test-report.json").write_text(out.stdout)
         finally:
             if app_proc:

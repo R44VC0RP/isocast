@@ -95,6 +95,7 @@ struct Control {
 
 #[derive(Default)]
 struct Pending {
+    generation: u64,
     released: Vec<(u64, u32)>,
     size: Option<(Option<u32>, Option<u32>)>,
 }
@@ -102,8 +103,24 @@ struct Pending {
 impl SharedControl {
     /// The viewer is done with `slot` of ring `generation`.
     pub fn release(&self, generation: u64, slot: u32) {
-        self.0.pending.lock().released.push((generation, slot));
+        let mut pending = self.0.pending.lock();
+        if (generation != pending.generation
+            && generation.checked_add(1) != Some(pending.generation))
+            || slot >= MAX_SLOTS
+            || pending.released.contains(&(generation, slot))
+        {
+            return;
+        }
+        pending.released.push((generation, slot));
         self.0.changed.notify_all();
+    }
+
+    fn generation(&self, generation: u64) {
+        let mut pending = self.0.pending.lock();
+        pending.generation = generation;
+        pending.released.retain(|(released, _)| {
+            *released == generation || released.checked_add(1) == Some(generation)
+        });
     }
 
     /// At most `fps` frames a second from the next frame.
@@ -120,7 +137,12 @@ impl SharedControl {
 
     /// Slots released and a new size, since last asked.
     fn take(&self) -> Pending {
-        std::mem::take(&mut self.0.pending.lock())
+        let mut pending = self.0.pending.lock();
+        Pending {
+            generation: pending.generation,
+            released: std::mem::take(&mut pending.released),
+            size: pending.size.take(),
+        }
     }
 
     /// Wait up to `timeout` for a slot to come back.
@@ -218,6 +240,9 @@ fn run<P: Platform>(
     let slots = request.slots.clamp(2, MAX_SLOTS) as usize;
     let mut max_size = request.max_size;
     let mut ring: Option<Ring<P::SharedSurface>> = None;
+    // A viewer can retain an old frame during resize. Keep at most one old
+    // ring, coalescing further resizes until its GPU reads are acknowledged.
+    let mut retired: Option<Ring<P::SharedSurface>> = None;
     let mut generation = 0;
     let mut pace = Pace::default();
     // The filters drawn last, and what draws them (made on first use).
@@ -233,13 +258,22 @@ fn run<P: Platform>(
             continue;
         }
         let pending = control.take();
-        if let Some(ring) = &mut ring {
-            for (released, slot) in pending.released {
+        for (released, slot) in pending.released {
+            for ring in ring.iter_mut().chain(retired.iter_mut()) {
                 if released == ring.generation
                     && let Some(held) = ring.held.get_mut(slot as usize)
                 {
                     *held = false;
                 }
+            }
+        }
+        if retired
+            .as_ref()
+            .is_some_and(|ring| ring.held.iter().all(|held| !held))
+        {
+            retired = None;
+            if let Some(ring) = &mut ring {
+                ring.fresh = true;
             }
         }
         if let Some(size) = pending.size
@@ -301,7 +335,7 @@ fn run<P: Platform>(
         }
         let input = (picture.width, picture.height);
         let size = fitted(input, max_size);
-        if ring.as_ref().is_none_or(|ring| ring.size != size) {
+        if retired.is_none() && ring.as_ref().is_none_or(|ring| ring.size != size) {
             generation += 1;
             let mut surfaces = Vec::with_capacity(slots);
             for _ in 0..slots {
@@ -320,10 +354,11 @@ fn run<P: Platform>(
                     .map(|(surface, _)| surface.clone())
                     .collect(),
             };
+            control.generation(generation);
             if tx.send(event).is_err() {
                 return Ok(());
             }
-            ring = Some(Ring {
+            retired = ring.replace(Ring {
                 generation,
                 size,
                 surfaces,
@@ -332,6 +367,7 @@ fn run<P: Platform>(
             });
         }
         let ring = ring.as_mut().expect("made above");
+        let size = ring.size;
         let index = ring
             .held
             .iter()

@@ -1,8 +1,8 @@
-//! Native Media Foundation camera samples, copied GPU-to-GPU into owned NV12
-//! frames. Interleaved fields are woven by preserving their existing rows.
-//! Busy cameras can supply shared MJPEG through the Windows Frame Server:
-//! software JPEG decode and GPU upload, never GPU readback. No interpolation
-//! or timestamp rebasing on either path.
+//! Media Foundation camera samples, kept native as NV12 where possible.
+//! Packed YUV/RGB uses GPU conversion after one upload; MJPEG uses the Media
+//! Foundation decoder followed by that same upload path. Interleaved fields
+//! preserve their existing rows. Busy cameras attach read-only through the
+//! Windows Frame Server. No GPU readback, interpolation or timestamp rebasing.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
@@ -11,10 +11,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use isocast_engine::{CameraRequest, CaptureFormat, FramePool, Time, VideoSink};
+use isocast_engine::{CameraRequest, CaptureFormat, Time, VideoSink};
 use isocast_protocol::{CameraCaptureMetadata, Canvas};
 use parking_lot::Mutex;
-use windows::Foundation::{IPropertyValue, TypedEventHandler};
+use windows::Foundation::{IClosable, IPropertyValue, TypedEventHandler};
+use windows::Graphics::Imaging::{BitmapBufferAccessMode, BitmapPixelFormat};
 use windows::Media::Capture::Frames::{
     MediaFrameFormat, MediaFrameReader, MediaFrameReaderStartStatus, MediaFrameReference,
     MediaFrameSourceGroup, MediaFrameSourceKind,
@@ -24,25 +25,22 @@ use windows::Media::Capture::{
     MediaCaptureMemoryPreference, MediaCaptureSharingMode, StreamingCaptureMode,
 };
 use windows::Win32::Foundation::{S_OK, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device5, ID3D11Texture2D,
-};
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
-use windows::Win32::Graphics::Imaging::{
-    CLSID_WICImagingFactory, GUID_WICPixelFormat32bppBGRA, IWICImagingFactory,
-    WICConvertBitmapSource, WICDecodeMetadataCacheOnDemand,
-};
 use windows::Win32::Media::MediaFoundation::*;
-use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::WaitForMultipleObjects;
-use windows::Win32::System::WinRT::IBufferByteAccess;
+use windows::Win32::System::WinRT::{IBufferByteAccess, IMemoryBufferByteAccess};
 use windows::core::{GUID, HRESULT, Interface, Ref, implement};
 
 use crate::clock;
-use crate::frames::{Frame, GraphicsDevice, TexturePool};
+use crate::frames::{Frame, GraphicsDevice};
 use crate::mf::Runtime;
 use crate::native::{Apartment, Event};
-use crate::output::OutputPool;
+mod jpeg;
+mod pixels;
+
+use jpeg::JpegDecoder;
+pub use pixels::CameraPixelFormat;
+use pixels::{CameraPixels, Color, Delivery, Layout};
 
 const MAX_DEVICES: u32 = 256;
 const MAX_FORMATS: u32 = 512;
@@ -59,6 +57,10 @@ pub struct CameraFormat {
     pub height: u32,
     pub fps: u32,
     pub media_type_interlace_mode: u32,
+    pub pixel_format: CameraPixelFormat,
+    /// Exact advertised rate; fps is its nominal integer (e.g.59.94→60).
+    pub rate_numerator: u32,
+    pub rate_denominator: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -66,7 +68,7 @@ pub struct CameraDevice {
     /// Exact MF video-capture symbolic link, not the friendly name.
     pub id: String,
     pub name: String,
-    /// Qualified native NV12, progressive/two-field, limited-range BT.709 modes.
+    /// Supported native SDR formats; actual GPU/CPU delivery is observed later.
     /// Metadata alone does not guarantee that the driver delivers GPU samples.
     pub formats: Vec<CameraFormat>,
 }
@@ -120,11 +122,65 @@ struct State {
 #[derive(Default)]
 struct ObservedFlags {
     media_type_interlace_mode: AtomicU32,
-    shared_mjpg: AtomicBool,
+    mode: Mutex<ModeInfo>,
+    delivery: AtomicU8,
     interlaced: AtomicU8,
     bottom_first: AtomicU8,
     single_field: AtomicU8,
     repeat_first: AtomicU8,
+}
+
+#[derive(Clone, Default)]
+struct ModeInfo {
+    native_format: String,
+    decoded_format: String,
+    native_frame_rate: String,
+    color: String,
+    shared: bool,
+}
+
+fn describe_mode(state: &State, native: CameraFormat, layout: Layout, shared: bool) {
+    *state.observed.mode.lock() = ModeInfo {
+        native_format: native.pixel_format.name().into(),
+        decoded_format: if native.pixel_format == CameraPixelFormat::Mjpg {
+            layout.format.name().into()
+        } else {
+            String::new()
+        },
+        native_frame_rate: format!("{}/{}", native.rate_numerator, native.rate_denominator),
+        color: if matches!(
+            layout.format,
+            CameraPixelFormat::Rgb24 | CameraPixelFormat::Rgb32 | CameraPixelFormat::Argb32
+        ) {
+            if layout.color.full_range {
+                "rgb-full"
+            } else {
+                "rgb-limited"
+            }
+            .into()
+        } else {
+            format!(
+                "bt{}-{}",
+                layout.color.matrix,
+                if layout.color.full_range {
+                    "full"
+                } else {
+                    "limited"
+                }
+            )
+        },
+        shared,
+    };
+}
+
+fn note_delivery(state: &State, delivery: Delivery) {
+    let bit = match delivery {
+        Delivery::NativeGpu => 1,
+        Delivery::NativeUpload => 2,
+        Delivery::ConvertedGpu => 4,
+        Delivery::ConvertedUpload => 8,
+    };
+    state.observed.delivery.fetch_or(bit, Ordering::Relaxed);
 }
 
 fn observe(flag: &AtomicU8, value: Option<bool>) {
@@ -299,21 +355,42 @@ impl CameraCapture {
         let flags = self.state.observed.clone();
         let id = self.device.id.clone();
         let name = self.device.name.clone();
-        Arc::new(move || CameraCaptureMetadata {
-            device_id: id.clone(),
-            device_name: name.clone(),
-            media_type_interlace_mode: flags.media_type_interlace_mode.load(Ordering::Relaxed),
-            field_handling: "weave".into(),
-            delivery: if flags.shared_mjpg.load(Ordering::Relaxed) {
-                "frameserver-mjpg-cpu-decode-upload"
-            } else {
-                "mf-dxgi-nv12"
+        Arc::new(move || {
+            let mode = flags.mode.lock().clone();
+            let bits = flags.delivery.load(Ordering::Relaxed);
+            let paths: Vec<_> = [
+                (1, "dxgi-native"),
+                (2, "cpu-native-upload"),
+                (4, "dxgi-gpu-convert"),
+                (8, "cpu-upload-gpu-convert"),
+            ]
+            .into_iter()
+            .filter_map(|(bit, name)| (bits & bit != 0).then_some(name))
+            .collect();
+            CameraCaptureMetadata {
+                device_id: id.clone(),
+                device_name: name.clone(),
+                media_type_interlace_mode: flags.media_type_interlace_mode.load(Ordering::Relaxed),
+                field_handling: "weave".into(),
+                delivery: format!(
+                    "{}{}:{}",
+                    if mode.shared { "frameserver" } else { "mf" },
+                    if mode.decoded_format.is_empty() {
+                        ""
+                    } else {
+                        "-mjpeg-mf-decode"
+                    },
+                    paths.join("+")
+                ),
+                native_format: mode.native_format,
+                decoded_format: mode.decoded_format,
+                native_frame_rate: mode.native_frame_rate,
+                color_space: mode.color,
+                sample_interlaced: observed(&flags.interlaced),
+                sample_bottom_field_first: observed(&flags.bottom_first),
+                sample_single_field: observed(&flags.single_field),
+                sample_repeat_first_field: observed(&flags.repeat_first),
             }
-            .into(),
-            sample_interlaced: observed(&flags.interlaced),
-            sample_bottom_field_first: observed(&flags.bottom_first),
-            sample_single_field: observed(&flags.single_field),
-            sample_repeat_first_field: observed(&flags.repeat_first),
         })
     }
 
@@ -399,10 +476,11 @@ pub fn capture_camera(
     if request.fps.is_some_and(|fps| !(1..=240).contains(&fps)) {
         bail!("camera.fps: valid integer range is 1..=240");
     }
-    if request.size.is_some_and(|(width, height)| {
-        width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2)
-    }) {
-        bail!("camera.size: NV12 requires positive even width and height");
+    if request
+        .size
+        .is_some_and(|(width, height)| width == 0 || height == 0 || width > 16384 || height > 16384)
+    {
+        bail!("camera.size: width and height must be 1..=16384");
     }
     check_quarantine()?;
     let state = Arc::new(State {
@@ -688,11 +766,10 @@ fn optional_u32(attributes: &IMFAttributes, key: &GUID) -> Result<Option<u32>> {
 
 fn qualified_format(media_type: &IMFMediaType) -> Result<CameraFormat> {
     unsafe {
-        if media_type.GetGUID(&MF_MT_MAJOR_TYPE)? != MFMediaType_Video
-            || media_type.GetGUID(&MF_MT_SUBTYPE)? != MFVideoFormat_NV12
-        {
-            bail!("camera.format: only native NV12 video is qualified; no decoder or CPU fallback");
+        if media_type.GetGUID(&MF_MT_MAJOR_TYPE)? != MFMediaType_Video {
+            bail!("camera.format: expected a video media type");
         }
+        let pixel_format = CameraPixelFormat::from_guid(media_type.GetGUID(&MF_MT_SUBTYPE)?)?;
         let size = media_type.GetUINT64(&MF_MT_FRAME_SIZE)?;
         let width = (size >> 32) as u32;
         let height = size as u32;
@@ -703,24 +780,29 @@ fn qualified_format(media_type: &IMFMediaType) -> Result<CameraFormat> {
             || height == 0
             || width > 16384
             || height > 16384
-            || !width.is_multiple_of(2)
-            || !height.is_multiple_of(2)
+            || (matches!(
+                pixel_format,
+                CameraPixelFormat::Nv12
+                    | CameraPixelFormat::Yuy2
+                    | CameraPixelFormat::Uyvy
+                    | CameraPixelFormat::Mjpg
+            ) && !width.is_multiple_of(2))
+            || (matches!(
+                pixel_format,
+                CameraPixelFormat::Nv12 | CameraPixelFormat::Mjpg
+            ) && !height.is_multiple_of(2))
+            || u64::from(width) * u64::from(height) * 4 > 256 * 1024 * 1024
         {
-            bail!("camera.size: unsupported native NV12 size {width}x{height}");
+            bail!("camera.size: invalid/beyond 256MiB {pixel_format:?} size {width}x{height}");
         }
-        if denominator == 0
-            || !numerator.is_multiple_of(denominator)
-            || !(1..=240).contains(&(numerator / denominator))
-        {
-            bail!(
-                "camera.fps: native rate {numerator}/{denominator}; only exact integers 1..=240 are qualified"
-            );
-        }
-        let interlace = media_type.GetUINT32(&MF_MT_INTERLACE_MODE)?;
+        let fps = nominal_rate(numerator, denominator)?;
+        let interlace = optional_u32(media_type, &MF_MT_INTERLACE_MODE)?.unwrap_or(0);
         if ![
+            MFVideoInterlace_Unknown.0 as u32,
             MFVideoInterlace_Progressive.0 as u32,
             MFVideoInterlace_FieldInterleavedUpperFirst.0 as u32,
             MFVideoInterlace_FieldInterleavedLowerFirst.0 as u32,
+            MFVideoInterlace_MixedInterlaceOrProgressive.0 as u32,
         ]
         .contains(&interlace)
         {
@@ -728,45 +810,88 @@ fn qualified_format(media_type: &IMFMediaType) -> Result<CameraFormat> {
                 "camera.format: interlace mode {interlace}; valid modes are progressive or two interleaved fields"
             );
         }
-        for (key, expected, label) in [
-            (
-                &MF_MT_YUV_MATRIX,
-                MFVideoTransferMatrix_BT709.0 as u32,
-                "BT.709 matrix",
-            ),
-            (
-                &MF_MT_VIDEO_NOMINAL_RANGE,
-                MFNominalRange_16_235.0 as u32,
-                "16..235 nominal range",
-            ),
-            (
-                &MF_MT_VIDEO_PRIMARIES,
-                MFVideoPrimaries_BT709.0 as u32,
-                "BT.709 primaries",
-            ),
-        ] {
-            let value = optional_u32(media_type, key)?;
-            if value != Some(expected) {
-                bail!("camera.format: requires {label} ({expected}), got {value:?}");
-            }
-        }
-        // Transfer metadata can be absent even with explicit BT.709 primaries
-        // and matrix. Do not invent an attribute or apply a device-name quirk;
-        // reject explicit HDR/non-709 transfer functions.
+        // Missing colour metadata is common on virtual cameras. SDR defaults
+        // are explicit below, rather than treating an absent attribute as an
+        // unsupported pixel format. HDR still needs a separate tone-map path.
         if let Some(transfer) = optional_u32(media_type, &MF_MT_TRANSFER_FUNCTION)?
-            && transfer != MFVideoTransFunc_709.0 as u32
+            && ![
+                0,
+                MFVideoTransFunc_709.0 as u32,
+                MFVideoTransFunc_sRGB.0 as u32,
+            ]
+            .contains(&transfer)
         {
             bail!(
-                "camera.format: transfer function {transfer}; only BT.709 or unspecified is qualified"
+                "camera.format: transfer function {transfer}; supported: SDR BT.709, sRGB or unspecified"
             );
         }
         Ok(CameraFormat {
             width,
             height,
-            fps: numerator / denominator,
+            fps,
             media_type_interlace_mode: interlace,
+            pixel_format,
+            rate_numerator: numerator,
+            rate_denominator: denominator,
         })
     }
+}
+
+fn nominal_rate(numerator: u32, denominator: u32) -> Result<u32> {
+    if denominator == 0 {
+        bail!("camera.fps: zero denominator")
+    }
+    let fps = ((u64::from(numerator) + u64::from(denominator) / 2) / u64::from(denominator)) as u32;
+    let nominal = u64::from(fps) * u64::from(denominator);
+    // Keep the actual ratio in metadata. The integer setup clock accepts the
+    // usual 1000/1001 rates and UVC interval rounding, not arbitrary rounding.
+    if !(1..=240).contains(&fps) || u64::from(numerator).abs_diff(nominal) * 10_000 > nominal * 11 {
+        bail!(
+            "camera.fps: {numerator}/{denominator}; supported nominal rates1..=240 (within0.11%)"
+        );
+    }
+    Ok(fps)
+}
+
+fn input_layout(media: &IMFMediaType, format: CameraFormat) -> Result<Layout> {
+    let mut stride = optional_u32(media, &MF_MT_DEFAULT_STRIDE)?.map(|v| v as i32);
+    if stride.is_none() && format.pixel_format != CameraPixelFormat::Mjpg {
+        let computed = unsafe {
+            MFGetStrideForBitmapInfoHeader(media.GetGUID(&MF_MT_SUBTYPE)?.data1, format.width)
+        }?;
+        stride = Some(computed);
+    }
+    let matrix = match optional_u32(media, &MF_MT_YUV_MATRIX)?.unwrap_or(0) {
+        0 => {
+            if format.height >= 720 {
+                709
+            } else {
+                601
+            }
+        }
+        value if value == MFVideoTransferMatrix_BT709.0 as u32 => 709,
+        value if value == MFVideoTransferMatrix_BT601.0 as u32 => 601,
+        other => bail!("camera.color.matrix: {other}; supported: BT.601, BT.709 or unspecified"),
+    };
+    let full_range = match optional_u32(media, &MF_MT_VIDEO_NOMINAL_RANGE)?.unwrap_or(0) {
+        0 => matches!(
+            format.pixel_format,
+            CameraPixelFormat::Rgb24
+                | CameraPixelFormat::Rgb32
+                | CameraPixelFormat::Argb32
+                | CameraPixelFormat::Mjpg
+        ),
+        value if value == MFNominalRange_0_255.0 as u32 => true,
+        value if value == MFNominalRange_16_235.0 as u32 => false,
+        other => bail!("camera.color.range: {other}; supported: full, limited or unspecified"),
+    };
+    Ok(Layout {
+        format: format.pixel_format,
+        width: format.width,
+        height: format.height,
+        stride: stride.unwrap_or(0),
+        color: Color { matrix, full_range },
+    })
 }
 
 fn native_formats(reader: &IMFSourceReader, stream: u32) -> Result<Vec<NativeFormat>> {
@@ -786,15 +911,15 @@ fn native_formats(reader: &IMFSourceReader, stream: u32) -> Result<Vec<NativeFor
             }
             Err(error) => return Err(error).context("enumerate native MF camera modes"),
         };
-        match qualified_format(&raw) {
+        match qualified_format(&raw).and_then(|format| {
+            if format.pixel_format != CameraPixelFormat::Mjpg {
+                input_layout(&raw, format)?;
+            }
             Ok(format)
-                if !formats
-                    .iter()
-                    .any(|mode: &NativeFormat| mode.format == format) =>
-            {
+        }) {
+            Ok(format) => {
                 formats.push(NativeFormat { raw, format });
             }
-            Ok(_) => {}
             Err(error) => {
                 rejected += 1;
                 last_rejection = format!("{error:#}");
@@ -812,7 +937,9 @@ fn select_format(
     let wanted = request.size.unwrap_or((canvas.width, canvas.height));
     let fps = request.fps.unwrap_or(canvas.fps);
     // Exact requested fields are constraints. Unspecified fields prefer the
-    // nearest canvas dimensions, then rate; stable native order breaks ties.
+    // nearest canvas dimensions, then nominal rate and conversion cost.
+    // 30000/1001 and 30/1 are both nominal30: prefer NV12 before breaking
+    // their tie by the exact rate. Stable native order breaks remaining ties.
     let selected = formats
         .iter()
         .enumerate()
@@ -827,6 +954,17 @@ fn select_format(
                 u64::from(mode.format.width.abs_diff(wanted.0))
                     + u64::from(mode.format.height.abs_diff(wanted.1)),
                 mode.format.fps.abs_diff(fps),
+                mode.format.pixel_format.rank(),
+                u64::from(mode.format.rate_numerator)
+                    .abs_diff(u64::from(fps) * u64::from(mode.format.rate_denominator))
+                    * 1_000_000
+                    / u64::from(mode.format.rate_denominator),
+                input_layout(&mode.raw, mode.format).map_or(0, |layout| {
+                    u8::from(
+                        layout.format == CameraPixelFormat::Nv12
+                            && (layout.color.matrix != 709 || layout.color.full_range),
+                    )
+                }),
             )
         });
     if let Some((index, _)) = selected {
@@ -836,8 +974,11 @@ fn select_format(
         .iter()
         .map(|mode| {
             format!(
-                "{}x{}@{}",
-                mode.format.width, mode.format.height, mode.format.fps
+                "{}x{}@{} {}",
+                mode.format.width,
+                mode.format.height,
+                mode.format.fps,
+                mode.format.pixel_format.name()
             )
         })
         .collect::<Vec<_>>()
@@ -877,7 +1018,8 @@ struct Resources {
     reader: IMFSourceReader,
     _source: Source,
     _manager: IMFDXGIDeviceManager,
-    textures: TexturePool,
+    pixels: CameraPixels,
+    decoder: Option<JpegDecoder>,
     graphics: GraphicsDevice,
     pending: VecDeque<Pending>,
     uncertain: Option<IMFSample>,
@@ -952,8 +1094,19 @@ impl Session {
         let selected = &formats[select_format(&formats, request, canvas)?];
         unsafe { reader.SetCurrentMediaType(stream, None, &selected.raw) }
             .context("set exact native MF camera mode")?;
-        let current = qualified_format(&unsafe { reader.GetCurrentMediaType(stream) }?)?;
-        if current != selected.format {
+        let current_type = unsafe { reader.GetCurrentMediaType(stream) }?;
+        let current = qualified_format(&current_type)?;
+        if (
+            current.width,
+            current.height,
+            current.fps,
+            current.pixel_format,
+        ) != (
+            selected.format.width,
+            selected.format.height,
+            selected.format.fps,
+            selected.format.pixel_format,
+        ) {
             bail!(
                 "camera.format: requested {:?}, driver selected {current:?}",
                 selected.format
@@ -965,12 +1118,21 @@ impl Session {
             .observed
             .media_type_interlace_mode
             .store(current.media_type_interlace_mode, Ordering::Relaxed);
+        let decoder = (current.pixel_format == CameraPixelFormat::Mjpg)
+            .then(|| JpegDecoder::new(current.width, current.height, current.fps))
+            .transpose()?;
+        let layout = match &decoder {
+            Some(decoder) => decoder.layout(),
+            None => input_layout(&current_type, current)?,
+        };
+        describe_mode(&state, current, layout, false);
         Ok(Self {
             resources: Some(Resources {
                 reader,
                 _source: source,
                 _manager: manager,
-                textures: TexturePool::new(graphics.clone()),
+                pixels: CameraPixels::new(graphics.clone(), layout)?,
+                decoder,
                 graphics,
                 pending: VecDeque::with_capacity(IN_FLIGHT),
                 uncertain: None,
@@ -997,7 +1159,7 @@ impl Session {
             }
             check_quarantine()?;
             if !*running && Instant::now() >= deadline {
-                bail!("MF camera delivered no qualified GPU frame within 5 seconds");
+                bail!("MF camera delivered no supported frame within 5 seconds");
             }
             if let Some(message) = self.state.next()? {
                 match message {
@@ -1084,7 +1246,7 @@ impl Session {
         }
     }
 
-    fn check_flags(&self, flags: u32, running: bool) -> Result<()> {
+    fn check_flags(&mut self, flags: u32, running: bool) -> Result<()> {
         if flags & MF_SOURCE_READERF_STREAMTICK.0 as u32 != 0 {
             self.state
                 .counts
@@ -1107,9 +1269,20 @@ impl Session {
                 .format_changes
                 .fetch_add(1, Ordering::Relaxed);
             let reader = &self.resources.as_ref().expect("open camera").reader;
-            let current = qualified_format(&unsafe { reader.GetCurrentMediaType(self.stream) }?)?;
+            let media_type = unsafe { reader.GetCurrentMediaType(self.stream) }?;
+            let current = qualified_format(&media_type)?;
             if running
-                || current != self.format
+                || (
+                    current.width,
+                    current.height,
+                    current.fps,
+                    current.pixel_format,
+                ) != (
+                    self.format.width,
+                    self.format.height,
+                    self.format.fps,
+                    self.format.pixel_format,
+                )
                 || flags
                     & (MF_SOURCE_READERF_NEWSTREAM.0 as u32
                         | MF_SOURCE_READERF_ALLEFFECTSREMOVED.0 as u32)
@@ -1119,6 +1292,20 @@ impl Session {
                     "camera.format changed (flags {flags:#x}, current {current:?}); reopen explicitly"
                 );
             }
+            // Before the first picture a source may fill in stride/colour/
+            // interlace metadata. Use that actual layout, not stale defaults.
+            let resources = self.resources.as_mut().expect("open camera");
+            let layout = match &resources.decoder {
+                Some(decoder) => decoder.layout(),
+                None => input_layout(&media_type, current)?,
+            };
+            resources.pixels = CameraPixels::new(resources.graphics.clone(), layout)?;
+            self.format = current;
+            self.state
+                .observed
+                .media_type_interlace_mode
+                .store(current.media_type_interlace_mode, Ordering::Relaxed);
+            describe_mode(&self.state, current, layout, false);
         }
         Ok(())
     }
@@ -1135,64 +1322,35 @@ impl Session {
 
     fn copy(&mut self, sample: IMFSample) -> Result<Option<Frame>> {
         let (interlaced, bottom_first) = sample_fields(&self.state, self.format, &sample)?;
-        let buffers = unsafe { sample.GetBufferCount() }?;
-        if buffers != 1 {
-            bail!("camera.frame: requires exactly one DXGI buffer, got {buffers}");
-        }
-        let buffer = unsafe { sample.GetBufferByIndex(0) }?;
-        let dxgi: IMFDXGIBuffer = buffer
-            .cast()
-            .context("camera.frame: CPU/non-DXGI buffers are not supported")?;
-        let mut raw = std::ptr::null_mut();
-        unsafe { dxgi.GetResource(&ID3D11Texture2D::IID, &mut raw) }?;
-        if raw.is_null() {
-            bail!("camera.frame: null D3D11 texture");
-        }
-        // GetResource transferred this owned COM reference to the caller.
-        let texture = unsafe { ID3D11Texture2D::from_raw(raw) };
-        let subresource = unsafe { dxgi.GetSubresourceIndex() }?;
-        let owner: ID3D11Device5 = unsafe { texture.GetDevice() }?.cast()?;
-        let mut desc = D3D11_TEXTURE2D_DESC::default();
-        unsafe { texture.GetDesc(&mut desc) };
         let resources = self.resources.as_mut().expect("open camera");
-        if owner != *resources.graphics.raw()
-            || desc.Format != DXGI_FORMAT_NV12
-            || desc.Usage != D3D11_USAGE_DEFAULT
-            || desc.CPUAccessFlags != 0
-            || desc.MipLevels != 1
-            || desc.ArraySize == 0
-            || subresource >= desc.ArraySize
-            || desc.SampleDesc.Count != 1
-            || desc.SampleDesc.Quality != 0
-            || desc.Width < self.format.width
-            || desc.Height < self.format.height
-            || !desc.Width.is_multiple_of(2)
-            || !desc.Height.is_multiple_of(2)
-        {
-            bail!(
-                "camera.frame: requires same-device, GPU-only default-usage NV12 with a valid array subresource and dimensions; got {desc:?}, subresource {subresource}"
-            );
+        let decoded = resources
+            .decoder
+            .as_mut()
+            .map(|decoder| decoder.decode(&sample))
+            .transpose()?;
+        // Retain the original GPU sample before any possible GPU submission.
+        // A software decoder's CPU output is copied by UpdateSubresource
+        // before returning, so it is not an asynchronous input lease.
+        resources.uncertain = Some(sample.clone());
+        let converted = resources.pixels.sample(decoded.as_ref().unwrap_or(&sample));
+        if converted.is_err() && !resources.pixels.uncertain() {
+            resources.uncertain = None;
         }
-        // A failing pool call may already have queued CopySubresourceRegion
-        // without a successful fence signal. Keep its source even on Err.
-        resources.uncertain = Some(sample);
-        let frame = resources.textures.copy_subresource(
-            &texture,
-            subresource,
-            self.format.width,
-            self.format.height,
-        )?;
+        let converted = converted?;
         let sample = resources.uncertain.take().expect("copy source retained");
-        if let Some(frame) = &frame {
+        let frame = if let Some((frame, delivery)) = converted {
+            note_delivery(&self.state, delivery);
             count_fields(&self.state, interlaced, bottom_first);
             resources.pending.push_back(Pending {
                 frame: frame.clone(),
                 _sample: sample,
                 submitted: Instant::now(),
             });
+            Some(frame)
         } else {
             self.state.counts.pool_drops.fetch_add(1, Ordering::Relaxed);
-        }
+            None
+        };
         Ok(frame)
     }
 }
@@ -1343,9 +1501,10 @@ fn check_quarantine() -> Result<()> {
 }
 
 // Windows 10 exposes shared capture through MediaCapture, not the newer
-// MF_DEVSOURCE_ATTRIBUTE_FRAMESERVER_SHARE_MODE (Windows 11 26100). Only
-// compressed MJPEG needs this fallback today: the native NV12 path above
-// never downloads or software-converts its GPU samples.
+// MF_DEVSOURCE_ATTRIBUTE_FRAMESERVER_SHARE_MODE (Windows 11 26100). Keep the
+// controlling application's mode. Compressed buffers and CPU bitmaps share
+// the Source Reader's conversion path; GPU-only Frame Server surfaces are
+// rejected rather than silently downloaded.
 struct SharedCamera {
     capture: MediaCapture,
     reader: Option<MediaFrameReader>,
@@ -1355,7 +1514,12 @@ struct SharedCamera {
     state: Arc<State>,
     device: CameraDevice,
     format: Option<CameraFormat>,
-    output: Option<OutputPool>,
+    graphics: GraphicsDevice,
+    pixels: Option<CameraPixels>,
+    decoder: Option<JpegDecoder>,
+    layout: Option<Layout>,
+    pending: VecDeque<(Frame, Instant)>,
+    staging: Vec<u8>,
     previous: Option<Time>,
 }
 
@@ -1390,7 +1554,12 @@ impl SharedCamera {
             state,
             device,
             format: None,
-            output: None,
+            graphics: graphics.clone(),
+            pixels: None,
+            decoder: None,
+            layout: None,
+            pending: VecDeque::with_capacity(IN_FLIGHT),
+            staging: Vec::new(),
             previous: None,
         };
         let error = session.error.clone();
@@ -1429,7 +1598,8 @@ impl SharedCamera {
             })
             .context("camera.device: shared group has no color source")?;
         // Never call SetFormatAsync: the controlling application's choice wins.
-        let format = shared_format(&source.CurrentFormat()?)?;
+        let media_type = shared_media_type(&source.CurrentFormat()?)?;
+        let format = qualified_format(&media_type)?;
         if request
             .size
             .is_some_and(|size| size != (format.width, format.height))
@@ -1442,18 +1612,22 @@ impl SharedCamera {
                 format.fps
             );
         }
-        session.output = Some(OutputPool::new(graphics, format.width, format.height)?);
+        session.decoder = (format.pixel_format == CameraPixelFormat::Mjpg)
+            .then(|| JpegDecoder::new(format.width, format.height, format.fps))
+            .transpose()?;
+        let layout = match &session.decoder {
+            Some(decoder) => decoder.layout(),
+            None => input_layout(&media_type, format)?,
+        };
+        session.pixels = Some(CameraPixels::new(graphics, layout)?);
+        session.layout = Some(layout);
         session.format = Some(format);
         session
             .state
             .observed
             .media_type_interlace_mode
             .store(format.media_type_interlace_mode, Ordering::Relaxed);
-        session
-            .state
-            .observed
-            .shared_mjpg
-            .store(true, Ordering::Relaxed);
+        describe_mode(&session.state, format, layout, true);
         let reader = session.capture.CreateFrameReaderAsync(&source)?.join()?;
         session.reader = Some(reader.clone());
         let state = session.state.clone();
@@ -1474,8 +1648,6 @@ impl SharedCamera {
         started: &mpsc::SyncSender<Startup>,
         running: &mut bool,
     ) -> Result<()> {
-        let factory: IWICImagingFactory =
-            unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }?;
         let mut last = Instant::now();
         while !self.state.stopping.load(Ordering::Acquire) {
             if let Some(error) = self.error.lock().take() {
@@ -1485,6 +1657,18 @@ impl SharedCamera {
             // source forever, even if its driver omits the Failed event.
             if last.elapsed() >= START_WAIT {
                 bail!("shared camera delivered no frame for 5 seconds; reopen the source");
+            }
+            let completed = self.graphics.completed()?;
+            while self
+                .pending
+                .front()
+                .is_some_and(|(frame, _)| frame.ready_value() <= completed)
+            {
+                self.pending.pop_front();
+            }
+            if self.pending.len() == IN_FLIGHT {
+                self.state.wait(10)?;
+                continue;
             }
             let reference = match self
                 .reader
@@ -1501,8 +1685,8 @@ impl SharedCamera {
                 }
                 Err(error) => return Err(error).context("shared camera acquire"),
             };
-            let frame = self.decode(&factory, &reference);
-            // WIC and the synchronous CPU upload are finished; nothing on the
+            let frame = self.decode(&reference);
+            // Decoding and the synchronous CPU upload are finished; nothing on the
             // GPU refers to the compressed source buffer after this point.
             let closed = reference.Close();
             let Some((frame, at)) = frame? else {
@@ -1536,17 +1720,13 @@ impl SharedCamera {
         Ok(())
     }
 
-    fn decode(
-        &mut self,
-        factory: &IWICImagingFactory,
-        reference: &MediaFrameReference,
-    ) -> Result<Option<(Frame, Time)>> {
+    fn decode(&mut self, reference: &MediaFrameReference) -> Result<Option<(Frame, Time)>> {
         self.state
             .counts
             .received_frames
             .fetch_add(1, Ordering::Relaxed);
         let format = self.format.expect("shared format");
-        if shared_format(&reference.Format()?)? != format {
+        if qualified_format(&shared_media_type(&reference.Format()?)?)? != format {
             self.state
                 .counts
                 .format_changes
@@ -1592,56 +1772,159 @@ impl SharedCamera {
                 .fetch_add(1, Ordering::Relaxed);
         })?;
         let (interlaced, bottom_first) = sample_fields(&self.state, format, &sample)?;
-        let buffer = reference.BufferMediaFrame()?.Buffer()?;
-        let length = buffer.Length()? as usize;
-        // Compressed input is bounded independently of what a corrupt JPEG
-        // header claims. No allocation is sized from unvalidated JPEG data.
-        if !(2..=64 * 1024 * 1024).contains(&length) {
-            bail!("camera.frame: invalid MJPEG buffer length {length}");
-        }
-        let access: IBufferByteAccess = buffer.cast()?;
-        let pointer = unsafe { access.Buffer() }?;
-        if pointer.is_null() {
-            bail!("camera.frame: null MJPEG buffer");
-        }
-        let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
-        let stream = unsafe { factory.CreateStream() }?;
-        // IWICStream borrows these bytes. The frame, buffer and access live
-        // until decoding completes; declaration order releases WIC first.
-        unsafe { stream.InitializeFromMemory(bytes) }?;
-        let decoder = unsafe {
-            factory.CreateDecoderFromStream(
-                &stream,
-                std::ptr::null(),
-                WICDecodeMetadataCacheOnDemand,
-            )
-        }?;
-        let image = unsafe { decoder.GetFrame(0) }?;
-        let (mut width, mut height) = (0, 0);
-        unsafe { image.GetSize(&mut width, &mut height) }?;
-        if (width, height) != (format.width, format.height) {
-            bail!("camera.frame: JPEG dimensions {width}x{height} differ from {format:?}");
-        }
-        // WIC decodes the complete JPEG without scaling or changing row
-        // order. JPEG's own color conversion produces BGRA; do not label it
-        // as the native NV12 path's limited-range BT.709.
-        let bgra = unsafe { WICConvertBitmapSource(&GUID_WICPixelFormat32bppBGRA, &image) }?;
-        let mut decoded = Ok(());
-        let frame = self
-            .output
-            .as_mut()
-            .expect("shared output")
-            .draw(&mut |pixels, stride| {
-                decoded = unsafe { bgra.CopyPixels(std::ptr::null(), stride as u32, pixels) };
-            })?;
-        decoded.context("camera.frame: JPEG decode")?;
-        if frame.is_some() {
+        let converted = match reference.BufferMediaFrame() {
+            Ok(raw) => {
+                let buffer = raw.Buffer()?;
+                let length = buffer.Length()? as usize;
+                let limit = if self.decoder.is_some() { 64 } else { 256 } * 1024 * 1024;
+                if length == 0 || length > limit {
+                    bail!("camera.frame: invalid shared buffer length {length}")
+                }
+                let access: IBufferByteAccess = buffer.cast()?;
+                let pointer = unsafe { access.Buffer() }?;
+                if pointer.is_null() {
+                    bail!("camera.frame: null shared buffer")
+                }
+                let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
+                if let Some(decoder) = &mut self.decoder {
+                    let compressed = compressed_sample(bytes, ticks)?;
+                    let decoded = decoder.decode(&compressed)?;
+                    self.pixels
+                        .as_mut()
+                        .expect("shared pixels")
+                        .sample(&decoded)?
+                } else {
+                    self.pixels
+                        .as_mut()
+                        .expect("shared pixels")
+                        .bytes(bytes, self.layout.expect("layout").stride)?
+                }
+            }
+            Err(error) if error.code() == S_OK => self.bitmap(reference)?,
+            Err(error) => return Err(error).context("camera.frame: shared buffer"),
+        };
+        let frame = if let Some((frame, delivery)) = converted {
+            note_delivery(&self.state, delivery);
             count_fields(&self.state, interlaced, bottom_first);
+            self.pending.push_back((frame.clone(), Instant::now()));
+            Some(frame)
         } else {
             self.state.counts.pool_drops.fetch_add(1, Ordering::Relaxed);
-        }
+            None
+        };
         Ok(frame.map(|frame| (frame, at)))
     }
+
+    fn bitmap(&mut self, reference: &MediaFrameReference) -> Result<Option<(Frame, Delivery)>> {
+        let layout = self.layout.expect("shared layout");
+        let bitmap = reference.VideoMediaFrame()?.SoftwareBitmap().context(
+            "camera.frame: shared reader supplied no CPU bitmap; no GPU readback fallback",
+        )?;
+        let _bitmap = CloseOnDrop(bitmap.cast()?);
+        let actual = bitmap.BitmapPixelFormat()?;
+        let matches = match layout.format {
+            CameraPixelFormat::Nv12 => actual == BitmapPixelFormat::Nv12,
+            CameraPixelFormat::Yuy2 => actual == BitmapPixelFormat::Yuy2,
+            CameraPixelFormat::Rgb32 | CameraPixelFormat::Argb32 => {
+                actual == BitmapPixelFormat::Bgra8
+            }
+            _ => false,
+        };
+        if !matches
+            || bitmap.PixelWidth()? != layout.width as i32
+            || bitmap.PixelHeight()? != layout.height as i32
+        {
+            bail!("camera.frame: shared bitmap {actual:?} does not match negotiated {layout:?}");
+        }
+        let locked = bitmap.LockBuffer(BitmapBufferAccessMode::Read)?;
+        let _locked = CloseOnDrop(locked.cast()?);
+        let memory = locked.CreateReference()?;
+        let _memory = CloseOnDrop(memory.cast()?);
+        let access: IMemoryBufferByteAccess = memory.cast()?;
+        let (mut pointer, mut length) = (std::ptr::null_mut(), 0);
+        unsafe { access.GetBuffer(&mut pointer, &mut length) }?;
+        if pointer.is_null() || length == 0 {
+            bail!("camera.frame: empty bitmap memory")
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(pointer, length as usize) };
+        let row_bytes = layout.format.row_bytes(layout.width)? as usize;
+        let rows = layout.height as usize
+            * if layout.format == CameraPixelFormat::Nv12 {
+                3
+            } else {
+                2
+            }
+            / 2;
+        let size = row_bytes
+            .checked_mul(rows)
+            .filter(|n| *n <= 256 * 1024 * 1024)
+            .context("camera.frame: bitmap exceeds256MiB")?;
+        self.staging.clear();
+        self.staging.try_reserve_exact(size)?;
+        let planes = if layout.format == CameraPixelFormat::Nv12 {
+            2
+        } else {
+            1
+        };
+        if locked.GetPlaneCount()? != planes {
+            bail!("camera.frame: unexpected bitmap plane count")
+        }
+        for plane in 0..planes {
+            let desc = locked.GetPlaneDescription(plane)?;
+            let rows = if plane == 0 {
+                layout.height
+            } else {
+                layout.height / 2
+            };
+            if desc.Height < rows as i32 || desc.Stride.unsigned_abs() < row_bytes as u32 {
+                bail!("camera.frame: invalid bitmap plane dimensions/stride {desc:?}");
+            }
+            for y in 0..rows {
+                let start = i64::from(desc.StartIndex) + i64::from(y) * i64::from(desc.Stride);
+                let start =
+                    usize::try_from(start).context("camera.frame: negative bitmap row offset")?;
+                let end = start
+                    .checked_add(row_bytes)
+                    .context("camera.frame: bitmap row overflow")?;
+                self.staging.extend_from_slice(
+                    bytes
+                        .get(start..end)
+                        .context("camera.frame: bitmap row exceeds buffer")?,
+                );
+            }
+        }
+        // Row packing only; format expansion/colour conversion remains on GPU.
+        self.pixels
+            .as_mut()
+            .expect("shared pixels")
+            .bytes(&self.staging, row_bytes as i32)
+    }
+}
+
+struct CloseOnDrop(IClosable);
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.Close();
+    }
+}
+
+fn compressed_sample(bytes: &[u8], ticks: u64) -> Result<IMFSample> {
+    let sample = unsafe { MFCreateSample() }?;
+    let buffer = unsafe { MFCreateMemoryBuffer(bytes.len().try_into()?) }?;
+    let mut pointer = std::ptr::null_mut();
+    unsafe { buffer.Lock(&mut pointer, None, None) }?;
+    if pointer.is_null() {
+        let _ = unsafe { buffer.Unlock() };
+        bail!("camera.decode: null compressed buffer")
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer, bytes.len());
+        buffer.Unlock()?;
+        buffer.SetCurrentLength(bytes.len() as u32)?;
+        sample.AddBuffer(&buffer)?;
+        sample.SetSampleTime(ticks.try_into()?)?;
+    }
+    Ok(sample)
 }
 
 impl Drop for SharedCamera {
@@ -1659,30 +1942,48 @@ impl Drop for SharedCamera {
             let _ = self.capture.RemoveFailed(token);
         }
         let _ = self.capture.Close();
+        let deadline = Instant::now() + COPY_WAIT;
+        let drained = (|| -> Result<()> {
+            if self.pixels.as_ref().is_some_and(CameraPixels::uncertain) {
+                bail!("shared camera GPU write completion is unknown")
+            }
+            while !self.pending.is_empty() {
+                let completed = self.graphics.completed()?;
+                while self
+                    .pending
+                    .front()
+                    .is_some_and(|(frame, _)| frame.ready_value() <= completed)
+                {
+                    self.pending.pop_front();
+                }
+                if self.pending.is_empty() {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    bail!("shared camera GPU writes did not finish within5s")
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok(())
+        })();
+        if let Err(error) = drained {
+            QUARANTINED.store(true, Ordering::Release);
+            eprintln!(
+                "Windows shared camera teardown: {error:#}; retaining owned GPU resources until process exit"
+            );
+            std::mem::forget(self.pixels.take());
+            std::mem::forget(std::mem::take(&mut self.pending));
+        }
     }
 }
 
-fn shared_format(format: &MediaFrameFormat) -> Result<CameraFormat> {
+fn shared_media_type(format: &MediaFrameFormat) -> Result<IMFMediaType> {
     let subtype = format.Subtype()?;
-    if subtype != "MJPG" {
-        bail!(
-            "camera.format: shared source uses {subtype}; supported shared format is MJPG (native NV12 uses the GPU Source Reader)"
-        );
-    }
+    let pixel = CameraPixelFormat::from_name(&subtype.to_string_lossy())?;
     let video = format.VideoFormat()?;
     let rate = format.FrameRate()?;
     let (numerator, denominator) = (rate.Numerator()?, rate.Denominator()?);
     let (width, height) = (video.Width()?, video.Height()?);
-    if denominator == 0
-        || !numerator.is_multiple_of(denominator)
-        || !(1..=240).contains(&(numerator / denominator))
-        || width == 0
-        || height == 0
-    {
-        bail!(
-            "camera.format: invalid shared dimensions/rate {width}x{height}@{numerator}/{denominator}"
-        );
-    }
     let properties = format.Properties()?;
     let interlace = if properties.HasKey(MF_MT_INTERLACE_MODE)? {
         properties
@@ -1692,10 +1993,45 @@ fn shared_format(format: &MediaFrameFormat) -> Result<CameraFormat> {
     } else {
         MFVideoInterlace_Unknown.0 as u32
     };
-    Ok(CameraFormat {
-        width,
-        height,
-        fps: numerator / denominator,
-        media_type_interlace_mode: interlace,
-    })
+    let media = unsafe { MFCreateMediaType() }?;
+    let guid = match pixel {
+        CameraPixelFormat::Nv12 => MFVideoFormat_NV12,
+        CameraPixelFormat::Yuy2 => MFVideoFormat_YUY2,
+        CameraPixelFormat::Uyvy => MFVideoFormat_UYVY,
+        CameraPixelFormat::Rgb24 => MFVideoFormat_RGB24,
+        CameraPixelFormat::Rgb32 => MFVideoFormat_RGB32,
+        CameraPixelFormat::Argb32 => MFVideoFormat_ARGB32,
+        CameraPixelFormat::Mjpg => MFVideoFormat_MJPG,
+    };
+    unsafe {
+        media.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+        media.SetGUID(&MF_MT_SUBTYPE, &guid)?;
+        media.SetUINT64(
+            &MF_MT_FRAME_SIZE,
+            (u64::from(width) << 32) | u64::from(height),
+        )?;
+        media.SetUINT64(
+            &MF_MT_FRAME_RATE,
+            (u64::from(numerator) << 32) | u64::from(denominator),
+        )?;
+        media.SetUINT32(&MF_MT_INTERLACE_MODE, interlace)?;
+        for key in [
+            MF_MT_DEFAULT_STRIDE,
+            MF_MT_YUV_MATRIX,
+            MF_MT_VIDEO_NOMINAL_RANGE,
+            MF_MT_VIDEO_PRIMARIES,
+            MF_MT_TRANSFER_FUNCTION,
+        ] {
+            if properties.HasKey(key)? {
+                media.SetUINT32(
+                    &key,
+                    properties
+                        .Lookup(key)?
+                        .cast::<IPropertyValue>()?
+                        .GetUInt32()?,
+                )?;
+            }
+        }
+    }
+    Ok(media)
 }

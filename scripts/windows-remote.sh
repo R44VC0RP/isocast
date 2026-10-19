@@ -413,6 +413,7 @@ try:
             TEMP=str(root/'tmp'), TMP=str(root/'tmp'), HOME=str(root/'home'), USERPROFILE=str(root/'home'),
             APPDATA=str(root/'appdata'), LOCALAPPDATA=str(root/'localappdata'), PYTHONDONTWRITEBYTECODE='1',
             PYTHONNOUSERSITE='1', GIT_CONFIG_GLOBAL=str(git_config), GIT_CONFIG_NOSYSTEM='1',
+            PSModuleAnalysisCachePath=str(root/'scratch'/'ps-module-cache'),
             ISOCAST_BUILD_COMMIT=r['head']+'-worktree', ISOCAST_SCRATCH=str(root/'scratch'),
             ISOCAST_SOCKET=str(root/'scratch'/'isocastd.sock'), ISOCAST_SETUP=str(root/'scratch'/'setup.toml'),
             ISOCAST_TIMELINES=str(root/'scratch'/'timelines'), ISOCAST_PLUGINS=str(root/'scratch'/'plugins'))

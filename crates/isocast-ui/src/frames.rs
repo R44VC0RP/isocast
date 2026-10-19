@@ -11,11 +11,22 @@ use std::time::Duration;
 use isocast_client::shared::{SharedController, SharedFrame};
 use isocast_protocol::api::SharedFramesParams;
 
+/// The engine can't share pictures here at all (asking again won't help).
+pub fn unsupported(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<isocast_client::DaemonError>()
+        .is_some_and(|e| e.code() == isocast_protocol::api::RpcError::UNSUPPORTED)
+}
+
 /// What the window gets.
 pub enum Incoming {
     Frame(SharedFrame),
     /// No picture: why (the daemon can't be reached, or refused).
     Lost(String),
+    /// No picture, and asking again won't help: this engine can't share
+    /// its pictures here (`RpcError::UNSUPPORTED`). Not asked again until
+    /// the target changes.
+    Unavailable(String),
 }
 
 /// What the window wants: the target (none: nothing), the picture's size
@@ -154,6 +165,20 @@ impl Feed {
             match result {
                 // The target changed: the new one at once.
                 Ok(()) => continue,
+                Err(error) if unsupported(&error) => {
+                    deliver(Incoming::Unavailable(format!("{error:#}")));
+                    // Wait for another target (or the end) instead of
+                    // asking every few seconds.
+                    loop {
+                        let now = self.want.lock().unwrap().clone();
+                        if now.stopped || now.target != want.target {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    delay = Duration::from_millis(250);
+                    continue;
+                }
                 Err(error) => deliver(Incoming::Lost(format!("{error:#}"))),
             }
             thread::sleep(delay);

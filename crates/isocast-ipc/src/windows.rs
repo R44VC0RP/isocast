@@ -342,6 +342,28 @@ pub fn peer_pid(stream: &Stream) -> io::Result<u32> {
 }
 
 /// Check an overlapped pipe without reading or waiting for a message.
+pub fn readable(stream: &Stream) -> io::Result<bool> {
+    let state = lock(&stream.0.pipe);
+    let pipe = state.as_ref().ok_or_else(closed)?;
+    let mut available = 0;
+    // Readiness only; never changes PIPE_WAIT/NOWAIT on concurrent writers.
+    if unsafe {
+        PeekNamedPipe(
+            pipe.raw(),
+            null_mut(),
+            0,
+            null_mut(),
+            &mut available,
+            null_mut(),
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    Ok(available != 0)
+}
+
+/// Check an overlapped pipe without reading or waiting for a message.
 pub fn hung_up(stream: &Stream) -> bool {
     let state = lock(&stream.0.pipe);
     let Some(pipe) = state.as_ref() else {

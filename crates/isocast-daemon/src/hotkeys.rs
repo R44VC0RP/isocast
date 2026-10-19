@@ -637,7 +637,7 @@ impl Daemon {
                     seconds: None,
                     ..Default::default()
                 })),
-                "recording.stop" => Method::Stop,
+                "recording.stop" => Method::RequestStop,
                 "recording.pause" => Method::Pause,
                 "recording.resume" => Method::Resume,
                 "recording.pause_toggle" => {
@@ -653,7 +653,7 @@ impl Daemon {
                 }
                 "recording.toggle" => {
                     if self.state.lock().session.is_some() {
-                        Method::Stop
+                        Method::RequestStop
                     } else {
                         Method::Start(Box::new(StartParams {
                             setup: None,

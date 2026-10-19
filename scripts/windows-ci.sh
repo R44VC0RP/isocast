@@ -99,7 +99,9 @@ done
 }
 echo "windows-ci: https://github.com/$repo/actions/runs/$run"
 printf '%s\n' "$run" >"$result/run-id.txt"
-deadline=$((SECONDS + 2700))
+# Release UI builds plus the second update/rollback candidate can exceed the
+# old 45-minute debug-only gate. Still bounded, and shorter than two hours.
+deadline=$((SECONDS + 6000))
 while [ "$SECONDS" -lt "$deadline" ]; do
     gh run view "$run" --repo "$repo" \
         --json status,conclusion,url,headSha,headBranch,jobs >"$result/run.json"

@@ -658,9 +658,9 @@ encoder = {{ codec = "hevc", quality = 95 }}
             driver = "cua-driver"
             cua_drag(suite, name, frames, origin, work)
         time.sleep(2)
-        run([cli, "stop"], rec, check=False)
+        run([cli, "stop", "--wait"], rec, check=False)
         if variant == "recording":
-            run([cli, "stop"], test, check=False)
+            run([cli, "stop", "--wait"], test, check=False)
     finally:
         if app:
             app.terminate()

@@ -18,6 +18,7 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast hotkeys defaults`](#isocast-hotkeys-defaults)
   - [`isocast hotkeys input`](#isocast-hotkeys-input)
 - [`isocast encoders`](#isocast-encoders)
+- [`isocast gpu-adapter`](#isocast-gpu-adapter)
 - [`isocast setup`](#isocast-setup)
   - [`isocast setup check`](#isocast-setup-check)
   - [`isocast setup schema`](#isocast-setup-schema)
@@ -152,6 +153,7 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
 - [`isocast engine`](#isocast-engine)
   - [`isocast engine start`](#isocast-engine-start)
   - [`isocast engine stop`](#isocast-engine-stop)
+  - [`isocast engine shutdown`](#isocast-engine-shutdown)
 - [`isocast mcp`](#isocast-mcp)
 
 ## isocast
@@ -167,6 +169,7 @@ Commands:
   logs           Read structured logs (also works when the daemon is stopped)
   hotkeys        Customize profile hotkeys, including global keys and push-to-talk
   encoders       List recording codecs and the containers each supports
+  gpu-adapter    Show the daemon's graphics adapter identity (Windows DX12 LUID)
   setup          Work with setup files
   collection     Scene collections, as in OBS: named sets of scenes, sources, transitions and the canvas size, swapped as a whole. The one in use is the live setup's (with the profile in use)
   profile        Profiles, as in OBS: named frame rate, recording, stream and audio settings, swapped as a whole. The one in use is the live setup's (with the scene collection in use)
@@ -179,7 +182,7 @@ Commands:
   record         Record a setup's ISO sources, each to its own file, until --seconds runs out or Ctrl-C. Without a setup file, record --source specs
   start          Start recording in the background (in isocastd, launched if needed) and return once every file is created. Same options as `record`; with neither a setup nor --source, records the live setup. A setup or --source given here becomes the live setup
   record-target  Where the next recording goes, or choose it: `new` (each recording starts a new project with its own timeline; the default) or a timeline's id (its next take). Kept across restarts; a recording running keeps its own
-  stop           Stop the background recording and print its report
+  stop           Ask the background recording to stop and return at once, while isocastd finishes its files (`status` says finalizing until it has; the files aren't done yet). With --wait, wait until they are and print the report. An older daemon without acknowledgement support also waits and returns the completed report
   pause          Pause this take without closing its files; streaming continues
   resume         Resume the paused take into the same files
   status         Show whether isocastd is recording, with live counters
@@ -391,6 +394,18 @@ Usage: isocast encoders [OPTIONS]
 
 Options:
       --json  
+  -h, --help  Print help
+```
+
+## isocast gpu-adapter
+
+```text
+Show the daemon's graphics adapter identity (Windows DX12 LUID)
+
+Usage: isocast gpu-adapter [OPTIONS]
+
+Options:
+      --json  Print JSON
   -h, --help  Print help
 ```
 
@@ -1452,11 +1467,12 @@ Options:
 ## isocast stop
 
 ```text
-Stop the background recording and print its report
+Ask the background recording to stop and return at once, while isocastd finishes its files (`status` says finalizing until it has; the files aren't done yet). With --wait, wait until they are and print the report. An older daemon without acknowledgement support also waits and returns the completed report
 
 Usage: isocast stop [OPTIONS]
 
 Options:
+      --wait  Wait for the files to be finished and print the report; exits with failure if the recording had errors
       --json  
   -h, --help  Print help
 ```
@@ -2554,9 +2570,10 @@ Keep the live engine running (`start`), or let it stop once nothing needs it (`s
 Usage: isocast engine [OPTIONS] <COMMAND>
 
 Commands:
-  start  Start the live engine and keep it running
-  stop   Let the live engine stop once nothing needs it
-  help   Print this message or the help of the given subcommand(s)
+  start     Start the live engine and keep it running
+  stop      Let the live engine stop once nothing needs it
+  shutdown  Shut down only if recording/output work is idle; cancels an idle calibration
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
       --json  
@@ -2581,6 +2598,18 @@ Options:
 Let the live engine stop once nothing needs it
 
 Usage: isocast engine stop [OPTIONS]
+
+Options:
+      --json  
+  -h, --help  Print help
+```
+
+## isocast engine shutdown
+
+```text
+Shut down only if recording/output work is idle; cancels an idle calibration
+
+Usage: isocast engine shutdown [OPTIONS]
 
 Options:
       --json  

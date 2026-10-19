@@ -15,8 +15,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, SecondsFormat};
 use isocast_protocol::manifest::{
-    AudioStop, MANIFEST_VERSION, ManifestAudio, ManifestFile, Marker, SceneChange, SessionManifest,
-    SessionStatus,
+    AudioStop, MANIFEST_VERSION, ManifestAudio, ManifestEncoder, ManifestFile, Marker, SceneChange,
+    SessionManifest, SessionStatus,
 };
 use isocast_protocol::{
     AudioSettings, CanvasId, Container, Filter, PROGRAM, PanLaw, Setup, Transition, TransitionKind,
@@ -55,7 +55,7 @@ pub use shared_frames::{DEFAULT_SLOTS, SharedControl, SharedEvent, SharedFeed};
 use crate::source::{AUDIO_CHUNK, FrameSlot};
 use crate::{
     AudioTrackSpec, BrowserControl, CameraMetadataReader, FileWriter, Platform, SAMPLE_RATE, Time,
-    VideoTrackSpec, WriterSpec,
+    VideoTrackSpec, WriterRequest, WriterSpec,
 };
 
 /// How far ahead of "now" the session clock starts, so every source and
@@ -826,15 +826,18 @@ pub(super) struct Changing {
 /// Called with live counters while recording.
 pub type OnStatus<'a> = &'a (dyn Fn(&LiveStatus) + Sync);
 
-/// Called with the paths of the files a session is writing, and its first
-/// take's manifest.
-pub type OnStart<'a> = &'a (dyn Fn(&[PathBuf], &Path) + Sync);
+/// Called with the paths of the files a session is writing, its first
+/// take's manifest, and notes about how its files were opened (like the
+/// platform's encoder admission; empty where there is nothing to say).
+pub type OnStart<'a> = &'a (dyn Fn(&[PathBuf], &Path, &[String]) + Sync);
 
 /// Called with a finished take's number (from 1), its manifest's path and
 /// the manifest as written.
 pub type OnTake<'a> = &'a (dyn Fn(u32, &Path, &SessionManifest) + Sync);
 
 struct FilePlan {
+    /// The recording this file belongs to (see `next_recording`).
+    recording: u64,
     /// The take this file belongs to, from 1.
     take: u32,
     /// The take's timeline zero, once it is known.
@@ -872,6 +875,8 @@ struct FilePlan {
     /// A finalized movie can be playable even when its source failed. Keep
     /// its actual duration and tail repeats instead of inferring them later.
     failed_report: Mutex<Option<FileReport>>,
+    /// How the platform admitted its encoder, once it has been created.
+    encoder: Mutex<Option<ManifestEncoder>>,
 }
 
 impl FilePlan {
@@ -922,6 +927,15 @@ struct Formats {
     /// only when a manifest is written. A device opened later (a changed
     /// source) isn't one of them, so its counters never mix in.
     cameras: BTreeMap<String, CameraMetadataReader>,
+    /// This recording's identity, shared by all its takes.
+    recording: u64,
+}
+
+/// A process-unique identity for one recording (all its takes): a split's
+/// files are told apart from another recording's by it, never by names.
+fn next_recording() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Frame slots by source id.
@@ -1130,6 +1144,7 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
         .map(
             |((_, source, kind, (width, height, fps), encoder, audio), path)| {
                 Arc::new(FilePlan {
+                    recording: formats.recording,
                     take: number,
                     epoch: AtomicI64::new(i64::MIN),
                     source,
@@ -1147,6 +1162,7 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
                     commit_failed: AtomicU64::new(0),
                     commit_error: Mutex::new(None),
                     failed_report: Mutex::new(None),
+                    encoder: Mutex::new(None),
                     audio: audio.clone(),
                     audio_timing: audio
                         .iter()
@@ -1195,41 +1211,147 @@ fn sidechain_sources(setup: &Setup) -> Vec<&str> {
 /// [`Platform::create_writer_for_frame`]).
 type WriterInputs<F> = BTreeMap<String, Arc<FrameSlot<F>>>;
 
-/// A writer for each file, or none if any can't be created. A file whose
-/// source is in `inputs` waits briefly for that source's first frame.
+/// Waits for an input's first frame, when the platform asks for it.
+type FirstFrame<'a, F> = Box<dyn Fn() -> Result<F> + 'a>;
+
+/// A writer for each file, or none if any can't be created, and notes on
+/// how the platform admitted them. A file whose source is in `inputs` waits
+/// briefly for that source's first frame.
 fn create_writers<P: Platform>(
     platform: &P,
     plans: &[Arc<FilePlan>],
     inputs: &WriterInputs<P::Frame>,
-) -> Result<Vec<P::Writer>> {
-    let mut writers = Vec::new();
-    for plan in plans {
-        let writer = match inputs.get(&plan.source) {
-            Some(slot) => wait_for_frame(slot)
-                .with_context(|| format!("{:?} sent no frame to record", plan.source))
-                .and_then(|(frame, _)| platform.create_writer_for_frame(&plan.spec, &frame)),
-            None => platform.create_writer(&plan.spec),
-        };
-        match writer {
-            Ok(mut writer) => {
-                plan.hardware_accelerated.store(
-                    writer.hardware_accelerated().map_or(-1, i64::from),
-                    Ordering::Relaxed,
-                );
-                if let Some(canvas) = program_canvas(plan) {
-                    // Preserve the id for per-canvas pins; native admission
-                    // still puts every non-main canvas in the secondary class.
-                    writer.prioritize_video(canvas);
-                }
-                writers.push(writer);
-            }
-            Err(err) => {
-                writers.into_iter().for_each(FileWriter::cancel);
-                return Err(err.context(format!("could not create {}", plan.spec.path.display())));
-            }
+) -> Result<(Vec<P::Writer>, Vec<String>)> {
+    // Each input waits for its source's first frame only when the platform
+    // asks for it, so the default keeps the per-file order.
+    let waits: Vec<Option<FirstFrame<'_, P::Frame>>> = plans
+        .iter()
+        .map(|plan| {
+            inputs.get(&plan.source).map(|slot| {
+                let source = &plan.source;
+                Box::new(move || {
+                    wait_for_frame(slot)
+                        .with_context(|| format!("{source:?} sent no frame to record"))
+                        .map(|(frame, _)| frame)
+                }) as FirstFrame<'_, P::Frame>
+            })
+        })
+        .collect();
+    let requests: Vec<WriterRequest<'_, P::Frame>> = plans
+        .iter()
+        .zip(&waits)
+        .map(|(plan, wait)| WriterRequest {
+            spec: &plan.spec,
+            recording: plan.recording,
+            take: plan.take,
+            output: format!(
+                "{}/{}",
+                if is_program(plan) { "program" } else { "iso" },
+                plan.source
+            ),
+            iso: !is_program(plan),
+            input: wait.as_deref(),
+        })
+        .collect();
+    let (mut writers, admission) = platform.create_writer_batch(&requests)?;
+    if writers.len() != plans.len() {
+        let opened = writers.len();
+        writers.into_iter().for_each(FileWriter::cancel);
+        bail!(
+            "the platform opened {opened} writers for {} files; none were kept",
+            plans.len()
+        );
+    }
+    let mut notes = Vec::new();
+    if let Some(admission) = &admission {
+        let summary = admission_note(admission);
+        isocast_diagnostics::emit(
+            "info",
+            "recording",
+            &summary,
+            serde_json::to_value(admission).unwrap_or_default(),
+        );
+        notes.push(summary);
+        for plan in plans {
+            let output = admission
+                .outputs
+                .iter()
+                .find(|output| output.take == plan.take && output.path == plan.spec.path);
+            *plan.encoder.lock() = output.map(|output| ManifestEncoder {
+                admission: admission.mode.to_string(),
+                source: admission.source.map(str::to_string),
+                calibrated: admission.calibrated,
+                key: admission.key.clone(),
+                planned_preset: output.planned_preset,
+                applied_preset: output.applied_preset,
+                backend: output.backend.clone(),
+                estimated_load: admission.estimated_load,
+                reason: admission.reason.clone(),
+            });
         }
     }
-    Ok(writers)
+    for (plan, writer) in plans.iter().zip(&mut writers) {
+        plan.hardware_accelerated.store(
+            writer.hardware_accelerated().map_or(-1, i64::from),
+            Ordering::Relaxed,
+        );
+        if let Some(canvas) = program_canvas(plan) {
+            // Preserve the id for per-canvas pins; native admission
+            // still puts every non-main canvas in the secondary class.
+            writer.prioritize_video(canvas);
+        }
+    }
+    Ok((writers, notes))
+}
+
+/// One line saying how a take's encoders were admitted: the mode, the
+/// figures' source and key, the load, each file's planned and applied
+/// preset, and why measured figures were not applied.
+fn admission_note(admission: &crate::EncoderAdmission) -> String {
+    let mut note = format!("encoder admission: {}", admission.mode);
+    if let Some(source) = admission.source {
+        note.push_str(&format!(
+            " with {source} figures{}",
+            if admission.calibrated {
+                " (measured)"
+            } else {
+                " (estimates, not measurements)"
+            }
+        ));
+    }
+    if let Some(key) = &admission.key {
+        note.push_str(&format!(", adapter {key}"));
+    }
+    if let Some(load) = admission.estimated_load {
+        note.push_str(&format!(", estimated load {:.0}%", load * 100.0));
+    }
+    if admission.accounted_sessions > 0 || admission.handed_over_sessions > 0 {
+        note.push_str(&format!(
+            " ({} open session(s) charged at their fixed presets, {} handed over at the split)",
+            admission.accounted_sessions, admission.handed_over_sessions
+        ));
+    }
+    let files: Vec<String> = admission
+        .outputs
+        .iter()
+        .map(|output| {
+            let preset = |preset: Option<u32>| preset.map_or("-".to_string(), |p| format!("P{p}"));
+            format!(
+                "{} planned {} applied {} ({})",
+                output.output,
+                preset(output.planned_preset),
+                preset(output.applied_preset),
+                output.backend
+            )
+        })
+        .collect();
+    if !files.is_empty() {
+        note.push_str(&format!(": {}", files.join(", ")));
+    }
+    if let Some(reason) = &admission.reason {
+        note.push_str(&format!("; {reason}"));
+    }
+    note
 }
 
 /// Whether `plan` writes a canvas's program (not an ISO source).
@@ -1485,6 +1607,7 @@ fn take_manifest<P: Platform>(
                     dropped_frames: result.as_ref().map(|r| r.dropped_frames),
                     audio_dropouts: result.as_ref().map(|r| r.audio_dropouts),
                     audio_stops: file_audio_stops(setup, take, plan, stops, mapped),
+                    encoder: plan.encoder.lock().clone(),
                 }
             })
             .collect(),
@@ -2169,7 +2292,14 @@ pub fn expand_home(folder: &str) -> PathBuf {
                 || rest.starts_with('/')
                 || (cfg!(windows) && rest.starts_with('\\')) =>
         {
-            home.join(rest.trim_start_matches(|c| c == '/' || (cfg!(windows) && c == '\\')))
+            let rest = rest.trim_start_matches(|c| c == '/' || (cfg!(windows) && c == '\\'));
+            if cfg!(windows) {
+                // `~/Videos/Isocast` is the Videos known folder on Windows,
+                // wherever it was moved (another drive, OneDrive).
+                isocast_protocol::api::home_join(rest)
+            } else {
+                home.join(rest)
+            }
         }
         _ => PathBuf::from(folder),
     }

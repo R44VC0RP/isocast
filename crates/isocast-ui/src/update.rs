@@ -30,7 +30,16 @@ pub use mac::{
     automatic, available, check_now, feed_url, set_automatic, staged, start, stopping_engine,
 };
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+#[path = "update_windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub use windows::{
+    automatic, available, check_now, cleanup, command_line, feed_url, set_automatic, staged, start,
+    stopping_engine,
+};
+
+#[cfg(not(any(target_os = "macos", windows)))]
 mod other {
     use std::rc::Rc;
 
@@ -56,10 +65,16 @@ mod other {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub use other::{
     automatic, available, check_now, feed_url, set_automatic, staged, start, stopping_engine,
 };
+
+/// Windows currently supports only user-requested checks: WinSparkle cannot
+/// postpone an unsolicited notification when a recording starts mid-check.
+pub fn automatic_available() -> bool {
+    available() && !cfg!(windows)
+}
 
 /// What keeps an update from installing now, from the engine's status:
 /// a recording (paused or not), a stream, a timeline export, the virtual

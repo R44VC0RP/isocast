@@ -372,6 +372,7 @@ export component Stage inherits Rectangle {
         program-live: Ui.editing-extra ? CanvasArea.extra-live : Ui.live;
         empty-text: CanvasArea.program-empty-text;
         waiting: CanvasArea.program-waiting;
+        error-text: CanvasArea.program-error;
     }
 
     if Ui.studio: MonitorHead {
@@ -413,6 +414,7 @@ export component Stage inherits Rectangle {
         program-live: CanvasArea.extra-live;
         empty-text: CanvasArea.extra-empty-text;
         waiting: CanvasArea.extra-waiting;
+        error-text: CanvasArea.extra-error;
     }
     // Right-click on the canvas picture: its menu, with Open Projector
     // (#96). Draws nothing.

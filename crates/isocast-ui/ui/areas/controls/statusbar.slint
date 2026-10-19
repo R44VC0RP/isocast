@@ -234,6 +234,7 @@ component RecordingDetails inherits VerticalLayout {
             text: "Split";
             icon: Icons.scissors;
             tooltip: "End these files at the next whole second and carry on in new ones";
+            enabled: !ControlsArea.busy-record;
             clicked => { ControlsArea.split(); }
         }
     }
@@ -323,15 +324,16 @@ export component StatusBar inherits Rectangle {
             }
         }
         if root.recording || ControlsArea.record-state == "starting": rec-item := StatusItem {
-            label: "REC " + ControlsArea.rec-time;
+            // Finishing its files after a stop: not capturing any more.
+            label: (ControlsArea.record-state == "stopping" ? "Finishing… " : "REC ") + ControlsArea.rec-time;
             clickable: root.recording;
             tooltip: ControlsArea.rec-tooltip;
             clicked => { rec-details.show(); }
             VerticalLayout {
                 alignment: center;
                 Badge {
-                    text: "REC";
-                    tone: BadgeTone.rec;
+                    text: ControlsArea.record-state == "stopping" ? "FINISHING" : "REC";
+                    tone: ControlsArea.record-state == "stopping" ? BadgeTone.neutral : BadgeTone.rec;
                     dot: true;
                     status: true;
                 }

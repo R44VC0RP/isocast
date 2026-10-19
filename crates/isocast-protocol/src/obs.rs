@@ -1014,11 +1014,11 @@ pub const FOLDER_ENV: &str = "ISOCAST_OBS_FOLDER";
 pub fn obs_folder(home: &Path) -> PathBuf {
     match std::env::var_os(FOLDER_ENV) {
         Some(folder) if !folder.is_empty() => PathBuf::from(folder),
-        _ if cfg!(windows) => std::env::var_os("APPDATA")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("AppData/Roaming"))
-            .join("obs-studio"),
+        // %APPDATA%, else the RoamingAppData known folder (Windows itself
+        // may not set the variable for an app launched without a shell).
+        _ if cfg!(windows) => {
+            crate::api::windows_folder("APPDATA", "AppData/Roaming").join("obs-studio")
+        }
         _ => home.join("Library/Application Support/obs-studio"),
     }
 }

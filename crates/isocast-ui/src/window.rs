@@ -52,6 +52,8 @@ pub(crate) fn with_app(f: impl FnOnce(&Rc<App>)) {
 }
 
 pub fn run(options: &Options) -> Result<()> {
+    #[cfg(windows)]
+    daemon::prewarm_preview();
     let gpu = Gpu::new()?;
     // Test and measurement runs never take focus (see background.rs).
     let background = background::enabled(options);
@@ -61,6 +63,11 @@ pub fn run(options: &Options) -> Result<()> {
         .require_wgpu_30(gpu.slint_configuration());
     if background {
         selector = background::configure(selector);
+    }
+    // Windows: dark title bars and menus, the app icon (chrome_windows.rs).
+    #[cfg(windows)]
+    {
+        selector = crate::chrome_windows::configure(selector, background);
     }
     selector
         .select()
@@ -94,9 +101,18 @@ pub fn run(options: &Options) -> Result<()> {
             occluded_time.clone(),
             occluded_since.clone(),
         );
+        let weak = app.as_weak();
         app.window().on_winit_window_event(move |window, event| {
             if background && matches!(event, winit::event::WindowEvent::Resized(_)) {
                 window.with_winit_window(background::keep_in_corner);
+            }
+            // The Window menu's Maximize/Restore and Full Screen (Windows).
+            if let winit::event::WindowEvent::Resized(_) = event
+                && let Some(app) = weak.upgrade()
+            {
+                let ui = app.global::<Ui>();
+                ui.set_window_maximized(window.is_maximized());
+                ui.set_window_fullscreen(window.is_fullscreen());
             }
             if let winit::event::WindowEvent::Focused(false) = event {
                 crate::keys::release_all();
@@ -114,6 +130,14 @@ pub fn run(options: &Options) -> Result<()> {
         });
     }
 
+    #[cfg(windows)]
+    {
+        crate::chrome_windows::take_colors(&app);
+        // ui/app.slint's preferred size, within the screen's work area.
+        if !background {
+            crate::chrome_windows::fit_first_window(app.window(), (1280.0, 800.0));
+        }
+    }
     app.show()?;
     // Keys pressed in the window go to the daemon's hotkeys too.
     crate::keys::start();
@@ -238,7 +262,7 @@ pub fn run(options: &Options) -> Result<()> {
                 );
                 if !occluded_time.get().is_zero() {
                     isocast_diagnostics::diagnostic!("warn";
-                        "the window was covered for part of the run (macOS reported it occluded), so it wasn't drawn then: this measurement is not valid"
+                        "{}", isocast_protocol::platform_text::select("the window was covered for part of the run (macOS reported it occluded), so it wasn't drawn then: this measurement is not valid", "the window was covered for part of the run (Windows reported it occluded), so it wasn't drawn then: this measurement is not valid")
                     );
                 }
                 let _ = slint::quit_event_loop();
@@ -246,7 +270,10 @@ pub fn run(options: &Options) -> Result<()> {
         );
     }
 
-    app.run()?;
+    let result = app.run();
+    #[cfg(windows)]
+    crate::update::cleanup();
+    result?;
     APP.with(|s| s.borrow_mut().take());
     Ok(())
 }
@@ -280,6 +307,8 @@ fn setup_when_ready(weak: slint::Weak<AppWindow>, shell: Rc<App>, setup: Setup) 
         if ready.is_none() {
             return setup_when_ready(weak, shell, setup);
         }
+        #[cfg(windows)]
+        crate::chrome_windows::style_windows_soon();
         crate::quit::install_terminate_question();
         crate::update::start(&shell);
         let output =

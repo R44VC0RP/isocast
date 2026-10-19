@@ -181,7 +181,11 @@ fn host_now() -> u64 {
         };
         (u128::from(ticks) * u128::from(info.numer.max(1)) / u128::from(info.denom.max(1))) as u64
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        isocast_client::shared::host_now()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         0
     }
@@ -692,6 +696,8 @@ impl Projectors {
         // native window).
         self.place(app, &shown);
         shown.window.show()?;
+        #[cfg(windows)]
+        crate::chrome_windows::style_windows_soon();
         self.watch_window(app, &shown, &id);
         self.shown.borrow_mut().insert(id.clone(), shown.clone());
         // Shown, and where it ended up, once it has settled.
@@ -914,7 +920,7 @@ impl Projectors {
             // Pictures already showing stay.
             for (index, tile) in tiles.iter().enumerate() {
                 if let Some(frame) = &tile.showing
-                    && let Some(image) = tile.images.get(&frame.slot())
+                    && let Some(image) = tile.images.get(&frame.cache_key())
                     && let Some(mut row) = shown.model.row_data(index)
                 {
                     row.picture = image.clone();
@@ -1146,7 +1152,9 @@ impl Projectors {
                                     arrived.frame = Some(frame);
                                     arrived.lost = None;
                                 }
-                                Incoming::Lost(why) => arrived.lost = Some(why),
+                                Incoming::Lost(why) | Incoming::Unavailable(why) => {
+                                    arrived.lost = Some(why)
+                                }
                             }
                         }
                         if !woken {
@@ -1185,7 +1193,7 @@ impl Projectors {
                     shown.model.set_row_data(index, row);
                 }
                 let Some(frame) = frame else { continue };
-                let key = frame.slot();
+                let key = frame.cache_key();
                 if !tile.images.contains_key(&key) {
                     tile.images
                         .retain(|(generation, _), _| *generation == key.0);

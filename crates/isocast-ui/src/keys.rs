@@ -243,7 +243,17 @@ pub fn chord_caps(chord: &str) -> Vec<String> {
     let Some((key, modifiers)) = parts.split_last() else {
         return caps;
     };
-    for (name, glyph) in [("ctrl", "⌃"), ("alt", "⌥"), ("shift", "⇧"), ("cmd", "⌘")] {
+    let modifiers_shown = if cfg!(windows) {
+        [
+            ("ctrl", "Ctrl"),
+            ("alt", "Alt"),
+            ("shift", "Shift"),
+            ("cmd", "Win"),
+        ]
+    } else {
+        [("ctrl", "⌃"), ("alt", "⌥"), ("shift", "⇧"), ("cmd", "⌘")]
+    };
+    for (name, glyph) in modifiers_shown {
         if modifiers.iter().any(|m| m.eq_ignore_ascii_case(name)) {
             caps.push(glyph.to_string());
         }
@@ -253,6 +263,15 @@ pub fn chord_caps(chord: &str) -> Vec<String> {
 }
 
 fn key_label(key: &str) -> String {
+    if cfg!(windows) {
+        match key {
+            "return" => return "Enter".into(),
+            "tab" => return "Tab".into(),
+            "backspace" => return "Backspace".into(),
+            "delete" => return "Delete".into(),
+            _ => {}
+        }
+    }
     let named = match key {
         "space" => "Space",
         "return" => "↩",
@@ -302,6 +321,42 @@ fn key_label(key: &str) -> String {
         return format!("Num {n}");
     }
     key.to_uppercase()
+}
+
+/// Static UI shortcuts use Slint's logical modifiers: Control is Command
+/// on Mac and Ctrl on Windows; Meta is Control on Mac and Win on Windows.
+/// This is distinct from a configured physical `cmd` hotkey (shown as Win).
+pub fn ui_key_cap(mac: &str) -> &str {
+    if !cfg!(windows) {
+        return mac;
+    }
+    match mac {
+        "⌘" => "Ctrl",
+        "⌃" => "Win",
+        "⌥" => "Alt",
+        "⇧" => "Shift",
+        "⌫" => "Backspace",
+        "⌦" => "Delete",
+        "Return" | "↩" => "Enter",
+        "⇥" => "Tab",
+        _ => mac,
+    }
+}
+
+/// A trusted, compact UI hint such as ⇧⌘Z, not user text or a saved binding.
+pub fn ui_shortcut(mac: &str) -> String {
+    if !cfg!(windows) {
+        return mac.to_string();
+    }
+    mac.replace("⌃⌘", "Win+Ctrl+")
+        .replace("⇧⌘", "Ctrl+Shift+")
+        .replace("⌥⌘", "Ctrl+Alt+")
+        .replace('⌘', "Ctrl+")
+        .replace('⌃', "Win+")
+        .replace('⌥', "Alt+")
+        .replace('⇧', "Shift+")
+        .replace('⌫', "Backspace")
+        .replace('⌦', "Delete")
 }
 
 /// AppKit's virtual key codes (HIToolbox Events.h), the daemon's names.

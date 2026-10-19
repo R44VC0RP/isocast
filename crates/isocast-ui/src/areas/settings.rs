@@ -20,6 +20,7 @@ use isocast_protocol::change::{Change, merge_patch};
 use isocast_protocol::devices::{CameraKind, Devices, Permission};
 use isocast_protocol::governor::GovernorSettings;
 use isocast_protocol::init::{InitOptions, Layout};
+use isocast_protocol::platform_text as wording;
 use isocast_protocol::stream::{MAIN_DESTINATION, StreamService, StreamState, StreamStatus};
 use isocast_protocol::{CanvasId, EncoderQuality, QualityPreset, Setup};
 use serde_json::{Map, Value, json};
@@ -210,11 +211,17 @@ const SHORTCUTS: &[(&str, &[Shortcut])] = &[
             (&["⌘", "D"], "Center to Screen"),
             (
                 &["⌘", "C"],
-                "Copy the selected source (⌘V: paste it as a reference)",
+                wording::select(
+                    "Copy the selected source (⌘V: paste it as a reference)",
+                    "Copy the selected source (Ctrl+V: paste it as a reference)",
+                ),
             ),
             (
                 &["←", "↑", "→", "↓"],
-                "Nudge the selected source 1 px (with ⇧, 10 px)",
+                wording::select(
+                    "Nudge the selected source 1 px (with ⇧, 10 px)",
+                    "Nudge the selected source 1 px (with Shift, 10 px)",
+                ),
             ),
             (&["⌫"], "Remove the selected source from the scene"),
             (&["Esc"], "Deselect"),
@@ -229,7 +236,10 @@ const SHORTCUTS: &[(&str, &[Shortcut])] = &[
             ),
             (&["⌥", "Drag"], "Crop from an edge or corner"),
             (&["⌘", "Drag"], "Place freely, without snapping"),
-            (&["⌘", "Z"], "Undo (⇧⌘Z: redo)"),
+            (
+                &["⌘", "Z"],
+                wording::select("Undo (⇧⌘Z: redo)", "Undo (Ctrl+Y: redo)"),
+            ),
         ],
     ),
     (
@@ -237,9 +247,18 @@ const SHORTCUTS: &[(&str, &[Shortcut])] = &[
         &[
             (
                 &["Drag"],
-                "A number’s label: scrub (with ⇧, ×10; with ⌥, ×0.1)",
+                wording::select(
+                    "A number’s label: scrub (with ⇧, ×10; with ⌥, ×0.1)",
+                    "A number’s label: scrub (with Shift, ×10; with Alt, ×0.1)",
+                ),
             ),
-            (&["↑", "↓"], "In a number: step (with ⇧, ×10)"),
+            (
+                &["↑", "↓"],
+                wording::select(
+                    "In a number: step (with ⇧, ×10)",
+                    "In a number: step (with Shift, ×10)",
+                ),
+            ),
             (&["Return"], "Apply what you typed (Esc: put it back)"),
             (&["Double-click"], "A fader: back to 0 dB"),
         ],
@@ -258,7 +277,10 @@ const SHORTCUTS: &[(&str, &[Shortcut])] = &[
             (&["F2"], "In the Scenes or Sources list: rename"),
             (
                 &["←", "→"],
-                "On a slider: move it (with ⇧, ×10; Home and End: its ends)",
+                wording::select(
+                    "On a slider: move it (with ⇧, ×10; Home and End: its ends)",
+                    "On a slider: move it (with Shift, ×10; Home and End: its ends)",
+                ),
             ),
             (
                 &["↑", "↓"],
@@ -268,11 +290,21 @@ const SHORTCUTS: &[(&str, &[Shortcut])] = &[
     ),
     (
         "Window",
-        &[
-            (&["⌘", ","], "Settings"),
-            (&["⌃", "⌘", "F"], "Full screen"),
-            (&["⌘", "/"], "These shortcuts"),
-        ],
+        // Windows: full screen is F11, and Alt+F4 exits (the File menu's).
+        if cfg!(windows) {
+            &[
+                (&["⌘", ","], "Settings"),
+                (&["F11"], "Full screen"),
+                (&["⌘", "/"], "These shortcuts"),
+                (&["⌥", "F4"], "Exit"),
+            ]
+        } else {
+            &[
+                (&["⌘", ","], "Settings"),
+                (&["⌃", "⌘", "F"], "Full screen"),
+                (&["⌘", "/"], "These shortcuts"),
+            ]
+        },
     ),
 ];
 
@@ -346,6 +378,10 @@ struct Draft {
 #[derive(Debug, Clone)]
 struct FirstRun {
     step: i32,
+    /// The first step (permissions) is shown. On Windows only when a
+    /// privacy switch blocks the camera or microphone: nothing else there
+    /// needs allowing. Once shown in a run, it stays.
+    access: bool,
     display: String,
     /// None: the best camera (the daemon picks).
     camera: Option<String>,
@@ -359,10 +395,17 @@ struct FirstRun {
     creating: bool,
 }
 
+impl FirstRun {
+    fn first_step(&self) -> i32 {
+        if self.access { 0 } else { 1 }
+    }
+}
+
 impl Default for FirstRun {
     fn default() -> Self {
         Self {
             step: 0,
+            access: true,
             display: "main".into(),
             camera: None,
             microphone: "default".into(),
@@ -370,7 +413,7 @@ impl Default for FirstRun {
             layout: "bottom_right".into(),
             canvas: "1920x1080".into(),
             fps: 60,
-            folder: "~/Movies/Isocast".into(),
+            folder: isocast_protocol::init::DEFAULT_FOLDER.into(),
             name: "My setup".into(),
             creating: false,
         }
@@ -430,9 +473,14 @@ impl Area for Settings {
         ));
         area.set_hotkeys(model(SHORTCUTS.iter().map(|(title, rows)| HotkeyGroup {
             title: (*title).into(),
-            rows: model(rows.iter().map(|(keys, what)| HotkeyRow {
-                what: (*what).into(),
-                keys: model(keys.iter().map(|k| SharedString::from(*k))),
+            rows: model(rows.iter().map(|(keys, what)| {
+                HotkeyRow {
+                    what: (*what).into(),
+                    keys: model(
+                        keys.iter()
+                            .map(|k| SharedString::from(crate::keys::ui_key_cap(k))),
+                    ),
+                }
             })),
         })));
         area.on_server_valid(|text| server_valid(&text));
@@ -573,7 +621,10 @@ impl Area for Settings {
         // The first run.
         on!(on_ob_close, |app| app.settings.close_first_run(&app));
         on!(on_ob_back, |app| {
-            let back = app.settings.first_run.borrow().step > 0;
+            let back = {
+                let run = app.settings.first_run.borrow();
+                run.step > run.first_step()
+            };
             if back {
                 app.settings.first_run.borrow_mut().step -= 1;
                 app.settings.show_first_run(&app);
@@ -793,7 +844,10 @@ impl Area for Settings {
                     _ => Link::Failed,
                 };
                 let why = if arg.is_empty() && link == Link::Failed {
-                    "connect /tmp/isocast.sock: No such file or directory (os error 2)"
+                    wording::select(
+                        "connect /tmp/isocast.sock: No such file or directory (os error 2)",
+                        "connect to isocastd.exe: the recording engine is not available",
+                    )
                 } else {
                     arg
                 };
@@ -818,7 +872,9 @@ impl Area for Settings {
             "first-run" => {
                 self.start_first_run(app);
                 let step: i32 = arg.parse().unwrap_or(1);
-                self.first_run.borrow_mut().step = (step - 1).clamp(0, 2);
+                let mut run = self.first_run.borrow_mut();
+                run.step = (step - 1).clamp(run.first_step(), 2);
+                drop(run);
                 self.show_first_run(app);
             }
             _ => return None,
@@ -1557,7 +1613,10 @@ impl Settings {
                     app.toast(
                         ToastKind::Success,
                         "Stream key saved",
-                        "It’s in your Keychain; Isocast never shows it again.",
+                        format!(
+                            "It’s in your {}; Isocast never shows it again.",
+                            wording::CREDENTIAL_STORE
+                        ),
                     );
                     app.refresh_status(true);
                 }
@@ -1574,7 +1633,11 @@ impl Settings {
             Method::StreamKeyClear(Box::new(target)),
             |app, result| match result {
                 Ok(_) => {
-                    app.toast(ToastKind::Info, "Stream key removed from the Keychain", "");
+                    app.toast(
+                        ToastKind::Info,
+                        &format!("Stream key removed from the {}", wording::CREDENTIAL_STORE),
+                        "",
+                    );
                     app.refresh_status(true);
                 }
                 Err(error) => app.failed("Couldn’t remove the stream key", &error),
@@ -1625,7 +1688,13 @@ impl Settings {
                     app.session.borrow_mut().devices = Some(devices);
                     app.changed(Changed::DEVICES);
                 }
-                Err(error) => app.failed("Couldn’t list this Mac’s devices", &error),
+                Err(error) => app.failed(
+                    wording::select(
+                        "Couldn’t list this Mac’s devices",
+                        "Couldn’t list this PC’s devices",
+                    ),
+                    &error,
+                ),
             }
             app.settings.show(app);
         });
@@ -1793,6 +1862,7 @@ impl Settings {
         area.set_snap_distance(d.prefs.distance as f32);
         area.set_preview_rate(d.prefs.preview_rate.as_str().into());
         area.set_updates_available(crate::update::available());
+        area.set_automatic_updates_available(crate::update::automatic_available());
         area.set_auto_updates(d.prefs.auto_updates);
 
         // Stream: the destinations, and the open one's service, server
@@ -2503,7 +2573,12 @@ impl Settings {
     // ---------- The first run ----------
 
     fn start_first_run(&self, app: &Rc<App>) {
-        *self.first_run.borrow_mut() = FirstRun::default();
+        let access = app.permissions.access_needed();
+        *self.first_run.borrow_mut() = FirstRun {
+            access,
+            step: if access { 0 } else { 1 },
+            ..FirstRun::default()
+        };
         if let Some(window) = app.window() {
             window.global::<Ui>().set_onboarding(true);
         }
@@ -2513,6 +2588,19 @@ impl Settings {
         // which read the permissions every second while it shows.
         app.permissions.check(app);
         self.show_first_run(app);
+    }
+
+    /// Fresh permissions: a camera or microphone that became blocked
+    /// during the first run brings its access step back (it never goes
+    /// away while shown, so the step doesn't vanish under you).
+    pub fn permissions_changed(&self, app: &Rc<App>) {
+        let open = app
+            .window()
+            .is_some_and(|window| window.global::<Ui>().get_onboarding());
+        if open && !self.first_run.borrow().access && app.permissions.access_needed() {
+            self.first_run.borrow_mut().access = true;
+            self.show_first_run(app);
+        }
     }
 
     fn close_first_run(&self, app: &Rc<App>) {
@@ -2609,6 +2697,7 @@ impl Settings {
         let run = self.first_run.borrow();
         let s = app.session.borrow();
         area.set_step(run.step);
+        area.set_ob_access(run.access);
         area.set_can_close(s.setup.is_some());
         area.set_creating(run.creating);
 
@@ -2697,11 +2786,10 @@ impl Settings {
                 disabled: false,
             });
             area.set_cameras(model(camera_choices));
-            let default_mic = devices
-                .microphones
-                .iter()
-                .find(|m| m.default)
-                .map_or("Follows System Settings", |m| m.name.as_str());
+            let default_mic = devices.microphones.iter().find(|m| m.default).map_or(
+                wording::select("Follows System Settings", "Follows Windows Settings"),
+                |m| m.name.as_str(),
+            );
             let mut mic_choices = vec![DeviceChoice {
                 value: "default".into(),
                 title: "System default".into(),

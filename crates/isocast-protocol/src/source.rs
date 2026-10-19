@@ -347,6 +347,10 @@ pub struct TextSource {
     pub data: Option<String>,
     /// A font family installed on this Mac, like "Helvetica Neue" or
     /// "Menlo".
+    #[cfg_attr(
+        windows,
+        schemars(description = "A font family installed on this PC, such as Segoe UI or Arial.")
+    )]
     #[serde(default = "font")]
     pub font: String,
     /// Font size in pixels.

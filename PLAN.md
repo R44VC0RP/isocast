@@ -1947,7 +1947,7 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
     **Elgato Cam Link4K** (Ryan corrected the earlier4K S assumption). Prior
     MF-source4K S results are wrong-target diagnostics, not Cam Link proof.
     SharedReadOnly FrameServer now supplies realMJPG1080p60 without changing
-    the bridge. WIC decode→BGRA GPU upload is explicit in manifest.delivery;
+    the bridge. The original WIC path is replaced by MF decoding in W.5d2b;
     native NV12 retains the GPU-only path.30QPC-matched nonuniform frames,
     248,832,000exact bytes and discriminatory field-swap/line-double controls
     pass;180-frame Renderer/NVENC run passes GPU validation and12reopens.
@@ -1960,7 +1960,7 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
     and source-keyed manifest metadata bridge are implemented;180-frame real
     capture/render/native-encode and bounded retention/reopen checks now pass
     on the realCam Link via sharedMJPG. Writer lane owns native Platform camera/metadata
-    hooks and actual-frame ISO input selection. Shared uncompressed formats and
+    hooks and actual-frame ISO input selection. Shared GPU-only surfaces and
     single-field pairing remain unsupported; no other app terminated.
     Optional per-source off/weave/bob setting comes later. No RGB roundtrip
     for camera/ISO or fake plane textures. Regular reviewer unavailable.
@@ -1970,6 +1970,152 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
       component checks and7files/210decodedframes. BGRA regression37files/
       1110frames, native fmt/strict Clippy/81tests pass. Full portable gates
       now pass onm2-b:233unit+1doctest,1hardware-only ignored; no floor bypass.
+    - [x] **W.5d2b Common camera formats.** Uncommitted, ready for CI.
+      Missing SDR colour metadata no longer rejects Elgato Virtual Camera.
+      Prefer NV12 at matching dimensions/nominal rate, then other raw formats,
+      then MJPEG. YUY2/UYVY/RGB24/RGB32/ARGB32 use one upload plus GPU
+      conversion; MJPEG uses the MF software decoder (replacing WIC) and the
+      same upload. Manifest records subtype, decoder output, rate and colour.
+      Exon-desk real CLI 10s program+ISO, all six files fully decoded: virtual
+      600/600 frames, shared Cam Link597/600,4K S599/600 (pacing drops retained).
+      Virtual delivered its Camera Hub placeholder;4K S was black, not a
+      verified live HDMI feed. Cam Link delivered live imagery without touching
+      the bridge. Real virtual-camera YUY2/ARGB32 GPU and NV12/YUY2/ARGB32 CPU
+      samples passed60frames each; pixel/range/stride/8K-RGB24 checks pass.
+      Native strict Clippy including UI, release CLI/daemon build,90 protocol
+      tests and full portable250tests including doctest pass (1existing ignore).
+      Final redundant recording attempt waited on writer's GPU lock and timed
+      out without running; earlier recording receipts and final pixel/native
+      build receipts are preserved separately in capture scratch REPORT.
+    - [ ] **W.5d2c Attribute historical startup drops.** Original CamLink
+      program+ISO lacked ticks6–8;4K S lackedtick6, not59.94drift. The exact
+      historical pacing/queue/encoder cause remains unproven: it did not recur
+      under ETW, without profiling, or with bounded stage timestamps. No
+      speculative behavior change or drop-counter relaxation was retained.
+      - [x] **60s zero-file-loss qualification.** Waited for shared GPU lock.
+        Three60s series per camera (GeneralProfile+GPU, unprofiled production,
+        temporary stage timing with CSwitch-only ETW);18program/ISO files,
+        64,800frames fully decoded,3600/3600 each,0reported drops. Existing
+        traces show0encoderrefusals/obsolete program ticks and low wake jitter.
+        CamLink MFdecode mean9.08ms/max12.32ms, upload-submit max1.37ms; observed
+        delivered cadence59.994Hz. Virtual placeholder31.960Hz and black4K S
+        58.753Hz are source-adapter observations, not proven sensor rates;
+        clocked picture reuse fills60fps outputs, not missing file samples.
+        Temporary timing code removed, production matchesd18f2515 exactly;
+        native daemon rebuilt without instrumentation. Verification ready for
+        CI, NOT a claim that the old intermittent startup failure was fixed.
+        In-take metrics exclude measurablepre-roll stalls (CamLinkupload24.8ms,
+        4K Sdevice→worker46.9ms); these precedeepoch and do not root-causeold
+        epoch+0.1s gaps. Unprofiledreceipt syncedtemporarysource but explicitly
+        SHA-checked/rantheoldproductionbinary withoutbuilding; seeREPORT.
+  - [ ] **W.5s Windows streaming.** Reuse portable RTMP/RTMPS, destination/
+    canvas hubs, queues and reconnects. Full feature remains open until native
+    budget/scaling integration and desktop Credential Manager proof are done.
+    - [x] **W.5s1 Native AAC + matching-size transport slice — ready for CI,
+      uncommitted.** MF AAC requested at 160 kbps produced 107/105 kbps in the
+      unchanged oracle; native CBR/VBR properties returned E_NOTIMPL. Live AAC
+      fill prefixes restore the bitrate without changing any native payload or
+      recording packet. All 24 mono/stereo/rate/content cases decode exactly
+      like their unpadded counterparts. Main and portrait stream oracles pass.
+      The 615-second 1080p60 program + two ISOs kept 36,900 frames per file.
+      Two RTMP destinations each received 36,746 frames over 612.434 seconds:
+      zero drops, full decode and relative frame checks. Receiver kill/reconnect
+      preserved recording and the other destination. RTMPS used a scoped test
+      CA; untrusted-certificate failure preserved 900/900 recording frames and
+      the trusted case 1800/1800. The native NVENC governor acknowledged
+      6000→3000→1500 kbps; program and ISO kept 2400/2400 frames. The congested
+      stream's 151 intentional drops remain reported. No aggregate admission
+      or scaled-input claim is made from these legacy-factory runs.
+    - [x] **W.5s2 Hidden Windows CLI secret entry — ready for CI, uncommitted.**
+      Disable console echo before the prompt; fail closed if that fails; restore
+      the mode afterwards. Headless ConPTY verified hidden input, restored echo,
+      no key in output/private files, and the expected SSH logon refusal.
+    - [ ] **W.5s3 Credential Manager persistence.** The native generic-user store
+      is implemented and reviewed: bounded UTF-8 blobs, case-safe target names,
+      no file fallback. Positive roundtrip needs a legitimate desktop logon.
+      SSH returns 1312; the desktop launcher refused active use and has an
+      Isocast-only allowlist. No guard bypass or real-key read was attempted.
+    - [ ] **W.5s4 Shared admission and scaled destinations.** Integrate the
+      writer's reviewed live/fixed-active ledger; no separate stream budget or
+      wholesale NVENC replacement. Windows live encoders currently need matching
+      input dimensions. GPU scaling remains next. No new test files or CI jobs.
+  - [ ] **W.5p Windows performance capture/encoder lane (#105).** Follow
+    main's docs/windows-performance.md; all changes remain uncommitted until
+    coordinator handoff. No silent codec/quality substitutions.
+    - [ ] **#1 Aggregate encoder budget.** Native preset/driver-keyed planning
+      API and explicit no-provider-fallback factory implemented/reviewed.
+      Real2x4K60+1080p60,30swarm+60smeasure: H264P56938/10800 at100%NVENC;
+      P3all10800/10800 at76.3%. HEVCP5allalreadyfits at88.05%; planned5/1/3
+      fitsat78.80%.49files1470frames decoded. Writer aggregatepre-open wiring,
+      selected-preset reporting and automatic calibration/cache integration
+      remain open.
+      - [x] **#1a Native planning/preset and calibration-data slice.**
+        Finite positive per-preset measurements accepted without imposing
+        monotonic hardware throughput; only beneficial ISO downgrades.
+        Six actual driver-keyed measurements, independent load recomputation,
+        invalid/stale/nonmonotone cases and native Clippy pass655fa805.
+        Measured plans H2643/3/3 load0.638146; HEVC5/1/3 load0.759703.
+        Short-window workload calibration, not an automatic daemon cache.
+    - [x] **#3 Shared async completion.** Ready forCI, uncommitted. One worker/LUID,12sessions/two
+      devices, bounded8pending/16total,32parallelreopens, stablehandles,
+      retained-prefix/fatalquarantine and deterministic retirement-race tests
+      pass. Independent review/recheck closes findings. MatchedWPRbothcodecs
+      10800/10800/noMisses; CPUH26417.68→16.30%,HEVC15.96→15.64%onecore.
+      Combinednative strictClippy/165unit tests pass; protocol-doc check
+      separately passes aftersharedtimeout. Fullportable233unit+1docpass;
+      no blanketlatency/engine-stopclaim.
+    - [ ] **#6 Borderless DXGI monitors.** Additive dedicated-helper-device
+      API functional slice readyforCI; actual4Kpixels/16GPUcursorcases/
+      pressure/reopens and stale-final-update/burst fix proven/re-reviewed.
+      PendingAcquire nominal1ms actuallyp9916ms; timer correction lowers
+      DDA CPU6.635→5.699%,update-agep9916.35→2.879ms. MatchedWGC4.685%
+      remainsbetterCPU; DDA23longgaps, no fullperformance/no-drop claim.
+      Both workers nowAboveNormal; mechanics ofWGC remainunchanged.
+      Helper routing/performance gates open; final strictClippycc0287d8pass.
+      - [x] **#6a Opt-in functional capture slice.** ReadyforCI, uncommitted.
+        Final704dd37c and independent two-hunk re-review pass; all own
+        fixtures/probes/guards ended, private ETLs retained remotely.
+    - [ ] **#7 Waitable deadline clock.** ExplicitQPC-based high-resolution
+      timer, engineopt-in and no-obsolete-renderburst policy implemented and
+      reviewed. ThreepairedWPRruns:0misses, p99~1.05ms, NOT<1mstarget.
+      No sleep-spin existed here; no claimedCPUwin. Adapterhook remains open.
+      - [x] **#7a Cached native timer and portable opt-in slice.** Actual
+        MediaClock first-tick selection/default preservation, no false
+        escalation/global contamination and Stop hand-off verified b503a2a6.
+        Runtime1.99.1 already uses a fresh high-resolution timer per stdsleep;
+        new TLS reuse avoids Create/Close churn, not an existing spin loop.
+    - [ ] **#11 Scheduling/power.** AudioMMCSS/AboveNormalvideo helpers and
+      recording-lifetimeguard hooks reviewed.32threadcycles174handlesstable;
+      ownsingle-corecontention288/600misses→0forvideo/audio. Win10policyquery
+      unsupported: guardNoOp, no guessedrestore. Win11save/restore and native
+      adapterwiring remain open; no timeBeginPeriod request shipped.
+      - [x] **#11a Thread roles and recording-lifetime hook slice.** Real
+        WaveXLR48k AB/BA contention14e4908e: first normal loses2304steady
+        frames/MMCSS0, second steady pair ties0 (normal warm-up loses1824).
+        0timestamp errors,0lostETW events, processNormal unchanged. Helpers
+        and supported-policy guard source reviewed; Win11runtime gate open.
+    - [x] **#12 Event-only WASAPI.** Ready forCI, uncommitted. Remove250msidlepoll, add session-format/
+      service-disconnectioneventwakeup.24realdevicecycles175handlesstable;
+      registered-handlerfailure/reopen passes, no actualdevice/service reset.
+      FinalWPRidlewakeups4.02/s→0,active100.87→100.82/s;720000frames/15s,
+      0gaps/timestamp errors,NVENC0%,0lostETWevents. NativeClippy/165tests
+      andfullportable233unit+1docpass (nativeprotocol-doc rerun aftertimeout).
+      Unattributedprobe APIs/export preserved untouched and excluded from
+      owned-only audio-event-only.patch in capture scratch.
+    - [x] **#13a Startup overlap slice (2026-10-19).** Ready for CI,
+      uncommitted. WPR identified eager shader preparation on the startup
+      path; Windows compositor shader families now prepare concurrently and
+      join before use. UI starts a bounded existing-API preview warm-up while
+      opening its GPU. Five qualifying app-only process-cold pairs: median
+      first-positive picture observation1.471s versus OBS1.857s, same720p30
+      colour scene, warm filesystem/driver caches. Two Isocast cases1.58s;
+      not an every-start guarantee or exact presentation-time speedup.
+      Native build/strict Clippy, portable250 tests, oracle7pass/2pending,
+      early-death idle cleanup and900/900-frame app-kill/resize take verified.
+      Cua's desktop-wide UIA discovery delay excluded by owned-PID native
+      window discovery; raw prior attempts and sampling bounds retained in
+      windows-capture/scratch/REPORT.md. No encoder probe/cache changes:
+      none occur on this path; wgpu30 persistent DX12 cache is unsupported.
 - [ ] **W.6 App, IPC and shared surfaces.** Slint Windows window and native
   integration, same-user named pipes with isolated engines, D3D11/D3D12
   surface hand-over/fences with adapter identity and bounded per-viewer
@@ -1984,10 +2130,62 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   real Windows executable/privacy controls instead of Mac/Keychain/Finder/
   Command glyphs or "Isocast Engine" macOS privacy instructions. Cover
   onboarding, capacity/admission, settings, errors and shortcut labels.
+  - [x] **W.6 wording qualification.** Windows vocabulary/privacy/executable
+    instructions and shortcut labels verified in ten actual VM offscreen
+    screenshots, native help and the first-launch window. Mac239 unit+
+    1doctest/gates and nine unchanged snapshot text regions pass. No native
+    integration/capture claim from labels; hosted UI memory work is separate.
+  - [x] **Shared GPU preview slice (2026-10-18).** Ready for CI, uncommitted.
+    Same-session/LUID DX12 handover, producer completion and renderer-queue
+    fences; bounded current/retired rings. Real Windows studio/program,
+    source Properties target changes and projectors show live pixels.
+    Held-GPU/resize probe passes; app killed during a 10s take leaves all
+    three files complete, 300 frames each, no losses, full decode passes.
+    Oracle 7 PASS/0 FAIL/2 PENDING (not shared-preview coverage). Portable
+    250 tests incl doctest/one existing ignore; native strict checks and
+    release UI pass. Startup and per-viewer CPU/GPU samples, limitations
+    and receipts: windows-capture/scratch/REPORT.md. Broader W.6 stays open.
+  - [x] **W.6 first run on Windows (Ryan's 0.0.7.801 report).** No console
+    window (GUI-subsystem app; engine started with CREATE_NO_WINDOW); no
+    permissions step unless a Windows privacy switch blocks the camera or
+    microphone, then one Access step opening its exact Settings page; OBS,
+    `~` and app folders from USERPROFILE/AppData/known folders instead of
+    HOME; "Preview not available" instead of retried `shared_frames`
+    errors; Optimize skips a source it can't open with a per-source
+    warning; doctor lists NVENC/Media Foundation encoders as recording
+    would open them. Verified in the clean VM and on exon-desk (REPORT).
+  - [x] **W.6 Windows chrome.** Dark title bar, border and menu bar in
+    Console tokens on every app window (Windows light and dark modes); app
+    icon in Start, taskbar, Task View/Alt-Tab, title bars and the installer;
+    the first window sized and centred in the work area (1024×768, 150%);
+    Calibrate disabled on Windows with a tooltip.
+  - [x] **W.6 Windows menus.** Exit Alt+F4, Redo Ctrl+Y, Maximize/Restore,
+    Full Screen F11 (menu bar hidden in full screen), no Bring All to Front;
+    Hotkeys page matches. Mac menus unchanged.
 - [ ] **W.7 Packaging and updates.** Choose MSIX or installer; reproducible
   install/upgrade/uninstall, correct paths and per-user state, verified
   update authenticity and rollback. Build/test packages on runners; signing
   credentials, releases and publication require the delegator/Ryan.
+  - [ ] **W.7a Per-user installer.** Pinned Inno Setup compiler, adjacent
+    app/CLI/daemon and app-local CRT, no elevation or forced process exits,
+    install/uninstall gate and downloadable unsigned payload in windows.yml.
+    Clean Windows 11 evaluation VM under `C:\isocast-dev\vm`.
+    - [x] **W.7a1 Test VM.** Official hash-verified Windows 11 Enterprise
+      Evaluation, Gen2/Secure Boot/vTPM, 8 vCPU/32 GiB/200 GiB dynamic disk.
+      Key-only admin and standard-user SSH; offline `clean` checkpoint and
+      up/ssh/ps/down/revert wrapper verified, including actual clean restore.
+  - [x] **W.7b Authentic updates.** Windows appcast alongside Sparkle's,
+    pinned update verifier and embedded public key, idle-engine interlock,
+    explicit trusted rollback; real WinSparkle download/signature rejection
+    and successful update verified with a private test key. Feed-supplied
+    installer arguments are ignored. Authenticode/publication remain gated.
+  - [x] **W.7c Clean-machine qualification.** Fresh install/first launch,
+    real older-build upgrade, rollback, uninstall, preserved settings and
+    recordings, tampered-update refusal: native0.0.7.1→.2→.1→.2 in the clean
+    Windows11 VM as a non-admin. Exact binary hashes and retained files
+    verified; after-uninstall movie full decode passes. VM uses WARP/CPU;
+    no GPU/NVENC or production capture qualification. Runner packaging is
+    still open under W.7a pending the hosted UI-memory fix.
 - [ ] **W.8 Windows e2e and stress.** Port existing synthetic e2e/stress
   checks: recording/ISOs/streaming, pause/split/retake/export, killed writers,
   ownership, rapid controls, overload and stalled clients. Run short gates
@@ -2011,6 +2209,68 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- W.6 integration blockers (2026-10-19, #105, uncommitted): one pinned
+  DX12 adapter LUID now serves capture, compositor and viewers; software MF
+  BGRA8 no longer requires a video-processor interface. Recording admission
+  absorbs short encoder stalls with bounded shared wait/cooldown windows.
+  Controlled120ms stalls:11/540 lost before,0/540 three times after;300ms
+  still reports30/540 lost, no audio dropouts. Native full oracle9/0/2,
+  zero lost; macOS gates and native strict checks pass. Corrected the
+  oracle's exact0.15s flash/beep cutoff against its retained failing movie.
+  VM CLI without UI:720p30 H264,10s,300frames/0lost. Live previews now show
+  pixels, but VM recording with UI open still drops under an exclusive
+  host reservation; W.6 GUI qualification remains open. Full evidence and
+  proposed commit messages: windows-integrate/scratch/REPORT.md.
+
+- W.6 Windows menus (2026-10-18, #105): the menus follow Windows
+  conventions.
+  - File ends with Exit (Alt+F4); Redo is Ctrl+Y.
+  - The Window menu has Maximize/Restore, and Full Screen / Exit Full
+    Screen on F11 (which hides the menu bar while full screen). Bring All
+    to Front is gone.
+  - The Hotkeys page matches.
+
+  Verified with windows-gui.sh screenshots of all nine menus in the clean
+  VM, of Restore / Exit Full Screen after maximizing and pressing F11, and
+  of F11 full screen (no menu bar) and back (bar #1e1e1e again).
+  15 Mac snapshot pairs are unchanged, including every menu bar menu and
+  Hotkeys. Windows UI clippy passes.
+
+- W.6 Windows chrome (2026-10-18, #105): Ryan saw a white title bar and
+  menu bar over the dark app. Now:
+  - The title bar, border and menu bar are drawn in Console's tokens:
+    winit's dark theme, DWM colours, and a menu-bar subclass with dark
+    dropdowns.
+  - The app icon comes from Isocast.icon's design, as a resource and in the
+    installer.
+  - The first window fits the work area.
+  - Calibrate is off on Windows, with a tooltip.
+
+  Verified in the clean VM (0.0.7.903, Start menu): 1024×768 in Windows
+  light and dark mode, and 1920×1080 at 150% in both modes. Title and menu
+  bars measure #1e1e1e, the line #242424. Mac gates pass (250 tests); 9 Mac
+  snapshot pairs are unchanged.
+
+- W.6 first run on Windows (2026-10-18, #105): Ryan's 0.0.7.801 report.
+  isocast-ui.exe is a GUI program (subsystem 2; it was 3) and the engine
+  starts with CREATE_NO_WINDOW. Onboarding asks nothing unless a Windows
+  privacy switch blocks the camera or mic (consent store), then one Access
+  step opens its Settings page. OBS, `~` and app folders come from
+  USERPROFILE/AppData/known folders, not HOME. "Preview not available"
+  (UNSUPPORTED, one request) replaces shared_frames retries. Optimize skips
+  an unopenable source with a warning, and doctor lists NVENC/MF encoders.
+  Verified in the clean VM from the Start menu (no console, both onboarding
+  paths, OBS found, Optimize with a missing camera) and on exon-desk (doctor
+  NVENC, Ryan's Elgato case skipped). Mac gates 250 pass; 8 Mac snapshot
+  pairs unchanged. windows-firstrun/scratch/REPORT.md.
+
+- W.5p main integration (2026-10-18, #105): merged main565729db into capture
+  1b9fc578, staged without commit. Preserved main's named canvases/governor and
+  capture metadata/pacing hooks; main's UI memory workflow replaces the older
+  global-jobs workaround. Portable fmt/strictClippy/248unit+1doc pass; native
+  services/all-target build and separate NO_GALLERY/-j1 UI+test build pass on
+  tree91ec7b7a. Review clear; native API/cache/completion handoff to writer.
 
 - W integration (2026-10-18, ready for CI): main1dbb44c9 merged into
   agent/windows5e2d496b withoutcommit. Retained WindowsBGRA/NV12/helper/camera/
@@ -2117,6 +2377,80 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   Capture-lane writable-frame/quality/AAC coordination and independent review
   remain open; two reviewer launches failed at the service endpoint. Not
   ready for CI/native parity/performance claims. Evidence: windows/scratch/REPORT.md.
+
+- W.7b hosted CI fix and B1 follow-ups (2026-10-18, #105): run
+  39161376599 failed because the hosted step's job forbids breakaway and the
+  CLI deliberately won't start a daemon its caller's job could kill. The
+  wording and install steps now start their own isocastd. Both pass natively
+  inside a fresh no-breakaway job (the old step reproduced "Access is
+  denied"). WinSparkle now shows a distinct offline message and sweeps
+  staging folders left by interrupted downloads. Clean VM: a killed
+  mid-download folder was removed at the next start, decoys were kept, the
+  offline wording showed, and all 23 hostile names were still refused.
+
+- W.7b B1 updater confinement (2026-10-18, #105): WinSparkle 0.9.4 now
+  builds from pinned source with `winsparkle-download.patch`. Each update
+  downloads only to `Isocast-update.exe` in a private per-user staging
+  folder. A server name that isn't a strict plain `.exe` is refused with
+  "This update couldn't be verified and wasn't installed", and its staging
+  folder is removed. The app refuses the unpatched DLL. Clean VM, non-admin:
+  all 23 hostile names refused with no new profile entries (one Windows
+  TokenBroker cache file aside), no payload copy outside staging and
+  unchanged sentinel files and streams. The real app refused a signed
+  traversal name with that message, then a normal update took 0.0.7.4 to
+  0.0.7.5 and relaunched. Also fixed CI's wording step: debug `isocast.exe`
+  overflowed Windows' 1 MiB main stack, now 8 MiB; the step passes natively
+  in 43 s. Mac gates pass. Evidence in `windows-pkg/scratch/security`.
+
+- Windows packaging merge-main (2026-10-18, #105): main565729db merged with
+  `--no-commit` over095385e0. Canvas/settings/self-tuning behavior retained,
+  W.6 words reapplied; main's debug/no-gallery/isolated-j1 Windows CI memory
+  fix retained with installer and updater gates. Mac gates248unit+1doctest
+  pass;14 main/merge offscreen UI-region comparisons are pixel-identical.
+  Native merged release/installer0.0.7.3 builds on exon-desk; exact hash in
+  notes/REPORT.md. Merge left staged/uncommitted; hosted CI and requested
+  Tier1 release review remain coordinator-owned.
+
+- W.7b/W.7c and W.6 native qualification (2026-10-18, #105): built in the
+  packaging lane's own exon-desk folder after explicit approval. Fixed native
+  callback return type, allowed Slint's existing CPU/WARP fallback before any
+  threads, and decoded appcast notes as UTF8 on PS5. Non-admin clean install/
+  Start launch, .1→.2 upgrade, authenticated rollback, tampered WinSparkle
+  refusal, valid update/idle exit, ignored unsigned arguments and uninstall
+  pass. Both real movies/custom data and3setup files retained byte-identical;
+  full decode after uninstall passes. Ten Windows wording snapshots inspected,
+  native CLI help/capacity words pass. Native strict Clippy and14unit+1doctest
+  pass; fallback review has no blockers. Evidence/hashes in
+  `windows-pkg/scratch/qualified` and REPORT.md. Test key only, no release or
+  production certificate used; all qualification tasks stopped and VM off.
+
+- W.6 wording preparation (2026-10-18, #105): target-aware PC/Credential
+  Manager/Explorer/Ctrl copy, correct desktop-app privacy instructions,
+  isocastd.exe errors, generated CLI/MCP help and fresh Windows Videos default.
+  Mac full gates239 unit+1doctest pass;9 snapshot pairs preserve authored UI
+  pixels in explicit text regions. Review gaps fixed. Native Windows build/
+  snapshots queued through coordinator CI; not yet verified or marked done.
+
+- W.7b preparation (2026-10-18, #105): bounded atomic idle shutdown on
+  client/CLI/MCP, incoming-CLI installer interlock, pinned WinSparkle/manual
+  checks, authenticated explicit rollback, Windows appcast/signing hooks and
+  preservation of adjacent Mac/Windows assets. Source-review blockers fixed;
+  strict Mac client/CLI/UI Clippy,15 unit tests+1doctest and release build pass;
+  development Mac Updates pixels unchanged. Native verifier rejects tamper/
+  wrong key. W.7a hosted build passed but CRLF version parsing prevented any
+  package artifact; W.7b replaces that parser and awaits two-build native CI.
+  Actual install/update/rollback/uninstall qualification is not yet claimed.
+
+- W.7a1 / W.7a preparation (2026-10-18, #105): `isocast-pkg` installed
+  unattended on exon-desk-lan with no host reboot or host-wide setting change.
+  Official ISO hash, Windows11 EnterpriseEval/build26300, Secure Boot, ready
+  vTPM, standard-user SSH, exact exit-code propagation and checkpoint restore
+  pass. Inno7.1.0 compiles the installer source as a non-admin (compiler-only
+  check, not an Isocast install); shellcheck, actionlint and native PS5 parse
+  pass. Unsigned Actions installer gate awaits delegator CI and payload before
+  lifecycle qualification. Authentic updates/rollback and W.6 wording remain
+  open. Evidence: `windows-pkg/scratch/REPORT.md`. No GPU/NVENC claim.
+
 - 0.0.8 follow-ups (2026-10-18, #94 #102 #64): HEVC exports with cuts,
   the .isoprj shutdown flush/"file wins" warning and Vorbis were already on
   main and were re-checked (headless Chrome 154 plays EDITED/VERTICAL/crop
@@ -2211,6 +2545,26 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   filtered-ISO stop cycles pass on both baseline and candidate; no claim that
   ordinary recording already failed. Separate Tier1 change before adapter work.
 
+- W.5p#1a/#6a/#7a/#11a (2026-10-18, #105, uncommitted): native API slices
+  readyforCI with explicit remaining gates. Six unmodified per-preset
+  measurements feed reviewed budget math; actual API cases655fa805pass.
+  Borderless DDA pixel/cursor/lifetime/final-update proofs pass; bounded
+  timer correction improves pending age/CPU but does not beat matchedWGC.
+  MediaClock opt-in/default/Stop behavior and real48kMMCSS contention tested.
+  Native/portable checks pass as recorded; optional final consolidated
+  rerun62688d6d did not execute because writer heldGPUlock. Adapter/split/
+  cache integration, Win11power/sub1ms/fullpipeline targets remain open.
+  All own jobs cleaned up; shared local volume below20GiB, no local builds.
+
+- W.5p#3/#12 (2026-10-18, #105, uncommitted): sharedNVENCcompletionworker
+  andevent-onlyWASAPI are readyforCI. Deterministicretirementrace fixedand
+  re-reviewed;12sessionsoneworker,49files1470frames decoded, matchedWPR
+  10800/10800eachcodec/noMisses. WASAPIidle4.02wakeups/s→0 withregistered
+  session-disconnectionwake;24devicecyclesstable175handles. NativeClippy/
+  165unit+remainingdocpass, fullportable233unit+1docpass. #1budget,#7timer,
+  #11scheduling APIs qualified as primitives; adapter/Win11/precision gates
+  remain, #6DDAstillunderreview. No commits orunownedprobehunksaltered.
+
 - W integration (2026-10-18, #105 #28 #110 #114): main49e7732 merged into
   agent/windows with profile-aware capacity checks retained, standalone
   record explicitly starting a new project, workspace lock versions0.0.7,
@@ -2234,6 +2588,35 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   W.3b and whole W.3 remain blocked on Mac lifetime investigation and the
   capture lane's Windows Platform/FileWriter adapter. CI additions run only
   the supported core profiles, not a false full-native qualification.
+- W.5s1/W.5s2 (2026-10-19, uncommitted): native AAC live fill fixed the strict
+  stream bitrate oracle; 24 cases preserve payloads and decoded PCM exactly.
+  Main/portrait oracles, the 615-second program + two ISOs + two destinations,
+  receiver kill/reconnect, positive/negative TLS trust, and governor bitrate
+  steps were verified on exon-desk under the GPU lock. Healthy outputs had zero
+  drops; intentional congestion loss remained visible while recordings stayed
+  complete. ConPTY verified hidden CLI input, restoration and redaction. Native
+  Clippy/build and 250 portable tests passed. Credential desktop roundtrip,
+  shared admission and live GPU scaling remain open; this is not full Windows
+  streaming completion. Exact receipts and reviews are in capture REPORT.
+- W.5d2c (2026-10-19, verification only): ETW GeneralProfile+GPU, CSwitch-only
+  timing, and unprofiled production60s takes pass for all3cameras:18files,
+  64,800decodedframes,0file drops. Historical3/1drop events were matching
+  startupPTS gaps inprogram/ISO, not a fractional-rate pattern, but their
+  exactcause did not reproduce. Measured MFJPEGdecode/upload and delivered
+  sourcecadence separately; no speculative scheduling/writer change. Temporary
+  instrumentation removed, production source byte-identical tod18f2515 and
+  native daemon rebuilt. Root-cause checkbox remains open; captureREPORT has
+  receipts, failed analysis attempts, clock counters and interpretation limits.
+- W.5d2b (2026-10-19, #105, uncommitted): common camera formats now negotiate
+  by size/nominal rate/cost; absent SDR metadata uses explicit defaults.
+  NV12 stays native, packed YUV/RGB converts on GPU after one upload, and MF
+  MJPEG decoding replaces WIC. Actual10s program+ISO recordings for all three
+  exposed cameras fully decode with manifest formats; virtual600, CamLink597,
+  4K S599frames/file. Preserve placeholder/black-feed and pacing-drop qualifiers.
+  Actual GPU/CPU raw-format captures, exact/tolerance pixel checks, MFJPEG
+  full-range oracle, native build/strictClippy/90tests, and portable250tests
+  pass. Shared bridge untouched. Final duplicate take blocked by writer GPU
+  lock; no claim of a final-snapshot six-file rerun.
 - W.5d2 (2026-10-18, #105, uncommitted shared camera slice): realCamLink4K
   concurrent FrameServer MJPG1080p60 capture preserves bridge's mode/process;
   explicit CPUJPEG decode/GPUupload path, nativeNV12 staysGPU.30QPC-matched
@@ -2377,6 +2760,30 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   release build pass; full remote Mac gates pass. Work remains uncommitted
   for coordinator CI. No daemon platform switch, writer edits, CPU capture
   fallback or recording/OBS-parity claim; W.4/W.5 remain open.
+
+- W integration (2026-10-18, #105 #28 #110 #114): main49e7732 merged into
+  agent/windows with profile-aware capacity checks retained, standalone
+  record explicitly starting a new project, workspace lock versions0.0.7,
+  and unsupported non-mac calibration skipped before any worker launch.
+  Merged full hosted e2e19/19 passes; real record Ctrl-C exits0 with3complete
+  H.264 files, no drops, private workspace removed and sentinel target intact.
+  Its .isoprj opens via the real editor's project-open path after private
+  timeline cleanup, with decoded preview and3file lanes. Mac full gates
+  pass233unit+1doctest; Windows scoped strict clippy and190tests pass.
+  GPU-lifetime task remains separate; no such fix is included in the merge.
+
+- W.3a (2026-10-17, #105 #28): shared development-only Platform contract
+  workers and bounded runner implemented; new files explicitly approved.
+  Same generic clock/pool/GPU/writer/capture checks, real decode/A-V and
+  commit-kill-repair verification,12 falsification/selftests on both hosts.
+  Mac/Windows strict scoped clippy and build pass; existing Mac full gates
+  pass232unit+1doctest. Windows stub/core passes; native/full is explicitly
+  unavailable. Mac full suite has7passes/1GPU failure: dropping the importer
+  before submitted work completes retains one pool slot per round. Strict
+  test preserved and independently reviewed, no production backend changes.
+  W.3b and whole W.3 remain blocked on Mac lifetime investigation and the
+  capture lane's Windows Platform/FileWriter adapter. CI additions run only
+  the supported core profiles, not a false full-native qualification.
 
 - W.2b/W.2c (2026-10-17, #105 #28): Windows startup now repairs encoded
   takes and writes truthful manifests through one pinned folder lease.
@@ -5331,3 +5738,17 @@ One line per finished task, newest last.
   lock. Verified at agent/windows 0c47af4c: 7 PASS, 2 PENDING, 0 FAIL;
   the pattern oracle fails a Windows program shifted one frame or with one
   frame missing; macOS VM quick and win_* PASS.
+- W.6 shared previews (2026-10-18): GPU-only DX12 daemon→app/projectors,
+  adapter/session checks, renderer-queue fenced releases and two-ring viewer
+  bounds. Live studio/source dialogs/projectors verified on exon-desk;
+  app-kill recording900/900 pictures decodes, oracle7 pass/2 pending,
+  native strict checks/release build and portable250 tests pass. Startup,
+  per-viewer CPU/GPU and app-arrival samples retained in capture REPORT;
+  no cold-engine or photon-latency claim. Ready for CI, left uncommitted.
+- W.5/#13a startup overlap (2026-10-19): WPR-driven parallel Windows shader
+  preparation (joined before use) plus bounded UI-requested engine pre-warm.
+  Five qualifying app-only cold-process pairs: median first-positive picture
+  observation1.471s vs OBS1.857s; warm caches, fixed order, sampling intervals
+  overlap, two native cases1.58s. No exact presentation/before-after claim.
+  Native build/strict Clippy, portable250 tests, oracle7pass/2pending and
+  900/900-frame resize/app-kill recording proof pass. Ready for CI; uncommitted.

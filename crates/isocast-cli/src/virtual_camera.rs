@@ -30,7 +30,11 @@ pub fn run(command: Command) -> Result<ExitCode> {
     if let Command::Remove { json } = command {
         if !json {
             println!(
-                "Removing Isocast Virtual Camera: enter an administrator password when macOS asks…"
+                "{}",
+                isocast_protocol::platform_text::select(
+                    "Removing Isocast Virtual Camera: enter an administrator password when macOS asks…",
+                    "Requesting removal of Isocast Virtual Camera; Windows support depends on this build"
+                )
             );
         }
         let removal: VirtualCameraRemoval =

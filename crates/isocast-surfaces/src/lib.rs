@@ -9,7 +9,11 @@
 //! client is told that name and a one-time token over the control socket
 //! and fetches the ring with [`fetch`]. After that only slot numbers travel
 //! (see `isocast_protocol::api::shared`). docs/shared-frames.md explains
-//! the choice and the Windows design.
+//! the transport and release contracts.
+//!
+//! Windows uses same-session named DX12 allocations and one-time offers over
+//! authenticated named pipes. The client checks the adapter and acknowledges
+//! a frame only after its rendering queue's fence completes.
 //!
 //! On other systems everything here returns an error saying so.
 
@@ -21,11 +25,27 @@ mod mac;
 #[cfg(target_os = "macos")]
 pub use mac::{Exporter, Surface, fetch, host_now, retained_surfaces};
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{Exporter, Surface, fetch, host_now};
+#[cfg(all(windows, feature = "wgpu"))]
+pub use windows::{check_render_queue, dx12_adapter, dx12_adapter_luid};
+#[cfg(all(windows, feature = "wgpu"))]
+pub use windows::{retire, retirement_failed};
+
+#[cfg(not(any(target_os = "macos", windows)))]
 mod other;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub use other::{Exporter, Surface, fetch, host_now};
+
+#[cfg(target_os = "macos")]
+pub const TRANSPORT: &str = "iosurface-mach";
+#[cfg(windows)]
+pub const TRANSPORT: &str = "d3d12-named-pipe";
+#[cfg(not(any(target_os = "macos", windows)))]
+pub const TRANSPORT: &str = "unsupported";
 
 /// The most surfaces a ring may have.
 pub const MAX_SLOTS: usize = 8;
@@ -81,7 +101,17 @@ fn fill_random(bytes: &mut [u8]) {
         .expect("could not read /dev/urandom");
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn fill_random(bytes: &mut [u8]) {
+    use ::windows::Win32::Security::Cryptography::{
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
+    };
+    unsafe { BCryptGenRandom(None, bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }
+        .ok()
+        .expect("system random generator");
+}
+
+#[cfg(not(any(unix, windows)))]
 fn fill_random(bytes: &mut [u8]) {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};

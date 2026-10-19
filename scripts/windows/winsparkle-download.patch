@@ -1,0 +1,666 @@
+--- a/src/updatedownloader.cpp
++++ b/src/updatedownloader.cpp
+@@ -36,6 +36,23 @@
+ #include <sstream>
+ #include <rpc.h>
+ #include <time.h>
++#include <sddl.h>
++#include <aclapi.h>
++#include <shlobj.h>
++#include <vector>
++#include <memory>
++#include <io.h>
++#include <fcntl.h>
++
++#pragma comment(lib, "advapi32.lib")
++#pragma comment(lib, "shell32.lib")
++#pragma comment(lib, "ole32.lib")
++
++// Isocast modification: this ABI marker prevents shipping an unpatched DLL.
++extern "C" __declspec(dllexport) int __cdecl win_sparkle_isocast_confined_downloads()
++{
++    return 1;
++}
+ 
+ namespace winsparkle
+ {
+@@ -47,53 +64,272 @@
+ namespace
+ {
+ 
+-std::wstring GetUniqueTempDirectoryPrefix()
++// Do not inherit permissions from TEMP, or trust an environment-selected path.
++struct PrivateDirectorySecurity
++{
++    std::vector<BYTE> user;
++    PSECURITY_DESCRIPTOR descriptor = NULL;
++    SECURITY_ATTRIBUTES attributes = { sizeof(SECURITY_ATTRIBUTES), NULL, FALSE };
++
++    PrivateDirectorySecurity()
++    {
++        HANDLE token = NULL;
++        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
++            throw Win32Exception("Cannot identify update owner");
++        DWORD size = 0;
++        GetTokenInformation(token, TokenUser, NULL, 0, &size);
++        if (!size)
++        {
++            CloseHandle(token);
++            throw Win32Exception("Cannot identify update owner");
++        }
++        user.resize(size);
++        const BOOL gotUser = GetTokenInformation(token, TokenUser, user.data(), size, &size);
++        CloseHandle(token);
++        if (!gotUser)
++            throw Win32Exception("Cannot identify update owner");
++        LPWSTR sid = NULL;
++        if (!ConvertSidToStringSidW(User(), &sid))
++            throw Win32Exception("Cannot identify update owner");
++        const std::wstring sddl = std::wstring(L"O:") + sid + L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;" + sid + L")";
++        LocalFree(sid);
++        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
++                sddl.c_str(), SDDL_REVISION_1, &descriptor, NULL))
++            throw Win32Exception("Cannot protect update directory");
++        attributes.lpSecurityDescriptor = descriptor;
++    }
++
++    ~PrivateDirectorySecurity() { LocalFree(descriptor); }
++
++    PSID User() const { return reinterpret_cast<const TOKEN_USER*>(user.data())->User.Sid; }
++
++    bool Trusted(PSID sid) const
++    {
++        return sid && IsValidSid(sid) &&
++            (EqualSid(sid, User()) || IsWellKnownSid(sid, WinLocalSystemSid) ||
++             IsWellKnownSid(sid, WinBuiltinAdministratorsSid));
++    }
++};
++
++// Keep every path component pinned while checking and using the namespace.
++// The ACL checks, not this download-lifetime lease, protect the subsequent UI
++// wait and installer launch. Same-user, administrator and SYSTEM compromise
++// are outside this boundary.
++struct CheckedDirectory
+ {
+-    wchar_t tmpdir[MAX_PATH + 1];
+-    if (GetTempPath(MAX_PATH + 1, tmpdir) == 0)
+-        throw Win32Exception("Cannot create temporary directory");
+-
+-    std::wstring dir(tmpdir);
+-    dir += L"Update-";
+-    return dir;
+-}
+-
+-std::wstring CreateUniqueTempDirectory()
+-{
+-    // We need to put downloaded updates into a directory of their own, because
+-    // if we put it in $TMP, some DLLs could be there and interfere with the
+-    // installer.
+-    //
+-    // This code creates a new randomized directory name and tries to create it;
+-    // this process is repeated if the directory already exists.
+-    const std::wstring tmpdir = GetUniqueTempDirectoryPrefix();
++    HANDLE handle;
++
++    CheckedDirectory(const std::wstring& path, const PrivateDirectorySecurity& security,
++                     bool ancestor = false, bool staging = false)
++        : handle(CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | READ_CONTROL,
++              FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
++              FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL))
++    {
++        if (handle == INVALID_HANDLE_VALUE)
++            throw Win32Exception("Cannot pin update directory");
++        try
++        {
++            BY_HANDLE_FILE_INFORMATION info;
++            DWORD flags = 0;
++            if (!GetFileInformationByHandle(handle, &info) ||
++                !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
++                (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
++                !GetVolumeInformationByHandleW(handle, NULL, 0, NULL, NULL, &flags, NULL, 0) ||
++                !(flags & FS_PERSISTENT_ACLS))
++                throw std::runtime_error("Update directory requires a non-reparse ACL filesystem");
++
++            PSID owner = NULL;
++            PACL dacl = NULL;
++            PSECURITY_DESCRIPTOR sd = NULL;
++            if (GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
++                    &owner, NULL, &dacl, NULL, &sd) != ERROR_SUCCESS)
++                throw std::runtime_error("Cannot check update directory permissions");
++
++            // Windows servicing owns the system volume root on standard Windows
++            // installations. Trust its exact service SID only for ancestors,
++            // never for LocalAppData or the private staging directory.
++            PSID installer = NULL;
++            if (ancestor)
++                ConvertStringSidToSidW(L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", &installer);
++            const auto trusted = [&](PSID sid) {
++                return security.Trusted(sid) ||
++                    (ancestor && installer && sid && IsValidSid(sid) && EqualSid(sid, installer));
++            };
++            bool valid = trusted(owner) && dacl && IsValidAcl(dacl);
++            if (staging)
++            {
++                SECURITY_DESCRIPTOR_CONTROL control = 0;
++                DWORD revision = 0;
++                valid = valid && EqualSid(owner, security.User()) &&
++                    GetSecurityDescriptorControl(sd, &control, &revision) && (control & SE_DACL_PROTECTED);
++            }
++            // Ancestors may allow creation of unrelated subdirectories (e.g.
++            // C:\), but not deletion/replacement of existing path components.
++            const DWORD writes = FILE_ADD_FILE | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES |
++                FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER |
++                (ancestor ? 0 : FILE_ADD_SUBDIRECTORY);
++            for (DWORD i = 0; valid && i < dacl->AceCount; ++i)
++            {
++                void *entry = NULL;
++                if (!GetAce(dacl, i, &entry))
++                {
++                    valid = false;
++                    break;
++                }
++                const ACE_HEADER *header = static_cast<const ACE_HEADER*>(entry);
++                if (!staging && (header->AceFlags & INHERIT_ONLY_ACE))
++                    continue;
++                if (header->AceType == ACCESS_DENIED_ACE_TYPE)
++                    continue; // Ignoring denies is conservative: never broadens acceptance.
++                if (header->AceType != ACCESS_ALLOWED_ACE_TYPE)
++                {
++                    valid = false; // Fail closed on conditional/object/unknown grants.
++                    break;
++                }
++                const ACCESS_ALLOWED_ACE *ace = static_cast<const ACCESS_ALLOWED_ACE*>(entry);
++                DWORD mask = ace->Mask;
++                GENERIC_MAPPING mapping = { FILE_GENERIC_READ, FILE_GENERIC_WRITE,
++                    FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS };
++                MapGenericMask(&mask, &mapping);
++                if ((mask & writes) && !trusted(const_cast<DWORD*>(&ace->SidStart)))
++                    valid = false;
++            }
++            LocalFree(installer);
++            LocalFree(sd);
++            if (!valid)
++                throw std::runtime_error("Update directory is writable by an untrusted owner or principal");
++        }
++        catch (...)
++        {
++            CloseHandle(handle);
++            throw;
++        }
++    }
++
++    ~CheckedDirectory() { CloseHandle(handle); }
++    CheckedDirectory(const CheckedDirectory&) = delete;
++    CheckedDirectory& operator=(const CheckedDirectory&) = delete;
++};
++
++struct UpdateRoot
++{
++    PrivateDirectorySecurity security;
++    std::wstring prefix;
++    std::vector<std::unique_ptr<CheckedDirectory>> directories;
++
++    UpdateRoot()
++    {
++        PWSTR known = NULL;
++        if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, NULL, &known)))
++            throw std::runtime_error("Cannot locate LocalAppData for updates");
++        std::wstring path(known);
++        CoTaskMemFree(known);
++        // Require a local absolute DOS path; reject UNC, device paths, alternate
++        // streams and redirected/reparse ancestors rather than guessing trust.
++        if (path.size() < 4 || !((path[0] >= L'A' && path[0] <= L'Z') ||
++                (path[0] >= L'a' && path[0] <= L'z')) || path[1] != L':' || path[2] != L'\\' ||
++            path.find_first_of(L"/:", 2) != std::wstring::npos)
++            throw std::runtime_error("Updates require local LocalAppData");
++        if (GetDriveTypeW(path.substr(0, 3).c_str()) != DRIVE_FIXED)
++            throw std::runtime_error("Updates require fixed local storage");
++        directories.emplace_back(new CheckedDirectory(path.substr(0, 3), security, true));
++        for (size_t start = 3; start < path.size(); )
++        {
++            const size_t end = path.find(L'\\', start);
++            const std::wstring component = path.substr(start, end == std::wstring::npos ? end : end - start);
++            if (component.empty() || component == L"." || component == L".." ||
++                component.back() == L'.' || component.back() == L' ')
++                throw std::runtime_error("Unsafe LocalAppData path");
++            directories.emplace_back(new CheckedDirectory(path.substr(0, end), security,
++                end != std::wstring::npos));
++            if (end == std::wstring::npos)
++                break;
++            start = end + 1;
++        }
++        if (path.back() == L'\\')
++            throw std::runtime_error("Unsafe LocalAppData path");
++        prefix = path + L"\\Isocast-Update-";
++    }
++};
++
++std::wstring CreateUniqueTempDirectory(UpdateRoot& root)
++{
++    // No reusable staging root: create each UUID directly in checked LocalAppData.
+ 
+     for ( ;; )
+     {
+-        std::wstring dir(tmpdir);
++        std::wstring dir(root.prefix);
+         UUID uuid;
+-        UuidCreate(&uuid);
++        const RPC_STATUS created = UuidCreate(&uuid);
++        if (created != RPC_S_OK && created != RPC_S_UUID_LOCAL_ONLY)
++            throw std::runtime_error("Cannot create update directory name");
+         RPC_WSTR uuidStr;
+         RPC_STATUS status = UuidToString(&uuid, &uuidStr);
++        if (status != RPC_S_OK)
++            throw std::runtime_error("Cannot create update directory name");
+         dir += reinterpret_cast<wchar_t*>(uuidStr);
+         RpcStringFree(&uuidStr);
+ 
+-        if ( CreateDirectory(dir.c_str(), NULL) )
++        if ( CreateDirectory(dir.c_str(), &root.security.attributes) )
+             return dir;
+         else if ( GetLastError() != ERROR_ALREADY_EXISTS )
+             throw Win32Exception("Cannot create temporary directory");
+     }
+ }
+ 
++// A remote name is advisory, never a filesystem path. Keep an intentionally
++// small ASCII .exe vocabulary; reject Windows path/stream/device aliases,
++// encoded names and ambiguous trailing characters before opening anything.
++bool SafeRemoteFilename(const std::wstring& name)
++{
++    if (name.size() < 5 || name.size() > 128 || name[0] == L'.' ||
++        name.find(L"..") != std::wstring::npos)
++        return false;
++    std::wstring lower;
++    for (wchar_t c : name)
++    {
++        if (!((c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
++              (c >= L'0' && c <= L'9') || c == L'.' || c == L'-' || c == L'_'))
++            return false;
++        lower += (c >= L'A' && c <= L'Z') ? c + (L'a' - L'A') : c;
++    }
++    if (lower.substr(lower.size() - 4) != L".exe")
++        return false;
++    const std::wstring stem = lower.substr(0, lower.find(L'.'));
++    if (stem == L"con" || stem == L"prn" || stem == L"aux" || stem == L"nul")
++        return false;
++    if (stem.size() == 4 && (stem.substr(0, 3) == L"com" || stem.substr(0, 3) == L"lpt") &&
++        stem[3] >= L'1' && stem[3] <= L'9')
++        return false;
++    return true;
++}
++
+ struct UpdateDownloadSink : public IDownloadSink
+ {
+-    UpdateDownloadSink(Thread& thread, const std::wstring& dir)
++    UpdateDownloadSink(Thread& thread, const std::wstring& dir, const PrivateDirectorySecurity& security)
+         : m_thread(thread),
+-          m_dir(dir), m_file(NULL),
++          m_dir(dir), m_directory(new CheckedDirectory(dir, security, false, true)), m_file(NULL),
++          m_created(false), m_keep(false),
+           m_downloaded(0), m_total(0), m_lastUpdate(-1)
+-    {}
++    {
++    }
++
++    ~UpdateDownloadSink()
++    {
++        Close();
++        if (!m_keep)
++        {
++            // Delete only our CREATE_NEW output, while the checked directory
++            // AND its ancestors remain pinned. A failed constructor never gets
++            // here; a CREATE_NEW collision never owns the pre-existing file.
++            if (m_created)
++                DeleteFileW(m_path.c_str());
++            m_directory.reset();
++            RemoveDirectoryW(m_dir.c_str()); // Empty only; never recurse.
++        }
++    }
+ 
+-    ~UpdateDownloadSink() { Close(); }
++    void Keep() { m_keep = true; }
+ 
+     void Close()
+     {
+@@ -106,17 +342,40 @@
+ 
+     std::wstring GetFilePath(void) { return m_path; }
+ 
+-    virtual void SetLength(size_t l) { m_total = l; }
++    virtual void SetLength(size_t l)
++    {
++        if (l > 1024ULL * 1024 * 1024)
++            throw std::runtime_error("Update exceeds 1 GiB limit");
++        m_total = l;
++    }
+ 
+     virtual void SetFilename(const std::wstring& filename)
+     {
+-        if ( m_file )
++        if ( m_file || !m_path.empty() )
+             throw std::runtime_error("Update file already set");
+ 
+-        m_path = m_dir + L"\\" + filename;
+-        m_file = _wfopen(m_path.c_str(), L"wb");
+-        if ( !m_file )
++        if (!SafeRemoteFilename(filename))
++            throw std::runtime_error("Unsafe update filename");
++        // The only downloaded-data filename is application-chosen. CREATE_NEW
++        // refuses an existing file/link instead of ever truncating it.
++        m_path = m_dir + L"\\Isocast-update.exe";
++        HANDLE file = CreateFileW(m_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
++            NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
++        if (file == INVALID_HANDLE_VALUE)
++            throw Win32Exception("Cannot create update file");
++        m_created = true;
++        const int fd = _open_osfhandle(reinterpret_cast<intptr_t>(file), _O_BINARY | _O_WRONLY);
++        if (fd == -1)
++        {
++            CloseHandle(file);
++            throw std::runtime_error("Cannot open update file stream");
++        }
++        m_file = _fdopen(fd, "wb");
++        if (!m_file)
++        {
++            _close(fd);
+             throw std::runtime_error("Cannot save update file");
++        }
+     }
+ 
+     virtual void Add(const void *data, size_t len)
+@@ -125,6 +384,8 @@
+             throw std::runtime_error("Filename is not net");
+ 
+         m_thread.CheckShouldTerminate();
++        if (len > 1024ULL * 1024 * 1024 - m_downloaded)
++            throw std::runtime_error("Update exceeds 1 GiB limit");
+ 
+         if ( fwrite(data, len, 1, m_file) != 1 )
+             throw std::runtime_error("Cannot save update file");
+@@ -141,9 +402,11 @@
+     }
+ 
+     Thread& m_thread;
+-    size_t m_downloaded, m_total;
+-    FILE *m_file;
+     std::wstring m_dir;
++    std::unique_ptr<CheckedDirectory> m_directory;
++    FILE *m_file;
++    bool m_created, m_keep;
++    size_t m_downloaded, m_total;
+     std::wstring m_path;
+     clock_t m_lastUpdate;
+ };
+@@ -173,10 +436,10 @@
+ 
+     try
+     {
+-      const std::wstring tmpdir = CreateUniqueTempDirectory();
+-      Settings::WriteConfigValue("UpdateTempDir", tmpdir);
++      UpdateRoot root;
++      const std::wstring tmpdir = CreateUniqueTempDirectory(root);
+ 
+-      UpdateDownloadSink sink(*this, tmpdir);
++      UpdateDownloadSink sink(*this, tmpdir, root.security);
+       DownloadFile(m_appcast.enclosure.DownloadURL, &sink, this, Settings::GetHttpHeadersString());
+       sink.Close();
+ 
+@@ -184,28 +447,28 @@
+       {
+           SignatureVerifier::VerifyEdDSASignatureValid(sink.GetFilePath(), m_appcast.enclosure.EdDsaSignature);
+       }
+-      else if (Settings::HasDSAPubKeyPem())
+-      {
+-          LogWarning("Using deprecated DSA signature. Please update your app to use EdDSA.");
+-          SignatureVerifier::VerifyDSASHA1SignatureValid(sink.GetFilePath(), m_appcast.enclosure.DsaSignature);
+-      }
+       else
+       {
+-          // backward compatibility - accept as is, but complain about it
+-          LogError("Using unsigned updates!");
++          throw std::runtime_error("Isocast updates require an Ed25519 key");
+       }
+ 
++      // Persist only a verified, application-owned staging path, never a
++      // response-selected name or unverified payload location.
++      Settings::WriteConfigValue("UpdateTempDir", tmpdir);
+       UI::NotifyUpdateDownloaded(sink.GetFilePath(), m_appcast);
++      sink.Keep();
+     }
+     catch (BadSignatureException&)
+     {
+-        CleanLeftovers();  // remove potentially corrupted file
+         UI::NotifyUpdateError(Err_BadSignature);
+         throw;
+     }
+     catch ( ... )
+     {
+-        UI::NotifyUpdateError();
++        // Every download-phase refusal (unsafe name, size, staging, transfer)
++        // means nothing verified was installed. Err_Generic is kept for the
++        // appcast check, so an unreachable feed reads as an offline error.
++        UI::NotifyUpdateError(Err_BadSignature);
+         throw;
+     }
+ }
+@@ -215,44 +478,111 @@
+                                cleanup
+  *--------------------------------------------------------------------------*/
+ 
++namespace
++{
++
++// Only an exact `<LocalAppData>\Isocast-Update-<uuid>` path is ever a
++// cleanup candidate.
++bool IsStagingDirectory(const UpdateRoot& root, const std::wstring& dir)
++{
++    const std::wstring& prefix = root.prefix;
++    bool valid = dir.compare(0, prefix.size(), prefix) == 0 && dir.size() == prefix.size() + 36;
++    for (size_t i = 0; valid && i < 36; ++i)
++    {
++        const wchar_t c = dir[prefix.size() + i];
++        valid = (i == 8 || i == 13 || i == 18 || i == 23) ? c == L'-' :
++            ((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F'));
++    }
++    return valid;
++}
++
++// Re-check the private staging lease, delete only the fixed payload name
++// through its own handle, then remove the directory only if it is empty. An
++// active download or running installer holds its files without delete
++// sharing, so it is skipped. Throws for unsafe directories: never targets.
++bool RemoveStagingDirectory(const UpdateRoot& root, const std::wstring& dir)
++{
++    {
++        CheckedDirectory directory(dir, root.security, false, true);
++        // Open the fixed payload without following a final link. Mark that
++        // same file for deletion while both directory leases hold.
++        HANDLE file = CreateFileW((dir + L"\\Isocast-update.exe").c_str(),
++            DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING,
++            FILE_FLAG_OPEN_REPARSE_POINT, NULL);
++        if (file != INVALID_HANDLE_VALUE)
++        {
++            BY_HANDLE_FILE_INFORMATION info;
++            if (GetFileInformationByHandle(file, &info) &&
++                !(info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)))
++            {
++                FILE_DISPOSITION_INFO disposition = { TRUE };
++                SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition));
++            }
++            CloseHandle(file);
++        }
++    }
++    // Release only the child lease for empty-directory removal. The checked
++    // LocalAppData parent remains pinned and excludes other users' writers.
++    return RemoveDirectoryW(dir.c_str()) != 0;
++}
++
++} // anonymous namespace
++
+ void UpdateDownloader::CleanLeftovers()
+ {
+     // Note: this is called at startup. Do not use wxWidgets from this code!
+ 
+-    std::wstring tmpdir;
+-    if ( !Settings::ReadConfigValue("UpdateTempDir", tmpdir) )
+-        return;
+-
+-    // Check that the directory actually is a valid update temp dir, to prevent
+-    // malicious users from forcing us into deleting arbitrary directories:
++    // Registry persistence is not authority to follow a path. Re-establish the
++    // same private root, strict UUID shape, and checked no-delete directory lease.
+     try
+     {
+-        if (tmpdir.find(GetUniqueTempDirectoryPrefix()) != 0)
++        UpdateRoot root;
++
++        std::wstring tmpdir;
++        if ( Settings::ReadConfigValue("UpdateTempDir", tmpdir) )
+         {
+-            Settings::DeleteConfigValue("UpdateTempDir");
++            if (!IsStagingDirectory(root, tmpdir))
++                Settings::DeleteConfigValue("UpdateTempDir");
++            else
++            {
++                try
++                {
++                    if (RemoveStagingDirectory(root, tmpdir))
++                        Settings::DeleteConfigValue("UpdateTempDir");
++                }
++                catch (...) {} // An orphan, never a cleanup target.
++            }
++        }
++
++        // Downloads interrupted by a crash or kill are never recorded (only
++        // verified ones are). Sweep a bounded number of strictly named
++        // staging directories with the same checks; skip anything else.
++        const std::wstring parent = root.prefix.substr(0, root.prefix.rfind(L'\\') + 1);
++        WIN32_FIND_DATAW found;
++        HANDLE search = FindFirstFileExW((root.prefix + L"*").c_str(), FindExInfoBasic, &found,
++            FindExSearchLimitToDirectories, NULL, 0);
++        if (search == INVALID_HANDLE_VALUE)
+             return;
++        std::vector<std::wstring> candidates;
++        do
++        {
++            const std::wstring dir = parent + found.cFileName;
++            if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
++                !(found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
++                IsStagingDirectory(root, dir))
++                candidates.push_back(dir);
++        } while (candidates.size() < 64 && FindNextFileW(search, &found));
++        FindClose(search);
++        for (const std::wstring& dir : candidates)
++        {
++            try { RemoveStagingDirectory(root, dir); }
++            catch (...) {} // Unsafe or in use: leave it.
+         }
+     }
+-    catch (Win32Exception&) // cannot determine temp directory
++    catch (...) // Unsafe/unavailable paths are orphans, never cleanup targets.
+     {
+         return;
+     }
+-
+-    tmpdir.append(1, '\0'); // double NULL-terminate for SHFileOperation
+-
+-    SHFILEOPSTRUCT fos = {0};
+-    fos.wFunc = FO_DELETE;
+-    fos.pFrom = tmpdir.c_str();
+-    fos.fFlags = FOF_NO_UI | // Vista+-only
+-                 FOF_SILENT |
+-                 FOF_NOCONFIRMATION |
+-                 FOF_NOERRORUI;
+-
+-    if ( SHFileOperation(&fos) == 0 )
+-    {
+-        Settings::DeleteConfigValue("UpdateTempDir");
+-    }
+-    // else: try another time, this is just a "soft" error
+ }
+ 
+ } // namespace winsparkle
+--- a/src/download.cpp
++++ b/src/download.cpp
+@@ -284,34 +284,34 @@
+     bool filename_set = false;
+     if ( HttpQueryInfoA(conn, HTTP_QUERY_CONTENT_DISPOSITION, contentDisposition, &cdSize, NULL) )
+     {
+-        char *ptr = strstr(contentDisposition, "filename=");
+-        if ( ptr )
++        const std::string disposition(contentDisposition, cdSize);
++        const size_t nameAt = disposition.find("filename=");
++        if ( nameAt != std::string::npos )
+         {
+-            char c_filename[512];
+-            ptr += 9;
+-            while ( *ptr == ' ' )
+-                ptr++;
+-
+-            bool quoted = false;
+-            if ( *ptr == '"' || *ptr == '\'')
++            std::string name = disposition.substr(nameAt + 9);
++            const size_t start = name.find_first_not_of(" \t");
++            if (start == std::string::npos)
++                throw std::runtime_error("Empty update filename");
++            name.erase(0, start);
++            if (name[0] == '"' || name[0] == '\'')
+             {
+-                quoted = true;
+-                ptr++;
++                const size_t end = name.find(name[0], 1);
++                if (end == std::string::npos)
++                    throw std::runtime_error("Malformed update filename");
++                name = name.substr(1, end - 1);
+             }
+-
+-            char *ptr2 = c_filename;
+-            while ( *ptr != ';' && *ptr != 0)
+-                *ptr2++ = *ptr++;
+-
+-            if ( quoted )
+-                *(ptr2 - 1) = 0;
+             else
+-                *ptr2 = 0;
+-
+-            sink->SetFilename(AnsiToWide(c_filename));
++                name = name.substr(0, name.find(';'));
++            // String parsing avoids the old quoted-empty-name buffer underflow.
++            // The file sink validates this name before any filesystem write.
++            sink->SetFilename(AnsiToWide(name));
+             filename_set = true;
+         }
+     }
++    else if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
++    {
++        throw std::runtime_error("Update filename header is too large");
++    }
+ 
+     if ( !filename_set )
+     {
+--- a/src/ui.cpp
++++ b/src/ui.cpp
+@@ -847,16 +847,16 @@
+ 
+     LayoutChangesGuard guard(this);
+ 
+-    m_heading->SetLabel(_("Update Error!"));
+-
+     wxString msg;
+     switch (err)
+     {
+-        case Err_Generic:
+-            msg = _("An error occurred in retrieving update information; are you connected to the internet? Please try again later.");
++        case Err_Generic: // The appcast check: offline, unreachable or unreadable.
++            m_heading->SetLabel(_("Couldn't check for updates"));
++            msg = _("Isocast couldn't reach its update server. Check your internet connection and try again later.");
+             break;
+-        case Err_BadSignature:
+-            msg = _("The update is improperly signed.");
++        case Err_BadSignature: // Any refused download, including unsafe names.
++            m_heading->SetLabel(_("Isocast update not installed"));
++            msg = _("This update couldn't be verified and wasn't installed");
+             break;
+     }
+     SetMessage(msg);

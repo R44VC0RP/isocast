@@ -57,6 +57,34 @@ impl DaemonError {
 }
 
 impl Client {
+    /// Stop an existing daemon only when its atomic idle check permits it.
+    /// Installers use this instead of terminating a process or starting a new
+    /// daemon. Bound both the RPC and the wait for the old endpoint to go away.
+    pub fn shutdown_if_idle() -> Result<()> {
+        if let Some(mut client) = Self::connect()? {
+            client
+                .writer
+                .set_write_timeout(Some(Duration::from_secs(5)))?;
+            client
+                .reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(5)))?;
+            let _: Value = client.call(Method::ShutdownIfIdle)?;
+        } else {
+            return Ok(());
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if Self::connect()?.is_none() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!("isocastd did not stop after its idle shutdown was accepted");
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     pub fn clear_preview(&mut self) -> Result<isocast_protocol::api::Switched> {
         self.call(Method::ClearPreview)
     }
@@ -106,10 +134,16 @@ impl Client {
                 return Ok(None);
             };
             if Instant::now() > deadline {
+                let next = if cfg!(windows) {
+                    format!(
+                        "Try again. For an unresponsive isocastd.exe (PID {pid}), Task Manager is a last resort: forced termination can interrupt work and leave files unfinished."
+                    )
+                } else {
+                    format!("Try again, or end it with `kill {pid}` (it finishes its files first)")
+                };
                 bail!(
                     "isocastd (pid {pid}) is running but has not accepted a connection on {} \
-                     for {} s ({error}); it may be stopped or overloaded. Try again, or end it \
-                     with `kill {pid}` (it finishes its files first)",
+                     for {} s ({error}); it may be stopped or overloaded. {next}",
                     socket_path().display(),
                     BUSY_TIMEOUT.as_secs()
                 );
@@ -195,7 +229,12 @@ impl Client {
             .with_context(|| format!("isocastd sent an unreadable response: {line}"))?;
         if let Some(error) = response.error {
             isocast_diagnostics::emit(
-                "error",
+                // Something this engine can't do here isn't a failure.
+                if error.code == RpcError::UNSUPPORTED {
+                    "info"
+                } else {
+                    "error"
+                },
                 "client",
                 "API request failed",
                 serde_json::json!({"method":audit["method"],"error":error,"duration_ms":started.elapsed().as_secs_f64()*1000.0}),
@@ -490,6 +529,12 @@ fn daemon_path() -> Result<PathBuf> {
         }
     }
     if !built.exists() {
+        #[cfg(windows)]
+        bail!(
+            "{} is missing; reinstall Isocast so isocastd.exe is beside the app and CLI (in a development checkout, run `cargo build -p isocast-daemon`)",
+            built.display()
+        );
+        #[cfg(not(windows))]
         bail!(
             "{} is missing; build it with `cargo build -p isocast-daemon`",
             built.display()

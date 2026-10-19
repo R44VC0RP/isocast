@@ -133,7 +133,10 @@ impl Area for PermissionsStep {
                 .iter()
                 .any(|d| needed[index(d.permission)] && !settled(d.state));
             app.permissions.take(app, report);
-            if missing {
+            // Windows' first run shows a blocked camera or microphone as
+            // its own first step (nothing else there needs allowing), so
+            // no sheet before Welcome.
+            if missing && !(cfg!(windows) && first) {
                 app.permissions.open(app, first);
             }
         });
@@ -184,6 +187,22 @@ impl Area for PermissionsStep {
 }
 
 impl PermissionsStep {
+    /// Whether the first run starts with its permissions step: always on
+    /// macOS (its prompts are asked there); on Windows only when a privacy
+    /// switch blocks the camera or microphone (screen and output audio need
+    /// no permission there).
+    pub fn access_needed(&self) -> bool {
+        !cfg!(windows)
+            || self.report.borrow().as_ref().is_some_and(|report| {
+                report.details.iter().any(|d| {
+                    matches!(
+                        d.permission,
+                        PermissionKind::Camera | PermissionKind::Microphone
+                    ) && !settled(d.state)
+                })
+            })
+    }
+
     /// Relaunch stopped the engine a moment ago: calls failing on the lost
     /// link are expected, not errors to show.
     pub fn relaunching(&self) -> bool {
@@ -255,7 +274,14 @@ impl PermissionsStep {
             match answer {
                 Ok(report) => self.take(app, report),
                 Err(error) => {
-                    app.toast(ToastKind::Error, "Couldn’t ask macOS", error);
+                    app.toast(
+                        ToastKind::Error,
+                        isocast_protocol::platform_text::select(
+                            "Couldn’t ask macOS",
+                            "Couldn’t check Windows access",
+                        ),
+                        error,
+                    );
                 }
             }
             self.show(app);
@@ -319,6 +345,7 @@ impl PermissionsStep {
             app.load_devices(true);
         }
         self.show(app);
+        app.settings.permissions_changed(app);
     }
 
     fn act(&self, app: &Rc<App>, kind: PermissionKind, action: &str) {
@@ -373,7 +400,13 @@ impl PermissionsStep {
                 let step = &app.permissions;
                 step.busy.set(None);
                 if let Err(error) = result {
-                    app.failed("Couldn’t open System Settings", &error);
+                    app.failed(
+                        isocast_protocol::platform_text::select(
+                            "Couldn’t open System Settings",
+                            "Couldn’t open Windows Settings",
+                        ),
+                        &error,
+                    );
                     step.show(app);
                     return;
                 }
@@ -382,7 +415,9 @@ impl PermissionsStep {
                     .borrow()
                     .as_ref()
                     .and_then(|r| r.details.iter().find(|d| d.permission == kind).cloned());
-                if let Some(path) = detail.as_ref().and_then(|d| d.app_path.clone()) {
+                if !cfg!(windows)
+                    && let Some(path) = detail.as_ref().and_then(|d| d.app_path.clone())
+                {
                     let detail = detail.expect("checked above");
                     // A screen recording grant (or a denied one) is turned on
                     // by hand; drag it in if it isn't listed.
@@ -504,7 +539,7 @@ impl PermissionsStep {
             return;
         };
         area.set_app_name(
-            if report.app == "isocastd" {
+            if cfg!(windows) || report.app == "isocastd" {
                 "Isocast"
             } else {
                 report.app.as_str()
@@ -518,7 +553,16 @@ impl PermissionsStep {
                 .all(|d| !needed[index(d.permission)] || settled(d.state)),
         );
         let busy = self.busy.get();
-        area.set_items(model(report.details.iter().map(|d| {
+        // Windows can only block the camera and microphone: the rows are
+        // those two.
+        let shown = |d: &&PermissionDetail| {
+            !cfg!(windows)
+                || matches!(
+                    d.permission,
+                    PermissionKind::Camera | PermissionKind::Microphone
+                )
+        };
+        area.set_items(model(report.details.iter().filter(shown).map(|d| {
             row(
                 d,
                 needed[index(d.permission)],
@@ -530,6 +574,7 @@ impl PermissionsStep {
 
 /// One permission's row: its status in words, what happened in plain
 /// words, and the one action.
+#[cfg(not(windows))]
 fn row(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem {
     let (icon, title, purpose, pane) = match d.permission {
         PermissionKind::ScreenRecording => (
@@ -659,6 +704,64 @@ fn row(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem
     }
 }
 
+#[cfg(windows)]
+fn row(d: &PermissionDetail, needed: bool, busy: Option<&str>) -> PermissionItem {
+    let (icon, title, purpose) = match d.permission {
+        PermissionKind::ScreenRecording => (
+            "display",
+            "Screen Recording",
+            "Displays and windows on this PC.",
+        ),
+        PermissionKind::Camera => ("camera", "Camera", "Cameras and capture cards."),
+        PermissionKind::Microphone => ("mic", "Microphone", "Microphones and audio interfaces."),
+        PermissionKind::SystemAudio => (
+            "speaker",
+            "System Audio",
+            "Optional: what this PC and its apps play.",
+        ),
+    };
+    // A privacy switch in Settings is the only thing Windows can turn off;
+    // its exact page opens, and the row flips to Allowed by itself.
+    let (status, label, action, action_label) = if d.state == Permission::Granted {
+        ("allowed", "Allowed", "", "")
+    } else if d.state == Permission::Restricted || d.action == PermissionAction::AskAdministrator {
+        ("blocked", "Blocked", "", "")
+    } else if d.action == PermissionAction::OpenSettings {
+        // The row's own page (Camera or Microphone) opens.
+        ("denied", "Turned off", "open", "Open Settings")
+    } else {
+        ("not-asked", "Unknown", "", "")
+    };
+    let detail = if d.state == Permission::Granted {
+        String::new()
+    } else if status == "blocked" {
+        d.next_step.clone().unwrap_or_else(|| {
+            "A policy on this PC blocks it; only its administrator can allow it.".into()
+        })
+    } else {
+        d.next_step.clone().unwrap_or_default()
+    };
+    PermissionItem {
+        id: PermissionKind::NAMES[index(d.permission)].into(),
+        icon: icon.into(),
+        title: title.into(),
+        purpose: if needed || d.permission == PermissionKind::SystemAudio {
+            purpose.into()
+        } else {
+            format!("{purpose} This setup doesn’t use it.").into()
+        },
+        status: status.into(),
+        status_label: label.into(),
+        detail: detail.into(),
+        action: action.into(),
+        action_label: action_label.into(),
+        alt_action: "".into(),
+        alt_label: "".into(),
+        busy: busy.is_some(),
+        needed,
+    }
+}
+
 /// The helper's one line.
 fn helper_line(app: &str, drag: bool) -> String {
     if drag {
@@ -672,7 +775,9 @@ fn helper_line(app: &str, drag: bool) -> String {
 /// bare isocastd (a development build), whose name means nothing to a
 /// person.
 fn shown_name(d: &PermissionDetail) -> &str {
-    if d.app_path.is_none() && d.app == "isocastd" {
+    if cfg!(windows) {
+        isocast_protocol::platform_text::ENGINE
+    } else if d.app_path.is_none() && d.app == "isocastd" {
         "Isocast"
     } else {
         &d.app

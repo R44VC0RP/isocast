@@ -1033,7 +1033,13 @@ impl Dialogs {
                         app.session.borrow_mut().devices = Some(devices);
                         app.changed(crate::session::Changed::DEVICES);
                     }
-                    Err(error) => app.failed("Couldn’t list this Mac’s devices", &error),
+                    Err(error) => app.failed(
+                        isocast_protocol::platform_text::select(
+                            "Couldn’t list this Mac’s devices",
+                            "Couldn’t list this PC’s devices",
+                        ),
+                        &error,
+                    ),
                 }
                 if let Some(window) = app.window() {
                     app.sources.dialogs.update(app, &window);

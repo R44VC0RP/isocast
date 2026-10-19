@@ -4,7 +4,9 @@
 
 use anyhow::{Context, Result, bail};
 use isocast_engine::FramePool;
-use windows::Win32::Graphics::Direct3D11::D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION, ID3D11DeviceContext4, ID3D11Texture2D,
+};
 
 use crate::{Frame, GraphicsDevice, MAX_POOL_FRAMES};
 
@@ -68,6 +70,20 @@ impl OutputPool {
         let frame = Frame::new_output(self.device.clone(), self.width, self.height)?;
         self.frames.push(frame);
         Ok(Some(self.frames.len() - 1))
+    }
+
+    pub(crate) fn render(
+        &mut self,
+        draw: impl FnOnce(&ID3D11DeviceContext4, &ID3D11Texture2D) -> Result<()>,
+    ) -> Result<Option<Frame>> {
+        let Some(index) = self.slot()? else {
+            return Ok(None);
+        };
+        if let Err(error) = self.frames[index].render(draw) {
+            self.failed = true;
+            return Err(error);
+        }
+        Ok(Some(self.frames[index].clone()))
     }
 }
 

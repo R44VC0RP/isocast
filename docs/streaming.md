@@ -287,6 +287,40 @@ Kick and Facebook only take RTMPS; the setup check says so for an
 
 ## Testing locally
 
+### Windows native path (qualification in progress)
+
+Windows reuses the RTMP/RTMPS client, destination and canvas routing, shared
+live encoders, send queues and reconnect logic above. The native video path
+uses H.264 NVENC or Media Foundation, and audio uses Microsoft's AAC-LC MFT.
+Matching-size main and portrait streams are exercised by `e2e.py --only
+stream --only vertical` on Windows. Live GPU scaling and the combined
+recording/stream encoder-admission integration are separate qualification
+items; these short scenarios do not certify either of them.
+
+The native AAC encoder accepts 96, 128, 160 and 192 kb/s. Its configured
+average bitrate does not keep simple audio near that rate. For live outputs,
+Isocast prefixes standard AAC fill elements when needed, budgeting by encoded
+samples rather than wall time. It never truncates the encoder's payload or
+changes the decoded audio. Native packets already above budget are preserved,
+so this is not a hard peak-bitrate limiter. Recording packets are unchanged.
+
+Windows keys use generic entries in **Windows Credential Manager**, persistent
+on this machine for the same user. Target names start with `Isocast/v1/` and
+encode the service/account in hexadecimal: Windows compares target names
+case-insensitively, but stream paths and destination accounts are case-sensitive.
+The current unbundled Windows service is `dev.isocast.unbundled.stream`.
+Keys are not written into setup files, and there is no plaintext-file fallback.
+Some network-only SSH or service logons have no credential store (Windows
+error 1312); use the signed-in Windows desktop session for storing keys.
+The CLI disables console echo before displaying its secret prompt and fails
+closed if it cannot do so; piped stdin remains supported.
+
+Positive Credential Manager round-trip and the full streaming acceptance
+matrix remain separate from the matching-size media checks above. The
+`ISOCAST_STREAM_KEY` test override is not evidence of credential persistence.
+
+### Loopback receiver
+
 Never stream to a real service while testing. An ffmpeg listener stands
 in for one:
 

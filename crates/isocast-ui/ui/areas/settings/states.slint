@@ -5,7 +5,7 @@
 
 import { Theme } from "../../theme.slint";
 import { BrandMark, Icon, Icons } from "../../icons.slint";
-import { Ui, ConnectionState } from "../../state.slint";
+import { Ui, ConnectionState, PlatformText } from "../../state.slint";
 import { Button, ButtonVariant, ControlSize, LcdHero, Spinner } from "../../kit.slint";
 import { SettingsArea } from "state.slint";
 
@@ -216,7 +216,7 @@ export component Welcome inherits Rectangle {
                         // pixel or two wider, so 10px more keeps Paper's
                         // line breaks (the lines are centred either way).
                         width: min(460px + 10px, root.width - 2 * Theme.space-8);
-                        text: "Isocast records the program and every source to its own file, all on one clock. Start from this Mac, or bring what you have.";
+                        text: "Isocast records the program and every source to its own file, all on one clock. Start from this " + PlatformText.machine + ", or bring what you have.";
                     }
                 }
             }
@@ -226,7 +226,7 @@ export component Welcome inherits Rectangle {
                 alignment: center;
                 Choice {
                     icon: Icons.monitor;
-                    title: "Start with this Mac";
+                    title: "Start with this " + PlatformText.machine;
                     hint: "Pick your screen, camera and mic; get three scenes, ready to record.";
                     primary: true;
                     enabled: !root.busy;

@@ -8,7 +8,7 @@
 
 import { Theme } from "../../theme.slint";
 import { BrandMark, Icon, Icons } from "../../icons.slint";
-import { Ui } from "../../state.slint";
+import { Ui, PlatformText } from "../../state.slint";
 import {
     Button, ButtonVariant, ControlSize, DialogFooter, FocusRing, GroupRow, IconButton, LinkButton, RowGroup,
     RowPlace, ScrollArea, Segmented, Spinner, Switch, TextField,
@@ -24,6 +24,8 @@ component StepItem inherits HorizontalLayout {
     in property <string> label;
     property <bool> on: SettingsArea.step == root.index;
     property <bool> done: SettingsArea.step > root.index;
+    // Numbered from the first step shown (Windows may leave out the first).
+    property <int> number: SettingsArea.ob-access ? root.index + 1 : root.index;
     spacing: Theme.space-2;
     VerticalLayout {
         alignment: center;
@@ -40,7 +42,7 @@ component StepItem inherits HorizontalLayout {
                 color: Theme.text-2;
             }
             if !root.done: Text {
-                text: root.index + 1;
+                text: root.number;
                 color: root.on ? Theme.on-accent : Theme.text-3;
                 font-size: Theme.fs-xs;
                 letter-spacing: Theme.tracking-xs;
@@ -329,8 +331,9 @@ component PermissionsStep inherits VerticalLayout {
     spacing: 0;
     alignment: start;
     StepTitle {
-        title: "Let Isocast see and hear";
-        lead: PermissionsArea.unknown-access
+        title: PlatformText.windows ? "Turn on camera and microphone access" : "Let Isocast see and hear";
+        lead: PlatformText.windows ? "A Windows privacy setting is keeping desktop apps like Isocast from using them. Open its page in Settings, turn access on, and this updates by itself. You can skip this and turn it on later."
+            : PermissionsArea.unknown-access
             ? "Access is checked when capture starts; no per-app permission prompt is available. See each item for guidance."
             : "macOS asks you once for each. You can skip any of them now; your setup leaves out what it can’t use, and you can allow it later.";
     }
@@ -401,13 +404,13 @@ component DevicesStep inherits VerticalLayout {
                     alignment: center;
                     Switch {
                         on: SettingsArea.system-audio;
-                        label: "Include what this Mac plays";
+                        label: "Include what this " + PlatformText.machine + " plays";
                         toggled(on) => { SettingsArea.ob-set("system_audio", on ? "true" : "false"); }
                     }
                 }
                 Text {
                     horizontal-stretch: 1;
-                    text: "Include what this Mac plays";
+                    text: "Include what this " + PlatformText.machine + " plays";
                     color: Theme.text-2;
                     font-size: Theme.fs-sm;
                     letter-spacing: Theme.tracking-sm;
@@ -576,9 +579,9 @@ export component Onboarding inherits Rectangle {
                     horizontal-stretch: 1;
                     spacing: Theme.space-5;
                     alignment: start;
-                    StepItem {
+                    if SettingsArea.ob-access: StepItem {
                         index: 0;
-                        label: "Permissions";
+                        label: PlatformText.windows ? "Access" : "Permissions";
                     }
                     StepItem {
                         index: 1;
@@ -620,7 +623,7 @@ export component Onboarding inherits Rectangle {
             // setup (the one yellow button) on the right.
             DialogFooter {
                 inset: Theme.space-8 - 1px;
-                extra-text: SettingsArea.step > 0 ? "Back" : SettingsArea.can-close ? "Cancel" : "Back";
+                extra-text: SettingsArea.step > (SettingsArea.ob-access ? 0 : 1) ? "Back" : SettingsArea.can-close ? "Cancel" : "Back";
                 cancel-text: "";
                 ok-text: SettingsArea.step < 2 ? "Continue" : "Create setup";
                 ok-enabled: !SettingsArea.creating;

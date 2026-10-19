@@ -35,6 +35,154 @@ exists at the tag and isn't empty. A published version ends the run green
 with "nothing to build or draft" and never asks for an approval; a missing
 tag, a mismatch or missing notes fail there with the reason.
 
+## Windows packaging (W.7, qualification in progress)
+
+Windows uses **Inno Setup 7.1.0**, pinned by version and SHA-256 in
+`scripts/windows/package.ps1`. Its source licence permits open-source and
+commercial use; the vendor requests commercial licences but its
+[licensing FAQ](https://jrsoftware.org/isorder.php#required) says purchase is
+not strictly required and is not expected during qualification. No purchase
+has been made. Unlike MSIX, this keeps the existing native daemon/CLI layout
+and ordinary user-data paths without package identity or filesystem
+virtualization. It installs per user in `%LOCALAPPDATA%\Programs\Isocast`,
+with the app, CLI and `isocastd.exe` beside each other and the x64 Visual C++
+CRT app-local; it needs no administrator prompt or machine-wide runtime.
+There is one Start menu shortcut and no service or PATH modification. WinGet
+distribution is later work, not a requirement to install the alpha.
+
+The Windows CI engine job builds debug binaries without debug symbols from the locked Cargo tree,
+packages them with that compiler, exercises install/daemon-launch/uninstall,
+and retains `windows-x64-unsigned` and `windows-x64-unsigned-next`. These are
+distinct compiled `X.Y.Z.1` and `X.Y.Z.2` qualification builds, with an explicit
+test-only public key and loopback feed. The private test key is not in GitHub
+or its artifacts. `payload/package.json` records the compiler, payload hashes
+and the actual executable's `--update-info` identity. This is a pinned recipe,
+**not yet a claim of bit-identical Rust builds across runner images**. The
+delegator runs it through `scripts/windows-ci.sh`; agents do not dispatch,
+push, upload releases or publish. Do not distribute qualification builds as
+production releases. The signing/appcast stages refuse their test-only identity.
+The hosted UI is compiled separately at `-j 1`, with `ISOCAST_UI_NO_GALLERY=1`
+also retained for Clippy, tests and the second candidate, following the
+runner's measured memory limit. Installer/snapshot paths use `target/debug`.
+Native and production release builds retain the full gallery; the native
+package qualification uses release binaries, not this hosted debug recipe.
+
+For an already-built Windows payload:
+
+```powershell
+./scripts/windows/package.ps1 -BinDir target/release `
+  -OutputDir C:\isocast-dev\packages\candidate `
+  -ToolsDir C:\isocast-dev\package-tools `
+  -CrtDir '<Visual Studio VC\Redist\MSVC\version\x64\Microsoft.VC143.CRT>'
+```
+
+`OutputDir` must be new. The compiler is installed only inside `ToolsDir`.
+Close the app and CLI commands first. The incoming CLI asks the daemon to
+shut down through the same atomic `shutdown_if_idle` API used on Mac; active
+recording/output work is refused, idle calibration is cancelled, and IPC waits
+are bounded. Nothing is force-terminated. A remaining executable/DLL lock
+blocks replacement. Uninstall removes only packaged files and the shortcut;
+it does not remove `%LOCALAPPDATA%\Isocast` (the engine's existing state root),
+recordings, credentials or unknown files inside the installation directory.
+`isocast engine shutdown --json` and MCP's `shutdown_idle_daemon` expose that
+same non-launching idle shutdown for maintenance.
+
+**Windows updates are manual checks for now.** Settings → General → Check
+for Updates uses pinned **WinSparkle 0.9.4**. Its Ed25519 verifier uses the
+public key compiled into the app (the existing Sparkle release key), never a
+key or feed chosen in user settings. Its automatic timer/startup prompt is
+disabled before initialization, even if an old preference enabled it: an
+unsolicited dialog must not enter a screen recording. The automatic switch
+is disabled on Windows; Mac's daily-check behavior is unchanged. Installation
+requires atomic idle shutdown and executes only fixed installer arguments,
+never unsigned arguments supplied by an appcast.
+
+Upstream 0.9.4 names the downloaded file after the server's
+`Content-Disposition` header or the URL and writes it before checking the
+signature, so a hostile response could write outside its temporary folder.
+No upstream release fixes this, so `scripts/windows/winsparkle.ps1` builds
+0.9.4 from its pinned source with `winsparkle-download.patch` applied and never
+ships the prebuilt DLL. The patch:
+
+- saves only as `Isocast-update.exe` (`CREATE_NEW`) in a fresh
+  `%LOCALAPPDATA%\Isocast-Update-<uuid>` folder that only the user and
+  SYSTEM can open. Any ancestor that isn't on ACL-capable fixed storage, or
+  is a reparse point, fails closed;
+- refuses the update unless the server's name is a plain
+  `[A-Za-z0-9._-]+\.exe` with no `..` that isn't a device name;
+- requires Ed25519 (no DSA or unsigned fallback) and caps the payload at
+  1 GiB;
+- deletes refused folders without recursion, through held handles. At
+  startup it also sweeps folders left by an interrupted download (up to 64
+  strictly named, private ones), never touching one in use or one it didn't
+  create;
+- tells the user "This update couldn't be verified and wasn't installed"
+  for any refused download. An unreachable or unreadable feed instead shows
+  "Couldn't check for updates" / "Isocast couldn't reach its update server.
+  Check your internet connection and try again later."
+
+The app refuses a WinSparkle DLL that lacks the patch's
+`win_sparkle_isocast_confined_downloads` export (it must return `1`). The
+build is cached by patch SHA-256, and the package's `WinSparkle-build.json`
+records the patch, source and DLL hashes. Rebuild after any change to the
+patch.
+
+Preserve the previous installer and its public `.ed25519` sidecar. After
+closing the app, deliberate authenticated rollback is:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Isocast\isocast-ui.exe" `
+  --rollback-update C:\path\Isocast-previous-windows-x64-setup.exe '<signature from its .ed25519 file>'
+```
+
+The embedded key verifies the locked installer before stopping the daemon or
+launching anything. Only this explicit path adds `/ALLOWDOWNGRADE=1`; automatic
+updates cannot supply it. This is a deliberate older-installer rollback, not
+automatic recovery from an unsuccessful application launch. If the current
+app cannot run, the release operator can use the pinned standalone
+`winsparkle-tool verify --public-key ... --signature ... PREVIOUS.exe` and run
+that verified previous installer with `/ALLOWDOWNGRADE=1`. Do not infer that
+Inno's failure rollback restores overwritten application files. User state is
+retained, not downgraded or deleted; older versions may reject newer settings.
+
+**Production boundary (operator-owned):** clear all `ISOCAST_WINDOWS_UPDATE_*`
+and `ISOCAST_WINDOWS_APPCAST_URL` qualification overrides when compiling the
+release. The production build number defaults to the workspace version. Give
+`package.ps1` all three signing options—`CertificateThumbprint`, `SignToolPath`
+and an HTTPS `TimestampUrl`—only in the protected release environment. It
+uses an already-installed certificate, SHA-256/RFC3161 signing, and validates
+the expected timestamped signatures; Inno signs the uninstaller and Setup too.
+It never imports credentials or publishes. The resulting installer is then
+signed with the existing Sparkle Ed25519 key (`sign_update`; its signature is
+compatible with WinSparkle), under the same protected signing authority.
+
+`scripts/windows/appcast.ps1 -PackageDir ... -Signature ... -DownloadUrl ...
+-ToolsDir ... -ExpectedCertificateThumbprint ...` verifies the checksum,
+timestamped Authenticode identity, embedded release key/feed and Ed25519
+signature before producing `appcast-windows.xml` and the public signature
+sidecar. It uses the same committed `docs/releases/X.Y.Z.md`. For private
+qualification only, `-AllowUnsignedTest` accepts a test-key build and produces
+`appcast-windows-test.xml`; HTTP is allowed only on `127.0.0.1`.
+
+Finish/verify the Mac draft **first**, then the operator attaches the Windows
+installer, its `.sha256`, its `.ed25519` and `appcast-windows.xml` to that same
+unpublished version. A Mac-only draft replacement now refuses to delete any
+attached Windows assets. Published Mac-note refresh accepts an optional
+complete Windows set, verifies and preserves every asset digest, and still
+replaces only the Mac `appcast.xml`. No Windows-only latest release should
+strand Mac users without their feed. Signing, release approval and publishing
+remain the delegator/Ryan's. Actual package/update lifecycle qualification is
+still required before W.7 is complete; source checks are not release sign-off.
+
+Native qualification (2026-10-18): test-key builds0.0.7.1 and0.0.7.2 passed
+non-admin clean-VM install/launch, upgrade, authenticated rollback, actual
+WinSparkle tamper refusal and valid installation, and state/recording-preserving
+uninstall. Windows automatically permits Slint's CPU/WARP adapter fallback
+when no hardware adapter is available; it does not force CPU rendering.
+This does not qualify capture/encoding or Authenticode/SmartScreen behavior.
+Hosted package qualification still depends on the Windows runner memory fix.
+Release-note generation explicitly reads UTF8 on Windows PowerShell5.1.
+
 ## One-time setup (Ryan)
 
 ### 1. Publish the workflow and protect its environment
@@ -393,8 +541,9 @@ published release with one that embeds `docs/releases/X.Y.Z.md` from main:
    ```
 
 Preflight (no secrets) refuses drafts, unpublished or missing versions,
-missing notes and a release whose assets aren't exactly the DMG, its
-`.sha256` and `appcast.xml`. After approval the job downloads the three,
+missing notes and unexpected/partial asset sets. Assets must be the DMG, its
+`.sha256` and `appcast.xml`, optionally plus the complete four-file Windows
+set described above. After approval the job downloads the assets,
 checks their GitHub digests and the DMG's `.sha256`, reads the version, build
 and `SUPublicEDKey` from the DMG's app (mounted read-only), verifies the
 published appcast (one item, the DMG's EdDSA signature against that key,

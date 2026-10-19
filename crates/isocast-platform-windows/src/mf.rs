@@ -499,8 +499,13 @@ impl Session {
     ) -> Result<Self> {
         let (activation, label) = candidate;
         unsafe {
-            let transform: IMFTransform = activation.0.ActivateObject()?;
-            let attrs = transform.GetAttributes()?;
+            let transform: IMFTransform = activation
+                .0
+                .ActivateObject()
+                .context("activate video encoder IMFTransform")?;
+            let attrs = transform
+                .GetAttributes()
+                .context("get video encoder attributes")?;
             let asynchronous = attribute(&attrs, &MF_TRANSFORM_ASYNC)? != 0;
             let d3d11 = attribute(&attrs, &MF_SA_D3D11_AWARE)? != 0;
             if asynchronous {
@@ -536,7 +541,7 @@ impl Session {
             } else {
                 None
             };
-            let codec: ICodecAPI = transform.cast()?;
+            let codec: ICodecAPI = transform.cast().context("query video encoder ICodecAPI")?;
             let b_picture_control = codec
                 .IsSupported(&CODECAPI_AVEncMPVDefaultBPictureCount)
                 .is_ok();
@@ -642,14 +647,20 @@ impl Session {
             } else {
                 None
             };
-            let converter = Converter::with_format(
+            let convert = if mode == MfMode::Hardware {
+                Converter::with_format
+            } else {
+                Converter::for_software
+            };
+            let converter = convert(
                 device,
                 spec.width,
                 spec.height,
                 spec.fps,
                 pixel_format,
                 encoding.bit_depth(),
-            )?;
+            )
+            .context("create video encoder input converter")?;
             let output_info = transform.GetOutputStreamInfo(0)?;
             let mut session = Self {
                 activation,
@@ -1364,6 +1375,33 @@ fn name(activation: &IMFActivate) -> Result<String> {
     };
     unsafe { CoTaskMemFree(Some(value.0.cast())) };
     Ok(result)
+}
+
+/// The installed encoder transforms' names for each encoding, hardware
+/// (only those for `adapter`, as recording asks) or software, without
+/// activating any: the order recording tries them.
+pub(crate) fn encoder_names(
+    hardware: bool,
+    adapter: Option<(u32, i32)>,
+    encodings: &[VideoEncoding],
+) -> Result<Vec<(VideoEncoding, String)>> {
+    let encodings = encodings.to_vec();
+    std::thread::Builder::new()
+        .name("MF encoder names".into())
+        .spawn(move || -> Result<_> {
+            let _apartment = Apartment::new()?;
+            let _runtime = Runtime::new()?;
+            let mut result = Vec::new();
+            for encoding in encodings {
+                for activation in candidates(hardware, adapter, encoding)? {
+                    result.push((encoding, name(&activation)?));
+                }
+            }
+            Ok(result)
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("MF encoder listing panicked"))?
+        .context("list Media Foundation video encoders")
 }
 
 /// Enumerate and inspect H.264 transforms on a private COM thread. This

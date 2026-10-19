@@ -8,6 +8,7 @@
 // interface.
 
 import { Theme } from "theme.slint";
+import { PlatformText } from "state.slint";
 import { Icon, Icons } from "icons.slint";
 import {
     Button, IconButton, ButtonVariant, ControlSize, TransportButton, TransportKind, Capsule, CapsuleButton, CapsuleDivider, MiniToggle,
@@ -998,7 +999,7 @@ export component KitGallery inherits Rectangle {
                         height: Theme.control-h-sm;
                         spacing: 6px;
                         alignment: start;
-                        for k in ["⇧", "⌘", "R", "Esc"]: VerticalLayout {
+                        for k in [PlatformText.windows ? "Shift" : "⇧", PlatformText.primary-key, "R", "Esc"]: VerticalLayout {
                             alignment: center;
                             Kbd { text: k; }
                         }
@@ -1397,8 +1398,8 @@ export component KitGallery inherits Rectangle {
                                 entries: [
                                     { id: "add", label: "Add", has-submenu: true },
                                     { kind: MenuEntryKind.separator },
-                                    { id: "copy", label: "Copy", hint: "⌘C" },
-                                    { id: "paste", label: "Paste (Reference)", hint: "⌘V", disabled: true },
+                                    { id: "copy", label: "Copy", hint: PlatformText.primary + "C" },
+                                    { id: "paste", label: "Paste (Reference)", hint: PlatformText.primary + "V", disabled: true },
                                     { kind: MenuEntryKind.separator },
                                     { label: "Scene", kind: MenuEntryKind.heading },
                                     { id: "visible", label: "Visible", checked: true },
@@ -1781,7 +1782,7 @@ export component KitGallery inherits Rectangle {
                     HorizontalLayout {
                         spacing: Theme.space-3;
                         alignment: start;
-                        Button { width: 180px; text: "Start with this Mac"; icon: Icons.display; variant: ButtonVariant.primary; size: ControlSize.large; capsule: true; font-weight: Theme.weight-semibold; }
+                        Button { width: 180px; text: "Start with this " + PlatformText.machine; icon: Icons.display; variant: ButtonVariant.primary; size: ControlSize.large; capsule: true; font-weight: Theme.weight-semibold; }
                         Button { width: 180px; text: "Import from OBS…"; icon: Icons.file-up; size: ControlSize.large; capsule: true; }
                         Button { width: 180px; text: "Open a Setup…"; icon: Icons.folder-open; size: ControlSize.large; capsule: true; }
                     }

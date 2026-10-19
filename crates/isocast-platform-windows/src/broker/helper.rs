@@ -155,7 +155,7 @@ fn serve(
     commands: &mpsc::Receiver<Command>,
 ) -> Result<i32> {
     let _apartment = Apartment::new()?;
-    let device = GraphicsDevice::new()?;
+    let device = GraphicsDevice::on_adapter(init.luid)?;
     if device.adapter_luid() != init.luid {
         bail!(
             "capture helper adapter LUID differs from the parent; no cross-adapter/readback fallback is available"

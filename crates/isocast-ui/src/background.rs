@@ -9,7 +9,8 @@
 //! front as its window showed). Once the window is shown it becomes an
 //! accessory app (no Dock icon, no menu bar), and the window sits in the
 //! bottom-right corner of its screen, in front of other apps' windows but
-//! the app inactive. Windows asks winit not to activate the initial window;
+//! the app inactive. Windows asks winit not to activate the initial window
+//! (chrome_windows.rs);
 //! its normal interactive launch is unchanged. Elsewhere this is a no-op.
 
 use crate::Options;
@@ -34,11 +35,9 @@ pub fn configure(selector: slint::BackendSelector) -> slint::BackendSelector {
             .with_activate_ignoring_other_apps(false);
         selector.with_winit_event_loop_builder(builder)
     }
-    #[cfg(windows)]
-    {
-        selector.with_winit_window_attributes_hook(|attributes| attributes.with_active(false))
-    }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    // Windows: chrome_windows::configure asks winit not to activate (its
+    // window attributes hook also sets the theme and icon).
+    #[cfg(not(target_os = "macos"))]
     {
         selector
     }

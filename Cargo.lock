@@ -3100,6 +3100,7 @@ dependencies = [
  "tokio",
  "toml",
  "wgpu",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -3168,6 +3169,7 @@ dependencies = [
  "isocast-diagnostics",
  "isocast-mux",
  "isocast-protocol",
+ "isocast-surfaces",
  "libc",
  "native-tls",
  "nnnoiseless",
@@ -3179,6 +3181,7 @@ dependencies = [
  "taffy",
  "wasmtime",
  "wgpu",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3310,6 +3313,7 @@ dependencies = [
  "serde_path_to_error",
  "thiserror 2.0.21",
  "toml",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3317,11 +3321,14 @@ name = "isocast-surfaces"
 version = "0.0.8"
 dependencies = [
  "anyhow",
+ "isocast-ipc",
  "mach2",
  "objc2-core-foundation",
  "objc2-io-surface",
  "objc2-metal 0.3.2",
  "wgpu",
+ "windows",
+ "windows-core",
 ]
 
 [[package]]

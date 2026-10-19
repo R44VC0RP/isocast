@@ -63,19 +63,68 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo test --locked --no-fail-fast -p isocast-protocol -p isocast-diagnostics -p isocast-obsws -p isocast-mux
 
+      - name: Protect adjacent release assets (no GitHub calls)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          python - <<'PY'
+          import importlib.util, json
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location("release", "scripts/release-finalize.py")
+          release = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(release)
+          mac = {"Isocast-1.2.3-arm64.dmg", "Isocast-1.2.3-arm64.dmg.sha256", "appcast.xml"}
+          windows = release.windows_asset_names("1.2.3")
+          current = {}
+          def read_only(*args, **kwargs):
+              assert args[:2] == ("gh", "api") and "--method" not in args
+              return json.dumps(current)
+          release.command = read_only
+          for names, accepted in [(mac, True), (mac | windows, True),
+                                  (mac | {"appcast-windows.xml"}, False),
+                                  (mac | windows | {"unexpected.exe"}, False)]:
+              current = {"tag_name": "v1.2.3", "draft": False,
+                         "assets": [{"name": name} for name in names]}
+              try:
+                  _, assets = release.published_release("v1.2.3", mac, allow_windows=True)
+              except ValueError:
+                  assert not accepted
+              else:
+                  assert accepted and set(assets) == names
+          def forbidden(*args, **kwargs):
+              raise AssertionError("draft replacement must stop before signing or writing")
+          release.command = forbidden
+          release.appcast = forbidden
+          release.release_notes = lambda version: "Qualification notes"
+          release.all_releases = lambda: [{"tag_name": "v1.2.3", "draft": True,
+                                          "assets": [{"name": name} for name in mac | windows]}]
+          try:
+              release.draft_release(Path("unused"), {"version": "1.2.3"}, [], replace=True)
+          except ValueError as error:
+              assert "Windows assets" in str(error)
+          else:
+              raise AssertionError("Mac-only replacement accepted a Windows draft")
+          print("Mac-only/full Windows sets accepted; partial/unknown sets and destructive replacement refused")
+          PY
+
   engine:
     # W.1e: UI/native services compile with explicit platform stubs, not a
     # Windows capture, recording or shared-GPU-surface claim.
     # Native runtime checks run on exon-desk; this is the clean-machine build.
-    name: daemon + CLI + UI build (windows-latest)
+    name: daemon + CLI + UI + installer (windows-latest)
     runs-on: windows-latest
-    # Cold cache: the services, then the UI's dependencies at -j 1, then two
-    # rustc runs of ~8 minutes each (measured on a fast desktop CPU).
+    # Keep main's proven memory-bounded build: debug symbols off, no kit
+    # gallery, and the UI compiled separately with exactly one Cargo job.
     timeout-minutes: 90
     env:
-      # Debug info isn't needed to prove the build; smaller objects, cache
-      # and link steps (the UI memory figures below are measured with it off).
       CARGO_PROFILE_DEV_DEBUG: '0'
+      # Every step that can compile the UI, including Clippy/tests and the
+      # second installer, must keep this setting or restore the large module.
+      ISOCAST_UI_NO_GALLERY: '1'
+      # Qualification artifacts only, never release builds. The private half
+      # stays in the packaging lane's isolated VM-host folder, not GitHub.
+      ISOCAST_WINDOWS_UPDATE_TEST: '1'
+      ISOCAST_WINDOWS_UPDATE_KEY: '8mHwrJ82GhszmY2GnbKhW/qJsDL0XEYReeB5AsIT1Z0='
+      ISOCAST_WINDOWS_APPCAST_URL: 'http://127.0.0.1:17745/appcast-windows-test.xml'
     defaults:
       run:
         shell: bash
@@ -98,6 +147,13 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/ci/windows' }}
 
+      - name: Qualification build identity
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          export ISOCAST_WINDOWS_BUILD_VERSION="$version.1"
+          echo "ISOCAST_WINDOWS_BASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "ISOCAST_WINDOWS_BUILD_VERSION=$ISOCAST_WINDOWS_BUILD_VERSION" >> "$GITHUB_ENV"
+
       - name: Build native services and test binaries (do not run)
         run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-platform-windows -p isocast-ipc -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts
 
@@ -111,9 +167,13 @@ jobs:
       # each rustc to 10.8 GiB (12.2 committed). The gallery's .slint is not
       # compiled here; macOS CI and the exon-desk qualification build it.
       - name: Build UI and its test binary (do not run)
-        env:
-          ISOCAST_UI_NO_GALLERY: '1'
+        id: native_build
         run: cargo build --locked --all-targets -j 1 -p isocast-ui
+
+      - name: Check updater clients
+        run: |
+          cargo clippy --locked --all-targets -j 1 -p isocast-client -p isocast-cli -p isocast-ui -- -D warnings
+          cargo test --locked -j 1 -p isocast-client -p isocast-cli -p isocast-ui
 
       - name: Check Platform contract harness
         run: |
@@ -123,3 +183,174 @@ jobs:
       # Explicit CPU placeholder baseline, NOT native Windows qualification.
       - name: Clock and pool contracts (stub)
         run: python scripts/platform-contracts.py --bin target/debug/isocast-platform-contracts.exe --backend stub --suite core --work "$RUNNER_TEMP/platform-contracts"
+
+      - name: Windows wording snapshots (isolated, offscreen)
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = "$env:RUNNER_TEMP/wording"
+          New-Item -ItemType Directory -Force $work | Out-Null
+          $env:ISOCAST_SOCKET = "$work/engine.sock"
+          $env:ISOCAST_SETUP = "$work/setup.toml"
+          $env:ISOCAST_TIMELINES = "$work/timelines"
+          $env:ISOCAST_CALIBRATION = 'off'
+          $bin = (Resolve-Path target/debug).Path
+          $env:ISOCAST_DAEMON = "$bin/isocastd.exe"
+          Copy-Item scripts/screenshots/landscape.jpg, scripts/screenshots/brb.jpg $work
+          $setup = (Get-Content scripts/screenshots/offscreen.toml -Raw).Replace('folder = "recordings"', ('folder = "' + $work.Replace('\','/') + '/recordings"'))
+          [IO.File]::WriteAllText($env:ISOCAST_SETUP, $setup)
+          $views = [ordered]@{
+            permissions = @('permissions-sample:first-launch')
+            denied = @('permissions-sample:denied')
+            onboarding = @('first-run:2')
+            general = @('settings:general', 'drag:1144,280,1144,560')
+            stream = @('settings:stream')
+            hotkeys = @('settings:hotkeys','hotkeys-sample')
+            advanced = @('settings:advanced')
+            tools = @('menu-bar-open:Tools')
+            files = @('replay:saved')
+          }
+          # A hosted step runs in a job object that forbids breakaway, and
+          # the CLI deliberately refuses to start a daemon that its caller's
+          # job could kill (os error 5), so a recording always outlives its
+          # caller. Start this throwaway daemon as the step's own child.
+          Add-Type -Namespace Probe -Name Job -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool IsProcessInJob(IntPtr p, IntPtr j, out bool r); [DllImport("kernel32.dll")] public static extern bool QueryInformationJobObject(IntPtr j, int c, byte[] i, int n, IntPtr r);'
+          $inJob = $false; $null = [Probe.Job]::IsProcessInJob([Diagnostics.Process]::GetCurrentProcess().Handle, [IntPtr]::Zero, [ref]$inJob)
+          $limits = New-Object byte[] 144
+          $flags = if ([Probe.Job]::QueryInformationJobObject([IntPtr]::Zero, 9, $limits, 144, [IntPtr]::Zero)) { [BitConverter]::ToUInt32($limits, 16) } else { 0 }
+          "step job: in_job=$inJob breakaway_ok=$([bool]($flags -band 0x1800)) limit_flags=0x$($flags.ToString('x'))"
+          $daemon = Start-Process $env:ISOCAST_DAEMON -PassThru -NoNewWindow -RedirectStandardOutput "$work/isocastd.out" -RedirectStandardError "$work/isocastd.err"
+          $null = $daemon.Handle
+          try {
+            $deadline = (Get-Date).AddSeconds(60)
+            do {
+              Start-Sleep -Milliseconds 250
+              $status = & "$bin/isocast.exe" status --json | ConvertFrom-Json
+            } until ($status.daemon.pid -eq $daemon.Id -or $daemon.HasExited -or (Get-Date) -gt $deadline)
+            if ($status.daemon.pid -ne $daemon.Id) { throw 'Isolated wording daemon did not start' }
+            & "$bin/isocast.exe" get --json | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Isolated wording daemon did not answer' }
+            foreach ($view in $views.GetEnumerator()) {
+              $arguments = @('--snapshot', "$work/$($view.Key).png", '--size', '1440x900', '--scale', '2', '--a11y')
+              foreach ($state in $view.Value) { $arguments += @('--state', $state) }
+              $process = Start-Process "$bin/isocast-ui.exe" -ArgumentList $arguments -PassThru -NoNewWindow -RedirectStandardOutput "$work/$($view.Key).txt" -RedirectStandardError "$work/$($view.Key).log"
+              $null = $process.Handle
+              if (-not $process.WaitForExit(60000)) { $process.Kill(); $process.WaitForExit(); throw "Snapshot timed out: $($view.Key)" }
+              if ($process.ExitCode -ne 0 -or -not (Test-Path "$work/$($view.Key).png")) { throw "Snapshot failed: $($view.Key)" }
+            }
+            foreach ($args in @(@('permissions','--help'), @('setup','init','--help'), @('stream','key','--help'), @('capacity','--help'))) {
+              $text = & "$bin/isocast.exe" @args | Out-String
+              if ($LASTEXITCODE -ne 0 -or $text -match 'this Mac|Keychain|macOS|System Settings|~/Movies') { throw "Wrong Windows help: $args" }
+              $text | Set-Content "$work/help-$($args -join '-').txt"
+            }
+          } finally {
+            & "$bin/isocast.exe" engine shutdown --json
+            if (-not $daemon.WaitForExit(15000)) { $daemon.Kill(); throw 'Could not shut down isolated wording daemon' }
+          }
+
+      - name: Keep native Windows wording evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-wording-snapshots
+          path: ${{ runner.temp }}/wording
+          if-no-files-found: warn
+          retention-days: 14
+
+      # W.7a: unsigned qualification only. No signing secrets or release writes.
+      - name: Package per-user installer
+        # Includes the pinned, security-patched WinSparkle source build.
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -property installationPath
+          $redist = Get-ChildItem "$vs\VC\Redist\MSVC" -Directory | Where-Object Name -Match '^\d+\.\d+\.\d+$' | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          $crt = Get-ChildItem "$($redist.FullName)\x64" -Directory -Filter 'Microsoft.VC*.CRT' | Select-Object -First 1
+          if (-not $crt) { throw 'x64 app-local Visual C++ CRT not found' }
+          "ISOCAST_WINDOWS_CRT=$($crt.FullName)" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          ./scripts/windows/package.ps1 -BinDir target/debug -OutputDir "$env:RUNNER_TEMP/windows-package" -ToolsDir "$env:RUNNER_TEMP/package-tools" -CrtDir $crt.FullName
+
+      - name: Install and uninstall without deleting user files
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Get-ChildItem "$env:RUNNER_TEMP/windows-package/*-setup.exe" | Select-Object -ExpandProperty FullName
+          $install = "$env:LOCALAPPDATA\Programs\Isocast"
+          $process = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Install failed: $($process.ExitCode)" }
+          & "$install\isocast.exe" --help
+          if ($LASTEXITCODE -ne 0) { throw 'Installed CLI did not load' }
+          $env:ISOCAST_CALIBRATION = 'off'
+          # The step's job forbids breakaway, so the CLI refuses to launch the
+          # daemon itself (see the wording step); start the installed one.
+          # The clean-VM lifecycle qualifies the CLI's own adjacent launch.
+          $daemon = Start-Process "$install\isocastd.exe" -PassThru -NoNewWindow -RedirectStandardOutput "$env:RUNNER_TEMP/installed-isocastd.out" -RedirectStandardError "$env:RUNNER_TEMP/installed-isocastd.err"
+          $null = $daemon.Handle # Retain this process identity even if its PID is reused.
+          $deadline = (Get-Date).AddSeconds(60)
+          do {
+            Start-Sleep -Milliseconds 250
+            $status = & "$install\isocast.exe" status --json | ConvertFrom-Json
+          } until ($status.daemon.pid -eq $daemon.Id -or $daemon.HasExited -or (Get-Date) -gt $deadline)
+          if ($status.daemon.pid -ne $daemon.Id) { throw 'The installed daemon did not start' }
+          & "$install\isocast.exe" get --json | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Installed CLI could not reach its daemon' }
+          New-Item -ItemType Directory -Force "$install\recordings", "$env:LOCALAPPDATA\Isocast" | Out-Null
+          'keep recording' | Set-Content "$install\recordings\keep.mp4"
+          'keep settings' | Set-Content "$env:LOCALAPPDATA\Isocast\packaging-sentinel"
+          $process = Start-Process "$install\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Uninstall failed: $($process.ExitCode)" }
+          if (-not $daemon.WaitForExit(5000)) { throw 'Uninstall did not stop the installed daemon' }
+          $daemon.Dispose()
+          if (Test-Path "$install\isocast.exe") { throw 'Executable remains after uninstall' }
+          if ((Get-Content "$install\recordings\keep.mp4") -ne 'keep recording') { throw 'Recording removed or changed' }
+          if ((Get-Content "$env:LOCALAPPDATA\Isocast\packaging-sentinel") -ne 'keep settings') { throw 'Settings removed or changed' }
+
+      - name: Keep unsigned installer and exact payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-x64-unsigned
+          path: ${{ runner.temp }}/windows-package
+          if-no-files-found: error
+          retention-days: 14
+
+      # A distinct compiled build, with the same qualification key, lets the
+      # clean VM prove update and authenticated rollback without release keys.
+      - name: Build second update candidate
+        run: |
+          export ISOCAST_WINDOWS_BUILD_VERSION="$ISOCAST_WINDOWS_BASE_VERSION.2"
+          cargo build --locked -j 1 -p isocast-ui
+
+      - name: Package second update candidate
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          ./scripts/windows/package.ps1 -BinDir target/debug -OutputDir "$env:RUNNER_TEMP/windows-package-next" -ToolsDir "$env:RUNNER_TEMP/package-tools" -CrtDir $env:ISOCAST_WINDOWS_CRT
+
+      - name: Keep second qualification installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-x64-unsigned-next
+          path: ${{ runner.temp }}/windows-package-next
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Retain successful builds even if packaging fails
+        if: ${{ !cancelled() && steps.native_build.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $folder = "$env:RUNNER_TEMP/windows-build-diagnostics"
+          New-Item -ItemType Directory -Force $folder | Out-Null
+          Copy-Item target/debug/isocast.exe, target/debug/isocastd.exe, target/debug/isocast-ui.exe, target/debug/isocast-capture.exe $folder
+          if ($env:ISOCAST_WINDOWS_CRT) { Copy-Item "$env:ISOCAST_WINDOWS_CRT\*.dll" $folder }
+          Get-ChildItem $folder -File | ForEach-Object { Get-FileHash $_.FullName -Algorithm SHA256 } | ConvertTo-Json | Set-Content "$folder/hashes.json"
+
+      - name: Keep unpackaged diagnostic binaries
+        if: ${{ !cancelled() && steps.native_build.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-x64-unpackaged-diagnostics
+          path: ${{ runner.temp }}/windows-build-diagnostics
+          if-no-files-found: error
+          retention-days: 14

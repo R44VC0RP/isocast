@@ -57,9 +57,16 @@ impl Gpu {
 
     fn open(start: impl FnOnce() + Send + 'static) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            backends: if cfg!(windows) {
+                wgpu::Backends::DX12
+            } else {
+                wgpu::Backends::PRIMARY
+            },
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
+        #[cfg(windows)]
+        let adapter = isocast_surfaces::dx12_adapter(&instance, None)?;
+        #[cfg(not(windows))]
         let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()

@@ -88,12 +88,15 @@ pub fn expand_home(path: &str) -> String {
 /// `path` with this user's home folder written `~` (as the setup and the
 /// Files list show paths).
 pub fn abbreviate_home(path: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && home != "/" => match path.strip_prefix(home.as_str()) {
-            Some("") => "~".into(),
-            Some(rest) if rest.starts_with('/') => format!("~{rest}"),
-            _ => path.to_string(),
-        },
+    // The home folder as this OS has it (the user profile on Windows,
+    // where HOME is unset), with its own separator after it.
+    let home = isocast_protocol::api::home_folder();
+    let home = home.to_string_lossy();
+    let separator = |rest: &str| rest.starts_with('/') || (cfg!(windows) && rest.starts_with('\\'));
+    match path.strip_prefix(home.as_ref()) {
+        _ if home.is_empty() || home == "/" => path.to_string(),
+        Some("") => "~".into(),
+        Some(rest) if separator(rest) => format!("~{rest}"),
         _ => path.to_string(),
     }
 }
@@ -214,17 +217,69 @@ pub fn reveal(path: &str) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Show a file or folder selected in File Explorer.
+#[cfg(windows)]
+pub fn reveal(path: &str) {
+    let path = std::path::PathBuf::from(path.replace('/', "\\"));
+    let mut select = std::ffi::OsString::from("/select,");
+    select.push(path.as_os_str());
+    // Explorer is a GUI program: no console window opens.
+    if let Err(error) = std::process::Command::new("explorer.exe")
+        .arg(select)
+        .spawn()
+    {
+        isocast_diagnostics::diagnostic!("error"; "couldn’t show {}: {error}", path.display());
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn reveal(_path: &str) {}
 
 /// Open a web page in the browser (a prefilled GitHub issue to post).
 pub fn open_url(url: &str) {
     #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("/usr/bin/open").arg(url).spawn();
-    #[cfg(not(target_os = "macos"))]
-    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+    let result = std::process::Command::new("/usr/bin/open")
+        .arg(url)
+        .spawn()
+        .map(drop);
+    #[cfg(windows)]
+    let result = shell_open(url);
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let result = std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(drop);
     if let Err(error) = result {
         eprintln!("couldn’t open {url}: {error}");
+    }
+}
+
+/// Open a URL with its registered handler (the default browser).
+#[cfg(windows)]
+fn shell_open(url: &str) -> std::io::Result<()> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (verb, target) = (wide("open"), wide(url));
+    // SAFETY: NUL-terminated strings live through the synchronous call.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // Values above 32 mean success (the documented HINSTANCE convention).
+    if result as isize > 32 {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "ShellExecute failed with code {}",
+            result as isize
+        )))
     }
 }
 

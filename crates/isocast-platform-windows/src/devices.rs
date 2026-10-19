@@ -187,12 +187,15 @@ pub(crate) fn devices() -> Result<Devices> {
             Vec::new()
         });
     notes.push(
-        "Camera id is the Media Foundation symbolic link. formats lists only native NV12 modes \
-         (progressive or two-field, recorded as delivered), which Isocast captures on the GPU; \
-         a camera with no such mode, or whose modes could not be read, is listed with none. \
+        "Camera id is the Media Foundation symbolic link. formats lists supported NV12, \
+         YUY2/UYVY, RGB24/RGB32/ARGB32 and MJPG modes. At matching size/rate, native NV12 \
+         wins, then other uncompressed formats, then MJPEG. CPU pixels use one GPU upload; \
+         colour conversion is on the GPU and MJPEG uses Media Foundation decoding. \
+         Missing SDR colour metadata defaults to limited BT.709 for HD or BT.601 for SD; \
+         RGB defaults full range. Frame rates are nominal; the exact ratio is in the manifest. \
          When another app already controls a camera, Isocast attaches read-only through the \
-         Windows Camera Frame Server and records that app's current MJPEG mode (decoded to \
-         BGRA), which need not be listed; a source's width, height and fps must then match \
+         Windows Camera Frame Server and keeps that app's current mode, which need not be \
+         listed; a source's width, height and fps must then match \
          it or be left out. kind is not reported (other)."
             .into(),
     );
@@ -242,16 +245,16 @@ fn camera(device: CameraDevice) -> Camera {
     let mut formats: Vec<VideoFormat> = Vec::new();
     for mode in &device.formats {
         let fps = f64::from(mode.fps);
-        match formats
-            .iter_mut()
-            .find(|format| (format.width, format.height) == (mode.width, mode.height))
-        {
+        match formats.iter_mut().find(|format| {
+            (format.width, format.height) == (mode.width, mode.height)
+                && format.pixel_format == mode.pixel_format.name()
+        }) {
             Some(format) if format.frame_rates.contains(&fps) => {}
             Some(format) => format.frame_rates.push(fps),
             None => formats.push(VideoFormat {
                 width: mode.width,
                 height: mode.height,
-                pixel_format: "NV12".into(),
+                pixel_format: mode.pixel_format.name().into(),
                 frame_rates: vec![fps],
                 frame_rate_ranges: Vec::new(),
             }),
