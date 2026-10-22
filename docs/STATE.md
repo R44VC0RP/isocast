@@ -58,6 +58,9 @@ A new capability needs all of these:
 - Allowed: the delegator's merges; the `ui-dev` offscreen loop and headless motion harness (no windows, no focus
   stealing); being the Mac engine in remote tests (firewall off; the signed "Isocast Dev" already has LAN access).
 - The nightly hardware runner starts here (cronctl `isocast-hw-nightly`, 01:30 New York).
+- The isocast.com preview (`website/`, static, no build) is served on the LAN at http://basebook.local:8790/ by the
+  LaunchAgent `dev.isocast.website` (KeepAlive; it serves the `.claude/worktrees/website` checkout). Port 8788 is
+  something else; leave it alone. (2026-10-22)
 - Never build, test or run gates here as a fallback; when remote-build has no free host, wait and retry.
 
 **IsocastBuild** (`/Volumes/IsocastBuild`): a 120 GiB APFS sparse bundle on the Extreme SSD.
