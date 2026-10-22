@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # ci/<lane>: candidates published by scripts/ci.sh before they merge.
+    branches: [main, 'ci/**']
   pull_request:
   workflow_dispatch:
 
@@ -12,7 +13,9 @@ permissions:
 # A newer push to the same branch or pull request cancels the run before it.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Per branch, so lanes never cancel each other; a lane's newer candidate
+  # (or a pull request's newer push) cancels its older run, main's never.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/ci/') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,7 +27,10 @@ jobs:
     # GitHub-hosted only: pull requests from forks must never run on our own
     # machines, so no self-hosted runners here.
     runs-on: macos-15
-    timeout-minutes: 60
+    # A cold cache (a ci/** candidate, or main after a failed run, which
+    # saves no cache) needs ~29 min of clippy and ~28 of tests before the
+    # contract and docs steps: 60 cut one off at 61 min (2026-10-22).
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 

@@ -977,12 +977,49 @@ mod tests {
             });
             let audio = &writer.audio[0];
             let sample = audio_sample_buffer(&audio.format, 1, &[0.0; 480], at).unwrap();
-            let audio = catch(|| unsafe { audio.input.appendSampleBuffer(&sample) });
+            let early_audio = catch(|| unsafe { audio.input.appendSampleBuffer(&sample) });
             writer.cancel();
-            for error in [video, audio] {
-                let error = error.expect_err("append before startSession must throw");
+            let error = video.expect_err("a pixel buffer before startSession must throw");
+            assert!(error.to_string().contains("exception"), "{error:#}");
+            // Audio before startSession: macOS 26 throws, but macOS 15
+            // (15.7.9, the hosted CI runner) accepts the sample and answers
+            // YES. Recording never does this (a writer appends only after
+            // `start`); before 26, either answer is fine.
+            let os = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
+            if os.majorVersion >= 26 {
+                let error =
+                    early_audio.expect_err("audio before startSession must throw on macOS 26+");
+                assert!(error.to_string().contains("exception"), "{error:#}");
+            } else if let Err(error) = &early_audio {
+                // macOS 15.7.9 returns; an older or later 15.x may throw,
+                // which must still arrive as an error, not an unwind.
                 assert!(error.to_string().contains("exception"), "{error:#}");
             }
+
+            // An audio append that throws on every version: an input on a
+            // writer that never started writing ("status is 0").
+            let path = std::env::temp_dir().join(format!(
+                "isocast-append-exception-unstarted-{}.mov",
+                std::process::id()
+            ));
+            let url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
+            let unstarted = unsafe {
+                AVAssetWriter::assetWriterWithURL_fileType_error(
+                    &url,
+                    AVFileTypeQuickTimeMovie.unwrap(),
+                )
+            }
+            .unwrap();
+            let input = unsafe {
+                AVAssetWriterInput::assetWriterInputWithMediaType_outputSettings(
+                    AVMediaTypeAudio.unwrap(),
+                    Some(&aac_settings(1)),
+                )
+            };
+            add_input(&unstarted, &input).unwrap();
+            let error = catch(|| unsafe { input.appendSampleBuffer(&sample) })
+                .expect_err("audio on a writer that never started must throw");
+            assert!(error.to_string().contains("exception"), "{error:#}");
         });
     }
 }
