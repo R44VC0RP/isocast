@@ -17,7 +17,7 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   TLS 1.3, local-only code + SPAKE2 pairing, OS DNS-SD. Verified basebook ↔ exon-desk both ways.
 - **In progress:** R2 (app on a remote engine) paused as WIP on `agent/remote-r2-core`/`-ui`
   (`/Volumes/IsocastBuild/remote-r2-*/scratch/REPORT.md`); Windows UI DirectComposition port, uncommitted in
-  `.claude/worktrees/windows-perf`; `agent/ci-green` making hosted CI green.
+  `.claude/worktrees/windows-perf`; `agent/ci-green` making hosted CI green and adding pre-merge CI (`scripts/ci.sh`).
 
 ## 2. Architecture map
 
@@ -119,8 +119,13 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 **Public repo and CI:** R44VC0RP/isocast has its own history. Only the delegator pushes; agents never write to GitHub.
 - `scripts/publish-snapshot.sh [--push] "msg"` copies `git archive main` into `~/dev/isocast-public`, after scanning
   for secrets and AI attribution.
-- `scripts/windows-ci.sh` (clean worktree only) exports HEAD, pushes only `ci/windows`, saves logs to
-  `/Volumes/IsocastBuild/windows/scratch`. Workflows: ci, e2e, windows (`ci/**` only), release, nightly-soak, visual.
+- `scripts/ci.sh [--worktree] [--merge-main] [--lane NAME] [--allow-workflow-changes]` (2026-10-22) publishes a
+  candidate (`git archive` of HEAD's tree, or the worktree's through a temporary index, so export-ignore applies and
+  is checked) as ONE commit on public main to `ci/<lane>` only, after the same scan, and waits for CI, Engine E2E and
+  Windows on it; evidence under `/Volumes/IsocastBuild/ci/<lane>`. It refuses a candidate without main (unless
+  `--merge-main`) and a `.github/` that differs from public main (unless `--allow-workflow-changes`). ci, e2e and
+  windows run on `ci/**` pushes; a lane's newer push cancels its older run, never another lane's.
+  `scripts/windows-ci.sh` is `ci.sh --lane windows --workflow Windows`. Other workflows: release, nightly-soak, visual.
 
 ## 4. Commands that matter
 
@@ -199,8 +204,14 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 - 2026-10-18: WGC `CreateForWindow` fails with E_INVALIDARG on WS_EX_NOACTIVATE windows. `TryGetNextFrame` returns S_OK plus null when no frame is ready.
 - 2026-10-22: Windows DNS-SD answers a new browse from a cache that keeps dead engines for about 4,000 s. Treat browse results as hints until a resolve answers.
 - 2026-10-22: GPU-backed private commit is not physical RAM. Claim CPU or RAM wins only from workloads matched against OBS. `ISOCAST_SOCKET` sets the `.logs` path; `ISOCAST_LOG_DIR` is ignored.
-- 2026-10-13: GitHub's macos-15 runners are small VMs with paravirtual Metal, and they drop frames. Hosted e2e uses `--hosted` (720p30). The zero-drop bar belongs on the M2s.
-- 2026-10-22: The latest hosted runs are red. On macOS, `writer::tests::append_exceptions_are_errors_without_unwinding_into_rust` fails, and e2e `oracle_masks` and `win_record` drop frames (`agent/ci-green` owns this).
+- 2026-10-22: GitHub's macos-15 runners (macOS 15.7.9, 3 vCPU M1 VM, paravirtual Metal and encoders) drop frames:
+  GPU waits stall up to ~143 ms, and a zero-drop qualification never predicted a zero-drop suite (every hosted run
+  2026-10-17..22 dropped somewhere; worst 1.5% of the suite's slots). So `e2e.py --hosted` always allows accounted
+  loss up to 25% per output and 3% over the suite (dropped + held oracle pictures, at most 3 per output and never two
+  in a row + late file starts, at most 3 slots), with every integrity, picture-oracle and audio check still strict.
+  The zero-drop bar is the test Macs' (no `--hosted`).
+- 2026-10-22: macOS 15 `AVAssetWriterInput appendSampleBuffer:` before `startSessionAtSourceTime:` returns YES; macOS
+  26 throws. The pixel-buffer adaptor throws on both, as does any append on a writer that never started writing.
 
 ## 7. Open decisions and waiting on Ryan
 

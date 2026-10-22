@@ -225,7 +225,7 @@ fn open_part(spec: &JoinPart, format: Option<&Format>) -> Result<Part> {
         Some((frames, fps)) if fps > 0 => unsafe { CMTime::new(frames as i64, fps as i32) },
         _ => range.duration,
     };
-    let at = |seconds: f64| unsafe { CMTime::with_seconds(seconds, timescale) };
+    let at = |seconds: f64| time_at(seconds, timescale);
     let offset = at(spec.offset_seconds.max(0.0));
     let audio = match &spec.audio {
         None => AudioSource {
@@ -310,6 +310,16 @@ fn matches(track: &AVAssetTrack, recorded: u32, format: &Format) -> bool {
         && (size.width, size.height) == format.size
         && (fps == format.fps || fps == 0 || format.fps == 0)
         && main10(&own) == format.ten_bit
+}
+
+/// `seconds` on a `timescale` clock, rounded to the nearest tick. Not
+/// `CMTimeMakeWithSeconds`, which truncates: a clip's in point of
+/// 2.1666666666666665 s (frame 65 at 30 fps) became 129,999/60,000, a tick
+/// before the frame, so the export showed the frame before it for one tick
+/// at the join (a 1-tick sample, and FFmpeg's "non monotonically
+/// increasing dts"; hosted Engine E2E, 2026-10-22).
+fn time_at(seconds: f64, timescale: i32) -> CMTime {
+    unsafe { CMTime::new((seconds * f64::from(timescale)).round() as i64, timescale) }
 }
 
 fn valid(time: CMTime) -> bool {
@@ -1384,6 +1394,18 @@ fn write(spec: &JoinSpec, path: &Path, progress: OnJoinProgress) -> Result<Joine
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_points_land_on_their_frame_not_a_tick_before() {
+        // 65 frames at 30 fps, as f64 seconds: 2.1666666666666665, which
+        // times 60,000 is 129,999.99999999999.
+        let at = time_at(65.0 / 30.0, 60_000);
+        assert_eq!(({ at.value }, { at.timescale }), (130_000, 60_000));
+        assert_eq!({ time_at(0.0, 600).value }, 0);
+        assert_eq!({ time_at(1.0 / 3.0, 90).value }, 30);
+        // A manifest's microsecond offset of one frame at 30 fps.
+        assert_eq!({ time_at(0.033333, 60_000).value }, 2000);
+    }
 
     #[test]
     fn a_joined_file_never_replaces_one_made_meanwhile() {

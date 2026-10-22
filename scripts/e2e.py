@@ -19,10 +19,12 @@ hardware-only streaming is explicitly skipped. No performance fallback is
 compared with hardware benchmark numbers.
 
 --hosted qualifies a lighter 720p30 H.264 profile with two program+ISO/stream
-runs. Zero drops in qualification keeps the zero-drop bar for the suite.
-Otherwise only accounted video losses up to 25% per output are allowed; all
-integrity, duration, audio, sync, picture and API checks still apply. Ordinary
-local/test-Mac runs remain 1080p60 and require zero drops. --summary REPORT
+runs (each output within 25% video loss), then allows the suite accounted
+video losses up to 25% per output; all integrity, duration, audio, sync,
+picture and API checks still apply. A zero-drop qualification does not keep
+the zero-drop bar: GitHub's paravirtual GPU stalls (gpu_wait p99 up to
+143 ms) drop a frame or more in some scenario of nearly every hosted run.
+Ordinary local/test-Mac runs remain 1080p60 and require zero drops. --summary REPORT
 renders the same hardware, qualification and loss tables used by Actions.
 
 The frame oracle (#124): the oracle_* scenarios record generated fixture
@@ -86,6 +88,11 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "timeline", 
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
+# Hosted only: held oracle pictures per output, late-starting frame slots per
+# file, and accounted losses (dropped + held + late) over the whole suite.
+HOSTED_HOLD_CAP = 3
+HOSTED_LATE_START_CAP = 3
+HOSTED_SUITE_LOSS_LIMIT = 0.03
 # The longest run folder whose scenarios' sockets all fit in sun_path.
 SHORT_ROOT = 44
 
@@ -600,11 +607,30 @@ def check_take(path, manifest, duration=None, sync=False, expected_sources=None,
                 "manifest source/file list differs from setup")
     rows = []
     for f, loss in zip(manifest["files"], losses):
-        check_loss(loss, loss_limit(evidence))
+        limit = loss_limit(evidence)
+        check_loss(loss, limit)
         file = path.parent / f["path"]
-        row = check_file(file, duration if duration is not None else f["duration_seconds"],
-                         f["fps"], (f["width"], f["height"]),
+        expect = duration if duration is not None else f["duration_seconds"]
+        late = 0
+        if duration is not None and limit:
+            # Hosted: a file whose encoder started late covers the take
+            # from its manifest's start_offset_seconds on; those missing
+            # first slots count as accounted loss (test Macs: strict).
+            late = round((f.get("start_offset_seconds") or 0) * f["fps"])
+            take_slots = round(duration * f["fps"])
+            require(late <= HOSTED_LATE_START_CAP,
+                    f"{file.name}: started {late} frame(s) late, more than the hosted cap of "
+                    f"{HOSTED_LATE_START_CAP}")
+            require(late + loss["dropped"] <= limit * take_slots,
+                    f"{file.name}: started {late} frame(s) late and dropped {loss['dropped']} of {take_slots} "
+                    f"slots, more than the hosted {limit:.0%}")
+            expect = duration - late / f["fps"]
+            if late:
+                loss["late_start_slots"] = late
+        row = check_file(file, expect, f["fps"], (f["width"], f["height"]),
                          dropped=loss["dropped"], repeated=loss["repeated"])
+        if late:
+            row["late_start_slots"] = late
         require(row["frames"] == f["frames"], f"{file.name}: manifest/decoded frame counts disagree")
         if sync:
             row.update(sync_check(file, f["fps"]))
@@ -1045,7 +1071,21 @@ def record_targets(e, evidence):
     time.sleep(1.5)
     second = e.rpc("split")
     time.sleep(1.5)
-    e.rpc("retake")
+    # The engine refuses a retake while the split is still starting its
+    # files (busy, "retry once it has finished"); a loaded hosted runner can
+    # take longer than 1.5 s to finish one, so hosted runs retry as the
+    # error says, bounded. Test Macs must finish within the 1.5 s.
+    retries, deadline = 0, time.time() + 10
+    while True:
+        try:
+            e.rpc("retake")
+            break
+        except RpcError as exc:
+            if (not loss_limit(evidence) or "still starting its files" not in exc.error.get("message", "")
+                    or time.time() > deadline):
+                raise
+            retries += 1
+            time.sleep(0.2)
     time.sleep(1.5)
     e.rpc("stop")
     until(lambda: e.rpc("status")["state"] == "idle", description="idle recorder")
@@ -1059,7 +1099,8 @@ def record_targets(e, evidence):
             and any(Path(r["take"]) == Path(second["manifest"]) for r in session["removed"]),
             f"split and retake did not stay together: {into} {session.get('clips')}")
     require(into["takes"] == 2 and into["clips"] == 2, f"stopped event timeline: {into}")
-    out["split_retake"] = {"timeline": into, "clips": [c["take"] for c in session["clips"]]}
+    out["split_retake"] = {"timeline": into, "clips": [c["take"] for c in session["clips"]],
+                           "retake_retries_while_splitting": retries}
     # A current timeline from before #114: migrated, shown, never used.
     e.stop()
     write_json(e.root / "timelines" / "current.json", {"timeline": "e2e"})
@@ -1598,18 +1639,33 @@ def nle_tracks(fmt, path):
     return tracks, int(rate), audio
 
 
+def by_slot(pictures, fps):
+    """`pictures` (pattern_frames rows, pts first) as the picture on screen
+    in each frame slot from the first picture's: a dropped slot shows the
+    picture before it, as an editor plays a file with gaps (and Isocast's
+    export holds it). Without drops, slot k is simply picture k."""
+    slots = []
+    for i, row in enumerate(pictures):
+        start = round((row[0] - pictures[0][0]) * fps)
+        end = round((pictures[i + 1][0] - pictures[0][0]) * fps) if i + 1 < len(pictures) else start + 1
+        require(start == len(slots) and end > start, "pictures off the frame grid or out of order")
+        slots.extend([row] * (end - start))
+    return slots
+
+
 def check_nle(e, export, segments, crop, crop_segments, fps, sources):
     """timeline_export_nle in each format, checked against Isocast's own
-    export `export` frame by frame."""
+    export `export` frame by frame (by frame slot, so accounted drops in
+    either line up by time, not by stored picture)."""
     exported = {f["source"]: f for f in export["files"]}
     order = [s for s in exported if s not in ("program", "edited")] + ["program"]
     want = {}  # export file -> its pictures
     for f in export["files"]:
-        want[f["source"]] = pattern_frames(Path(f["path"]), f["width"], f["height"])
+        want[f["source"]] = by_slot(pattern_frames(Path(f["path"]), f["width"], f["height"]), f["fps"])
     def same(a, b, width):
         apart = abs(a[1] - b[1])
         return min(apart, width - apart) <= 3 and (a[2] > 50) == (b[2] > 50)
-    rows = []
+    rows, slotted = [], {}
     for fmt, app in (("fcpxml", "final_cut"), ("fcpxml", "resolve"), ("xmeml", "premiere"),
                      ("xmeml", "resolve"), ("otio", None)):
         params = {"format": fmt, "folder": str(e.root / "nle")}
@@ -1637,10 +1693,12 @@ def check_nle(e, export, segments, crop, crop_segments, fps, sources):
                 require((cropped is None) == (want_crop is None) and (cropped is None or all(
                         abs(a - b) < 1e-3 for a, b in zip(cropped, want_crop))),
                         f"{path.name}: {source} at {start}: crop read back as {cropped}, the clip's is {want_crop}")
-                src = sources.get(Path(file))
-                if src is None:
-                    sources[Path(file)] = src = (pattern_frames(Path(file), width, exported[source]["height"]), None)
-                frames = src[0]
+                frames = slotted.get(Path(file))
+                if frames is None:
+                    src = sources.get(Path(file))
+                    if src is None:
+                        sources[Path(file)] = src = (pattern_frames(Path(file), width, exported[source]["height"]), None)
+                    slotted[Path(file)] = frames = by_slot(src[0], fps)
                 for j in range(start, end):
                     k = first + j - start
                     got = want[source][j] if j < len(want[source]) else None
@@ -1962,7 +2020,13 @@ def scenario_projects(e, cfg, evidence):
     for f in export["files"]:
         require(Path(f["path"]).is_file() and all(Path(p["path"]).is_file() for p in f["parts"]),
                 f"export manifest does not resolve after rename: {f}")
-        check_file(Path(f["path"]), f["duration_seconds"], f["fps"])
+        # An export keeps every decoded picture of its parts, their accounted
+        # losses included (as in scenario_timeline).
+        frames = sum(int(probe(Path(part["path"]))["streams"][0]["nb_read_frames"]) for part in f["parts"])
+        dropped = round(f["duration_seconds"] * f["fps"]) - frames
+        row = check_file(Path(f["path"]), f["duration_seconds"], f["fps"],
+                         dropped=dropped if loss_limit(evidence) else 0)
+        require(row["frames"] == frames, f"{Path(f['path']).name}: the export lost decoded pictures at a join")
     for clip in export["clips"]:
         require(Path(clip["take"]).is_file(), "export clip take does not resolve after rename")
     # Collisions get a number, and bad names name the field.
@@ -2655,21 +2719,64 @@ class Oracle:
     """Expected-vs-actual checks of one output; `verdict` fails with the
     first mismatch and a contact sheet."""
 
-    def __init__(self, label, path, root, evidence):
+    def __init__(self, label, path, root, evidence, hold_ok=None):
         self.label, self.path, self.root, self.evidence = label, Path(path), root, evidence
         self.checked, self.mismatches, self.pictures = 0, [], set()
+        # Hosted runs (accounted losses allowed): a source frame that came
+        # too late for its slot shows the region's previous picture again,
+        # a held frame (the runner's wake jitter, p99 ~26 ms, passes half a
+        # frame at 30 fps). A hold must repeat exactly the previous picture's
+        # expected frame of the same source, after a picture that was right,
+        # so a run of holds is at most one long; holds count in the output's
+        # loss budget. Test Macs, and edited exports (made from files, not
+        # live), stay strict.
+        self.hold_ok = loss_limit(evidence) > 0 if hold_ok is None else hold_ok
+        self.held, self.previous = [], {}
 
     def expect(self, index, t, region, want, got, allowed=()):
         self.checked += 1
         self.pictures.add(index)
-        if got == want or got in allowed:
+        previous = self.previous.get(region)
+        right = got == want or got in allowed
+        held = (not right and self.hold_ok and previous is not None
+                and previous[0] == index - 1 and previous[2]           # right the picture before
+                and got == previous[1]                                  # exactly its expected frame
+                and isinstance(got, tuple) and isinstance(want, tuple)
+                and got[:1] == ("id",) and got[:2] == want[:2])         # the same source
+        self.previous[region] = (index, want, right)
+        if right:
+            return
+        if held:
+            self.held.append((index, t, region, want, got))
             return
         self.mismatches.append((index, t, region, want, got))
 
+    def loss_row(self):
+        """This output's row of the take's accounted losses, if it has one."""
+        for key, row in self.evidence.get("drops", {}).items() if isinstance(self.evidence, dict) else ():
+            if Path(key).resolve() == self.path.resolve():
+                return row
+        return None
+
     def verdict(self):
         row = {"output": self.path.name, "checks": self.checked, "mismatches": len(self.mismatches)}
+        held = sorted({i for i, *_ in self.held})
+        if self.held:
+            row["held"] = [{"picture": i, "time": round(t, 4), "region": r, "expected": describe(w),
+                            "actual": describe(g)} for i, t, r, w, g in self.held]
         self.evidence.setdefault("oracle", []).append(row)
         require(self.checked > 0, f"{self.label}: the oracle checked nothing")
+        if held:
+            loss = self.loss_row()
+            dropped, slots = (loss["dropped"], loss["slots"]) if loss else (0, len(self.pictures))
+            if loss:
+                loss["held"] = loss.get("held", 0) + len(held)
+            require(len(held) <= HOSTED_HOLD_CAP,
+                    f"{self.label} ({self.path.name}): {len(held)} held pictures (at {held[:5]}), more than "
+                    f"the hosted cap of {HOSTED_HOLD_CAP} per output")
+            require(dropped + len(held) <= loss_limit(self.evidence) * max(slots, 1),
+                    f"{self.label} ({self.path.name}): {dropped} dropped + {len(held)} held of {slots} slots, "
+                    f"over the hosted {loss_limit(self.evidence):.0%}")
         if not self.mismatches:
             return row
         index, t, region, want, got = self.mismatches[0]
@@ -3230,7 +3337,7 @@ def scenario_oracle_edit(e, cfg, evidence):
             require(regions, f"{path.name}: the oracle has nothing to read in a clip of it")
             regions_of.append(regions)
         w2, h2, frames = gray_frames(path)
-        oracle = Oracle(f"export {kind}", path, e.root, evidence)
+        oracle = Oracle(f"export {kind}", path, e.root, evidence, hold_ok=False)
         for index, (t, pixels) in enumerate(frames):
             slot = round(t * fps)
             i, seg = segment(slot)
@@ -3276,7 +3383,7 @@ def oracle_nle(e, segments, starts, total, anchors, fps, count, evidence):
         for f in read_json(take_path)["files"]:
             files[str((Path(take_path).parent / f["path"]).resolve())] = (
                 str(Path(take_path).resolve()), round((f.get("start_offset_seconds") or 0) * fps), f["source"])
-    rows = []
+    rows, slotted = [], {}
     for fmt, app in (("fcpxml", "final_cut"), ("fcpxml", "resolve"), ("xmeml", "premiere"),
                      ("xmeml", "resolve"), ("otio", None)):
         params = {"format": fmt, "folder": str(e.root / "nle")}
@@ -3732,9 +3839,9 @@ def oracle_rules_selftest(work):
     """The oracle's own rules on made-up pictures: it is strict (any
     mismatch fails, even one picture one frame late), and the edit model
     catches an engine timeline that ignored or misplaced an edit."""
-    def run(changes, pictures=300):
+    def run(changes, pictures=300, evidence=None):
         try:
-            oracle = Oracle("rules", work / "none.mov", work, {})
+            oracle = Oracle("rules", work / "none.mov", work, {} if evidence is None else evidence)
             for i in range(pictures):
                 want = {r: ("id", ORACLE_TAGS[r], 1000 + i) for r in ("a", "b", "c")}
                 got = dict(want)
@@ -3754,6 +3861,22 @@ def oracle_rules_selftest(work):
         "a short output, one picture late": (run({40: {r: ("id", ORACLE_TAGS[r], 1039) for r in "abc"}},
                                                   pictures=60), "fail"),
     }
+    # Hosted rules: a held picture (a region repeating its previous expected
+    # frame once) is accounted loss; nothing else is.
+    def hosted():
+        return {"capabilities": {"hosted": True, "max_drop_ratio": HOSTED_DROP_LIMIT}}
+    cases.update({
+        "hosted: one held picture": (run({100: {"a": ("id", 1, 1099)}}, evidence=hosted()), "pass"),
+        "hosted: two held pictures in a row": (
+            run({100: {"a": ("id", 1, 1099)}, 101: {"a": ("id", 1, 1099)}}, evidence=hosted()), "fail"),
+        "hosted: a hold showing another source": (
+            run({100: {"a": ("id", ORACLE_TAGS["b"], 1099)}}, evidence=hosted()), "fail"),
+        "hosted: a picture two frames behind": (run({100: {"a": ("id", 1, 1098)}}, evidence=hosted()), "fail"),
+        "hosted: more holds than the cap": (
+            run({i: {"a": ("id", 1, i + 999)} for i in range(10, 10 + 10 * (HOSTED_HOLD_CAP + 1), 10)},
+                evidence=hosted()), "fail"),
+        "strict: one held picture": (run({100: {"a": ("id", 1, 1099)}}), "fail"),
+    })
     # A stale picture at a pause's resume (#124 re-review B1): 43 frames cut
     # out after slot 99; picture 100 shows a frame 20 behind for every source.
     want = lambda slot, r: ("id", ORACLE_TAGS[r], 1000 + slot + (43 if slot >= 100 else 0))  # noqa: E731
@@ -4243,6 +4366,20 @@ def run_case(args, root, name):
     return result
 
 
+def suite_losses(report):
+    """Accounted video losses over every scenario's outputs (not the
+    qualification): dropped slots, held oracle pictures and late-starting
+    slots, against all slots."""
+    rows = [row for r in report.get("scenarios", []) if r["name"] != "capacity"
+            for row in r.get("evidence", {}).get("drops", {}).values()]
+    dropped = sum(row["dropped"] for row in rows)
+    held = sum(row.get("held", 0) for row in rows)
+    late = sum(row.get("late_start_slots", 0) for row in rows)
+    slots = sum(row["slots"] for row in rows) + late
+    return {"dropped": dropped, "held": held, "late_start_slots": late, "accounted": dropped + held + late,
+            "slots": slots, "ratio": (dropped + held + late) / slots if slots else 0.0}
+
+
 def summary(report):
     def cell(value):
         return str(value).replace("|", "/").replace("\n", " ")[:500]
@@ -4261,6 +4398,14 @@ def summary(report):
                ("Hardware-only encode probes", f"HEVC={caps.get('hevc')}, H.264={caps.get('h264')} (availability, not capacity)"),
                ("Profile", f"{profile['width']}×{profile['height']} @ {profile['fps']} fps, {caps.get('record_codec')}"),
                ("Video drop limit, per output", f"{caps.get('max_drop_ratio', 0):.0%}; audio dropouts must be zero")]
+    if caps.get("max_drop_ratio"):
+        entries.append(("Hosted caps", f"suite {HOSTED_SUITE_LOSS_LIMIT:.0%} accounted; {HOSTED_HOLD_CAP} held "
+                                       f"pictures per output; {HOSTED_LATE_START_CAP} late-start slots per file"))
+    suite = report.get("suite_losses")
+    if suite:
+        entries.append(("Suite accounted losses", f"{suite['dropped']} dropped + {suite['held']} held + "
+                                                  f"{suite['late_start_slots']} late / {suite['slots']} slots "
+                                                  f"({suite['ratio']:.2%})"))
     for name, value in entries:
         lines.append(f"| {name} | {cell(value)} |")
     qualification = caps.get("qualification")
@@ -4275,8 +4420,9 @@ def summary(report):
             lines.append(f"| harness | FAIL | {cell(report[field])} |")
     lines.extend(["", "## Actual throughput and losses", "",
                   "Counts and ratios include failed outputs; each output must meet its limit independently.", "",
-                  "| Scenario / output | Stored/sent frames | Dropped / slots | Ratio | Delivered / target fps | Audio dropouts |",
-                  "|---|---:|---:|---:|---:|---:|"])
+                  "| Scenario / output | Stored/sent frames | Dropped / slots | Ratio | Held | Late start | "
+                  "Delivered / target fps | Audio dropouts |",
+                  "|---|---:|---:|---:|---:|---:|---:|---:|"])
     groups = [("qualification", qualification.get("drops", []))] if qualification else []
     groups += [(r["name"], list(r.get("evidence", {}).get("drops", {}).values()))
                for r in report.get("scenarios", []) if r["name"] != "capacity"]
@@ -4285,7 +4431,8 @@ def summary(report):
             ratio = f"{row['ratio']:.2%}" if row.get("ratio") is not None else "n/a"
             rate = f"{row['delivered_fps']:.2f}" if row.get("delivered_fps") is not None else "n/a"
             lines.append(f"| {cell(name)} / {cell(row['output'])} | {row['frames']} | {row['dropped']} / {row['slots']} | "
-                         f"{ratio} | {rate} / {row['target_fps']} | {row['audio_dropouts']} |")
+                         f"{ratio} | {row.get('held', 0)} | {row.get('late_start_slots', 0)} | {rate} / {row['target_fps']} | "
+                         f"{row['audio_dropouts']} |")
     return "\n".join(lines) + "\n"
 
 
@@ -4420,20 +4567,30 @@ def main():
                 measured = result.get("evidence", {})
                 losses = list(measured.get("drops", {}).values())
                 zero = result["status"] == "PASS" and bool(losses) and all(r["dropped"] == 0 for r in losses)
-                caps["max_drop_ratio"] = 0 if zero else HOSTED_DROP_LIMIT
+                # Hosted runs always account losses: a zero-drop sample here
+                # did not predict a zero-drop suite (every hosted run from
+                # 2026-10-17 to 10-22 dropped frames in some later scenario).
+                # Zero drops are the test Macs' bar (no --hosted).
+                caps["max_drop_ratio"] = HOSTED_DROP_LIMIT
                 caps["machine_info"] = measured.get("machine_info", {})
                 caps["daemon_sha256"] = hashlib.sha256(args.daemon.read_bytes()).hexdigest()
                 caps["qualification"] = {"status": result["status"], "drops": losses,
-                    "reason": (f"Two 5-second program+2-ISO takes and {2 if caps['h264'] else 0} 7-second streams: zero drops; "
-                               "the complete hosted suite must also have zero drops." if zero else
-                               f"720p30 qualification: {result['reason']}. Video loss limit is 25% per output; "
-                               "all integrity checks and zero audio loss remain mandatory.")}
+                    "reason": (f"Two 5-second program+2-ISO takes and {2 if caps['h264'] else 0} 7-second streams: "
+                               + ("zero drops. " if zero else f"{result['reason']}. ")
+                               + "Hosted video loss limit is 25% per output (zero drops are enforced on test Macs); "
+                               "all integrity and picture checks and zero audio loss remain mandatory.")}
                 write_json(root / "capabilities.json", caps)
                 print(json.dumps(caps, indent=2), file=sys.stderr)
                 require(result["status"] == "PASS", "hosted profile qualification failed; see capacity results")
             if not args.capabilities:
                 for name in args.only or SCENARIOS:
                     report["scenarios"].append(run_case(args, root, name))
+                if caps.get("max_drop_ratio"):
+                    report["suite_losses"] = suite = suite_losses(report)
+                    require(suite["ratio"] <= HOSTED_SUITE_LOSS_LIMIT,
+                            f"the suite's accounted losses (dropped + held + late starts) are "
+                            f"{suite['accounted']}/{suite['slots']} ({suite['ratio']:.1%}), over the hosted "
+                            f"{HOSTED_SUITE_LOSS_LIMIT:.0%} for the whole suite")
     except Exception as exc:
         report["error"] = str(exc)
         print(f"FAIL harness: {exc}", file=sys.stderr)

@@ -325,9 +325,17 @@ fn build(name: &str, takes: &[TakeClip]) -> Result<Model, String> {
                 ));
             }
             let file_rate = Rate::whole(file.fps);
-            let file_frames = file
-                .frames
-                .unwrap_or_else(|| (seconds * file_rate.fps()).round().max(0.0) as u64);
+            // Its length on its own frame grid, from its duration: a file
+            // that dropped frames still spans its whole time (an editor
+            // holds a picture over a dropped slot, as Isocast's export
+            // does), so its stored frame count would end it early and cut
+            // the angle short. A recovered file without final counters
+            // keeps its stored frames, when known.
+            let from_duration = (seconds * file_rate.fps()).round().max(0.0) as u64;
+            let file_frames = match (file.dropped_frames, file.frames) {
+                (None, Some(frames)) => frames,
+                _ => from_duration,
+            };
             let media_index = match media.iter().position(|m| m.path == path) {
                 Some(i) => i,
                 None => {
@@ -1597,5 +1605,52 @@ mod tests {
         let p = placement(None, (3840, 2160), (1920, 1080));
         assert!((p.scale - 0.5).abs() < 1e-9 && !p.moved() && !p.cropped());
         assert_eq!(url_path(Path::new("/a b/é.mov")), "/a%20b/%C3%A9.mov");
+    }
+
+    #[test]
+    fn an_iso_that_dropped_frames_still_covers_the_clip() {
+        // A 5 s take at 30 fps whose ISO stored 122 of its 150 frame
+        // slots (28 dropped, as on a loaded hosted runner): the file still
+        // spans 5 s, so its angle must cover the whole clip like the
+        // program's, not end 28 frames early.
+        let file = |path: &str, source: &str, frames: u64, dropped: u64| {
+            json!({
+                "path": path, "source": source, "kind": "test_pattern",
+                "width": 1280, "height": 720, "fps": 30, "audio": [],
+                "start_offset_seconds": 0.0, "duration_seconds": 5.0,
+                "frames": frames, "repeated_frames": 0, "dropped_frames": dropped,
+                "audio_dropouts": 0
+            })
+        };
+        let manifest: SessionManifest = serde_json::from_value(json!({
+            "version": 1, "setup": "e2e", "status": "complete",
+            "started_at": "2026-10-22T12:00:00+00:00", "host_time_ns": 0,
+            "duration_seconds": 5.0,
+            "files": [file("iso.mov", "bars", 122, 28), file("program.mov", PROGRAM, 150, 0)],
+            "errors": []
+        }))
+        .unwrap();
+        let take = |manifest: SessionManifest| TakeClip {
+            id: "c1".into(),
+            folder: PathBuf::from("/take"),
+            manifest,
+            in_frame: 15,
+            frames: 120,
+            fps: 30,
+            angle: "bars".into(),
+            crop: None,
+        };
+        let model = build("e2e", &[take(manifest.clone())]).unwrap();
+        assert_eq!(model.duration, 120);
+        for track in &model.video {
+            let covered: u64 = track.items.iter().map(|i| i.length).sum();
+            assert_eq!(
+                covered, 120,
+                "{} covers {covered} of 120 frames",
+                track.source
+            );
+        }
+        let iso = model.media.iter().find(|m| m.source == "bars").unwrap();
+        assert_eq!(iso.frames, 150, "the ISO's length on its frame grid");
     }
 }

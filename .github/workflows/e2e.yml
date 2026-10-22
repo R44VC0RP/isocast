@@ -17,7 +17,8 @@ on:
       - 'scripts/pacing-probe.m'
       - '.github/workflows/e2e.yml'
   push:
-    branches: [main]
+    # ci/<lane>: candidates published by scripts/ci.sh before they merge.
+    branches: [main, 'ci/**']
   workflow_dispatch:
 
 permissions:
@@ -25,7 +26,9 @@ permissions:
 
 concurrency:
   group: e2e-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Per branch, so lanes never cancel each other; a lane's newer candidate
+  # (or a pull request's newer push) cancels its older run, main's never.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/ci/') }}
 
 jobs:
   e2e:
