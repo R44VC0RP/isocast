@@ -470,12 +470,21 @@ Tier 1.
   - listing only, never file contents;
   - "Show in Finder" becomes "Show on exon-desk".
 - **Projector ownership** (decision 24).
-- **Interim previews:** JPEG stills via `frame` at a low rate.
+- **Live program video (required, Ryan 2026-10-22):** a remote window shows
+  the program moving, even at low quality.
+  - The engine's existing low-latency H.264 monitor stream (`frames`) runs
+    through each platform's hardware encoder, at about 960 px wide and
+    30 fps.
+  - It's hardware-decoded in the app (VideoToolbox on macOS, Media
+    Foundation on Windows) into the preview.
+  - JPEG stills are only the fallback when decoding isn't available.
+  - R3 adds the rest: every monitor, adaptive bitrate, under 100 ms.
 
 **Done when** the Mac app fully controls the Windows engine and vice versa:
-scenes, sources, settings, recording, streaming, library and profiles. The
-engine is named in the window, every engine-side word matches its OS, and
-two apps on one engine see each other and don't duplicate projectors.
+scenes, sources, settings, recording, streaming, library and profiles,
+**with the program playing as live video** in the remote window. The engine
+is named in the window, every engine-side word matches its OS, and two
+apps on one engine see each other and don't duplicate projectors.
 
 ### R3. Pictures
 
@@ -586,7 +595,7 @@ frame, and fuzzing finds nothing.
   - basebook (Ryan's Mac, 10.0.10.26) is the Mac engine. It runs the signed
     dev engine, which already has LAN access; heavy builds run elsewhere.
   - exon-desk (10.0.10.149) is the Windows engine. TCP 47470 is open on
-    the Private profile.
+    any profile, from LocalSubnet and Tailscale (100.64/10).
   - exonbook (10.0.10.165) is the SSH-run Mac client only; its firewall
     would prompt for an engine.
 - **Same-OS pairs and CI:** the loopback mode; exon-desk ↔ the

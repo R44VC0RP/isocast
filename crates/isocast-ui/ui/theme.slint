@@ -206,7 +206,7 @@ export global Theme {
     // Slint's Skia text on macOS (CoreText glyphs, subpixel positioned)
     // lays about a fixed amount of extra ink on every stem, so at Paper's
     // weights every word read one step heavier than the boards' WebKit
-    // export (ink 1.2–1.5× Paper's: docs/notes.md, Gotchas 2026-10-13).
+    // export (ink 1.2–1.5× Paper's: docs/archive/2026-10-22/notes.md, Gotchas 2026-10-13).
     // Each Paper weight is drawn with the next lighter static cut, which
     // brings the ink back to Paper's and, being a hair narrower, cancels
     // Skia's ~2px-per-line widening as well. The names stay Paper's; a
@@ -221,7 +221,7 @@ export global Theme {
     out property <length> tracking-lcd-hero: -0.44px; // -0.01em at 44px
     // Letter-spacing per size. Paper sets none on Mona Sans, and the
     // bundled static cuts shape to Paper's word widths (HarfBuzz widths of
-    // the boards' labels are within a pixel of Paper's: docs/notes.md,
+    // the boards' labels are within a pixel of Paper's: docs/archive/2026-10-22/notes.md,
     // 2026-10-13 Console), so these are 0. They stay as names (every kit
     // Text carries one) for a theme whose face needs widening, as the
     // system font did.

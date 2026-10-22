@@ -1,5 +1,5 @@
 {
-  "about": "How much video each Apple chip's H.264/HEVC encode engines take in real time, for `estimate_capacity` (crates/isocast-engine/src/estimate.rs). A file's encoder runs on one engine for its whole life. Rates are 8-bit HEVC pixels a second per engine at Isocast's settings (real-time mode, no B-frames, constant quality), on synthetic content. Add a chip by measuring it (docs/notes.md, #66): record files of known sizes on it and find where ISO files start dropping.",
+  "about": "How much video each Apple chip's H.264/HEVC encode engines take in real time, for `estimate_capacity` (crates/isocast-engine/src/estimate.rs). A file's encoder runs on one engine for its whole life. Rates are 8-bit HEVC pixels a second per engine at Isocast's settings (real-time mode, no B-frames, constant quality), on synthetic content. Add a chip by measuring it (docs/archive/2026-10-22/notes.md, #66): record files of known sizes on it and find where ISO files start dropping.",
   "fits_below": 0.85,
   "codec_cost": {
     "hevc": 1.0,

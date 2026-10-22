@@ -14,7 +14,7 @@
 #
 # Privacy grants (screen recording, camera, microphone, cua-driver's
 # Accessibility) still need a person at the desktop once, over Screen
-# Sharing; see "Test Mac" in docs/notes.md.
+# Sharing; see "Test Mac" in docs/archive/2026-10-22/notes.md.
 set -eu
 
 keys="$HOME/.config/isocast-testmac"

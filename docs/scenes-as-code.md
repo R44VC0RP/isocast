@@ -3,7 +3,7 @@
 Status: design, 2026-10-13. Covers PLAN sections 5 (5.1–5.7) and 7
 (7.1–7.5). Slices 5.0 (compiled scenes), 5.1 (layout), 5.5a (data store,
 content items, bound text), 5.2a (keyframe animations) and 7.1 are built
-(PLAN log, and docs/notes.md for where they went beyond this text); the
+(PLAN log, and docs/archive/2026-10-22/notes.md for where they went beyond this text); the
 rest is not yet. It turns Ryan's proposal in
 [scene-language.md](scene-language.md) into one buildable design: the data
 model, the method table, the engine changes, a performance budget with
@@ -327,7 +327,7 @@ style = { background = "#000000aa", radius = 16 }
   shrink to fit; `flex_grow` is CSS's longhand, so share a row by
   `flex_grow` with `flex_basis = 0`, CSS's `flex: 1`. Text measuring
   comes with content items in 5.5a; a text source's size is its
-  picture's. See docs/notes.md.)
+  picture's. See docs/archive/2026-10-22/notes.md.)
 - `transform` stays a visual transform after layout (CSS's `transform`):
   it never moves siblings.
 - `taffy` 0.10 does the work, with its default features and not its
@@ -384,7 +384,7 @@ layout = { position = "absolute", left = 64, bottom = 64 }
   50 ms, then publishing with the old content and swapping it in later),
   so one apply never shows its new layout with old text.
 
-As built (5.5a; docs/notes.md has the details):
+As built (5.5a; docs/archive/2026-10-22/notes.md has the details):
 
 - The scene thread draws content's pictures itself while it resolves
   (text ≈0.5–1 ms, images once per file), keyed by everything that
@@ -527,7 +527,7 @@ a pure function of the compiled scene and the tick time, so a program
 could later be re-rendered from the ISO files, the setup and the
 manifest (and a data log, see "Later").
 
-As built (5.2a; docs/notes.md has the details):
+As built (5.2a; docs/archive/2026-10-22/notes.md has the details):
 
 - Keyframe sets travel with the scene collection. A property no stop at 0
   or 1 sets runs from or to the value underneath it (the item's own, or
@@ -1595,7 +1595,7 @@ unpersisted one doesn't; bad keys and oversized values give errors naming
 the rule; MCP `set_data`/`get_data` round trip; inline text and image
 content snapshot the same as the equivalent sources.
 
-Built 2026-10-13 (PLAN log, 5.5a; numbers in docs/notes.md, Benchmarks).
+Built 2026-10-13 (PLAN log, 5.5a; numbers in docs/archive/2026-10-22/notes.md, Benchmarks).
 Content pictures are drawn on the scene thread (no worker pool yet), kept
 keys live with the scene collection, and laid-out text is drawn the size
 of its box; the "As built" notes in "Content items" and "The data store"
@@ -1615,7 +1615,7 @@ and `clock` doesn't; compositor CPU with 0, 100 and 1,000 animated
 properties stays within 0.2 µs per property; existing transitions record
 the same frames.
 
-Built 2026-10-13 (PLAN log, 5.2a; numbers in docs/notes.md, Benchmarks).
+Built 2026-10-13 (PLAN log, 5.2a; numbers in docs/archive/2026-10-22/notes.md, Benchmarks).
 Every check passed on isocast-m2-a; each animated property costs 0.04–0.06
 µs with the clocks up (0.24 µs at 100 properties, where a fixed ~20 µs a
 tick once anything animates dominates) and ~0.44 µs at rest, where the
@@ -1764,7 +1764,7 @@ compressor within 0.5 dB; an injected trap and an infinite loop each give
 a warning, 0 audio dropouts, a continuous mix, and disabling after three;
 CPU per block measured (gain ≤ 0.05 ms).
 
-Built 2026-10-13 (PLAN log, 7.4a; docs/notes.md Decisions for where it
+Built 2026-10-13 (PLAN log, 7.4a; docs/archive/2026-10-22/notes.md Decisions for where it
 differs): the WIT package is `wit/plugin.wit`; calls are bounded by fuel
 (a budget of work) rather than epoch deadlines, results are lifted into a
 host buffer (wasmtime 49 frees a `WasmList` before the call returns), and

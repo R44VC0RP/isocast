@@ -2,7 +2,7 @@
 //! Updates…, a check about once a day (Settings › General turns it off),
 //! and Sparkle's own windows (release notes, Install / Remind Me Later /
 //! Skip). Updating is how the app is packaged, not something the engine
-//! does, so it has no method in the API (docs/notes.md, 2026-10-14).
+//! does, so it has no method in the API (docs/archive/2026-10-22/notes.md, 2026-10-14).
 //!
 //! The released bundle carries Sparkle.framework in Contents/Frameworks
 //! and its feed and public key in Info.plist; the framework is loaded at

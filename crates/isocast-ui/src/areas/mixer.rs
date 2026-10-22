@@ -40,7 +40,7 @@ const FLOOR: f64 = -60.0;
 const PROGRAM: &str = "program";
 /// How often moving meters are drawn (30 fps). Each change redraws the
 /// whole window (the Skia wgpu renderer has no partial rendering), so this
-/// sets the meters' cost: docs/notes.md has the measurements.
+/// sets the meters' cost: docs/archive/2026-10-22/notes.md has the measurements.
 const TICK: Duration = Duration::from_millis(33);
 /// A level this old is silence (the source stopped sending).
 const STALE: Duration = Duration::from_millis(1500);

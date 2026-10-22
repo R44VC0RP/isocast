@@ -1291,7 +1291,7 @@ impl Canvas {
         );
         // A dragged handle stays under the pointer: the box is drawn from
         // the edit at once and the picture follows. A moved item's box
-        // stays with the picture (docs/notes.md 2026-10-12, "Drag lag").
+        // stays with the picture (docs/archive/2026-10-22/notes.md 2026-10-12, "Drag lag").
         if handle {
             let live = app.session.borrow().selected(|_, chain| {
                 let shape = Placement::of(chain[chain.len() - 1], origin_of(chain)).shape();

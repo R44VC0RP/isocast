@@ -25,7 +25,7 @@
 #                                         an SSH tunnel, logged in
 #
 # The test Mac is $ISOCAST_TESTMAC (an SSH host; default exonbook, an M4
-# Max; isocast-m2-a and isocast-m2-b are M2 Macs on AWS, see docs/notes.md).
+# Max; isocast-m2-a and isocast-m2-b are M2 Macs on AWS, see docs/archive/2026-10-22/notes.md).
 # The main checkout goes to ~/dev/isocast there, and a worktree to
 # ~/dev/isocast-worktrees/<name> with its own dev app (ISOCAST_DEV_APP), so
 # agents in different worktrees don't overwrite each other. Scratch output

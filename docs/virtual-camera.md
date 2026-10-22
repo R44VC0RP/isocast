@@ -7,7 +7,7 @@ events report state, format, frame counts and failures. The release app
 carries the camera extension and activates it on the first Start (below); a
 development engine never installs anything (use `scripts/vcam-install.sh`).
 Real activation and camera-client qualification wait on Ryan's Developer ID
-provisioning profiles; see `docs/notes.md`.
+provisioning profiles; see `docs/archive/2026-10-22/notes.md`.
 
 ## In the release app (#67)
 

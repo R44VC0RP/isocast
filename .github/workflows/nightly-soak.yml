@@ -2,7 +2,7 @@ name: Nightly soak
 
 # Hours of recording on synthetic sources, looking for slow failures that
 # the short E2E scenarios can't see: crashes, hangs, leaks, stalled writes,
-# broken takes and stream disconnects. See "Nightly soak" in docs/handoff/README.md (section 6).
+# broken takes and stream disconnects. See "Nightly soak" in docs/archive/2026-10-22/delegator-handbook.md (section 6).
 on:
   schedule:
     - cron: '23 6 * * *'

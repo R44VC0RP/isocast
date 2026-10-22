@@ -3,3 +3,5 @@ docs/handoff/** export-ignore
 # Preserve exact security-patch bytes on Windows, regardless of autocrlf;
 # diff context lines legitimately end in a space.
 scripts/windows/*.patch -text -whitespace
+docs/archive/2026-10-22/delegator-handbook.md export-ignore
+docs/archive/2026-10-22/agent-rules.md export-ignore

@@ -50,7 +50,7 @@ KINDS = (
 SEVERITIES = ("low", "medium", "high")
 JUDGED = ("changed", "resized", "added")
 # Never copied into the input folder (defence in depth: OpenCode doesn't load
-# them from there anyway; see "Visual check" in docs/notes.md).
+# them from there anyway; see "Visual check" in docs/archive/2026-10-22/notes.md).
 SKIP_NAMES = {"AGENTS.md", "opencode.json", "opencode.jsonc", ".opencode"}
 MAX_DIFF_BYTES = 60_000
 

@@ -1920,7 +1920,7 @@ mod tests {
         assert_eq!(result.capacity, Capacity::CannotKeepUp);
     }
 
-    /// The base M2's measured results (docs/notes.md, #66): fits,
+    /// The base M2's measured results (docs/archive/2026-10-22/notes.md, #66): fits,
     /// borderline and over.
     #[test]
     fn base_m2_matches_measurements() {

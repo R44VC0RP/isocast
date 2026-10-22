@@ -150,8 +150,9 @@ closed with a link to it.
 
 - [docs/architecture.md](../docs/architecture.md): how the engine and its
   clients fit together.
-- [PLAN.md](../PLAN.md) and [docs/notes.md](../docs/notes.md): the task
-  queue, decisions and measurements.
+- [PLAN.md](../PLAN.md): the roadmap; the work itself is in GitHub issues.
+- [docs/STATE.md](../docs/STATE.md): current facts, machines and gotchas.
+  Older decisions and measurements are archived in `docs/archive/`.
 
 By contributing, you agree that your contribution is licensed under MIT OR
 Apache-2.0, like the rest of Isocast.

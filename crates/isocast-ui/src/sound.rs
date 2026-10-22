@@ -21,7 +21,7 @@ use std::time::Instant;
 /// is on screen: the frames the window's Metal layer keeps queued, about
 /// two refreshes at 60 Hz (measured in a real window on isocast-m2-b: the
 /// sound was 37 ms early without it, 20.5 ms with 17 ms; see
-/// docs/notes.md). ISOCAST_AV_OFFSET_MS overrides it.
+/// docs/archive/2026-10-22/notes.md). ISOCAST_AV_OFFSET_MS overrides it.
 #[cfg(target_os = "macos")]
 const PICTURE_LATENCY: Duration = Duration::from_millis(37);
 

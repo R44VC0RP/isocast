@@ -4,7 +4,7 @@
 //! goal, an upload speed and a setup into the setup to benchmark. The
 //! daemon runs the upload test and `tune` and applies the result.
 //!
-//! The rules (docs/notes.md, 2026-10-15, #46):
+//! The rules (docs/archive/2026-10-22/notes.md, 2026-10-15, #46):
 //! - Recording favours quality and ISO files: HEVC at the High preset (a
 //!   better preset or ProRes is kept) for the program and every ISO file,
 //!   and ISO files of every captured source (displays, windows, apps,

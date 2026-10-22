@@ -11,7 +11,7 @@
 //! copied ones the recording's (so a seek to any keyframe decodes, whatever
 //! came before). The copied frames' own bytes are unchanged. Chrome,
 //! Safari, QuickTime (AVFoundation) and ffmpeg all decode such files, bit
-//! for bit as before (checked 2026-10-16, see docs/notes.md).
+//! for bit as before (checked 2026-10-16, see docs/archive/2026-10-22/notes.md).
 //!
 //! ProRes has no parameter sets: its encoded-again samples just take the
 //! joined file's format. A sample in another codec, size or profile (bit

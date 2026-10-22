@@ -905,7 +905,7 @@ def run_drops(r):
 def gate(results, work, scenario):
     """The A/B screen (#124), a heuristic for material regressions, not a
     confidence test (its false-fail rate at these settings is measured in
-    docs/notes.md). First functional validity: every run of both builds
+    docs/archive/2026-10-22/notes.md). First functional validity: every run of both builds
     must have finished, counted outputs; and when the base lost no video or
     audio, the new build must lose none either. Then per metric the median
     of the paired (new - base) differences of interleaved runs (pairs in
