@@ -3,23 +3,43 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Isocast · One take. Every file.</title>
+<title>Isocast — One take. Every file.</title>
 <meta name="description" content="An open-source Mac recorder. Every source gets its own file, on one clock.">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#0a0a0a">
+<link rel="canonical" href="https://isocast.com/">
 <link rel="icon" href="img/favicon.svg" type="image/svg+xml">
-<link rel="icon" href="img/icon-64.png" sizes="64x64" type="image/png">
+<link rel="icon" href="img/icon-32.png" sizes="32x32" type="image/png">
 <link rel="apple-touch-icon" href="img/apple-touch-icon.png">
+<link rel="manifest" href="site.webmanifest">
 <link rel="preload" href="fonts/isocast-sans.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="modulepreload" href="js/main.js">
 <link rel="modulepreload" href="js/hero.js">
 <link rel="modulepreload" href="js/files.js">
 <link rel="modulepreload" href="js/spring.js">
-<link rel="preload" href="img/program.webp" as="image" type="image/webp">
+<link rel="modulepreload" href="js/slab.js">
+<link rel="modulepreload" href="js/take.js">
+<link rel="preload" href="media/mic-peaks.json" as="fetch" crossorigin>
 <link rel="stylesheet" href="css/site.css">
-<meta property="og:title" content="Isocast · One take. Every file.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://isocast.com/">
+<meta property="og:site_name" content="Isocast">
+<meta property="og:title" content="Isocast — One take. Every file.">
 <meta property="og:description" content="An open-source Mac recorder. Every source gets its own file.">
-<meta property="og:image" content="img/icon-512.png">
+<meta property="og:image" content="https://isocast.com/img/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="One take. Every file. — four file windows, program.mov, screen.mov, camera.mov and mic.mov, on one clock.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Isocast — One take. Every file.">
+<meta name="twitter:description" content="An open-source Mac recorder. Every source gets its own file.">
+<meta name="twitter:image" content="https://isocast.com/img/og.jpg">
+<!-- Before first paint, so scroll-in sections start hidden instead of flashing. -->
+<script>
+  document.documentElement.classList.add("js");
+  // If the page script never starts, show everything rather than leave it hidden.
+  setTimeout(function () { if (!window.__isocast) document.documentElement.classList.remove("js"); }, 2500);
+</script>
 <script type="module" src="js/main.js"></script>
 </head>
 <body>
@@ -75,8 +95,8 @@
     </div>
   </section>
 
-  <section class="fig fig-take reveal" aria-labelledby="fig1-title">
-    <div class="panel">
+  <section class="fig fig-take" aria-labelledby="fig1-title">
+    <div class="panel" data-reveal>
       <div class="panel-head">
         <h2 id="fig1-title">One take, four files, one clock</h2>
       </div>
@@ -90,11 +110,12 @@
             <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden="true"><rect x="4.8" y="1" width="4.4" height="7.6" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.1"/><path d="M2.6 6.8C2.6 9.4 4.6 10.9 7 10.9S11.4 9.4 11.4 6.8M7 10.9V13" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>Mic</li>
         </ul>
         <svg class="flow-in" viewBox="0 0 84 148" preserveAspectRatio="none" aria-hidden="true">
-          <path data-src="screen" d="M0 20C42 20 40 74 72 74H84"/>
-          <path data-src="camera" d="M0 74H84"/>
-          <path data-src="mic" d="M0 128C42 128 40 74 72 74H84"/>
+          <path data-src="screen" d="M0 20.5C42 20.5 40 74.5 72 74.5H84"/>
+          <path data-src="camera" d="M0 74.5H84"/>
+          <path data-src="mic" d="M0 128.5C42 128.5 40 74.5 72 74.5H84"/>
         </svg>
         <div class="flow-hub" aria-hidden="true">
+          <span class="flow-hub-glow"></span>
           <svg viewBox="140 142 740 740" width="44" height="44">
             <path d="M200 512a200 200 0 1 0 400 0a200 200 0 1 0 -400 0" fill="url(#g-dot)"/>
             <path d="M332 426H580.57A200 200 0 0 1 598.79 490H332A32 32 0 0 1 332 426ZM332 534H598.79A200 200 0 0 1 580.57 598H332A32 32 0 0 1 332 534Z" fill="url(#g-bone)"/>
@@ -102,10 +123,10 @@
           </svg>
         </div>
         <svg class="flow-out" viewBox="0 0 84 196" preserveAspectRatio="none" aria-hidden="true">
-          <path data-out="program" d="M0 98H14C54 98 48 20 84 20"/>
-          <path data-out="screen" d="M14 98C54 98 48 72 84 72"/>
-          <path data-out="camera" d="M14 98C54 98 48 124 84 124"/>
-          <path data-out="mic" d="M14 98C54 98 48 176 84 176"/>
+          <path data-out="program" d="M0 98.5H14C54 98.5 48 20.5 84 20.5"/>
+          <path data-out="screen" d="M14 98.5C54 98.5 48 72.5 84 72.5"/>
+          <path data-out="camera" d="M14 98.5C54 98.5 48 124.5 84 124.5"/>
+          <path data-out="mic" d="M14 98.5C54 98.5 48 176.5 84 176.5"/>
         </svg>
         <ul class="flow-files" aria-label="Files">
           <li class="chip chip-file is-program" data-out="program">program.mov<span class="chip-dot" aria-hidden="true"></span></li>
@@ -117,13 +138,13 @@
     </div>
   </section>
 
-  <section class="facts reveal" aria-label="Why Isocast">
-    <ul class="points">
+  <section class="facts" aria-label="Why Isocast">
+    <ul class="points" data-reveal>
       <li><strong>Crash-safe.</strong> A crash loses about 0.5 s.</li>
       <li><strong>Scriptable.</strong> Anything the app does, <code>isocast mcp</code> can do.</li>
       <li><strong>Open source.</strong> MIT or Apache-2.0. Windows is coming.</li>
     </ul>
-    <figure class="panel cpu" aria-labelledby="cpu-cap">
+    <figure class="panel cpu" aria-labelledby="cpu-cap" data-reveal>
       <figcaption id="cpu-cap">CPU, % of one core</figcaption>
       <div class="cpu-row">
         <span class="cpu-name">Isocast</span>
@@ -153,7 +174,7 @@
 
 <div class="dock" id="dock" aria-hidden="true">
   <div class="dock-inner">
-    <img src="img/icon-64.png" width="36" height="36" alt="">
+    <img src="img/icon-64.png" srcset="img/icon-64.png 64w, img/icon-192.png 192w" sizes="36px" width="36" height="36" alt="" loading="lazy" decoding="async">
     <div class="dock-text"><strong>Isocast</strong><span>Free · macOS 14+</span></div>
     <a class="dock-get" href="https://github.com/R44VC0RP/isocast/releases/download/v0.0.8/Isocast-0.0.8-arm64.dmg" tabindex="-1">Download</a>
   </div>

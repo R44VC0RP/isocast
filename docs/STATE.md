@@ -61,6 +61,10 @@ A new capability needs all of these:
 - The isocast.com preview (`website/`, static, no build) is served on the LAN at http://basebook.local:8790/ by the
   LaunchAgent `dev.isocast.website` (KeepAlive; it serves the `.claude/worktrees/website` checkout). Port 8788 is
   something else; leave it alone. (2026-10-22)
+- Gotcha (2026-10-22): another project's `wrangler dev` (workerd) can bind `localhost:8790` (127.0.0.1 and ::1), and
+  then `basebook.local` resolves to ::1 on basebook itself and shows that app. Test the site from basebook via the LAN
+  IP (`http://10.0.10.26:8790/`); other devices are unaffected. The hero's video loops are built by
+  `/Volumes/IsocastBuild/website/scratch/harness/encode.sh` from copies of Ryan's take in `.../scratch/take/`.
 - Never build, test or run gates here as a fallback; when remote-build has no free host, wait and retry.
 
 **IsocastBuild** (`/Volumes/IsocastBuild`): a 120 GiB APFS sparse bundle on the Extreme SSD.

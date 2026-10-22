@@ -1,9 +1,12 @@
 // isocast.com — one loop, one clock, springs for everything that moves.
-import { Spring, clamp, easeOutCubic, timecode } from "./spring.js";
+import { Spring, clamp, timecode } from "./spring.js";
 import { mountHero } from "./hero.js";
+import { TAKE, SIZES, createTake, loadPeaks } from "./take.js";
 
 const root = document.documentElement;
-root.classList.add("js");
+// The inline head script hides scroll-in sections and un-hides them if this
+// module is slow to arrive; in that case leave them in place.
+const lateStart = !root.classList.contains("js");
 
 const stage = document.getElementById("stage");
 const inner = document.getElementById("stage-inner");
@@ -25,15 +28,13 @@ const s = {
 };
 
 // ───────── One clock for every file ─────────
-// A 04:12 take, played back in real time. Dragging scrubs it.
-const take = {
-  dur: 252,
-  pos: 97.4,
-  pos0: 97.4,
-  t0: performance.now(),
-  frac: 0,
-  introUntil: 0,
-};
+// The real take's loop time, read from program.mp4 (js/take.js). Dragging scrubs it.
+// Every file is the whole 26 s take; the loop is 00:20–00:23 of it, so the
+// playheads creep through that stretch and spring back at the seam.
+const take = { dur: TAKE.length, pos: 0, frac: (TAKE.start / TAKE.total) };
+const head = new Spring(TAKE.start / TAKE.total, 0.32, 0);
+const peaksP = loadPeaks();
+let loop = null;
 
 const ctx = {
   stage, inner, s, take,
@@ -43,7 +44,7 @@ const ctx = {
   w: 700, h: 560,
   hover: false,
   scrubbing: false,
-  tc: { mmss: "00:00" },
+  tc: timecode(TAKE.start),
 };
 
 let hero3d = null;
@@ -79,45 +80,51 @@ ro.observe(stage);
 addEventListener("scroll", () => { stageRect = stage.getBoundingClientRect(); heroRect = hero.getBoundingClientRect(); }, { passive: true });
 
 // ───────── Mounting ─────────
+// The encoded size that covers the drawn picture at this screen's density.
+function takeSize() {
+  // Device pixels the picture is drawn at; allow ~10% softness before stepping up.
+  const px = 464 * ctx.k * (window.devicePixelRatio || 1) * 0.9;
+  const sizes = [...SIZES].sort((a, b) => a - b);
+  return ctx.compact ? sizes[0] : sizes.find((s) => s >= px) || sizes[sizes.length - 1];
+}
+const saveData = !!(navigator.connection && navigator.connection.saveData);
+
 function mount({ intro = true } = {}) {
   measure();
   if (hero3d) hero3d.destroy();
+  if (loop) loop.destroy();
   inner.replaceChildren();
-  hero3d = mountHero(ctx);
+  // Reduced motion and data saver get the stills.
+  loop = createTake({ size: takeSize(), still: ctx.reduced || saveData });
+  hero3d = mountHero(ctx, loop, peaksP);
+  loop.setVisible(visible && inView);
   if (intro && !ctx.reduced) {
     s.enter.snap(0);
     s.enter.target = 1;
-    take.introUntil = performance.now() + 1300;
   } else {
     s.enter.snap(1);
   }
   kick();
 }
 
-function updateClock(now) {
-  if (ctx.reduced) {
-    take.pos = take.pos0; // calm version: nothing travels
-  } else if (ctx.scrubbing) {
-    take.t0 = now; // the finger holds the clock
-  } else if (now < take.introUntil) {
-    const t = 1 - (take.introUntil - now) / 1300;
-    take.pos = take.pos0 * easeOutCubic(clamp(t, 0, 1));
-    take.t0 = take.introUntil;
-  } else {
-    take.pos = (take.pos0 + Math.max(0, now - take.t0) / 1000) % take.dur;
-  }
-  take.frac = clamp(take.pos / take.dur, 0, 1);
-  ctx.tc = timecode(take.pos);
+function updateClock() {
+  if (loop) loop.sync();
+  take.pos = loop ? loop.time() : 0;
+  head.target = (TAKE.start + take.pos) / TAKE.total;
+  // Playing forward (and while scrubbing) the head is exactly on the clock;
+  // the jump back at the loop seam glides on its spring instead of popping.
+  const d = head.target - head.x;
+  if (ctx.reduced || ctx.scrubbing || (d >= 0 && d < 0.02)) head.snap();
+  take.frac = clamp(head.x, 0, 1);
+  ctx.tc = timecode(TAKE.start + take.pos);
 }
 
-// Scrub: move the one clock by a fraction of the take.
+// Scrub: move the one clock (and every file with it) by a fraction of the loop.
 ctx.scrubBy = (df) => {
-  const now = performance.now();
-  const p = ((take.pos + df * take.dur) % take.dur + take.dur) % take.dur;
-  take.pos = take.pos0 = p;
-  take.t0 = now;
-  take.introUntil = 0;
+  if (!loop) return;
+  loop.scrubTo(loop.time() + df * take.dur);
 };
+let keyScrubTimer = 0;
 
 // ───────── Loop ─────────
 let raf = 0;
@@ -142,9 +149,10 @@ function frame(now) {
     s.lx.snap(); s.ly.snap();
   } else {
     for (const k in s) s[k].step(dt);
+    head.step(dt);
   }
 
-  updateClock(now);
+  updateClock();
   light.style.transform = `translate3d(${s.lx.x.toFixed(1)}px, ${s.ly.x.toFixed(1)}px, 0)`;
   if (hero3d) hero3d.update(ctx, dt, now);
 
@@ -207,6 +215,7 @@ function endDrag(e) {
   if (drag.active) {
     ctx.scrubbing = false;
     stage.classList.remove("is-dragging");
+    loop.endScrub();
     hero3d.onRelease(ctx);
   }
   s.press.target = 0;
@@ -220,13 +229,16 @@ addEventListener("pointerup", endDrag);
 addEventListener("pointercancel", endDrag);
 addEventListener("blur", () => { if (drag) endDrag({ pointerId: drag.id }); });
 
-// Keyboard: with the stage focused, arrows scrub the clock (Shift for bigger steps).
+// Keyboard: with the stage focused, arrows step the take a frame at a time
+// (Shift: half a second); it plays on again shortly after the last press.
 stage.tabIndex = 0;
 stage.addEventListener("keydown", (e) => {
   if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
   e.preventDefault();
   const dir = e.key === "ArrowLeft" ? -1 : 1;
-  ctx.scrubBy((dir * (e.shiftKey ? 10 : 1)) / take.dur);
+  ctx.scrubBy((dir * (e.shiftKey ? 0.5 : 1 / 30)) / take.dur);
+  clearTimeout(keyScrubTimer);
+  keyScrubTimer = setTimeout(() => loop.endScrub(), 900);
   hero3d.onRelease(ctx);
   kick();
 });
@@ -234,12 +246,15 @@ stage.addEventListener("keydown", (e) => {
 // Visibility: run the loop only while the hero can be seen.
 document.addEventListener("visibilitychange", () => {
   visible = document.visibilityState === "visible";
+  loop?.setVisible(visible && inView);
   if (visible) kick();
 });
+// Videos and the render loop pause while the object is off-screen.
 new IntersectionObserver((entries) => {
   inView = entries[entries.length - 1].isIntersecting;
+  loop?.setVisible(visible && inView);
   if (inView) kick();
-}, { rootMargin: "80px" }).observe(hero);
+}, { rootMargin: "48px" }).observe(stage);
 
 reducedMQ.addEventListener("change", () => {
   ctx.reduced = reducedMQ.matches;
@@ -248,18 +263,123 @@ reducedMQ.addEventListener("change", () => {
 });
 
 // ───────── Below the hero ─────────
-const io = new IntersectionObserver((entries) => {
-  for (const en of entries) if (en.isIntersecting) { en.target.classList.add("is-in"); io.unobserve(en.target); }
-}, { rootMargin: "0px 0px -12% 0px" });
-document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+// Sections enter once, on springs, as they scroll in; the CPU bars then grow
+// to their values. Reduced motion shows everything in place.
+const revealItems = [...document.querySelectorAll("[data-reveal]")];
+const bars = [...document.querySelectorAll(".cpu-bar")];
+const moving = new Set();
+let belowRaf = 0;
+let belowLast = 0;
+function belowKick() {
+  if (!belowRaf) { belowLast = performance.now(); belowRaf = requestAnimationFrame(belowFrame); }
+}
+function settle(el) {
+  el.style.opacity = "";
+  el.style.transform = "";
+  el.removeAttribute("data-reveal");
+}
+function belowFrame(now) {
+  belowRaf = 0;
+  const dt = Math.min(0.05, (now - belowLast) / 1000);
+  belowLast = now;
+  for (const m of moving) {
+    if (now < m.start) continue;
+    m.s.step(dt);
+    if (m.kind === "reveal") {
+      const x = Math.min(1, m.s.x);
+      m.el.style.opacity = Math.min(1, x * 1.15).toFixed(3);
+      m.el.style.transform = `translate3d(0, ${((1 - m.s.x) * 16).toFixed(2)}px, 0)`;
+      if (m.s.resting) { settle(m.el); moving.delete(m); }
+    } else {
+      m.el.style.transform = `scaleX(${Math.max(0, m.s.x).toFixed(4)})`;
+      if (m.s.resting) { m.el.style.transform = "none"; moving.delete(m); }
+    }
+  }
+  const pulsing = pulseFrame(now);
+  if (moving.size || pulsing) belowRaf = requestAnimationFrame(belowFrame);
+}
+const revealIO = new IntersectionObserver((entries) => {
+  const now = performance.now();
+  let i = 0;
+  for (const en of entries) {
+    if (!en.isIntersecting) continue;
+    const el = en.target;
+    revealIO.unobserve(el);
+    if (ctx.reduced || lateStart) { settle(el); continue; }
+    const start = now + i++ * 90; // stagger sections that arrive together
+    const s = new Spring(0, 0.9, 0);
+    s.target = 1;
+    moving.add({ kind: "reveal", el, s, start });
+    if (el.classList.contains("cpu")) {
+      el.querySelectorAll(".cpu-bar").forEach((bar, j) => {
+        const b = new Spring(0, 1.1, 0);
+        b.target = 1;
+        moving.add({ kind: "bar", el: bar, s: b, start: start + 220 + j * 110 });
+      });
+    }
+  }
+  belowKick();
+}, { rootMargin: "0px 0px -10% 0px" });
+revealItems.forEach((el) => revealIO.observe(el));
+if (ctx.reduced || lateStart) bars.forEach((b) => (b.style.transform = "none"));
 
+// The diagram: hover a tile and its wires light up with the files it feeds.
 const flow = document.getElementById("flow");
-flow.querySelectorAll(".chip[data-src]").forEach((chip) => {
-  const on = () => (flow.dataset.hot = chip.dataset.src);
-  const off = () => delete flow.dataset.hot;
-  chip.addEventListener("pointerenter", on);
-  chip.addEventListener("pointerleave", off);
+const chips = [...flow.querySelectorAll(".chip")];
+const wires = [...flow.querySelectorAll(".flow-in path, .flow-out path")];
+function hot(kind) {
+  const on = (el) => {
+    const src = el.dataset.src, out = el.dataset.out;
+    if (!kind) return false;
+    if (kind === "program") return out === "program" || !!src;
+    return src === kind || out === kind || out === "program";
+  };
+  for (const el of chips) el.classList.toggle("is-hot", on(el));
+  for (const el of wires) el.classList.toggle("is-hot", on(el));
+}
+for (const chip of chips) {
+  const kind = chip.dataset.src || chip.dataset.out;
+  chip.addEventListener("pointerenter", (e) => { if (e.pointerType === "mouse") hot(kind); });
+  chip.addEventListener("pointerleave", () => hot(null));
+}
+
+// One slow pulse travels the wires on one clock: from the sources into the
+// mark, then out to all four files at once.
+const PULSE = 4.8; // seconds per cycle
+const hubGlow = flow.querySelector(".flow-hub-glow");
+const pulses = wires.map((w) => {
+  const p = w.cloneNode();
+  p.removeAttribute("data-src");
+  p.removeAttribute("data-out");
+  p.classList.add("pulse");
+  p.setAttribute("pathLength", "1");
+  w.after(p);
+  return { p, out: !!w.dataset.out };
 });
+let flowVisible = false;
+let pulseT0 = 0;
+function pulseFrame(now) {
+  if (!flowVisible || ctx.reduced || document.visibilityState !== "visible") return false;
+  const t = ((now - pulseT0) / 1000) % PULSE;
+  const leg = (from, dur) => Math.min(1, Math.max(0, (t - from) / dur));
+  const ease = (x) => x * x * (3 - 2 * x);
+  for (const { p, out } of pulses) {
+    const x = out ? leg(1.55, 1.25) : leg(0.2, 1.25);
+    const d = ease(x);
+    // A short dash slides along the wire; it fades in and out at the ends.
+    p.style.strokeDashoffset = (0.14 - d * 1.14).toFixed(4);
+    p.style.opacity = x > 0 && x < 1 ? (Math.sin(Math.PI * x) * 0.9).toFixed(3) : "0";
+  }
+  const g = leg(1.25, 0.9);
+  hubGlow.style.opacity = g > 0 && g < 1 ? (Math.sin(Math.PI * g) * 0.8).toFixed(3) : "0";
+  return true;
+}
+new IntersectionObserver(([en]) => {
+  const was = flowVisible;
+  flowVisible = en.isIntersecting;
+  if (flowVisible && !was) { pulseT0 = performance.now(); belowKick(); }
+}).observe(flow);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") belowKick(); });
 
 // Mobile dock: appears (spring) once the hero's Download scrolls away.
 const dock = document.getElementById("dock");

@@ -5,62 +5,53 @@
 //               each with its own content and the same ticking timecode
 // then it eases back together and loops. Springs drive every move.
 import { Spring, clamp, lerp } from "./spring.js";
-import { FILES, fileWindow, h, svg, picture, tcBadge, waveform, camera } from "./files.js";
+import { FILES, fileWindow, h, svg, tcBadge, peakWave, brackets } from "./files.js";
+import { extrude } from "./slab.js";
+import { TAKE, LAYERS } from "./take.js";
 
 const W = 480;
 const BW = W - 16;
 const BH = 261; // 16:9
 const T = 12; // slab thickness (matches the Paper 3a slabs)
+const R = 16; // corner radius of the slab; the picture inside is concentric (16 − 8 = 8)
 
-// Loop timeline (seconds). Holds are long on purpose: calm, not busy.
+// Loop timeline (seconds). Each state settles (about 1.3 s of spring), then
+// holds: together ~1.6 s, exploded ~2.6 s, fanned ~3.6 s. Calm, not busy.
 const TIMELINE = [
   { at: 0.0, sep: 0, fan: 0, tags: 0 },   // together
-  { at: 2.2, sep: 1, fan: 0, tags: 1 },   // exploded: labels and the copper pin
-  { at: 5.6, sep: 1, fan: 1, tags: 0 },   // fanned files
-  { at: 10.6, sep: 0, fan: 0, tags: 0 },  // fold straight back into one slab
+  { at: 2.6, sep: 1, fan: 0, tags: 1 },   // exploded: labels and the copper pin
+  { at: 6.6, sep: 1, fan: 1, tags: 0 },   // fanned files
+  { at: 11.8, sep: 0, fan: 0, tags: 0 },  // fold straight back into one slab
 ];
-const LOOP = 13.0;
+const LOOP = 14.6;
 
-function screenContent(w) {
-  // The screen file's own picture: the terminal, crisp, without its title bar.
-  const box = h("div", "content");
-  box.style.background = "#1e1e1e";
-  // Zoomed past the program's view so it reads as the source at full size.
-  // img/screen.webp is the terminal's top-left, cropped below its title bar.
-  const iw = w * 1.072;
-  box.appendChild(picture("img/screen.webp", 1010, 620, { left: `${-w * 0.02}px`, top: "0", width: `${iw}px`, height: `${(iw * 620) / 1010}px` }));
-  return box;
+// Each layer shows its own file of the real take (js/take.js): the program
+// composite, the screen, the camera, and the mic as a waveform of its audio.
+function videoContent(kind, loop, extra) {
+  return () => {
+    const box = h("div", "content");
+    box.style.background = "#0d0d0e";
+    if (loop.els[kind]) box.appendChild(loop.els[kind]);
+    if (extra) box.appendChild(extra());
+    return box;
+  };
 }
 
-function programContent(w, hgt) {
-  // The composite on air, with the camera as its picture-in-picture.
-  const box = h("div", "content");
-  box.style.background = "#000";
-  box.appendChild(picture("img/program.webp", 1280, 718, { left: "0", top: "0", width: `${w}px`, height: `${hgt}px` }));
-  const pip = h("div", "pip");
-  Object.assign(pip.style, { left: `${w * 0.726}px`, top: `${hgt * 0.653}px`, width: `${w * 0.249}px`, height: `${hgt * 0.25}px` });
-  pip.appendChild(camera(true));
-  box.appendChild(pip);
-  return box;
+function micContent(peaks) {
+  return (w, hgt) => {
+    const box = h("div", "content");
+    box.style.background = "linear-gradient(180deg, #0d100f, #0a0b0b)";
+    const wh = 132;
+    const place = (wv) => {
+      Object.assign(wv.style, { left: "16px", top: `${(hgt - wh) / 2}px`, width: `${w - 32}px`, height: `${wh}px` });
+      box.appendChild(wv);
+    };
+    // The whole file's waveform; the loop is the stretch under the playhead.
+    peaks.then((p) => { if (p) place(peakWave(p.overview, w - 32, wh)); });
+    return box;
+  };
 }
 
-function micContent(w, hgt) {
-  const box = h("div", "content");
-  box.style.background = "linear-gradient(180deg, #0d100f, #0a0b0b)";
-  const wh = 132;
-  const wv = waveform(w - 32, wh, { seed: 5, bar: 3.4, gap: 2.6 });
-  Object.assign(wv.style, { left: "16px", top: `${(hgt - wh) / 2}px`, width: `${w - 32}px`, height: `${wh}px` });
-  box.appendChild(wv);
-  return box;
-}
-
-function cameraContent() {
-  const box = h("div", "content");
-  box.appendChild(camera(false));
-  return box;
-}
-
-const CONTENT = { program: programContent, screen: screenContent, camera: cameraContent, mic: micContent };
 const COLORS = {
   program: ["#2b2d30", "#1b1c1e", 0.16],
   screen: ["#28292c", "#19191b", 0.14],
@@ -68,7 +59,20 @@ const COLORS = {
   mic: ["#222326", "#151617", 0.1],
 };
 
-export function mountHero(ctx) {
+// z of the bottom layer in the stacked (isometric) arrangement.
+const zIsoBottom = (sep, gap) => -1.5 * (T + sep * gap);
+
+export function mountHero(ctx, loop, peaksP) {
+  // Each layer shows what js/take.js's LAYERS says: a video, a still or peaks.
+  const layer = (kind, extra) => (LAYERS[kind] && LAYERS[kind].peaks ? micContent(peaksP) : videoContent(kind, loop, extra));
+  const CONTENT = {
+    program: layer("program"),
+    screen: layer("screen"),
+    camera: layer("camera", brackets),
+    mic: layer("mic"),
+  };
+  let peaks = null;
+  peaksP.then((p) => { peaks = p; });
   // Small screens get taller window headers so names stay readable when scaled down.
   // The header only exists for the fanned files; stacked, each layer is an even
   // bezel around its picture (as in the Paper 3a slabs).
@@ -77,19 +81,22 @@ export function mountHero(ctx) {
   Object.assign(world.style, { position: "absolute", inset: "0", perspective: "2600px", perspectiveOrigin: "50% 46%" });
   const group = h("div", "merge-group");
   Object.assign(group.style, { position: "absolute", left: "0", top: "0", width: "0", height: "0", transformStyle: "preserve-3d", transformOrigin: "0 0" });
-  group.style.setProperty("--t", `${T}px`);
   world.appendChild(group);
 
   const units = FILES.map((f, i) => {
     const unit = h("div", "merge-unit");
     unit.style.zIndex = String(10 - i);
     const win = fileWindow(f, { w: W, bodyH: BH, headH: HEAD, colors: COLORS[f.kind], content: CONTENT[f.kind] });
-    const sideY = h("div", "unit-side unit-side-y");
-    const sideX = h("div", "unit-side unit-side-x");
-    unit.append(sideY, sideX, win.el);
+    unit.append(win.el);
+    const slab = extrude(unit, { r: R, t: T });
     group.appendChild(unit);
-    return { ...win, unit, i };
+    return { ...win, unit, slab, i };
   });
+
+  // Contact shadow under the stack (drawn first, so it sits beneath the slabs).
+  const floor = h("div", "floor");
+  Object.assign(floor.style, { width: `${W}px`, height: `${8 + HEAD + BH + 8}px`, transformOrigin: "50% 50%" });
+  group.prepend(floor);
 
   // One copper playhead through every layer while they're stacked.
   const rods = [0, 1, 2, 3, 4].map(() => {
@@ -125,10 +132,14 @@ export function mountHero(ctx) {
   const tcb = tcBadge();
   overlay.appendChild(tcb.el);
   ctx.inner.append(world, overlay);
+  // Label widths, so every label keeps the page gutter even when the object
+  // runs edge to edge on phones.
+  let labelW = labels.map((l) => l.offsetWidth);
+  document.fonts?.ready.then(() => { labelW = labels.map((l) => l.offsetWidth); });
 
   // Phase springs.
   const sepS = new Spring(0, 1.25, 0);
-  const fanS = new Spring(0, 1.45, 0.06);
+  const fanS = new Spring(0, 1.45, 0);
   const tagS = new Spring(0, 0.6, 0); // labels, pin and badge fade on their own
   let clock = 0;
   let hold = 0; // seconds the loop stays paused (after a scrub)
@@ -141,10 +152,12 @@ export function mountHero(ctx) {
     const p = M.transformPoint(tmp);
     return { x: p.x / p.w, y: p.y / p.w };
   };
-  let lastHeadA = -1, lastRodA = -1, lastLabelA = 1, lastHH = -1;
+  let lastHeadA = -1, lastRodA = -1, lastLabelA = 1, lastHH = -1, lastFloor = "", lastSh = -1;
 
   return {
-    scrubSpan: () => BW * lerp(0.84, 1, fanS.x),
+    // Dragging moves the playhead with the finger (the loop spans
+    // length/total of the file's width).
+    scrubSpan: () => BW * lerp(0.84, 1, fanS.x) * (TAKE.length / TAKE.total),
     onRelease() { hold = 1.4; },
     phase: () => ({ clock: +clock.toFixed(2), sep: +sepS.x.toFixed(3), fan: +fanS.x.toFixed(3) }),
     // Verification: jump to a point in the loop and settle there.
@@ -193,7 +206,9 @@ export function mountHero(ctx) {
       const rz = lerp(45, 0, f) + s.tiltX.x * 4 * (1 - f);
       const ry = lerp(0, -10, f) + s.tiltX.x * 7 * f;
       // One slab reads big; it shrinks a little to make room as it explodes.
-      const sc = lerp(lerp(0.96, ctx.compact ? 0.8 : 0.84, clamp(sep, 0, 1)), 0.98, f);
+      // On phones the object runs edge to edge, so the fanned deck is a touch
+      // smaller to keep a margin on both sides.
+      const sc = lerp(lerp(0.96, ctx.compact ? 0.8 : 0.84, clamp(sep, 0, 1)), ctx.compact ? 0.92 : 0.98, f);
       const lift = -s.press.x * 14 - (1 - e) * 40;
       const tf = `translate3d(${cx.toFixed(2)}px, ${cy.toFixed(2)}px, ${lift.toFixed(2)}px) rotateX(${rx.toFixed(3)}deg) rotateY(${ry.toFixed(3)}deg) rotateZ(${rz.toFixed(3)}deg) scale(${sc.toFixed(4)})`;
       group.style.transform = tf;
@@ -204,11 +219,14 @@ export function mountHero(ctx) {
       // opens as they turn to face you, and closes back into the bezel.
       const open = clamp((f - 0.1) / 0.7, 0, 1);
       const hh = Math.round(HEAD * open * (2 - open) * 4) / 4; // ease-out, quarter pixels
+      const H = 8 + hh + BH + 8;
       if (hh !== lastHH) {
-        for (const u of units) u.head.style.height = `${hh}px`;
+        for (const u of units) {
+          u.head.style.height = `${hh}px`;
+          u.slab.layout(W, H);
+        }
         lastHH = hh;
       }
-      const H = 8 + hh + BH + 8;
 
       // ── the four files ──
       const gap = (ctx.compact ? 102 : 146) * (1 + boost * 0.35);
@@ -229,18 +247,44 @@ export function mountHero(ctx) {
         // Each body's playhead at the same instant.
         const px = take.frac * BW;
         u.playhead.style.transform = `translate3d(${px.toFixed(2)}px,0,0)`;
-        if (u.dim) u.dim.style.transform = `translate3d(${px.toFixed(2)}px,0,0)`;
+        if (u.dim) {
+          u.dim.style.transform = `translate3d(${px.toFixed(2)}px,0,0)`;
+          // The mic's level right now, from the same peaks the bars are drawn from.
+          let lv = 0;
+          if (peaks) {
+            const p = peaks.peaks, x = (take.pos / TAKE.length) * p.length;
+            const i = Math.min(p.length - 1, Math.max(0, Math.floor(x)));
+            lv = Math.max(p[i], p[Math.min(p.length - 1, i + 1)]) / 100;
+          }
+          u.level.style.transform = `translate3d(${px.toFixed(2)}px,0,0) scaleY(${Math.max(0.04, lv).toFixed(3)})`;
+        }
         u.ticker.set(ctx.tc.mmss);
         u.glare.style.setProperty("--gx", `${(-s.tiltX.x * 60).toFixed(1)}px`);
         u.glare.style.setProperty("--gy", `${(-s.tiltY.x * 40).toFixed(1)}px`);
         dots[i].style.transform = `translate3d(${(px - 6).toFixed(2)}px, ${(BH * 0.5 - 6).toFixed(2)}px, 0)`;
       }
 
-      // Window chrome (names, timecodes) belongs to the fanned files.
-      const headA = clamp((f - 0.45) / 0.45, 0, 1);
+      // Names and timecodes only show once the files have spread apart, so a
+      // header never peeks out half-covered while the deck turns or folds.
+      const headA = clamp((f - 0.72) / 0.22, 0, 1);
       if (Math.abs(headA - lastHeadA) > 0.002) {
-        for (const u of units) u.head.style.opacity = headA.toFixed(3);
+        const a = (headA * headA * (3 - 2 * headA)).toFixed(3);
+        for (const u of units) for (const c of u.head.children) c.style.opacity = a;
         lastHeadA = headA;
+      }
+
+      // Contact shadow: tight under one slab, soft and wide as the layers lift,
+      // gone once the files face you.
+      const floorA = (1 - clamp(f * 1.6, 0, 1)) * lerp(0.95, 0.55, clamp(sep, 0, 1));
+      const shA = lerp(0.25, 1, clamp(f, 0, 1));
+      if (Math.abs(shA - lastSh) > 0.003) { for (const u of units) u.slab.setShadow(shA); lastSh = shA; }
+      const spread = lerp(1.04, 1.16, clamp(sep, 0, 1));
+      const fz = (zIsoBottom(sep, gap) - T - 1).toFixed(2);
+      const fl = `${floorA.toFixed(3)}|${spread.toFixed(3)}|${fz}`;
+      if (fl !== lastFloor) {
+        floor.style.transform = `translate3d(${-W / 2}px, ${-H / 2 + 10}px, ${fz}px) scale(${spread.toFixed(3)})`;
+        floor.style.opacity = floorA.toFixed(3);
+        lastFloor = fl;
       }
 
       // ── the rod, labels and badge belong to the exploded stack ──
@@ -274,7 +318,9 @@ export function mountHero(ctx) {
             const p = project(M, x + lx, y + ly, z);
             if (!best || p.x > best.x) best = p;
           }
-          const labelX = Math.max(best.x + 26, ctx.w - (ctx.compact ? 140 : 118));
+          const edge = ctx.w - (ctx.compact ? 22 : 12) / ctx.k; // keep the page gutter
+          const widest = Math.max(...labelW);
+          const labelX = Math.min(Math.max(best.x + 26, edge - widest), edge - labelW[i]) ;
           paths[i].setAttribute("d", `M${(best.x + 8).toFixed(1)} ${best.y.toFixed(1)}H${(labelX - 10).toFixed(1)}`);
           labels[i].style.transform = `translate3d(${labelX.toFixed(1)}px, ${(best.y - (ctx.compact ? 14 : 10)).toFixed(1)}px, 0)`;
         }

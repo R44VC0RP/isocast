@@ -44,7 +44,6 @@ export class Spring {
 
 export const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 export const lerp = (a, b, t) => a + (b - a) * t;
-export const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
 
 // mm:ss for timecodes.
 export function timecode(seconds) {
