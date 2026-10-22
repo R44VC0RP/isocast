@@ -61,6 +61,9 @@ pub struct AudioCaptureStats {
     /// Fatal invalid/uncertain timing, including resampled discontinuities.
     /// Zero gap_frames does NOT imply no loss when this counter is nonzero.
     pub timestamp_errors: u64,
+    /// Native 48 kHz microphone packets whose QPC phase spike exceeded 2 ms and was
+    /// filtered using continuous device positions. Not missing PCM frames.
+    pub qpc_corrections: u64,
 }
 
 struct State {
@@ -74,6 +77,7 @@ struct State {
     discontinuities: AtomicU64,
     gap_frames: AtomicU64,
     timestamp_errors: AtomicU64,
+    qpc_corrections: AtomicU64,
 }
 
 impl State {
@@ -117,6 +121,7 @@ impl AudioCapture {
             discontinuities: self.state.discontinuities.load(Ordering::Relaxed),
             gap_frames: self.state.gap_frames.load(Ordering::Relaxed),
             timestamp_errors: self.state.timestamp_errors.load(Ordering::Relaxed),
+            qpc_corrections: self.state.qpc_corrections.load(Ordering::Relaxed),
         }
     }
 }
@@ -129,6 +134,12 @@ impl Drop for AudioCapture {
             && worker.thread().id() != thread::current().id()
         {
             let _ = worker.join();
+            let stats = self.stats();
+            isocast_diagnostics::diagnostic!("info";
+                "Windows audio capture ended: device={}, native_rate={}, packets={}, delivered_frames={}, gap_frames={}, timestamp_errors={}, qpc_corrections={}",
+                self.device.name, self.device.sample_rate, stats.packets,
+                stats.delivered_frames, stats.gap_frames, stats.timestamp_errors, stats.qpc_corrections
+            );
         }
         // A callback may itself drop the handle. It cannot join itself; the
         // worker observes stopping before any further callback and returns.
@@ -283,6 +294,7 @@ fn capture(
         discontinuities: AtomicU64::new(0),
         gap_frames: AtomicU64::new(0),
         timestamp_errors: AtomicU64::new(0),
+        qpc_corrections: AtomicU64::new(0),
     });
     let (started, ready) = mpsc::sync_channel(1);
     let query = query.to_owned();
@@ -682,6 +694,7 @@ struct Session {
     pick: Vec<usize>,
     frames: u32,
     native_rate: u32,
+    microphone: bool,
 }
 
 impl Session {
@@ -746,12 +759,13 @@ impl Session {
             pick,
             frames,
             native_rate: endpoint.device.sample_rate,
+            microphone: input,
         })
     }
 
     fn run(&self, state: &State, sink: &AudioSink) -> Result<()> {
         let mut samples = Vec::with_capacity(self.frames as usize * self.pick.len());
-        let mut clock = PacketClock::new(self.native_rate, self.frames);
+        let mut clock = PacketClock::new(self.native_rate, self.frames, self.microphone);
         loop {
             if state.stopping.load(Ordering::Acquire) {
                 return Ok(());
@@ -833,6 +847,9 @@ impl Session {
                         )
                     })?;
                 state.gap_frames.fetch_add(gap, Ordering::Relaxed);
+                state
+                    .qpc_corrections
+                    .store(clock.qpc_corrections, Ordering::Relaxed);
                 samples.clear();
                 if silent {
                     samples.resize(frames as usize * self.pick.len(), 0.0);
@@ -891,26 +908,40 @@ struct ClockPacket {
 }
 
 /// AUTOCONVERTPCM can leave device positions in the endpoint's native rate.
-/// Keep that domain separate from produced 48 kHz frames. The first packet
-/// anchors position only; every PTS still comes from the current packet's QPC.
+/// Keep that domain separate from produced 48 kHz frames. Native 48 kHz
+/// microphone positions let us reject short QPC phase spikes without dropping PCM.
+/// A rolling phase estimate follows clock drift; it is not a fixed epoch plus
+/// an indefinitely free-running sample counter. Resampled and loopback timing stay raw.
 struct PacketClock {
     native_rate: u32,
     buffer_frames: u32,
+    filter_phase: bool,
     anchor: Option<u64>,
     output_frames: u64,
     expected_debt: Option<i128>,
     previous: Option<ClockPacket>,
+    first_qpc_nanos: Option<i64>,
+    qpc_corrections: u64,
+    phases: [i64; 5],
+    phase_count: usize,
+    phase_next: usize,
 }
 
 impl PacketClock {
-    fn new(native_rate: u32, buffer_frames: u32) -> Self {
+    fn new(native_rate: u32, buffer_frames: u32, filter_phase: bool) -> Self {
         Self {
             native_rate,
             buffer_frames,
+            filter_phase,
             anchor: None,
             output_frames: 0,
             expected_debt: None,
             previous: None,
+            first_qpc_nanos: None,
+            qpc_corrections: 0,
+            phases: [0; 5],
+            phase_count: 0,
+            phase_next: 0,
         }
     }
 
@@ -924,8 +955,18 @@ impl PacketClock {
         if flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 != 0 || qpc == 0 {
             bail!("WASAPI reported an invalid packet timestamp; lost frames are unknown");
         }
-        if self.previous.is_some_and(|previous| qpc <= previous.qpc) {
-            bail!("WASAPI QPC did not advance");
+        if let Some(previous) = self.previous
+            && qpc <= previous.qpc
+            && (self.native_rate != SAMPLE_RATE
+                || !self.filter_phase
+                || self.phase_count < self.phases.len())
+        {
+            bail!(
+                "WASAPI QPC did not advance: previous QPC100ns={}, position={}, frames={}; current QPC100ns={qpc}, position={position}, frames={frames}",
+                previous.qpc,
+                previous.position,
+                previous.frames
+            );
         }
         let raw_nanos = qpc
             .checked_mul(100)
@@ -953,7 +994,54 @@ impl PacketClock {
             } else {
                 0
             };
-            (raw_nanos, gap)
+            let nanos = if self.filter_phase {
+                let first = self.first_qpc_nanos.unwrap_or(raw_nanos);
+                let elapsed =
+                    i128::from(position - anchor) * 1_000_000_000 / i128::from(SAMPLE_RATE);
+                let phase = i64::try_from(i128::from(raw_nanos) - i128::from(first) - elapsed)
+                    .context("WASAPI QPC phase overflow")?;
+                if self.previous.is_none()
+                    || gap > 0
+                    || flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0
+                {
+                    // Real loss/discontinuity must remain visible, not be smoothed
+                    // over. Re-anchor the estimate to this packet's actual QPC.
+                    self.phase_count = 0;
+                    self.phase_next = 0;
+                } else if self.phase_count == self.phases.len() {
+                    let mut ordered = self.phases;
+                    ordered[..self.phase_count].sort_unstable();
+                    let previous_phase = ordered[self.phase_count / 2];
+                    let bound =
+                        i128::from(self.buffer_frames) * 1_000_000_000 / i128::from(SAMPLE_RATE);
+                    if (i128::from(phase) - i128::from(previous_phase)).abs() > bound {
+                        bail!(
+                            "WASAPI QPC phase changed from {previous_phase} to {phase} ns beyond buffer duration {bound} ns; packet timing is uncertain"
+                        );
+                    }
+                }
+                self.phases[self.phase_next] = phase;
+                self.phase_next = (self.phase_next + 1) % self.phases.len();
+                self.phase_count = (self.phase_count + 1).min(self.phases.len());
+                let mut ordered = self.phases;
+                ordered[..self.phase_count].sort_unstable();
+                // Five observations reject a one/two-packet timestamp spike.
+                // No samples are delayed, removed, inserted or resampled here.
+                // Preserve the original startup/discontinuity behavior until the
+                // full window exists; an even-sized partial median is biased.
+                let filtered = i128::from(if self.phase_count == self.phases.len() {
+                    ordered[self.phase_count / 2]
+                } else {
+                    phase
+                });
+                i64::try_from(i128::from(first) + elapsed + filtered)
+                    .context("WASAPI filtered timestamp overflow")?
+            } else {
+                // Loopback may legitimately stop producing packets while its
+                // render endpoint is idle; its existing timing stays raw.
+                raw_nanos
+            };
+            (nanos, gap)
         } else {
             if self.native_rate == 0 {
                 bail!("WASAPI native sample rate is zero");
@@ -1009,6 +1097,12 @@ impl PacketClock {
             .is_some_and(|previous| nanos <= previous.nanos)
         {
             bail!("WASAPI corrected packet timestamp did not advance");
+        }
+        if self.native_rate == SAMPLE_RATE && self.filter_phase {
+            if (i128::from(nanos) - i128::from(raw_nanos)).abs() > 2_000_000 {
+                self.qpc_corrections += 1;
+            }
+            self.first_qpc_nanos.get_or_insert(raw_nanos);
         }
         self.anchor = Some(anchor);
         self.output_frames = output_frames;
@@ -1139,5 +1233,103 @@ impl Drop for Notifications {
             self.enumerator
                 .UnregisterEndpointNotificationCallback(&self.callback)
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_clock_rejects_short_phase_spikes_without_losing_samples() {
+        let mut clock = PacketClock::new(48_000, 480, true);
+        let base = 1_000_000_000;
+        for n in 0..12 {
+            let phase = if n == 6 || n == 7 { 30_000 } else { 0 };
+            let (at, gap) = clock
+                .timestamp(480, n * 480, base + n * 100_000 + phase, 0)
+                .unwrap();
+            assert_eq!(at.as_nanos(), (base + n * 100_000) as i64 * 100);
+            assert_eq!(gap, 0);
+        }
+        assert_eq!(clock.output_frames, 12 * 480);
+        assert_eq!(clock.qpc_corrections, 2);
+    }
+
+    #[test]
+    fn native_clock_keeps_raw_startup_and_real_gaps() {
+        let mut clock = PacketClock::new(48_000, 1440, true);
+        let base = 1_000_000_000;
+        for n in 0..4 {
+            let qpc = base + n * 100_000 + if n == 1 { 30_000 } else { 0 };
+            assert_eq!(
+                clock.timestamp(480, n * 480, qpc, 0).unwrap().0.as_nanos(),
+                qpc as i64 * 100
+            );
+        }
+        let (at, gap) = clock.timestamp(480, 5 * 480, base + 500_000, 0).unwrap();
+        assert_eq!(gap, 480);
+        assert_eq!(at.as_nanos(), (base + 500_000) as i64 * 100);
+        assert_eq!(clock.phase_count, 1);
+    }
+
+    #[test]
+    fn native_clock_tracks_drift_instead_of_free_running() {
+        let mut clock = PacketClock::new(48_000, 480, true);
+        let base = 1_000_000_000;
+        for n in 0..1000 {
+            let qpc = base + n * 100_000 + n * 10;
+            let (at, gap) = clock.timestamp(480, n * 480, qpc, 0).unwrap();
+            assert_eq!(gap, 0);
+            assert!((qpc as i64 * 100 - at.as_nanos()).abs() <= 2000);
+        }
+    }
+
+    #[test]
+    fn native_clock_bounds_duplicate_qpc_and_rejects_uncertain_timing() {
+        let mut clock = PacketClock::new(48_000, 480, true);
+        let base = 1_000_000_000;
+        for n in 0..5 {
+            clock
+                .timestamp(480, n * 480, base + n * 100_000, 0)
+                .unwrap();
+        }
+        let (at, gap) = clock.timestamp(480, 5 * 480, base + 400_000, 0).unwrap();
+        assert_eq!(at.as_nanos(), (base + 500_000) as i64 * 100);
+        assert_eq!(gap, 0);
+        assert!(clock.timestamp(480, 6 * 480, base + 10_000_000, 0).is_err());
+        assert!(
+            PacketClock::new(48_000, 480, true)
+                .timestamp(480, 0, 0, 0)
+                .is_err()
+        );
+        assert!(
+            PacketClock::new(48_000, 480, true)
+                .timestamp(480, 0, base, AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn resampled_clock_still_rejects_nonadvancing_qpc() {
+        let mut clock = PacketClock::new(24_000, 1440, true);
+        clock.timestamp(480, 0, 1_000_000_000, 0).unwrap();
+        assert!(clock.timestamp(480, 240, 1_000_000_000, 0).is_err());
+    }
+
+    #[test]
+    fn loopback_preserves_sparse_raw_timing() {
+        let mut clock = PacketClock::new(48_000, 480, false);
+        let base = 1_000_000_000;
+        for n in 0..6 {
+            clock
+                .timestamp(480, n * 480, base + n * 100_000, 0)
+                .unwrap();
+        }
+        let qpc = base + 10_000_000;
+        let (at, gap) = clock.timestamp(480, 6 * 480, qpc, 0).unwrap();
+        assert_eq!(at.as_nanos(), qpc as i64 * 100);
+        assert_eq!(gap, 0);
+        assert_eq!(clock.qpc_corrections, 0);
     }
 }

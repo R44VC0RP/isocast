@@ -41,6 +41,17 @@ impl Gpu {
         .context("no GPU found")?;
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("isocast-ui"),
+            // Preview textures are shared with the daemon. The UI's own small
+            // allocations do not need DX12's default 128 MiB heap blocks.
+            #[cfg(windows)]
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            // DX12 eagerly allocates the entire descriptor heap. The default
+            // million bindings are unnecessary for the UI's shared previews.
+            #[cfg(windows)]
+            required_limits: wgpu::Limits {
+                max_non_sampler_bindings: 65_536,
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .context("could not open the GPU")?;

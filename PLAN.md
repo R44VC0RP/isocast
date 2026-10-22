@@ -2042,6 +2042,41 @@ slices, especially alongside the GPU, vertical-canvas and editor lanes.
   - [ ] **W.5p Windows performance capture/encoder lane (#105).** Follow
     main's docs/windows-performance.md; all changes remain uncommitted until
     coordinator handoff. No silent codec/quality substitutions.
+    - [x] **UI DX12 heap sizing (2026-10-19).** Windows UI uses wgpu's
+      MemoryUsage allocator hint, keeping preview size/rate unchanged.
+      Matched n=3 main/candidate cohorts: private commit1513.85→1335.06MiB
+      at1080,1755.75→1574.85MiB at4K; resident memory essentially unchanged.
+      No CPU-speedup claim.48files fully decode, native zero losses;
+      Windows oracle9pass/2partial-pending, zero losses; UI strict Clippy,
+      fmt and13tests pass. Ready for CI, uncommitted; broader UI CPU open.
+    - [x] **Windows adapter scheduling hooks (2026-10-19).** Cached deadline
+      clock from first tick; Audio MMCSS for capture/AAC/mixer, AboveNormal
+      video workers, recording-scoped power guard with warning-only failure.
+      Native strict Clippy/85engine tests, reviewed; matched native n=3 at
+      both sizes and Windows oracle zero losses. CPU not improved consistently
+      (1080higher,4Klower); performance target remains open. Ready for CI,
+      uncommitted. Win11 power-policy runtime proof remains outstanding.
+    - [x] **DX12 descriptor heaps (2026-10-22).** UI/compositor request65,536
+      live non-sampler bindings instead of1million. Quick paired measurements
+      cut another~55MiB private commit; resident memory unchanged. Reviewed;
+      final matched n=3 and Windows oracle zero losses, strict native Clippy
+      and188tests pass. Ready for CI, uncommitted; not a CPU/RAM-goal win.
+    - [x] **First-packet status (2026-10-22).** Optional output_active marks
+      an actual muxed video fragment, not raw admission. Early publication
+      lowers observed all-active median1162→473ms(1080),1188→502ms(4K),n=3;
+      no claim of accelerated encoding or fsync. Same API for all clients,
+      unknown backends omit it. Reviewed, native checks/oracle pass; ready
+      for CI, uncommitted. Full CPU/preview parity remains open.
+    - [x] **Native48k microphone de-jitter (2026-10-22).** Continuous device
+      positions exposed short QPC spikes causing ISO silence/trim. Five-sample
+      warmed phase median removes the exercised3ISO gaps; corrected4spikes in
+      an80s4K take with0output losses. Microphone only; SRC/loopback/startup and
+      real gaps retain prior timing. Six inline tests/native Clippy pass;
+      final n=3/oracle and portable gates pass with documented partial cases.
+      Ready for CI, uncommitted. Hardware proof preceded microphone-only scope
+      narrowing (same mic path); historical QPC fatal/long soaks unqualified.
+      Final Native CPU26.227/24.279 vsOBS18.356/17.726%onecore at1080/4K;
+      resident299.204/375.903 vs216.044/276.175MiB. Overall goals remain open.
     - [ ] **#1 Aggregate encoder budget.** Native preset/driver-keyed planning
       API and explicit no-provider-fallback factory implemented/reviewed.
       Real2x4K60+1080p60,30swarm+60smeasure: H264P56938/10800 at100%NVENC;
@@ -2249,6 +2284,8 @@ future work, outside R. Order follows Windows quality work (W) unless Ryan reord
 - FilmCraft reads `session.json` to line up ISO files without audio sync.
 
 ## Log
+
+- R1 (2026-10-22): remote control of an engine on another machine works: mutual TLS 1.3 with pinned keys, local-only code + SPAKE2 pairing, caller policy (machine control stays local, keys never to caller-chosen servers, folder roots and browser rule as guard rails), OS DNS-SD discovery, session ids, `isocast remote`/`engines`/`--engine` for CLI and MCP. Verified basebook <-> exon-desk both ways (30 s program + ISO recordings, zero loss; Reconnecting 3.97 s after a link block, same session; revocation 0.50 s); four, three and two review rounds; gates 269 tests.
 
 - R1 transport/integration (2026-10-22, ready for review): pinned TLS,
   single-use PAKE, OS-backed identities, caller origins, discovery, CLI/MCP

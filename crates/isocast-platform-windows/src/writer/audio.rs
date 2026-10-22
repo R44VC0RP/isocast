@@ -37,7 +37,7 @@ impl AudioTrack {
                 channels,
                 bitrate_kbps: if channels == 1 { 128 } else { 192 },
             },
-            crate::system::real_time_thread,
+            crate::system::audio_thread,
         )?;
         // The mux's AAC helper generates exactly this ASC. Verify the ACTUAL
         // native description before reserving a file, not just our request.

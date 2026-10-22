@@ -59,6 +59,7 @@ pub struct VideoWriter {
     repeated: u64,
     reported_losses: u64,
     last_written: Option<u64>,
+    first_video_packet: Option<Box<dyn FnOnce() + Send>>,
     failed: Option<String>,
     output_failed: bool,
     closed: bool,
@@ -135,6 +136,7 @@ impl VideoWriter {
             repeated: 0,
             reported_losses: 0,
             last_written: None,
+            first_video_packet: None,
             failed: None,
             output_failed: false,
             closed: false,
@@ -618,8 +620,23 @@ impl VideoWriter {
                 framing: Framing::LengthPrefixed,
             })?;
         self.last_written = Some(pts);
+        self.publish_first_video_packet();
         self.repeated += u64::from(repeated);
         Ok(())
+    }
+
+    fn publish_first_video_packet(&mut self) {
+        // video() holds a packet until its fragment is written. Admission
+        // alone must not announce an active output.
+        if self.first_video_packet.is_some()
+            && self
+                .mux
+                .as_ref()
+                .is_some_and(|mux| mux.progress().video_frames > 0)
+            && let Some(notify) = self.first_video_packet.take()
+        {
+            notify();
+        }
     }
 
     fn drain_ready(&mut self) -> Result<()> {
@@ -668,7 +685,9 @@ impl VideoWriter {
 
     fn commit_packets(&mut self) -> Result<Option<Duration>> {
         if let Some(mux) = &mut self.mux {
-            return Ok(mux.commit()?.committed);
+            let committed = mux.commit()?.committed;
+            self.publish_first_video_packet();
+            return Ok(committed);
         }
         self.reserved
             .as_ref()
@@ -1149,6 +1168,12 @@ impl FileWriter for VideoWriter {
 
     fn completed_video_frames(&self) -> Option<u64> {
         Some(self.completed)
+    }
+
+    fn on_first_video_packet(&mut self, notify: Box<dyn FnOnce() + Send>) -> bool {
+        self.first_video_packet = Some(notify);
+        self.publish_first_video_packet();
+        true
     }
 
     fn append_audio(&mut self, track: usize, samples: &[f32], pts: Time) -> Result<bool> {

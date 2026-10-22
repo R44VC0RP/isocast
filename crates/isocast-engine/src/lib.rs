@@ -918,6 +918,14 @@ pub trait FileWriter: Send {
         None
     }
 
+    /// Notify once the muxer has written the first encoded video packet to
+    /// the output, not merely queued or buffered it. This is not a durability
+    /// barrier. Returns false when the backend cannot observe that milestone.
+    /// The callback must be cheap and must not call back into the writer.
+    fn on_first_video_packet(&mut self, _notify: Box<dyn FnOnce() + Send>) -> bool {
+        false
+    }
+
     /// Actual native session selection, not the machine's codec catalogue.
     /// Unknown for backends that cannot inspect the running encoder.
     fn hardware_accelerated(&self) -> Option<bool> {

@@ -19,6 +19,67 @@ each section. Delete entries that stop being true.
   ephemeral process/token objects to satisfy IPC peer inspection across
   logons. Production IPC/credential permissions were unchanged. Runner
   source and exact two-machine driver stay in remote-r1/scratch, not the repo.
+- 2026-10-22 (#105 microphone): actual default is Microphone (Virtual Desktop
+  Audio), not Wave XLR. At native48k, continuous positions plus ~3ms QPC phase
+  spikes caused ISO timestamp gaps/silence/trim. Warmed five-packet phase median
+  now applies only to microphones; startup/reset, loopback and SRC retain prior
+  timing. Real gaps reset it; uncertain timing still fails. Six inline tests
+  pass. Real4K80s proof corrected4spikes with0output losses; proof preceded the
+  mic-only scope restriction, whose mic path is unchanged. Historical fatal
+  nonadvancing-QPC failure, other devices/soaks/physical A/V sync unqualified.
+  Mono48k mic ISO legitimately fails W19's stereo-only workload assertion;
+  separate interpretation preserves that gate and verifies other file checks.
+- 2026-10-22 (#105 final handoff): exact frozen tree
+  bc2b5b737b1b4dffd39b37ff654f97ddb8a4e122 passed native checks, full portable
+  gates on exonbook,12interleaved matched takes and Windows oracle9PASS/2partial.
+  CPU and resident RAM still exceed OBS; no hidden helper-CPU gain found.
+  Full-window preview redraw remains; native-child preview is design-only.
+  Evidence: /Volumes/IsocastBuild/windows-perf/scratch/REPORT.md. Owned Windows
+  target/target-installer caches and5ETLs cleaned, C:328.6GiB free afterward;
+  frozen final-bin-20261022, recordings, exported analyses and hashes preserved.
+  No commits; delegator owns rollout. ISOCAST_SOCKET determines .logs path;
+  ISOCAST_LOG_DIR is ignored. Empty untracked p.md left untouched.
+
+- 2026-10-22 (#105): wgpu's default max_non_sampler_bindings=1million
+  eagerly creates a DX12 descriptor heap per device. UI and engine now request
+ 65,536; measured~55MiB less private commit together, but private working set
+  stays unchanged. Do not equate GPU-backed commit with physical CPU RAM.
+- 2026-10-22 (#105): LiveFile.output_active is optional, supported on Windows
+  only after the mux writes a video fragment. The first encoded packet can
+  still be buffered: progress.video_frames, not accepted_video_frames, drives
+  the one-shot callback. The existing coordinator publishes that event early;
+  fsync durability and actual encoder startup are separate. Unknown backends
+  remain omitted; every split gets a new flag.
+- 2026-10-22 (#105 measurement): plain release matches installer optimization
+  settings, but old profiling builds also removed the gallery/added debug info.
+  Final runs use full gallery/no debug override. Private stages deliberately
+  omit WinSparkle to avoid shared updater preference writes. Fresh lightweight
+  ETW found Native60presents/s vsOBS60 at1080,54 at4K; viewports also differ.
+  Do not claim full preview-work parity or normalize all CPU by previewfps.
+
+- 2026-10-19 (#105 scheduling): WindowsPlatform wires the existing deadline
+  timer, Audio MMCSS and recording power-lease hooks. Video/GPU/file workers
+  now AboveNormal, not blanket MMCSS Capture. Win10's unsupported power-policy
+  query remains no-op; other power-hint failures warn without aborting record.
+  Matched n=3/oracle show zero native losses but no consistent CPU improvement;
+  do not advertise a CPU win or Win11 restoration qualification.
+
+- 2026-10-19 (#105 Windows performance): symbolized ETW attributes roughly
+  69% of UI sampled CPU to Slint's wgpu render path, including full-window
+  drawing, imported-texture transitions and presentation. Preview textures
+  already match physical display size; do not fix an imaginary full-canvas
+  resize or claim a30fps cap as a matched60fps improvement. UI MemoryUsage
+  hint cuts private commit by~180MiB at1080/4K without changing cadence;
+  resident memory is effectively unchanged. Report/evidence:
+  `/Volumes/IsocastBuild/windows-perf/scratch/REPORT.md`.
+- 2026-10-19 (#105 benchmark): merged UI's parallel preview/GPU startup can
+  launch two daemon candidates; the process lock selects one. W19's adapter
+  pinned the first candidate even after it exited, rejecting the actual owned
+  pipe server forever. Scratch adapter now reselects only after the held
+  candidate exits, only from verified owned family members; per-connection
+  server-PID and executable identity checks remain. Failed cohorts retained;
+  fresh n=3 baseline/candidate both complete. This is not a production startup
+  fix or grounds for discarding a genuine application failure.
 
 - 2026-10-19 (#105 integration): Windows capture, compositor and viewers
   must use one DX12-compatible adapter LUID. Hyper-V exposed different

@@ -3159,6 +3159,11 @@ pub struct LiveFile {
     /// The native encoder's actual selection; unknown is not hardware.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardware_accelerated: Option<bool>,
+    /// Whether the muxer has written this file's first encoded video packet.
+    /// Not encoder admission or a disk durability guarantee. Absent
+    /// when the backend cannot observe this milestone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_active: Option<bool>,
     pub frames: u64,
     /// Frames due so far that never reached the file. Approximate while
     /// recording; the final report has the exact count.

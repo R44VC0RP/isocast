@@ -1,13 +1,11 @@
 //! What this Windows machine is, the volumes recordings go to, CPU time,
-//! and MMCSS registration for the engine's real-time threads.
+//! and scheduling for the engine's media threads.
 //!
 //! Every query here is read-only and cheap: none opens a graphics device or
 //! an encoder, writes the registry, changes process-wide priority, or
 //! creates a directory.
 
-use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
-use std::marker::PhantomData;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
@@ -35,8 +33,8 @@ use windows::Win32::System::SystemInformation::{
 };
 use windows::Win32::System::SystemServices::VER_NT_WORKSTATION;
 use windows::Win32::System::Threading::{
-    ALL_PROCESSOR_GROUPS, AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
-    GetActiveProcessorCount, GetCurrentProcess, GetCurrentThread, GetProcessTimes, GetThreadTimes,
+    ALL_PROCESSOR_GROUPS, GetActiveProcessorCount, GetCurrentProcess, GetCurrentThread,
+    GetProcessTimes, GetThreadTimes,
 };
 use windows::core::{PCWSTR, w};
 
@@ -383,69 +381,18 @@ pub(crate) fn thread_cpu_time() -> Option<Duration> {
     Some(Duration::from_nanos(ticks.checked_mul(100)?))
 }
 
-/// This thread's MMCSS registration, reverted on this same thread when it
-/// exits (thread-local destructors run on their own thread).
-enum Mmcss {
-    Unset,
-    /// Held only for its `Drop`, which reverts the registration.
-    Registered {
-        _task: MmcssTask,
-    },
-    /// Tried and refused; not tried again on this thread.
-    Failed,
-}
-
-/// The opaque AVRT handle `AvSetMmThreadCharacteristicsW` returned. It is
-/// not a kernel handle: it is never closed, only reverted, and only on the
-/// thread that registered (the raw pointer and marker keep it !Send/!Sync).
-struct MmcssTask {
-    handle: HANDLE,
-    _thread_bound: PhantomData<*const ()>,
-}
-
-impl Drop for MmcssTask {
-    fn drop(&mut self) {
-        // SAFETY: the handle this thread got from a successful
-        // AvSetMmThreadCharacteristicsW, reverted exactly once, on it.
-        if let Err(error) = unsafe { AvRevertMmThreadCharacteristics(self.handle) } {
-            eprintln!("MMCSS: could not leave the Capture task: {error}");
-        }
+/// Video clocks, GPU completion and file writers use the same above-normal
+/// policy as native capture/NVENC workers, not an MMCSS audio task.
+pub(crate) fn real_time_thread() {
+    if let Err(error) = crate::video_thread() {
+        isocast_diagnostics::diagnostic!("warn"; "Windows video scheduling: {error:#}");
     }
 }
 
-thread_local! {
-    static MMCSS: RefCell<Mmcss> = const { RefCell::new(Mmcss::Unset) };
-}
-
-/// Join the calling thread to MMCSS's "Capture" task, so it is scheduled
-/// ahead of background work. The task's own default priority is kept:
-/// the engine marks many threads (program, frame clocks, audio, mix,
-/// writers), and raising them all would only make them compete with
-/// capture and encoder workers. Idempotent per thread; a failure (MMCSS
-/// service stopped, task missing) is reported once and the thread carries
-/// on at normal priority. Nothing process-wide changes.
-pub(crate) fn real_time_thread() {
-    // `try_with`: a thread already tearing down its locals just skips this.
-    let _ = MMCSS.try_with(|state| {
-        let Ok(mut state) = state.try_borrow_mut() else {
-            return;
-        };
-        if !matches!(*state, Mmcss::Unset) {
-            return;
-        }
-        let mut task_index = 0u32;
-        // SAFETY: a static NUL-terminated task name and a live output index.
-        *state = match unsafe { AvSetMmThreadCharacteristicsW(w!("Capture"), &mut task_index) } {
-            Ok(handle) => Mmcss::Registered {
-                _task: MmcssTask {
-                    handle,
-                    _thread_bound: PhantomData,
-                },
-            },
-            Err(error) => {
-                eprintln!("MMCSS: could not join the Capture task: {error}; normal priority");
-                Mmcss::Failed
-            }
-        };
-    });
+/// The native helper owns an idempotent thread-local MMCSS Audio lease,
+/// reverted on that same thread at exit. Never register shared executors.
+pub(crate) fn audio_thread() {
+    if let Err(error) = crate::audio_thread() {
+        isocast_diagnostics::diagnostic!("warn"; "Windows audio scheduling: {error:#}");
+    }
 }

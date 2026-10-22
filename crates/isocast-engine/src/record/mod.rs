@@ -855,6 +855,8 @@ struct FilePlan {
     audio_dropouts: AtomicU64,
     /// Native backend selection: -1 unknown, 0 software, 1 hardware.
     hardware_accelerated: AtomicI64,
+    /// First encoded packet written: -1 unknown, 0 waiting, 1 active.
+    output_active: AtomicI64,
     audio: Vec<String>,
     /// Source timing policy for each audio track (the program is continuous).
     audio_timing: Vec<file::AudioTiming>,
@@ -1154,6 +1156,7 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
                     newest: AtomicI64::new(i64::MIN),
                     audio_dropouts: AtomicU64::new(0),
                     hardware_accelerated: AtomicI64::new(-1),
+                    output_active: AtomicI64::new(-1),
                     crash_safe: AtomicBool::new(false),
                     committed: AtomicI64::new(-1),
                     commit_requested: AtomicU64::new(0),
@@ -1411,6 +1414,11 @@ fn live_status(
                     source: plan.source.clone(),
                     codec: Some(plan.spec.video.encoder.codec),
                     hardware_accelerated: match plan.hardware_accelerated.load(Ordering::Relaxed) {
+                        0 => Some(false),
+                        1 => Some(true),
+                        _ => None,
+                    },
+                    output_active: match plan.output_active.load(Ordering::Acquire) {
                         0 => Some(false),
                         1 => Some(true),
                         _ => None,

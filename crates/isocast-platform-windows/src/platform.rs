@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -406,6 +407,23 @@ impl Platform for WindowsPlatform {
         now()
     }
 
+    fn sleep_until(&self, at: Time) {
+        if let Err(error) = crate::sleep_until(at) {
+            static REPORTED: AtomicBool = AtomicBool::new(false);
+            if !REPORTED.swap(true, Ordering::Relaxed) {
+                isocast_diagnostics::diagnostic!("warn";
+                    "Windows media timer failed; using ordinary sleep: {error:#}"
+                );
+            }
+            let remaining = at.saturating_since(now());
+            std::thread::sleep(remaining);
+        }
+    }
+
+    fn prefers_deadline_timer(&self) -> bool {
+        true
+    }
+
     fn gpu_adapter_luid(&self) -> Result<Option<(u32, i32)>> {
         Ok(Some(self.graphics()?.adapter_luid()))
     }
@@ -493,6 +511,20 @@ impl Platform for WindowsPlatform {
 
     fn real_time_thread(&self) {
         system::real_time_thread();
+    }
+
+    fn audio_thread(&self) {
+        system::audio_thread();
+    }
+
+    fn recording_activity(&self) -> Result<Option<Box<dyn Send>>> {
+        match crate::RecordingPowerGuard::new() {
+            Ok(guard) => Ok(guard.map(|guard| Box::new(guard) as Box<dyn Send>)),
+            Err(error) => {
+                isocast_diagnostics::diagnostic!("warn"; "Windows recording power policy: {error:#}");
+                Ok(None)
+            }
+        }
     }
 
     fn frame_pool(&self, width: u32, height: u32) -> Result<OutputPool> {
@@ -789,7 +821,7 @@ impl Platform for WindowsPlatform {
         channels: Option<&[u32]>,
         sink: AudioSink,
     ) -> Result<(Capture, u32)> {
-        crate::capture_microphone(device, channels, sink, system::real_time_thread)
+        crate::capture_microphone(device, channels, sink, system::audio_thread)
             .map(|(capture, channels)| (Capture::Audio(capture), channels))
     }
 
@@ -799,7 +831,7 @@ impl Platform for WindowsPlatform {
         sink: AudioSink,
         exclude_own: bool,
     ) -> Result<(Capture, u32)> {
-        crate::capture_system_audio(exclude, sink, exclude_own, system::real_time_thread)
+        crate::capture_system_audio(exclude, sink, exclude_own, system::audio_thread)
             .map(|(capture, channels)| (Capture::Audio(capture), channels))
     }
 
@@ -850,7 +882,7 @@ impl Platform for WindowsPlatform {
     }
 
     fn create_audio_encoder(&self, spec: &LiveAudioSpec) -> Result<MfAacEncoder> {
-        MfAacEncoder::streaming(spec, system::real_time_thread)
+        MfAacEncoder::streaming(spec, system::audio_thread)
     }
 
     fn has_secret(&self, service: &str, account: &str) -> Result<bool> {

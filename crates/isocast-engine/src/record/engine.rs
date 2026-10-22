@@ -4384,6 +4384,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
         let mut disk_meter = DiskMeter::default();
         let mut losses = 0;
         let mut next_status = platform.now() + STATUS_INTERVAL;
+        let mut output_activity = (1, 0);
         let mut next_space_check = platform.now();
         let mut disk_full = None;
         let stop_below = reserve.max((rate * MIN_FREE_SECONDS).max(MIN_FREE_BYTES) as u64);
@@ -4409,10 +4410,19 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                     }
                 }
                 let current = takes.last().expect("a take");
+                let activity = (
+                    takes.len(),
+                    current
+                        .plans
+                        .iter()
+                        .filter(|plan| plan.output_active.load(Ordering::Acquire) == 1)
+                        .count(),
+                );
                 if let Some(on_status) = options.on_status
-                    && now >= next_status
+                    && (now >= next_status || (activity.1 > 0 && activity != output_activity))
                 {
                     next_status = now + STATUS_INTERVAL;
+                    output_activity = activity;
                     // The loudest of each source since the last status.
                     let levels = std::mem::take(&mut *inner.loudest.lock())
                         .into_iter()

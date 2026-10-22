@@ -512,7 +512,14 @@ struct OpenFile<W: FileWriter> {
 }
 
 impl<W: FileWriter> OpenFile<W> {
-    fn new(writer: W, plan: Arc<FilePlan>, clock: Arc<RecordingClock>) -> Self {
+    fn new(mut writer: W, plan: Arc<FilePlan>, clock: Arc<RecordingClock>) -> Self {
+        plan.output_active.store(0, Ordering::Release);
+        let active = plan.clone();
+        if !writer.on_first_video_packet(Box::new(move || {
+            active.output_active.store(1, Ordering::Release);
+        })) {
+            plan.output_active.store(-1, Ordering::Release);
+        }
         let crash_safe = writer.crash_safe();
         plan.crash_safe.store(crash_safe, Ordering::Release);
         let tracks = plan
