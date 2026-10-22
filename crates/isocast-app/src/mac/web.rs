@@ -19,9 +19,9 @@
 //!
 //! Daemon events reach the page as `window.__isocastEvent(event)`.
 
+use isocast_ipc::Stream as UnixStream;
 use std::collections::HashMap;
 use std::io::Read;
-use std::os::unix::net::UnixStream;
 use std::ptr;
 use std::thread;
 

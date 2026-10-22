@@ -283,8 +283,8 @@ impl Tracker {
             )],
             // OBS aggregates every main-canvas destination (#73, #74),
             // but has no second canvas (#86).
-            Event::Stream { stream } if !stream.canvas.is_main() => Vec::new(),
-            Event::Stream { stream } => {
+            Event::Stream { stream, .. } if !stream.canvas.is_main() => Vec::new(),
+            Event::Stream { stream, .. } => {
                 self.streams.insert(stream.id, stream.state);
                 let now = stream_state(self.streams.values().copied());
                 let before = std::mem::replace(&mut self.stream, now);

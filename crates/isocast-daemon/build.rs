@@ -41,6 +41,22 @@ fn main() {
             generated.display()
         );
     }
+    // Provenance from the release pipelines' own variables, never from the
+    // build number's shape (a macOS dev build has a numeric timestamp too):
+    // scripts/release.sh sets ISOCAST_BUILD_VERSION, the Windows packaging
+    // workflow ISOCAST_WINDOWS_BUILD_VERSION (docs/remote-engines.md,
+    // decision 7).
+    println!("cargo:rerun-if-env-changed=ISOCAST_WINDOWS_BUILD_VERSION");
+    let given = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    let release = match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("macos") => given("ISOCAST_BUILD_VERSION"),
+        Ok("windows") => given("ISOCAST_WINDOWS_BUILD_VERSION"),
+        _ => None,
+    };
+    println!(
+        "cargo:rustc-env=ISOCAST_BUILD_PROVENANCE={}",
+        if release.is_some() { "release" } else { "dev" }
+    );
     let commit = std::env::var("ISOCAST_BUILD_COMMIT")
         .ok()
         .or_else(|| {

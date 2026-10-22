@@ -334,7 +334,7 @@ impl App {
 
     pub(crate) fn event(self: &Rc<Self>, event: Event) {
         match &event {
-            Event::SetupChanged { revision } => {
+            Event::SetupChanged { revision, .. } => {
                 let stale = {
                     let s = self.session.borrow();
                     *revision > s.revision && !s.editing()
@@ -472,7 +472,7 @@ impl App {
                     .insert(status.source.clone(), status.clone());
                 self.changed(Changed::RUNNING);
             }
-            Event::Stream { stream } => {
+            Event::Stream { stream, .. } => {
                 let (before, several) = {
                     let s = self.session.borrow();
                     let list: &[isocast_protocol::stream::StreamStatus] = if stream.canvas.is_main()
@@ -579,6 +579,15 @@ impl App {
             }
             // The Controls area shows where the next recording goes.
             Event::RecordTarget { .. } => {}
+            // Shown by the remote-engines UI (R2).
+            Event::Refused { .. } => {}
+            // Presence/remote settings are presented by the R2 remote UI.
+            Event::RemoteClientConnected { .. }
+            | Event::RemoteClientDisconnected { .. }
+            | Event::RemotePaired { .. }
+            | Event::RemoteRevoked { .. }
+            | Event::RemoteDisabled
+            | Event::RemoteHeartbeat => {}
         }
         for area in self.areas() {
             area.event(self, &event);

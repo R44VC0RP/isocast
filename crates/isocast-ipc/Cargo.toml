@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 description = "Local control transport: native Unix sockets and owner-only Windows named pipes."
 
+[dependencies]
+isocast-remote = { path = "../isocast-remote" }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

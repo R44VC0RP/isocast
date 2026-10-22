@@ -17,6 +17,7 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 ctrlc = "3"
 isocast-client = { path = "../isocast-client" }
+isocast-discovery = { path = "../isocast-discovery" }
 isocast-engine = { path = "../isocast-engine" }
 isocast-protocol = { path = "../isocast-protocol" }
 libc = "0.2"

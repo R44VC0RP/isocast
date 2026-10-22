@@ -335,6 +335,14 @@ impl Daemon {
         if let Some(problem) = relative_folder(&folder.to_string_lossy()) {
             return Err(wrong(format!("recording.folder: {problem}")));
         }
+        // For a network caller, where it saves (the running recording's
+        // project, or the recordings folder) is inside the folder roots,
+        // checked right before writing and used as checked (decision 26).
+        let folder = self.checked_path(
+            "folder",
+            &folder.to_string_lossy(),
+            crate::roots::Access::Write,
+        )?;
         // The vertical canvas's replays end in "vertical", as its
         // recordings do.
         let name = format!(

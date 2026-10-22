@@ -1388,7 +1388,9 @@ fn collection_path(
     obs: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let path = expand(collection, home);
-    if path.is_file() {
+    // A path counts only when absolute (or `~/...`): a bare name is OBS's,
+    // never a file in isocastd's working folder.
+    if path.is_absolute() && path.is_file() {
         return Ok(path);
     }
     let named = obs.map(|obs| obs.join("basic/scenes").join(format!("{collection}.json")));
@@ -1454,9 +1456,10 @@ fn read_profile(
     obs: Option<&Path>,
 ) -> Result<(PathBuf, Profile), String> {
     let path = expand(profile, home);
-    let path = if path.is_file() {
+    // As for collections: only an absolute path is a file.
+    let path = if path.is_absolute() && path.is_file() {
         path
-    } else if path.join("basic.ini").is_file() {
+    } else if path.is_absolute() && path.join("basic.ini").is_file() {
         path.join("basic.ini")
     } else {
         let all = obs.map(profiles).unwrap_or_default();

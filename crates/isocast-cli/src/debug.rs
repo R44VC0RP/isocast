@@ -25,6 +25,26 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Advertise a test engine on the local network until Ctrl-C, so
+    /// `isocast engines --discover` on another computer has something to
+    /// find. Development only: nothing listens on the port, and it runs
+    /// in this process, not the engine.
+    Advertise {
+        /// The instance name to advertise.
+        #[arg(long)]
+        name: String,
+        /// The TCP port to advertise.
+        #[arg(long)]
+        port: u16,
+        /// The `id` in the TXT record.
+        #[arg(long, default_value = "debug")]
+        id: String,
+        /// Stop by itself after this many seconds, as Ctrl-C would.
+        #[arg(long)]
+        seconds: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn run(command: Command) -> Result<ExitCode> {
@@ -47,6 +67,13 @@ pub fn run(command: Command) -> Result<ExitCode> {
             json,
         ),
         Command::Status { json } => (Method::DebugStatus, json),
+        Command::Advertise {
+            name,
+            port,
+            id,
+            seconds,
+            json,
+        } => return crate::engines::advertise(&name, port, &id, seconds, json),
     };
     let status: DeveloperStatus = Client::connect_or_launch()?.call(method)?;
     if json {

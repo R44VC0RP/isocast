@@ -34,6 +34,7 @@ mod jpeg;
 mod keychain;
 mod matroska;
 mod media;
+pub mod network;
 mod output;
 mod pacing;
 mod permissions;

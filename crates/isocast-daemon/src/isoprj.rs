@@ -787,6 +787,25 @@ impl Daemon {
                 target_path.display()
             )));
         }
+        // A network caller's relink reads the take's manifest it names
+        // inside the folder roots: the folder given joined with the take's
+        // file name too (decision 26).
+        if !crate::callers::current().is_local() && target_path.is_dir() {
+            let name = {
+                let timelines = self.timelines.lock();
+                let id = timelines.resolve(params.timeline.as_deref())?;
+                let t = timelines
+                    .get(&id)
+                    .ok_or_else(|| invalid(format!("timeline: no timeline {id:?}")))?;
+                let at = timeline::find(t, &params.clip)?;
+                t.clips[at]
+                    .take
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_os_string()
+            };
+            self.check_path("path", &target_path.join(name), crate::roots::Access::Read)?;
+        }
         let (id, note) = {
             let mut timelines = self.timelines.lock();
             let id = timelines.resolve(params.timeline.as_deref())?;

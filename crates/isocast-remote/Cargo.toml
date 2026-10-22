@@ -1,0 +1,23 @@
+[package]
+name = "isocast-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pinned mutual TLS and single-use pairing for Isocast remote engines."
+
+[dependencies]
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring"] }
+ring = "0.17"
+spake2 = "0.4"
+socket2 = { version = "0.6", features = ["all"] }
+mio = { version = "1", features = ["net", "os-poll"] }
+zeroize = "1"
+base64 = "0.22.1"
+serde = "1.0.229"
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+isocast-protocol = { path = "../isocast-protocol" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -397,7 +397,7 @@ impl Area for Controls {
             Event::Status { live } => self.note_drops(app, Some(&live.files), None),
             // The main canvas's stream only: the vertical canvas's has
             // its own status (#86).
-            Event::Stream { stream } if stream.canvas.is_main() => {
+            Event::Stream { stream, .. } if stream.canvas.is_main() => {
                 let on = matches!(
                     stream.state,
                     StreamState::Live | StreamState::Connecting | StreamState::Reconnecting
@@ -2250,7 +2250,7 @@ fn toggle_recording(app: &Rc<App>) {
         };
         // Answered at once: the files are still being finished (the
         // status's `finalizing`) until the `stopped` event.
-        app.call(Method::RequestStop, move |app, result| {
+        app.call(Method::RequestStop(None), move |app, result| {
             match result {
                 // The `stopped` event's toast says where it went (#114),
                 // for this window's stop and any other alike.
@@ -2260,7 +2260,7 @@ fn toggle_recording(app: &Rc<App>) {
                     // structured capability refusal permits this fallback;
                     // keep busy/finishing until the completed Report arrives.
                     app.call_as::<isocast_protocol::api::Report>(
-                        Method::Stop,
+                        Method::Stop(None),
                         move |app, result| {
                             match result {
                                 Ok(report) if !report.errors.is_empty() => {

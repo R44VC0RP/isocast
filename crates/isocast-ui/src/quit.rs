@@ -202,7 +202,7 @@ fn stop_and_quit(app: &Rc<App>) {
     };
     if now.recording {
         let (failed, left) = (failed.clone(), left.clone());
-        app.call(Method::Stop, move |app, result| {
+        app.call(Method::Stop(None), move |app, result| {
             if let Err(error) = result {
                 app.failed("Couldn’t stop recording, so Isocast stays open", &error);
                 failed.set(true);

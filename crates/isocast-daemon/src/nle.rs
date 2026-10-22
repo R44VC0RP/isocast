@@ -1435,6 +1435,12 @@ impl Daemon {
                     .folder
                     .clone()
                     .unwrap_or_else(|| takes[0].folder.clone());
+                // As for exports: the default folder is checked too.
+                let folder = self.checked_path(
+                    "folder",
+                    &folder.to_string_lossy(),
+                    crate::roots::Access::Write,
+                )?;
                 std::fs::create_dir_all(&folder).map_err(|err| {
                     failed(format!(
                         "folder: could not make {}: {err}",

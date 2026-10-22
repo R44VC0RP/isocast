@@ -111,11 +111,10 @@ pub fn tune<P: Platform>(
         .unwrap_or_else(|| expand_home(&setup.recording.folder));
     std::fs::create_dir_all(&folder)
         .with_context(|| format!("could not create {}", folder.display()))?;
-    let scratch = folder.join(".isocast-tune");
-    // Files an earlier run left behind (it was killed or panicked) would
-    // fail every benchmark that writes to the same name.
-    let _ = std::fs::remove_dir_all(&scratch);
-    std::fs::create_dir_all(&scratch)?;
+    // This run's own folder, made new (never one already there, and never
+    // through a link): the benchmark writes and then removes only what it
+    // made, wherever the folder came from.
+    let scratch = crate::space::owned_temp_dir(&folder, ".isocast-tune")?;
     let tuner = Tuner {
         platform,
         setup,

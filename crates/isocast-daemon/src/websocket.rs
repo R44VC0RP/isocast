@@ -296,6 +296,9 @@ fn restart(inner: &mut Inner, daemon: &Arc<Daemon>) {
                     "no password"
                 }
             );
+            if let Some(warning) = inner.settings.bind_warning() {
+                isocast_diagnostics::diagnostic!("warn"; "isocastd: {warning}");
+            }
             inner.server = Some(server);
         }
         Err(err) => {
@@ -329,6 +332,7 @@ fn status(inner: &Inner, generated_password: Option<String>) -> WebsocketStatus 
         last_error: inner.last_error.clone(),
         generated_password,
         warning: None,
+        bind_warning: settings.bind_warning(),
     }
 }
 
@@ -336,20 +340,32 @@ fn status(inner: &Inner, generated_password: Option<String>) -> WebsocketStatus 
 struct Bridge(Weak<Daemon>);
 
 impl Engine for Bridge {
-    fn call(&self, method: Method, peer: &str) -> Result<serde_json::Value, RpcError> {
+    fn call(&self, method: Method, peer: SocketAddr) -> Result<serde_json::Value, RpcError> {
         let Some(daemon) = self.0.upgrade() else {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
                 message: "isocastd is stopping".into(),
             });
         };
+        // A network caller (decision 14 of docs/remote-engines.md): held
+        // to the local-only policy, and named in events and the audit.
+        let caller = Caller {
+            origin: isocast_protocol::caller::Origin::ObsWebsocket { addr: peer },
+        };
         let request = Request::new(0, method);
         let line = serde_json::to_string(&request).unwrap_or_default();
-        let mut audit = diagnostics::ApiCall::new(
-            &line,
-            &serde_json::json!({ "transport": "obs-websocket", "peer": peer }),
-        );
-        let response = daemon.call(request);
+        let mut audit = diagnostics::ApiCall::new(&line, &caller.peer().unwrap_or_default());
+        let method = callers::method_name(&request.method);
+        let response = match callers::refusal(&caller, &request.method) {
+            Some(error) => Response::err(Some(request.id), error),
+            None => {
+                let _entered = callers::enter(caller.clone());
+                daemon.call(request)
+            }
+        };
+        if let Some(error) = &response.error {
+            daemon.note_refusal(&caller, &method, error);
+        }
         audit.response(&response);
         match (response.result, response.error) {
             (_, Some(error)) => Err(error),

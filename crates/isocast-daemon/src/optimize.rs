@@ -71,7 +71,13 @@ impl Daemon {
     }
 
     pub(crate) fn speed_test(&self, params: SpeedTestParams) -> Result<SpeedTest, RpcError> {
-        let state = self.state.read();
+        // Held from choosing the destination until its key is in hand,
+        // migration included: destination changes (and their key clearing)
+        // and key provisioning take this lock too, so the key is the one
+        // for the destination checked, never one set after a network
+        // caller's server became current (decision 26). Released before
+        // the upload.
+        let state = self.state.lock();
         if state.streaming() {
             return Err(wrong_state(
                 "not while streaming: the test would compete with the stream for the upload",
@@ -80,7 +86,6 @@ impl Daemon {
         let live = stream_settings(&state);
         // The bitrate is for the canvas's rate, as optimize picks it.
         let fps = state.setup.as_ref().map_or(60, |s| s.canvas.fps);
-        drop(state);
         let service = match (params.service, &live) {
             (Some(service), _) => service,
             (None, Some(live)) => live.service,
@@ -93,6 +98,29 @@ impl Daemon {
                 )));
             }
         };
+        // A network caller's test goes only to the configured stream
+        // destination (decision 25): it publishes with the stored key, so a
+        // server or service chosen from another computer could receive it.
+        // Checked here, so `optimize` and anything else that tests the
+        // upload are held to it too.
+        if !crate::callers::current().is_local() {
+            let configured = live.as_ref().filter(|l| l.service == service);
+            let server_ok = params
+                .server
+                .as_ref()
+                .is_none_or(|given| configured.is_some_and(|l| l.server.as_ref() == Some(given)));
+            if configured.is_none() || !server_ok {
+                return Err(RpcError {
+                    code: RpcError::NOT_PERMITTED,
+                    message: format!(
+                        "an upload test from another computer goes only to the live setup's \
+                         configured stream destination (it publishes with the stored stream \
+                         key); leave out service and server, or test another server on {}",
+                        crate::callers::machine_name()
+                    ),
+                });
+            }
+        }
         let server = params.server.clone().or_else(|| {
             live.as_ref()
                 .filter(|l| l.service == service)
@@ -134,8 +162,9 @@ impl Daemon {
         let account = key_account(service, settings.server.as_deref());
         let key = match std::env::var(KEY_ENV) {
             Ok(key) if !key.trim().is_empty() => Some(key.trim().to_string()),
-            _ => stream_key(&account).map_err(crate::failed)?,
+            _ => stream_key(&state, &account).map_err(crate::failed)?,
         };
+        drop(state);
         let Some(mut key) = key else {
             return Ok(fallback(format!(
                 "no stream key is set for {}, so the upload couldn't be tested; set it (Settings \
@@ -195,6 +224,21 @@ impl Daemon {
         // benchmark takes a minute).
         let revision = state.revision;
         drop(state);
+        // From another computer it can't name a server (decision 25): the
+        // stream would then publish the stored key there.
+        if !crate::callers::current().is_local()
+            && let Some(server) = &params.server
+            && live.stream.as_ref().and_then(|s| s.server.as_ref()) != Some(server)
+        {
+            return Err(RpcError {
+                code: RpcError::NOT_PERMITTED,
+                message: format!(
+                    "server: optimize from another computer uses the live setup's configured \
+                     stream destination; leave out server, or choose another on {}",
+                    crate::callers::machine_name()
+                ),
+            });
+        }
         let mut notes = Vec::new();
         let mut speed = None;
         let choice = if params.goal.streams() {

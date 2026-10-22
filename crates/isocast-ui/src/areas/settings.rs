@@ -1661,6 +1661,7 @@ impl Settings {
             service: Some(service),
             server,
             canvas: self.stream_canvas(),
+            revision: None,
         })
     }
 

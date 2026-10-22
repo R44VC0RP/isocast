@@ -143,7 +143,7 @@ fn record(
                 // cancel once it exists, rather than misreporting a finished
                 // short take as one which never started.
             } else if stop.load(Ordering::SeqCst) && !stopping {
-                match control.call::<Report>(Method::Stop) {
+                match control.call::<Report>(Method::Stop(None)) {
                     Ok(report) => return Ok(report),
                     Err(error)
                         if error

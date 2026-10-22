@@ -10,8 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use isocast_ipc::Stream as UnixStream;
 use std::io::BufReader;
-use std::os::unix::net::UnixStream;
 
 use isocast_client::{Client, DaemonError};
 use isocast_protocol::api::{FrameStream, FramesParams, RpcError};

@@ -11,8 +11,9 @@
 #                                              isocast-ui), then fetch them
 #   scripts/remote-build.sh [--host H] gates   the full workspace gates: fmt
 #                                              --check, clippy --release
-#                                              --all-targets -D warnings,
-#                                              test --release
+#                                              --locked --all-targets -D
+#                                              warnings, test --release
+#                                              --locked
 #   scripts/remote-build.sh [--host H] fetch [--to DIR] BIN…
 #                                              copy release binaries back
 #                                              (from the lane's host)
@@ -469,7 +470,7 @@ build)
     ;;
 gates)
     sync
-    run_remote 'cargo fmt --check && cargo clippy --release --all-targets -- -D warnings && cargo test --release'
+    run_remote 'cargo fmt --check && cargo clippy --release --locked --all-targets -- -D warnings && cargo test --release --locked'
     ;;
 fetch)
     shift

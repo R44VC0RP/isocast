@@ -91,7 +91,7 @@ struct Session<'a> {
     /// Messages are MessagePack (binary frames), not JSON.
     msgpack: bool,
     shared: &'a Shared,
-    peer: String,
+    peer: SocketAddr,
     challenge: Option<String>,
     identified: bool,
     subscriptions: u32,
@@ -171,7 +171,7 @@ pub fn run(stream: TcpStream, peer: SocketAddr, shared: &Arc<Shared>) {
     let mut session = Session {
         msgpack,
         shared,
-        peer: format!("obs-websocket {peer}"),
+        peer,
         challenge: None,
         identified: false,
         subscriptions: 0,
@@ -234,7 +234,7 @@ impl Session<'_> {
     fn ctx(&self) -> Ctx<'_> {
         Ctx {
             shared: self.shared,
-            peer: &self.peer,
+            peer: self.peer,
             stats: &self.stats,
         }
     }
@@ -351,7 +351,7 @@ impl Session<'_> {
         let mut out = Vec::new();
         let ctx = Ctx {
             shared: self.shared,
-            peer: &self.peer,
+            peer: self.peer,
             stats: &self.stats,
         };
         if let Some(tracker) = self.tracker.as_mut() {
@@ -495,20 +495,44 @@ impl Session<'_> {
                 }
                 if let (Some(password), Some(challenge)) = (&self.shared.password, &self.challenge)
                 {
-                    let Some(given) = data.get("authentication") else {
-                        return Err(closing(
-                            close::AUTHENTICATION_FAILED,
-                            "Your payload's data is missing an `authentication` string, however authentication is required.",
-                        ));
+                    // An address that got the password wrong too often
+                    // waits before its next try is even checked. The try
+                    // is counted under the same lock, so tries on many
+                    // connections at once are counted too.
+                    let ip = self.peer.ip();
+                    let ticket = match self.shared.auth_limit.lock().attempt(ip, Instant::now()) {
+                        Ok(ticket) => ticket,
+                        Err(wait) => {
+                            return Err(closing(
+                                close::AUTHENTICATION_FAILED,
+                                format!(
+                                    "Too many failed authentication attempts; try again in {} s.",
+                                    wait.as_secs_f64().ceil() as u64
+                                ),
+                            ));
+                        }
                     };
                     let expected = crate::authentication(password, &self.shared.salt, challenge);
-                    if given
-                        .as_str()
-                        .is_none_or(|g| !constant_time_eq(g.as_bytes(), expected.as_bytes()))
-                    {
+                    let good = data
+                        .get("authentication")
+                        .and_then(Value::as_str)
+                        .is_some_and(|g| constant_time_eq(g.as_bytes(), expected.as_bytes()));
+                    self.shared
+                        .auth_limit
+                        .lock()
+                        .finish(ticket, good, Instant::now());
+                    if !good {
+                        self.shared.engine.log(&format!(
+                            "isocastd: obs-websocket: wrong password from {}",
+                            self.peer
+                        ));
                         return Err(closing(
                             close::AUTHENTICATION_FAILED,
-                            "Authentication failed.",
+                            if data.get("authentication").is_none() {
+                                "Your payload's data is missing an `authentication` string, however authentication is required."
+                            } else {
+                                "Authentication failed."
+                            },
                         ));
                     }
                 }

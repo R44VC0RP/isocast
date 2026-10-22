@@ -185,7 +185,8 @@ type Answer = Result<Value, Fail>;
 /// One client's view of the engine while answering its requests.
 pub struct Ctx<'a> {
     pub shared: &'a Shared,
-    pub peer: &'a str,
+    /// The client's address: the engine attributes and limits its calls.
+    pub peer: std::net::SocketAddr,
     pub stats: &'a Stats,
 }
 
@@ -1697,7 +1698,7 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
                     ..Default::default()
                 })))?;
             } else {
-                ctx.act(Method::Stop)?;
+                ctx.act(Method::Stop(None))?;
             }
             Ok(match request_type {
                 "ToggleRecord" => json!({ "outputActive": start }),

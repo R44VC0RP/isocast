@@ -4,6 +4,8 @@
 
 mod isolated;
 pub mod library;
+pub mod remote;
+pub use remote::Engine;
 #[cfg(feature = "shared")]
 pub mod shared;
 #[cfg(windows)]
@@ -31,10 +33,68 @@ const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a running daemon may refuse connections before giving up.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// A real loopback TLS control exchange in the existing cargo-test gate.
+    /// Ephemeral test keys stay in memory; no user credential store or daemon
+    /// profile is touched. Native persistence/recording are qualified separately.
+    #[test]
+    fn tls_loopback_control_and_revocation() -> Result<()> {
+        use isocast_remote::{Hooks, Identity, PairedClient, Pins, Server, pairing::Pairing};
+        let engine = Arc::new(Identity::from_pkcs8(&Identity::generate()?)?);
+        let identity = Identity::from_pkcs8(&Identity::generate()?)?;
+        let server = Server::bind(
+            engine.clone(),
+            vec![PairedClient {
+                spki: identity.spki().to_vec(),
+                name: "loopback gate".into(),
+            }],
+            Arc::new(Pairing::default()),
+            "127.0.0.1".parse()?,
+            Some(0),
+            Hooks {
+                on_link: Box::new(|_| false),
+                paired: Box::new(|_, _| Err(std::io::Error::other("this gate is pre-paired"))),
+                connected: Box::new(|stream| {
+                    let mut writer = stream.try_clone().unwrap();
+                    for line in BufReader::new(stream).lines() {
+                        let Ok(line) = line else { break };
+                        let Ok(request) = serde_json::from_str::<Request>(&line) else {
+                            break;
+                        };
+                        let reply =
+                            Response::ok(request.id, serde_json::json!({"request_id":request.id}));
+                        if writeln!(writer, "{}", serde_json::to_string(&reply).unwrap()).is_err() {
+                            break;
+                        }
+                    }
+                }),
+            },
+        )?;
+        let pins = Arc::new(Pins::default());
+        pins.insert(engine.spki().to_vec())?;
+        let config = isocast_remote::client_config(&identity, pins)?;
+        let stream = isocast_remote::connect(server.local_addr(), config)?;
+        let mut client = Client::new(UnixStream::Tls(stream))?;
+        assert!(client.is_remote());
+        assert_eq!(client.call_value("status", None)?["request_id"], 1);
+        assert_eq!(client.call_value("status", None)?["request_id"], 2);
+        server.revoke(&identity.id());
+        assert!(client.call_value("status", None).is_err());
+        server.disable();
+        Ok(())
+    }
+}
+
 pub struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
     next_id: u64,
+    hello: Option<isocast_protocol::hello::Hello>,
+    compatibility_error: Option<String>,
 }
 
 /// An error the daemon returned, with its JSON-RPC code.
@@ -61,6 +121,9 @@ impl Client {
     /// Installers use this instead of terminating a process or starting a new
     /// daemon. Bound both the RPC and the wait for the old endpoint to go away.
     pub fn shutdown_if_idle() -> Result<()> {
+        if !Engine::selected()?.is_local() {
+            bail!("shutdown_if_idle is local-only; change this on the engine machine");
+        }
         if let Some(mut client) = Self::connect()? {
             client
                 .writer
@@ -124,6 +187,10 @@ impl Client {
     /// retried for up to [`BUSY_TIMEOUT`]: launching another would take
     /// over its socket and orphan whatever it records.
     pub fn connect() -> Result<Option<Self>> {
+        Engine::selected()?.connect()
+    }
+
+    pub fn connect_local() -> Result<Option<Self>> {
         let deadline = Instant::now() + BUSY_TIMEOUT;
         loop {
             let error = match UnixStream::connect(socket_path()) {
@@ -154,13 +221,17 @@ impl Client {
 
     /// Connect, launching the daemon in the background if it isn't running.
     pub fn connect_or_launch() -> Result<Self> {
-        if let Some(client) = Self::connect()? {
+        Engine::selected()?.connect_or_launch()
+    }
+
+    pub fn connect_local_or_launch() -> Result<Self> {
+        if let Some(client) = Self::connect_local()? {
             return Ok(client);
         }
         launch()?;
         let deadline = Instant::now() + SPAWN_TIMEOUT;
         loop {
-            if let Some(client) = Self::connect()? {
+            if let Some(client) = Self::connect_local()? {
                 return Ok(client);
             }
             if Instant::now() > deadline {
@@ -180,6 +251,8 @@ impl Client {
             writer: stream.try_clone()?,
             reader: BufReader::new(stream),
             next_id: 1,
+            hello: None,
+            compatibility_error: None,
         })
     }
 
@@ -213,20 +286,58 @@ impl Client {
     fn request(&mut self, request: &impl Serialize) -> Result<Value> {
         let started = Instant::now();
         let audit = serde_json::to_value(request)?;
+        if let Some(message) = &self.compatibility_error
+            && !matches!(
+                audit["method"].as_str(),
+                Some("hello" | "status" | "remote_update_request")
+            )
+        {
+            return Err(DaemonError(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: message.clone(),
+            })
+            .into());
+        }
+        if self.writer.peer().is_some() {
+            let method = audit["method"].as_str().unwrap_or_default();
+            let seconds = if matches!(method, "start" | "stop" | "request_stop") {
+                180
+            } else {
+                30
+            };
+            self.reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(seconds)))?;
+            self.writer
+                .set_write_timeout(Some(Duration::from_secs(5)))?;
+        }
         // Learn credentials without persisting arbitrary client params/prose.
         let _ = isocast_diagnostics::redact::Redactor::default().value(&audit);
         let request = serde_json::to_string(request)?;
-        writeln!(self.writer, "{request}").context("lost the connection to isocastd")?;
         let mut line = String::new();
-        self.reader
-            .read_line(&mut line)
-            .context("lost the connection to isocastd")?;
-        if line.is_empty() {
-            bail!("isocastd closed the connection");
-        }
-        isocast_diagnostics::daemon_answered();
-        let response: Response = serde_json::from_str(&line)
-            .with_context(|| format!("isocastd sent an unreadable response: {line}"))?;
+        let received = (|| -> Result<Response> {
+            writeln!(self.writer, "{request}").context("lost the connection to isocastd")?;
+            self.reader
+                .read_line(&mut line)
+                .context("lost the connection to isocastd")?;
+            if line.is_empty() {
+                bail!("isocastd closed the connection");
+            }
+            isocast_diagnostics::daemon_answered();
+            serde_json::from_str(&line).context("isocastd sent an unreadable response")
+        })();
+        let response = match received {
+            Ok(response) => response,
+            Err(error) => {
+                // A timed-out request may still receive a late reply. Never
+                // let another call on this serial client consume that reply
+                // as its own result: callers must reconnect and resnapshot.
+                if self.is_remote() {
+                    let _ = self.writer.shutdown(std::net::Shutdown::Both);
+                }
+                return Err(error);
+            }
+        };
         if let Some(error) = response.error {
             isocast_diagnostics::emit(
                 // Something this engine can't do here isn't a failure.
@@ -253,6 +364,12 @@ impl Client {
 }
 
 impl Client {
+    pub fn is_remote(&self) -> bool {
+        self.writer.peer().is_some()
+    }
+    pub fn hello(&self) -> Option<&isocast_protocol::hello::Hello> {
+        self.hello.as_ref()
+    }
     /// Watch a target's picture as H.264 (`frames`): returns the reply and
     /// the connection, positioned at the first binary record (see
     /// [`isocast_protocol::api::frames`]). Closing it stops watching.
@@ -275,6 +392,11 @@ impl Client {
         params: Option<WatchParams>,
     ) -> Result<(Live, impl Iterator<Item = Result<Event>>)> {
         let live: Live = self.call(Method::Watch(params))?;
+        if self.is_remote() {
+            self.reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(6)))?;
+        }
         let events = self.reader.lines().map(|line| {
             let line = line.context("lost the connection to isocastd")?;
             let notification: Notification = serde_json::from_str(&line)
@@ -298,6 +420,11 @@ impl Client {
     ) -> Result<(Value, impl Iterator<Item = Result<Value>>)> {
         let params = params.map(serde_json::to_value).transpose()?;
         let live = self.call_value("watch", params)?;
+        if self.is_remote() {
+            self.reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(6)))?;
+        }
         let events = self.reader.lines().map(|line| {
             let line = line.context("lost the connection to isocastd")?;
             let mut notification: Value = serde_json::from_str(&line)

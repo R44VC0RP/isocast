@@ -155,7 +155,7 @@ jobs:
           echo "ISOCAST_WINDOWS_BUILD_VERSION=$ISOCAST_WINDOWS_BUILD_VERSION" >> "$GITHUB_ENV"
 
       - name: Build native services and test binaries (do not run)
-        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-platform-windows -p isocast-ipc -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts
+        run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-platform-windows -p isocast-ipc -p isocast-discovery -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts
 
       # Slint compiles the whole interface into one generated Rust module;
       # rustc needs 13.6 GiB for it (15.1 GiB committed), measured on
@@ -172,7 +172,7 @@ jobs:
 
       - name: Check updater clients
         run: |
-          cargo clippy --locked --all-targets -j 1 -p isocast-client -p isocast-cli -p isocast-ui -- -D warnings
+          cargo clippy --locked --all-targets -j 1 -p isocast-discovery -p isocast-client -p isocast-cli -p isocast-ui -- -D warnings
           cargo test --locked -j 1 -p isocast-client -p isocast-cli -p isocast-ui
 
       - name: Check Platform contract harness

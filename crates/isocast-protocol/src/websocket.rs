@@ -118,6 +118,12 @@ pub struct WebsocketStatus {
     /// in `websocket_status`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Set while it listens beyond this machine (a bind other than
+    /// 127.0.0.1 or ::1): other computers may try its password, and its
+    /// clients control the show. Kept from an earlier choice; give bind
+    /// 127.0.0.1 to keep it on this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_warning: Option<String>,
 }
 
 impl WebsocketSettings {
@@ -144,6 +150,23 @@ impl WebsocketSettings {
             ));
         }
         None
+    }
+
+    /// A warning when the server listens beyond this machine (decision 14
+    /// of docs/remote-engines.md): loopback is the default, and a LAN bind
+    /// someone chose earlier keeps working, but says so.
+    pub fn bind_warning(&self) -> Option<String> {
+        let ip = self.bind.parse::<std::net::IpAddr>().ok()?;
+        (!ip.is_loopback()).then(|| {
+            format!(
+                "obs-websocket is set to listen on {}, which reaches other computers: anyone \
+                 on the network can try its password, and its clients control recording and \
+                 streaming. Give bind 127.0.0.1 to keep it on this {machine} (`isocast \
+                 websocket enable --bind 127.0.0.1`)",
+                self.bind,
+                machine = crate::platform_text::MACHINE
+            )
+        })
     }
 
     /// Where clients connect.

@@ -71,8 +71,10 @@ pub enum Method {
     /// Returns [`Started`] once every file has been created.
     Start(Box<StartParams>),
     /// Stop recording and finish the files. Returns the session's
-    /// [`Report`].
-    Stop,
+    /// [`Report`]. Its params are optional: with `session`, it stops only
+    /// that session (refused with `WRONG_STATE` if another is running), so
+    /// a retried stop never ends a recording someone else started since.
+    Stop(Option<StopParams>),
     /// Ask the running session to stop (or cancel one still starting) and
     /// answer at once, without waiting for its files to be finished.
     /// Returns [`StopAccepted`]: an acknowledgement, not a finished
@@ -80,7 +82,9 @@ pub enum Method {
     /// and a new `start` is refused; the [`Event::Stopped`] event (and
     /// `status`'s `last` or `last_error`) then gives the outcome. Asking
     /// again while finalizing answers the same way; refused when idle.
-    RequestStop,
+    /// Its params are optional: with `session`, only that session (as
+    /// `stop`).
+    RequestStop(Option<StopParams>),
     /// Split the running recording into a new take at the next whole
     /// second, without stopping any device: the current files end there and
     /// new ones (with their own manifest) begin. Returns the new take's
@@ -92,11 +96,15 @@ pub enum Method {
     /// Resume the same take and files. Returns [`RecordingPause`].
     Resume,
     /// Mark this moment in the running recording. Returns [`Marked`].
-    Marker { label: String },
+    Marker {
+        label: String,
+    },
     /// Reload a browser source's page in the running recording, bypassing
     /// the cache (OBS's "Refresh cache of current page"). Returns
     /// [`Refreshed`].
-    RefreshBrowser { source: String },
+    RefreshBrowser {
+        source: String,
+    },
     /// Put a scene on air (by id). While recording, the switch is written to
     /// the manifest's scene timeline. Returns [`Switched`].
     SwitchScene {
@@ -175,7 +183,9 @@ pub enum Method {
     /// once; it also runs while a recording or stream does, or while a
     /// client asks for frames. Returns [`EngineInfo`], or null once
     /// stopped.
-    Engine { running: bool },
+    Engine {
+        running: bool,
+    },
     /// Read an OBS Studio scene collection into a setup, matching its
     /// devices and sizes against this Mac, without changing the live setup.
     /// Returns [`Imported`](crate::obs::Imported): the setup and what
@@ -250,7 +260,9 @@ pub enum Method {
     /// Remove a canvas from the live setup, with its arrangements, stream
     /// and recording (not while it records or streams). Returns
     /// [`Canvases`].
-    CanvasRemove { canvas: CanvasId },
+    CanvasRemove {
+        canvas: CanvasId,
+    },
     /// The scene collections and profiles (the two parts the live setup is
     /// kept in, as in OBS) and which are current. Returns
     /// [`Library`](crate::library::Library).
@@ -489,6 +501,14 @@ pub enum Method {
     /// Turn off the obs-websocket server, disconnecting its clients.
     /// Returns [`WebsocketStatus`](crate::websocket::WebsocketStatus).
     WebsocketDisable,
+    RemoteStatus,
+    RemoteEnable(Option<crate::remote::RemoteEnableParams>),
+    RemoteDisable,
+    RemotePairBegin,
+    /// Dedicated, pre-parser PAKE exchange; JSON calls explain the pairing flow.
+    RemotePairFinish,
+    RemoteClients,
+    RemoteRevoke(crate::remote::RemoteRevokeParams),
     /// Move a clip's in and/or out point, on its take's clock (rounded to
     /// its frame grid); the take's files are never touched. One revision.
     /// Returns [`TimelineInfo`](crate::timeline::TimelineInfo).
@@ -589,6 +609,19 @@ pub enum Method {
     /// renderer. Windows returns its DX12 LUID as [low: u32, high: i32];
     /// other platforms return null. Does not start capture or recording.
     GpuAdapter,
+    /// What this engine is: its machine's operating system and name, its
+    /// identity, build, protocol version and methods. Remote clients call
+    /// it first; local ones may. Returns [`Hello`](crate::hello::Hello).
+    Hello,
+    /// The folders other computers can use: every path a client on another
+    /// computer (or an obs-websocket client) gives, read or written, must
+    /// be inside one, symlinks resolved. Returns
+    /// [`FolderRoots`](crate::roots::FolderRoots).
+    FolderRoots,
+    /// Choose the folders other computers can use (kept across restarts),
+    /// or go back to the defaults. Only on this machine. Returns
+    /// [`FolderRoots`](crate::roots::FolderRoots).
+    FolderRootsSet(crate::roots::FolderRootsSetParams),
 }
 
 /// Every method's name, as requests and plugin grants spell it
@@ -657,6 +690,12 @@ pub struct StreamKeyTarget {
     /// so the vertical canvas's Twitch key is not the main one's.
     #[serde(default, skip_serializing_if = "CanvasId::is_main")]
     pub canvas: CanvasId,
+    /// Store it only if the live setup is still at this revision (the one
+    /// the client showed the destination from), so a key never lands on a
+    /// destination someone moved meanwhile; refused with `WRONG_STATE`
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
 }
 
 /// Which stream destinations `stream_start` and `stream_stop` mean.
@@ -795,6 +834,10 @@ pub struct StreamDestinations {
     pub id: Option<String>,
     /// Every destination, the main one first.
     pub destinations: Vec<StreamStatus>,
+    /// Things to know, like a stream key cleared because the server
+    /// changed from another computer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// Where a stream key is kept, and whether one is.
@@ -830,6 +873,17 @@ pub struct StartParams {
     /// unless one was chosen).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub into: Option<String>,
+}
+
+/// Which recording session `stop` and `request_stop` are meant for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StopParams {
+    /// The session's id (`session` in `start`'s answer, `status` and the
+    /// `started` event); refused with `WRONG_STATE` when it isn't the one
+    /// running. Any session if absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1224,7 +1278,12 @@ pub struct Applied {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     /// The live setup changed.
-    SetupChanged { revision: u64 },
+    SetupChanged {
+        revision: u64,
+        /// The client on another computer that changed it (its name).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
+    },
     /// A recording started writing these files, or a split (or `retake`)
     /// began a new take's; `begins_at` is when a new take's files begin
     /// (local time, RFC 3339 with milliseconds), a moment after the event.
@@ -1247,11 +1306,21 @@ pub enum Event {
         /// What began the take: `start`, `split` or `retake`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cause: Option<TakeCause>,
+        /// The recording session's id (as `stop` takes it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        /// The client on another computer that started it (its name).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
     },
     /// Live counters, about once a second while recording.
-    Status { live: LiveStatus },
+    Status {
+        live: LiveStatus,
+    },
     /// Something needs attention, like a file dropping frames.
-    Warning { message: String },
+    Warning {
+        message: String,
+    },
     /// A scene went on air.
     SceneChanged {
         scene: String,
@@ -1261,7 +1330,9 @@ pub enum Event {
         transition: Option<crate::Transition>,
     },
     /// A scene was staged in preview.
-    PreviewChanged { scene: String },
+    PreviewChanged {
+        scene: String,
+    },
     /// A marker was added to the recording.
     Marker {
         label: String,
@@ -1273,7 +1344,13 @@ pub enum Event {
     },
     /// The stream's state changed (connecting, live, reconnecting, failed,
     /// offline).
-    Stream { stream: StreamStatus },
+    Stream {
+        stream: StreamStatus,
+        /// The client on another computer that last started or stopped
+        /// this destination's stream (its name).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
+    },
     /// A recording ended: its report, or why it failed to start.
     Stopped {
         report: Option<Box<Report>>,
@@ -1287,15 +1364,27 @@ pub enum Event {
         /// The timeline its takes went to (#114).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeline: Option<crate::timeline::RecordingInto>,
+        /// The recording session's id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
+        /// The client on another computer that stopped it (its name).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
     },
     /// Every audio source's and the program mix's level (`program`), about
     /// 20 times a second while the live engine runs.
-    Levels { levels: Vec<AudioLevel> },
+    Levels {
+        levels: Vec<AudioLevel>,
+    },
     /// One of the live engine's sources started opening, is running, or
     /// failed.
-    SourceChanged { status: SourceStatus },
+    SourceChanged {
+        status: SourceStatus,
+    },
     /// The live engine started or stopped.
-    EngineChanged { running: bool },
+    EngineChanged {
+        running: bool,
+    },
     /// A scene collection or profile was made, renamed, deleted, imported
     /// or switched to (`kind` and `id` say which, unless both were
     /// switched); `collection` and `profile` are the current ones after.
@@ -1320,7 +1409,10 @@ pub enum Event {
     /// Data keys were set or deleted (`data_get` reads them): every key
     /// changed since the last such event, at most 20 events a second;
     /// `revision` is the store's after them.
-    DataChanged { revision: u64, keys: Vec<String> },
+    DataChanged {
+        revision: u64,
+        keys: Vec<String>,
+    },
     /// A timeline was made, opened, closed or changed (`action` says how;
     /// `clip` is the clip concerned, if any); `current` is the current
     /// timeline after. `timeline_get` reads it.
@@ -1387,7 +1479,9 @@ pub enum Event {
         errors: Vec<String>,
     },
     /// A recording made a new project folder, as its first take began.
-    ProjectCreated { project: crate::project::Project },
+    ProjectCreated {
+        project: crate::project::Project,
+    },
     /// A project was renamed: its folder moved from `old_folder`.
     ProjectRenamed {
         project: crate::project::Project,
@@ -1403,13 +1497,19 @@ pub enum Event {
     },
     /// A replay buffer started, stopped or failed (`replay.canvas` says
     /// whose: absent for the main canvas's).
-    Replay { replay: crate::replay::ReplayStatus },
+    Replay {
+        replay: crate::replay::ReplayStatus,
+    },
     /// A replay buffer saved a file (`saved.canvas` says whose).
-    ReplaySaved { saved: crate::replay::ReplaySaved },
+    ReplaySaved {
+        saved: crate::replay::ReplaySaved,
+    },
     /// The hardware encoders can't keep up: files of the take are dropping
     /// frames (ISO files first; the program and stream are protected), and
     /// the disk isn't the cause. Comes at most once per take.
-    EncoderOverload { overload: Box<Overload> },
+    EncoderOverload {
+        overload: Box<Overload>,
+    },
     /// A projector opened, closed or moved: the open projectors now, and
     /// why one closed if it wasn't asked to (a display went away).
     Projectors {
@@ -1452,6 +1552,34 @@ pub enum Event {
     RecordTarget {
         target: crate::timeline::RecordTarget,
     },
+    /// A network caller's request was refused by the engine's policy
+    /// (machine control stays on the machine, folders other computers can
+    /// use, credentials stay with configured servers; docs/remote-engines.md
+    /// decisions 4 and 25). Also in the audit log.
+    Refused {
+        /// The method, as requests spell it.
+        method: String,
+        /// Why, as the caller was told.
+        message: String,
+        /// Who asked (a client's name, or `obs-websocket client ADDRESS`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
+    },
+    RemoteClientConnected {
+        peer: crate::remote::RemoteAuditPeer,
+    },
+    RemoteClientDisconnected {
+        peer: crate::remote::RemoteAuditPeer,
+    },
+    RemotePaired {
+        client: crate::remote::RemotePeer,
+    },
+    RemoteRevoked {
+        client_id: String,
+    },
+    RemoteDisabled,
+    /// Remote watch liveness; not published to local subscribers.
+    RemoteHeartbeat,
 }
 
 /// What began a take, in `started` events.
@@ -1520,11 +1648,18 @@ pub enum EventKind {
     ProjectOpened,
     GovernorChanged,
     RecordTarget,
+    Refused,
+    RemoteClientConnected,
+    RemoteClientDisconnected,
+    RemotePaired,
+    RemoteRevoked,
+    RemoteDisabled,
+    RemoteHeartbeat,
 }
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 35] = [
+    pub const NAMES: [&str; 42] = [
         "setup_changed",
         "started",
         "status",
@@ -1560,6 +1695,13 @@ impl EventKind {
         "project_opened",
         "governor_changed",
         "record_target",
+        "refused",
+        "remote_client_connected",
+        "remote_client_disconnected",
+        "remote_paired",
+        "remote_revoked",
+        "remote_disabled",
+        "remote_heartbeat",
     ];
 
     /// The kind's name, as events and `watch` spell it.
@@ -1606,6 +1748,13 @@ impl Event {
             Self::ProjectOpened { .. } => EventKind::ProjectOpened,
             Self::GovernorChanged { .. } => EventKind::GovernorChanged,
             Self::RecordTarget { .. } => EventKind::RecordTarget,
+            Self::Refused { .. } => EventKind::Refused,
+            Self::RemoteClientConnected { .. } => EventKind::RemoteClientConnected,
+            Self::RemoteClientDisconnected { .. } => EventKind::RemoteClientDisconnected,
+            Self::RemotePaired { .. } => EventKind::RemotePaired,
+            Self::RemoteRevoked { .. } => EventKind::RemoteRevoked,
+            Self::RemoteDisabled => EventKind::RemoteDisabled,
+            Self::RemoteHeartbeat => EventKind::RemoteHeartbeat,
         }
     }
 }
@@ -1635,6 +1784,9 @@ impl Notification {
 pub struct StopAccepted {
     /// The session asked to stop (this isocastd's own count).
     pub session_id: u64,
+    /// The session's id, as `start`, `status` and the events give it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     /// The session was finishing its files when the request was taken (a
     /// snapshot: it may have finished since).
     pub finalizing: bool,
@@ -1659,6 +1811,16 @@ pub struct Started {
     /// one chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline: Option<crate::timeline::RecordingInto>,
+    /// The recording session's id: give it to `stop` and `request_stop`
+    /// so they can only end this session. Absent for a split's new take
+    /// (the session is the same).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// `start` was asked again with the same params while this session
+    /// was already recording (or starting): nothing new started, and this
+    /// is the running session.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already_recording: bool,
 }
 
 /// A warning about current headroom, not the setup's estimated capacity.
@@ -1704,6 +1866,10 @@ pub struct Status {
     /// The scene staged in preview, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// The running session's id (while starting, recording or
+    /// finalizing), as `stop` and `request_stop` take it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     /// The running session's live counters, once it has started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<LiveStatus>,

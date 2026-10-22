@@ -8,6 +8,7 @@
 mod animation;
 pub mod api;
 mod audio_filter;
+pub mod caller;
 pub mod change;
 mod content;
 pub mod data;
@@ -17,6 +18,7 @@ pub mod diagnostics;
 mod fields;
 mod filter;
 pub mod governor;
+pub mod hello;
 pub mod hotkeys;
 pub mod init;
 pub mod isoprj;
@@ -32,7 +34,9 @@ pub mod platform_text;
 pub mod plugin;
 pub mod project;
 pub mod projector;
+pub mod remote;
 pub mod replay;
+pub mod roots;
 mod source;
 pub mod stream;
 pub mod timeline;
@@ -2119,44 +2123,109 @@ impl Setup {
     /// content items and transitions relative to `base`, the folder of the
     /// setup file they came from.
     pub fn resolve_paths(&mut self, base: &std::path::Path) {
-        let resolve = |path: &mut String| {
+        self.for_each_file_mut(&mut |_, path| {
             if !path.is_empty() && !path.starts_with('/') && !path.starts_with('~') {
                 *path = base.join(&*path).to_string_lossy().into_owned();
             }
-        };
-        fn contents(items: &mut [SceneItem], resolve: &impl Fn(&mut String)) {
-            for item in items {
+        });
+    }
+
+    /// Every file the setup reads (images, slide shows, media, text and
+    /// browser files, mask and LUT images, transition files), with its
+    /// field path, as written. Browser URLs and the recording folder
+    /// aren't files it reads; see [`Setup::browser_urls`].
+    pub fn file_paths(&self) -> Vec<(String, String)> {
+        let mut copy = self.clone();
+        let mut out = Vec::new();
+        copy.for_each_file_mut(&mut |field, path| {
+            if !path.is_empty() {
+                out.push((field, path.clone()));
+            }
+        });
+        out
+    }
+
+    /// Every browser source's URL, with its field path.
+    pub fn browser_urls(&self) -> Vec<(String, String)> {
+        self.sources
+            .iter()
+            .filter_map(|source| match &source.kind {
+                SourceKind::Browser(browser) => browser
+                    .url
+                    .as_ref()
+                    .map(|url| (format!("sources[{}].url", source.id), url.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Call `f` with each file path the setup reads and its field path.
+    fn for_each_file_mut(&mut self, f: &mut dyn FnMut(String, &mut String)) {
+        fn contents(items: &mut [SceneItem], at: &str, f: &mut dyn FnMut(String, &mut String)) {
+            for (i, item) in items.iter_mut().enumerate() {
+                let at = format!("{at}[{i}]");
                 match item.content.as_mut().map(|content| &mut content.kind) {
-                    Some(ContentKind::Image(image)) => resolve(&mut image.path),
-                    Some(ContentKind::Text(text)) => text.file.iter_mut().for_each(resolve),
+                    Some(ContentKind::Image(image)) => {
+                        f(format!("{at}.content.path"), &mut image.path)
+                    }
+                    Some(ContentKind::Text(text)) => {
+                        if let Some(file) = &mut text.file {
+                            f(format!("{at}.content.file"), file);
+                        }
+                    }
                     None => {}
                 }
-                contents(&mut item.children, resolve);
+                contents(&mut item.children, &format!("{at}.children"), f);
             }
         }
-        for scene in &mut self.scenes {
-            contents(&mut scene.items, &resolve);
+        for (i, scene) in self.scenes.iter_mut().enumerate() {
+            contents(&mut scene.items, &format!("scenes[{i}].items"), f);
         }
         for source in &mut self.sources {
+            let at = format!("sources[{}]", source.id);
             match &mut source.kind {
-                SourceKind::Image(image) => resolve(&mut image.path),
-                SourceKind::Slideshow(slideshow) => slideshow.files.iter_mut().for_each(resolve),
-                SourceKind::Text(text) => text.file.iter_mut().for_each(resolve),
-                SourceKind::Media(media) => media.files.iter_mut().for_each(resolve),
-                SourceKind::Browser(browser) => browser.file.iter_mut().for_each(resolve),
+                SourceKind::Image(image) => f(format!("{at}.path"), &mut image.path),
+                SourceKind::Slideshow(slideshow) => {
+                    for (i, file) in slideshow.files.iter_mut().enumerate() {
+                        f(format!("{at}.files[{i}]"), file);
+                    }
+                }
+                SourceKind::Text(text) => {
+                    if let Some(file) = &mut text.file {
+                        f(format!("{at}.file"), file);
+                    }
+                }
+                SourceKind::Media(media) => {
+                    for (i, file) in media.files.iter_mut().enumerate() {
+                        f(format!("{at}.files[{i}]"), file);
+                    }
+                }
+                SourceKind::Browser(browser) => {
+                    if let Some(file) = &mut browser.file {
+                        f(format!("{at}.file"), file);
+                    }
+                }
                 _ => {}
             }
-            for filter in &mut source.filters {
+            for (i, filter) in source.filters.iter_mut().enumerate() {
                 match &mut filter.kind {
-                    FilterKind::ImageMask(mask) => resolve(&mut mask.path),
-                    FilterKind::ApplyLut(lut) => resolve(&mut lut.path),
+                    FilterKind::ImageMask(mask) => {
+                        f(format!("{at}.filters[{i}].path"), &mut mask.path)
+                    }
+                    FilterKind::ApplyLut(lut) => {
+                        f(format!("{at}.filters[{i}].path"), &mut lut.path)
+                    }
                     _ => {}
                 }
             }
         }
-        let scenes = self.scenes.iter_mut().filter_map(|s| s.transition.as_mut());
-        for transition in std::iter::once(&mut self.transition).chain(scenes) {
-            transition.files_mut().into_iter().for_each(resolve);
+        if let Some(file) = self.transition.files_mut() {
+            f("transition".into(), file);
+        }
+        for (i, scene) in self.scenes.iter_mut().enumerate() {
+            if let Some(file) = scene.transition.as_mut().and_then(|t| t.files_mut()) {
+                f(format!("scenes[{i}].transition"), file);
+            }
         }
     }
 

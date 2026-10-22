@@ -53,8 +53,20 @@ use crate::client::Client;
 
 mod events;
 
+use isocast_protocol::remote::{
+    RemoteEnableParams, RemoteIdentity, RemotePairWindow, RemotePeer, RemoteRevokeParams,
+    RemoteStatus,
+};
 use isocast_protocol::replay::{ReplayParams, ReplaySaved, ReplayStatus};
 use isocast_protocol::websocket::{WebsocketEnableParams, WebsocketStatus};
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PairRemoteParams {
+    host: String,
+    pairing_secret: String,
+    name: Option<String>,
+}
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -280,6 +292,15 @@ struct ClearPreviewParams {
     /// "main" (the default) or "vertical".
     #[serde(default)]
     canvas: CanvasId,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct StopRecordingParams {
+    /// Stop only this recording session (`session` from start_recording
+    /// or get_status): refused if another session is recording now, so a
+    /// retried stop never ends a recording someone else started since.
+    /// Any session if absent.
+    session: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1474,6 +1495,139 @@ impl Isocast {
     }
 
     #[tool(
+        description = "What this engine is: its machine's operating system (macos, windows, \
+                       linux) and name, its identity (once it has one for remote control), \
+                       its build (version, build, commit), the protocol version and every \
+                       method it offers.",
+        annotations(read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn engine_hello(&self) -> Result<Json<isocast_protocol::hello::Hello>, String> {
+        self.call(Method::Hello).await
+    }
+
+    #[tool(
+        description = "The folders other computers can use: every path a client on another \
+                       computer or an obs-websocket client gives (recording folders, exports, \
+                       images, text and browser files, OBS imports) must be inside one, \
+                       symlinks resolved. Chosen folders (or the defaults: Movies/Videos, \
+                       Pictures, Music, Desktop, Downloads), this machine's recordings \
+                       folders, and fonts (read only).",
+        annotations(read_only_hint = true, idempotent_hint = true)
+    )]
+    async fn folder_roots(&self) -> Result<Json<isocast_protocol::roots::FolderRoots>, String> {
+        self.call(Method::FolderRoots).await
+    }
+
+    #[tool(
+        description = "Choose the folders other computers can use (kept across restarts), or \
+                       leave out `folders` for the defaults. Only on the engine's own machine.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn folder_roots_set(
+        &self,
+        Parameters(Strict(params)): Parameters<
+            Strict<isocast_protocol::roots::FolderRootsSetParams>,
+        >,
+    ) -> Result<Json<isocast_protocol::roots::FolderRoots>, String> {
+        self.call(Method::FolderRootsSet(params)).await
+    }
+
+    #[tool(
+        description = "Read this engine's TLS remote-control status.",
+        annotations(read_only_hint = true)
+    )]
+    async fn remote_status(&self) -> Result<Json<RemoteStatus>, String> {
+        self.call(Method::RemoteStatus).await
+    }
+
+    #[tool(
+        description = "Enable remote control on this local engine. Refused over remote connections."
+    )]
+    async fn remote_enable(
+        &self,
+        Parameters(params): Parameters<RemoteEnableParams>,
+    ) -> Result<Json<RemoteStatus>, String> {
+        self.call(Method::RemoteEnable(Some(params))).await
+    }
+
+    #[tool(
+        description = "Disable remote control and immediately disconnect every remote client. Local only."
+    )]
+    async fn remote_disable(&self) -> Result<Json<RemoteStatus>, String> {
+        self.call(Method::RemoteDisable).await
+    }
+
+    #[tool(
+        description = "Open a single-use two-minute pairing window on the local engine. Keep the returned code private; never log it."
+    )]
+    async fn remote_pair_begin(&self) -> Result<Json<RemotePairWindow>, String> {
+        self.call(Method::RemotePairBegin).await
+    }
+
+    #[tool(
+        description = "Pair this client with an engine using its locally opened code and TLS-bound SPAKE2. Never log pairing_secret."
+    )]
+    async fn remote_pair_finish(
+        &self,
+        Parameters(params): Parameters<PairRemoteParams>,
+    ) -> Result<Json<RemotePeer>, String> {
+        tokio::task::spawn_blocking(move || {
+            isocast_client::remote::pair(
+                &params.host,
+                &params.pairing_secret,
+                params.name.as_deref(),
+            )
+            .map(Json)
+            .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    #[tool(
+        description = "List the engine's paired public client identities.",
+        annotations(read_only_hint = true)
+    )]
+    async fn remote_clients(&self) -> Result<Json<Vec<RemotePeer>>, String> {
+        self.call(Method::RemoteClients).await
+    }
+
+    #[tool(description = "Revoke a client and close its live connections immediately. Local only.")]
+    async fn remote_revoke(
+        &self,
+        Parameters(params): Parameters<RemoteRevokeParams>,
+    ) -> Result<Json<Vec<RemotePeer>>, String> {
+        self.call(Method::RemoteRevoke(params)).await
+    }
+
+    #[tool(
+        description = "Read or create this MCP client's public identity. Its private key stays in the OS credential store."
+    )]
+    async fn remote_identity(&self) -> Result<Json<RemoteIdentity>, String> {
+        tokio::task::spawn_blocking(|| {
+            isocast_client::remote::identity()
+                .map(Json)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    #[tool(
+        description = "List engines paired with this client.",
+        annotations(read_only_hint = true)
+    )]
+    async fn remote_engines(&self) -> Result<Json<Vec<RemotePeer>>, String> {
+        isocast_client::remote::engines()
+            .map(Json)
+            .map_err(|error| error.to_string())
+    }
+
+    #[tool(
         description = wording::description("Turn on the obs-websocket v5 server (off by default; kept across \
                        restarts), optionally setting port (4455), bind (127.0.0.1, this Mac \
                        only; 0.0.0.0 for every network), password (kept in the Keychain) or \
@@ -1632,6 +1786,7 @@ impl Isocast {
                 service: params.service,
                 server: params.server,
                 canvas: params.canvas,
+                revision: None,
             },
         })))
         .await
@@ -1655,6 +1810,7 @@ impl Isocast {
             service: params.service,
             server: params.server,
             canvas: params.canvas,
+            revision: None,
         })))
         .await
     }
@@ -2272,8 +2428,16 @@ impl Isocast {
             idempotent_hint = false
         )
     )]
-    async fn stop_recording(&self) -> Result<Json<Report>, String> {
-        self.call(Method::Stop).await
+    async fn stop_recording(
+        &self,
+        Parameters(Strict(params)): Parameters<Strict<StopRecordingParams>>,
+    ) -> Result<Json<Report>, String> {
+        self.call(Method::Stop(params.session.map(|session| {
+            isocast_protocol::api::StopParams {
+                session: Some(session),
+            }
+        })))
+        .await
     }
 
     #[tool(
@@ -2292,8 +2456,14 @@ impl Isocast {
     )]
     async fn request_stop_recording(
         &self,
+        Parameters(Strict(params)): Parameters<Strict<StopRecordingParams>>,
     ) -> Result<Json<isocast_protocol::api::StopAccepted>, String> {
-        self.call(Method::RequestStop).await
+        self.call(Method::RequestStop(params.session.map(|session| {
+            isocast_protocol::api::StopParams {
+                session: Some(session),
+            }
+        })))
+        .await
     }
 
     #[tool(

@@ -14,20 +14,33 @@ pub struct ApiCall {
     started: Instant,
     request: Value,
     client: Value,
+    pairing: bool,
     done: bool,
 }
 impl ApiCall {
     pub fn new(line: &str, client: &Value) -> Self {
         // Malformed JSON may contain credentials: don't retain its raw bytes.
-        let request = serde_json::from_str::<Value>(line)
+        let mut request = serde_json::from_str::<Value>(line)
             .unwrap_or_else(|_| json!({"invalid_json":true,"bytes":line.len()}));
+        let pairing = request["method"].as_str().is_some_and(|method| {
+            method
+                .get(.."remote_pair_".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("remote_pair_"))
+        });
+        if pairing && request.get("params").is_some() {
+            request["params"] = json!("[pairing material omitted]");
+        }
         let request = Redactor::default().value(&request);
         Self {
             started: Instant::now(),
             request,
             client: client.clone(),
+            pairing,
             done: false,
         }
+    }
+    pub fn pairing(&self) -> bool {
+        self.pairing
     }
     pub fn response(&mut self, response: &Response) {
         self.response_bytes(response, 0);

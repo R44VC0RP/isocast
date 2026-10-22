@@ -564,13 +564,7 @@ fn build(
         return Ok(report);
     }
     let home = isocast_protocol::api::home_folder();
-    let out = params.out.clone().unwrap_or_else(|| {
-        if std::env::var_os("ISOCAST_SOCKET").is_some() {
-            logs_folder().with_extension("reports")
-        } else {
-            home.join("Downloads/Isocast Reports")
-        }
-    });
+    let out = params.out.clone().unwrap_or_else(default_out);
     let out = out
         .strip_prefix("~")
         .map_or_else(|_| out.clone(), |rest| home.join(rest));
@@ -674,4 +668,14 @@ fn collect(
             + "\n"
     };
     contents.insert(name, safe);
+}
+
+/// Where a report goes when `out` isn't given: beside an isolated engine's
+/// logs, else `~/Downloads/Isocast Reports`.
+pub fn default_out() -> PathBuf {
+    if std::env::var_os("ISOCAST_SOCKET").is_some() {
+        logs_folder().with_extension("reports")
+    } else {
+        isocast_protocol::api::home_folder().join("Downloads/Isocast Reports")
+    }
 }

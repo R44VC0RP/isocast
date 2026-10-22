@@ -20,6 +20,7 @@ mod h264;
 mod hevc;
 mod mf;
 mod native;
+pub mod network;
 mod nvenc;
 mod output;
 mod p010;

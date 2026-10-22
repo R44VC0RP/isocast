@@ -16,6 +16,7 @@ path = "src/bin/isocast-capture.rs"
 cc = "1.8.0"
 
 [target.'cfg(windows)'.dependencies]
+isocast-platform-credentials = { path = "../isocast-platform-credentials" }
 anyhow = "1.0.104"
 isocast-diagnostics = { path = "../isocast-diagnostics" }
 isocast-engine = { path = "../isocast-engine" }
@@ -40,6 +41,9 @@ windows = { version = "0.62.2", features = [
     "Wdk_Storage_FileSystem",
     "Wdk_System_SystemServices",
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
     "Win32_Devices_FunctionDiscovery",
     "Win32_Devices_Display",
     "Win32_Graphics_Direct3D",
@@ -55,7 +59,6 @@ windows = { version = "0.62.2", features = [
     "Win32_Media_MediaFoundation",
     "Win32_Media_Multimedia",
     "Win32_Security",
-    "Win32_Security_Credentials",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",

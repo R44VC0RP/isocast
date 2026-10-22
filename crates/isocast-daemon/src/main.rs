@@ -40,6 +40,7 @@ use isocast_protocol::api::{
     StreamKey, StreamKeyParams, StreamKeyTarget, Switched, TakeCause, TuneParams, Tuning,
     WatchParams, lock_path, shared, socket_path,
 };
+use isocast_protocol::caller::Caller;
 use isocast_protocol::change::{Change, diff, merge_patch, missing_removals};
 use isocast_protocol::devices::{PermissionKind, PermissionsReport};
 use isocast_protocol::init::{self, Initialized};
@@ -85,6 +86,7 @@ const MAX_REQUEST: usize = 16 << 20;
 
 use platform::{NativePlatform, native};
 
+mod callers;
 mod canvases;
 mod data;
 mod debug;
@@ -103,7 +105,9 @@ mod plugins;
 mod projectors;
 mod projects;
 mod recovery;
+mod remote;
 mod replay;
+mod roots;
 mod store;
 mod streams;
 mod timeline;
@@ -216,6 +220,7 @@ fn main() -> ExitCode {
             isoprj::start(&daemon);
             start_plugins(&daemon);
             daemon.websocket.load(&daemon);
+            daemon.remote.load(&daemon);
             let saver = daemon.clone();
             thread::spawn(move || saver.contain("setup saver", || saver.save_live_changes()));
             // On Ctrl-C, SIGTERM or SIGHUP, finish the files before exiting.
@@ -347,7 +352,9 @@ fn serve(listener: UnixListener, daemon: Arc<Daemon>) {
             let mut gid = 0;
             // Darwin does not provide a security boundary from socket mode
             // alone. Check the kernel peer uid before any RPC/plugin dispatch.
-            if unsafe { libc::getpeereid(connection.as_raw_fd(), &mut uid, &mut gid) } != 0
+            if unsafe {
+                libc::getpeereid(connection.local().unwrap().as_raw_fd(), &mut uid, &mut gid)
+            } != 0
                 || uid != unsafe { libc::geteuid() }
             {
                 continue;
@@ -359,7 +366,7 @@ fn serve(listener: UnixListener, daemon: Arc<Daemon>) {
         let scope = daemon.plugins.scope_of_peer(&connection);
         thread::spawn(move || {
             daemon.contain("API connection", || {
-                let _ = handle(connection, &daemon, scope);
+                let _ = handle(connection, &daemon, scope, Caller::local());
             });
         });
     }
@@ -387,7 +394,7 @@ fn start_plugins(daemon: &Arc<Daemon>) {
             if let Some(daemon) = serve.upgrade() {
                 thread::spawn(move || {
                     daemon.contain("plugin connection", || {
-                        let _ = handle(connection, &daemon, Some(scope));
+                        let _ = handle(connection, &daemon, Some(scope), Caller::local());
                     });
                 });
             }
@@ -396,11 +403,14 @@ fn start_plugins(daemon: &Arc<Daemon>) {
 }
 
 /// Answer requests on one connection until the client hangs up. A
-/// plugin's connection (`scope`) may only call what it was granted.
+/// plugin's connection (`scope`) may only call what it was granted, and a
+/// caller on another computer (`caller`) nothing that controls the machine
+/// rather than the show (`isocast_protocol::caller::local_only_reason`).
 fn handle(
     connection: UnixStream,
     daemon: &Arc<Daemon>,
     scope: Option<Arc<plugins::Scope>>,
+    caller: Caller,
 ) -> std::io::Result<()> {
     if diagnostics::CONNECTION_PANIC.swap(false, Ordering::SeqCst) {
         panic!("requested API connection panic");
@@ -410,26 +420,41 @@ fn handle(
     }
     let _tracked = scope.as_ref().and_then(|scope| scope.track(&connection));
     #[cfg(target_os = "macos")]
-    let peer = isocast_platform_macos::diagnostics::peer(&connection);
+    let peer = match connection.local() {
+        Some(local) => isocast_platform_macos::diagnostics::peer(local),
+        None => serde_json::Value::Null,
+    };
     #[cfg(windows)]
     let peer =
         serde_json::json!({"transport":"named_pipe","pid":isocast_ipc::peer_pid(&connection).ok()});
     #[cfg(all(not(target_os = "macos"), not(windows)))]
     let peer = serde_json::json!({"transport":"unix"});
+    // A remote client's audit peer names it (decision 15).
+    let peer = caller.peer().unwrap_or(peer);
     let _closed = diagnostics::PeerClosed(peer.clone());
+    let remote = connection.peer().is_some();
+    let max_request = if remote {
+        isocast_ipc::MAX_REMOTE_REQUEST
+    } else {
+        MAX_REQUEST
+    };
     let mut focused = None;
     let mut writer = connection.try_clone()?;
     let mut reader = BufReader::new(connection);
     let mut line = String::new();
     loop {
-        line.clear();
-        let read = (&mut reader)
-            .take(MAX_REQUEST as u64 + 1)
-            .read_line(&mut line)?;
-        if read == 0 {
+        // Revocation also invalidates requests already buffered by BufReader.
+        if writer.aborted() {
             return Ok(());
         }
-        if read > MAX_REQUEST {
+        line.clear();
+        let read = (&mut reader)
+            .take(max_request as u64 + 1)
+            .read_line(&mut line)?;
+        if read == 0 || writer.aborted() {
+            return Ok(());
+        }
+        if read > max_request {
             let mut audit = diagnostics::ApiCall::new(r#"{"method":"[oversized request]"}"#, &peer);
             // The rest of the line can't be skipped without reading it, so
             // the connection ends here.
@@ -439,7 +464,7 @@ fn handle(
                     code: RpcError::INVALID_REQUEST,
                     message: format!(
                         "the request is longer than {} MB; requests are one JSON object per line",
-                        MAX_REQUEST >> 20
+                        max_request >> 20
                     ),
                 },
             );
@@ -452,6 +477,14 @@ fn handle(
         }
         let request = serde_json::from_str::<Request>(&line);
         let mut audit = diagnostics::ApiCall::new(&line, &peer);
+        if audit.pairing() && request.is_err() {
+            // A mistaken JSON pairing call must not echo PINs or PAKE proofs
+            // through serde's detailed type errors into either endpoint's log.
+            let response = Response::err(id_of(&line), RpcError { code: RpcError::INVALID_PARAMS, message: "params: remote_pair_begin takes no parameters; remote_pair_finish requires the dedicated TLS-bound PAKE exchange (isocast remote pair HOST --code-stdin)".into() });
+            writeln!(writer, "{}", serde_json::to_string(&response)?)?;
+            audit.response(&response);
+            continue;
+        }
         if let (Some(scope), Ok(request)) = (&scope, &request)
             && let Some(message) = scope.refusal(&request.method)
         {
@@ -466,7 +499,26 @@ fn handle(
             audit.response(&refused);
             continue;
         }
+        // A network caller's method, for refusal events (decision 15).
+        let refusable = match &request {
+            Ok(request) if !caller.is_local() => Some(callers::method_name(&request.method)),
+            _ => None,
+        };
+        if let Ok(request) = &request
+            && let Some(error) = callers::refusal(&caller, &request.method)
+        {
+            daemon.note_refusal(&caller, refusable.as_deref().unwrap_or_default(), &error);
+            let refused = Response::err(Some(request.id), error);
+            writeln!(writer, "{}", serde_json::to_string(&refused)?)?;
+            audit.response(&refused);
+            continue;
+        }
+        let pairing_reply = matches!(
+            request.as_ref().map(|request| &request.method),
+            Ok(Method::RemotePairBegin)
+        );
         let _caller = scope.as_ref().map(|scope| PluginCaller::set(&scope.id));
+        let _entered = callers::enter(caller.clone());
         let response = match request {
             Ok(Request {
                 id,
@@ -489,6 +541,12 @@ fn handle(
                 let params = params.unwrap_or_default();
                 match params.problem() {
                     None => {
+                        if remote && !reader.buffer().is_empty() {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "watch is one-way; unexpected trailing input",
+                            ));
+                        }
                         audit.value(serde_json::json!({"subscribed":"events"}));
                         return watch(writer, daemon, id, &params);
                     }
@@ -547,8 +605,15 @@ fn handle(
                 },
             ),
         };
+        if let (Some(method), Some(error)) = (&refusable, &response.error) {
+            daemon.note_refusal(&caller, method, error);
+        }
         let bytes = serde_json::to_vec(&response)?;
-        audit.response_bytes(&response, bytes.len());
+        if pairing_reply && response.error.is_none() {
+            audit.value(serde_json::json!({"pairing":"opened"}));
+        } else {
+            audit.response_bytes(&response, bytes.len());
+        }
         writer.write_all(&bytes)?;
         writer.write_all(b"\n")?;
     }
@@ -577,10 +642,27 @@ fn stream_frames(
     thread::spawn({
         let left = left.clone();
         move || {
-            for line in reader.lines() {
-                let Ok(line) = line else { break };
-                if let Ok(change) = serde_json::from_str::<FrameRate>(&line) {
-                    rate.set(change.fps);
+            if reader.get_ref().peer().is_some() {
+                let mut reader = reader;
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    let read = (&mut reader)
+                        .take(isocast_ipc::MAX_REMOTE_REQUEST as u64 + 1)
+                        .read_line(&mut line);
+                    if !matches!(read, Ok(n) if n > 0 && n <= isocast_ipc::MAX_REMOTE_REQUEST) {
+                        break;
+                    }
+                    if let Ok(change) = serde_json::from_str::<FrameRate>(&line) {
+                        rate.set(change.fps);
+                    }
+                }
+            } else {
+                for line in reader.lines() {
+                    let Ok(line) = line else { break };
+                    if let Ok(change) = serde_json::from_str::<FrameRate>(&line) {
+                        rate.set(change.fps);
+                    }
                 }
             }
             left.store(true, Ordering::SeqCst);
@@ -785,7 +867,23 @@ fn watch(
             writeln!(writer, "{}", serde_json::to_string(&warning)?)?;
         }
     }
+    let mut heartbeat = std::time::Instant::now();
     loop {
+        if let UnixStream::Tls(stream) = &writer
+            && stream.readable()
+        {
+            // A watch client never sends control messages. Do not leave its
+            // unexpected input parked behind a full plaintext pipe.
+            return Ok(());
+        }
+        if writer.peer().is_some() && heartbeat.elapsed() >= Duration::from_secs(2) {
+            writeln!(
+                writer,
+                "{}",
+                serde_json::to_string(&Notification::event(Event::RemoteHeartbeat))?
+            )?;
+            heartbeat = std::time::Instant::now();
+        }
         match rx.recv_timeout(WATCH_HANGUP_CHECK) {
             Ok(event) => writer.write_all(&event)?,
             // A client that left is noticed here even when no event it
@@ -894,10 +992,20 @@ struct Daemon {
     starting: parking_lot::RwLock<()>,
     /// The obs-websocket compatibility server (`websocket_*`).
     websocket: websocket::Runtime,
+    remote: remote::Runtime,
     /// Open projectors and where each view was last shown (`projector_*`).
     projectors: projectors::ProjectorState,
     /// The project files' writer (#88).
     isoprj: isoprj::Writer,
+    /// Who last started or stopped each stream slot from another computer
+    /// (`by` in its `stream` events); its own lock, since streams report
+    /// while the state lock is held.
+    stream_by: Mutex<HashMap<String, Option<String>>>,
+    /// The folders other computers can use (`folder_roots`).
+    roots: roots::Runtime,
+    /// Held from a `start`'s first check until its session is reserved, so
+    /// two starts (each maybe replacing the setup) can't interleave.
+    start_admission: Mutex<()>,
 }
 
 /// isocastd's processor use, as `status` reports it: the share of all the
@@ -1044,9 +1152,22 @@ struct SplitFailed {
     error: RpcError,
 }
 
+/// A session's outcome once it has ended, and the signal that it has.
+type SessionDone = (Mutex<Option<Result<Report, String>>>, Condvar);
+
 struct Session {
     /// Counts up from 1, so `stop` knows when this session has ended.
     id: u64,
+    /// Its id for clients (`session`), unique across runs.
+    token: String,
+    /// What `start` was asked with, so the same `start` again answers
+    /// with this session (`already_recording`).
+    asked: StartParams,
+    /// Who first asked it to stop: `Some(None)` for a local caller.
+    stopped_by: Arc<Mutex<Option<Option<String>>>>,
+    /// Its outcome once it has ended, for whoever waits for it (a blocking
+    /// `stop`), whatever starts and ends after it.
+    done: Arc<SessionDone>,
     stop: Arc<AtomicBool>,
     files: Arc<Mutex<Option<Vec<PathBuf>>>>,
     live: Arc<Mutex<Option<LiveStatus>>>,
@@ -1356,7 +1477,7 @@ impl Daemon {
         let _shutdown = self.shutdown_lock.lock();
         let _ = self.cancel_calibration("Calibration cancelled by shutdown");
         loop {
-            let result = self.stop();
+            let result = self.stop(None);
             if self.state.lock().session.is_none() {
                 break;
             }
@@ -1448,8 +1569,14 @@ impl Daemon {
         })
     }
 
-    fn call(self: &Arc<Self>, request: Request) -> Response {
+    fn call(self: &Arc<Self>, mut request: Request) -> Response {
         let id = request.id;
+        // A network caller's paths must be inside the folder roots, and are
+        // used in the form checked (decisions 25, 26); local callers pass
+        // at once.
+        if let Err(error) = self.check_params(&mut request.method) {
+            return Response::err(Some(id), error);
+        }
         let _starting = matches!(
             request.method,
             Method::Start(_)
@@ -1473,9 +1600,10 @@ impl Daemon {
                 request.method,
                 Method::Status
                     | Method::Get(_)
-                    | Method::Stop
-                    | Method::RequestStop
+                    | Method::Stop(_)
+                    | Method::RequestStop(_)
                     | Method::Shutdown
+                    | Method::Hello
             )
         {
             return Response::err(
@@ -1496,6 +1624,13 @@ impl Daemon {
             Method::MachineCalibrate => self.machine_calibrate().and_then(to_json),
             Method::MachineCancel => self.machine_cancel().and_then(to_json),
             Method::Status => to_json(self.status()),
+            Method::Hello => {
+                let mut hello = callers::hello();
+                hello.engine_id = self.remote.status().identity.map(|identity| identity.id);
+                to_json(hello)
+            },
+            Method::FolderRoots => to_json(self.folder_roots()),
+            Method::FolderRootsSet(params) => self.folder_roots_set(params).and_then(to_json),
             Method::EncoderOptions => to_json(isocast_protocol::Codec::options()),
             Method::BugReport(params) => diagnostics::bug_report(self, &params).and_then(to_json),
             Method::ReportFile(params) => isocast_diagnostics::preview::read(&params)
@@ -1520,6 +1655,8 @@ impl Daemon {
                     files: split.files,
                     notes: split.notes,
                     timeline: None,
+                    session: None,
+                    already_recording: false,
                 })
                 .map_err(|failed| failed.error)
                 .and_then(to_json),
@@ -1553,7 +1690,13 @@ impl Daemon {
             Method::InitSetup(params) => self.init_setup(*params).and_then(to_json),
             Method::Doctor(params) => check_folder(params.folder.as_deref()).and_then(|()| {
                 let setup = params.setup.or_else(|| self.state.lock().setup.clone());
-                let mut report = doctor(setup.as_ref(), params.folder.as_deref());
+                // The disk test writes in the nearest folder that exists: for
+                // a network caller only inside the folder roots (decision 26).
+                let may_write = |existing: &Path| {
+                    self.check_path("folder", existing, roots::Access::Write)
+                        .is_ok()
+                };
+                let mut report = doctor(setup.as_ref(), params.folder.as_deref(), &may_write);
                 if let Some(setup) = setup
                     && let Ok(estimate) = self.estimate_capacity(CapacityParams {
                         setup: Some(setup),
@@ -1627,6 +1770,13 @@ impl Daemon {
             Method::ProjectorList => to_json(self.projector_list()),
             Method::ProjectorPlace(params) => self.projector_place(*params).and_then(to_json),
             Method::WebsocketStatus => to_json(self.websocket.status()),
+            Method::RemoteStatus => to_json(self.remote.status()),
+            Method::RemoteEnable(params) => self.remote.enable(self, params.unwrap_or_default()).and_then(to_json),
+            Method::RemoteDisable => self.remote.disable(self).and_then(to_json),
+            Method::RemotePairBegin => self.remote.begin().and_then(to_json),
+            Method::RemotePairFinish => Err(RpcError { code: RpcError::NOT_PERMITTED, message: "remote_pair_finish requires the dedicated TLS-bound PAKE exchange; use `isocast remote pair HOST --code-stdin`".into() }),
+            Method::RemoteClients => self.remote.clients().and_then(to_json),
+            Method::RemoteRevoke(params) => self.remote.revoke(self, &params.client_id).and_then(to_json),
             Method::WebsocketEnable(params) => self
                 .websocket
                 .enable(self, params.unwrap_or_default())
@@ -1727,8 +1877,13 @@ impl Daemon {
             Method::TimelineRelink(params) => self.timeline_relink(params).and_then(to_json),
             Method::TimelineExportNle(params) => self.timeline_export_nle(params).and_then(to_json),
             Method::EstimateCapacity(params) => self.estimate_capacity(*params).and_then(to_json),
-            Method::RequestStop => self.request_stop().and_then(to_json),
-            Method::Stop | Method::Shutdown => match self.stop() {
+            Method::RequestStop(params) => self
+                .request_stop(params.unwrap_or_default().session.as_deref())
+                .and_then(to_json),
+            Method::Stop(params) => self
+                .stop(params.unwrap_or_default().session.as_deref())
+                .and_then(to_json),
+            Method::Shutdown => match self.stop(None) {
                 // Shutting down while idle is fine.
                 Err(err) if shutdown && err.code == RpcError::WRONG_STATE => {
                     to_json(serde_json::Value::Null)
@@ -1914,6 +2069,9 @@ impl Daemon {
                 state.preview = view.preview;
                 state.setup = Some(setup.clone());
                 state.revision = first_revision();
+                // The setup this machine starts with records where it was
+                // set to here.
+                self.note_local_recording_folder(&setup.recording.folder);
                 // An unlinked vertical canvas starts from the main canvas's
                 // scene and preview (no engine or watchers yet).
                 let _ = sync_canvases(&mut state, &[], true);
@@ -1982,8 +2140,35 @@ impl Daemon {
     }
 
     fn apply(&self, params: ApplyParams) -> Result<Applied, RpcError> {
+        // A network caller's change is checked first, outside the lock
+        // (it may look a browser source's host up): developer settings,
+        // files, URLs and folders (decision 25). The change is then made
+        // only if the setup is still the one checked.
+        let checked = if callers::current().is_local() {
+            None
+        } else {
+            let (revision, old, planned) = {
+                let state = self.state.read();
+                let planned = plan(&state, params.change.clone(), &self.plugins)?;
+                (state.revision, state.setup.clone(), planned)
+            };
+            if let Some(new) = &planned.setup {
+                self.check_setup(new, old.as_ref())?;
+            }
+            Some(revision)
+        };
         let mut state = self.state.lock();
-        let plan = plan(&state, params.change, &self.plugins)?;
+        if checked.is_some_and(|revision| revision != state.revision) {
+            return Err(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: format!(
+                    "the live setup changed (revision {}) while the change was checked; plan \
+                     it again",
+                    state.revision
+                ),
+            });
+        }
+        let mut plan = plan(&state, params.change, &self.plugins)?;
         if params.revision != state.revision {
             return Err(RpcError {
                 code: RpcError::WRONG_STATE,
@@ -2038,6 +2223,16 @@ impl Daemon {
         }
         // Whether the vertical canvas was there, and linked, before.
         let vertical_before = canvas_links(&state);
+        // A network caller's browser sources load the URL as checked
+        // (WHATWG-normalized; decision 26).
+        if !callers::current().is_local()
+            && let Some(setup) = plan.setup.as_mut()
+        {
+            roots::normalize_browser_urls(setup);
+        }
+        // A network caller moving a destination clears its key before
+        // anything else changes; refused (engine untouched) if it can't.
+        let cleared = self.clear_moved_keys(state.setup.as_ref(), plan.setup.as_ref())?;
         // The live engine runs it from the next frame (or refuses, like a
         // canvas change while recording).
         if let (Some(engine), Some(setup)) = (&state.engine, &plan.setup) {
@@ -2045,13 +2240,19 @@ impl Daemon {
                 .update(&state.with_hotkey_holds(setup), state.revision + 1)
                 .map_err(|message| RpcError {
                     code: RpcError::WRONG_STATE,
-                    message,
+                    message: callers::with_cleared(message, &cleared),
                 })?;
         }
         state.setup = plan.setup;
+        // A local caller's recordings folder is one set on this machine: a
+        // folder root for network callers (decision 26). Nobody else's is.
+        if let Some(setup) = &state.setup {
+            self.note_local_recording_folder(&setup.recording.folder);
+        }
         state.prune_hotkey_holds();
         state.revision += 1;
         let mut notes = plan.notes;
+        notes.extend(cleared.iter().cloned());
         // Saved after the lock is released: writing (two fsyncs) can take
         // a while, and status, switches and frames shouldn't wait for it.
         let (prepared, target) = state.file.prepare();
@@ -2082,7 +2283,13 @@ impl Daemon {
         let vertical_events = sync_canvases(&mut state, &vertical_before, false);
         let revision = state.revision;
         drop(state);
-        self.publish(Event::SetupChanged { revision });
+        self.publish(Event::SetupChanged {
+            revision,
+            by: callers::by(),
+        });
+        for message in cleared {
+            self.publish(Event::Warning { message });
+        }
         for event in vertical_events {
             self.publish(event);
         }
@@ -2227,6 +2434,24 @@ impl Daemon {
         Ok(made)
     }
 
+    /// Where `tune` writes its benchmark files: as given for a local
+    /// caller; for a network caller the folder (given, or the setup's
+    /// recordings folder) resolved inside the folder roots.
+    fn tune_folder(
+        &self,
+        folder: Option<&Path>,
+        setup: &Setup,
+    ) -> Result<Option<PathBuf>, RpcError> {
+        if callers::current().is_local() {
+            return Ok(folder.map(Path::to_path_buf));
+        }
+        let folder = folder
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| expand_home(&setup.recording.folder));
+        self.checked_path("folder", &folder.to_string_lossy(), roots::Access::Write)
+            .map(Some)
+    }
+
     fn tune(&self, params: TuneParams) -> Result<Tuning, RpcError> {
         check_folder(params.folder.as_deref())?;
         // Optimize already holds a read guard; recursive acquisition must
@@ -2257,13 +2482,17 @@ impl Daemon {
                 message: "the daemon is shutting down; tune once it has restarted".into(),
             });
         }
+        // Where the benchmark writes, however chosen (given, or the setup's
+        // recordings folder): for a network caller inside the folder roots,
+        // checked right before and used as checked (decision 26).
+        let folder = self.tune_folder(params.folder.as_deref(), &setup)?;
         state.tuning = true;
         drop(state);
         drop(gate);
         // Recording stays blocked until `tuning` clears, so clear it even if
         // the benchmark panics.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            tune(&setup, params.folder.as_deref(), &memory)
+            tune(&setup, folder.as_deref(), &memory)
         }))
         .unwrap_or_else(|_| {
             Err(anyhow::anyhow!(
@@ -2508,6 +2737,7 @@ impl Daemon {
         let current = session.files.clone();
         let takes = session.takes.clone();
         let project = session.project.clone();
+        let token = session.token.clone();
         drop(state);
         match reply.recv_timeout(START_TIMEOUT) {
             Ok(Ok(split)) => {
@@ -2528,6 +2758,8 @@ impl Daemon {
                     folder: split.manifest.parent().map(Path::to_path_buf),
                     project: project.map(|p| p.id),
                     cause: Some(cause),
+                    session: Some(token),
+                    by: callers::by(),
                 });
                 Ok(split)
             }
@@ -2962,6 +3194,7 @@ impl Daemon {
             load_warning: None,
             scene: state.scene.clone(),
             preview: state.preview.clone(),
+            session: state.session.as_ref().map(|session| session.token.clone()),
             live,
             files,
             last: state.last.clone(),
@@ -3019,8 +3252,27 @@ impl Daemon {
                  goes in the setup's stream.server)"
             )));
         }
-        let (service, account) = self.key_target(params.target)?;
+        // Resolved and written under the state lock, which every
+        // destination change (and its key clearing) also holds: the key goes
+        // to the account of the destination as it is when it's stored, and a
+        // network caller's concurrent move can't slip between (decision 26).
+        let state = self.state.lock();
+        if let Some(revision) = params.target.revision
+            && revision != state.revision
+        {
+            return Err(RpcError {
+                code: RpcError::WRONG_STATE,
+                message: format!(
+                    "revision: the live setup is at revision {}, not {revision} (a destination \
+                     may have changed); look at it again before setting the key",
+                    state.revision
+                ),
+            });
+        }
+        let live = streams::canvas_stream_settings(&state, params.target.canvas);
+        let (service, account) = self.key_target_with(live, params.target)?;
         set_secret(key_service(), &account, key).map_err(failed)?;
+        drop(state);
         retire_legacy_key(&account);
         forget_key_problem();
         isocast_diagnostics::redact::remember_secret(key_service(), &account, key);
@@ -3046,9 +3298,18 @@ impl Daemon {
     /// The service and Keychain account a key command means: as given, or
     /// the live setup's `[stream]`.
     fn key_target(&self, target: StreamKeyTarget) -> Result<(StreamService, String), RpcError> {
+        let live = streams::canvas_stream_settings(&self.state.read(), target.canvas);
+        self.key_target_with(live, target)
+    }
+
+    /// [`Self::key_target`] against `live`, the canvas's stream settings.
+    fn key_target_with(
+        &self,
+        live: Option<StreamSettings>,
+        target: StreamKeyTarget,
+    ) -> Result<(StreamService, String), RpcError> {
         // Each canvas keeps its own keys (`canvas_key_account`).
         let canvas = target.canvas;
-        let live = streams::canvas_stream_settings(&self.state.read(), canvas);
         if let Some(id) = &target.destination {
             // A destination not applied yet (Settings' draft) names its
             // service (and custom server) itself.
@@ -3157,6 +3418,13 @@ impl Daemon {
         mut params: StartParams,
         cause: TakeCause,
     ) -> Result<Started, RpcError> {
+        // As asked, for a repeated `start` (decision 17), and who asked.
+        let asked = params.clone();
+        let by = callers::by();
+        // One start at a time from here until its session is reserved: a
+        // second `start` (maybe with another setup) waits, then finds this
+        // session (decision 17; review M2).
+        let admission = self.start_admission.lock();
         // Where its takes go (#114): a new project, or a chosen timeline,
         // written into the folder of that timeline's last take.
         let (into, into_notes) = self.choose_into(&params)?;
@@ -3200,11 +3468,8 @@ impl Daemon {
                     message: reason,
                 });
             }
-            if state.session.is_some() {
-                return Err(RpcError {
-                    code: RpcError::WRONG_STATE,
-                    message: "already recording; stop the current session first".into(),
-                });
+            if let Some(session) = &state.session {
+                return already_recording(session, cause, &asked);
             }
         }
         // A setup given with the request becomes the live setup; say so if
@@ -3245,6 +3510,12 @@ impl Daemon {
                 .clone()
                 .unwrap_or_else(|| expand_home(&setup.recording.folder))
         };
+        // For a network caller, where it records is inside the folder roots
+        // however it was chosen: given, a chosen timeline's last take's
+        // folder (`into`, `record_target`, a retake) or the setup's
+        // (decision 26), and used as checked.
+        let folder =
+            self.checked_path("folder", &folder.to_string_lossy(), roots::Access::Write)?;
         // It records into a project folder in the recordings folder
         // (`folder` itself, if it is a project's).
         let root = projects::root_of(&folder);
@@ -3277,11 +3548,8 @@ impl Daemon {
         // The session is in the state before the engine warms up, so
         // `status` says it is starting and `stop` can cancel it.
         let mut state = self.state.lock();
-        if state.session.is_some() {
-            return Err(RpcError {
-                code: RpcError::WRONG_STATE,
-                message: "already recording; stop the current session first".into(),
-            });
+        if let Some(session) = &state.session {
+            return already_recording(session, cause, &asked);
         }
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err(RpcError {
@@ -3296,8 +3564,13 @@ impl Daemon {
             });
         }
         state.next_session += 1;
+        let token = callers::session_token(state.next_session);
         let session = Session {
             id: state.next_session,
+            token: token.clone(),
+            asked,
+            stopped_by: Arc::new(Mutex::new(None)),
+            done: Arc::default(),
             stop: Arc::new(AtomicBool::new(false)),
             files: Arc::new(Mutex::new(None)),
             live: Arc::new(Mutex::new(None)),
@@ -3305,6 +3578,7 @@ impl Daemon {
             project: None,
         };
         let id = session.id;
+        let stopped_by = session.stopped_by.clone();
         let (started_tx, started_rx) = mpsc::channel();
         let options = (
             session.stop.clone(),
@@ -3314,6 +3588,7 @@ impl Daemon {
         );
         state.session = Some(session);
         drop(state);
+        drop(admission);
 
         // Its project folder, picked holding the projects lock so a rename
         // can't move it meanwhile, and kept with the session (renames are
@@ -3357,6 +3632,8 @@ impl Daemon {
                         project: None,
                         folder: None,
                         timeline: None,
+                        session: Some(token.clone()),
+                        by: stopped_by.lock().clone().flatten(),
                     },
                 );
                 return Err(err);
@@ -3394,6 +3671,8 @@ impl Daemon {
                         project: None,
                         folder: None,
                         timeline: None,
+                        session: Some(token.clone()),
+                        by: stopped_by.lock().clone().flatten(),
                     },
                 );
                 return Err(err);
@@ -3402,6 +3681,7 @@ impl Daemon {
 
         let daemon = self.clone();
         let recording = engine.clone();
+        let session = token.clone();
         let session_takes = options.3.clone();
         thread::spawn(move || {
             let (stop, files, live, takes) = options;
@@ -3430,6 +3710,8 @@ impl Daemon {
                     folder: Some(project.folder.clone()),
                     project: Some(project.id.clone()),
                     cause: Some(cause),
+                    session: Some(token.clone()),
+                    by: by.clone(),
                 });
             };
             let reported = Mutex::new(Vec::<(u64, u64)>::new());
@@ -3486,6 +3768,8 @@ impl Daemon {
                 project: project.folder.exists().then(|| project.id.clone()),
                 folder: project.folder.exists().then(|| project.folder.clone()),
                 timeline: daemon.recording_into(&takes),
+                session: Some(token.clone()),
+                by: stopped_by.lock().clone().flatten(),
             };
             let error = ended.as_ref().err().cloned();
             daemon.ended(id, ended, stopped);
@@ -3527,6 +3811,8 @@ impl Daemon {
                     begins_at: None,
                     notes,
                     timeline,
+                    session: Some(session),
+                    already_recording: false,
                 })
             }
             Ok(Err(message)) => Err(RpcError {
@@ -4133,61 +4419,58 @@ impl Daemon {
     /// answer at once: the session's own coordinator finishes its files and
     /// ends it as `stop` waits for. Only flags and copies under the lock;
     /// asking again while it finishes answers the same way.
-    fn request_stop(&self) -> Result<StopAccepted, RpcError> {
+    fn request_stop(&self, only: Option<&str>) -> Result<StopAccepted, RpcError> {
         let state = self.state.read();
-        let Some(session) = &state.session else {
-            return Err(RpcError {
-                code: RpcError::WRONG_STATE,
-                message: "not recording".into(),
-            });
-        };
+        let session = running_session(&state, only)?;
         let files = session.files.lock().clone().unwrap_or_default();
         session.stop.store(true, Ordering::SeqCst);
+        note_stopped_by(session);
         let session_id = session.id;
+        let token = session.token.clone();
         #[cfg(windows)]
         if let Some(control) = state.control() {
             control.wake_recording();
         }
         Ok(StopAccepted {
             session_id,
+            session: Some(token),
             finalizing: true,
             files,
         })
     }
 
     /// Stop the running session (or cancel one still starting) and wait
-    /// for its files to be finished.
-    fn stop(&self) -> Result<Report, RpcError> {
-        let mut state = self.state.lock();
-        let Some(session) = &state.session else {
-            return Err(RpcError {
-                code: RpcError::WRONG_STATE,
-                message: "not recording".into(),
-            });
-        };
+    /// for its files to be finished; with `only`, only if that is the
+    /// session running.
+    fn stop(&self, only: Option<&str>) -> Result<Report, RpcError> {
+        let state = self.state.lock();
+        let session = running_session(&state, only)?;
         session.stop.store(true, Ordering::SeqCst);
-        let id = session.id;
+        note_stopped_by(session);
+        // This session's own completion, whatever starts and ends after it.
+        let done = session.done.clone();
         #[cfg(windows)]
         if let Some(control) = state.control() {
             control.wake_recording();
         }
-        let timeout = state.wait_while_for(&self.ended, STOP_TIMEOUT, |s| s.ended_session < id);
-        if timeout.timed_out() {
-            return Err(RpcError {
+        drop(state);
+        let (outcome, ended) = &*done;
+        let mut outcome = outcome.lock();
+        let deadline = std::time::Instant::now() + STOP_TIMEOUT;
+        while outcome.is_none() {
+            if ended.wait_until(&mut outcome, deadline).timed_out() {
+                break;
+            }
+        }
+        match outcome.clone() {
+            Some(Ok(report)) => Ok(report),
+            Some(Err(error)) => Err(RpcError {
+                code: RpcError::FAILED,
+                message: error,
+            }),
+            None => Err(RpcError {
                 code: RpcError::FAILED,
                 message: "the recording did not stop in time".into(),
-            });
-        }
-        // This session's outcome: a later one can't have ended yet.
-        match (&state.last_error, &state.last) {
-            (Some(error), _) => Err(RpcError {
-                code: RpcError::FAILED,
-                message: error.clone(),
-            }),
-            (None, Some(report)) => Ok(report.clone()),
-            (None, None) => Err(RpcError {
-                code: RpcError::FAILED,
-                message: "the recording ended without a report".into(),
             }),
         }
     }
@@ -4199,6 +4482,13 @@ impl Daemon {
         // Broken control state must not prevent a writer's completed report
         // from reaching the emergency finalizer (the lock never poisons).
         let mut state = self.state.lock();
+        // Whoever waits for this session (a blocking `stop`) gets its own
+        // outcome.
+        if let Some(session) = state.session.as_ref().filter(|s| s.id == id) {
+            let (outcome, finished) = &*session.done;
+            *outcome.lock() = Some(ended.clone());
+            finished.notify_all();
+        }
         if state.session.as_ref().is_some_and(|s| s.id == id) {
             state.session = None;
         }
@@ -4216,6 +4506,89 @@ impl Daemon {
         // Unlike publish, send_event only queues bytes, with no state callbacks.
         self.send_event(stopped);
         self.ended.notify_all();
+    }
+}
+
+/// `start` while `session` records: the same `start` again (a retry
+/// after a lost answer) answers with the running session; anything else
+/// is refused.
+fn already_recording(
+    session: &Session,
+    cause: TakeCause,
+    asked: &StartParams,
+) -> Result<Started, RpcError> {
+    if session.stop.load(Ordering::SeqCst) {
+        return Err(RpcError {
+            code: RpcError::WRONG_STATE,
+            message: format!(
+                "session {:?} is stopping (finishing its files); start again once `status` \
+                 says it has stopped",
+                session.token
+            ),
+        });
+    }
+    // "The same params": the parsed StartParams compare equal (setup,
+    // folder, seconds, new_project, into), whatever the JSON's spelling.
+    if cause != TakeCause::Start || session.asked != *asked {
+        return Err(RpcError {
+            code: RpcError::WRONG_STATE,
+            message: format!(
+                "already recording (session {:?}); stop the current session first",
+                session.token
+            ),
+        });
+    }
+    let files = session.files.lock().clone();
+    let mut notes = vec![format!(
+        "already recording with these params: session {:?} keeps going and nothing new started",
+        session.token
+    )];
+    if files.is_none() {
+        notes.push("it is still starting; `status` shows when it records".into());
+    }
+    Ok(Started {
+        files: files.unwrap_or_default(),
+        begins_at: None,
+        notes,
+        timeline: None,
+        session: Some(session.token.clone()),
+        already_recording: true,
+    })
+}
+
+/// The running session, if it is `only` (any, without it): `stop` and
+/// `request_stop` with a session id never end another (decision 17).
+fn running_session<'a>(state: &'a State, only: Option<&str>) -> Result<&'a Session, RpcError> {
+    let Some(session) = &state.session else {
+        return Err(RpcError {
+            code: RpcError::WRONG_STATE,
+            message: match only {
+                Some(only) => format!("not recording; session {only:?} has ended"),
+                None => "not recording".into(),
+            },
+        });
+    };
+    if let Some(only) = only
+        && only != session.token
+    {
+        return Err(RpcError {
+            code: RpcError::WRONG_STATE,
+            message: format!(
+                "session {only:?} isn't the one recording (it has ended): session {:?} is \
+                 recording now, and is left running",
+                session.token
+            ),
+        });
+    }
+    Ok(session)
+}
+
+/// Remember who asked `session` to stop, for its `stopped` event (the
+/// first to ask, if several do).
+fn note_stopped_by(session: &Session) {
+    let mut stopped_by = session.stopped_by.lock();
+    if stopped_by.is_none() {
+        *stopped_by = Some(callers::by());
     }
 }
 
@@ -5079,7 +5452,16 @@ fn app_identifier() -> Option<String> {
 /// The stream key for `account`: this build's own, or one an older Isocast
 /// kept under the shared legacy service, moved here once if this build may
 /// read it without asking.
-fn stream_key(account: &str) -> Result<Option<String>> {
+///
+/// `_held` is the state, borrowed from a guard the caller holds: resolving
+/// (and migrating, which writes a key) happens only under the state lock,
+/// as destination changes, their key clearing and key provisioning do, so
+/// a key resolved for a destination is that destination's as checked, and
+/// a migration can't bring back a key a destination change just cleared
+/// (decision 26). Every resolver takes it: stream start
+/// (`destination_key`), the speed test (and `optimize` through it), and
+/// stream statuses (`has_stream_key`).
+fn stream_key(_held: &State, account: &str) -> Result<Option<String>> {
     match secret(key_service(), account)? {
         Some(key) => Ok(Some(key)),
         None => Ok(migrate_legacy_key(account)),
@@ -5087,8 +5469,8 @@ fn stream_key(account: &str) -> Result<Option<String>> {
 }
 
 /// Whether a key for `account` is stored for this build (moving a readable
-/// legacy one here first).
-fn has_stream_key(account: &str) -> Result<bool> {
+/// legacy one here first); under the state lock, as [`stream_key`].
+fn has_stream_key(_held: &State, account: &str) -> Result<bool> {
     Ok(has_secret(key_service(), account)? || migrate_legacy_key(account).is_some())
 }
 
@@ -5469,8 +5851,12 @@ fn free_bytes(folder: &Path) -> Option<u64> {
         .map(|volume| volume.free_bytes)
 }
 
-fn doctor(setup: Option<&Setup>, folder: Option<&Path>) -> isocast_protocol::api::Doctor {
-    isocast_engine::doctor::doctor(native(), setup, folder)
+fn doctor(
+    setup: Option<&Setup>,
+    folder: Option<&Path>,
+    may_write: &dyn Fn(&Path) -> bool,
+) -> isocast_protocol::api::Doctor {
+    isocast_engine::doctor::doctor_writing(native(), setup, folder, may_write)
 }
 
 fn devices() -> Result<isocast_protocol::devices::Devices> {

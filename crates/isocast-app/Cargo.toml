@@ -18,6 +18,7 @@ base64 = "0.22.1"
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
 isocast-client = { path = "../isocast-client" }
+isocast-ipc = { path = "../isocast-ipc" }
 isocast-protocol = { path = "../isocast-protocol" }
 serde_json = "1.0.154"
 objc2 = { version = "0.6.5", features = ["exception"] }

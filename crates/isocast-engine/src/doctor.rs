@@ -19,6 +19,18 @@ type Delivers<'a> = (&'a str, Option<(u32, u32, u32)>, Option<u32>);
 /// Check this machine, and `setup` if given: permissions, hardware
 /// encoders, the setup's devices and the recording disk.
 pub fn doctor<P: Platform>(platform: &P, setup: Option<&Setup>, folder: Option<&Path>) -> Doctor {
+    doctor_writing(platform, setup, folder, &|_| true)
+}
+
+/// [`doctor`], with the disk write test only where `may_write` allows (the
+/// folder it writes in is the nearest one that exists): an engine skips it
+/// for a client on another computer outside the folders it may use.
+pub fn doctor_writing<P: Platform>(
+    platform: &P,
+    setup: Option<&Setup>,
+    folder: Option<&Path>,
+    may_write: &dyn Fn(&Path) -> bool,
+) -> Doctor {
     let mut machine = platform.machine();
     let encoders = platform.video_encoders();
     machine.hardware_encoders = encoders.hardware;
@@ -387,37 +399,50 @@ pub fn doctor<P: Platform>(platform: &P, setup: Option<&Setup>, folder: Option<&
                     Some("record to a local disk; a dropped connection can lose the files"),
                 ));
             }
-            match space::write_speed(&existing) {
-                Ok(speed) => {
-                    let detail = format!(
-                        "wrote {}/s in a test; the files may need up to {}/s",
-                        space::human(speed),
-                        space::human(rate)
-                    );
-                    checks.push(if speed < rate {
-                        check(
-                            &format!("{name} speed"),
-                            CheckStatus::Problem,
-                            detail,
-                            Some("record to a faster disk"),
-                        )
-                    } else if speed < 2.0 * rate {
-                        check(
-                            &format!("{name} speed"),
-                            CheckStatus::Warning,
-                            detail,
-                            Some("record to a faster disk"),
-                        )
-                    } else {
-                        check(&format!("{name} speed"), CheckStatus::Ok, detail, None)
-                    });
+            if !may_write(&existing) {
+                checks.push(check(
+                    &format!("{name} write speed"),
+                    CheckStatus::Warning,
+                    format!(
+                        "not tested: the test would write in {}, which isn't a folder this \
+                         client may use",
+                        existing.display()
+                    ),
+                    Some("run doctor on the engine's computer, or choose the folder there"),
+                ));
+            } else {
+                match space::write_speed(&existing) {
+                    Ok(speed) => {
+                        let detail = format!(
+                            "wrote {}/s in a test; the files may need up to {}/s",
+                            space::human(speed),
+                            space::human(rate)
+                        );
+                        checks.push(if speed < rate {
+                            check(
+                                &format!("{name} speed"),
+                                CheckStatus::Problem,
+                                detail,
+                                Some("record to a faster disk"),
+                            )
+                        } else if speed < 2.0 * rate {
+                            check(
+                                &format!("{name} speed"),
+                                CheckStatus::Warning,
+                                detail,
+                                Some("record to a faster disk"),
+                            )
+                        } else {
+                            check(&format!("{name} speed"), CheckStatus::Ok, detail, None)
+                        });
+                    }
+                    Err(err) => checks.push(check(
+                        &format!("{name} speed"),
+                        CheckStatus::Problem,
+                        format!("could not write a test file: {err}"),
+                        Some("check the folder exists and is writable"),
+                    )),
                 }
-                Err(err) => checks.push(check(
-                    &format!("{name} speed"),
-                    CheckStatus::Problem,
-                    format!("could not write a test file: {err}"),
-                    Some("check the folder exists and is writable"),
-                )),
             }
         }
         Err(err) => checks.push(check(

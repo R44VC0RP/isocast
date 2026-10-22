@@ -194,7 +194,7 @@ pub(crate) fn canvas_statuses(state: &State, canvas: CanvasId) -> Vec<StreamStat
             // service, server and key are the setup's: what a new stream
             // would use (#59).
             let account = &destination.key_account;
-            let key_set = from_env || has_stream_key(account).unwrap_or(false);
+            let key_set = from_env || has_stream_key(state, account).unwrap_or(false);
             let mut offline = StreamStatus::offline_destination(&destination, key_set);
             offline.canvas = canvas;
             let mut status = match known {
@@ -321,7 +321,7 @@ impl Daemon {
                 });
                 continue;
             }
-            match destination_key(destination, canvas) {
+            match destination_key(&state, destination, canvas) {
                 Ok(key) => keys.push(key),
                 Err(message) => problems.push(message),
             }
@@ -385,12 +385,17 @@ impl Daemon {
             // Its previous stream, finished, makes way.
             state.streams.retain(|(other, _)| *other != slot_id);
             state.stream_reported.remove(&slot_id);
+            self.stream_by
+                .lock()
+                .insert(slot_id.clone(), crate::callers::by());
             let daemon = Arc::downgrade(self);
+            let attributed = slot_id.clone();
             let on_change: OnChange = Box::new(move |status| {
                 if let Some(daemon) = daemon.upgrade() {
                     let mut stream = status.clone();
                     stream.canvas = canvas;
-                    daemon.publish(Event::Stream { stream });
+                    let by = daemon.stream_by.lock().get(&attributed).cloned().flatten();
+                    daemon.publish(Event::Stream { stream, by });
                 }
             });
             let settings = destination.settings.clone();
@@ -410,6 +415,7 @@ impl Daemon {
                     status.last_error = Some(format!("{err:#}"));
                     self.publish(Event::Stream {
                         stream: status.clone(),
+                        by: crate::callers::by(),
                     });
                     Output::Failed(Box::new(status))
                 }
@@ -758,6 +764,13 @@ impl Daemon {
         }
         state.streams = kept;
         drop(state);
+        {
+            let by = crate::callers::by();
+            let mut stream_by = self.stream_by.lock();
+            for (slot, _) in &stopping {
+                stream_by.insert(slot.clone(), by.clone());
+            }
+        }
         // Each says goodbye to its server at once, rather than one after
         // another's grace period.
         let finals: Vec<StreamStatus> = thread::scope(|scope| {
@@ -1215,6 +1228,7 @@ impl Daemon {
             revision: applied.revision,
             id,
             destinations: canvas_statuses(&self.state.read(), canvas),
+            notes: applied.notes,
         })
     }
 }
@@ -1336,7 +1350,12 @@ fn choose(
 
 /// The key `destination` streams with: `ISOCAST_STREAM_KEY` (local
 /// testing), else its Keychain item. Says what to do when there is none.
-fn destination_key(destination: &Destination, canvas: CanvasId) -> Result<String, String> {
+/// Resolved under the state lock (`state`), as [`crate::stream_key`] needs.
+fn destination_key(
+    state: &State,
+    destination: &Destination,
+    canvas: CanvasId,
+) -> Result<String, String> {
     if let Ok(key) = std::env::var(KEY_ENV)
         && !key.trim().is_empty()
     {
@@ -1344,7 +1363,7 @@ fn destination_key(destination: &Destination, canvas: CanvasId) -> Result<String
     }
     let account = &destination.key_account;
     let flag = canvas_flag(canvas);
-    match stream_key(account) {
+    match stream_key(state, account) {
         Ok(Some(key)) => Ok(key),
         Ok(None) if destination.id == MAIN_DESTINATION && canvas.is_main() => Err(format!(
             "no stream key is set for {}; run `isocast stream key set` (it reads the key from \

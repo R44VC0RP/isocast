@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use isocast_protocol::api::{EventKinds, Method, RpcError};
 use serde_json::Value;
 
+mod auth_limit;
 mod events;
 mod requests;
 mod session;
@@ -42,8 +43,9 @@ pub const MAX_CLIENTS: u32 = 32;
 
 /// isocastd, as the server sees it.
 pub trait Engine: Send + Sync + 'static {
-    /// Call the method table. `peer` names the client, for the log.
-    fn call(&self, method: Method, peer: &str) -> Result<Value, RpcError>;
+    /// Call the method table for the client at `peer`: a network caller,
+    /// held to the engine's local-only policy and named in the audit log.
+    fn call(&self, method: Method, peer: SocketAddr) -> Result<Value, RpcError>;
     /// Watch events of `kinds`: each a JSON-RPC `event` notification line,
     /// as `watch` sends them. The channel closes if the watcher falls too
     /// far behind; dropping the [`Watching`] stops it.
@@ -89,6 +91,8 @@ pub(crate) struct Shared {
     /// When a refused web page's connection was last logged, and how many
     /// were refused since without a log line.
     pub origin_log: parking_lot::Mutex<(Option<Instant>, u32)>,
+    /// Wrong passwords per address, and how long each must wait.
+    pub auth_limit: parking_lot::Mutex<auth_limit::AuthLimit>,
 }
 
 impl Server {
@@ -107,6 +111,7 @@ impl Server {
             isocast_version: config.isocast_version,
             custom: parking_lot::Mutex::new(Vec::new()),
             origin_log: parking_lot::Mutex::new((None, 0)),
+            auth_limit: Default::default(),
         });
         let accept = thread::Builder::new().name("obs-websocket".into()).spawn({
             let shared = shared.clone();
@@ -253,7 +258,7 @@ mod tests {
     struct Failing(std::sync::Mutex<Vec<String>>);
 
     impl Engine for Failing {
-        fn call(&self, _: Method, _: &str) -> Result<Value, RpcError> {
+        fn call(&self, _: Method, _: SocketAddr) -> Result<Value, RpcError> {
             Err(RpcError {
                 code: RpcError::WRONG_STATE,
                 message: "isocastd is stopping".into(),

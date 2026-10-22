@@ -7,6 +7,15 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
 
 ## Commands
 
+- [`isocast remote`](#isocast-remote)
+  - [`isocast remote status`](#isocast-remote-status)
+  - [`isocast remote enable`](#isocast-remote-enable)
+  - [`isocast remote disable`](#isocast-remote-disable)
+  - [`isocast remote identity`](#isocast-remote-identity)
+  - [`isocast remote pair`](#isocast-remote-pair)
+  - [`isocast remote clients`](#isocast-remote-clients)
+  - [`isocast remote revoke`](#isocast-remote-revoke)
+  - [`isocast remote forget`](#isocast-remote-forget)
 - [`isocast report-file`](#isocast-report-file)
 - [`isocast report`](#isocast-report)
 - [`isocast logs`](#isocast-logs)
@@ -86,6 +95,7 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
 - [`isocast pause`](#isocast-pause)
 - [`isocast resume`](#isocast-resume)
 - [`isocast status`](#isocast-status)
+- [`isocast hello`](#isocast-hello)
 - [`isocast split`](#isocast-split)
 - [`isocast marker`](#isocast-marker)
 - [`isocast refresh`](#isocast-refresh)
@@ -134,6 +144,9 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast websocket status`](#isocast-websocket-status)
   - [`isocast websocket enable`](#isocast-websocket-enable)
   - [`isocast websocket disable`](#isocast-websocket-disable)
+- [`isocast roots`](#isocast-roots)
+  - [`isocast roots show`](#isocast-roots-show)
+  - [`isocast roots set`](#isocast-roots-set)
 - [`isocast projector`](#isocast-projector)
   - [`isocast projector open`](#isocast-projector-open)
   - [`isocast projector close`](#isocast-projector-close)
@@ -147,6 +160,7 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast debug on`](#isocast-debug-on)
   - [`isocast debug off`](#isocast-debug-off)
   - [`isocast debug status`](#isocast-debug-status)
+  - [`isocast debug advertise`](#isocast-debug-advertise)
 - [`isocast watch`](#isocast-watch)
 - [`isocast frame`](#isocast-frame)
 - [`isocast frames`](#isocast-frames)
@@ -154,6 +168,7 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast engine start`](#isocast-engine-start)
   - [`isocast engine stop`](#isocast-engine-stop)
   - [`isocast engine shutdown`](#isocast-engine-shutdown)
+- [`isocast engines`](#isocast-engines)
 - [`isocast mcp`](#isocast-mcp)
 
 ## isocast
@@ -161,9 +176,10 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
 ```text
 Isocast: scene-based recording with per-source ISO files, controlled from the command line or by agents
 
-Usage: isocast <COMMAND>
+Usage: isocast [OPTIONS] <COMMAND>
 
 Commands:
+  remote         Remote-control settings, pairing and client identities
   report-file    Read a bounded page from a redacted report preview
   report         Create a private, redacted bug-report zip. Nothing is uploaded unless you pass --submit
   logs           Read structured logs (also works when the daemon is stopped)
@@ -186,6 +202,7 @@ Commands:
   pause          Pause this take without closing its files; streaming continues
   resume         Resume the paused take into the same files
   status         Show whether isocastd is recording, with live counters
+  hello          Show what the engine is: its machine's operating system and name, its identity, build, protocol version and how many methods it offers (all of them with --json)
   split          Split the background recording into a new take at the next whole second, without stopping any device
   marker         Mark this moment in the background recording, with a label
   refresh        Reload a browser source's page in the background recording, bypassing the cache
@@ -209,6 +226,7 @@ Commands:
   canvas         Canvases besides the main one (#84): the vertical canvas and `[[canvases]]`, each with its own size, frame rate, scene (or the main one's), recording and stream destinations
   replay         The replay buffer: keep the last seconds of the program in memory, and save them to a file on demand
   websocket      The obs-websocket v5 server, so OBS tools (Stream Deck, Touch Portal, Streamer.bot, scripts) drive Isocast. Off until enabled
+  roots          The folders other computers can use (remote control and obs-websocket clients): see and, on this machine, choose them
   projector      Projectors: the program, the preview, a scene, a source or a multiview grid, full screen on a display or in a window (the app shows them)
   vcam           Feed a picture to Isocast Virtual Camera (extension approval required once)
   debug          Developer mode, for testing a build locally: verbose logs of every API call and component, and frame timing traces while recording
@@ -216,14 +234,145 @@ Commands:
   frame          Save the live engine's newest frame of the program (the default), studio mode's preview, or a video source as a JPEG. Starts the engine if it isn't running
   frames         Record what a monitor shows: the live engine's low-latency H.264 stream of the program (the default), studio mode's preview or a video source, saved as an H.264 elementary stream (Annex B, which ffprobe and ffplay read). Starts the engine if it isn't running
   engine         Keep the live engine running (`start`), or let it stop once nothing needs it (`stop`). It runs the live setup's sources, program and mix all the time, so recording starts at once; it also runs while recording or while a client shows frames
+  engines        Paired engines and engines advertising on the local network. Discovery is an unverified hint; the saved TLS pin establishes identity
   mcp            Serve the control API to agents over MCP, on stdin and stdout
   help           Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help     Print help
-  -V, --version  Print version
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
+  -V, --version          Print version
 
 Getting started: `isocast permissions` shows what macOS allows, `isocast setup init --apply` makes a setup from this Mac's devices, `isocast frame` saves a picture of the program, `isocast start --seconds 10` records a test, and `isocast status` shows how it went. Agents: `isocast mcp`.
+```
+
+## isocast remote
+
+```text
+Remote-control settings, pairing and client identities
+
+Usage: isocast remote [OPTIONS] <COMMAND>
+
+Commands:
+  status    
+  enable    
+  disable   
+  identity  Show/create this client's public identity; its private key never leaves the OS store
+  pair      Open a window locally (--show), or pair with HOST using a code read from stdin
+  clients   
+  revoke    
+  forget    
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
+```
+
+## isocast remote status
+
+```text
+Usage: isocast remote status [OPTIONS]
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
+```
+
+## isocast remote enable
+
+```text
+Usage: isocast remote enable [OPTIONS]
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --port <PORT>      
+      --bind <BIND>      
+      --json             
+  -h, --help             Print help
+```
+
+## isocast remote disable
+
+```text
+Usage: isocast remote disable [OPTIONS]
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
+```
+
+## isocast remote identity
+
+```text
+Show/create this client's public identity; its private key never leaves the OS store
+
+Usage: isocast remote identity [OPTIONS]
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
+```
+
+## isocast remote pair
+
+```text
+Open a window locally (--show), or pair with HOST using a code read from stdin
+
+Usage: isocast remote pair [OPTIONS] [HOST]
+
+Arguments:
+  [HOST]  
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --show             
+      --code-stdin       
+      --name <NAME>      
+      --json             
+  -h, --help             Print help
+```
+
+## isocast remote clients
+
+```text
+Usage: isocast remote clients [OPTIONS]
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
+```
+
+## isocast remote revoke
+
+```text
+Usage: isocast remote revoke [OPTIONS] <CLIENT_ID>
+
+Arguments:
+  <CLIENT_ID>  
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
+```
+
+## isocast remote forget
+
+```text
+Usage: isocast remote forget [OPTIONS] <ENGINE_ID>
+
+Arguments:
+  <ENGINE_ID>  
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast report-file
@@ -238,6 +387,7 @@ Arguments:
   <FILE>        
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --offset <OFFSET>  [default: 0]
       --limit <LIMIT>    
       --json             
@@ -252,6 +402,7 @@ Create a private, redacted bug-report zip. Nothing is uploaded unless you pass -
 Usage: isocast report [OPTIONS]
 
 Options:
+      --engine <ENGINE>          Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --out <OUT>                
       --describe <DESCRIBE>      
       --preview                  
@@ -271,6 +422,7 @@ Read structured logs (also works when the daemon is stopped)
 Usage: isocast logs [OPTIONS]
 
 Options:
+      --engine <ENGINE>        Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --follow                 
       --level <LEVEL>          
       --component <COMPONENT>  
@@ -283,7 +435,7 @@ Options:
 ```text
 Customize profile hotkeys, including global keys and push-to-talk
 
-Usage: isocast hotkeys <COMMAND>
+Usage: isocast hotkeys [OPTIONS] <COMMAND>
 
 Commands:
   list      Current profile bindings and native registration warnings
@@ -295,7 +447,8 @@ Commands:
   help      Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast hotkeys list
@@ -306,8 +459,9 @@ Current profile bindings and native registration warnings
 Usage: isocast hotkeys list [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast hotkeys set
@@ -323,9 +477,10 @@ Arguments:
   <ACTION>  
 
 Options:
-      --args <ARGS>  Typed action arguments as JSON; see `hotkeys actions --json` [default: {}]
-      --json         
-  -h, --help         Print help
+      --args <ARGS>      Typed action arguments as JSON; see `hotkeys actions --json` [default: {}]
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast hotkeys unset
@@ -339,8 +494,9 @@ Arguments:
   <ID>  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast hotkeys actions
@@ -351,8 +507,9 @@ Stable action catalogue, schemas, key names and suggested defaults
 Usage: isocast hotkeys actions [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast hotkeys defaults
@@ -363,9 +520,10 @@ Add defaults without replacing custom ids or occupied chords
 Usage: isocast hotkeys defaults [OPTIONS]
 
 Options:
-      --replace  Explicitly replace the whole set with defaults
-      --json     
-  -h, --help     Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --replace          Explicitly replace the whole set with defaults
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast hotkeys input
@@ -379,6 +537,7 @@ Arguments:
   <KEYS>  
 
 Options:
+      --engine <ENGINE>    Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --phase <PHASE>      [default: press] [possible values: press, release]
       --hold-ms <HOLD_MS>  
       --json               
@@ -393,8 +552,9 @@ List recording codecs and the containers each supports
 Usage: isocast encoders [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast gpu-adapter
@@ -405,8 +565,9 @@ Show the daemon's graphics adapter identity (Windows DX12 LUID)
 Usage: isocast gpu-adapter [OPTIONS]
 
 Options:
-      --json  Print JSON
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             Print JSON
+  -h, --help             Print help
 ```
 
 ## isocast setup
@@ -414,7 +575,7 @@ Options:
 ```text
 Work with setup files
 
-Usage: isocast setup <COMMAND>
+Usage: isocast setup [OPTIONS] <COMMAND>
 
 Commands:
   check         Validate a setup file (.toml or .json) and summarize it
@@ -425,7 +586,8 @@ Commands:
   help          Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast setup check
@@ -439,8 +601,9 @@ Arguments:
   <PATH>  
 
 Options:
-      --json  Print the result as JSON
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             Print the result as JSON
+  -h, --help             Print help
 ```
 
 ## isocast setup schema
@@ -448,10 +611,11 @@ Options:
 ```text
 Print the JSON Schema of the setup document
 
-Usage: isocast setup schema
+Usage: isocast setup schema [OPTIONS]
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast setup init
@@ -462,6 +626,7 @@ Make a good starting setup from this Mac's devices: the main display, the best c
 Usage: isocast setup init [OPTIONS]
 
 Options:
+      --engine <ENGINE>          Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
   -o, --output <OUTPUT>          Write the setup to this file (it must not exist yet)
       --apply                    Make it the live setup, replacing any (kept in the setup file's .bak)
       --display <DISPLAY>        The display: "main" (the default), or an id or name from `isocast devices`
@@ -484,6 +649,7 @@ Find OBS Studio's scene collections and profiles on this Mac (in ~/Library/Appli
 Usage: isocast setup discover-obs [OPTIONS]
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --folder <FOLDER>  Look in this folder instead
       --json             
   -h, --help             Print help
@@ -500,6 +666,7 @@ Arguments:
   <COLLECTION>  A collection's .json file, or its name in OBS's scenes folder (like "Recording")
 
 Options:
+      --engine <ENGINE>     Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
   -o, --output <OUTPUT>     Write the setup to this file (it must not exist yet)
       --canvas <WxH[@FPS]>  Import onto this canvas, WIDTHxHEIGHT or WIDTHxHEIGHT@FPS, scaling positions and sizes; the collection's own canvas and the profile's frame rate otherwise
       --profile <PROFILE>   The OBS profile with the frame rate and recording settings: a name or a basic.ini path. Found automatically if absent
@@ -512,7 +679,7 @@ Options:
 ```text
 Scene collections, as in OBS: named sets of scenes, sources, transitions and the canvas size, swapped as a whole. The one in use is the live setup's (with the profile in use)
 
-Usage: isocast collection <COMMAND>
+Usage: isocast collection [OPTIONS] <COMMAND>
 
 Commands:
   list       List them, marking the one in use
@@ -526,7 +693,8 @@ Commands:
   help       Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast collection list
@@ -537,8 +705,9 @@ List them, marking the one in use
 Usage: isocast collection list [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast collection new
@@ -552,10 +721,11 @@ Arguments:
   <NAME>  
 
 Options:
-      --id <ID>  Its id (lowercase letters, digits and dashes); made from the name if absent
-      --switch   Switch to it (refused while recording or streaming)
-      --json     
-  -h, --help     Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --id <ID>          Its id (lowercase letters, digits and dashes); made from the name if absent
+      --switch           Switch to it (refused while recording or streaming)
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast collection duplicate
@@ -570,6 +740,7 @@ Arguments:
   <NAME>  
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --new-id <NEW_ID>  The copy's id; made from the name if absent
       --switch           
       --json             
@@ -588,8 +759,9 @@ Arguments:
   <NAME>  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast collection delete
@@ -603,8 +775,9 @@ Arguments:
   <ID>  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast collection switch
@@ -618,9 +791,10 @@ Arguments:
   <ID>  
 
 Options:
-      --with <ID>  Also switch the other half at the same time: the profile (for a collection) or the collection (for a profile), by id
-      --json       
-  -h, --help       Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --with <ID>        Also switch the other half at the same time: the profile (for a collection) or the collection (for a profile), by id
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast collection import
@@ -634,6 +808,7 @@ Arguments:
   [FILE]  
 
 Options:
+      --engine <ENGINE>             Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --obs <NAME_OR_FILE>          
       --obs-profile <NAME_OR_FILE>  For a scene collection from OBS: also import this OBS profile (name, folder or basic.ini), with Source Record's ISO settings
       --name <NAME>                 The name to give it; its own if absent
@@ -655,6 +830,7 @@ Arguments:
   [ID]  
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
   -o, --output <OUTPUT>  
       --json             
   -h, --help             Print help
@@ -665,7 +841,7 @@ Options:
 ```text
 Profiles, as in OBS: named frame rate, recording, stream and audio settings, swapped as a whole. The one in use is the live setup's (with the scene collection in use)
 
-Usage: isocast profile <COMMAND>
+Usage: isocast profile [OPTIONS] <COMMAND>
 
 Commands:
   list       List them, marking the one in use
@@ -679,7 +855,8 @@ Commands:
   help       Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast profile list
@@ -690,8 +867,9 @@ List them, marking the one in use
 Usage: isocast profile list [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast profile new
@@ -705,10 +883,11 @@ Arguments:
   <NAME>  
 
 Options:
-      --id <ID>  Its id (lowercase letters, digits and dashes); made from the name if absent
-      --switch   Switch to it (refused while recording or streaming)
-      --json     
-  -h, --help     Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --id <ID>          Its id (lowercase letters, digits and dashes); made from the name if absent
+      --switch           Switch to it (refused while recording or streaming)
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast profile duplicate
@@ -723,6 +902,7 @@ Arguments:
   <NAME>  
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --new-id <NEW_ID>  The copy's id; made from the name if absent
       --switch           
       --json             
@@ -741,8 +921,9 @@ Arguments:
   <NAME>  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast profile delete
@@ -756,8 +937,9 @@ Arguments:
   <ID>  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast profile switch
@@ -771,9 +953,10 @@ Arguments:
   <ID>  
 
 Options:
-      --with <ID>  Also switch the other half at the same time: the profile (for a collection) or the collection (for a profile), by id
-      --json       
-  -h, --help       Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --with <ID>        Also switch the other half at the same time: the profile (for a collection) or the collection (for a profile), by id
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast profile import
@@ -787,6 +970,7 @@ Arguments:
   [FILE]  
 
 Options:
+      --engine <ENGINE>             Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --obs <NAME_OR_FILE>          
       --obs-profile <NAME_OR_FILE>  For a scene collection from OBS: also import this OBS profile (name, folder or basic.ini), with Source Record's ISO settings
       --name <NAME>                 The name to give it; its own if absent
@@ -808,6 +992,7 @@ Arguments:
   [ID]  
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
   -o, --output <OUTPUT>  
       --json             
   -h, --help             Print help
@@ -818,7 +1003,7 @@ Options:
 ```text
 Plugins: folders with an isocast-plugin.toml, installed from a local folder. A plugin's process runs sandboxed and may only call the methods it was granted
 
-Usage: isocast plugin <COMMAND>
+Usage: isocast plugin [OPTIONS] <COMMAND>
 
 Commands:
   add      Install a plugin from its folder (one with an isocast-plugin.toml): the folder is copied into the plugins folder and its process, if it has one, starts at once. Without --allow it only lists the permissions the plugin asks for
@@ -829,7 +1014,8 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast plugin add
@@ -843,11 +1029,12 @@ Arguments:
   <PATH>  
 
 Options:
-      --allow  Grant the permissions it asks for (they are printed without this)
-      --link   Link to the folder instead of copying it, for developing a plugin: it is read again each time the plugin starts
-      --force  Install it even if the same or a newer version is installed
-      --json   
-  -h, --help   Print help
+      --allow            Grant the permissions it asks for (they are printed without this)
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --link             Link to the folder instead of copying it, for developing a plugin: it is read again each time the plugin starts
+      --force            Install it even if the same or a newer version is installed
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast plugin list
@@ -858,8 +1045,9 @@ List the installed plugins: version, what they provide, state, process and what 
 Usage: isocast plugin list [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast plugin remove
@@ -873,9 +1061,10 @@ Arguments:
   <ID>  
 
 Options:
-      --force  Remove it even though the live setup uses its kinds: they stay in the setup, bypassed, until the plugin is added again
-      --json   
-  -h, --help   Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --force            Remove it even though the live setup uses its kinds: they stay in the setup, bypassed, until the plugin is added again
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast plugin enable
@@ -889,8 +1078,9 @@ Arguments:
   <ID>  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast plugin disable
@@ -904,8 +1094,9 @@ Arguments:
   <ID>  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast data
@@ -913,7 +1104,7 @@ Options:
 ```text
 The data store: values by key (like `score.home`) that text in scenes shows (`data = "score.home"` on a text source or text content), set by you, scripts, agents and plugins without changing the setup
 
-Usage: isocast data <COMMAND>
+Usage: isocast data [OPTIONS] <COMMAND>
 
 Commands:
   get     Show data keys and their values: every key, the KEYs given, or those under --prefix
@@ -922,7 +1113,8 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast data get
@@ -936,6 +1128,7 @@ Arguments:
   [KEYS]...  
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --prefix <PREFIX>  Only keys under this prefix: `score` shows `score` and `score.home`, not `scoreboard`
       --json             
   -h, --help             Print help
@@ -953,10 +1146,11 @@ Arguments:
   <VALUE>  
 
 Options:
-      --persist     Keep it with the scene collection, so it comes back after a restart (it stays kept when set again without this)
-      --no-persist  Stop keeping it: it lasts until isocastd stops
-      --json        
-  -h, --help        Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --persist          Keep it with the scene collection, so it comes back after a restart (it stays kept when set again without this)
+      --no-persist       Stop keeping it: it lasts until isocastd stops
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast data delete
@@ -970,8 +1164,9 @@ Arguments:
   <KEYS>...  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast timeline
@@ -979,7 +1174,7 @@ Options:
 ```text
 Timelines: takes in order, joined into one file by `export`. Each recording starts a new project with its own timeline unless `isocast record-target` (or `timeline new`) chose one to add its takes to; `retake` records the last one again
 
-Usage: isocast timeline <COMMAND>
+Usage: isocast timeline [OPTIONS] <COMMAND>
 
 Commands:
   new     Make a timeline, make it current and choose it for the next recording: from then on every recording adds its takes to its end (`isocast record-target new` starts new projects again)
@@ -1002,7 +1197,8 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast timeline new
@@ -1016,8 +1212,9 @@ Arguments:
   [NAME]  Its name ("Timeline N" if absent); its id is made from it
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast timeline list
@@ -1028,8 +1225,9 @@ List the timelines, and which is current
 Usage: isocast timeline list [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast timeline open
@@ -1043,8 +1241,9 @@ Arguments:
   <TIMELINE>  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast timeline close
@@ -1055,8 +1254,9 @@ Make no timeline current. If it was chosen for the next recording, recordings st
 Usage: isocast timeline close [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast timeline show
@@ -1070,8 +1270,9 @@ Arguments:
   [TIMELINE]  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast timeline remove
@@ -1085,6 +1286,7 @@ Arguments:
   <CLIP>  
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --timeline <TIMELINE>  The timeline's id; the current one if absent
       --json                 
   -h, --help                 Print help
@@ -1102,6 +1304,7 @@ Arguments:
   <POSITION>  
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --timeline <TIMELINE>  The timeline's id; the current one if absent
       --json                 
   -h, --help                 Print help
@@ -1115,6 +1318,7 @@ Join the clips, in order, into one program file and one file per ISO source ever
 Usage: isocast timeline export [OPTIONS]
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --timeline <TIMELINE>  The timeline's id; the current one if absent
       --folder <FOLDER>      Write the files here (made if missing); else next to the first clip's take
       --vertical             Also write a vertical (9:16) edited file: each clip's picture or crop fitted into the program's size on its side (1080x1920 for 1080p), so a 9:16 crop fills it
@@ -1138,6 +1342,7 @@ Arguments:
   <CLIP>  
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --in <SECONDS>         The new in point (0 is the take's start)
       --out <SECONDS>        The new out point (up to the take's length)
       --timeline <TIMELINE>  
@@ -1156,6 +1361,7 @@ Arguments:
   <SECONDS>  
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --timeline <TIMELINE>  
       --json                 
   -h, --help                 Print help
@@ -1173,6 +1379,7 @@ Arguments:
   <END>    
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --timeline <TIMELINE>  
       --json                 
   -h, --help                 Print help
@@ -1191,6 +1398,7 @@ Arguments:
   <END>     
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --timeline <TIMELINE>  
       --json                 
   -h, --help                 Print help
@@ -1208,6 +1416,7 @@ Arguments:
   <END>    
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --rect <X,Y,W,H>       The part shown, as fractions of the picture: X,Y,WIDTH,HEIGHT from the top-left (0 to 1), like 0.25,0,0.5,1
       --preset <PRESET>      A shape: the largest one that fits, centred: 16:9, 9:16, 1:1 or 4:5
       --clear                Show the whole picture again
@@ -1228,6 +1437,7 @@ Arguments:
   <SECONDS>  
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --timeline <TIMELINE>  
       --json                 
   -h, --help                 Print help
@@ -1241,6 +1451,7 @@ Take back the last edit (trim, split, delete, angle, crop, roll, remove, move)
 Usage: isocast timeline undo [OPTIONS]
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --timeline <TIMELINE>  
       --json                 
   -h, --help                 Print help
@@ -1254,6 +1465,7 @@ Put back the last edit undone
 Usage: isocast timeline redo [OPTIONS]
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --timeline <TIMELINE>  
       --json                 
   -h, --help                 Print help
@@ -1271,6 +1483,7 @@ Arguments:
   <PATH>  The take's manifest, or its folder
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --timeline <TIMELINE>  
       --json                 
   -h, --help                 Print help
@@ -1281,7 +1494,7 @@ Options:
 ```text
 Recording projects: a folder per recording session (`<date> <time> Untitled` in the recordings folder) with every take's files, manifests and exports
 
-Usage: isocast project <COMMAND>
+Usage: isocast project [OPTIONS] <COMMAND>
 
 Commands:
   list       List the recording projects (a folder per recording session), newest first, with their takes and files
@@ -1292,7 +1505,8 @@ Commands:
   help       Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast project list
@@ -1303,9 +1517,10 @@ List the recording projects (a folder per recording session), newest first, with
 Usage: isocast project list [OPTIONS]
 
 Options:
-      --limit <LIMIT>  At most this many (100 if absent)
-      --json           
-  -h, --help           Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --limit <LIMIT>    At most this many (100 if absent)
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast project rename
@@ -1320,8 +1535,9 @@ Arguments:
   <NAME>     
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast project open
@@ -1335,6 +1551,7 @@ Arguments:
   <PATH>  The `.isoprj` file, or the project's folder
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --timeline <TIMELINE>  Which of its timelines (an id); else the current one if it is one of them, else the newest
       --no-editor            Don't ask the app to show the editor
       --json                 
@@ -1349,9 +1566,10 @@ The projects opened lately (File › Open Recent), newest first
 Usage: isocast project recent [OPTIONS]
 
 Options:
-      --clear  Forget them
-      --json   
-  -h, --help   Print help
+      --clear            Forget them
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast project auto-open
@@ -1365,8 +1583,9 @@ Arguments:
   [STATE]  [possible values: on, off]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast retake
@@ -1377,6 +1596,7 @@ Record the last take again. Not recording (or while a stop is finishing, once it
 Usage: isocast retake [OPTIONS]
 
 Options:
+      --engine <ENGINE>    Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --folder <FOLDER>    Write the new take here; else where the take it replaces is
       --seconds <SECONDS>  Stop on its own after this many seconds
       --json               
@@ -1391,8 +1611,9 @@ List displays, windows, cameras, microphones and audio outputs (for monitoring),
 Usage: isocast devices [OPTIONS]
 
 Options:
-      --json  Print the result as JSON
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             Print the result as JSON
+  -h, --help             Print help
 ```
 
 ## isocast record
@@ -1406,6 +1627,7 @@ Arguments:
   [SETUP]  Setup file (.toml or .json)
 
 Options:
+      --engine <ENGINE>    Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --source <SPEC>      Record without a setup file: screen, display[:NAME_OR_ID], camera:NAME_OR_ID, mic[:NAME_OR_ID], system-audio[:except=APP[,APP]], window:APP, app-audio:APP, test-pattern[:WIDTHxHEIGHT[@FPS]] or tone[:HZ]. Repeat for more sources; every audio source goes into every file
       --seconds <SECONDS>  Stop after this many seconds
       --folder <FOLDER>    Record into a new project folder in this folder instead of the setup's recording.folder (or into this folder, if it is a project's)
@@ -1427,6 +1649,9 @@ Arguments:
           
 
 Options:
+      --engine <ENGINE>
+          Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+
       --source <SPEC>
           
 
@@ -1460,8 +1685,9 @@ Arguments:
   [TARGET]  `new`, or a timeline's id; absent: show the choice
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast stop
@@ -1472,9 +1698,11 @@ Ask the background recording to stop and return at once, while isocastd finishes
 Usage: isocast stop [OPTIONS]
 
 Options:
-      --wait  Wait for the files to be finished and print the report; exits with failure if the recording had errors
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>    Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --wait               Wait for the files to be finished and print the report; exits with failure if the recording had errors
+      --session <SESSION>  Stop only this recording session (its id, from `isocast record --background --json` or `isocast status --json`): refused if another session is recording now
+      --json               
+  -h, --help               Print help
 ```
 
 ## isocast pause
@@ -1485,8 +1713,9 @@ Pause this take without closing its files; streaming continues
 Usage: isocast pause [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast resume
@@ -1497,8 +1726,9 @@ Resume the paused take into the same files
 Usage: isocast resume [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast status
@@ -1509,8 +1739,22 @@ Show whether isocastd is recording, with live counters
 Usage: isocast status [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
+```
+
+## isocast hello
+
+```text
+Show what the engine is: its machine's operating system and name, its identity, build, protocol version and how many methods it offers (all of them with --json)
+
+Usage: isocast hello [OPTIONS]
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast split
@@ -1521,8 +1765,9 @@ Split the background recording into a new take at the next whole second, without
 Usage: isocast split [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast marker
@@ -1536,8 +1781,9 @@ Arguments:
   <LABEL>  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast refresh
@@ -1551,8 +1797,9 @@ Arguments:
   <SOURCE>  The browser source's id
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast scene
@@ -1567,6 +1814,7 @@ Arguments:
 
 Options:
       --cut                     Cut straight to the scene
+      --engine <ENGINE>         Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --fade <MS>               Fade to the scene over this many milliseconds
       --transition <KIND|JSON>  Another transition: a kind (cut, fade, swipe, slide, fade_to_color, luma_wipe, stinger, move) with its default settings, or a JSON object like '{"kind":"swipe","direction":"up"}'
       --duration <MS>           How long --transition takes, in milliseconds (300 by default)
@@ -1587,6 +1835,7 @@ Arguments:
 
 Options:
       --clear            Leave Studio Mode (clear its staged preview)
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --canvas <CANVAS>  Which canvas: main, or vertical (once it stops following the main one) [default: main]
       --json             
   -h, --help             Print help
@@ -1601,6 +1850,7 @@ Usage: isocast take [OPTIONS]
 
 Options:
       --cut                     Cut straight to the scene
+      --engine <ENGINE>         Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --fade <MS>               Fade to the scene over this many milliseconds
       --transition <KIND|JSON>  Another transition: a kind (cut, fade, swipe, slide, fade_to_color, luma_wipe, stinger, move) with its default settings, or a JSON object like '{"kind":"swipe","direction":"up"}'
       --duration <MS>           How long --transition takes, in milliseconds (300 by default)
@@ -1620,6 +1870,7 @@ Arguments:
   [SETUP]  
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --folder <FOLDER>  Check this folder instead of the setup's recording.folder
       --json             
   -h, --help             Print help
@@ -1630,7 +1881,7 @@ Options:
 ```text
 Measure this machine quietly, inspect its profile, or cancel calibration
 
-Usage: isocast machine <COMMAND>
+Usage: isocast machine [OPTIONS] <COMMAND>
 
 Commands:
   show       Show the profile and calibration state without starting a measurement
@@ -1639,7 +1890,8 @@ Commands:
   help       Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast machine show
@@ -1650,8 +1902,9 @@ Show the profile and calibration state without starting a measurement
 Usage: isocast machine show [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast machine calibrate
@@ -1662,8 +1915,9 @@ Start an idle-only self-test (at most 30 seconds); poll show for results
 Usage: isocast machine calibrate [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast machine cancel
@@ -1674,8 +1928,9 @@ Cancel a self-test, retaining the previous profile
 Usage: isocast machine cancel [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast tune
@@ -1689,6 +1944,7 @@ Arguments:
   [SETUP]  
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --folder <FOLDER>  Benchmark writing to this folder instead of recording.folder
       --json             
   -h, --help             Print help
@@ -1705,6 +1961,7 @@ Arguments:
   [SETUP]  
 
 Options:
+      --engine <ENGINE>   Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --stream            Count the stream's encode (default: the live setup's if it streams now; a given setup's if it has a stream)
       --no-stream         Leave the stream's encode out
       --add-iso <SOURCE>  How to turn on this source's ISO file so the setup still fits
@@ -1723,6 +1980,7 @@ Arguments:
   <GOAL>  recording, streaming or both
 
 Options:
+      --engine <ENGINE>            Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --service <SERVICE>          Streaming: custom, twitch, youtube, kick or facebook; the live setup's if absent
       --server <SERVER>            Streaming: the ingest server, rtmp://host/app or rtmps://…
       --upload-kbps <UPLOAD_KBPS>  Streaming: the upload speed in kb/s, instead of testing it
@@ -1743,6 +2001,7 @@ Arguments:
   [SOURCE]  
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --scene <SCENE>    
       --preview          The scene in preview
   -o, --output <OUTPUT>  Where to save it; `<source or scene id>.png` if absent
@@ -1762,6 +2021,7 @@ Arguments:
   <SOURCE>  
 
 Options:
+      --engine <ENGINE>    Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --mono               Downmix to mono (before balance) in the program and monitor
       --stereo             Keep the source's stereo channels in the program and monitor
       --gain <GAIN>        
@@ -1786,10 +2046,11 @@ Arguments:
   [AUDIO]...  Audio source ids, in track order
 
 Options:
-      --default  
-      --none     
-      --json     
-  -h, --help     Print help
+      --default          
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --none             
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast restart
@@ -1797,10 +2058,11 @@ Options:
 ```text
 Restart isocastd, for example after granting it screen recording permission. Refused, atomically by isocastd, while it records, streams, exports or feeds the virtual camera
 
-Usage: isocast restart
+Usage: isocast restart [OPTIONS]
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast permissions
@@ -1811,6 +2073,7 @@ Show the screen recording, camera, microphone and system audio recording permiss
 Usage: isocast permissions [OPTIONS]
 
 Options:
+      --engine <ENGINE>         Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --request [<PERMISSION>]  screen_recording, camera, microphone or system_audio; all if left out
       --open <PERMISSION>       screen_recording, camera, microphone or system_audio
       --json                    
@@ -1825,6 +2088,7 @@ Print the live setup (TOML, or JSON with --json) and its revision; with --resolv
 Usage: isocast get [OPTIONS]
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --resolved         
       --canvas <CANVAS>  With --resolved: whose layout, main or vertical (the setup is the whole live setup either way) [default: main]
       --json             
@@ -1842,9 +2106,10 @@ Arguments:
   [FILE]  
 
 Options:
-      --patch <PATCH>  
-      --json           
-  -h, --help           Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --patch <PATCH>    
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast apply
@@ -1858,6 +2123,7 @@ Arguments:
   [FILE]  
 
 Options:
+      --engine <ENGINE>      Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --patch <PATCH>        
       --revision <REVISION>  
       --live                 One step of a gesture: apply at once and save to disk a moment later (for scripts sending many changes a second)
@@ -1870,7 +2136,7 @@ Options:
 ```text
 Stream the program live over RTMP or RTMPS to the live setup's [stream] service, and keep its stream key in the Keychain
 
-Usage: isocast stream <COMMAND>
+Usage: isocast stream [OPTIONS] <COMMAND>
 
 Commands:
   start        Go live: stream the program (the canvas and the program mix) to the live setup's [stream] destinations (every enabled one), starting the live engine if needed. Recordings start and stop without touching it. Returns once each is live or failed, or says why not
@@ -1882,7 +2148,8 @@ Commands:
   help         Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast stream start
@@ -1893,6 +2160,7 @@ Go live: stream the program (the canvas and the program mix) to the live setup's
 Usage: isocast stream start [OPTIONS]
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --only <ID>        Only this destination (main, or an id from `stream status`); repeat for several. A turned-off destination starts too
       --canvas <CANVAS>  Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
       --json             
@@ -1907,6 +2175,7 @@ Stop streaming (to every destination of the canvas, or --only those); the other 
 Usage: isocast stream stop [OPTIONS]
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --only <ID>        Only this destination; repeat for several. The others keep going
       --canvas <CANVAS>  Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
       --json             
@@ -1922,6 +2191,7 @@ Usage: isocast stream status [OPTIONS]
 
 Options:
       --canvas <CANVAS>  Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --json             
   -h, --help             Print help
 ```
@@ -1931,7 +2201,7 @@ Options:
 ```text
 Add, remove or change the places the program streams to
 
-Usage: isocast stream destination <COMMAND>
+Usage: isocast stream destination [OPTIONS] <COMMAND>
 
 Commands:
   add     Add a destination (the first makes the setup's [stream] section, id main). Set its key next: `isocast stream key set --destination ID`
@@ -1940,7 +2210,8 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast stream destination add
@@ -1954,6 +2225,8 @@ Arguments:
   <SERVICE>  custom, twitch, youtube, kick or facebook
 
 Options:
+      --engine <ENGINE>
+          Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --id <ID>
           Its id; made from the service if absent (youtube, youtube-2)
       --server <SERVER>
@@ -1992,6 +2265,7 @@ Arguments:
 
 Options:
       --canvas <CANVAS>  Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --json             
   -h, --help             Print help
 ```
@@ -2007,6 +2281,8 @@ Arguments:
   <ID>  
 
 Options:
+      --engine <ENGINE>
+          Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --service <SERVICE>
           
       --server <SERVER>
@@ -2040,7 +2316,7 @@ Options:
 ```text
 Keep or remove the stream key (in the Keychain, never in a setup)
 
-Usage: isocast stream key <COMMAND>
+Usage: isocast stream key [OPTIONS] <COMMAND>
 
 Commands:
   set    Store the stream key for the live setup's service (or --service). Reads it from stdin, or asks for it without echoing it in a terminal
@@ -2048,7 +2324,8 @@ Commands:
   help   Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast stream key set
@@ -2060,6 +2337,7 @@ Usage: isocast stream key set [OPTIONS]
 
 Options:
       --destination <DESTINATION>  A destination of the live setup (main, or an id from `stream status`): its own key
+      --engine <ENGINE>            Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --service <SERVICE>          custom, twitch, youtube, kick or facebook
       --server <SERVER>            For custom: the server the key belongs to (rtmp://host/app)
       --canvas <CANVAS>            Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
@@ -2076,6 +2354,7 @@ Usage: isocast stream key clear [OPTIONS]
 
 Options:
       --destination <DESTINATION>  A destination of the live setup (main, or an id from `stream status`): its own key
+      --engine <ENGINE>            Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --service <SERVICE>          custom, twitch, youtube, kick or facebook
       --server <SERVER>            For custom: the server the key belongs to (rtmp://host/app)
       --canvas <CANVAS>            Which canvas: main ([stream]), or vertical ([vertical.stream], with its own destinations and keys) [default: main]
@@ -2092,6 +2371,7 @@ Usage: isocast stream speed-test [OPTIONS]
 
 Options:
       --destination <DESTINATION>  A destination of the live setup (main, or an id from `stream status`): its own key
+      --engine <ENGINE>            Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --service <SERVICE>          custom, twitch, youtube, kick or facebook
       --server <SERVER>            For custom: the server the key belongs to (rtmp://host/app)
       --seconds <SECONDS>          Seconds to send for, 3 to 20 (8 by default)
@@ -2104,7 +2384,7 @@ Options:
 ```text
 Canvases besides the main one (#84): the vertical canvas and `[[canvases]]`, each with its own size, frame rate, scene (or the main one's), recording and stream destinations
 
-Usage: isocast canvas <COMMAND>
+Usage: isocast canvas [OPTIONS] <COMMAND>
 
 Commands:
   list    Every canvas: size, frame rate, scene, recording and streams
@@ -2114,7 +2394,8 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast canvas list
@@ -2125,8 +2406,9 @@ Every canvas: size, frame rate, scene, recording and streams
 Usage: isocast canvas list [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast canvas add
@@ -2140,6 +2422,7 @@ Arguments:
   <CANVAS>  
 
 Options:
+      --engine <ENGINE>            Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --name <NAME>                Display label, like "YouTube Shorts"
       --size <SIZE>                Size as WIDTHxHEIGHT, optionally @FPS (1080x1920, 1080x1080@30)
       --fps <FPS>                  Its own frame rate (else the main canvas's)
@@ -2160,6 +2443,7 @@ Arguments:
   <CANVAS>  
 
 Options:
+      --engine <ENGINE>            Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --name <NAME>                Display label, like "YouTube Shorts"
       --size <SIZE>                Size as WIDTHxHEIGHT, optionally @FPS (1080x1920, 1080x1080@30)
       --fps <FPS>                  Its own frame rate (else the main canvas's)
@@ -2182,8 +2466,9 @@ Arguments:
   <CANVAS>  
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast replay
@@ -2191,7 +2476,7 @@ Options:
 ```text
 The replay buffer: keep the last seconds of the program in memory, and save them to a file on demand
 
-Usage: isocast replay <COMMAND>
+Usage: isocast replay [OPTIONS] <COMMAND>
 
 Commands:
   start   Start keeping the last `recording.replay.seconds` of the program (video and the program mix) in memory, starting the live engine if needed. Recording and streaming start and stop without touching it. With --canvas vertical, the vertical canvas's program, in a buffer of its own with the same settings
@@ -2201,7 +2486,8 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast replay start
@@ -2213,6 +2499,7 @@ Usage: isocast replay start [OPTIONS]
 
 Options:
       --canvas <CANVAS>  Which canvas's buffer: main, or vertical (the setup's [vertical] canvas; each canvas has its own buffer) [default: main]
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --json             Print JSON
   -h, --help             Print help
 ```
@@ -2226,6 +2513,7 @@ Usage: isocast replay stop [OPTIONS]
 
 Options:
       --canvas <CANVAS>  Which canvas's buffer: main, or vertical (the setup's [vertical] canvas; each canvas has its own buffer) [default: main]
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --json             Print JSON
   -h, --help             Print help
 ```
@@ -2239,6 +2527,7 @@ Usage: isocast replay save [OPTIONS]
 
 Options:
       --canvas <CANVAS>  Which canvas's buffer: main, or vertical (the setup's [vertical] canvas; each canvas has its own buffer) [default: main]
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --json             Print JSON
   -h, --help             Print help
 ```
@@ -2252,6 +2541,7 @@ Usage: isocast replay status [OPTIONS]
 
 Options:
       --canvas <CANVAS>  Which canvas's buffer: main, or vertical (the setup's [vertical] canvas; each canvas has its own buffer) [default: main]
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --json             Print JSON
   -h, --help             Print help
 ```
@@ -2261,7 +2551,7 @@ Options:
 ```text
 The obs-websocket v5 server, so OBS tools (Stream Deck, Touch Portal, Streamer.bot, scripts) drive Isocast. Off until enabled
 
-Usage: isocast websocket <COMMAND>
+Usage: isocast websocket [OPTIONS] <COMMAND>
 
 Commands:
   status   Show whether the obs-websocket server is on and listening, where, whether it asks for a password, and how many clients are connected
@@ -2270,7 +2560,8 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast websocket status
@@ -2281,8 +2572,9 @@ Show whether the obs-websocket server is on and listening, where, whether it ask
 Usage: isocast websocket status [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast websocket enable
@@ -2293,12 +2585,13 @@ Turn the server on (kept across restarts). The first time, a password is generat
 Usage: isocast websocket enable [OPTIONS]
 
 Options:
-      --port <PORT>  The TCP port (OBS's is 4455)
-      --bind <BIND>  The address to listen on: 127.0.0.1 (this Mac only, the default), an address of this Mac, or 0.0.0.0 (every network)
-      --password     Set a new password: read from stdin, or asked for without echo. Also turns the password back on after --no-password
-      --no-password  Let clients connect without a password (any program on this Mac, but not web pages: connections with an Origin header are refused and logged in isocastd's log); only with a loopback --bind. Kept, also when --port or --bind changes, until --password sets one
-      --json         
-  -h, --help         Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --port <PORT>      The TCP port (OBS's is 4455)
+      --bind <BIND>      The address to listen on: 127.0.0.1 (this Mac only, the default), an address of this Mac, or 0.0.0.0 (every network)
+      --password         Set a new password: read from stdin, or asked for without echo. Also turns the password back on after --no-password
+      --no-password      Let clients connect without a password (any program on this Mac, but not web pages: connections with an Origin header are refused and logged in isocastd's log); only with a loopback --bind. Kept, also when --port or --bind changes, until --password sets one
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast websocket disable
@@ -2309,8 +2602,56 @@ Turn the server off, disconnecting its clients
 Usage: isocast websocket disable [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
+```
+
+## isocast roots
+
+```text
+The folders other computers can use (remote control and obs-websocket clients): see and, on this machine, choose them
+
+Usage: isocast roots [OPTIONS] <COMMAND>
+
+Commands:
+  show  Show the folders other computers can use: every path a client on another computer (or an obs-websocket client) gives must be inside one, symlinks resolved
+  set   Choose the folders other computers can use, besides this machine's recordings folders and fonts (kept across restarts); --default goes back to Movies or Videos, Pictures, Music, Desktop and Downloads. Only on this machine
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
+```
+
+## isocast roots show
+
+```text
+Show the folders other computers can use: every path a client on another computer (or an obs-websocket client) gives must be inside one, symlinks resolved
+
+Usage: isocast roots show [OPTIONS]
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
+```
+
+## isocast roots set
+
+```text
+Choose the folders other computers can use, besides this machine's recordings folders and fonts (kept across restarts); --default goes back to Movies or Videos, Pictures, Music, Desktop and Downloads. Only on this machine
+
+Usage: isocast roots set [OPTIONS] [FOLDERS]...
+
+Arguments:
+  [FOLDERS]...  Folders, absolute or ~/...
+
+Options:
+      --default          
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast projector
@@ -2318,7 +2659,7 @@ Options:
 ```text
 Projectors: the program, the preview, a scene, a source or a multiview grid, full screen on a display or in a window (the app shows them)
 
-Usage: isocast projector <COMMAND>
+Usage: isocast projector [OPTIONS] <COMMAND>
 
 Commands:
   open   Open a projector: the program, studio mode's preview, a scene, a video source or a multiview grid, full screen on a display or in a window. The app shows it (and opens it when it next starts if it isn't running). Opening a view that is open already moves it
@@ -2327,7 +2668,8 @@ Commands:
   help   Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast projector open
@@ -2343,6 +2685,7 @@ Arguments:
 
 Options:
       --display <DISPLAY>  Full screen on this display: `main`, a display's id or name (`isocast devices`)
+      --engine <ENGINE>    Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --fullscreen         Full screen on the main display (or --display)
       --window             In a window (where this view was last, unless --frame)
       --frame <X,Y,W,H>    The window's place: X,Y,WIDTH,HEIGHT in points from the main display's top left
@@ -2365,9 +2708,10 @@ Arguments:
   [ID]  
 
 Options:
-      --all   
-      --json  
-  -h, --help  Print help
+      --all              
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast projector list
@@ -2378,8 +2722,9 @@ The open projectors, where each is, and the displays
 Usage: isocast projector list [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast vcam
@@ -2387,7 +2732,7 @@ Options:
 ```text
 Feed a picture to Isocast Virtual Camera (extension approval required once)
 
-Usage: isocast vcam <COMMAND>
+Usage: isocast vcam [OPTIONS] <COMMAND>
 
 Commands:
   start   Start the live setup's virtual_camera selection. Never installs anything
@@ -2397,7 +2742,8 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast vcam start
@@ -2408,8 +2754,9 @@ Start the live setup's virtual_camera selection. Never installs anything
 Usage: isocast vcam start [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast vcam stop
@@ -2420,8 +2767,9 @@ Stop feeding the camera, restoring the Isocast waiting card
 Usage: isocast vcam stop [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast vcam status
@@ -2432,8 +2780,9 @@ Output state, format, counters, enqueue latency and last error
 Usage: isocast vcam status [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast vcam remove
@@ -2444,8 +2793,9 @@ Remove the camera from macOS before deleting Isocast (release app): stops it, th
 Usage: isocast vcam remove [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast debug
@@ -2453,16 +2803,18 @@ Options:
 ```text
 Developer mode, for testing a build locally: verbose logs of every API call and component, and frame timing traces while recording
 
-Usage: isocast debug <COMMAND>
+Usage: isocast debug [OPTIONS] <COMMAND>
 
 Commands:
-  on      Turn developer mode on in the current profile: every API call and debug messages logged, and frame timing traced each second while recording, in their own log segments (`isocast logs`). It turns itself off after 24 hours unless --auto-off-hours says otherwise
-  off     Turn developer mode off
-  status  Whether developer mode is on, until when, its logs and the latest trace
-  help    Print this message or the help of the given subcommand(s)
+  on         Turn developer mode on in the current profile: every API call and debug messages logged, and frame timing traced each second while recording, in their own log segments (`isocast logs`). It turns itself off after 24 hours unless --auto-off-hours says otherwise
+  off        Turn developer mode off
+  status     Whether developer mode is on, until when, its logs and the latest trace
+  advertise  Advertise a test engine on the local network until Ctrl-C, so `isocast engines --discover` on another computer has something to find. Development only: nothing listens on the port, and it runs in this process, not the engine
+  help       Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```
 
 ## isocast debug on
@@ -2473,9 +2825,14 @@ Turn developer mode on in the current profile: every API call and debug messages
 Usage: isocast debug on [OPTIONS]
 
 Options:
-      --auto-off-hours <AUTO_OFF_HOURS>  Hours until it turns itself off; 0 keeps it on
-      --json                             
-  -h, --help                             Print help
+      --auto-off-hours <AUTO_OFF_HOURS>
+          Hours until it turns itself off; 0 keeps it on
+      --engine <ENGINE>
+          Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json
+          
+  -h, --help
+          Print help
 ```
 
 ## isocast debug off
@@ -2486,8 +2843,9 @@ Turn developer mode off
 Usage: isocast debug off [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast debug status
@@ -2498,8 +2856,26 @@ Whether developer mode is on, until when, its logs and the latest trace
 Usage: isocast debug status [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
+```
+
+## isocast debug advertise
+
+```text
+Advertise a test engine on the local network until Ctrl-C, so `isocast engines --discover` on another computer has something to find. Development only: nothing listens on the port, and it runs in this process, not the engine
+
+Usage: isocast debug advertise [OPTIONS] --name <NAME> --port <PORT>
+
+Options:
+      --engine <ENGINE>    Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --name <NAME>        The instance name to advertise
+      --port <PORT>        The TCP port to advertise
+      --id <ID>            The `id` in the TXT record [default: debug]
+      --seconds <SECONDS>  Stop by itself after this many seconds, as Ctrl-C would
+      --json               
+  -h, --help               Print help
 ```
 
 ## isocast watch
@@ -2510,11 +2886,12 @@ Print events from isocastd as they happen, until Ctrl-C
 Usage: isocast watch [OPTIONS]
 
 Options:
-      --levels          Also show audio levels (about 20 a second while the live engine runs); isocastd doesn't send them otherwise
-      --kinds <KINDS>   Only these kinds of events, like `scene_changed,stopped` (setup_changed, started, status, warning, scene_changed, preview_changed, marker, stream, stopped, levels, source_changed, engine_changed, library_changed, plugin_changed, data_changed, timeline_changed, export_progress, export_finished)
-      --except <KINDS>  Leave out these kinds of events, like `status,source_changed`
-      --json            
-  -h, --help            Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --levels           Also show audio levels (about 20 a second while the live engine runs); isocastd doesn't send them otherwise
+      --kinds <KINDS>    Only these kinds of events, like `scene_changed,stopped` (setup_changed, started, status, warning, scene_changed, preview_changed, marker, stream, stopped, levels, source_changed, engine_changed, library_changed, plugin_changed, data_changed, timeline_changed, export_progress, export_finished)
+      --except <KINDS>   Leave out these kinds of events, like `status,source_changed`
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast frame
@@ -2528,6 +2905,7 @@ Arguments:
   [TARGET]  `program`, `preview`, `scene:ID` or a source id [default: program]
 
 Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
   -o, --output <OUTPUT>  Where to save it; `<target>.jpg` if absent
       --width <WIDTH>    Scale it down to at most this many pixels wide
       --canvas <CANVAS>  Which canvas: main, or vertical (its program; vertical takes `program` only) [default: main]
@@ -2546,6 +2924,7 @@ Arguments:
   [TARGET]  `program`, `preview`, `scene:ID` or a source id [default: program]
 
 Options:
+      --engine <ENGINE>    Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
   -o, --output <OUTPUT>    Where to save it; `<target>.h264` if absent
       --width <WIDTH>      Scale it down to at most this many pixels wide
       --height <HEIGHT>    With --shared, scale it down to at most this many pixels high
@@ -2576,8 +2955,9 @@ Commands:
   help      Print this message or the help of the given subcommand(s)
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast engine start
@@ -2588,8 +2968,9 @@ Start the live engine and keep it running
 Usage: isocast engine start [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast engine stop
@@ -2600,8 +2981,9 @@ Let the live engine stop once nothing needs it
 Usage: isocast engine stop [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
 ```
 
 ## isocast engine shutdown
@@ -2612,8 +2994,25 @@ Shut down only if recording/output work is idle; cancels an idle calibration
 Usage: isocast engine shutdown [OPTIONS]
 
 Options:
-      --json  
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             
+  -h, --help             Print help
+```
+
+## isocast engines
+
+```text
+Paired engines and engines advertising on the local network. Discovery is an unverified hint; the saved TLS pin establishes identity
+
+Usage: isocast engines [OPTIONS]
+
+Options:
+      --discover           Find engines on the local network
+      --engine <ENGINE>    Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --timeout <TIMEOUT>  How long to listen for answers, in seconds (Windows confirms each engine with a fresh query, which can take a few seconds) [default: 5]
+      --watch              With --discover: keep listening and print engines as they appear and go away, until Ctrl-C (JSON lines with --json)
+      --json               
+  -h, --help               Print help
 ```
 
 ## isocast mcp
@@ -2621,8 +3020,9 @@ Options:
 ```text
 Serve the control API to agents over MCP, on stdin and stdout
 
-Usage: isocast mcp
+Usage: isocast mcp [OPTIONS]
 
 Options:
-  -h, --help  Print help
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
 ```

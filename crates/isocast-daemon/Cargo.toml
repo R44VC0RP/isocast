@@ -22,6 +22,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 ctrlc = { version = "3", features = ["termination"] }
 isocast-engine = { path = "../isocast-engine" }
 isocast-ipc = { path = "../isocast-ipc" }
+isocast-remote = { path = "../isocast-remote" }
+isocast-discovery = { path = "../isocast-discovery" }
 isocast-obsws = { path = "../isocast-obsws" }
 isocast-protocol = { path = "../isocast-protocol" }
 isocast-surfaces = { path = "../isocast-surfaces" }
@@ -31,6 +33,10 @@ libc = "0.2"
 parking_lot = "0.12"
 serde = "1.0.229"
 serde_json = "1.0.154"
+# WHATWG URL parsing (already in the lock file through reqwest/tungstenite):
+# a network caller's browser URL is checked on the host a browser sees, and
+# loaded in that normalized form (docs/remote-engines.md, decision 26).
+url = "2.5.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 isocast-platform-macos = { path = "../isocast-platform-macos" }

@@ -695,10 +695,33 @@ impl Daemon {
                 describe(&problems)
             )));
         }
+        // A network caller's switch is checked as the setup it makes, every
+        // time (decision 26): developer settings, and files, URLs and
+        // folders against the current roots. Outside the lock (it may look
+        // a browser source's host up); the switch then happens only if the
+        // live setup is still the one checked.
+        let checked = if crate::callers::current().is_local() {
+            None
+        } else {
+            let (revision, old) = {
+                let state = self.state.read();
+                (state.revision, state.setup.clone())
+            };
+            self.check_setup(&setup, old.as_ref())?;
+            crate::roots::normalize_browser_urls(&mut setup);
+            Some(revision)
+        };
         let same = current
             .as_ref()
             .is_some_and(|c| c.collection == collection_id && c.profile == profile_id);
         let mut state = self.state.lock();
+        if checked.is_some_and(|revision| revision != state.revision) {
+            return Err(wrong_state(format!(
+                "the live setup changed (revision {}) while the switch was checked; switch \
+                 again",
+                state.revision
+            )));
+        }
         let collection_changed = state
             .file
             .current()
@@ -756,14 +779,20 @@ impl Daemon {
         }
         .restore(&setup);
         let vertical_before = crate::canvas_links(&state);
+        // A network caller switching to a profile that streams elsewhere
+        // clears those keys before anything else changes (decisions 13,
+        // 26); refused, engine untouched, if it can't.
+        let cleared = self.clear_moved_keys(state.setup.as_ref(), Some(&setup))?;
         // The live engine runs the new pair from its next frame: sources
         // open and close as for any change.
         if let Some(engine) = &state.engine {
             engine
                 .update(&setup, state.revision + 1)
-                .map_err(wrong_state)?;
+                .map_err(|message| wrong_state(crate::callers::with_cleared(message, &cleared)))?;
         }
         let save_renamed = (!renamed.is_empty()).then(|| setup.clone());
+        notes.extend(cleared.iter().cloned());
+        self.note_local_recording_folder(&setup.recording.folder);
         state.setup = Some(setup);
         state.hotkey_holds.clear();
         state.revision += 1;
@@ -823,7 +852,13 @@ impl Daemon {
         if collection_changed && let Some(file) = self.collection_file() {
             notes.extend(self.data.load_collection(&file));
         }
-        self.publish(Event::SetupChanged { revision });
+        self.publish(Event::SetupChanged {
+            revision,
+            by: crate::callers::by(),
+        });
+        for message in cleared {
+            self.publish(Event::Warning { message });
+        }
         if preview_changed {
             self.publish(match preview {
                 Some(scene) => Event::PreviewChanged { scene },
@@ -915,6 +950,32 @@ impl Daemon {
         unsupported: Vec<obs::Unsupported>,
         mut notes: Vec<String>,
     ) -> Result<LibraryChange, RpcError> {
+        // A network caller's documents are checked as the setups they
+        // make (decision 25): stored documents are trusted after this, so
+        // switching to them later needs no check.
+        if !crate::callers::current().is_local() {
+            let live = self.state.read().setup.clone();
+            let (live_collection, live_profile) = match live.clone() {
+                Some(live) => {
+                    let (collection, profile) = live.into_parts("");
+                    (collection, profile)
+                }
+                None => (Collection::blank("", 8192, 8192), Profile::starter("")),
+            };
+            for document in &documents {
+                // The live setup with this document's half replaced, so
+                // only what the document brings is judged.
+                let setup = match document {
+                    Document::Collection(collection) => {
+                        Setup::from_parts(collection.clone(), live_profile.clone())
+                    }
+                    Document::Profile(profile) => {
+                        Setup::from_parts(live_collection.clone(), profile.clone())
+                    }
+                };
+                self.check_setup(&setup, live.as_ref())?;
+            }
+        }
         for document in &documents {
             let problems = document.problems();
             if !problems.is_empty() {
@@ -1011,6 +1072,18 @@ impl Daemon {
         let mut iso = None;
         // A stream key OBS keeps in plain text, moved only when asked.
         let mut stream_key = None;
+        // Moving a stored secret into a destination is the machine's own
+        // decision (decision 26): never for a network caller.
+        if params.stream_key && !crate::callers::current().is_local() {
+            return Err(RpcError {
+                code: RpcError::NOT_PERMITTED,
+                message: format!(
+                    "stream_key: moving OBS's stream key into Isocast is done on {} itself; \
+                     import without it, then set the key there",
+                    crate::callers::machine_name()
+                ),
+            });
+        }
         if params.stream_key && params.profile.is_none() {
             return Err(invalid(
                 "stream_key: give the OBS `profile` whose service.json holds the key",
@@ -1105,6 +1178,7 @@ impl Daemon {
                     service: Some(stream.service),
                     server,
                     canvas: isocast_protocol::CanvasId::Main,
+                    revision: None,
                 },
             };
             match self.stream_key_set(params) {

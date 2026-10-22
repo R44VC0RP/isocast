@@ -10,7 +10,7 @@ a client, for example:
 claude mcp add isocast -- isocast mcp
 ```
 
-111 tools. Arguments marked required must be given; ids, not names,
+123 tools. Arguments marked required must be given; ids, not names,
 address sources, scenes and clips. Errors name the field and list the
 valid options.
 
@@ -199,6 +199,10 @@ Find OBS Studio's scene collections and profiles on this Mac (its settings folde
 |---|---|---|
 | `folder` | string (optional) | Look in this folder instead of OBS's (`~/Library/Application Support/obs-studio`, or the daemon's `$ISOCAST_OBS_FOLDER`). |
 
+## engine_hello
+
+What this engine is: its machine's operating system (macos, windows, linux) and name, its identity (once it has one for remote control), its build (version, build, commit), the protocol version and every method it offers.
+
 ## estimate_capacity
 
 Predict instantly, without benchmarking, whether a setup's files (the live setup's if none is given) fit this Mac's H.264/HEVC media engines, from measured per-chip data: `capacity` is fits, no_margin or cannot_keep_up, `load` the busiest engine's share, and `suggestions` the closest changes that fit (each a patch for plan_change, or a method like stream_stop; `after_take` ones wait for the recording to end). With add_iso, `admission` says how to turn that ISO file on so it fits (smaller, slower, or left off). tune_encoders measures instead.
@@ -231,6 +235,18 @@ Write a timeline (the current one unless `timeline` is given) as a project anoth
 | `path` | string (optional) | Write exactly this file (an absolute path ending in the format's extension: .fcpxml, .xml or .otio). A file already there is replaced only if it is an earlier Isocast timeline export, or with `replace`. Not with `folder`. |
 | `replace` | boolean | With `path`: replace whatever file is there. |
 | `timeline` | string (optional) | The timeline's id; the current one if absent. |
+
+## folder_roots
+
+The folders other computers can use: every path a client on another computer or an obs-websocket client gives (recording folders, exports, images, text and browser files, OBS imports) must be inside one, symlinks resolved. Chosen folders (or the defaults: Movies/Videos, Pictures, Music, Desktop, Downloads), this machine's recordings folders, and fonts (read only).
+
+## folder_roots_set
+
+Choose the folders other computers can use (kept across restarts), or leave out `folders` for the defaults. Only on the engine's own machine.
+
+| Argument | Type | Description |
+|---|---|---|
+| `folders` | array (optional) | The folders (absolute or `~/...`) other computers can use, besides this machine's recordings folders and fonts; the defaults (Movies or Videos, Pictures, Music, Desktop, Downloads) if absent. |
 
 ## get_collection_or_profile
 
@@ -610,6 +626,57 @@ Point an offline clip (its take isn't where the timeline says: the project folde
 | `path` (required) | string | The take's manifest (`….session.json`), or the folder holding a manifest of the same name. Given a folder, every take of every timeline that was in the clip's old folder is looked for there too. |
 | `timeline` | string (optional) | The timeline's id; the current one if absent. |
 
+## remote_clients
+
+List the engine's paired public client identities.
+
+## remote_disable
+
+Disable remote control and immediately disconnect every remote client. Local only.
+
+## remote_enable
+
+Enable remote control on this local engine. Refused over remote connections.
+
+| Argument | Type | Description |
+|---|---|---|
+| `bind` | string (optional) | A numeric address of an engine interface (default: 0.0.0.0). |
+| `port` | integer (optional) |  |
+
+## remote_engines
+
+List engines paired with this client.
+
+## remote_identity
+
+Read or create this MCP client's public identity. Its private key stays in the OS credential store.
+
+## remote_pair_begin
+
+Open a single-use two-minute pairing window on the local engine. Keep the returned code private; never log it.
+
+## remote_pair_finish
+
+Pair this client with an engine using its locally opened code and TLS-bound SPAKE2. Never log pairing_secret.
+
+| Argument | Type | Description |
+|---|---|---|
+| `host` (required) | string |  |
+| `name` | string (optional) |  |
+| `pairing_secret` (required) | string |  |
+
+## remote_revoke
+
+Revoke a client and close its live connections immediately. Local only.
+
+| Argument | Type | Description |
+|---|---|---|
+| `client_id` (required) | string |  |
+
+## remote_status
+
+Read this engine's TLS remote-control status.
+
 ## remove_clip
 
 Take a clip (by id, like c2) off a timeline (the current one unless `timeline` is given). Only the timeline changes: the take's files stay where they were recorded, listed under the timeline's `removed`. Returns the timeline.
@@ -666,6 +733,10 @@ Ask macOS for screen recording, camera and microphone access where it hasn't bee
 ## request_stop_recording
 
 Ask the recording to stop and return at once, while the files are still being finished. Returns the session id, `finalizing` and the files known so far (provisional): not a finished recording. get_status says `finalizing` until the files are done (a new recording is refused until then); then `last` (or `last_error`) and the `stopped` event give the report. Asking again while finalizing returns the same; use stop_recording to wait for the report instead.
+
+| Argument | Type | Description |
+|---|---|---|
+| `session` | string (optional) | Stop only this recording session (`session` from start_recording or get_status): refused if another session is recording now, so a retried stop never ends a recording someone else started since. Any session if absent. |
 
 ## restart_isocastd
 
@@ -806,6 +877,10 @@ Go live: stream the program (canvas and program mix) as H.264/AAC over RTMP or R
 ## stop_recording
 
 Stop recording and finish every file. Returns the report: each file, its frames, dropped frames, audio dropouts and the manifest path.
+
+| Argument | Type | Description |
+|---|---|---|
+| `session` | string (optional) | Stop only this recording session (`session` from start_recording or get_status): refused if another session is recording now, so a retried stop never ends a recording someone else started since. Any session if absent. |
 
 ## stop_replay
 

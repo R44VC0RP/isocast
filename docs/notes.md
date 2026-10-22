@@ -5,6 +5,21 @@ each section. Delete entries that stop being true.
 
 ## Environment
 
+- 2026-10-22 (R1): native remote keys reuse the existing Keychain/Credential
+  Manager code through `isocast-platform-credentials`, not the full media
+  backend (otherwise the Mac CLI gained 17 media-framework dependencies).
+  `ISOCAST_REMOTE_CLIENT` isolates a client's public pin file and credential
+  account; engine pins/settings live at `<setup>.remote.json`. No private
+  key files or bearer tokens. Sign development CLI builds consistently;
+  inaccessible/missing keys never silently rotate a stored identity.
+- 2026-10-22 (R1 Windows qualification): network-only SSH logons cannot use
+  Credential Manager (0x80070520). The approved scratch desktop runner used
+  the signed-in desktop token, owner-only IPC, a bounded GPU lease and job
+  cleanup. Its SSH caller granted only same-user query rights on its own
+  ephemeral process/token objects to satisfy IPC peer inspection across
+  logons. Production IPC/credential permissions were unchanged. Runner
+  source and exact two-machine driver stay in remote-r1/scratch, not the repo.
+
 - 2026-10-19 (#105 integration): Windows capture, compositor and viewers
   must use one DX12-compatible adapter LUID. Hyper-V exposed different
   first-DXGI and wgpu-selected adapters; matching power preferences was
@@ -3477,6 +3492,122 @@ each section. Delete entries that stop being true.
   `{exonbook,m2-a}/` and `combined/`.
 
 ## Decisions
+
+- 2026-10-22 (R1 remote API, third review): every stream-key resolver
+  holds the state lock (`stream_key`/`has_stream_key` take `&State` as
+  proof), so a resolved key always belongs to the destination as checked
+  and legacy migration can't recreate a key a destination change cleared:
+  `speed_test` (and `optimize` through it) keeps the lock from choosing
+  the destination to having the key, releasing it before the upload;
+  stream start resolves under its lock (key and server come from one
+  snapshot); statuses resolve under their read or write guard. Doctor's
+  disk test is skipped (a warning check) when the folder it writes in, the
+  nearest existing one, is outside a network caller's roots
+  (`doctor_writing`). Tune's folder (given or the setup's) and replay
+  save's folder are checked right before writing. Path comparison: existing
+  components are canonical and compare exactly; a missing component
+  compares ignoring ASCII case only on a caseless macOS volume
+  (`pathconf`), exactly on Windows (folders can be case sensitive there).
+
+- 2026-10-22 (R1 remote API, second review; decision 26): hard boundaries
+  versus guard rails. Hard: `library_import_obs` with `stream_key` is
+  local-only; `stream_key_set` resolves and writes under the state lock
+  (as destination changes do) and takes an optional `revision`; key
+  clearing runs before `engine.update` in `apply` and `library_switch`
+  (checks first, then deletions, a failed deletion reports the keys
+  already gone; an engine refusal after clearing says so too);
+  `library_switch` checks the effective setup (developer settings, roots)
+  for network callers every time, so stored documents no longer need to
+  be trusted and `library_create` needs no check of its own. Roots are now
+  only the locally chosen list (or defaults), recordings folders a local
+  caller's live setup has had (`recording_folders` in `<setup>.roots.json`,
+  20 kept) and fonts: recording history and remote-set folders never
+  authorize. Guard rails: derived destinations are checked where decided
+  (start's folder after `into`/`record_target`, export and NLE defaults,
+  bug_report's default, relink's joined manifest, the screenshot hotkey,
+  per-request transition files); request paths are handed on resolved;
+  OBS bare names never read the working folder; browser URLs are parsed
+  with the `url` crate and stored normalized; UNC paths from network
+  callers are refused; the not-yet-existing part of a path compares
+  without case on caseless volumes (pathconf on macOS, always on Windows).
+  obs-websocket: in-flight reservations apart from failures, successes
+  never count, loopback outside the aggregate budget. Blocking `stop` waits
+  on its session's own completion. `hello.build` is `{version, commit,
+  provenance}`; `compatibility` compares version and commit (a dev side
+  warns).
+
+- 2026-10-22 (R1 remote API, after review; decision 25): network callers
+  are checked on the **effective operation**. Folder roots live in
+  `isocast-daemon/src/roots.rs` (`folder_roots`, local-only
+  `folder_roots_set`, saved as `<setup>.roots.json`; defaults
+  Movies/Videos, Pictures, Music, Desktop, Downloads, plus this machine's
+  recordings folders and fonts read-only). Paths resolve through symlinks
+  (longest existing part canonicalized; `..`, relative paths and dangling
+  links refused). Params are checked at the top of `Daemon::call`
+  (`check_params`), setups at `apply` (outside the state lock, then the
+  revision must be unchanged) and in library imports (`add_documents`):
+  only paths, URLs and hotkey folders the old setup didn't have are judged,
+  and stored library documents are trusted (every remote way in is
+  checked), so remote library switches aren't. A remotely fired hotkey's
+  configured paths go through `check_params` too (fail closed). Browser
+  URLs: http(s) to anything but loopback/unspecified/link-local (literal
+  and resolved at apply; DNS failure refuses), `file://` inside roots,
+  nothing else. Key clearing fails closed (check or delete error refuses
+  the change; `ISOCAST_STREAM_KEY` refuses any remote move; the legacy
+  service is cleared too). Speed tests from network callers go only to the
+  configured destination (checked in `speed_test`, so `optimize` is too).
+  Benchmarks write `owned_temp_name`/`owned_temp_dir` files
+  (`create_new`/`create_dir`), so a planted `.isocast-speed-test` link no
+  longer receives 64 MB. Provenance comes from build.rs
+  (`ISOCAST_BUILD_PROVENANCE`: release when `ISOCAST_BUILD_VERSION` on macOS
+  or `ISOCAST_WINDOWS_BUILD_VERSION` on Windows is set); `hello.build` is
+  `{version, build, commit, provenance}` only. Session ids are a random
+  per-run id plus a counter. `start` admission is serialized
+  (`start_admission`), and blocking `stop` reads its own session's outcome.
+
+- 2026-10-22 (R1 remote API and policy): the caller policy is
+  `isocast_protocol::caller` (not `remote.rs`, which the transport lane
+  owns): `Caller { origin }` with `Local`, `Remote { client_id, name,
+  addr }` and a third origin, `ObsWebsocket { addr }`, because its clients
+  are network callers (decision 14) even on 127.0.0.1 (other users on the
+  machine reach the port). `local_only_reason` matches the Method table
+  exhaustively, so every new method must be classified there (the remote
+  lane's `remote_*` arm is written out as a comment). Beyond decision 4 it
+  also refuses `virtual_camera_remove`, `request_permissions`,
+  `open_permission_settings` (OS prompts on the engine's screen) and
+  `timeline_export_nle` with `replace` (overwrites any file). The caller
+  rides a thread-local (`callers::enter`) like `PluginCaller`, so
+  attribution and key clearing need no new parameters through the call
+  tree. Stream keys are cleared at the account the destination uses
+  *after* the change (the one an RTMP publish would send), in `apply` and
+  `library_switch`, for every non-local caller, including new
+  destinations. obs-websocket: each try counts as a failure under one lock
+  until the password proves right; 5 free per address (IPv4-mapped as IPv4,
+  IPv6 per /64) and 30 across all addresses, then waits of 1, 2, 4… s (at
+  most 5 min, forgotten after 15 quiet minutes); tries during a wait
+  aren't checked.
+
+- 2026-10-22 (R1.d discovery): DNS-SD lives in its own small crate,
+  `isocast-discovery` (free functions `register`/`browse`/`watch`, a
+  backend per OS behind `cfg`, like `isocast-ipc`), not on the engine's
+  `Platform` trait: the CLI and the app browse too, and they don't link
+  the media platform crates (AVFoundation, WebKit, libvpx). Raw FFI to
+  libSystem's `dns_sd.h` and `windows-sys` `DnsService*`; no new crate.
+  Instance names: dots become `-` everywhere (Windows splits service names
+  at dots), control characters dropped, cut to 63 bytes. TXT carries only
+  `id`, `proto`, `name`; other received keys are dropped, values capped
+  at 200 bytes, at most 64 engines and 16 addresses each are tracked.
+  Found engines are untrusted hints: identity comes from pinned keys.
+  Revised after review: macOS keeps each `DNSServiceResolve` running
+  (it reports SRV/port/TXT changes; TXT updates arrived at once) and
+  follows a new host with a new address query; callbacks read results
+  only without an error; async failures (e.g. `PolicyDenied`) become an
+  `Event::Error` and make `browse` fail with the Local Network
+  explanation (not forced in a run: the CLI is exempt from Local Network
+  privacy); resolve and address failures have separate counters and
+  backoff, 5 at most each, and a fresh announcement re-arms an instance
+  whose retries ran out.
+  `Registration::name()` follows later macOS renames.
 
 - 2026-10-19 (Ryan): **0.0.9 is paused until Windows is "insanely good".** All lanes go to Windows (#105): parity, performance against OBS, first-run polish and the alpha. Mac work resumes only for bugs that affect 0.0.8 users.
 
@@ -8447,6 +8578,79 @@ each section. Delete entries that stop being true.
   runs the scenarios through its `run` under the shared GPU lock.
 
 ## Gotchas
+
+- 2026-10-22 (R1.d, Windows 10 22H2 DNS-SD on exon-desk; revised after
+  review): what the watch works around, all seen in real runs:
+  - A new `DnsServiceBrowse` is first answered from the DNS Client cache
+    (all at once, within ms), which still held stopped engines' PTR/SRV
+    records with ~4,000 s TTL after their goodbyes (and 300 flood
+    instances an hour later). Network answers come ~1 s later. So browse
+    answers are hints: an engine is reported once a `DnsServiceResolve`
+    answers, rechecked every 30 s (which is also how TXT changes arrive,
+    within ~30 s), lost after 2 failed resolves or a goodbye.
+  - A running browse reports goodbyes (PTR TTL 0) but NOT engines that
+    start after it: the watch restarts its browse every 10 s (known
+    engines are kept), so a new engine appears within ~10–16 s; a one-shot
+    `isocast engines --discover` finds it within its 5 s.
+  - Resolves for stale cache instances never call back at all, and with 64
+    running at once none completed (not even live ones). So at most 4 run
+    at once (5 s timeout, backoff 2–30 s), ranked known engines first,
+    then instances *heard* (an answer >300 ms after the browse started,
+    i.e. from the network), then TTL; a heard engine pre-empts a
+    cache-only resolve and can evict a cache-only instance when all 64
+    slots are full. With ~300 stale instances cached, a live engine was
+    found in 5 of 6 four-second one-shots.
+  - Resolve gives at most one IPv4 and one IPv6 address, sometimes none;
+    A/AAAA records from browse answers fill in, kept until their TTL
+    (cap 4500 s), pruned, 64 hosts max (link-local IPv6 dropped).
+  - Callbacks run on threadpool threads, including after a cancel
+    (status 1223), so contexts are tokens in a global table. Microsoft
+    documents only that a cancel handle must live until cancelled, so
+    each request, its strings and its cancel handle live in the token's
+    route until the final callback has arrived and the owner let go.
+  - One long-lived cleanup worker per process owns every registration
+    Windows hasn't finished with: one that missed its 5 s confirmation
+    (cancelled; a success that still arrives is withdrawn) and one whose
+    withdrawal wasn't confirmed within 3 s of `Drop`. It keeps their
+    memory until the completion arrives, however long; registering fails
+    before `DnsServiceRegister` if it can't start. Forced with a 300 ms
+    scratch timeout and no cancel: the late success was withdrawn 0.55 s
+    later and the Mac saw it lost 1.2 s after it appeared.
+  - Outstanding operations are budgeted (256 unfinished, 64 abandoned
+    awaiting their final callback); past it nothing new starts and the
+    watch reports `Event::Error("discovery is paused: …")`.
+  - Killing the advertising process (Stop-Process -Force) still sends the
+    goodbye; Windows renames a conflict to `name(1)`, macOS to `name (2)`.
+- 2026-10-22 (R1.d, macOS): `DNSServiceProcessResult` doesn't handle one
+  reply: it loops while the socket has bytes (`do { … } while
+  (morebytes)` in dnssd_clientstub.c), and a dispatch queue's handler runs
+  the same loop, so neither bounds a flood. The supported exit is
+  `DNSServiceRefDeallocate` from inside a callback (it clears `morebytes`;
+  the call then returns without touching the ref). Every watch callback
+  checks the stop flag, a per-operation slice (10 ms, 50 ms per loop) and
+  a 512-reply queue first and, past any, ends its own operation, which the
+  browser restarts (a restarted browse sweeps instances it no longer
+  announces once settled). Resolves and lookups are served before the
+  browse. Replies carry their operation's generation, so an old host's
+  queued addresses never attach to a new one. Under a sustained flood
+  (600 instances, 200 re-registered every 0.1 s, ~400 browse replies/s)
+  a watch exited 59–204 ms after Ctrl-C and 2 s one-shots returned in
+  2.10–2.19 s; while the flood starts, a watch may report nothing for
+  several seconds.
+- 2026-10-22 (R1.d, both OSes): a flood (300 instances from exonbook, 50
+  re-registered every 0.1 s) can hide engines past the 64 tracked, but
+  browse deadlines and shutdown hold: macOS one-shots returned in
+  3.13–3.22 s for `--timeout 3`, a flooded watch exited 114–169 ms after
+  Ctrl-C; Windows one-shots in 3.1–3.4 s (10.1 s for 10). macOS bounds
+  reading per loop (64 `DNSServiceProcessResult` per socket, 50 ms, a
+  512-reply queue drained at half) and Windows applies 64 messages per
+  loop from a 1,024-message queue, checking for stop between each.
+- 2026-10-22 (R1.d): exon-desk's LAN adapter ("Ethernet 4") is on the
+  **Public** network profile; Tailscale is Private. mDNS works anyway (the
+  built-in "mDNS (UDP-In)" rule for svchost/dnscache allows all profiles,
+  and Isocast needs no 5353 rule), but the "Isocast dev" TCP 47470 rule is
+  Private-only, so LAN connections to an engine there will be blocked until
+  the profile or the rule changes (transport lane / Ryan).
 
 - 2026-10-18 (#64): the media-source A/V check (two burst tracks mixed in
   one program, burst length ~100 ms in step, ~144 ms if one is 44 ms late)

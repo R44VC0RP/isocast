@@ -148,6 +148,35 @@ pub fn human(bytes: f64) -> String {
 
 /// Size of the file written to measure a disk's speed.
 const SPEED_TEST_BYTES: usize = 64 << 20;
+
+/// A name in `folder` for a temporary file or folder of this run only:
+/// `prefix`, this process's id and a counter, so it never meets one
+/// another run (or a person) left there.
+pub fn owned_temp_name(folder: &Path, prefix: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.subsec_nanos());
+    folder.join(format!(
+        "{prefix}-{}-{}-{nanos:x}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// A new folder in `folder` that this run owns (made with `create_dir`,
+/// which fails rather than reuse anything already there).
+pub fn owned_temp_dir(folder: &Path, prefix: &str) -> std::io::Result<std::path::PathBuf> {
+    loop {
+        let path = owned_temp_name(folder, prefix);
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+}
 const SPEED_TEST_CHUNK: usize = 8 << 20;
 
 /// Measure how fast `folder` takes data, in bytes per second, by writing a
@@ -155,7 +184,7 @@ const SPEED_TEST_CHUNK: usize = 8 << 20;
 /// network volumes; it measures a short burst, so sustained speed on some
 /// drives is lower.
 pub fn write_speed(folder: &Path) -> std::io::Result<f64> {
-    let path = folder.join(".isocast-speed-test");
+    let path = owned_temp_name(folder, ".isocast-speed-test");
     // Bytes that don't compress, in case the file system compresses.
     let mut chunk = vec![0u8; SPEED_TEST_CHUNK];
     let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -166,14 +195,18 @@ pub fn write_speed(folder: &Path) -> std::io::Result<f64> {
         *byte = x as u8;
     }
     let started = Instant::now();
+    // A new file only: never one already there, or a link's target. If it
+    // can't be made, nothing is removed (whatever is there isn't ours).
+    let mut file = File::create_new(&path)?;
     let result = (|| {
-        let mut file = File::create(&path)?;
         for _ in 0..SPEED_TEST_BYTES / SPEED_TEST_CHUNK {
             file.write_all(&chunk)?;
         }
         file.sync_all()
     })();
     let elapsed = started.elapsed().as_secs_f64();
+    drop(file);
+    // This run made it: removed whether the test worked or not.
     let _ = fs::remove_file(&path);
     result?;
     Ok(SPEED_TEST_BYTES as f64 / elapsed.max(1e-6))

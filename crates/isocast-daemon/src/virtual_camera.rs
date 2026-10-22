@@ -120,6 +120,12 @@ impl Daemon {
                 status
             })
         };
+        // A network caller only feeds a camera already installed and
+        // current: installing or updating the system extension is done on
+        // the machine itself (decision 25).
+        if !crate::callers::current().is_local() {
+            return tag(self.start_installed_camera());
+        }
         #[cfg(target_os = "macos")]
         if let Some(result) = self.update_camera_extension() {
             return tag(result);
@@ -135,6 +141,55 @@ impl Daemon {
             return tag(self.activate_camera());
         }
         tag(result)
+    }
+
+    /// Start feeding the camera without installing or updating anything:
+    /// refused when the extension isn't installed or isn't this build's.
+    fn start_installed_camera(self: &Arc<Self>) -> Result<VirtualCameraStatus, RpcError> {
+        #[cfg(target_os = "macos")]
+        let not_here = |what: &str| RpcError {
+            code: RpcError::NOT_PERMITTED,
+            message: format!(
+                "virtual_camera: {what}; installing or updating it is done on {} (start it \
+                 there once)",
+                crate::callers::machine_name()
+            ),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            use isocast_platform_macos::virtual_camera::{
+                ExtensionState, embedded_extension, extension_state,
+            };
+            if embedded_extension().is_some() {
+                match extension_state() {
+                    Ok(ExtensionState::Current) => {}
+                    Ok(ExtensionState::Outdated { .. }) => {
+                        return Err(not_here("the installed camera is another build's"));
+                    }
+                    Ok(ExtensionState::Waiting) => {
+                        return Err(not_here("the camera is waiting to be allowed"));
+                    }
+                    Ok(ExtensionState::Absent) => {
+                        return Err(not_here("the camera isn't installed"));
+                    }
+                    Err(err) => {
+                        return Err(not_here(&format!(
+                            "whether the camera is installed couldn't be checked ({err:#})"
+                        )));
+                    }
+                }
+            }
+        }
+        let result = self.start_camera();
+        #[cfg(target_os = "macos")]
+        if let Err(error) = &result
+            && error
+                .message
+                .contains(isocast_platform_macos::virtual_camera::NOT_INSTALLED)
+        {
+            return Err(not_here("the camera isn't installed"));
+        }
+        result
     }
 
     /// After an update (#69): Sparkle replaced the app and the extension it

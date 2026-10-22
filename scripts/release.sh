@@ -149,6 +149,8 @@ verify_app() {
         # Without it macOS denies the local network silently (#57).
         /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' "$bundle/Contents/Info.plist" 2>/dev/null | grep -q . ||
             die "$bundle has no NSLocalNetworkUsageDescription; streaming to a local-network server would fail without a prompt"
+        /usr/libexec/PlistBuddy -c 'Print :NSBonjourServices' "$bundle/Contents/Info.plist" 2>/dev/null | grep -qx '[[:space:]]*_isocast._tcp' ||
+            die "$bundle doesn't declare _isocast._tcp in NSBonjourServices; finding remote engines would fail"
     done
     # The virtual camera (#67): extension present, signed, and (Developer ID)
     # each bundle's profile matching its team, app id, expiry, certificate
@@ -245,7 +247,10 @@ usage={"NSCameraUsageDescription":"Isocast records cameras and capture cards int
        "NSAudioCaptureUsageDescription":"Isocast records the system or app audio you choose for your scenes and recordings.",
        # Without it macOS keeps the engine off the local network with no
        # prompt: a LAN RTMP server fails with "No route to host" (#57).
-       "NSLocalNetworkUsageDescription":"Isocast streams to servers on your local network, such as an RTMP server on another computer."}
+       "NSLocalNetworkUsageDescription":"Isocast streams to servers on your local network, such as an RTMP server on another computer.",
+       # Remote engines advertise and browse this DNS-SD type (decision 11
+       # of docs/remote-engines.md), declared as Local Network privacy asks.
+       "NSBonjourServices":["_isocast._tcp"]}
 for source,dest,identifier,name,binary in [
     ("crates/isocast-ui/Info.plist" if executable=="isocast-ui" else "crates/isocast-app/bundle/Info.plist",app,bundle_id,"Isocast",executable),
     ("crates/isocast-daemon/Info.plist",engine,"dev.isocast.isocastd","Isocast Engine",engine_executable)]:

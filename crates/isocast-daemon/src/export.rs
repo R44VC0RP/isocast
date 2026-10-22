@@ -721,6 +721,13 @@ impl Daemon {
             .folder
             .clone()
             .unwrap_or_else(|| takes[0].folder.clone());
+        // A network caller's export goes inside the folder roots, the
+        // default (the first take's folder) included (decision 26).
+        let folder = self.checked_path(
+            "folder",
+            &folder.to_string_lossy(),
+            crate::roots::Access::Write,
+        )?;
         std::fs::create_dir_all(&folder).map_err(|err| {
             failed(format!(
                 "folder: could not make {}: {err}",

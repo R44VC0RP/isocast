@@ -123,6 +123,9 @@ fn print(status: &WebsocketStatus) {
     if let Some(warning) = &status.warning {
         println!("  warning: {warning}");
     }
+    if let Some(warning) = &status.bind_warning {
+        println!("  warning: {warning}");
+    }
     if let Some(error) = &status.last_error {
         println!("  {error}");
     }

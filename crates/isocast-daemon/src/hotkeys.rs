@@ -19,6 +19,7 @@ use isocast_protocol::Setup;
 use isocast_protocol::api::{
     ApplyParams, Event, Method, Request, RpcError, SnapshotParams, StartParams, StreamStartParams,
 };
+use isocast_protocol::caller::Caller;
 use isocast_protocol::change::Change;
 use isocast_protocol::hotkeys::{
     self, Arguments, Binding, Bindings, Chord, Hotkeys, InputParams, InputSource, Phase,
@@ -50,10 +51,12 @@ pub(crate) struct HotkeyRuntime {
 }
 
 enum Input {
-    /// A key edge, its source, owner, time, and the plugin whose request
-    /// sent it (`hotkeys_input`), if one did: its action is then checked as
-    /// that plugin's request (#103).
-    Key(Edge, InputSource, u64, Instant, Option<String>),
+    /// A key edge, its source, owner, time, the plugin whose request sent
+    /// it (`hotkeys_input`), if one did: its action is then checked as that
+    /// plugin's request (#103), and the caller who sent it: its action runs
+    /// as that caller (a network caller's is held to its policy, and its
+    /// changes carry its name; decision 25). Native keys are local.
+    Key(Edge, InputSource, u64, Instant, Option<String>, Caller),
     Disconnect(u64),
 }
 
@@ -228,9 +231,9 @@ impl Daemon {
                     daemon.publish(Event::Warning { message: "hotkey input queue overflowed; pending actions cancelled and push keys released".into() });
                     continue;
                 }
-                let (edge, source, owner, at, plugin) = match input {
-                    Input::Key(edge, source, owner, at, plugin) => {
-                        (edge, source, owner, at, plugin)
+                let (edge, source, owner, at, plugin, caller) = match input {
+                    Input::Key(edge, source, owner, at, plugin, caller) => {
+                        (edge, source, owner, at, plugin, caller)
                     }
                     Input::Disconnect(owner) => {
                         let released = pressed.disconnect(owner);
@@ -270,8 +273,14 @@ impl Daemon {
                 let hold_id = format!("press:{stroke}");
                 let result = {
                     let _caller = plugin.as_deref().map(crate::PluginCaller::set);
+                    // Every path an action takes (methods, setup patches,
+                    // library switches) sees who pressed it.
+                    let _entered = crate::callers::enter(caller.clone());
                     daemon.fire_hotkey(&hold_id, &binding, edge.phase)
                 };
+                if let Err(error) = &result {
+                    daemon.note_refusal(&caller, &format!("hotkey {}", binding.action), error);
+                }
                 let error = result.err().map(|e| {
                     let field = if e.message.starts_with("args") || e.message.starts_with("action:")
                     {
@@ -368,6 +377,7 @@ impl Daemon {
                     0,
                     Instant::now(),
                     None,
+                    Caller::local(),
                 ))
                 .is_err()
             {
@@ -542,6 +552,7 @@ impl Daemon {
                 owner,
                 Instant::now(),
                 crate::PluginCaller::current(),
+                crate::callers::current(),
             ))
             .is_err()
         {
@@ -637,7 +648,7 @@ impl Daemon {
                     seconds: None,
                     ..Default::default()
                 })),
-                "recording.stop" => Method::RequestStop,
+                "recording.stop" => Method::RequestStop(None),
                 "recording.pause" => Method::Pause,
                 "recording.resume" => Method::Resume,
                 "recording.pause_toggle" => {
@@ -653,7 +664,7 @@ impl Daemon {
                 }
                 "recording.toggle" => {
                     if self.state.lock().session.is_some() {
-                        Method::RequestStop
+                        Method::RequestStop(None)
                     } else {
                         Method::Start(Box::new(StartParams {
                             setup: None,
@@ -820,6 +831,13 @@ impl Daemon {
                 collection: (action == "collection.switch").then_some(args.id),
             }),
             Arguments::Screenshot(args) => {
+                // Fired by a network caller: the file goes inside the folder
+                // roots (a guard rail, decision 26), written where checked.
+                let path = self.checked_path(
+                    "args.path",
+                    &args.path.to_string_lossy(),
+                    crate::roots::Access::Write,
+                )?;
                 let shot = self.snapshot(SnapshotParams {
                     source: None,
                     scene: None,
@@ -834,7 +852,7 @@ impl Daemon {
                 let mut file = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
-                    .open(&args.path)
+                    .open(&path)
                     .map_err(|e| invalid(format!("args.path: {}: {e}", args.path.display())))?;
                 file.write_all(&png)
                     .and_then(|()| file.sync_all())
@@ -861,6 +879,11 @@ impl Daemon {
                 }))
             }
         };
+        // A key sent by a client on another computer (`hotkeys_input`) is
+        // held to the same local-only policy as its own requests.
+        if let Some(error) = crate::callers::refusal(&crate::callers::current(), &method) {
+            return Err(error);
+        }
         let response = self.call(Request::new(0, method));
         response.error.map_or(Ok(()), |mut error| {
             if action.starts_with("timeline.")

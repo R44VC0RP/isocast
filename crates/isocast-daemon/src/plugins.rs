@@ -2142,7 +2142,7 @@ fn spawn(
 #[cfg(target_os = "macos")]
 fn peer_pid(stream: &UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd;
-    isocast_platform_macos::plugin::peer_pid(stream.as_raw_fd())
+    isocast_platform_macos::plugin::peer_pid(stream.local()?.as_raw_fd())
 }
 
 /// The pipe's client process, as the kernel reports it.

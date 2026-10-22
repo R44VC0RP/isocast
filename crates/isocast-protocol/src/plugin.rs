@@ -31,6 +31,11 @@ pub const MAX_ID: usize = 40;
 /// Methods a plugin can't be granted: with them it could get more than it
 /// was granted itself ([`ungrantable_reason`]).
 pub const UNGRANTABLE: &[&str] = &[
+    "remote_enable",
+    "remote_disable",
+    "remote_pair_begin",
+    "remote_pair_finish",
+    "remote_revoke",
     "plugin_add",
     "plugin_set_enabled",
     "websocket_enable",
@@ -40,6 +45,8 @@ pub const UNGRANTABLE: &[&str] = &[
 /// Why a plugin can't be granted `method`, if it can't.
 pub fn ungrantable_reason(method: &str) -> Option<&'static str> {
     match method {
+        "remote_enable" | "remote_disable" | "remote_pair_begin" | "remote_pair_finish"
+        | "remote_revoke" => Some("remote trust and listener settings belong to the local user"),
         "plugin_add" | "plugin_set_enabled" => {
             Some("it could install or enable plugins with more than it was granted itself")
         }

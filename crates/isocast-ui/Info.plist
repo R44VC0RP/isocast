@@ -32,6 +32,12 @@
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Isocast streams to servers on your local network, such as an RTMP server on another computer.</string>
+	<!-- Remote engines: the engine advertises and the app browses this
+	     DNS-SD type (docs/remote-engines.md, decision 11). -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_isocast._tcp</string>
+	</array>
 	<!-- Project files (#88): Isocast owns .isoprj (dev.isocast.project, a
 	     JSON document), so the Finder opens them in Isocast. The icon is
 	     the system's document page with the app icon as its badge. -->

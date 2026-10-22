@@ -17,6 +17,8 @@ isocast-diagnostics = { path = "../isocast-diagnostics" }
 anyhow = "1.0.104"
 isocast-protocol = { path = "../isocast-protocol" }
 isocast-ipc = { path = "../isocast-ipc" }
+isocast-remote = { path = "../isocast-remote" }
+isocast-platform-credentials = { path = "../isocast-platform-credentials" }
 isocast-surfaces = { path = "../isocast-surfaces", optional = true }
 serde = "1.0.229"
 serde_json = "1.0.154"

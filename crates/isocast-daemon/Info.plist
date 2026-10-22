@@ -34,6 +34,12 @@
 	<string>Isocast captures the system or application audio you choose for your scenes.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Isocast streams to servers on your local network, such as an RTMP server on another computer.</string>
+	<!-- Remote engines: the engine advertises and the app browses this
+	     DNS-SD type (docs/remote-engines.md, decision 11). -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_isocast._tcp</string>
+	</array>
 	<key>CFBundleIconFile</key>
 	<string>Isocast</string>
 	<key>CFBundleIconName</key>

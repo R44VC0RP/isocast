@@ -66,6 +66,9 @@ pub fn set_audio(client: &mut Client, source: &str, change: &AudioChange) -> Res
 /// Restarting it is left to the person (`isocast restart`, refused while
 /// it records or streams).
 pub fn warn_if_stale(daemon: Option<&isocast_protocol::api::DaemonBuild>) {
+    if isocast_client::Engine::selected().is_ok_and(|engine| !engine.is_local()) {
+        return;
+    }
     if let Some(stale) = isocast_client::stale_engine(daemon) {
         let pid = stale
             .pid

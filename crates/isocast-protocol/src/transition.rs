@@ -137,6 +137,15 @@ impl Transition {
 
     /// The files it reads (a luma wipe's picture, a stinger's video), to
     /// make paths relative to a setup file absolute.
+    /// The file it reads (a luma wipe's picture, a stinger's video).
+    pub fn file(&self) -> Option<&str> {
+        match &self.kind {
+            TransitionKind::LumaWipe(wipe) => wipe.image.as_deref(),
+            TransitionKind::Stinger(stinger) => Some(&stinger.file),
+            _ => None,
+        }
+    }
+
     pub(crate) fn files_mut(&mut self) -> Option<&mut String> {
         match &mut self.kind {
             TransitionKind::LumaWipe(wipe) => wipe.image.as_mut(),
