@@ -382,6 +382,7 @@ def execute(command, env, input_bytes=None, low=False):
 
 code = 1
 lock = None
+build_lock = None
 gpu_lock = None
 try:
     for path in [root, root/'staging', root/'scratch', root/'scratch'/'remote', root/'target',
@@ -394,7 +395,13 @@ try:
             source={k:source.get(k) for k in ('head','tree')}, tracked_files=len(source.get('files',[])))))
         code = 0
     else:
-        lock = Lock(root/'build.lock', 'native build')
+        # Same order as the measurement harness: global build, lane, GPU.
+        # Taking the lane first deadlocks with a measurement holding global
+        # while waiting for that lane, and permits foreign-lane compilation.
+        build_path = pathlib.Path('C:/isocast-dev/build.lock')
+        build_lock = Lock(build_path, 'global native build')
+        if root/'build.lock' != build_path:
+            lock = Lock(root/'build.lock', 'native lane')
         if shutil.disk_usage(root).free < 20 * 2**30:
             raise RuntimeError('less than 20 GiB free on the Windows build drive')
         if r['gpu_lock']:
@@ -469,13 +476,16 @@ except Exception as error:
     traceback.print_exc(file=sys.stdout)
     code = 1
 finally:
-    # Release BOTH locks even if result publication or another close fails.
+    # Release every lock even if result publication or another close fails.
     # Keep the watchdog armed through cleanup, including blocked SSH output.
     try:
         try:
             if gpu_lock is not None: gpu_lock.close()
         finally:
-            if lock is not None: lock.close()
+            try:
+                if lock is not None: lock.close()
+            finally:
+                if build_lock is not None: build_lock.close()
         if job.is_dir():
             save(job/'result.json', dict(operation=r['op'], head=r['head'], tree=r['tree'],
                 exit_code=code, seconds=round(time.time()-started,2)))

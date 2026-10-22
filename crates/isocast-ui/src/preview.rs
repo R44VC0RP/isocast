@@ -1,5 +1,5 @@
 //! The monitors' pictures in the window: the daemon's frames (shared GPU
-//! surfaces, never copied) with, over the edited one, the selected item's
+//! surfaces) with, over the edited one, the selected item's
 //! box drawn at the layout of the setup revision each frame was drawn
 //! from, so box and picture can't drift apart, even while the item is
 //! dragged. One `Preview` per monitor: the edited one (`program`, or in
@@ -9,12 +9,14 @@
 //! Two ways to put them on screen:
 //! - macOS: Core Animation layers under the interface (`layers.rs`); the
 //!   interface isn't redrawn for each frame.
+//! - Windows: DirectComposition under the interface (`layers_windows.rs`),
+//!   with one GPU copy into each transactional picture surface.
 //! - Anywhere (`--preview image`): the surface as a wgpu texture in a Slint
 //!   `Image`, and the box drawn by Slint, set in the same event so they
 //!   are drawn in the same frame. Slint then redraws the window per frame.
 
 use std::cell::Cell;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
@@ -24,22 +26,22 @@ use isocast_client::shared::SharedFrame;
 use slint::ComponentHandle;
 use slint::wgpu_30::wgpu;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use crate::Theme;
 use crate::frames::Feed;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub use crate::layers::{BoxShape, BoxStyle};
 use crate::{AppWindow, CanvasArea, Ui};
 
 /// The selected item's box (see layers.rs; the same off macOS).
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct BoxShape {
     pub rect: [f32; 4],
     pub rotate: f32,
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct BoxStyle {
     pub locked: bool,
@@ -168,10 +170,10 @@ pub enum Role {
     Extra,
 }
 
-/// Where pictures go: the shared layers (macOS), or Slint images.
+/// Where pictures go: native layers (macOS/Windows), or Slint images.
 #[derive(Clone)]
 pub enum Output {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     Layers(Rc<RefCell<crate::layers::Layers>>),
     Image(wgpu::Device),
 }
@@ -195,8 +197,25 @@ impl Output {
                     test_outline,
                 )?)))
             }
-            #[cfg(not(target_os = "macos"))]
-            Mode::Layers => anyhow::bail!("--preview layers is macOS only; use --preview image"),
+            #[cfg(windows)]
+            Mode::Layers => {
+                match crate::layers::Layers::attach(app, theme_colours(app), test_outline) {
+                    Ok(layers) => {
+                        app.global::<CanvasArea>().set_native_picture(true);
+                        Output::Layers(Rc::new(RefCell::new(layers)))
+                    }
+                    Err(error) => {
+                        isocast_diagnostics::diagnostic!("warn";
+                        "native previews unavailable; using Slint images: {error:#}");
+                        app.global::<CanvasArea>().set_native_picture(false);
+                        Output::Image(device.clone())
+                    }
+                }
+            }
+            #[cfg(not(any(target_os = "macos", windows)))]
+            Mode::Layers => {
+                anyhow::bail!("--preview layers requires macOS or Windows; use --preview image")
+            }
             Mode::Image => {
                 app.global::<CanvasArea>().set_native_picture(false);
                 Output::Image(device.clone())
@@ -206,7 +225,7 @@ impl Output {
 }
 
 /// The layers' colours, from the theme (so a theme's change follows).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn theme_colours(app: &AppWindow) -> crate::layers::Colours {
     let theme = app.global::<Theme>();
     let rgb = |c: slint::Color| [c.red(), c.green(), c.blue()];
@@ -220,6 +239,10 @@ fn theme_colours(app: &AppWindow) -> crate::layers::Colours {
         locked: rgb(theme.get_text_2()),
         bone: rgb(theme.get_bone()),
         handle_edge: rgba(theme.get_handle_edge()),
+        #[cfg(windows)]
+        frame: rgb(theme.get_line()),
+        #[cfg(windows)]
+        live: rgb(theme.get_danger()),
         meter: crate::layers::MeterColours {
             inset: rgb(theme.get_surface_inset()),
             track: rgb(theme.get_meter_capsule_track()),
@@ -284,7 +307,7 @@ pub struct Preview {
 /// How the preview is put on screen.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
-    /// Core Animation layers (macOS).
+    /// Native composition layers (macOS and Windows).
     Layers,
     /// A Slint image.
     Image,
@@ -292,7 +315,7 @@ pub enum Mode {
 
 impl Mode {
     pub fn default_for_platform() -> Self {
-        if cfg!(target_os = "macos") {
+        if cfg!(any(target_os = "macos", windows)) {
             Mode::Layers
         } else {
             Mode::Image
@@ -428,17 +451,17 @@ impl Preview {
         self.stats.lost += 1;
         self.waiting = None;
         match &mut self.output {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Output::Layers(layers) => layers.borrow_mut().clear(self.role),
-            Output::Image(_) => {
-                if let Some(app) = self.app.upgrade() {
-                    let canvas = app.global::<CanvasArea>();
-                    match self.role {
-                        Role::Editor => canvas.set_picture(slint::Image::default()),
-                        Role::Program => canvas.set_program_picture(slint::Image::default()),
-                        Role::Extra => canvas.set_extra_picture(slint::Image::default()),
-                    }
-                }
+            Output::Image(_) => {}
+        }
+        // A Windows layers output can have fallen back to Slint images.
+        if let Some(app) = self.app.upgrade() {
+            let canvas = app.global::<CanvasArea>();
+            match self.role {
+                Role::Editor => canvas.set_picture(slint::Image::default()),
+                Role::Program => canvas.set_program_picture(slint::Image::default()),
+                Role::Extra => canvas.set_extra_picture(slint::Image::default()),
             }
         }
         self.images.clear();
@@ -531,7 +554,7 @@ impl Preview {
     /// box (false: no layers, Slint draws it).
     pub fn show_test_pointer(&self, rect: [f64; 4]) -> bool {
         match &self.output {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Output::Layers(layers) => layers.borrow().show_test_pointer(rect),
             _ => {
                 let _ = rect;
@@ -566,6 +589,13 @@ impl Preview {
         if self.role == Role::Editor
             && let Output::Layers(layers) = &self.output
             && layers.borrow().geometry() != geometry(&app)
+        {
+            self.redraw_box();
+        }
+        #[cfg(windows)]
+        if self.role == Role::Editor
+            && let Output::Layers(layers) = &self.output
+            && layers.borrow().needs_layout(geometry(&app))
         {
             self.redraw_box();
         }
@@ -689,7 +719,7 @@ impl Preview {
         frame: Option<&SharedFrame>,
         rect: Option<BoxShape>,
     ) -> bool {
-        match &self.output {
+        let device = match &self.output {
             #[cfg(target_os = "macos")]
             Output::Layers(layers) => {
                 let mut layers = layers.borrow_mut();
@@ -699,50 +729,66 @@ impl Preview {
                     (Role::Program | Role::Extra, None) => {}
                     (Role::Editor, _) => layers.show(frame, rect, self.style, geometry(app)),
                 }
+                return true;
             }
-            Output::Image(device) => {
-                let canvas = app.global::<CanvasArea>();
-                if let Some(frame) = frame {
-                    let key = frame.cache_key();
-                    if !self.images.contains_key(&key) {
-                        // A new ring: the old one's images go.
-                        self.images
-                            .retain(|(generation, _), _| *generation == key.0);
-                        match frame
-                            .texture(device)
-                            .and_then(|t| slint::Image::try_from(t).map_err(Into::into))
-                        {
-                            Ok(image) => {
-                                self.images.insert(key, image);
-                            }
-                            Err(error) => {
-                                isocast_diagnostics::diagnostic!("warn";
-                                    "preview: can't show a shared frame: {error:#}"
-                                );
-                                return false;
-                            }
-                        }
-                    }
-                    match self.role {
-                        Role::Editor => canvas.set_picture(self.images[&key].clone()),
-                        Role::Program => canvas.set_program_picture(self.images[&key].clone()),
-                        Role::Extra => canvas.set_extra_picture(self.images[&key].clone()),
+            #[cfg(windows)]
+            Output::Layers(layers) => {
+                let mut layers = layers.borrow_mut();
+                if layers.available() {
+                    let shown = match (self.role, frame) {
+                        (Role::Program, Some(frame)) => layers.show_program(frame),
+                        (Role::Extra, Some(frame)) => layers.show_extra(frame),
+                        (Role::Program | Role::Extra, None) => true,
+                        (Role::Editor, _) => layers.show(frame, rect, self.style, geometry(app)),
+                    };
+                    if layers.available() {
+                        return shown;
                     }
                 }
-                if self.role == Role::Editor {
-                    canvas.set_shown_box_visible(rect.is_some());
-                    if let Some(BoxShape {
-                        rect: [x, y, w, h],
-                        rotate,
-                    }) = rect
-                    {
-                        canvas.set_shown_box_x(x);
-                        canvas.set_shown_box_y(y);
-                        canvas.set_shown_box_w(w);
-                        canvas.set_shown_box_h(h);
-                        canvas.set_shown_box_rotate(rotate);
+                layers.device()
+            }
+            Output::Image(device) => device.clone(),
+        };
+        let canvas = app.global::<CanvasArea>();
+        if let Some(frame) = frame {
+            let key = frame.cache_key();
+            if !self.images.contains_key(&key) {
+                // A new ring: the old one's images go.
+                self.images
+                    .retain(|(generation, _), _| *generation == key.0);
+                match frame
+                    .texture(&device)
+                    .and_then(|t| slint::Image::try_from(t).map_err(Into::into))
+                {
+                    Ok(image) => {
+                        self.images.insert(key, image);
+                    }
+                    Err(error) => {
+                        isocast_diagnostics::diagnostic!("warn";
+                            "preview: can't show a shared frame: {error:#}"
+                        );
+                        return false;
                     }
                 }
+            }
+            match self.role {
+                Role::Editor => canvas.set_picture(self.images[&key].clone()),
+                Role::Program => canvas.set_program_picture(self.images[&key].clone()),
+                Role::Extra => canvas.set_extra_picture(self.images[&key].clone()),
+            }
+        }
+        if self.role == Role::Editor {
+            canvas.set_shown_box_visible(rect.is_some());
+            if let Some(BoxShape {
+                rect: [x, y, w, h],
+                rotate,
+            }) = rect
+            {
+                canvas.set_shown_box_x(x);
+                canvas.set_shown_box_y(y);
+                canvas.set_shown_box_w(w);
+                canvas.set_shown_box_h(h);
+                canvas.set_shown_box_rotate(rotate);
             }
         }
         true
@@ -817,7 +863,7 @@ impl Preview {
 }
 
 /// Where the stage and the pictures are in the window.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn geometry(app: &AppWindow) -> crate::layers::Geometry {
     let (ax, ay) = (app.get_stage_x() as f64, app.get_stage_y() as f64);
     crate::layers::Geometry {
@@ -847,12 +893,25 @@ fn geometry(app: &AppWindow) -> crate::layers::Geometry {
         ],
         scale: app.get_canvas_scale() as f64,
         meter: meter_rect(app),
+        #[cfg(windows)]
+        has_setup: app.global::<Ui>().get_has_setup(),
+        #[cfg(windows)]
+        live: {
+            let ui = app.global::<Ui>();
+            let extra = app.global::<CanvasArea>().get_extra_live();
+            let program = if ui.get_editing_extra() {
+                extra
+            } else {
+                ui.get_live()
+            };
+            [!ui.get_studio() && program, program, extra]
+        },
     }
 }
 
 /// The control bar's master level's inside, in window points (its native
 /// layer's place).
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub fn meter_rect(app: &AppWindow) -> [f64; 4] {
     [
         app.get_master_meter_x() as f64,

@@ -62,7 +62,7 @@ try {
     }
     function WindowInfo([IntPtr]$window) {
         $p = Get-Process -Id ([GuiNative]::ProcessId($window)) -ErrorAction Stop
-        return @{handle=$window.ToInt64();title=[GuiNative]::Title($window);process=$p.ProcessName;pid=$p.Id;rect=(Rect ([GuiNative]::Bounds($window)));minimized=[GuiNative]::IsIconic($window)}
+        return @{handle=$window.ToInt64();title=[GuiNative]::Title($window);process=$p.ProcessName;pid=$p.Id;rect=(Rect ([GuiNative]::Bounds($window)));minimized=[GuiNative]::IsIconic($window);dpi=[GuiNative]::GetDpiForWindow($window)}
     }
     function Windows {
         foreach ($w in [GuiNative]::Windows()) {
@@ -160,7 +160,29 @@ try {
     Guard
     $result = @{ok=$true;command=$r.command;session=$script:session;idle_seconds=$script:initialIdle}
     switch ($r.command) {
-        'windows' { $result.windows = @(Windows); $result.filtered = $script:desk }
+        'windows' {
+            $result.windows = @(Windows)
+            $result.filtered = $script:desk
+            $result.screens = @([Windows.Forms.Screen]::AllScreens | ForEach-Object {
+                @{name=$_.DeviceName;primary=$_.Primary;x=$_.Bounds.X;y=$_.Bounds.Y;width=$_.Bounds.Width;height=$_.Bounds.Height}
+            })
+        }
+        'window-state' {
+            if (-not $r.window -and -not $r.process) { throw 'Explicit window selection is required' }
+            $w = SelectWindow
+            $command = switch ($r.state) {
+                'minimized' { 6 }
+                'restored' { 9 }
+                'maximized' { 3 }
+                default { throw 'Unknown window state' }
+            }
+            if ($null -eq $command) { throw 'Unknown window state' }
+            Guard
+            RequireWindow $w
+            [void][GuiNative]::ShowWindow($w, $command)
+            $result.window = WindowInfo $w
+            $result.requested_state = $r.state
+        }
         'screenshot' {
             $w = [IntPtr]::Zero
             if ($r.window -or $r.process) {

@@ -2722,8 +2722,6 @@ dependencies = [
 [[package]]
 name = "i-slint-renderer-skia"
 version = "1.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc9c1cf02385f1d26fc1f423544e52390a8e5c2d89420a8042aa94b4fe109d1f"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -3436,6 +3434,7 @@ dependencies = [
  "anyhow",
  "block2 0.6.2",
  "i-slint-backend-testing",
+ "i-slint-renderer-skia",
  "isocast-client",
  "isocast-diagnostics",
  "isocast-protocol",
@@ -3453,6 +3452,8 @@ dependencies = [
  "slint-build",
  "toml",
  "wgpu",
+ "windows",
+ "windows-numerics",
  "windows-sys 0.61.2",
 ]
 

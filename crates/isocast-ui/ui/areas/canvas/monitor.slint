@@ -11,13 +11,13 @@
 // moves, resizes and crops, and says what to draw while it does
 // (guides, the readout, the hovered item, the pointer's shape).
 //
-// With `native-picture` (macOS) the pictures and the shown box are Core
-// Animation layers under the window, changed together for each frame;
+// With `native-picture` the pictures and shown box are native composition
+// layers under the interface, changed together for each frame;
 // this then only lets them show through, draws the rest over them and
 // takes the pointer.
 
 import { Theme } from "../../theme.slint";
-import { Ui } from "../../state.slint";
+import { Ui, PlatformText } from "../../state.slint";
 import { Button, EmptyState, Spinner, Menus } from "../../kit.slint";
 import { Icons } from "../../icons.slint";
 import { CanvasArea, CanvasBox } from "state.slint";
@@ -129,7 +129,9 @@ export component Monitor inherits Rectangle {
         height: pic-h;
         background: Theme.surface-monitor;
     }
-    if Ui.has-setup: Rectangle {
+    // Windows composition also owns the monitor ring: painting it here would
+    // cut through the native selection handles and cover its yellow outline.
+    if Ui.has-setup && !(PlatformText.windows && CanvasArea.native-picture): Rectangle {
         x: pic-x - (root.program-live ? 2px : 1px);
         y: pic-y - (root.program-live ? 2px : 1px);
         width: pic-w + (root.program-live ? 4px : 2px);

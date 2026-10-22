@@ -24,6 +24,12 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/R44VC0RP/isocast"
 
+# Slint's winit renderer needs an application-owned composition surface on
+# Windows. Pinned upstream sources, with the small WGPU surface hook described
+# in vendor/i-slint-renderer-skia/ISocast.md; other platforms are unchanged.
+[patch.crates-io]
+i-slint-renderer-skia = { path = "vendor/i-slint-renderer-skia" }
+
 # Noise suppression (RNNoise) runs in real time, and unoptimised it costs
 # about 11% of a core per channel, so its crates are optimised even in
 # debug builds (which the dev app runs).

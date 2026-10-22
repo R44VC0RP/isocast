@@ -126,7 +126,7 @@ pub struct Mixer {
     master_skip: Cell<bool>,
     /// macOS, layers preview: the master level is a native layer (see
     /// layers.rs), which moves without redrawing the window.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     native: RefCell<Option<Rc<RefCell<crate::layers::Layers>>>>,
     /// When each source's levels last came.
     arrived: RefCell<HashMap<String, Instant>>,
@@ -144,7 +144,7 @@ impl Default for Mixer {
             meters: RefCell::default(),
             master: RefCell::default(),
             master_skip: Cell::new(false),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             native: RefCell::default(),
             arrived: RefCell::default(),
             timer: slint::Timer::default(),
@@ -384,7 +384,17 @@ impl Mixer {
         let Some(window) = app.window() else {
             return active;
         };
-        #[cfg(target_os = "macos")]
+        #[cfg(windows)]
+        if self
+            .native
+            .borrow()
+            .as_ref()
+            .is_some_and(|layers| !layers.borrow().available())
+        {
+            self.native.borrow_mut().take();
+            window.global::<MixerArea>().set_master_native(false);
+        }
+        #[cfg(any(target_os = "macos", windows))]
         if let Some(layers) = self.native.borrow().as_ref() {
             return self.step_native_master(app, &window, layers, dt, now) || active;
         }
@@ -421,7 +431,7 @@ impl Mixer {
 
     /// Draw the master level in its native layer (from now on, macOS with
     /// the layers preview): the control bar leaves its inside unpainted.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub fn use_native_master(
         &self,
         window: &AppWindow,
@@ -435,13 +445,17 @@ impl Mixer {
         layers
             .borrow_mut()
             .show_meter(crate::preview::meter_rect(window), [silent; 2]);
+        #[cfg(windows)]
+        if !layers.borrow().available() {
+            return;
+        }
         *self.native.borrow_mut() = Some(layers);
         window.global::<MixerArea>().set_master_native(true);
     }
 
     /// The native master level's step: by whole device pixels, at the
     /// meters' 30 a second (a layer moves without redrawing the window).
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     fn step_native_master(
         &self,
         app: &Rc<App>,

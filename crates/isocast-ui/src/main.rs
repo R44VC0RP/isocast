@@ -52,6 +52,9 @@ mod keys;
 mod kit;
 #[cfg(target_os = "macos")]
 mod layers;
+#[cfg(windows)]
+#[path = "layers_windows.rs"]
+mod layers;
 mod model;
 // The motion harness (`--motion`): docs/motion-testing.md.
 mod motion;

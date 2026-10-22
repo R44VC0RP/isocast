@@ -58,12 +58,17 @@ def arguments():
         group.add_argument("--" + name)
     p.add_argument("--timeout", type=int, default=30)
     sub.add_parser("windows")
+    p = sub.add_parser("window-state")
+    selector(p)
+    p.add_argument("--state", required=True, choices=("minimized", "restored", "maximized"))
     p = sub.add_parser("launch")
     p.add_argument("path", help="absolute .exe or .lnk path")
     p.add_argument("--args", default="", help="Windows command-line arguments (one string)")
     p = sub.add_parser("close")
     p.add_argument("--process", required=True)
     args = vars(parser.parse_args())
+    if args['command'] == 'window-state' and not (args.get('window') or args.get('process')):
+        raise ValueError('window-state requires an explicit --window or --process selector')
     if not 1 <= args.get("timeout", 30) <= 300:
         raise ValueError("timeout must be 1..300 seconds")
     if not 0 <= args.get("depth", 6) <= 20:

@@ -16,8 +16,8 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 - **Remote engines R1 is on main**: CLI/MCP only, off by default (`isocast remote enable`), TCP 47470, pinned mutual
   TLS 1.3, local-only code + SPAKE2 pairing, OS DNS-SD. Verified basebook ↔ exon-desk both ways.
 - **In progress:** R2 (app on a remote engine) paused as WIP on `agent/remote-r2-core`/`-ui`
-  (`/Volumes/IsocastBuild/remote-r2-*/scratch/REPORT.md`); Windows UI DirectComposition port, uncommitted in
-  `.claude/worktrees/windows-perf`; `agent/ci-green` making hosted CI green and adding pre-merge CI (`scripts/ci.sh`).
+  (`/Volumes/IsocastBuild/remote-r2-*/scratch/REPORT.md`); Windows UI DirectComposition port (committed
+  on `agent/windows-perf`, CPU target still unmet) merging after pre-merge CI.
 
 ## 2. Architecture map
 
@@ -204,6 +204,21 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 - 2026-10-18: WGC `CreateForWindow` fails with E_INVALIDARG on WS_EX_NOACTIVATE windows. `TryGetNextFrame` returns S_OK plus null when no frame is ready.
 - 2026-10-22: Windows DNS-SD answers a new browse from a cache that keeps dead engines for about 4,000 s. Treat browse results as hints until a resolve answers.
 - 2026-10-22: GPU-backed private commit is not physical RAM. Claim CPU or RAM wins only from workloads matched against OBS. `ISOCAST_SOCKET` sets the `.logs` path; `ISOCAST_LOG_DIR` is ignored.
+- 2026-10-22: Windows native previews use transactional DirectComposition surfaces beneath Slint's
+  premultiplied visual (one GPU copy on the existing DX12 queue through an On12 wrapper). The monitor
+  ring must be native too, below selection; a Slint ring paints over its outline and handles.
+  Slint 1.18.1 needs the pinned renderer surface hook: choose alpha before first configure, not later
+  via ResizeBuffers. The attempted destination-Unwrap path stalled on exon-desk; wrapped-source
+  CopySubresourceRegion works. `--preview image` is the control; `ISOCAST_DCOMP_FAIL_SETUP=1` exercises
+  setup fallback without touching the system driver. Qualification evidence is in windows-perf's scratch REPORT.
+- 2026-10-22: The matched 18-take DComp cohort (n=3 per mode/resolution) reduced total one-core CPU
+  from image 26.16/25.09% to 23.28/21.52% at 1080p/4K; OBS was 19.21/19.54%. RAM did not improve.
+  All 36 files passed individual media checks; all 12 native takes passed accounting/alignment with zero
+  losses. OBS cross-output alignment remains unverified. Windows oracle: 9 PASS, 2 partial-PENDING.
+  First-preview capture brackets overlap; no proven no-regression claim. Native submissions stayed ~60/s,
+  while a diagnostic trace measured 3.16 full-window UI presents/s. Removing Slint redraws alone did not
+  meet the CPU target. No-redirection produced blank native-menu captures (physical screen unconfirmed);
+  version metadata and ValidateRect probes gave no established win. None of those experiments is retained.
 - 2026-10-22: GitHub's macos-15 runners (macOS 15.7.9, 3 vCPU M1 VM, paravirtual Metal and encoders) drop frames:
   GPU waits stall up to ~143 ms, and a zero-drop qualification never predicted a zero-drop suite (every hosted run
   2026-10-17..22 dropped somewhere; worst 1.5% of the suite's slots). So `e2e.py --hosted` always allows accounted

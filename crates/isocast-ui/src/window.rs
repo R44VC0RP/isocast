@@ -55,6 +55,10 @@ pub fn run(options: &Options) -> Result<()> {
     #[cfg(windows)]
     daemon::prewarm_preview();
     let gpu = Gpu::new()?;
+    #[cfg(windows)]
+    if options.preview == crate::preview::Mode::Layers {
+        crate::layers::install(&gpu);
+    }
     // Test and measurement runs never take focus (see background.rs).
     let background = background::enabled(options);
     let mut selector = slint::BackendSelector::new()
@@ -113,6 +117,13 @@ pub fn run(options: &Options) -> Result<()> {
                 let ui = app.global::<Ui>();
                 ui.set_window_maximized(window.is_maximized());
                 ui.set_window_fullscreen(window.is_fullscreen());
+            }
+            #[cfg(windows)]
+            if let winit::event::WindowEvent::Resized(size) = event {
+                with_app(|app| {
+                    app.canvas
+                        .set_hidden(occluded.get() || size.width == 0 || size.height == 0)
+                });
             }
             if let winit::event::WindowEvent::Focused(false) = event {
                 crate::keys::release_all();
@@ -273,6 +284,8 @@ pub fn run(options: &Options) -> Result<()> {
     let result = app.run();
     #[cfg(windows)]
     crate::update::cleanup();
+    #[cfg(windows)]
+    crate::layers::uninstall();
     result?;
     APP.with(|s| s.borrow_mut().take());
     Ok(())
@@ -315,7 +328,7 @@ fn setup_when_ready(weak: slint::Weak<AppWindow>, shell: Rc<App>, setup: Setup) 
             crate::preview::Output::new(&app, setup.mode, &setup.device, setup.test_outline);
         match output {
             Ok(output) => {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 if let crate::preview::Output::Layers(layers) = &output {
                     shell.mixer.use_native_master(&app, layers.clone());
                 }
