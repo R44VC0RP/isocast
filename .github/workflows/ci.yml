@@ -47,8 +47,16 @@ jobs:
           # Only main writes the cache; pull requests read it.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # The quick checks first, so a candidate that fails one of them fails
+      # in minutes, not after the half hour of Clippy and tests.
       - name: Format
         run: cargo fmt --all --check
+
+      - name: PR description checks (unit tests)
+        run: python3 .github/scripts/pr_checks_test.py
+
+      - name: Third-party notices up to date
+        run: scripts/third-party-notices.sh --check
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -62,12 +70,6 @@ jobs:
           cargo build --locked -p isocast-platform-contracts
           python3 -m unittest discover -s scripts -p test_platform_contracts.py
           python3 scripts/platform-contracts.py --bin target/debug/isocast-platform-contracts --backend native --suite core --work "$RUNNER_TEMP/platform-contracts"
-
-      - name: PR description checks (unit tests)
-        run: python3 .github/scripts/pr_checks_test.py
-
-      - name: Third-party notices up to date
-        run: scripts/third-party-notices.sh --check
 
       - name: CLI, setup and MCP references up to date
         run: |
@@ -103,7 +105,7 @@ jobs:
           run=true
           if [ "$EVENT" = pull_request ]; then
             base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
-            if [ -z "$(git diff --name-only "$base" "$HEAD_SHA" -- crates/isocast-ui/ scripts/motion.sh scripts/motion/ .github/workflows/ci.yml)" ]; then
+            if [ -z "$(git diff --name-only "$base" "$HEAD_SHA" -- crates/isocast-ui/ crates/isocast-ui-interface/ scripts/motion.sh scripts/motion/ .github/workflows/ci.yml)" ]; then
               run=false
             fi
           fi

@@ -3871,6 +3871,7 @@ dependencies = [
  "isocast-discovery",
  "isocast-ipc",
  "isocast-protocol",
+ "isocast-ui-interface",
  "libc",
  "objc2 0.6.5",
  "objc2-audio-toolbox",
@@ -3888,13 +3889,20 @@ dependencies = [
  "serde",
  "serde_json",
  "slint",
- "slint-build",
  "str0m",
  "toml",
  "wgpu",
  "windows",
  "windows-numerics",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "isocast-ui-interface"
+version = "0.0.8"
+dependencies = [
+ "slint",
+ "slint-build",
 ]
 
 [[package]]

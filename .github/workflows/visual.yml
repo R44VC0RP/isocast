@@ -32,7 +32,7 @@ env:
   ISOCAST_SHOTS_WORK: /tmp/isocast-visual-shots
   # What the app shows depends on these; a change anywhere else skips the build.
   UI_PATHS: >-
-    crates/isocast-ui/ crates/isocast-app/ui/ crates/isocast-protocol/
+    crates/isocast-ui/ crates/isocast-ui-interface/ crates/isocast-app/ui/ crates/isocast-protocol/
     scripts/visual-shots.sh scripts/visual_diff.py scripts/screenshots/offscreen.toml
     .github/workflows/visual.yml
 

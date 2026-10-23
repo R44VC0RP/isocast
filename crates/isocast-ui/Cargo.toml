@@ -14,13 +14,15 @@ description = "The Isocast app rebuilt in Slint (spike): a portable native windo
 # edit, under `--snapshot-watch`) instead of being compiled into the
 # binary, so a layout change needs no rebuild and a Rust change rebuilds
 # far less. Same Slint version; see build.rs.
-live-slint = ["slint/live-preview"]
+live-slint = ["slint/live-preview", "isocast-ui-interface/live-slint"]
 
 [[bin]]
 name = "isocast-ui"
 path = "src/main.rs"
 
 [dependencies]
+# The interface (ui/*.slint) compiled into Rust, built once per profile.
+isocast-ui-interface = { path = "../isocast-ui-interface" }
 isocast-diagnostics = { path = "../isocast-diagnostics" }
 anyhow = "1.0.104"
 # `wgpu`: the daemon's shared frames as wgpu textures (the portable preview).
@@ -107,6 +109,3 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = ["s
 objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AUComponent", "AudioComponent", "AudioOutputUnit", "AudioUnitProperties", "objc2-core-audio-types"] }
 objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-media", "objc2-core-video", "VTDecompressionSession", "VTDecompressionProperties", "VTSession", "VTErrors"] }
-
-[build-dependencies]
-slint-build = "=1.18.1"

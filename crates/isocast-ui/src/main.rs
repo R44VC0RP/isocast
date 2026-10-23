@@ -78,7 +78,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
-slint::include_modules!();
+// The interface (ui/*.slint), compiled in its own crate.
+use isocast_ui_interface::*;
 
 pub struct Options {
     /// Each picture, after the first N of `states` (the states given

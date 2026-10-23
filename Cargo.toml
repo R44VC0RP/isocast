@@ -16,6 +16,7 @@ default-members = [
     "crates/isocast-protocol",
     "crates/isocast-surfaces",
     "crates/isocast-ui",
+    "crates/isocast-ui-interface",
 ]
 
 [workspace.package]
@@ -35,6 +36,13 @@ xaac-rs = { path = "vendor/xaac-rs" }
 # Noise suppression (RNNoise) runs in real time, and unoptimised it costs
 # about 11% of a core per channel, so its crates are optimised even in
 # debug builds (which the dev app runs).
+# The interface's generated module (isocast-ui-interface) without debug
+# info: rustc's peak memory for it drops from 18.1 to 14.4 GiB and its build
+# from 148 to 126 s (isocast-m2-a, 2026-10-23); GitHub's 7 GB macOS runners
+# swap through it. Its line tables would only point into generated code.
+[profile.dev.package.isocast-ui-interface]
+debug = 0
+
 [profile.dev.package.nnnoiseless]
 opt-level = 3
 
