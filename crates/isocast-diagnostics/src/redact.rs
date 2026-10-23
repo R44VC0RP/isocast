@@ -119,7 +119,6 @@ pub fn sensitive(key: &str) -> bool {
     matches!(
         key.as_str(),
         "key"
-            | "sdp"
             | "token"
             | "password"
             | "passwd"
@@ -149,17 +148,6 @@ pub fn sensitive(key: &str) -> bool {
     ]
     .iter()
     .any(|s| key.ends_with(s))
-}
-
-#[cfg(test)]
-mod sdp_tests {
-    #[test]
-    fn sdp_credentials_are_not_retained_in_diagnostics() {
-        let input = serde_json::json!({"method":"whep_offer","params":{"sdp":"v=0\r\na=ice-pwd:example-only\r\n"}});
-        let redacted = super::Redactor::default().value(&input);
-        assert_eq!(redacted["params"]["sdp"], "[redacted]");
-        assert_eq!(redacted["method"], "whep_offer");
-    }
 }
 
 #[derive(Default)]

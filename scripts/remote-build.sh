@@ -1,7 +1,6 @@
 #!/bin/sh
 # Build, lint and test on a build host instead of Ryan's Mac, with a warm
 # target per lane, and copy binaries back.
-# Build hosts need CMake on PATH for bundled libopus and aws-lc-sys.
 #
 #   scripts/remote-build.sh [--host H] cargo <args>…
 #                                              sync this checkout, run

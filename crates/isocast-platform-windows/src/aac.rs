@@ -62,6 +62,10 @@ pub struct AacStats {
 
 type Job = Box<dyn FnOnce(&mut Session) + Send>;
 
+/// Set to a nonempty value other than 0 for the earlier one-call-per-request
+/// protocol, as a same-binary CPU baseline. Diagnostic only; read once per encoder.
+const BASELINE_ENV: &str = "ISOCAST_CPU_AAC_BASELINE";
+
 /// COM lives exclusively on a private MTA worker. Calls are synchronous RPCs
 /// through a one-deep queue, not a deadline around potentially hung COM calls.
 /// Recording callers must finish and receive explicitly; Drop aborts and joins.
@@ -73,6 +77,13 @@ pub struct MfAacEncoder {
     config: [u8; 2],
     /// Only the byte-oriented live path pads; packet consumers never see it.
     padding: Option<Padding>,
+    /// Each request hands back the worker's ready packets, oldest first. They
+    /// still count against its admission and output budgets until received.
+    received: VecDeque<AacPacket>,
+    /// The last request left the worker healthy, with nothing ready and
+    /// nothing to output until it gets more input.
+    idle: bool,
+    baseline: bool,
 }
 
 impl MfAacEncoder {
@@ -92,6 +103,12 @@ impl MfAacEncoder {
     /// Run the platform's thread-local scheduling hook once on this worker,
     /// so its existing MMCSS registration can be reused without duplicating it.
     pub fn with_thread_start(spec: &LiveAudioSpec, thread_start: fn()) -> Result<Self> {
+        let baseline =
+            std::env::var_os(BASELINE_ENV).is_some_and(|value| !value.is_empty() && value != "0");
+        Self::open(spec, thread_start, baseline)
+    }
+
+    fn open(spec: &LiveAudioSpec, thread_start: fn(), baseline: bool) -> Result<Self> {
         if !matches!(spec.channels, 1 | 2) {
             bail!("audio.channels: Microsoft AAC supports 1 or 2 channels");
         }
@@ -109,7 +126,7 @@ impl MfAacEncoder {
                         let _apartment = Apartment::new()?;
                         thread_start();
                         let _runtime = Runtime::new()?;
-                        let (mut session, config) = Session::open(&settings)?;
+                        let (mut session, config) = Session::open(&settings, baseline)?;
                         if started.send(Ok(config)).is_err() {
                             return Ok(());
                         }
@@ -145,6 +162,9 @@ impl MfAacEncoder {
             spec: *spec,
             config,
             padding: None,
+            received: VecDeque::new(),
+            idle: false,
+            baseline,
         })
     }
 
@@ -187,39 +207,91 @@ impl MfAacEncoder {
                     .clamp(-32768.0, 32767.0) as i16
             })
             .collect();
-        self.call(move |session| session.encode(pcm))
+        if self.baseline {
+            return self.call(move |session| session.encode(pcm));
+        }
+        self.transact(move |session| session.encode(pcm))
     }
 
     /// Pop valid queued output even after a fatal error. Once that prefix has
     /// been consumed, the fatal error is sticky. An empty healthy queue is pumped.
     pub fn receive(&mut self) -> Result<Option<AacPacket>> {
-        self.call(|session| {
-            if let Some(packet) = session.ready.pop_front() {
-                return Ok(Some(packet));
+        if self.baseline {
+            return self.call(|session| {
+                if let Some(packet) = session.ready.pop_front() {
+                    return Ok(Some(packet));
+                }
+                let result = session.drain_ready();
+                if let Some(packet) = session.ready.pop_front() {
+                    return Ok(Some(packet));
+                }
+                result?;
+                Ok(None)
+            });
+        }
+        if let Some(packet) = self.received.pop_front() {
+            return Ok(Some(packet));
+        }
+        if self.idle {
+            // The worker would pop nothing and skip its pump: no round trip.
+            return Ok(None);
+        }
+        let result = self.transact(|session| {
+            if session.ready.is_empty() {
+                session.drain_ready()
+            } else {
+                Ok(())
             }
-            let result = session.drain_ready();
-            if let Some(packet) = session.ready.pop_front() {
-                return Ok(Some(packet));
-            }
-            result?;
-            Ok(None)
-        })
+        });
+        // As above: the valid prefix first, then the (sticky) error.
+        match self.received.pop_front() {
+            Some(packet) => Ok(Some(packet)),
+            None => result.map(|()| None),
+        }
     }
 
     /// Poll normal output without EOS, DRAIN or FLUSH. The MFT can still retain
     /// accepted input afterwards; inspect stats rather than treating this as EOS.
     pub fn drain_ready(&mut self) -> Result<()> {
-        self.call(Session::drain_ready)
+        if self.baseline {
+            return self.call(Session::drain_ready);
+        }
+        if self.idle {
+            return Ok(());
+        }
+        self.transact(Session::drain_ready)
     }
 
     /// Terminal and idempotent; never removes queued packets, including on error.
     pub fn finish(&mut self) -> Result<AacFinish> {
-        self.call(Session::finish)
+        if self.baseline {
+            return self.call(Session::finish);
+        }
+        self.transact(Session::finish)
     }
 
     /// Available after failure as well as during normal operation.
     pub fn stats(&self) -> Result<AacStats> {
-        self.call(|session| Ok(session.stats()))
+        let mut stats = self.call(|session| Ok(session.stats()))?;
+        stats.ready_packets += self.received.len();
+        Ok(stats)
+    }
+
+    /// One round trip that runs `f`, then hands back every ready packet and
+    /// whether the worker is idle, so the next receive or poll need not ask.
+    fn transact<T: Send + 'static>(
+        &mut self,
+        f: impl FnOnce(&mut Session) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.idle = false;
+        let (result, ready, idle) = self.call(move |session| {
+            let result = f(session);
+            let ready: Vec<AacPacket> = session.ready.drain(..).collect();
+            Ok((result, ready, session.idle()))
+        })?;
+        self.received.extend(ready);
+        self.idle = idle;
+        result
     }
 
     fn call<T: Send + 'static>(
@@ -227,10 +299,12 @@ impl MfAacEncoder {
         f: impl FnOnce(&mut Session) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let (tx, rx) = mpsc::sync_channel(1);
+        let held = self.received.len();
         self.jobs
             .as_ref()
             .context("MF AAC encoder is closed")?
             .send(Box::new(move |session| {
+                session.held = held;
                 let _ = tx.send(f(session));
             }))
             .map_err(|_| anyhow!("MF AAC worker stopped"))?;
@@ -247,8 +321,12 @@ impl AudioEncoder for MfAacEncoder {
         // Do not remove valid output before a possible native failure: packet
         // callers can still retrieve the entire valid prefix on the error path.
         self.drain_ready()?;
-        let packets: Vec<Vec<u8>> =
-            self.call(|session| Ok(session.ready.drain(..).map(|packet| packet.data).collect()))?;
+        let packets: Vec<Vec<u8>> = if self.baseline {
+            self.call(|session| Ok(session.ready.drain(..).map(|packet| packet.data).collect()))?
+        } else {
+            // Every request above already handed its ready packets back.
+            self.received.drain(..).map(|packet| packet.data).collect()
+        };
         let Some(padding) = &mut self.padding else {
             return Ok(packets);
         };
@@ -330,10 +408,17 @@ struct Session {
     terminal: bool,
     finished: Option<AacFinish>,
     failed: Option<String>,
+    /// Packets the handle holds but has not received yet: they count as
+    /// ready for admission debt and the output budget.
+    held: usize,
+    /// ProcessOutput last returned NEED_MORE_INPUT, and the transform has had
+    /// no input or message since, so pumping again cannot produce output.
+    probed: bool,
+    baseline: bool,
 }
 
 impl Session {
-    fn open(spec: &LiveAudioSpec) -> Result<(Self, [u8; 2])> {
+    fn open(spec: &LiveAudioSpec, baseline: bool) -> Result<(Self, [u8; 2])> {
         let transform: IMFTransform =
             unsafe { CoCreateInstance(&AACMFTEncoder, None, CLSCTX_INPROC_SERVER) }
                 .context("activate Microsoft AACMFTEncoder")?;
@@ -405,6 +490,9 @@ impl Session {
             terminal: false,
             finished: None,
             failed: None,
+            held: 0,
+            probed: false,
+            baseline,
         };
         unsafe {
             session
@@ -447,7 +535,8 @@ impl Session {
         timestamp(terminal_frames(accepted)?)?;
         let new_blocks = (self.partial.len() + pcm.len()) / self.channels / BLOCK as usize
             + usize::from(!self.primed && frames != 0);
-        let debt = self.ready.len() as u64 + self.submitted / BLOCK - self.produced;
+        let ready = self.ready.len() + self.held;
+        let debt = ready as u64 + self.submitted / BLOCK - self.produced;
         if debt + new_blocks as u64 > DEBT_LIMIT {
             return Ok(false);
         }
@@ -501,6 +590,7 @@ impl Session {
                     .ProcessInput(0, &sample, 0)
                     .context("MF AAC ProcessInput")?;
             }
+            self.probed = false;
             self.submitted = next;
             self.partial.drain(..block);
             self.pump()?;
@@ -510,7 +600,7 @@ impl Session {
 
     fn drain_ready(&mut self) -> Result<()> {
         self.healthy()?;
-        if self.finished.is_some() {
+        if self.finished.is_some() || (self.probed && !self.baseline) {
             return Ok(());
         }
         self.media(Self::pump)
@@ -520,7 +610,13 @@ impl Session {
         // Each successful output consumes a submitted block, bounding this loop
         // by the admission debt. A stream change or extra output is fatal.
         while self.output()? {}
+        self.probed = true;
         Ok(())
+    }
+
+    /// Nothing is ready and nothing can be output without more input.
+    fn idle(&self) -> bool {
+        self.ready.is_empty() && self.failed.is_none() && (self.finished.is_some() || self.probed)
     }
 
     fn output(&mut self) -> Result<bool> {
@@ -584,7 +680,7 @@ impl Session {
         if !self.terminal && samples != BLOCK as u32 {
             bail!("MF AAC output exceeds real input");
         }
-        if samples != 0 && self.ready.len() >= READY_LIMIT {
+        if samples != 0 && self.ready.len() + self.held >= READY_LIMIT {
             bail!("MF AAC output exceeded its queue budget");
         }
         self.produced += 1;
@@ -613,6 +709,7 @@ impl Session {
                 session.partial.resize(remaining, 0);
                 session.submit_partial()?;
             }
+            session.probed = false;
             unsafe {
                 session.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0)?;
                 session.transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0)?;
@@ -784,4 +881,99 @@ fn with_buffer<T>(
     std::mem::forget(guard);
     unlocked?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(channels: u32) -> LiveAudioSpec {
+        LiveAudioSpec {
+            channels,
+            bitrate_kbps: 192,
+        }
+    }
+
+    /// About 1.6 s in the mixer's 480-frame chunks: a tone, then silence,
+    /// then a short last chunk, so the tail is padded.
+    fn chunks(channels: usize) -> Vec<Vec<f32>> {
+        let mut frame = 0u64;
+        (0..160)
+            .map(|index| {
+                let frames = if index == 159 { 123 } else { 480 };
+                let mut chunk = Vec::with_capacity(frames * channels);
+                for _ in 0..frames {
+                    let at = frame as f32 / RATE as f32;
+                    let tone = 0.25 * (std::f32::consts::TAU * 440.0 * at).sin();
+                    let sample = if index < 120 { tone } else { 0.0 };
+                    chunk.extend(std::iter::repeat_n(sample, channels));
+                    frame += 1;
+                }
+                chunk
+            })
+            .collect()
+    }
+
+    /// What the recording writer does: receive what is ready, admit a chunk,
+    /// receive again; then finish and receive the tail.
+    fn record(baseline: bool, channels: u32) -> (Vec<AacPacket>, AacFinish, AacStats) {
+        let mut encoder = MfAacEncoder::open(&spec(channels), || {}, baseline).unwrap();
+        let mut packets = Vec::new();
+        for chunk in chunks(channels as usize) {
+            while let Some(packet) = encoder.receive().unwrap() {
+                packets.push(packet);
+            }
+            assert!(encoder.try_encode(&chunk).unwrap());
+            while let Some(packet) = encoder.receive().unwrap() {
+                packets.push(packet);
+            }
+        }
+        let finished = encoder.finish().unwrap();
+        while let Some(packet) = encoder.receive().unwrap() {
+            packets.push(packet);
+        }
+        (packets, finished, encoder.stats().unwrap())
+    }
+
+    #[test]
+    fn combined_requests_give_the_same_packets_timeline_and_finish() {
+        for channels in [1, 2] {
+            let baseline = record(true, channels);
+            assert_eq!(baseline.1.packets, baseline.0.len() as u64);
+            assert_eq!(baseline.2.ready_packets, 0);
+            assert_eq!(record(false, channels), baseline);
+        }
+    }
+
+    #[test]
+    fn packets_handed_back_still_count_against_admission() {
+        // Never receiving: both protocols must refuse at the same input, with
+        // the same packets counted as ready.
+        let refused = |baseline: bool| {
+            let mut encoder = MfAacEncoder::open(&spec(2), || {}, baseline).unwrap();
+            let block = vec![0.1; BLOCK as usize * 2];
+            let mut accepted = 0;
+            while encoder.try_encode(&block).unwrap() {
+                accepted += 1;
+                assert!(accepted < 64, "admission never refused");
+            }
+            (accepted, encoder.stats().unwrap())
+        };
+        assert_eq!(refused(false), refused(true));
+    }
+
+    #[test]
+    fn live_streams_give_the_same_padded_bytes() {
+        let live = |baseline: bool| {
+            let mut encoder = MfAacEncoder::open(&spec(2), || {}, baseline).unwrap();
+            encoder.padding = Some(Padding::default());
+            chunks(2)
+                .iter()
+                .flat_map(|chunk| AudioEncoder::encode(&mut encoder, chunk).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let baseline = live(true);
+        assert!(!baseline.is_empty());
+        assert_eq!(live(false), baseline);
+    }
 }

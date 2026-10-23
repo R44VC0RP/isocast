@@ -134,11 +134,6 @@ header = root / "crates/isocast-platform-windows/native/nvEncodeAPI.h"
 notice = header.read_text().split("*/", 1)[0].splitlines()[1:]
 print("\n".join(line.removeprefix(" *").removeprefix(" ") for line in notice).strip())
 
-section("Opus encoder")
-print("Program WebRTC audio uses libopus (https://opus-codec.org), bundled by libopus_sys.")
-opus = next(p for p in packages.values() if p["name"] == "libopus_sys")
-print((Path(opus["manifest_path"]).parent / "opus" / "COPYING").read_text().rstrip())
-
 section(f"Rust crates ({len(rows)})")
 print("Crate, version, licence, link.")
 print()

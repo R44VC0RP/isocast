@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real-file engine checks on macOS; Python stdlib + ffmpeg/ffprobe only.
 
-Build: cargo build --release -p isocast-daemon --bins --examples
+Build: cargo build --release -p isocast-daemon
 Run:   python3 scripts/e2e.py [--only record] [--keep] [--json]
 
 Each scenario gets a signed, background-only app, socket, setup, library,
@@ -77,7 +77,7 @@ from fractions import Fraction
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "timeline", "edit",
+SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "timeline", "edit",
              "data", "plugin", "hotkeys", "shutdown", "pause", "bug_report", "projects",
              "plugin_files", "replay", "vertical",
              # The frame oracle (#124), defined below.
@@ -340,7 +340,6 @@ ENGINE_ENV = {}  # --engine-env
 class Engine:
     def __init__(self, root, daemon):
         self.root = root
-        self.webrtc_receiver = Path(daemon).parent / "examples" / ("webrtc-receive.exe" if WINDOWS else "webrtc-receive")
         self.sock = root / "d.sock"
         if WINDOWS:
             # No app bundle or signing; the logical socket names a pipe.
@@ -778,51 +777,6 @@ def scenario_scenes(e, cfg, evidence):
         require(any(s["scene"] == switch["scene"] and abs(s["time_seconds"] - t) < 0.001
                     for s in manifest["scenes"]), "scene change absent from manifest")
     evidence["switches"] = switches
-
-
-def scenario_webrtc(e, cfg, evidence):
-    if not evidence["capabilities"]["h264"]:
-        raise Skip("no hardware encoder on this runner (H.264 WebRTC)")
-    if not e.webrtc_receiver.is_file():
-        message = "build the webrtc-receive example alongside isocastd (--examples)"
-        if evidence["capabilities"].get("hosted"):
-            raise Failure(message)
-        raise Skip(message)
-    e.apply(cfg)
-    for invalid in ("not SDP", " " * 65537):
-        try:
-            e.rpc("whep_offer", {"sdp": invalid})
-            raise Failure("malformed SDP was accepted")
-        except RpcError as error:
-            require(error.error["code"] == -32602, "wrong SDP error code")
-    evidence["viewers"] = []
-    for count in (1, 3):
-        started = e.rpc("start", {})
-        viewers = []
-        try:
-            for index in range(count):
-                output = e.root / f"viewer-{count}-{index}.h264"
-                viewers.append((subprocess.Popen([str(e.webrtc_receiver), "6", str(output)],
-                    env=dict(e.env, ISOCAST_WEBRTC_FEEDBACK_TEST="1"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True), output))
-            for process, output in viewers:
-                stdout, stderr = process.communicate(timeout=20)
-                require(process.returncode == 0, f"WebRTC receiver failed: {stderr}")
-                result = json.loads(stdout)
-                require(result["video_frames"] > 30 and result["decoded_audio_frames"] > RATE,
-                        f"insufficient WebRTC media: {result}")
-                require(result["audio_peak"] > 0.001 and result["closed"],
-                        f"program audio or session close failed: {result}")
-                decoded = ffmpeg("-xerror", "-i", output, "-f", "null", "-", timeout=30)
-                require(not decoded.stderr.strip(), f"WebRTC H.264 decode failed: {decoded.stderr.decode()}")
-                evidence["viewers"].append(result)
-        finally:
-            for process, _ in viewers:
-                if process.poll() is None:
-                    process.kill()
-                    process.wait(timeout=5)
-            e.rpc("stop")
-        manifest = until(lambda: finished(started["manifest"]), description="WebRTC take finalization")
-        evidence.setdefault("files", []).extend(check_take(Path(started["manifest"]), manifest, evidence=evidence))
 
 
 def scenario_stream(e, cfg, evidence):

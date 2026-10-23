@@ -113,7 +113,6 @@ mod streams;
 mod timeline;
 mod virtual_camera;
 mod websocket;
-mod whep;
 
 static PARENT_OWNED: AtomicBool = AtomicBool::new(false);
 
@@ -560,17 +559,6 @@ fn handle(
                     ),
                 }
             }
-            Ok(Request {
-                id,
-                method: Method::WhepOffer(params),
-                ..
-            }) => match whep::prepare(daemon, &params, &caller) {
-                Ok(viewer) => {
-                    audit.value(serde_json::json!({"subscribed":"webrtc"}));
-                    return viewer.run(reader, writer, daemon, id);
-                }
-                Err(error) => Response::err(Some(id), error),
-            },
             Ok(Request {
                 id,
                 method: Method::Frames(params),
@@ -1208,7 +1196,6 @@ trait LiveEngine: Send + Sync {
     ) -> Result<Option<JpegFrame>, String>;
     /// `target`'s picture as low-latency H.264 for a monitor.
     fn frames(&self, target: &str, max_width: Option<u32>, fps: u32) -> Result<FrameFeed, String>;
-    fn opus(&self) -> Result<isocast_engine::record::OpusFeed, String>;
     /// `target`'s picture in surfaces shared with a client on this machine.
     fn shared_frames(
         &self,
@@ -1315,10 +1302,6 @@ impl<P: Platform<SharedSurface = Surface>> LiveEngine for LiveEngineOf<P> {
 
     fn frames(&self, target: &str, max_width: Option<u32>, fps: u32) -> Result<FrameFeed, String> {
         LiveEngineOf::frames(self, target, max_width, fps)
-    }
-
-    fn opus(&self) -> Result<isocast_engine::record::OpusFeed, String> {
-        LiveEngineOf::opus(self).map_err(|error| error.to_string())
     }
 
     fn shared_frames(
@@ -1633,10 +1616,6 @@ impl Daemon {
         }
         let shutdown = request.method == Method::Shutdown;
         let result = match request.method {
-            Method::WhepOffer(_) | Method::WhepClose => Err(RpcError {
-                code: RpcError::WRONG_STATE,
-                message: "whep_offer opens a dedicated connection; whep_close ends its viewer".into(),
-            }),
             Method::GpuAdapter => native()
                 .gpu_adapter_luid()
                 .map_err(failed)

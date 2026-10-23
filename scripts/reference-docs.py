@@ -4,7 +4,6 @@
   docs/cli.md              every command's own --help
   docs/setup-reference.md  `isocast setup schema`, as tables
   docs/mcp-tools.md        the tools `isocast mcp` serves
-  docs/openrpc.json        `isocast api spec --json`, the method table as OpenRPC
 
     cargo build --release -p isocast-cli
     scripts/reference-docs.py [path/to/isocast]     # default target/release/isocast
@@ -325,16 +324,6 @@ def mcp_type(node):
     return "any"
 
 
-# ---------------------------------------------------------------- OpenRPC
-
-
-def openrpc_doc(binary):
-    doc = json.loads(run(binary, "api", "spec", "--json"))
-    if doc.get("openrpc") != "1.3.2" or not doc.get("methods"):
-        sys.exit("isocast api spec --json: not an OpenRPC 1.3.2 document")
-    return json.dumps(doc, indent=2, ensure_ascii=False)
-
-
 # ---------------------------------------------------------------- main
 
 
@@ -347,7 +336,6 @@ def main():
         "docs/cli.md": cli_doc(binary),
         "docs/setup-reference.md": schema_doc(binary),
         "docs/mcp-tools.md": mcp_doc(binary),
-        "docs/openrpc.json": openrpc_doc(binary),
     }
     stale = []
     for path, text in docs.items():

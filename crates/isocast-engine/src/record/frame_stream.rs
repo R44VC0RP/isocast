@@ -102,7 +102,6 @@ pub(crate) fn stamp_at(drawn: &Drawn, tick: Time) -> Option<Stamp> {
 pub(crate) struct Shared {
     viewers: Mutex<Vec<Viewer>>,
     want_keyframe: AtomicBool,
-    feedback_at: Mutex<Option<std::time::Instant>>,
     next_viewer: AtomicU64,
 }
 
@@ -129,21 +128,6 @@ pub struct FrameFeed {
 }
 
 impl FrameFeed {
-    /// The viewer connected after its handshake and needs a fresh IDR.
-    /// Unlike RTCP feedback, this happens only once per admitted viewer.
-    pub fn connected(&self) {
-        self.shared.want_keyframe.store(true, Ordering::SeqCst);
-    }
-
-    /// PLI/FIR recovery is coalesced and rate-limited by the shared encoder.
-    pub fn request_keyframe(&self) {
-        let mut last = self.shared.feedback_at.lock();
-        if last.is_none_or(|last| last.elapsed() >= Duration::from_secs(1)) {
-            *last = Some(std::time::Instant::now());
-            self.shared.want_keyframe.store(true, Ordering::SeqCst);
-        }
-    }
-
     /// A handle that changes how many frames a second this viewer wants,
     /// from any thread; the stream follows from its next frame, without a
     /// new keyframe.
@@ -208,7 +192,6 @@ pub(crate) fn watch<P: Platform>(
             let shared = Arc::new(Shared {
                 viewers: Mutex::new(Vec::new()),
                 want_keyframe: AtomicBool::new(true),
-                feedback_at: Mutex::new(None),
                 next_viewer: AtomicU64::new(0),
             });
             running.insert(key.clone(), shared.clone());
@@ -582,28 +565,6 @@ fn remove(running: &mut HashMap<Key, Arc<Shared>>, key: &Key, shared: &Arc<Share
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn connection_keyframe_is_not_lost_to_feedback_rate_limit() {
-        use super::*;
-        let shared = Arc::new(Shared {
-            viewers: Mutex::new(Vec::new()),
-            want_keyframe: AtomicBool::new(false),
-            feedback_at: Mutex::new(Some(std::time::Instant::now())),
-            next_viewer: AtomicU64::new(1),
-        });
-        let (_, records) = sync_channel(1);
-        let feed = FrameFeed {
-            records,
-            fps: Arc::new(AtomicU32::new(30)),
-            shared: shared.clone(),
-            id: 0,
-        };
-        feed.request_keyframe();
-        assert!(!shared.want_keyframe.load(Ordering::SeqCst));
-        feed.connected();
-        assert!(shared.want_keyframe.load(Ordering::SeqCst));
-    }
-
     use super::scaled;
 
     #[test]

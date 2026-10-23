@@ -119,7 +119,7 @@ up)
   ;;
 install)
   mkdir -p "$STAGE"
-  cargo build --release -p isocast-daemon -p isocast-cli --bins --examples
+  cargo build --release -p isocast-daemon -p isocast-cli
   ISOCAST_DEV_APP="$STAGE/Isocast Dev.app" scripts/sign-dev.sh target/release/isocastd
   ISOCAST_APP="$STAGE/Isocast.app" scripts/app-dev.sh --release
   cp target/release/isocast "$STAGE/isocast"
@@ -168,11 +168,6 @@ e2e)
   cli=; [ -f "$bin/isocast" ] && cli="$bin/isocast"
   rsync -a -e "ssh -i $KEY -o BatchMode=yes -o UserKnownHostsFile=$HOME_DIR/known_hosts" \
     "$bin/isocastd" $cli "$VM_USER@$(ip):$dir/src/target/release/"
-  if [ -f "$bin/examples/webrtc-receive" ]; then
-    ssh_vm "mkdir -p ~/$dir/src/target/release/examples"
-    rsync -a -e "ssh -i $KEY -o BatchMode=yes -o UserKnownHostsFile=$HOME_DIR/known_hosts" \
-      "$bin/examples/webrtc-receive" "$VM_USER@$(ip):$dir/src/target/release/examples/"
-  fi
   set +e
   ssh_vm "export PATH=/opt/homebrew/bin:/usr/local/bin:\$PATH; cd ~/$dir/src && mkdir -p ~/$dir/work && python3 scripts/e2e.py --daemon target/release/isocastd \
       --work ~/$dir/work --report ~/$dir/e2e-report.json $*"

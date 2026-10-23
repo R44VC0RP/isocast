@@ -707,11 +707,6 @@ enum Command {
         #[command(subcommand)]
         command: virtual_camera::Command,
     },
-    /// The engine API itself: its methods, params and results.
-    Api {
-        #[command(subcommand)]
-        command: ApiCommand,
-    },
     /// Developer mode, for testing a build locally: verbose logs of every
     /// API call and component, and frame timing traces while recording.
     Debug {
@@ -1207,18 +1202,6 @@ fn canvas_target(canvas: CanvasId, target: String) -> Result<String> {
 }
 
 #[derive(Subcommand)]
-enum ApiCommand {
-    /// Describe this build's method table as an OpenRPC 1.3.2 document
-    /// (JSON Schema draft-07): every method's params and result. Without
-    /// --json, list each method and what it returns. Needs no engine.
-    Spec {
-        /// Print the OpenRPC document.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand)]
 enum SetupCommand {
     /// Validate a setup file (.toml or .json) and summarize it.
     Check {
@@ -1369,31 +1352,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-fn api_spec(json: bool) -> Result<ExitCode> {
-    let doc = isocast_protocol::openrpc::document();
-    if json {
-        println!("{}", serde_json::to_string_pretty(&doc)?);
-        return Ok(ExitCode::SUCCESS);
-    }
-    let methods = doc["methods"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    for method in methods {
-        println!(
-            "{:28} {}",
-            method["name"].as_str().unwrap_or_default(),
-            method["result"]["name"].as_str().unwrap_or("(untyped)")
-        );
-    }
-    println!(
-        "{} methods, OpenRPC {}; `isocast api spec --json` prints the document.",
-        methods.len(),
-        isocast_protocol::openrpc::OPENRPC_VERSION
-    );
-    Ok(ExitCode::SUCCESS)
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
@@ -1953,9 +1911,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Websocket { command } => websocket::run(command),
         Command::Roots { command } => roots::run(command),
         Command::Debug { command } => debug::run(command),
-        Command::Api {
-            command: ApiCommand::Spec { json },
-        } => api_spec(json),
         Command::Engines {
             discover,
             timeout,

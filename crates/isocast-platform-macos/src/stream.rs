@@ -53,7 +53,7 @@ use objc2_video_toolbox::{
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
     kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
     kVTEncodeFrameOptionKey_ForceKeyFrame, kVTH264EntropyMode_CABAC,
-    kVTProfileLevel_H264_ConstrainedHigh_AutoLevel, kVTProfileLevel_H264_High_AutoLevel,
+    kVTProfileLevel_H264_High_AutoLevel,
     kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
     kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
@@ -226,27 +226,10 @@ impl H264Encoder {
         };
         let rate_control = unsafe {
             set(kVTCompressionPropertyKey_RealTime, CFBoolean::new(true))?;
-            if spec.low_latency {
-                if let Err(error) = set(
-                    kVTCompressionPropertyKey_ProfileLevel,
-                    kVTProfileLevel_H264_ConstrainedHigh_AutoLevel,
-                ) {
-                    set(
-                        kVTCompressionPropertyKey_ProfileLevel,
-                        kVTProfileLevel_H264_High_AutoLevel,
-                    )
-                    .context("the H.264 monitor's High profile fallback also failed")?;
-                    static WARNED: std::sync::Once = std::sync::Once::new();
-                    WARNED.call_once(|| {
-                        isocast_diagnostics::diagnostic!("warn"; "H.264 monitor: Constrained High unavailable ({error}); using High profile");
-                    });
-                }
-            } else {
-                set(
-                    kVTCompressionPropertyKey_ProfileLevel,
-                    kVTProfileLevel_H264_High_AutoLevel,
-                )?;
-            }
+            set(
+                kVTCompressionPropertyKey_ProfileLevel,
+                kVTProfileLevel_H264_High_AutoLevel,
+            )?;
             set(
                 kVTCompressionPropertyKey_AllowFrameReordering,
                 CFBoolean::new(false),
@@ -815,8 +798,7 @@ pub struct AacEncoder {
     /// What the converter is reading; it may keep reading it until it
     /// next asks for input, so it stays put until then.
     lent: Vec<f32>,
-    /// Reused output storage; completed packets are copied into owned frames.
-    packet: Vec<u8>,
+    max_packet: usize,
     delay: u32,
 }
 
@@ -865,7 +847,7 @@ impl AacEncoder {
             channels: channels as usize,
             pending: Vec::new(),
             lent: Vec::with_capacity(AAC_FRAME * channels as usize),
-            packet: Vec::new(),
+            max_packet: 0,
             delay: 0,
         };
         // Constant bitrate, as streaming services ask. In its default mode
@@ -903,7 +885,7 @@ impl AacEncoder {
         let max_packet: u32 =
             unsafe { get_property(converter, kAudioConverterPropertyMaximumOutputPacketSize) }
                 .context("could not ask the AAC encoder its largest frame")?;
-        encoder.packet.resize(max_packet.max(1) as usize, 0);
+        encoder.max_packet = max_packet.max(1) as usize;
         // Apple's AAC encoder starts with priming samples; the engine
         // shifts frame times back by them so audio and video line up.
         let prime: AudioConverterPrimeInfo =
@@ -937,7 +919,7 @@ impl AudioEncoder for AacEncoder {
     fn encode(&mut self, samples: &[f32]) -> Result<Vec<Vec<u8>>> {
         self.pending.extend_from_slice(samples);
         let mut frames = Vec::new();
-        let buffer = &mut self.packet;
+        let mut buffer = vec![0u8; self.max_packet];
         while self.pending.len() >= AAC_FRAME * self.channels {
             let mut feed = Feed {
                 pending: &self.pending,

@@ -322,7 +322,7 @@ pub(super) fn audit_peer(peer: &isocast_remote::Peer) -> RemoteAuditPeer {
     }
 }
 
-pub(super) fn prefixes() -> Vec<(std::net::IpAddr, u8)> {
+fn prefixes() -> Vec<(std::net::IpAddr, u8)> {
     #[cfg(target_os = "macos")]
     {
         isocast_platform_macos::network::prefixes()

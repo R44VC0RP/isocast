@@ -16,8 +16,9 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 - **Remote engines R1 is on main**: CLI/MCP only, off by default (`isocast remote enable`), TCP 47470, pinned mutual
   TLS 1.3, local-only code + SPAKE2 pairing, OS DNS-SD. Verified basebook ↔ exon-desk both ways.
 - **In progress:** R2 (app on a remote engine) paused as WIP on `agent/remote-r2-core`/`-ui`
-  (`/Volumes/IsocastBuild/remote-r2-*/scratch/REPORT.md`); Windows UI DirectComposition port (committed
-  on `agent/windows-perf`, CPU target still unmet) merging after pre-merge CI.
+  (`/Volumes/IsocastBuild/remote-r2-*/scratch/REPORT.md`); Windows UI DirectComposition port, runtime-qualified
+  and committed as `b9aa4248` in `.claude/worktrees/windows-perf`, awaiting full pre-merge CI (CPU target unmet).
+  Hosted Windows CI passed; pre-merge CI is available through `scripts/ci.sh`.
 
 ## 2. Architecture map
 
@@ -30,10 +31,6 @@ A new capability needs all of these:
 3. a class in `isocast_protocol::caller::local_only_reason` (exhaustive);
 4. a CLI command with `--json` and an MCP tool, both in isocast-cli;
 5. regenerated reference docs.
-
-2026-10-22: the published method contract is generated with `isocast api spec --json` into
-`docs/openrpc.json`; `scripts/reference-docs.py --check` verifies currency. A new method also needs its
-result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the protocol tests).
 
 - `isocast-protocol`: setup document (TOML/JSON), validation, schema, API types, caller policy, `platform_text` wording.
 - `isocast-engine`: portable engine: shared clock, wgpu compositor, audio mix, recording, governor, the `Platform` trait.
@@ -77,7 +74,6 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
 - Keep ≥ 20 GB free (92 GB on 2026-10-22). Old lanes' reports are in `archive/lanes-2026-10-22/`.
 
 **Build hosts** (`scripts/remote-build.sh`): exonbook (M4 Max, 14 cores), isocast-m2-a and isocast-m2-b (8 cores).
-- Build hosts need CMake for bundled libopus and aws-lc-sys (Homebrew on Macs; VS-bundled on exon-desk); no lane-private venv is needed. (2026-10-23)
 - Auto keeps a lane on its host and skips hosts running a hardware job. Lanes live in `~/isocast-builds/<lane>`; nice 15.
 - Nothing starts below 40 GB free (m2-a had 43 GB on 2026-10-22; use `remote-build.sh prune`).
 - Exit codes: 255 unreachable, 3 disk guard, 75 lane lock, 76 hardware job, 69 no free host.
@@ -172,13 +168,6 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 
 ## 6. Gotchas that still bite
 
-- 2026-10-22: the native WebRTC prototype uses `whep_offer` / `whep_close` on a dedicated local or
-  authenticated R1 connection, not an HTTP endpoint. Keep that Client alive. str0m's received H.264 is
-  Annex B, unlike `frames`' avcC/AVCC records. The local desktop keeps `shared_frames`; see
-  `docs/server-protocol.md` for the native media contract and unqualified areas.
-- 2026-10-22: program Opus inherits `record/mix.rs::MIX_DELAY` (200 ms). Fast video packet arrival is
-  not synchronized display/playback latency; desktop audio/video playout still needs clock alignment.
-
 - 2026-10-11: macOS ties privacy grants to the bundle id plus the signing identity. Re-sign isocastd after every build, or grants and Keychain reads break.
 - 2026-10-15: A grant made in System Settings while isocastd runs reaches only processes started later. Restart the engine; "Quit & Reopen" doesn't restart it.
 - 2026-10-15: macOS 27 attributes the bundled engine's permissions to the outer Isocast.app. System Settings lists "Isocast", not the engine.
@@ -216,6 +205,15 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 - 2026-10-18: WGC `CreateForWindow` fails with E_INVALIDARG on WS_EX_NOACTIVATE windows. `TryGetNextFrame` returns S_OK plus null when no frame is ready.
 - 2026-10-22: Windows DNS-SD answers a new browse from a cache that keeps dead engines for about 4,000 s. Treat browse results as hints until a resolve answers.
 - 2026-10-22: GPU-backed private commit is not physical RAM. Claim CPU or RAM wins only from workloads matched against OBS. `ISOCAST_SOCKET` sets the `.logs` path; `ISOCAST_LOG_DIR` is ignored.
+- 2026-10-23: Server-first Windows measurements exclude isocast-ui and all preview viewers; the
+  matched private OBS has Enable Preview off. AAC combined worker transactions preserve the existing
+  packet/admission bounds and skip redundant synchronous-MFT probes. Native MF equivalence tests pass;
+  measured AAC worker switch-ins fell from ~406–411/s to ~103–104/s. Headless n=3 family CPU medians
+  were 12.17→11.17% at1080p and 8.68→7.37% at4K (one core); corresponding preview-off OBS medians
+  were17.10/16.54% in the AAC cohort. Both tools produced ~40 distinct decoded fps/output from the
+  unchanged fixture despite60 encoded fps; do not equate zero reported drops with zero pixel repeats.
+  `ISOCAST_CPU_AAC_BASELINE=1` selects the old transaction path for A/B only. Evidence and deferred
+  client/other-engine patches: `/Volumes/IsocastBuild/windows-perf/scratch/REPORT.md`.
 - 2026-10-22: Windows native previews use transactional DirectComposition surfaces beneath Slint's
   premultiplied visual (one GPU copy on the existing DX12 queue through an On12 wrapper). The monitor
   ring must be native too, below selection; a Slint ring paints over its outline and handles.
@@ -239,21 +237,6 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   The zero-drop bar is the test Macs' (no `--hosted`).
 - 2026-10-22: macOS 15 `AVAssetWriterInput appendSampleBuffer:` before `startSessionAtSourceTime:` returns YES; macOS
   26 throws. The pixel-buffer adaptor throws on both, as does any append on a writer that never started writing.
-
-- 2026-10-22: Mac server baseline (ISO-25, `0c1da2aa`, exonbook M4 Max): matched headless
-  1080p60 program + 1080p60 ISO, HEVC70/no B-frames/AAC256, n=3 interleaved, zero repeats/drops
-  in both apps: Isocast family CPU 43.80% vs OBS 97.16% of one core, RSS 208 vs 1192 MiB.
-  Family includes daemon/OBS, descendants and VT services attributed by launch interval (not authoritative
-  OS client ownership). The older Mac “half CPU” benchmark was already headless but did not match ISO
-  outputs. The new three-output 1080/4K cohorts overload OBS: report unique pictures and shortened ISO
-  durations beside CPU, never credit repeats as delivered work. Evidence: mac-perf/scratch/REPORT.md.
-  The AAC workspace-reuse candidate's paired A/B showed no demonstrated aggregate CPU improvement;
-  do not attribute differences between later, unpaired cohorts to that allocation change.
-- 2026-10-22: Preview demand audit (ISO-25): cold headless recording with an off-air scene staged
-  produces zero shared/H.264-monitor/scene-feed/Studio-preview renders; only the recording program
-  runs at 60 fps. Subscriber-created workers already provide demand control. Existing compositor/scene
-  demand has a 3s grace after the last request, and the daemon's `frames` status label lasts 15s for
-  idle shutdown; neither label nor recording GPU work proves an unwatched preview renderer.
 
 ## 7. Open decisions and waiting on Ryan
 

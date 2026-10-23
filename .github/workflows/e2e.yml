@@ -61,7 +61,7 @@ jobs:
         run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
       - name: Build release engine
         # The CLI too: the frame oracle reads a scene feed with it (masks B5).
-        run: cargo build --locked --release -p isocast-daemon -p isocast-cli --bins --examples
+        run: cargo build --locked --release -p isocast-daemon -p isocast-cli
       - name: Diagnose timers, process policy, Metal and compositor pacing
         timeout-minutes: 11
         continue-on-error: true

@@ -139,28 +139,6 @@ fn local_hung_up(stream: &LocalStream) -> bool {
     windows::hung_up(stream)
 }
 
-#[cfg(all(test, unix))]
-mod readiness_tests {
-    use super::*;
-    use std::io::{Read, Write};
-
-    #[test]
-    fn readiness_does_not_consume_bytes_and_observes_eof() {
-        let (left, mut right) = LocalStream::pair().unwrap();
-        let mut left = Stream::Local(left);
-        assert!(!readable(&left).unwrap());
-        right.write_all(b"x").unwrap();
-        assert!(readable(&left).unwrap());
-        let mut byte = [0];
-        left.read_exact(&mut byte).unwrap();
-        assert_eq!(byte, *b"x");
-        assert!(!readable(&left).unwrap());
-        drop(right);
-        assert!(readable(&left).unwrap());
-        assert!(hung_up(&left));
-    }
-}
-
 #[cfg(windows)]
 pub fn peer_pid(stream: &Stream) -> io::Result<u32> {
     match stream {
@@ -172,39 +150,11 @@ pub fn peer_pid(stream: &Stream) -> io::Result<u32> {
     }
 }
 
-/// Whether data or EOF can be read without blocking; does not consume it.
+#[cfg(windows)]
 pub fn readable(stream: &Stream) -> io::Result<bool> {
     match stream {
-        Stream::Local(stream) => local_readable(stream),
+        Stream::Local(stream) => windows::readable(stream),
         Stream::Tls(stream) => Ok(stream.readable()),
-    }
-}
-
-#[cfg(windows)]
-fn local_readable(stream: &LocalStream) -> io::Result<bool> {
-    windows::readable(stream)
-}
-
-#[cfg(unix)]
-fn local_readable(stream: &LocalStream) -> io::Result<bool> {
-    use std::os::fd::AsRawFd;
-    let mut byte = 0u8;
-    // SAFETY: a one-byte, non-consuming peek into a valid local buffer.
-    let read = unsafe {
-        libc::recv(
-            stream.as_raw_fd(),
-            (&raw mut byte).cast(),
-            1,
-            libc::MSG_PEEK | libc::MSG_DONTWAIT,
-        )
-    };
-    if read >= 0 {
-        return Ok(true);
-    }
-    let error = io::Error::last_os_error();
-    match error.kind() {
-        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => Ok(false),
-        _ => Err(error),
     }
 }
 

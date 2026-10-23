@@ -75,9 +75,6 @@ impl GovernorSettings {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct GovernorStatus {
-    /// Active WebRTC program viewers; expendable before recording.
-    #[serde(default)]
-    pub remote_viewers: u32,
     pub enabled: bool,
     pub bottleneck: Option<String>,
     pub reason: String,
@@ -103,7 +100,6 @@ pub struct GovernorStatus {
 impl Default for GovernorStatus {
     fn default() -> Self {
         Self {
-            remote_viewers: 0,
             enabled: true,
             bottleneck: None,
             reason: "At requested quality".into(),
