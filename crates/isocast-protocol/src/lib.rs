@@ -29,6 +29,7 @@ pub mod machine;
 pub mod manifest;
 mod mask;
 pub mod obs;
+pub mod openrpc;
 pub mod optimize;
 pub mod platform_text;
 pub mod plugin;

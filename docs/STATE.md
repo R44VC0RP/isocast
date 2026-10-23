@@ -31,6 +31,10 @@ A new capability needs all of these:
 4. a CLI command with `--json` and an MCP tool, both in isocast-cli;
 5. regenerated reference docs.
 
+2026-10-22: the published method contract is generated with `isocast api spec --json` into
+`docs/openrpc.json`; `scripts/reference-docs.py --check` verifies currency. A new method also needs its
+result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the protocol tests).
+
 - `isocast-protocol`: setup document (TOML/JSON), validation, schema, API types, caller policy, `platform_text` wording.
 - `isocast-engine`: portable engine: shared clock, wgpu compositor, audio mix, recording, governor, the `Platform` trait.
 - `isocast-daemon`: `isocastd` and its dispatcher. `platform.rs` picks the platform (macOS, Windows, else the stub);
@@ -73,6 +77,7 @@ A new capability needs all of these:
 - Keep ≥ 20 GB free (92 GB on 2026-10-22). Old lanes' reports are in `archive/lanes-2026-10-22/`.
 
 **Build hosts** (`scripts/remote-build.sh`): exonbook (M4 Max, 14 cores), isocast-m2-a and isocast-m2-b (8 cores).
+- Build hosts need CMake for bundled libopus and aws-lc-sys (Homebrew on Macs; VS-bundled on exon-desk); no lane-private venv is needed. (2026-10-23)
 - Auto keeps a lane on its host and skips hosts running a hardware job. Lanes live in `~/isocast-builds/<lane>`; nice 15.
 - Nothing starts below 40 GB free (m2-a had 43 GB on 2026-10-22; use `remote-build.sh prune`).
 - Exit codes: 255 unreachable, 3 disk guard, 75 lane lock, 76 hardware job, 69 no free host.
@@ -166,6 +171,13 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 - Windows packaging (Inno, WinSparkle) is in releasing.md. Authenticode and publication aren't set up yet.
 
 ## 6. Gotchas that still bite
+
+- 2026-10-22: the native WebRTC prototype uses `whep_offer` / `whep_close` on a dedicated local or
+  authenticated R1 connection, not an HTTP endpoint. Keep that Client alive. str0m's received H.264 is
+  Annex B, unlike `frames`' avcC/AVCC records. The local desktop keeps `shared_frames`; see
+  `docs/server-protocol.md` for the native media contract and unqualified areas.
+- 2026-10-22: program Opus inherits `record/mix.rs::MIX_DELAY` (200 ms). Fast video packet arrival is
+  not synchronized display/playback latency; desktop audio/video playout still needs clock alignment.
 
 - 2026-10-11: macOS ties privacy grants to the bundle id plus the signing identity. Re-sign isocastd after every build, or grants and Keychain reads break.
 - 2026-10-15: A grant made in System Settings while isocastd runs reaches only processes started later. Restart the engine; "Quit & Reopen" doesn't restart it.

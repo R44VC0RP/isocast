@@ -141,7 +141,56 @@ WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 
-Rust crates (527)
+Opus encoder
+============
+
+Program WebRTC audio uses libopus (https://opus-codec.org), bundled by libopus_sys.
+Copyright 2001-2023 Xiph.Org, Skype Limited, Octasic,
+                    Jean-Marc Valin, Timothy B. Terriberry,
+                    CSIRO, Gregory Maxwell, Mark Borgerding,
+                    Erik de Castro Lopo, Mozilla, Amazon
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+- Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+- Neither the name of Internet Society, IETF or IETF Trust, nor the
+names of specific contributors, may be used to endorse or promote
+products derived from this software without specific prior written
+permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
+OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Opus is subject to the royalty-free patent licenses which are
+specified at:
+
+Xiph.Org Foundation:
+https://datatracker.ietf.org/ipr/1524/
+
+Microsoft Corporation:
+https://datatracker.ietf.org/ipr/1914/
+
+Broadcom Corporation:
+https://datatracker.ietf.org/ipr/1526/
+
+Rust crates (605)
 =================
 
 Crate, version, licence, link.
@@ -164,6 +213,15 @@ addr2line 0.26.1
 adler2 2.0.1
   0BSD OR MIT OR Apache-2.0
   https://github.com/oyvindln/adler2
+aead 0.5.2
+  MIT OR Apache-2.0
+  https://github.com/RustCrypto/traits
+aes 0.8.4
+  MIT OR Apache-2.0
+  https://github.com/RustCrypto/block-ciphers
+aes-gcm 0.10.3
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/AEADs
 aho-corasick 1.1.5
   Unlicense OR MIT
   https://github.com/BurntSushi/aho-corasick
@@ -209,18 +267,39 @@ arrayvec 0.7.8
 ash 0.38.0+1.3.281
   MIT OR Apache-2.0
   https://github.com/ash-rs/ash
+asn1-rs 0.7.2
+  MIT OR Apache-2.0
+  https://github.com/rusticata/asn1-rs.git
+asn1-rs-derive 0.6.0
+  MIT OR Apache-2.0
+  https://github.com/rusticata/asn1-rs.git
+asn1-rs-impl 0.2.0
+  MIT/Apache-2.0
+  https://github.com/rusticata/asn1-rs.git
 async-trait 0.1.92
   MIT OR Apache-2.0
   https://github.com/dtolnay/async-trait
 autocfg 1.5.1
   Apache-2.0 OR MIT
   https://github.com/cuviper/autocfg
+aws-lc-rs 1.18.2
+  ISC AND (Apache-2.0 OR ISC)
+  https://github.com/aws/aws-lc-rs
+aws-lc-sys 0.46.0
+  ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)
+  https://github.com/aws/aws-lc-rs
+base16ct 0.2.0
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/formats/tree/master/base16ct
 base64 0.22.1
   MIT OR Apache-2.0
   https://github.com/marshallpierce/rust-base64
 base64 0.23.1
   MIT OR Apache-2.0
   https://github.com/marshallpierce/rust-base64
+base64ct 1.8.3
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/formats
 bincode 2.0.1
   MIT
   https://github.com/bincode-org/bincode
@@ -278,6 +357,9 @@ bytes 1.12.1
 cc 1.8.0
   MIT OR Apache-2.0
   https://github.com/rust-lang/cc-rs
+ccm 0.5.0
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/AEADs/tree/master/ccm
 cexpr 0.6.0
   Apache-2.0/MIT
   https://github.com/jethrogb/rust-cexpr
@@ -293,9 +375,18 @@ cgl 0.3.2
 chacha20 0.10.2
   MIT OR Apache-2.0
   https://github.com/RustCrypto/stream-ciphers
+chacha20 0.9.1
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/stream-ciphers
+chacha20poly1305 0.10.1
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/AEADs/tree/master/chacha20poly1305
 chrono 0.4.45
   MIT OR Apache-2.0
   https://github.com/chronotope/chrono
+cipher 0.4.4
+  MIT OR Apache-2.0
+  https://github.com/RustCrypto/traits
 clang-sys 1.9.1
   Apache-2.0
   https://github.com/KyleMayes/clang-sys
@@ -314,6 +405,9 @@ clap_lex 1.1.1
 clru 0.6.3
   MIT
   https://github.com/marmeladema/clru-rs
+cmake 0.1.58
+  MIT OR Apache-2.0
+  https://github.com/rust-lang/cmake-rs
 cobs 0.3.0
   MIT OR Apache-2.0
   https://github.com/jamesmunns/cobs.rs
@@ -326,6 +420,9 @@ color_quant 1.1.0
 colorchoice 1.0.5
   MIT OR Apache-2.0
   https://github.com/rust-cli/anstyle.git
+combine 4.6.8
+  MIT
+  https://github.com/Marwes/combine
 const-field-offset 0.2.1
   MIT OR Apache-2.0
   https://github.com/slint-ui/slint
@@ -335,6 +432,9 @@ const-field-offset-macro 0.2.1
 const-oid 0.10.2
   Apache-2.0 OR MIT
   https://github.com/RustCrypto/formats
+const-oid 0.9.6
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/formats/tree/master/const-oid
 convert_case 0.10.0
   MIT
   https://github.com/rutrum/convert-case
@@ -410,6 +510,12 @@ cranelift-native 0.136.2
 cranelift-srcgen 0.136.2
   Apache-2.0 WITH LLVM-exception
   https://github.com/bytecodealliance/wasmtime
+crc 3.4.0
+  MIT OR Apache-2.0
+  https://github.com/mrhooray/crc-rs.git
+crc-catalog 2.5.0
+  MIT OR Apache-2.0
+  https://github.com/akhilles/crc-catalog.git
 crc32fast 1.5.2
   MIT OR Apache-2.0
   https://github.com/srijs/rust-crc32fast
@@ -428,12 +534,18 @@ crossbeam-epoch 0.9.21
 crossbeam-utils 0.8.23
   MIT OR Apache-2.0
   https://github.com/crossbeam-rs/crossbeam
+crypto-bigint 0.5.5
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/crypto-bigint
 crypto-common 0.1.7
   MIT OR Apache-2.0
   https://github.com/RustCrypto/traits
 crypto-common 0.2.2
   MIT OR Apache-2.0
   https://github.com/RustCrypto/traits
+ctr 0.9.2
+  MIT OR Apache-2.0
+  https://github.com/RustCrypto/block-modes
 ctrlc 3.5.2
   MIT/Apache-2.0
   https://github.com/Detegr/rust-ctrlc.git
@@ -458,6 +570,18 @@ data-encoding 2.11.1
 data-url 0.3.2
   MIT OR Apache-2.0
   https://github.com/servo/rust-url
+der 0.7.10
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/formats/tree/master/der
+der-parser 10.0.0
+  MIT OR Apache-2.0
+  https://github.com/rusticata/der-parser.git
+der_derive 0.7.3
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/formats/tree/master/der/derive
+deranged 0.5.9
+  MIT OR Apache-2.0
+  https://github.com/jhpratt/deranged
 derive_arbitrary 1.5.0
   MIT OR Apache-2.0
   https://github.com/rust-fuzz/arbitrary
@@ -473,6 +597,9 @@ digest 0.10.7
 digest 0.11.3
   MIT OR Apache-2.0
   https://github.com/RustCrypto/traits
+dimpl 0.7.6
+  MIT OR Apache-2.0
+  https://github.com/algesten/dimpl
 dispatch 0.2.0
   MIT
   http://github.com/SSheldon/rust-dispatch
@@ -491,15 +618,24 @@ document-features 0.2.12
 dpi 0.1.2
   Apache-2.0 AND MIT
   https://github.com/rust-windowing/winit
+dunce 1.0.5
+  CC0-1.0 OR MIT-0 OR Apache-2.0
+  https://gitlab.com/kornelski/dunce
 dyn-clone 1.0.20
   MIT OR Apache-2.0
   https://github.com/dtolnay/dyn-clone
 easyfft 0.4.2
   MIT OR Apache-2.0
   https://github.com/WalterSmuts/easyfft
+ecdsa 0.16.9
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/signatures/tree/master/ecdsa
 either 1.19.0
   MIT OR Apache-2.0
   https://github.com/rayon-rs/either
+elliptic-curve 0.13.8
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/traits/tree/master/elliptic-curve
 embedded-io 0.4.0
   MIT OR Apache-2.0
   https://github.com/embassy-rs/embedded-io
@@ -527,6 +663,9 @@ fdeflate 0.3.7
 femtovg 0.27.0
   MIT OR Apache-2.0
   https://github.com/femtovg/femtovg
+ff 0.13.1
+  MIT/Apache-2.0
+  https://github.com/zkcrypto/ff
 field-offset 0.3.6
   MIT OR Apache-2.0
   https://github.com/Diggsey/rust-field-offset
@@ -539,6 +678,9 @@ find-msvc-tools 0.1.14
 fixed_decimal 0.7.2
   Unicode-3.0
   https://github.com/unicode-org/icu4x
+flagset 0.4.7
+  Apache-2.0
+  https://github.com/enarx/flagset
 flate2 1.1.10
   MIT OR Apache-2.0
   https://github.com/rust-lang/flate2-rs
@@ -578,6 +720,9 @@ foreign-types-shared 0.3.1
 form_urlencoded 1.2.2
   MIT OR Apache-2.0
   https://github.com/servo/rust-url
+fs_extra 1.3.0
+  MIT
+  https://github.com/webdesus/fs_extra
 futures 0.3.34
   MIT OR Apache-2.0
   https://github.com/rust-lang/futures-rs
@@ -614,9 +759,15 @@ generic_singleton 0.5.3
 getrandom 0.2.17
   MIT OR Apache-2.0
   https://github.com/rust-random/getrandom
+getrandom 0.3.4
+  MIT OR Apache-2.0
+  https://github.com/rust-random/getrandom
 getrandom 0.4.3
   MIT OR Apache-2.0
   https://github.com/rust-random/getrandom
+ghash 0.5.1
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/universal-hashes
 gif 0.14.2
   MIT OR Apache-2.0
   https://github.com/image-rs/image-gif
@@ -644,6 +795,9 @@ gpu-allocator 0.28.0
 grid 1.0.1
   MIT
   https://github.com/becheran/grid
+group 0.13.0
+  MIT/Apache-2.0
+  https://github.com/zkcrypto/group
 half 2.7.1
   MIT OR Apache-2.0
   https://github.com/VoidStarKat/half-rs
@@ -788,6 +942,12 @@ imgref 1.12.3
 indexmap 2.14.2
   Apache-2.0 OR MIT
   https://github.com/indexmap-rs/indexmap
+inout 0.1.4
+  MIT OR Apache-2.0
+  https://github.com/RustCrypto/utils
+is 0.11.1
+  MIT OR Apache-2.0
+  https://github.com/algesten/str0m
 is_terminal_polyfill 1.70.2
   MIT OR Apache-2.0
   https://github.com/polyfill-rs/is_terminal_polyfill
@@ -833,6 +993,9 @@ libloading 0.8.9
 libm 0.2.16
   MIT
   https://github.com/rust-lang/compiler-builtins
+libopus_sys 0.3.3
+  MIT
+  https://github.com/cijiugechu/libopus_sys.git
 linebender_resource_handle 0.1.1
   Apache-2.0 OR MIT
   https://github.com/linebender/raw_resource_handle
@@ -914,9 +1077,18 @@ nnnoiseless 0.5.2
 nom 7.1.3
   MIT
   https://github.com/Geal/nom
+nom 8.0.0
+  MIT
+  https://github.com/rust-bakery/nom
+num-bigint 0.4.8
+  MIT OR Apache-2.0
+  https://github.com/rust-num/num-bigint
 num-complex 0.4.6
   MIT OR Apache-2.0
   https://github.com/rust-num/num-complex
+num-conv 0.2.2
+  MIT OR Apache-2.0
+  https://github.com/jhpratt/num-conv
 num-integer 0.1.47
   MIT OR Apache-2.0
   https://github.com/rust-num/num-integer
@@ -1022,12 +1194,27 @@ objc2-web-kit 0.3.2
 object 0.40.0
   Apache-2.0 OR MIT
   https://github.com/gimli-rs/object
+oid-registry 0.8.1
+  MIT OR Apache-2.0
+  https://github.com/rusticata/oid-registry.git
 once_cell 1.21.4
   MIT OR Apache-2.0
   https://github.com/matklad/once_cell
+opaque-debug 0.3.1
+  MIT OR Apache-2.0
+  https://github.com/RustCrypto/utils
+opus2 0.4.0
+  MIT/Apache-2.0
+  https://github.com/cijiugechu/opus2
 ordered-float 5.5.0
   MIT
   https://github.com/reem/rust-ordered-float
+p256 0.13.2
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/elliptic-curves/tree/master/p256
+p384 0.13.1
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/elliptic-curves/tree/master/p384
 parking_lot 0.12.5
   MIT OR Apache-2.0
   https://github.com/Amanieu/parking_lot
@@ -1046,6 +1233,9 @@ parley_data 0.11.1
 pastey 0.2.3
   MIT OR Apache-2.0
   https://github.com/as1100k/pastey
+pem-rfc7468 0.7.0
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/formats/tree/master/pem-rfc7468
 percent-encoding 2.3.2
   MIT OR Apache-2.0
   https://github.com/servo/rust-url/
@@ -1067,15 +1257,24 @@ pin-utils 0.1.1
 pin-weak 1.1.0
   MIT
   https://github.com/sixtyfpsui/pin-weak
+pkcs8 0.10.2
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/formats/tree/master/pkcs8
 pkg-config 0.3.34
   MIT OR Apache-2.0
   https://github.com/rust-lang/pkg-config-rs
 png 0.18.1
   MIT OR Apache-2.0
   https://github.com/image-rs/image-png
+poly1305 0.8.0
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/universal-hashes
 polycool 0.4.0
   MIT OR Apache-2.0
   https://github.com/linebender/kurbo
+polyval 0.6.2
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/universal-hashes
 portable-atomic 1.15.0
   Apache-2.0 OR MIT
   https://github.com/taiki-e/portable-atomic
@@ -1085,6 +1284,12 @@ postcard 1.1.3
 potential_utf 0.1.6
   Unicode-3.0
   https://github.com/unicode-org/icu4x
+powerfmt 0.2.1
+  MIT OR Apache-2.0
+  https://github.com/jhpratt/powerfmt
+ppv-lite86 0.2.21
+  MIT OR Apache-2.0
+  https://github.com/cryptocorrosion/cryptocorrosion
 presser 0.3.1
   MIT OR Apache-2.0
   https://github.com/EmbarkStudios/presser
@@ -1094,6 +1299,9 @@ prettyplease 0.2.37
 primal-check 0.3.4
   MIT OR Apache-2.0
   https://github.com/huonw/primal
+primeorder 0.13.6
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/elliptic-curves/tree/master/primeorder
 proc-macro-crate 3.5.0
   MIT OR Apache-2.0
   https://github.com/bkchr/proc-macro-crate
@@ -1124,10 +1332,19 @@ quote 1.0.47
 rand 0.10.3
   MIT OR Apache-2.0
   https://github.com/rust-random/rand
+rand 0.9.5
+  MIT OR Apache-2.0
+  https://github.com/rust-random/rand
+rand_chacha 0.9.0
+  MIT OR Apache-2.0
+  https://github.com/rust-random/rand
 rand_core 0.10.1
   MIT OR Apache-2.0
   https://github.com/rust-random/rand_core
 rand_core 0.6.4
+  MIT OR Apache-2.0
+  https://github.com/rust-random/rand
+rand_core 0.9.5
   MIT OR Apache-2.0
   https://github.com/rust-random/rand
 rangemap 1.8.0
@@ -1145,6 +1362,9 @@ rayon 1.12.0
 rayon-core 1.13.0
   MIT OR Apache-2.0
   https://github.com/rayon-rs/rayon
+rcgen 0.14.10
+  MIT OR Apache-2.0
+  https://github.com/rustls/rcgen
 read-fonts 0.37.0
   MIT OR Apache-2.0
   https://github.com/googlefonts/fontations
@@ -1178,6 +1398,9 @@ renderdoc-sys 1.1.0
 resvg 0.48.1
   Apache-2.0 OR MIT
   https://github.com/linebender/resvg
+rfc6979 0.4.0
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/signatures/tree/master/rfc6979
 rgb 0.8.53
   MIT
   https://github.com/kornelski/rust-rgb
@@ -1220,6 +1443,9 @@ rustc_version 0.4.1
 rustfft 6.4.1
   MIT OR Apache-2.0
   https://github.com/ejmahler/RustFFT
+rusticata-macros 4.1.0
+  MIT/Apache-2.0
+  https://github.com/rusticata/rusticata-macros.git
 rustix 1.1.5
   Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
   https://github.com/bytecodealliance/rustix
@@ -1247,6 +1473,12 @@ scoped-tls-hkt 0.1.5
 scopeguard 1.2.0
   MIT OR Apache-2.0
   https://github.com/bluss/scopeguard
+sctp-proto 0.10.7
+  MIT OR Apache-2.0
+  https://github.com/algesten/sctp-proto
+sec1 0.7.3
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/formats/tree/master/sec1
 security-framework 3.7.0
   MIT OR Apache-2.0
   https://github.com/kornelski/rust-security-framework
@@ -1280,6 +1512,9 @@ serde_path_to_error 0.1.20
 serde_spanned 1.1.2
   MIT OR Apache-2.0
   https://github.com/toml-rs/toml
+sha1 0.10.7
+  MIT OR Apache-2.0
+  https://github.com/RustCrypto/hashes
 sha1 0.11.0
   MIT OR Apache-2.0
   https://github.com/RustCrypto/hashes
@@ -1292,6 +1527,9 @@ shlex 1.3.0
 shlex 2.0.1
   MIT OR Apache-2.0
   https://github.com/comex/rust-shlex
+signature 2.2.0
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/traits/tree/master/signature
 simd-adler32 0.3.10
   MIT
   https://github.com/mcountryman/simd-adler32
@@ -1361,12 +1599,24 @@ spin_on 0.1.1
 spirv 0.4.0+sdk-1.4.341.0
   Apache-2.0
   https://github.com/gfx-rs/rspirv
+spki 0.7.3
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/formats/tree/master/spki
 stable_deref_trait 1.2.1
   MIT OR Apache-2.0
   https://github.com/storyyeller/stable_deref_trait
 static_assertions 1.1.0
   MIT OR Apache-2.0
   https://github.com/nvzqz/static-assertions-rs
+str0m 0.24.1
+  MIT OR Apache-2.0
+  https://github.com/algesten/str0m
+str0m-proto 0.7.0
+  MIT OR Apache-2.0
+  https://github.com/algesten/str0m
+str0m-rust-crypto 0.6.0
+  MIT OR Apache-2.0
+  https://github.com/algesten/str0m
 strength_reduce 0.2.4
   MIT OR Apache-2.0
   http://github.com/ejmahler/strength_reduce
@@ -1397,6 +1647,9 @@ syn 2.0.119
 syn 3.0.8
   MIT OR Apache-2.0
   https://github.com/dtolnay/syn
+synstructure 0.13.2
+  MIT
+  https://github.com/mystor/synstructure
 synstructure 0.14.0
   MIT
   https://github.com/mystor/synstructure
@@ -1427,6 +1680,15 @@ thiserror 2.0.21
 thiserror-impl 2.0.21
   MIT OR Apache-2.0
   https://github.com/dtolnay/thiserror
+time 0.3.55
+  MIT OR Apache-2.0
+  https://github.com/time-rs/time
+time-core 0.1.9
+  MIT OR Apache-2.0
+  https://github.com/time-rs/time
+time-macros 0.2.32
+  MIT OR Apache-2.0
+  https://github.com/time-rs/time
 tiny-skia 0.12.0
   BSD-3-Clause
   https://github.com/linebender/tiny-skia
@@ -1514,6 +1776,12 @@ unicode-width 0.2.2
 unicode-xid 0.2.6
   MIT OR Apache-2.0
   https://github.com/unicode-rs/unicode-xid
+universal-hash 0.5.1
+  MIT OR Apache-2.0
+  https://github.com/RustCrypto/traits
+untrusted 0.7.1
+  ISC
+  https://github.com/briansmith/untrusted
 untrusted 0.9.0
   ISC
   https://github.com/briansmith/untrusted
@@ -1670,12 +1938,24 @@ write-fonts 0.50.0
 writeable 0.6.4
   Unicode-3.0
   https://github.com/unicode-org/icu4x
+x25519-dalek 2.0.1
+  BSD-3-Clause
+  https://github.com/dalek-cryptography/curve25519-dalek/tree/main/x25519-dalek
+x509-cert 0.2.5
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/formats/tree/master/x509-cert
+x509-parser 0.18.1
+  MIT OR Apache-2.0
+  https://github.com/rusticata/x509-parser.git
 xattr 1.6.1
   MIT OR Apache-2.0
   https://github.com/Stebalien/xattr
 xmlwriter 0.1.0
   MIT
   https://github.com/RazrFalcon/xmlwriter
+yasna 0.6.0
+  MIT OR Apache-2.0
+  https://github.com/qnighy/yasna.rs
 yazi 0.2.1
   Apache-2.0 OR MIT
   https://github.com/dfrg/yazi
@@ -1701,6 +1981,9 @@ zerofrom-derive 0.1.8
   Unicode-3.0
   https://github.com/unicode-org/icu4x
 zeroize 1.9.1
+  Apache-2.0 OR MIT
+  https://github.com/RustCrypto/utils
+zeroize_derive 1.5.0
   Apache-2.0 OR MIT
   https://github.com/RustCrypto/utils
 zerotrie 0.2.5

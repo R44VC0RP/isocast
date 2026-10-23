@@ -17,6 +17,160 @@ static MAIN_ACTIVE: AtomicBool = AtomicBool::new(false);
 static VERTICAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PREVIEW: AtomicU32 = AtomicU32::new(0);
 static MONITOR_DEMAND: AtomicU32 = AtomicU32::new(0);
+static REMOTE_VIEWERS: AtomicU32 = AtomicU32::new(0);
+
+/// A bounded viewer admission, released on every exit path.
+pub struct RemoteViewer(u64);
+
+/// One victim per continuous protected-output pressure episode. Keep the
+/// victim id after it leaves so other viewers cannot cascade out behind it.
+#[derive(Default)]
+struct RemoteViewers {
+    next: u64,
+    live: Vec<u64>,
+    pressure_until: u64,
+    victim: Option<u64>,
+}
+
+impl RemoteViewers {
+    fn observe(&mut self, protected: bool, pressure_until: u64, now: u64) {
+        if !protected {
+            self.pressure_until = 0;
+            self.victim = None;
+            return;
+        }
+        let continuing = self.pressure_until > now;
+        self.pressure_until = self.pressure_until.max(pressure_until);
+        if self.pressure_until <= now {
+            self.victim = None;
+        } else if !continuing {
+            self.victim = self.live.last().copied();
+        }
+    }
+
+    fn acquire(
+        &mut self,
+        protected: bool,
+        pressure_until: u64,
+        now: u64,
+    ) -> Result<u64, &'static str> {
+        self.observe(protected, pressure_until, now);
+        if self.pressure_until > now {
+            return Err(
+                "new viewers are suspended while a recording, stream or replay is under pressure",
+            );
+        }
+        if self.live.len() >= 3 {
+            return Err("all 3 viewer slots are in use");
+        }
+        let id = self.next;
+        self.next += 1;
+        self.live.push(id);
+        Ok(id)
+    }
+
+    fn should_shed(&mut self, id: u64, protected: bool, pressure_until: u64, now: u64) -> bool {
+        self.observe(protected, pressure_until, now);
+        self.victim == Some(id)
+    }
+
+    fn release(&mut self, id: u64) {
+        self.live.retain(|viewer| *viewer != id);
+    }
+}
+
+fn remote_viewers() -> &'static Mutex<RemoteViewers> {
+    static VIEWERS: OnceLock<Mutex<RemoteViewers>> = OnceLock::new();
+    VIEWERS.get_or_init(Mutex::default)
+}
+
+fn viewer_pressure_until(now: u64) -> u64 {
+    let auxiliary_until = FRAME_PRESSURE.load(Ordering::Acquire);
+    if FULL_FRAME_BUDGETS.load(Ordering::Acquire) > 0 || crate::record::pressure::snapshot().0 > 0 {
+        // Native stalls can flap per frame. Require a quiet five seconds
+        // before another victim; reuse (do not double) the auxiliary tail.
+        auxiliary_until.max(now.saturating_add(5000))
+    } else {
+        auxiliary_until
+    }
+}
+
+#[cfg(test)]
+mod remote_viewer_tests {
+    use super::RemoteViewers;
+
+    #[test]
+    fn sheds_newest_once_per_protected_pressure_episode() {
+        let mut viewers = RemoteViewers::default();
+        let oldest = viewers.acquire(true, 0, 0).unwrap();
+        let middle = viewers.acquire(true, 0, 0).unwrap();
+        let newest = viewers.acquire(true, 0, 0).unwrap();
+        assert!(viewers.acquire(true, 0, 0).is_err());
+        // The oldest worker can poll first; it must select the newest, not itself.
+        assert!(!viewers.should_shed(oldest, true, 5100, 100));
+        assert!(!viewers.should_shed(middle, true, 5100, 100));
+        assert!(viewers.should_shed(newest, true, 5100, 100));
+        viewers.release(newest);
+        // Clear -> pressed within the hold is the same episode, not a cascade.
+        assert!(!viewers.should_shed(middle, true, 0, 110));
+        assert!(!viewers.should_shed(middle, true, 5120, 120));
+        assert!(!viewers.should_shed(oldest, true, 5120, 120));
+        assert!(viewers.acquire(true, 0, 130).is_err());
+        // Only a new episode can shed the next newest survivor.
+        assert!(!viewers.should_shed(middle, true, 0, 5120));
+        assert!(!viewers.should_shed(oldest, true, 10130, 5130));
+        assert!(viewers.should_shed(middle, true, 10130, 5130));
+    }
+
+    #[test]
+    fn idle_pressure_neither_sheds_nor_blocks_reconnects() {
+        let mut viewers = RemoteViewers::default();
+        let first = viewers.acquire(false, 5000, 0).unwrap();
+        assert!(!viewers.should_shed(first, false, 5000, 0));
+        assert!(viewers.should_shed(first, true, 5100, 100));
+        viewers.release(first);
+        // A retained auxiliary-refusal timer does not make an idle engine protected.
+        let reconnected = viewers.acquire(false, 5100, 120).unwrap();
+        assert!(!viewers.should_shed(reconnected, false, 5100, 120));
+    }
+}
+
+impl RemoteViewer {
+    pub fn acquire() -> Result<Self, &'static str> {
+        let mut viewers = remote_viewers().lock();
+        let now = clock_ms();
+        let id = viewers.acquire(
+            ACTIVE.load(Ordering::Relaxed),
+            viewer_pressure_until(now),
+            now,
+        )?;
+        REMOTE_VIEWERS.store(viewers.live.len() as u32, Ordering::Release);
+        NOTICES.fetch_add(1, Ordering::Release);
+        Ok(Self(id))
+    }
+
+    /// Shed only the newest viewer in this protected-output pressure episode.
+    /// Idle auxiliary refusals must not evict viewers or prevent reconnects.
+    pub fn should_shed(&self) -> bool {
+        let mut viewers = remote_viewers().lock();
+        let now = clock_ms();
+        viewers.should_shed(
+            self.0,
+            ACTIVE.load(Ordering::Relaxed),
+            viewer_pressure_until(now),
+            now,
+        )
+    }
+}
+
+impl Drop for RemoteViewer {
+    fn drop(&mut self) {
+        let mut viewers = remote_viewers().lock();
+        viewers.release(self.0);
+        REMOTE_VIEWERS.store(viewers.live.len() as u32, Ordering::Release);
+        NOTICES.fetch_add(1, Ordering::Release);
+    }
+}
 static ISO: AtomicU32 = AtomicU32::new(100);
 static ISO_ALLOWED: AtomicBool = AtomicBool::new(false);
 // A separate, bounded emergency overlay cannot be overwritten by a slower
@@ -96,6 +250,7 @@ fn shared() -> &'static Mutex<Shared> {
 
 pub fn status() -> GovernorStatus {
     let mut status = shared().lock().status.clone();
+    status.remote_viewers = REMOTE_VIEWERS.load(Ordering::Acquire);
     status.native_iso_percent = crate::record::pressure::snapshot().1;
     status
 }
@@ -914,6 +1069,7 @@ impl Controller {
         self.previous = limits;
         self.held = held;
         let mut next = GovernorStatus {
+            remote_viewers: REMOTE_VIEWERS.load(Ordering::Acquire),
             enabled: settings.enabled,
             bottleneck: cause.map(str::to_string),
             reason,

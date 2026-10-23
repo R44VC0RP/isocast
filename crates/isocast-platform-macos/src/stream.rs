@@ -53,7 +53,7 @@ use objc2_video_toolbox::{
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
     kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
     kVTEncodeFrameOptionKey_ForceKeyFrame, kVTH264EntropyMode_CABAC,
-    kVTProfileLevel_H264_High_AutoLevel,
+    kVTProfileLevel_H264_ConstrainedHigh_AutoLevel, kVTProfileLevel_H264_High_AutoLevel,
     kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
     kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
@@ -226,10 +226,27 @@ impl H264Encoder {
         };
         let rate_control = unsafe {
             set(kVTCompressionPropertyKey_RealTime, CFBoolean::new(true))?;
-            set(
-                kVTCompressionPropertyKey_ProfileLevel,
-                kVTProfileLevel_H264_High_AutoLevel,
-            )?;
+            if spec.low_latency {
+                if let Err(error) = set(
+                    kVTCompressionPropertyKey_ProfileLevel,
+                    kVTProfileLevel_H264_ConstrainedHigh_AutoLevel,
+                ) {
+                    set(
+                        kVTCompressionPropertyKey_ProfileLevel,
+                        kVTProfileLevel_H264_High_AutoLevel,
+                    )
+                    .context("the H.264 monitor's High profile fallback also failed")?;
+                    static WARNED: std::sync::Once = std::sync::Once::new();
+                    WARNED.call_once(|| {
+                        isocast_diagnostics::diagnostic!("warn"; "H.264 monitor: Constrained High unavailable ({error}); using High profile");
+                    });
+                }
+            } else {
+                set(
+                    kVTCompressionPropertyKey_ProfileLevel,
+                    kVTProfileLevel_H264_High_AutoLevel,
+                )?;
+            }
             set(
                 kVTCompressionPropertyKey_AllowFrameReordering,
                 CFBoolean::new(false),

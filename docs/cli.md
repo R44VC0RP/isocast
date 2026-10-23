@@ -156,6 +156,8 @@ the API and in MCP ([mcp-tools.md](mcp-tools.md)).
   - [`isocast vcam stop`](#isocast-vcam-stop)
   - [`isocast vcam status`](#isocast-vcam-status)
   - [`isocast vcam remove`](#isocast-vcam-remove)
+- [`isocast api`](#isocast-api)
+  - [`isocast api spec`](#isocast-api-spec)
 - [`isocast debug`](#isocast-debug)
   - [`isocast debug on`](#isocast-debug-on)
   - [`isocast debug off`](#isocast-debug-off)
@@ -229,6 +231,7 @@ Commands:
   roots          The folders other computers can use (remote control and obs-websocket clients): see and, on this machine, choose them
   projector      Projectors: the program, the preview, a scene, a source or a multiview grid, full screen on a display or in a window (the app shows them)
   vcam           Feed a picture to Isocast Virtual Camera (extension approval required once)
+  api            The engine API itself: its methods, params and results
   debug          Developer mode, for testing a build locally: verbose logs of every API call and component, and frame timing traces while recording
   watch          Print events from isocastd as they happen, until Ctrl-C
   frame          Save the live engine's newest frame of the program (the default), studio mode's preview, or a video source as a JPEG. Starts the engine if it isn't running
@@ -2795,6 +2798,35 @@ Usage: isocast vcam remove [OPTIONS]
 Options:
       --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
       --json             
+  -h, --help             Print help
+```
+
+## isocast api
+
+```text
+The engine API itself: its methods, params and results
+
+Usage: isocast api [OPTIONS] <COMMAND>
+
+Commands:
+  spec  Describe this build's method table as an OpenRPC 1.3.2 document (JSON Schema draft-07): every method's params and result. Without --json, list each method and what it returns. Needs no engine
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+  -h, --help             Print help
+```
+
+## isocast api spec
+
+```text
+Describe this build's method table as an OpenRPC 1.3.2 document (JSON Schema draft-07): every method's params and result. Without --json, list each method and what it returns. Needs no engine
+
+Usage: isocast api spec [OPTIONS]
+
+Options:
+      --engine <ENGINE>  Engine to control: local, a paired name/id, or host[:port]. Also ISOCAST_ENGINE
+      --json             Print the OpenRPC document
   -h, --help             Print help
 ```
 

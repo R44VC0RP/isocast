@@ -37,6 +37,12 @@ serde_json = "1.0.154"
 # a network caller's browser URL is checked on the host a browser sees, and
 # loaded in that normalized form (docs/remote-engines.md, decision 26).
 url = "2.5.8"
+# Sans-I/O WebRTC: the authenticated R1 connection carries SDP, never HTTP.
+str0m = { version = "=0.24.1", default-features = false, features = ["rust-crypto"] }
+
+[dev-dependencies]
+isocast-client = { path = "../isocast-client" }
+opus2 = { version = "=0.4.0", features = ["bundled"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 isocast-platform-macos = { path = "../isocast-platform-macos" }

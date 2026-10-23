@@ -300,12 +300,14 @@ pub struct ProgramTap<F: Clone> {
     pub missed_audio_chunks: Arc<AtomicU64>,
     video: Arc<Routes<F>>,
     audio: Arc<Routes<F>>,
-    keys: (u64, u64),
+    keys: (Option<u64>, u64),
 }
 
 impl<F: Clone> Drop for ProgramTap<F> {
     fn drop(&mut self) {
-        self.video.remove(self.keys.0);
+        if let Some(key) = self.keys.0 {
+            self.video.remove(key);
+        }
         self.audio.remove(self.keys.1);
     }
 }
@@ -326,6 +328,19 @@ impl<P: Platform> ProgramTapSource<P> {
         depth: usize,
         missed_audio_chunks: Arc<AtomicU64>,
     ) -> Result<ProgramTap<P::Frame>> {
+        self.tap_inner(depth, missed_audio_chunks, true)
+    }
+
+    pub(crate) fn tap_audio(&self, depth: usize) -> Result<ProgramTap<P::Frame>> {
+        self.tap_inner(depth, Arc::new(AtomicU64::new(0)), false)
+    }
+
+    fn tap_inner(
+        &self,
+        depth: usize,
+        missed_audio_chunks: Arc<AtomicU64>,
+        video: bool,
+    ) -> Result<ProgramTap<P::Frame>> {
         let inner = &self.0;
         // Serialize acquiring the canvas with update's refusal check.
         let _state = inner.state.lock();
@@ -336,14 +351,16 @@ impl<P: Platform> ProgramTapSource<P> {
         let missed_frames = Arc::new(AtomicU64::new(0));
         let (tx, packets) = super::tap::channel(depth, missed_frames.clone());
         let keys = (
-            output.program_video.add_counted(
-                super::tap::Output::Live(tx.clone()),
-                0,
-                from,
-                None,
-                Some(missed_frames.clone()),
-                false,
-            ),
+            video.then(|| {
+                output.program_video.add_counted(
+                    super::tap::Output::Live(tx.clone()),
+                    0,
+                    from,
+                    None,
+                    Some(missed_frames.clone()),
+                    false,
+                )
+            }),
             inner.program_audio.add_counted(
                 super::tap::Output::Live(tx),
                 0,
@@ -403,6 +420,7 @@ struct Inner<P: Platform> {
     program_meter: Arc<StereoMeter>,
     /// Monitors' H.264 streams, by what they show.
     frame_streams: Arc<frame_stream::Streams>,
+    opus_stream: Mutex<Option<std::sync::Weak<super::opus_stream::Shared>>>,
     monitor: Arc<MonitorSlot>,
     /// The newest levels measured.
     levels: Mutex<Vec<AudioLevel>>,
@@ -902,6 +920,7 @@ impl<P: Platform> Engine<P> {
             program_audio: Arc::default(),
             program_meter: Arc::default(),
             frame_streams: Arc::default(),
+            opus_stream: Mutex::default(),
             monitor: Arc::new(Mutex::new(monitor)),
             levels: Mutex::new(Vec::new()),
             loudest: Critical::new(BTreeMap::new()),
@@ -1621,6 +1640,11 @@ impl<P: Platform> Engine<P> {
         self.program_tap_source()
             .tap(depth, Arc::new(AtomicU64::new(0)))
             .expect("the main canvas always exists")
+    }
+
+    /// The program mix as shared 48 kHz stereo Opus, without retaining video surfaces.
+    pub fn opus(&self) -> Result<super::OpusFeed> {
+        super::opus_stream::watch(&self.inner.opus_stream, self.program_tap_source())
     }
 
     pub(crate) fn program_tap_source(&self) -> ProgramTapSource<P> {

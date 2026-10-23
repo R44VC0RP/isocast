@@ -35,6 +35,7 @@ mod frame_stream;
 mod iso_frames;
 mod mix;
 mod monitor;
+mod opus_stream;
 mod pause;
 pub mod pressure;
 mod program;
@@ -50,6 +51,7 @@ pub use engine::{Engine, EngineEvent, JpegFrame, OnEngineEvent, ProgramTap};
 pub(crate) use engine::{ProgramTapSource, canvas_off};
 pub use engine::{compositor_canvas, compositor_worker};
 pub use frame_stream::{FeedRate, FrameFeed};
+pub use opus_stream::{OpusFeed, OpusPacket};
 pub use shared_frames::{DEFAULT_SLOTS, SharedControl, SharedEvent, SharedFeed};
 
 use crate::source::{AUDIO_CHUNK, FrameSlot};

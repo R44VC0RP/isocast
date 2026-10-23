@@ -112,6 +112,7 @@ pub const REMOTE_SETTINGS: &str = "who may control the engine's computer is deci
 /// exhaustively, so every new method must be placed here.
 pub fn local_only_reason(method: &Method) -> Option<&'static str> {
     match method {
+        Method::WhepOffer(_) | Method::WhepClose => None,
         Method::Shutdown | Method::ShutdownIfIdle => Some(
             "it quits the engine for everyone using it, ending any recording or stream, and \
              nothing on the network can start it again",

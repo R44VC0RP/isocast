@@ -31,6 +31,8 @@ resvg = { version = "0.48.1", default-features = false, features = ["text", "sys
 # TLS for RTMPS streaming, using the OS's own TLS and trust store
 # (Security.framework on macOS, SChannel on Windows, OpenSSL on Linux).
 native-tls = "0.2.18"
+# Program monitoring over WebRTC; bundled libopus, not audiopus_sys (unmaintained).
+opus2 = { version = "=0.4.0", features = ["bundled"] }
 # Plugins' audio filters: WebAssembly components (Apache-2.0 WITH
 # LLVM-exception), compiled with Cranelift; no WASI, async, GC or cache.
 wasmtime = { version = "=49.0.2", default-features = false, features = ["cranelift", "component-model", "runtime", "std"] }

@@ -622,6 +622,47 @@ pub enum Method {
     /// or go back to the defaults. Only on this machine. Returns
     /// [`FolderRoots`](crate::roots::FolderRoots).
     FolderRootsSet(crate::roots::FolderRootsSetParams),
+    /// Negotiate a program WebRTC viewer on this dedicated connection.
+    /// Returns [`WhepAnswer`]. The connection owns the viewer; closing it
+    /// (including remote revocation) stops media, never recording.
+    WhepOffer(WhepOfferParams),
+    /// End this connection's WebRTC viewer (WHEP DELETE semantics).
+    /// Returns null, then closes the connection.
+    WhepClose,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WhepOfferParams {
+    /// SDP offer, at most 64 KiB, with gathered host candidates and recvonly
+    /// H.264 video and Opus audio. No STUN/TURN servers or trickle ICE.
+    pub sdp: String,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct WhepAnswer {
+    /// Sendonly SDP answer, with all engine host candidates.
+    pub sdp: String,
+    /// Opaque connection-owned viewer id; not a credential or another
+    /// connection's authority to close it.
+    pub session: String,
+}
+
+impl std::fmt::Debug for WhepOfferParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WhepOfferParams")
+            .field("sdp", &"[omitted]")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for WhepAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WhepAnswer")
+            .field("sdp", &"[omitted]")
+            .field("session", &self.session)
+            .finish()
+    }
 }
 
 /// Every method's name, as requests and plugin grants spell it
