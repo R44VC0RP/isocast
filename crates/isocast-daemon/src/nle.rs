@@ -1653,4 +1653,49 @@ mod tests {
         let iso = model.media.iter().find(|m| m.source == "bars").unwrap();
         assert_eq!(iso.frames, 150, "the ISO's length on its frame grid");
     }
+
+    #[test]
+    fn a_recovered_file_without_counters_keeps_its_stored_frames() {
+        // A file recovered after a crash has a duration and its stored frame
+        // count but no dropped_frames: its length is the frames it holds
+        // (100), not its duration on the frame grid (150), so its angle ends
+        // where its pictures do.
+        let manifest: SessionManifest = serde_json::from_value(json!({
+            "version": 1, "setup": "e2e", "status": "complete",
+            "started_at": "2026-10-22T12:00:00+00:00", "host_time_ns": 0,
+            "duration_seconds": 5.0,
+            "files": [
+                {"path": "iso.mov", "source": "bars", "kind": "test_pattern", "width": 1280,
+                 "height": 720, "fps": 30, "audio": [], "start_offset_seconds": 0.0,
+                 "duration_seconds": 5.0, "frames": 100},
+                {"path": "program.mov", "source": PROGRAM, "kind": "program", "width": 1280,
+                 "height": 720, "fps": 30, "audio": [], "start_offset_seconds": 0.0,
+                 "duration_seconds": 5.0, "frames": 150, "repeated_frames": 0,
+                 "dropped_frames": 0, "audio_dropouts": 0}
+            ],
+            "errors": []
+        }))
+        .unwrap();
+        let model = build(
+            "e2e",
+            &[TakeClip {
+                id: "c1".into(),
+                folder: PathBuf::from("/take"),
+                manifest,
+                in_frame: 0,
+                frames: 150,
+                fps: 30,
+                angle: "bars".into(),
+                crop: None,
+            }],
+        )
+        .unwrap();
+        let iso = model.media.iter().find(|m| m.source == "bars").unwrap();
+        assert_eq!(iso.frames, 100, "the recovered file's stored frames");
+        let bars = model.video.iter().find(|t| t.source == "bars").unwrap();
+        let covered: u64 = bars.items.iter().map(|i| i.length).sum();
+        assert_eq!(covered, 100, "its angle ends with its last stored frame");
+        let program = model.media.iter().find(|m| m.source == PROGRAM).unwrap();
+        assert_eq!(program.frames, 150);
+    }
 }

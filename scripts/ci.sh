@@ -21,8 +21,8 @@
 #                "Engine E2E" and "Windows")
 #   --allow-workflow-changes
 #                publish even though the snapshot's .github/ differs from
-#                public main's (otherwise refused: a candidate's workflows
-#                run with the public repo's token and settings)
+#                this repo's main (otherwise refused: a candidate's
+#                workflows run with the public repo's token and settings)
 #
 # The snapshot is `git archive` of the candidate's tree, so .gitattributes
 # export-ignore applies (also with --worktree, through a temporary index),
@@ -87,26 +87,29 @@ fi
 
 mkdir -p "$scratch"
 scratch="$(cd "$scratch" && pwd)"
-lock="$scratch/.ci-lock"
-if ! mkdir "$lock" 2>/dev/null; then
-    holder="$(cat "$lock/pid" 2>/dev/null || true)"
-    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
-        echo "ci: pid $holder holds $lock (lane $lane is publishing)" >&2
-        exit 1
-    fi
-    echo "ci: taking over a stale lock (pid ${holder:-unknown} is gone)" >&2
-    rm -f "$lock/pid"
-    rmdir "$lock"
-    mkdir "$lock"
-fi
-echo $$ >"$lock/pid"
+# One publisher per lane: an flock(2) on fd 9, held until this script and
+# every child that inherited fd 9 exit, so a crash never leaves it stale.
+# (macOS has no flock(1); python3's fcntl takes the lock on the shared open
+# file, which outlives the python process.)
+lock="$scratch/.ci.lock"
+exec 9>>"$lock"
+locked=0
+python3 -c '
+import fcntl, sys
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(3)' || locked=$?
+case "$locked" in
+    0) ;;
+    3) echo "ci: another ci.sh holds $lock (lane $lane is publishing)" >&2; exit 1 ;;
+    *) echo "ci: couldn't lock $lock with python3 (exit $locked)" >&2; exit 1 ;;
+esac
 staging=
 tmp="$(mktemp -d "$scratch/tmp.XXXXXX")"
 cleanup() {
     [ -z "$staging" ] || rm -rf "${staging:?}"
     rm -rf "${tmp:?}"
-    rm -f "$lock/pid"
-    rmdir "$lock" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -131,6 +134,24 @@ if [ "$merge_main" = 1 ] && [ -n "$main_ref" ] && ! g merge-base --is-ancestor "
     }
     export_tree="${export_tree%%$'\n'*}"
     label="$label merged with main ${main_ref:0:12}"
+fi
+
+# Workflows run with the public repo's token and settings: a candidate may
+# change them only on purpose. The baseline is this repo's main (what merges
+# and publishes next), not public main, which can lag behind it.
+if [ -z "$main_ref" ]; then
+    echo "ci: no local main to compare .github against" >&2
+    exit 1
+fi
+if [ "$(g rev-parse "$export_tree:.github" 2>/dev/null)" != "$(g rev-parse "$main_ref:.github" 2>/dev/null)" ]; then
+    g diff --stat "$main_ref" "$export_tree" -- .github >&2
+    if [ "$allow_workflows" = 1 ]; then
+        echo "ci: .github/ differs from main (allowed by --allow-workflow-changes)" >&2
+    else
+        echo "ci: refused, the candidate's .github/ differs from main ${main_ref:0:12};" \
+             "pass --allow-workflow-changes if that is intended" >&2
+        exit 1
+    fi
 fi
 
 # 2. Export it: export-ignore applies (attributes come from the tree).
@@ -173,16 +194,6 @@ tree="$(GIT_INDEX_FILE="$tmp/public-index" GIT_WORK_TREE="$staging" pg add -A --
     GIT_INDEX_FILE="$tmp/public-index" GIT_WORK_TREE="$staging" pg write-tree)"
 rm -rf "${staging:?}"
 staging=
-if [ "$(pg rev-parse "$tree:.github" 2>/dev/null)" != "$(pg rev-parse "$public_main:.github" 2>/dev/null)" ]; then
-    pg diff --stat "$public_main" "$tree" -- .github >&2
-    if [ "$allow_workflows" = 1 ]; then
-        echo "ci: .github/ differs from public main (allowed by --allow-workflow-changes)" >&2
-    else
-        echo "ci: refused, the snapshot's .github/ differs from public main ${public_main:0:12};" \
-             "pass --allow-workflow-changes if that is intended" >&2
-        exit 1
-    fi
-fi
 echo "ci: $label -> tree $tree on public main ${public_main:0:12} -> https://github.com/$repo/tree/$branch"
 if [ "$dry_run" = 1 ]; then
     rm -rf "${scratch:?}/dry-run"
@@ -229,9 +240,24 @@ for w in "${workflows[@]}"; do
 done
 printf '%s\n' "${runs[@]}" >"$result/run-ids.txt"
 
-# Each run gets 120 minutes from when it started (queueing behind other
+# Each run gets 120 minutes from when its first job started (a run's own
+# startedAt is when it was queued, so waiting for a runner behind other
 # lanes doesn't count); the whole wait ends 150 minutes after the push, so
-# a run that never starts times out too.
+# a run that never starts times out too. GitHub's API blips are retried.
+gh_retry() {  # gh_retry FILE COMMAND…: FILE only ever holds a whole answer
+    local file="$1" attempt
+    shift
+    for attempt in 1 2 3 4 5; do
+        if "$@" >"$file.new"; then
+            mv "$file.new" "$file"
+            return 0
+        fi
+        echo "ci: '$*' failed (attempt $attempt of 5); retrying" >&2
+        sleep $((attempt * 10))
+    done
+    rm -f "$file.new"
+    return 1
+}
 pending=("${runs[@]}")
 while [ ${#pending[@]} -gt 0 ]; do
     if [ $((SECONDS - pushed_at)) -gt 9600 ]; then
@@ -251,16 +277,20 @@ while [ ${#pending[@]} -gt 0 ]; do
         read -r state conclusion running_s < <(python3 -c '
 import datetime, json, sys
 r = json.load(open(sys.argv[1]))
-started = r.get("startedAt") or ""
-age = -1
-if started and not started.startswith("0001"):
-    t = datetime.datetime.fromisoformat(started.replace("Z", "+00:00"))
-    age = int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds())
+starts = [j.get("startedAt") or "" for j in r.get("jobs") or []]
+starts = [datetime.datetime.fromisoformat(t.replace("Z", "+00:00")) for t in starts
+          if t and not t.startswith("0001")]
+age = -1  # no job has started yet
+if starts:
+    age = int((datetime.datetime.now(datetime.timezone.utc) - min(starts)).total_seconds())
 print(r["status"], r["conclusion"] or "-", age)' "$result/$run.json")
         if [ "$state" = completed ]; then
-            gh run view "$run" --repo "$repo" >"$result/$run-summary.txt"
+            gh_retry "$result/$run-summary.txt" gh run view "$run" --repo "$repo" ||
+                echo "ci: couldn't save run $run's summary (its conclusion is in $run.json)" >&2
             echo "ci: run $run finished: $conclusion"
-            [ "$conclusion" = success ] || gh run view "$run" --repo "$repo" --log-failed >"$result/$run-failed.log" || true
+            # Only a failed run has failed logs (a cancelled or skipped one has none).
+            [ "$conclusion" != failure ] ||
+                gh_retry "$result/$run-failed.log" gh run view "$run" --repo "$repo" --log-failed || true
         elif [ "$running_s" -gt 7200 ] || [ $((SECONDS - pushed_at)) -gt 9000 ]; then
             echo "ci: run $run timed out (running ${running_s}s, ${state}); not cancelled:" \
                  "https://github.com/$repo/actions/runs/$run" >&2

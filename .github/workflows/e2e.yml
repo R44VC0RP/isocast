@@ -59,6 +59,10 @@ jobs:
           restore-keys: ffmpeg-${{ runner.os }}-${{ runner.arch }}-
       - name: FFmpeg
         run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+      - name: Frame oracle selftest (fixture, decoder and the oracle's own rules)
+        # The hosted loss rules pass VM losses but still fail a broken frame,
+        # a frozen source, a 2-frame A/V offset and a missing ISO.
+        run: python3 scripts/e2e.py --selftest --work "$RUNNER_TEMP/selftest"
       - name: Build release engine
         # The CLI too: the frame oracle reads a scene feed with it (masks B5).
         run: cargo build --locked --release -p isocast-daemon -p isocast-cli --bins --examples
