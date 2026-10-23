@@ -351,7 +351,8 @@ pub fn doctor_writing<P: Platform>(
                 let own = formats
                     .iter()
                     .any(|(f, _, audio)| f == id && audio.is_some());
-                rate += file(*video, &iso.encoder, channels(&iso.audio_for(source, own)));
+                let encoder = iso.encoder_for(source);
+                rate += file(*video, &encoder, channels(&iso.audio_for(source, own)));
             }
         }
     }

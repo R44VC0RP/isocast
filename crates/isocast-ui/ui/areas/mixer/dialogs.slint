@@ -165,7 +165,7 @@ component AudioTableRow inherits GroupRow {
                 text: "ISO";
                 small: true;
                 faint: !MixerArea.iso-enabled;
-                tooltip: MixerArea.iso-enabled ? "Recorded with every ISO file" : "ISO recording is off (Settings → Output)";
+                tooltip: MixerArea.iso-enabled ? "Recorded with every ISO file" : "ISO recording is off (Settings → Recording)";
                 checked: root.audio.iso;
                 toggled(on) => { MixerArea.set-iso(root.audio.id, on); }
             }

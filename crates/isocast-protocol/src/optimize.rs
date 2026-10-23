@@ -223,7 +223,7 @@ pub fn prepare(setup: &Setup, goal: Goal, stream: Option<&StreamChoice>) -> (Set
     if goal.records() {
         let program = &mut out.recording.program;
         program.enabled = true;
-        quality_encoder(&mut program.encoder);
+        quality_encoder(&mut program.encoder.codec, &mut program.encoder.quality);
         let iso = &mut out.recording.iso;
         if iso.sources.is_empty() {
             iso.sources = setup
@@ -248,7 +248,7 @@ pub fn prepare(setup: &Setup, goal: Goal, stream: Option<&StreamChoice>) -> (Set
             }
         }
         iso.enabled = !iso.sources.is_empty();
-        quality_encoder(&mut iso.encoder);
+        quality_encoder(&mut iso.encoder.codec, &mut iso.encoder.quality);
     } else if out.recording.iso.enabled {
         out.recording.iso.enabled = false;
         notes.push(
@@ -300,17 +300,17 @@ pub fn prepare(setup: &Setup, goal: Goal, stream: Option<&StreamChoice>) -> (Set
 
 /// Favour quality: HEVC at the High preset, keeping ProRes or a better
 /// preset.
-fn quality_encoder(encoder: &mut crate::Encoder) {
-    if !matches!(encoder.codec, Codec::H264 | Codec::Hevc) {
+fn quality_encoder(codec: &mut Codec, quality: &mut EncoderQuality) {
+    if !matches!(codec, Codec::H264 | Codec::Hevc) {
         return;
     }
-    encoder.codec = Codec::Hevc;
+    *codec = Codec::Hevc;
     let better = matches!(
-        encoder.quality,
+        quality,
         EncoderQuality::Preset(QualityPreset::VeryHigh | QualityPreset::Incredible)
-    ) || matches!(encoder.quality, EncoderQuality::Value(v) if v > 60);
+    ) || matches!(quality, EncoderQuality::Value(v) if *v > 60);
     if !better {
-        encoder.quality = EncoderQuality::Preset(QualityPreset::High);
+        *quality = EncoderQuality::Preset(QualityPreset::High);
     }
 }
 

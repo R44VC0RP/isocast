@@ -1073,7 +1073,7 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
                 id.clone(),
                 setup.source(id).expect("validated").kind.label(),
                 (width, height, fps),
-                &iso.encoder,
+                iso.encoder_for(setup.source(id).expect("validated")),
                 {
                     let mut audio = iso.audio_for(
                         setup.source(id).expect("validated"),
@@ -1095,7 +1095,7 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
             PROGRAM.to_string(),
             PROGRAM,
             (width, height, setup.canvas.fps),
-            &program.encoder,
+            program.encoder.clone(),
             program_audio.clone(),
         ));
     }
@@ -1114,7 +1114,7 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
                 canvas.program().to_string(),
                 PROGRAM,
                 (width, height, extra.canvas.fps),
-                &program.encoder,
+                program.encoder.clone(),
                 program_audio.clone(),
             ));
         }
@@ -1163,7 +1163,7 @@ fn plan_take(setup: &Setup, formats: &Formats, folder: &Path, number: u32) -> Re
                             width,
                             height,
                             fps,
-                            encoder: encoder.clone(),
+                            encoder,
                         },
                         audio: audio_tracks(&audio),
                         created: now.into(),

@@ -73,7 +73,7 @@ pub const STATES: &[&str] = &[
 const TABS: &[(&str, &str, &str, &str, &str)] = &[
     (
         "output",
-        "Output",
+        "Recording",
         "drive",
         "Recording",
         "Where takes are written, how good they look, and which files each take makes.",
@@ -464,12 +464,11 @@ impl Area for Settings {
         })));
         // What makes the files (shown after the codec: Paper's Encoder row).
         // The engine machine's encoder (decision 22).
-        let mac = if crate::engine::is_local() {
-            cfg!(target_os = "macos")
+        let engine = if engine_is_mac() {
+            "Apple VideoToolbox"
         } else {
-            crate::engine::os() == isocast_protocol::hello::EngineOs::Macos
+            ""
         };
-        let engine = if mac { "Apple VideoToolbox" } else { "" };
         area.set_codecs(model(
             CODECS
                 .iter()
@@ -1091,7 +1090,10 @@ impl Settings {
             "program_codec" | "iso_codec" => {
                 let which = field.trim_end_matches("_codec");
                 let mut encoder = json!({"codec": value});
-                if value == "h264" {
+                // H.264 is 8-bit only; an ISO depth left out stays out
+                // (it is 8), and a set 10 becomes 8.
+                let depth = self.draft_value(&["recording", which, "encoder", "bit_depth"]);
+                if value == "h264" && (which == "program" || depth.is_some_and(|d| d != 8)) {
                     encoder["bit_depth"] = json!(8);
                 }
                 // A codec MP4 can't hold (ProRes) takes MOV with it, as the
@@ -1111,6 +1113,16 @@ impl Settings {
                     return self.show(app);
                 }
                 json!({"recording": {which: {"encoder": {"container": value}}}})
+            }
+            // Colour Depth's greyed 10 (arrow keys reach it): not for
+            // H.264 or an engine that captures screens in 8 bits.
+            "iso_depth"
+                if value == "10"
+                    && (!engine_is_mac()
+                        || self.draft_value(&["recording", "iso", "encoder", "codec"])
+                            == Some(json!("h264"))) =>
+            {
+                return self.show(app);
             }
             "program_depth" | "iso_depth" => {
                 let which = field.trim_end_matches("_depth");
@@ -2122,9 +2134,25 @@ impl Settings {
         let iso_codec = codec(&iso["encoder"]);
         area.set_iso_codec(iso_codec.as_str().into());
         area.set_iso_container(iso["encoder"]["container"].as_str().unwrap_or("mov").into());
-        area.set_iso_depth(depth(&iso["encoder"]).into());
+        // Colour Depth: every ISO file's without one of its own. A set
+        // depth shows as set; left out it is 8, or 10 at the incredible
+        // HEVC preset.
+        let iso_depth = iso_depth_of(&iso["encoder"]);
+        area.set_iso_depth(iso_depth.to_string().into());
+        let ten_ok = iso_codec != "h264" && engine_is_mac();
+        area.set_iso_ten_ok(ten_ok);
+        area.set_iso_depth_note(
+            if iso_codec == "h264" {
+                "H.264 files are 8-bit only; HEVC records 10-bit."
+            } else if !engine_is_mac() {
+                "This engine captures screens in 8 bits only."
+            } else {
+                ""
+            }
+            .into(),
+        );
         area.set_iso_mp4_ok(mp4_ok(&iso_codec));
-        area.set_iso_shows_depth(shows_depth(&iso_codec));
+        area.set_iso_shows_depth(!prores_codec(&iso_codec));
         area.set_iso_filtered(iso["filtered"] == json!(true));
         let chosen: Vec<&str> = iso["sources"]
             .as_array()
@@ -3179,6 +3207,32 @@ fn read_setup(path: &str) -> Result<Value, String> {
         setup.resolve_paths(folder);
     }
     serde_json::to_value(setup).map_err(|err| err.to_string())
+}
+
+/// Whether the engine machine is a Mac, the one place screens are captured
+/// (and their ISO files written) in 10 bits.
+pub(crate) fn engine_is_mac() -> bool {
+    if crate::engine::is_local() {
+        cfg!(target_os = "macos")
+    } else {
+        crate::engine::os() == isocast_protocol::hello::EngineOs::Macos
+    }
+}
+
+/// The depth of ISO files without one of their own, from the setup's
+/// `recording.iso.encoder`: its `bit_depth` if set (8 stays 8 at the
+/// incredible preset); left out, 8, but 10 at the incredible HEVC preset,
+/// as the engine has it (`IsoEncoder::depth`).
+pub(crate) fn iso_depth_of(encoder: &Value) -> u64 {
+    encoder["bit_depth"].as_u64().unwrap_or(
+        if encoder["codec"].as_str().unwrap_or("hevc") == "hevc"
+            && encoder["quality"] == json!("incredible")
+        {
+            10
+        } else {
+            8
+        },
+    )
 }
 
 /// Whether `codec` (a setup name: "h264", "prores422_hq"…) can be

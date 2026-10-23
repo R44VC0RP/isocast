@@ -253,8 +253,13 @@ export global SettingsArea {
     in-out property <[IsoChoice]> iso-sources;
     in-out property <string> iso-codec;
     in-out property <string> iso-container;
+    // Colour Depth ("8", "10"): every ISO file's without one of its own
+    // (a source's Properties); whether this codec and engine take 10,
+    // and why not.
     in-out property <string> iso-depth;
     in-out property <bool> iso-shows-depth;
+    in-out property <bool> iso-ten-ok: true;
+    in-out property <string> iso-depth-note;
     in-out property <bool> iso-filtered;
     in-out property <[DropdownOption]> codecs;
     callback browse-folder();

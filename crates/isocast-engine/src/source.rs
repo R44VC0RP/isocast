@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use isocast_protocol::platform_text as wording;
 use isocast_protocol::{
-    CameraSource, MediaSource, Setup, SlideshowSource, SourceKind, TestPatternSource, TextSource,
-    ToneSource,
+    CameraSource, MediaSource, Setup, SlideshowSource, Source, SourceKind, TestPatternSource,
+    TextSource, ToneSource,
 };
 use parking_lot::{Condvar, Mutex};
 
@@ -719,6 +719,7 @@ fn open_native<P: Platform>(
         SourceKind::Display(display) => screen(
             platform,
             setup,
+            source,
             timeline,
             ScreenTarget::Display(&display.display),
             display.cursor,
@@ -726,6 +727,7 @@ fn open_native<P: Platform>(
         SourceKind::Window(window) => screen(
             platform,
             setup,
+            source,
             timeline,
             ScreenTarget::Window {
                 app: &window.app,
@@ -736,6 +738,7 @@ fn open_native<P: Platform>(
         SourceKind::Application(application) => screen(
             platform,
             setup,
+            source,
             timeline,
             ScreenTarget::Application {
                 app: &application.app,
@@ -890,13 +893,15 @@ fn open_native<P: Platform>(
 fn screen<P: Platform>(
     platform: &P,
     setup: &Setup,
+    source: &Source,
     timeline: &Arc<Timeline>,
     target: ScreenTarget<'_>,
     cursor: bool,
 ) -> Result<Opened<P>> {
     let slot = Arc::new(FrameSlot::new(timeline.clone()));
+    // Its depth follows its ISO file (`IsoRecording::captures_ten_bit`).
+    let ten_bit = setup.recording.iso.captures_ten_bit(source);
     // Screens have no frame rate of their own; they follow the canvas.
-    let ten_bit = setup.recording.iso.encoder.bit_depth == 10;
     let sink = slot_sink(&slot);
     let (capture, format) =
         platform.capture_screen(target, setup.canvas.fps, ten_bit, cursor, sink)?;

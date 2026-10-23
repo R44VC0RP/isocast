@@ -360,17 +360,24 @@ function StreamKeyRow({ stream, status }) {
 
 // ---------- Output ----------
 
-function EncoderRows({ encoder = {}, onChange }) {
+// `autoDepth` (ISO files): the depth can be left out, for the engine to
+// pick each file's ("Auto"); H.264 then gets 8 bits without a set depth.
+function EncoderRows({ encoder = {}, onChange, autoDepth = false }) {
   const codec = encoder.codec ?? "hevc";
   const prores = codec.startsWith("prores");
+  const depths = autoDepth
+    ? [["auto", "Auto"], [8, "8-bit"], [10, "10-bit"]]
+    : [[8, "8-bit"], [10, "10-bit"]];
+  const depth = encoder.bit_depth ?? (autoDepth ? "auto" : 8);
+  const toH264 = !autoDepth || (encoder.bit_depth != null && encoder.bit_depth !== 8);
   return html`
     <${Row} label="Encoder">
-      <div class="w-m"><${Select} value=${codec} options=${CODECS} onChange=${(c) => onChange({ codec: c, ...(c === "h264" ? { bit_depth: 8 } : {}) })} /></div>
+      <div class="w-m"><${Select} value=${codec} options=${CODECS} onChange=${(c) => onChange({ codec: c, ...(c === "h264" && toH264 ? { bit_depth: 8 } : {}) })} /></div>
     <//>
     <${Row} label="Recording Format">
       <${Segmented} value=${encoder.container ?? "mov"} options=${[["mov", "MOV"], ["mp4", "MP4"]]} onChange=${(container) => onChange({ container })} />
       ${!prores && codec !== "h264" &&
-      html`<${Segmented} value=${encoder.bit_depth ?? 8} options=${[[8, "8-bit"], [10, "10-bit"]]} onChange=${(bit_depth) => onChange({ bit_depth })} />`}
+      html`<${Segmented} value=${depth} options=${depths} onChange=${(bit_depth) => onChange({ bit_depth: bit_depth === "auto" ? null : bit_depth })} />`}
     <//>
   `;
 }
@@ -547,7 +554,7 @@ function OutputPage({ draft, set, sources }) {
             ${videoSources.length === 0 && html`<span class="dim">No video sources yet.</span>`}
           </div>
         <//>
-        <${EncoderRows} encoder=${iso.encoder} onChange=${(encoder) => setRec({ iso: { encoder } })} />
+        <${EncoderRows} encoder=${iso.encoder} autoDepth=${true} onChange=${(encoder) => setRec({ iso: { encoder } })} />
         <${Row} label="With Filters" hint="Record sources as the program shows them (filters applied) instead of as captured.">
           <${Switch} on=${!!iso.filtered} onChange=${(filtered) => setRec({ iso: { filtered } })} />
         <//>`}

@@ -35,10 +35,10 @@ use serde::{Deserialize, Serialize};
 use crate::obs::Unsupported;
 use crate::stream::StreamSettings;
 use crate::{
-    AudioSetup, Canvas, Encoder, IsoRecording, Issue, Keyframes, LoadError, ProgramRecording,
-    Recording, SETUP_VERSION, Scene, Setup, Source, Transition, VerticalCanvas, VerticalRecording,
-    default_iso_filename, default_keep_free_gb, default_program_filename, default_true,
-    default_vertical_height, default_vertical_width,
+    AudioSetup, Canvas, Encoder, IsoEncoder, IsoRecording, Issue, Keyframes, LoadError,
+    ProgramRecording, Recording, SETUP_VERSION, Scene, Setup, Source, Transition, VerticalCanvas,
+    VerticalRecording, default_iso_filename, default_keep_free_gb, default_program_filename,
+    default_true, default_vertical_height, default_vertical_width,
 };
 
 /// A scene collection or a profile.
@@ -327,7 +327,7 @@ pub struct ProfileIso {
     #[serde(default = "default_iso_filename")]
     pub filename: String,
     #[serde(default)]
-    pub encoder: Encoder,
+    pub encoder: IsoEncoder,
     /// Record sources and audio through their filters.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub filtered: bool,
@@ -1099,7 +1099,44 @@ mod tests {
         let (legacy, _) = example().into_parts("Default");
         assert!(vertical_profile.vertical.is_some());
         assert_eq!(Setup::from_parts(legacy, vertical_profile).vertical, None);
-        for setup in [example(), full, vertical] {
+        // An ISO depth left out stays out of the profile; a set one, 8
+        // included, stays set.
+        let (_, automatic) = example().into_parts("Default");
+        assert_eq!(automatic.recording.iso.encoder.bit_depth, None);
+        let iso_depth = |profile: &Profile| {
+            serde_json::to_value(profile).unwrap()["recording"]["iso"]["encoder"]
+                .get("bit_depth")
+                .cloned()
+        };
+        assert_eq!(iso_depth(&automatic), None);
+        let mut eight = example();
+        eight.recording.iso.encoder.bit_depth = Some(8);
+        let mut ten = example();
+        ten.recording.iso.encoder.bit_depth = Some(10);
+        assert_eq!(
+            iso_depth(&eight.clone().into_parts("Default").1),
+            Some(8.into())
+        );
+        // A source's own depth goes with the source, into the collection,
+        // under either ISO depth.
+        fn video(setup: &mut Setup) -> &mut crate::Source {
+            let source = setup.sources.iter_mut().find(|s| s.kind.has_video());
+            source.expect("example() has a video source")
+        }
+        video(&mut ten).encoder.bit_depth = Some(8);
+        let mut own_ten = example();
+        video(&mut own_ten).encoder.bit_depth = Some(10);
+        let (collection, profile) = own_ten.clone().into_parts("Default");
+        assert_eq!(iso_depth(&profile), None);
+        let collection = serde_json::to_value(&collection).unwrap();
+        assert!(
+            collection["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["encoder"] == serde_json::json!({ "bit_depth": 10 }))
+        );
+        for setup in [example(), full, vertical, eight, ten, own_ten] {
             let (collection, profile) = setup.clone().into_parts("Default");
             assert_eq!(profile.name, "Default");
             assert_eq!(collection.name, setup.name);

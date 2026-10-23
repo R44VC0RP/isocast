@@ -4531,7 +4531,7 @@
         "properties": {
           "bit_depth": {
             "default": 8,
-            "description": "8 or 10. 10-bit HEVC uses the Main 10 profile and captures displays\nin 10 bits, which avoids banding in gradients. ProRes is always\n10-bit; H.264 can only be 8-bit. The incredible HEVC preset promotes\n8 to 10, including the display capture format.",
+            "description": "8 or 10. 10-bit HEVC uses the Main 10 profile, which avoids banding\nin gradients. ProRes is always 10-bit; H.264 can only be 8-bit. The\nincredible HEVC preset promotes 8 to 10.",
             "format": "uint8",
             "maximum": 255,
             "minimum": 0,
@@ -4768,7 +4768,7 @@
         "properties": {
           "bit_depth": {
             "default": 8,
-            "description": "8 or 10. 10-bit HEVC uses the Main 10 profile and captures displays\nin 10 bits, which avoids banding in gradients. ProRes is always\n10-bit; H.264 can only be 8-bit. The incredible HEVC preset promotes\n8 to 10, including the display capture format.",
+            "description": "8 or 10. 10-bit HEVC uses the Main 10 profile, which avoids banding\nin gradients. ProRes is always 10-bit; H.264 can only be 8-bit. The\nincredible HEVC preset promotes 8 to 10.",
             "format": "uint8",
             "maximum": 255,
             "minimum": 0,
@@ -8732,6 +8732,88 @@
         ],
         "type": "object"
       },
+      "IsoEncoder": {
+        "additionalProperties": false,
+        "description": "The ISO files' encoder: [`Encoder`]'s fields, but `bit_depth` can be\nleft out (it then stays out when saved).",
+        "properties": {
+          "bit_depth": {
+            "description": "8 or 10, for every ISO file without a depth of its own (a source's\n`encoder.bit_depth`). 10-bit HEVC uses the Main 10 profile, which\navoids banding in gradients, and captures displays, windows and\napplications in 10 bits, at more encoder work and bigger files.\nProRes is always 10-bit; H.264 can only be 8-bit. A set 8 stays 8\neven at the incredible preset. Left out: 8, but 10 at incredible\nHEVC.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "codec": {
+            "$ref": "#/components/schemas/Codec"
+          },
+          "container": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Container"
+              }
+            ],
+            "default": "mov"
+          },
+          "quality": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EncoderQuality"
+              }
+            ],
+            "default": "high",
+            "description": "A named quality preset, or the original 1–100 constant quality.\nIgnored by ProRes, which is constant quality."
+          }
+        },
+        "required": [
+          "codec"
+        ],
+        "type": "object"
+      },
+      "IsoEncoderResult": {
+        "additionalProperties": false,
+        "description": "The ISO files' encoder: [`Encoder`]'s fields, but `bit_depth` can be\nleft out (it then stays out when saved).",
+        "properties": {
+          "bit_depth": {
+            "description": "8 or 10, for every ISO file without a depth of its own (a source's\n`encoder.bit_depth`). 10-bit HEVC uses the Main 10 profile, which\navoids banding in gradients, and captures displays, windows and\napplications in 10 bits, at more encoder work and bigger files.\nProRes is always 10-bit; H.264 can only be 8-bit. A set 8 stays 8\neven at the incredible preset. Left out: 8, but 10 at incredible\nHEVC.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "codec": {
+            "$ref": "#/components/schemas/Codec"
+          },
+          "container": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Container"
+              }
+            ],
+            "default": "mov"
+          },
+          "quality": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EncoderQuality"
+              }
+            ],
+            "default": "high",
+            "description": "A named quality preset, or the original 1–100 constant quality.\nIgnored by ProRes, which is constant quality."
+          }
+        },
+        "required": [
+          "codec",
+          "quality",
+          "container"
+        ],
+        "type": "object"
+      },
       "IsoRecording": {
         "additionalProperties": false,
         "description": "ISO (\"isolated\") recording: each listed source is written to its own file\nat its native resolution, on the same clock as the program recording.",
@@ -8753,11 +8835,10 @@
           "encoder": {
             "allOf": [
               {
-                "$ref": "#/components/schemas/Encoder"
+                "$ref": "#/components/schemas/IsoEncoder"
               }
             ],
             "default": {
-              "bit_depth": 8,
               "codec": "hevc",
               "container": "mov",
               "quality": "high"
@@ -8814,11 +8895,10 @@
           "encoder": {
             "allOf": [
               {
-                "$ref": "#/components/schemas/EncoderResult"
+                "$ref": "#/components/schemas/IsoEncoderResult"
               }
             ],
             "default": {
-              "bit_depth": 8,
               "codec": "hevc",
               "container": "mov",
               "quality": "high"
@@ -13527,11 +13607,10 @@
           "encoder": {
             "allOf": [
               {
-                "$ref": "#/components/schemas/Encoder"
+                "$ref": "#/components/schemas/IsoEncoder"
               }
             ],
             "default": {
-              "bit_depth": 8,
               "codec": "hevc",
               "container": "mov",
               "quality": "high"
@@ -13560,11 +13639,10 @@
           "encoder": {
             "allOf": [
               {
-                "$ref": "#/components/schemas/EncoderResult"
+                "$ref": "#/components/schemas/IsoEncoderResult"
               }
             ],
             "default": {
-              "bit_depth": 8,
               "codec": "hevc",
               "container": "mov",
               "quality": "high"
@@ -13681,7 +13759,6 @@
             "default": {
               "enabled": false,
               "encoder": {
-                "bit_depth": 8,
                 "codec": "hevc",
                 "container": "mov",
                 "quality": "high"
@@ -13735,7 +13812,6 @@
             "default": {
               "enabled": false,
               "encoder": {
-                "bit_depth": 8,
                 "codec": "hevc",
                 "container": "mov",
                 "quality": "high"
@@ -14415,7 +14491,6 @@
             "default": {
               "enabled": false,
               "encoder": {
-                "bit_depth": 8,
                 "codec": "hevc",
                 "container": "mov",
                 "quality": "high"
@@ -14513,7 +14588,6 @@
             "default": {
               "enabled": false,
               "encoder": {
-                "bit_depth": 8,
                 "codec": "hevc",
                 "container": "mov",
                 "quality": "high"
@@ -17761,6 +17835,14 @@
             },
             "type": "array"
           },
+          "encoder": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SourceEncoder"
+              }
+            ],
+            "description": "For video sources: how its own ISO file is encoded, over\n`recording.iso.encoder`. Left out, it follows the recording\nsettings."
+          },
           "filters": {
             "description": "For video sources: effect filters run on the picture, in order,\nwherever it is shown (ISO files keep it as captured).",
             "items": {
@@ -17783,6 +17865,23 @@
         "required": [
           "id"
         ],
+        "type": "object"
+      },
+      "SourceEncoder": {
+        "additionalProperties": false,
+        "description": "A video source's own ISO file encoding, over `recording.iso.encoder`.",
+        "properties": {
+          "bit_depth": {
+            "description": "8 or 10: this source's ISO file depth, over\n`recording.iso.encoder.bit_depth` (an 8 here stays 8 even at the\nincredible preset). 10-bit HEVC uses the Main 10 profile, which\navoids banding in gradients, at more encoder work and bigger files;\na display, window or application is then also captured in 10 bits.\nNeeds a 10-bit ISO codec (HEVC; ProRes is always 10-bit). Left out,\nthe file follows the recording settings.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "SourceMask": {
@@ -18239,6 +18338,14 @@
               "$ref": "#/components/schemas/AudioFilterResult"
             },
             "type": "array"
+          },
+          "encoder": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SourceEncoder"
+              }
+            ],
+            "description": "For video sources: how its own ISO file is encoded, over\n`recording.iso.encoder`. Left out, it follows the recording\nsettings."
           },
           "filters": {
             "description": "For video sources: effect filters run on the picture, in order,\nwherever it is shown (ISO files keep it as captured).",

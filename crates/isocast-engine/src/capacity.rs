@@ -60,9 +60,9 @@ impl VideoLoad {
 pub type Workload = Vec<VideoLoad>;
 
 /// The workload of recording `setup`, given each ISO source's size and
-/// rate (`None` if one isn't known): its ISO files, its program and, with
-/// a vertical canvas that records, the vertical program at that canvas's
-/// size and rate.
+/// rate (`None` if one isn't known): its ISO files (each at its own
+/// depth), its program and, with a vertical canvas that records, the
+/// vertical program at that canvas's size and rate.
 pub fn workload(
     setup: &Setup,
     iso_format: impl Fn(&str) -> Option<(u32, u32, u32)>,
@@ -72,7 +72,8 @@ pub fn workload(
     if iso.enabled {
         for id in &iso.sources {
             let (width, height, fps) = iso_format(id)?;
-            loads.push(VideoLoad::new(width, height, fps, &iso.encoder));
+            let encoder = iso.encoder_for(setup.source(id)?);
+            loads.push(VideoLoad::new(width, height, fps, &encoder));
         }
     }
     let program = &setup.recording.program;

@@ -857,13 +857,28 @@ export component OutputPage inherits SetPage {
         reset-label: "Put ISO Recording back as saved";
         reset => { SettingsArea.revert-group("iso"); }
         hint: SettingsArea.iso-on
-            ? "Each source switched on here is recorded to its own file, at its own size, on the program’s clock, with the audio chosen under it. Also in each source’s right-click menu."
+            ? "Each source switched on here is recorded to its own file, at its own size, on the program’s clock, with the audio chosen under it. Also in each source’s right-click menu.\n" + (SettingsArea.iso-shows-depth ? "Depth applies to all ISOs; Properties can override. 10-bit: more CPU, ~40% larger screen files. " + SettingsArea.iso-depth-note : "")
             : "Each source chosen below in its own file, at its own size, on the program’s clock.\nAlso in each source’s right-click menu.";
         SwitchRow {
             label: "Record ISO Files";
             place: SettingsArea.iso-on ? RowPlace.first : RowPlace.only;
             on <=> SettingsArea.iso-on;
             toggled(on) => { SettingsArea.set-flag("iso", on); }
+        }
+        if SettingsArea.iso-on && SettingsArea.iso-shows-depth: GroupRow {
+            label: "Screen / ISO Colour Depth";
+            Centred {
+                Segmented {
+                    small: true;
+                    options: [
+                        { value: "8", label: "8-bit · Smaller files" },
+                        { value: "10", label: "10-bit · Smoother gradients", disabled: !SettingsArea.iso-ten-ok },
+                    ];
+                    value: SettingsArea.iso-depth;
+                    label: "Screen / ISO Colour Depth";
+                    selected(value) => { SettingsArea.set-text("iso_depth", value); }
+                }
+            }
         }
         if SettingsArea.iso-on && SettingsArea.iso-sources.length == 0: GroupRow {
             label: "No video sources yet.";
@@ -909,8 +924,8 @@ export component OutputPage inherits SetPage {
             codec: SettingsArea.iso-codec;
             container: SettingsArea.iso-container;
             mp4-ok: SettingsArea.iso-mp4-ok;
-            depth: SettingsArea.iso-depth;
-            shows-depth: SettingsArea.iso-shows-depth;
+            // Its depth has a row of its own, Screen / ISO Colour Depth.
+            shows-depth: false;
             last: false;
         }
         if SettingsArea.iso-on: SwitchRow {
