@@ -65,9 +65,6 @@ impl Platform for LinuxPlatform {
     fn volume(&self, path: &Path) -> Result<Volume> {
         system::volume(path)
     }
-    fn same_volume(&self, left: &Path, right: &Path) -> Result<bool> {
-        system::same_volume(left, right)
-    }
     fn process_cpu_seconds(&self) -> Option<f64> {
         system::process_cpu_seconds()
     }

@@ -2,7 +2,6 @@
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -87,10 +86,6 @@ fn file_system(kind: u64) -> (&'static str, bool) {
     }
 }
 
-pub fn same_volume(left: &Path, right: &Path) -> Result<bool> {
-    Ok(std::fs::metadata(left)?.dev() == std::fs::metadata(right)?.dev())
-}
-
 fn process_ticks(text: &str) -> Option<u64> {
     // comm (field 2) may contain spaces and parentheses. Everything after
     // its LAST ')' has fixed columns, starting with state (field 3).
@@ -127,7 +122,6 @@ mod tests {
         assert!(process_cpu_seconds().is_some());
         assert!(machine().memory_gb > 0.0);
         assert!(volume(Path::new(".")).unwrap().free_bytes > 0);
-        assert!(same_volume(Path::new("."), Path::new(".")).unwrap());
     }
 
     #[test]
