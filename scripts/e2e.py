@@ -858,15 +858,24 @@ def scenario_webrtc(e, cfg, evidence):
             for index in range(count):
                 output = e.root / f"viewer-{count}-{index}.h264"
                 viewers.append((subprocess.Popen([str(e.webrtc_receiver), "6", str(output)],
-                    env=dict(e.env, ISOCAST_WEBRTC_FEEDBACK_TEST="1"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True), output))
+                    env=dict(e.env, ISOCAST_WEBRTC_FEEDBACK_TEST="1", ISOCAST_WEBRTC_AV_SYNC_TEST="1", ISOCAST_WEBRTC_SAME_CLOCK="1"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True), output))
             for process, output in viewers:
                 stdout, stderr = process.communicate(timeout=20)
+                output.with_suffix(".receiver.jsonl").write_text(stdout)
+                output.with_suffix(".receiver.log").write_text(stderr)
                 require(process.returncode == 0, f"WebRTC receiver failed: {stderr}")
-                result = json.loads(stdout)
+                measurements = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+                result = measurements[0]
+                result["av_sync"] = next(m["av_sync"] for m in measurements if "av_sync" in m)
+                result["sender_reports"] = next(m["av_sync_sender_reports"] for m in measurements if "av_sync_sender_reports" in m)
                 require(result["video_frames"] > 30 and result["decoded_audio_frames"] > RATE,
                         f"insufficient WebRTC media: {result}")
                 require(result["audio_peak"] > 0.001 and result["closed"],
                         f"program audio or session close failed: {result}")
+                # VM timing isn't a latency qualification. Physical Mac runs
+                # enforce the fast-input target; all runs verify SR/content sync.
+                if not evidence["capabilities"].get("hosted") and result.get("audio_age_ms_p50") is not None:
+                    require(result["audio_age_ms_p50"] < 60, f"monitor audio is still held: {result}")
                 decoded = ffmpeg("-xerror", "-i", output, "-f", "null", "-", timeout=30)
                 require(not decoded.stderr.strip(), f"WebRTC H.264 decode failed: {decoded.stderr.decode()}")
                 evidence["viewers"].append(result)
@@ -878,6 +887,42 @@ def scenario_webrtc(e, cfg, evidence):
             e.rpc("stop")
         manifest = until(lambda: finished(started["manifest"]), description="WebRTC take finalization")
         evidence.setdefault("files", []).extend(check_take(Path(started["manifest"]), manifest, evidence=evidence))
+
+
+    # A single offer must survive a real program-audio graph replacement.
+    # Keep this separate from steady-state flash/beep checks: retapping can
+    # legitimately omit a pulse while sources reopen.
+    e.rpc("engine", {"running": True})
+    viewer = subprocess.Popen([str(e.webrtc_receiver), "8"], env=e.env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        until(lambda: e.rpc("status")["governor"]["remote_viewers"] == 1,
+              seconds=5, description="viewer before audio source addition")
+        time.sleep(1)
+        changed = copy.deepcopy(cfg)
+        changed["sources"].append({"id": "monitor-extra-tone", "kind": "tone", "audio": {"muted": True}})
+        changed["recording"]["program"]["audio"].append("monitor-extra-tone")
+        e.apply(changed)
+        until(lambda: any(s["source"] == "monitor-extra-tone" and s["state"] == "running"
+                          for s in e.rpc("status")["engine"]["sources"]),
+              seconds=5, description="added monitor audio source running")
+        time.sleep(2)
+        require(e.rpc("status")["governor"]["remote_viewers"] == 1,
+                "audio source addition disconnected the viewer")
+        stdout, stderr = viewer.communicate(timeout=15)
+        (e.root / "viewer-source-add.jsonl").write_text(stdout)
+        (e.root / "viewer-source-add.log").write_text(stderr)
+        require(viewer.returncode == 0, f"source-add viewer failed: {stderr}")
+        result = json.loads(stdout)
+        require(result["closed"] and result["decoded_audio_frames"] > 5 * RATE
+                and result["video_frames"] > 90,
+                f"viewer did not retain signaling and media across source addition: {result}")
+        evidence["source_add_viewer"] = result
+    finally:
+        if viewer.poll() is None:
+            viewer.kill()
+            viewer.wait(timeout=5)
+        e.apply(cfg)
 
 
 def scenario_stream(e, cfg, evidence):

@@ -109,6 +109,9 @@ the desktop session through an interactive launch-agent bridge (needed for windo
   `gpu.lock`, and stops before you release it (delegator, 2026-10-22).
   GPU/encoder benchmarks and timing runs take `C:\isocast-dev\gpu.lock`. Network-only runs need neither. Release in a
   `finally`, bound the wait and the hold, never delete a lock file.
+- 2026-10-23: `windows-remote.sh` defaults `CMAKE_GENERATOR` to `Visual Studio 17 2022` for native dependencies
+  (libopus/aws-lc-sys). Its VS2022-bundled CMake cannot create the auto-detected VS18 2026 generator; explicit
+  caller overrides are preserved. This is per child command, not a host setting; hosted Windows CI is unchanged.
 - **Disk:** keep ≥ 150 GB free on C: (311 GiB on 2026-10-22). After each slice, delete your lane's target and large
   scratch (recordings, ETW traces).
 - **Firewall:** one rule, group "Isocast dev": TCP 47470 in, any profile, from LocalSubnet and 100.64.0.0/10. The LAN
@@ -182,8 +185,10 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   authenticated R1 connection, not an HTTP endpoint. Keep that Client alive. str0m's received H.264 is
   Annex B, unlike `frames`' avcC/AVCC records. The local desktop keeps `shared_frames`; see
   `docs/server-protocol.md` for the native media contract and unqualified areas.
-- 2026-10-22: program Opus inherits `record/mix.rs::MIX_DELAY` (200 ms). Fast video packet arrival is
-  not synchronized display/playback latency; desktop audio/video playout still needs clock alignment.
+- 2026-10-23: WHEP Opus has a separate early-ready monitor mix and queried codec-lookahead compensation.
+  Recording/RTMP/replay still use the unchanged 200 ms program hold; monitor dependencies get only 40 ms.
+  Audio graph changes retap with bounded retries without replacing viewers. Desktop playout must align
+  the session's program MIDs through actual RTCP SRs.
 
 - 2026-10-11: macOS ties privacy grants to the bundle id plus the signing identity. Re-sign isocastd after every build, or grants and Keychain reads break.
 - 2026-10-15: A grant made in System Settings while isocastd runs reaches only processes started later. Restart the engine; "Quit & Reopen" doesn't restart it.

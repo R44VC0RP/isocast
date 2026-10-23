@@ -63,6 +63,11 @@ impl<T: ?Sized> Critical<T> {
         Read(self.lock.lock())
     }
 
+    /// Read without waiting or marking state broken if the reader panics.
+    pub fn try_read(&self) -> Option<Read<'_, T>> {
+        self.lock.try_lock().map(Read)
+    }
+
     /// Whether a panic cut a transaction short, so the state may be
     /// inconsistent and recordings must be finalized by the emergency path.
     pub fn is_broken(&self) -> bool {
@@ -132,5 +137,25 @@ impl<T: ?Sized> Deref for Read<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod monitor_read_tests {
+    use super::Critical;
+
+    #[test]
+    fn try_read_is_nonblocking_and_cannot_poison_recording_state() {
+        let state = Critical::new(7);
+        let held = state.read();
+        assert!(state.try_read().is_none());
+        drop(held);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _read = state.try_read().unwrap();
+            panic!("monitor read failed");
+        }));
+        assert!(result.is_err());
+        assert!(!state.is_broken());
+        assert_eq!(*state.read(), 7);
     }
 }

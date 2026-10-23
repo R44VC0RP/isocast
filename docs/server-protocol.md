@@ -71,7 +71,55 @@ match its authenticated TCP peer address; multihomed clients bind accordingly.
    on an address/codec change. An explicit `whep_close` on that connection
    is the DELETE equivalent. A failed offer retains no session.
    An encoder reconfigure (for example a canvas size change) ends the
-   viewer: the client must expect EOF and open a new connection to reoffer.
+    viewer: the client must expect EOF and open a new connection to reoffer.
+
+### Desktop timing contract (monitor-audio slice, 2026-10-23)
+
+The early monitor mix is WHEP-only. Recordings, streams and replays retain
+their existing delivery policy; this is not a blanket latency guarantee for
+every capture device or filter.
+
+- Video RTP is the engine capture/composition clock at **90,000 Hz**; Opus
+  RTP is that same clock at **48,000 Hz**. Do not rebase either track to its
+  first received packet. They wrap independently at 32 bits.
+- Use each track's RTCP **Sender Report**, not Receiver Report, to map its
+  samples to common sender time:
+  `capture_NTP = SR.NTP + signed_wrapping_delta(packet_RTP, SR.RTP) / rate`.
+  str0m gets one shared `(engine Time, Instant)` anchor for the two tracks;
+  encode/delivery delay must never replace capture time in that mapping.
+  Opus packet PTS accounts for the encoder's queried lookahead, so the
+  client must not subtract that codec delay a second time.
+- Pair the negotiated program audio/video **MIDs of this WHEP session**
+  (and common `program` MSID) as one sync group. str0m 0.24.1 currently emits
+  different per-track CNAMEs; CNAME equality alone cannot discover this
+  group. The actual SR mappings still share one wall-clock domain; no
+  Isocast per-frame timestamps or synchronized client/server system clocks
+  are needed to calculate relative A/V timing.
+- Choose **one** sender-time-to-local-playout mapping and adaptive delay for
+  both tracks, not a separate arrival-based epoch per track. Buffer the
+  faster stream for the slower one. A 50–60 ms starting target is appropriate
+  for fast inputs; include decoder/audio-device output latency and increase it
+  for late capture/lookahead or network jitter. Apply drift correction to the
+  audio device clock without
+  changing the common video/audio capture timeline. Start at the first common
+  available capture interval and discard older prefixes, rather than playing
+  old audio alongside new video. Configured source sync offsets and filter
+  latency compensation are already reflected in the timestamps. Reoffer after EOF.
+
+The low-latency path is a separate monitor-only mixer fed non-blockingly from
+the same timestamped raw inputs, with independent filter state and meters.
+It may commit complete 10 ms blocks early, including all sidechains and
+filter lookahead; late inputs get only a **40 ms monitor allowance** before
+missing samples become silence, never the recording mix's 200 ms hold.
+Recording, streaming and replay continue using the original mixer, with its
+unchanged samples, settings-at-commit semantics and unconditional live hold.
+A source-graph change or reopened input triggers a fresh monitor tap without
+replacing viewers, the Opus encoder or RTP sessions. Reattachment tries up to
+five times with 100 ms backoff between failures while the engine/viewers remain;
+exhaustion closes the feed. Brief audio gaps retain true capture timestamps. Live
+gain/mute changes are heard sooner in the monitor than in the held recording
+mix; this does not retroactively alter recorded audio.
+Monitor plugin warnings are diagnostics-only, not surfaced as engine events or status.
 
 Every offer passes `Caller`, `local_only_reason` and effective-operation
 policy as an ordinary remote caller. A loopback TCP peer is **not** local
@@ -102,9 +150,13 @@ feature still pulls AWS-LC transitively for certificate support; both it
 and bundled libopus need CMake on the build host.
 
 Reuse `record/frame_stream.rs`'s shared hardware H.264 encoder, not one
-encoder per viewer. Add a bounded **audio-only program-mix tap**, not a
-second mixer and not a video tap that retains GPU surfaces. Share Opus
-encoding between viewers. PLI/FIR requests force a keyframe with a global
+encoder per viewer. All WHEP viewers share one optional **monitor-only mix**
+and Opus encoder. Its bounded raw-input fan-out retains no video surfaces;
+filter histories, reports and meters are separate from the recording mix.
+Its normal-priority worker cannot block the input producer. Queue overruns
+become monitor-only gaps, not recording backpressure or a teardown of every
+viewer. Graph changes and source reopens retap without reoffering. PLI/FIR requests
+force a keyframe with a global
 per-encoder one-second rate limit. The existing governor reduces preview
 rates before encoding; viewer count and media demand must reach it, and
 viewers must be evictable before recording loses frames.
@@ -134,18 +186,72 @@ Measure timecode latency and matched 0/1/3-viewer CPU; inspect each recorded
 file and require zero recording loss on hardware. A successful SDP answer
 alone is not a working-media claim.
 
-### Latency limits of this prototype
+### Why the recording hold stays
 
-The existing program mixer deliberately holds audio for **200 ms**
-(`record/mix.rs::MIX_DELAY`) to tolerate capture jitter. The Opus tap
-preserves that recording-safe behavior. Fast video packet arrival therefore
-does **not** prove synchronized sub-100-ms playback: the desktop must align
-picture/sound by their RTP/RTCP clock mapping, or accept delayed sound.
-Measure video and audio separately; a future low-latency mix tap must not
-reduce the recording mix's jitter protection. The headless receiver does
-not implement desktop playout or measure glass-to-glass latency.
+`record/mix.rs::MIX_DELAY` is a **200 ms jitter/lookahead allowance**, not a
+video timestamp correction. Capture PTS is already mapped to the host clock
+(AVFoundation uses `camera::host_time` / `CMSyncConvertTime`; Windows uses
+WASAPI's QPC timestamps). Delivery can still be late or bursty: microphone,
+camera/system/loopback capture callbacks, decoded media and browser audio,
+scheduler stalls, negative sync offsets, and dependencies on other sources'
+sidechains. Noise suppression alone needs 960 future samples (20 ms);
+plugins can declare further lookahead. This slice does not claim a measured
+latency for each physical device.
 
-### Verification, 2026-10-22
+The ordinary mixer retains the hold even when all input is ready. A previous
+global early-complete change was rejected in `de5bfcd2` after real M2/M4
+streaming/Stop experiments; recording-only early drain was retained instead.
+`Input::filter` mutates filter history/buffered samples and `mix` consumes
+them; advancing that original mixer also changes which live gain/filter
+settings apply to recorded samples. Therefore it cannot be pulled early
+without changing recording behavior.
+
+The WHEP copy waits only for audible inputs and their sidechain/lookahead
+dependencies. Complete blocks can leave immediately; late dependencies get
+only 40 ms before missing input becomes silence. Both the original
+recording algorithm and its held RTMP/replay delivery are unchanged. The
+monitor's filter histories start independently, so startup and live-setting
+transients need not be sample-identical to the held program.
+
+The monitor input uses the existing bounded capture-burst reserve; raw mixed
+and encoded Opus queues cover one bounded catch-up pass (nine ten-ms blocks).
+Older backlog is skipped with true PTS, never retimestamped as current audio.
+The headless receiver measures capture-to-receive age and decoded marker
+alignment using actual SRs; it does not implement hardware playout or claim
+glass-to-glass latency.
+
+### Monitor-audio verification, 2026-10-23
+
+On basebook with synthetic flash/beep sources over normal R1, a 14-second
+receive run after the 40 ms/recovery fixes measured Opus **18.69 ms p50 /
+22.50 ms p95** (previously ~214 ms). Actual RTCP SRs mapped 13 decoded
+flash/beep pairs into one capture timeline: **2.43 ms worst absolute skew**,
+within one 30-fps frame. Both tracks supplied SRs; their engine-clock anchor
+discrepancy was 0.023 ms. This proves receiver
+timing, not hardware speaker/display playout. Video arrival in this 30-fps
+source run was 45.49/49.96 ms p50/p95, so the client still buffers the faster
+audio to the common playout target.
+
+A separate eight-second viewer survived adding a running audio source to the
+program graph, receiving 373,920 decoded audio frames and 236 video frames
+and closing the same signaling connection successfully. Its audio p50 was
+27.27 ms. The previous binary failed this exact source-add check (zero viewers).
+
+Five-second no-viewer and attached-viewer recordings each had **150 frames,
+zero drops/repeats/audio dropouts**, identical per-track PTS/DTS/durations,
+and matching recorded flash/beep alignment (0.021 ms worst). The recording
+mix algorithm remains unchanged; deterministic tests compare every output
+sample bit, meter bit and input/filter state with and without an early mix.
+The separately captured movie files are not claimed byte-identical: their
+wall-time metadata and burned-in source clocks naturally differ.
+
+Full build-host gates passed (296 tests; one existing hardware-only ignore).
+The hosted VM `webrtc` scenario also passed with actual SR/content checks:
+six pulse pairs per viewer, at most 1.49 ms skew, and source-add continuity.
+VM measurements are not a performance qualification. Physical device latency,
+LAN jitter and final desktop playout still require their own qualification.
+
+### Original transport verification, 2026-10-22
 
 Normal R1 pairing on an isolated signed basebook engine: H.264 received and
 independently decoded, Opus decoded, 1 and 3 viewers. Three 720p60 recordings

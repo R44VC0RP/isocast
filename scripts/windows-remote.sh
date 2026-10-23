@@ -410,6 +410,11 @@ try:
             sync()
             shutil.rmtree(stage)
         env = os.environ.copy()
+        # exon-desk has VS 2026 as well as VS 2022, but the bundled CMake
+        # comes from VS 2022 and cannot generate VS 18 projects. Keep native
+        # dependencies (libopus, aws-lc-sys) on the installed supported
+        # generator; an explicit caller override still wins.
+        env.setdefault('CMAKE_GENERATOR', 'Visual Studio 17 2022')
         # Keep the installed toolchain while isolating all newly generated caches.
         rustup = shutil.which('rustup')
         if rustup and not env.get('RUSTUP_HOME'):

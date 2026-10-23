@@ -11,7 +11,9 @@ use super::{Packet, ProgramTapSource};
 use crate::{Platform, Time};
 
 const FRAMES: usize = 480;
-const QUEUE: usize = 8;
+// Admit one explicitly bounded monitor catch-up batch. Recording routes
+// and their queues are unchanged; a slower viewer still loses monitor data.
+const QUEUE: usize = super::mix::MONITOR_BURST;
 
 pub struct OpusPacket {
     pub pts: Time,
@@ -32,6 +34,19 @@ struct Viewer {
 pub(super) struct Shared {
     viewers: Mutex<Option<Vec<Viewer>>>,
     next: std::sync::atomic::AtomicU64,
+}
+
+impl Shared {
+    fn has_viewers(&self) -> bool {
+        let mut viewers = self.viewers.lock();
+        if viewers.as_ref().is_none_or(Vec::is_empty) {
+            // Close admission atomically with observing the last viewer leave.
+            viewers.take();
+            false
+        } else {
+            true
+        }
+    }
 }
 
 impl Drop for OpusFeed {
@@ -68,7 +83,10 @@ pub(super) fn watch<P: Platform>(
         opus2::Application::LowDelay,
     )?;
     encoder.set_bitrate(opus2::Bitrate::Bits(128_000))?;
-    let tap = source.tap_audio(QUEUE)?;
+    // Decoded content follows the first input sample by this many samples.
+    // Place packet sample zero earlier so content keeps its capture-clock PTS.
+    let lookahead = i64::from(encoder.get_lookahead()?) * 1_000_000_000 / 48_000;
+    let tap = source.monitor_audio(QUEUE)?;
     let shared = Arc::new(Shared {
         viewers: Mutex::new(Some(vec![Viewer { id: 0, tx }])),
         next: std::sync::atomic::AtomicU64::new(1),
@@ -80,22 +98,37 @@ pub(super) fn watch<P: Platform>(
             fn drop(&mut self) { self.0.viewers.lock().take(); }
         }
         let _close = Close(worker.clone());
+        let mut tap = Some(tap);
         let mut pending = Vec::<f32>::with_capacity(FRAMES * 2);
         let mut beginning = Time::from_nanos(0);
         let mut expected = None;
         let mut output = [0u8; 4000];
         while !source.stopped() {
-            {
-                let mut viewers = worker.viewers.lock();
-                if viewers.as_ref().is_none_or(Vec::is_empty) {
-                    viewers.take();
-                    break;
-                }
-            }
-            let packet = match tap.packets.recv_timeout(Duration::from_millis(50)) {
+            if !worker.has_viewers() { break; }
+            let packet = match tap.as_ref().expect("attached monitor").packets.recv_timeout(Duration::from_millis(50)) {
                 Ok(packet) => packet,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // Graph changes replace the monitor's inputs, not the
+                    // subscribers, codec or RTP sessions. Detach stale routes
+                    // before acquiring the new graph, and bound retries.
+                    drop(tap.take());
+                    pending.clear();
+                    expected = None;
+                    for attempt in 0..5 {
+                        if source.stopped() || !worker.has_viewers() { return; }
+                        match source.monitor_audio(QUEUE) {
+                            Ok(next) => { tap = Some(next); break; }
+                            Err(_) if attempt < 4 => std::thread::sleep(Duration::from_millis(100)),
+                            Err(_) => {}
+                        }
+                    }
+                    if tap.is_none() {
+                        isocast_diagnostics::diagnostic!("warn"; "WHEP monitor audio could not reattach after five attempts; closing viewers");
+                        break;
+                    }
+                    continue;
+                }
             };
             let Packet::Audio { samples, pts, .. } = packet else { continue };
             // A lost input chunk creates a timestamp gap, never an ever-growing delay.
@@ -114,7 +147,7 @@ pub(super) fn watch<P: Platform>(
                         return;
                     }
                 };
-                let packet = Arc::new(OpusPacket { pts: beginning, bytes: output[..length].into() });
+                let packet = Arc::new(OpusPacket { pts: Time::from_nanos(beginning.as_nanos() - lookahead), bytes: output[..length].into() });
                 if let Some(viewers) = worker.viewers.lock().as_mut() {
                     viewers.retain(|viewer| match viewer.tx.try_send(packet.clone()) {
                         Ok(()) | Err(mpsc::TrySendError::Full(_)) => true,

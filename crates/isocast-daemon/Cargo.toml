@@ -13,6 +13,11 @@ vcam-diagnostics = ["isocast-platform-macos/vcam-diagnostics"]
 name = "isocastd"
 path = "src/main.rs"
 
+[[example]]
+name = "webrtc-receive"
+# Keep the RTP/SR and pulse-pairing unit checks in the normal CI test gate.
+test = true
+
 [dependencies]
 isocast-diagnostics = { path = "../isocast-diagnostics" }
 anyhow = "1.0.104"

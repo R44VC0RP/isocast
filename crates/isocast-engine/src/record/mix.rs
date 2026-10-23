@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::time::Duration;
 
 use isocast_protocol::{AudioSettings, PanLaw};
@@ -20,6 +20,19 @@ use crate::{Platform, SAMPLE_RATE, Time};
 /// Only a stopping recording or an ending mixer can drain complete blocks
 /// early; missing input still gets this allowance while draining.
 pub(super) const MIX_DELAY: Duration = Duration::from_millis(200);
+
+/// Monitoring must not inherit the recording jitter budget: late input is
+/// omitted from the monitor rather than holding every audible source back.
+pub(super) const MONITOR_DELAY: Duration = Duration::from_millis(40);
+const MONITOR_DELAY_SAMPLES: i64 = MONITOR_DELAY.as_millis() as i64 * SAMPLE_RATE as i64 / 1000;
+
+/// The most blocks one pass of the monitor mix ([`Mixer::run_monitor`])
+/// sends at once: a late source holds blocks for up to [`MONITOR_DELAY`], and
+/// a stall longer than that skips ahead rather than catching up, so the
+/// backlog stays under twice that (one more for rounding). Its output
+/// channel needs this much room to avoid a monitor-only gap.
+pub(super) const MONITOR_BURST: usize =
+    (2 * MONITOR_DELAY_SAMPLES / AUDIO_CHUNK as i64) as usize + 1;
 
 /// Peak and power of the samples since it was last read.
 #[derive(Default)]
@@ -232,6 +245,49 @@ impl Input {
     }
 }
 
+/// Which inputs the monitor mix must wait for: those its output depends
+/// on. That's every unmuted input heard in the program, and every unmuted
+/// input one of those (or of these, in turn) hears through a sidechain of
+/// its filters. A muted input is neither mixed, filtered nor heard by a
+/// sidechain, and the rest only feed sound that is thrown away.
+fn monitor_waits_for(inputs: &[Input]) -> Vec<bool> {
+    let mut waits: Vec<bool> = inputs
+        .iter()
+        .map(|input| !input.settings.muted && input.mixed && input.settings.in_program())
+        .collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (i, input) in inputs.iter().enumerate() {
+            if !waits[i] {
+                continue;
+            }
+            for id in input.chain.sidechains() {
+                for (j, key) in inputs.iter().enumerate() {
+                    if key.id == id && !key.settings.muted && !waits[j] {
+                        waits[j] = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    waits
+}
+
+/// Whether the monitor mix can mix the block ending before session sample
+/// `until` without missing anything: every input it depends on has that
+/// far, plus its filters' lookahead.
+fn monitor_ready(inputs: &[Input], until: i64) -> bool {
+    inputs
+        .iter()
+        .zip(monitor_waits_for(inputs))
+        .all(|(input, waits)| {
+            !waits
+                || input.start + input.frames.len() as i64 >= until + input.chain.latency() as i64
+        })
+}
+
 pub(super) struct Mixer<F> {
     inputs: Vec<Input>,
     /// How balance pans the inputs.
@@ -401,6 +457,103 @@ impl<F: Clone> Mixer<F> {
                     outputs.audio(&samples, pts);
                 }
                 out += count as i64;
+            }
+        }
+    }
+
+    /// Mix a low-latency copy of the program for live monitoring (WHEP)
+    /// from session sample `from`, sending each 10 ms block to `output` as
+    /// track 0's audio, until `alive` says to stop or `output` is closed.
+    /// A full output skips only this monitor's block. Never used for recordings:
+    /// run it on its own `Mixer`, with
+    /// its own inputs, filters and meter, so it can't change their mix.
+    ///
+    /// A block goes out as soon as it is due and every input it depends on
+    /// (sidechains and filter lookahead included) has arrived; a late one
+    /// gets only [`MONITOR_DELAY`] before missing input becomes silence.
+    /// The recording mix retains its separate [`MIX_DELAY`]. Never waits on `output`.
+    pub(super) fn run_monitor<P: Platform>(
+        &mut self,
+        platform: &P,
+        epoch: Time,
+        from: i64,
+        control: &SessionControl,
+        output: SyncSender<Packet<F>>,
+        mut alive: impl FnMut() -> bool,
+    ) {
+        // The next session sample to mix.
+        let mut out = from;
+        while alive() {
+            match self.packets.recv_timeout(Duration::from_millis(5)) {
+                Ok(Packet::Audio {
+                    track,
+                    samples,
+                    pts,
+                }) => {
+                    if let Some(input) = self.inputs.get_mut(track) {
+                        input.push(&samples, pts.ticks_since(epoch, SAMPLE_RATE));
+                    }
+                }
+                Ok(Packet::Video { .. } | Packet::Skipped { .. })
+                | Err(RecvTimeoutError::Timeout) => {}
+                // Every source has stopped: mix silence until told to stop.
+                Err(RecvTimeoutError::Disconnected) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            self.law = control.pan_law();
+            for input in &mut self.inputs {
+                if let Some(settings) = control.audio_settings(&input.id) {
+                    input.settings = settings;
+                }
+            }
+            self.update_filters();
+            if !self.monitor_due(platform.now(), epoch, &mut out, &output) {
+                break;
+            }
+        }
+    }
+
+    /// Mix and send the monitor's blocks from session sample `out` that
+    /// are ready at `now` (see [`Mixer::run_monitor`]), advancing `out`.
+    /// False once `output` is closed; full queues lose monitor audio only.
+    fn monitor_due(
+        &mut self,
+        now: Time,
+        epoch: Time,
+        out: &mut i64,
+        output: &SyncSender<Packet<F>>,
+    ) -> bool {
+        let block = AUDIO_CHUNK as i64;
+        // After a stall of more than MONITOR_DELAY past the late-input
+        // allowance, skip ahead instead of sending all of it at once.
+        let behind = now.ticks_since(epoch, SAMPLE_RATE) - MONITOR_DELAY_SAMPLES;
+        if *out < behind - MONITOR_DELAY_SAMPLES {
+            *out += (behind - *out) / block * block;
+            for input in &mut self.inputs {
+                input.release(*out);
+            }
+        }
+        loop {
+            let until = *out + block;
+            let due = epoch.add_ticks(until as u64, SAMPLE_RATE);
+            // Never mix ahead of the clock.
+            if now < due {
+                return true;
+            }
+            if now < due + MONITOR_DELAY && !monitor_ready(&self.inputs, until) {
+                return true;
+            }
+            let samples = self.mix(*out, block as usize);
+            let packet = Packet::Audio {
+                track: 0,
+                samples: samples.into(),
+                pts: epoch.add_ticks(*out as u64, SAMPLE_RATE),
+            };
+            *out = until;
+            match output.try_send(packet) {
+                Ok(()) | Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Disconnected(_)) => return false,
             }
         }
     }
@@ -589,6 +742,335 @@ mod tests {
                 "{at}: {left} not {expected}"
             );
             assert_eq!(left, right);
+        }
+    }
+
+    /// Every source's audio filters from `sources` (setup JSON).
+    fn live_filters(sources: &str) -> Arc<LiveAudioFilters> {
+        let setup = isocast_protocol::Setup::from_json(&format!(
+            r#"{{"version": 1, "name": "t", "canvas": {{"width": 8, "height": 8, "fps": 30}},
+                "sources": {sources},
+                "recording": {{"folder": ".", "program": {{"encoder": {{"codec": "hevc"}}}}}}}}"#
+        ))
+        .unwrap();
+        let live = Arc::new(LiveAudioFilters::default());
+        live.set(&setup);
+        live
+    }
+
+    const EPOCH: Time = Time::from_nanos(1_000_000_000);
+
+    fn at_ms(ms: u64) -> Time {
+        EPOCH + Duration::from_millis(ms)
+    }
+
+    /// The monitor's blocks sent so far, as (pts, samples).
+    fn sent(rx: &Receiver<Packet<()>>) -> Vec<(Time, Vec<f32>)> {
+        rx.try_iter()
+            .map(|packet| match packet {
+                Packet::Audio {
+                    track,
+                    samples,
+                    pts,
+                } => {
+                    assert_eq!(track, 0);
+                    (pts, samples.to_vec())
+                }
+                _ => panic!("the monitor sends only audio"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn monitor_sends_a_block_once_it_is_due_and_every_input_has_it() {
+        let mut mixer = mixer(vec![
+            ("a".into(), 1, AudioSettings::default()),
+            ("b".into(), 1, AudioSettings::default()),
+        ]);
+        let (tx, rx) = sync_channel(MONITOR_BURST);
+        let mut out = 0;
+        mixer.inputs[0].push(&[0.25; 960], 0);
+        // Due, but "b" hasn't arrived: it waits.
+        assert!(mixer.monitor_due(at_ms(10), EPOCH, &mut out, &tx));
+        assert!(sent(&rx).is_empty());
+        assert_eq!(out, 0);
+        mixer.inputs[1].push(&[0.5; 960], 0);
+        // Both have 20 ms, but at 15 ms only the first block is due: the
+        // monitor never mixes ahead of the clock.
+        assert!(mixer.monitor_due(at_ms(15), EPOCH, &mut out, &tx));
+        let blocks = sent(&rx);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, EPOCH);
+        assert_eq!(blocks[0].1, vec![0.75; 960]);
+        assert_eq!(out, 480);
+        assert!(mixer.monitor_due(at_ms(20), EPOCH, &mut out, &tx));
+        let blocks = sent(&rx);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, at_ms(10));
+        assert_eq!(out, 960);
+    }
+
+    #[test]
+    fn monitor_drops_late_input_after_its_own_short_allowance() {
+        let mut mixer = mixer(vec![
+            ("on time".into(), 1, AudioSettings::default()),
+            ("late".into(), 1, AudioSettings::default()),
+        ]);
+        let (tx, rx) = sync_channel(MONITOR_BURST);
+        let mut out = 0;
+        mixer.inputs[0].push(&[0.25; 960], 0);
+        let deadline = at_ms(10) + MONITOR_DELAY;
+        assert!(mixer.monitor_due(deadline - Duration::from_nanos(1), EPOCH, &mut out, &tx));
+        assert!(sent(&rx).is_empty());
+        assert!(mixer.monitor_due(deadline, EPOCH, &mut out, &tx));
+        let blocks = sent(&rx);
+        // Only the first block's allowance is over.
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].1, vec![0.25; 960]);
+        // What arrives for it afterwards is too late; the next block mixes
+        // as soon as it has everything.
+        mixer.inputs[1].push(&[0.5; 960], 0);
+        assert!(mixer.monitor_due(deadline, EPOCH, &mut out, &tx));
+        let blocks = sent(&rx);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].0, at_ms(10));
+        assert_eq!(blocks[0].1, vec![0.75; 960]);
+    }
+
+    #[test]
+    fn monitor_does_not_wait_for_sources_it_does_not_hear() {
+        let muted = AudioSettings {
+            muted: true,
+            ..AudioSettings::default()
+        };
+        let monitored = AudioSettings {
+            monitor: isocast_protocol::Monitoring::MonitorOnly,
+            ..AudioSettings::default()
+        };
+        let mut mixer = mixer(vec![
+            ("heard".into(), 1, AudioSettings::default()),
+            ("muted".into(), 1, muted),
+            ("monitored".into(), 1, monitored),
+        ]);
+        let (tx, rx) = sync_channel(MONITOR_BURST);
+        let mut out = 0;
+        mixer.inputs[0].push(&[0.25; 480], 0);
+        assert!(mixer.monitor_due(at_ms(10), EPOCH, &mut out, &tx));
+        assert_eq!(sent(&rx), vec![(EPOCH, vec![0.25; 960])]);
+    }
+
+    #[test]
+    fn monitor_waits_for_filter_lookahead_and_sidechain_keys() {
+        // Noise suppression works 20 ms (960 samples) behind.
+        let live = live_filters(
+            r#"[{"id": "mic", "kind": "tone", "audio_filters": [{"kind": "noise_suppression"}]},
+                {"id": "music", "kind": "tone", "audio_filters": [
+                  {"kind": "compressor", "sidechain_source": "voice"}]},
+                {"id": "voice", "kind": "tone"}]"#,
+        );
+        let mut mixer = mixer(vec![
+            ("mic".into(), 1, AudioSettings::default()),
+            ("music".into(), 1, AudioSettings::default()),
+        ]);
+        let voice = mixer.add_key("voice".into(), 1, AudioSettings::default());
+        mixer.set_filters(live);
+        assert_eq!(mixer.inputs[0].chain.latency(), 960);
+        let (tx, rx) = sync_channel(MONITOR_BURST);
+        let mut out = 0;
+        let now = at_ms(10);
+        mixer.inputs[0].push(&[0.1; 480], 0);
+        mixer.inputs[1].push(&[0.1; 480], 0);
+        assert!(mixer.monitor_due(now, EPOCH, &mut out, &tx));
+        assert!(sent(&rx).is_empty(), "waits for the mic's lookahead");
+        mixer.inputs[0].push(&[0.1; 960], 480);
+        assert!(mixer.monitor_due(now, EPOCH, &mut out, &tx));
+        assert!(sent(&rx).is_empty(), "waits for the music's sidechain");
+        mixer.inputs[voice].push(&[0.1; 480], 0);
+        assert!(mixer.monitor_due(now, EPOCH, &mut out, &tx));
+        assert_eq!(sent(&rx).len(), 1);
+        // A muted key isn't heard, so it isn't waited for.
+        mixer.inputs[voice].settings.muted = true;
+        mixer.inputs[0].push(&[0.1; 480], 1440);
+        mixer.inputs[1].push(&[0.1; 480], 480);
+        assert!(mixer.monitor_due(at_ms(20), EPOCH, &mut out, &tx));
+        assert_eq!(sent(&rx).len(), 1);
+    }
+
+    #[test]
+    fn monitor_skips_ahead_after_a_stall_instead_of_bursting() {
+        let mut mixer = mixer(vec![("m".into(), 1, AudioSettings::default())]);
+        let (tx, rx) = sync_channel(MONITOR_BURST);
+        let mut out = 0;
+        mixer.inputs[0].push(&[0.25; 48_000], 0);
+        // A second without running: what is more than MONITOR_DELAY behind
+        // its own allowance is dropped, and what's left fits the channel.
+        assert!(mixer.monitor_due(at_ms(1000), EPOCH, &mut out, &tx));
+        let blocks = sent(&rx);
+        assert!(
+            !blocks.is_empty() && blocks.len() <= MONITOR_BURST,
+            "{}",
+            blocks.len()
+        );
+        assert!(blocks[0].0 >= at_ms(1000) - MONITOR_DELAY - Duration::from_millis(10));
+        assert_eq!(out, 48_000);
+        assert!(
+            blocks
+                .iter()
+                .all(|(_, samples)| *samples == vec![0.25; 960])
+        );
+        // The longest hold within the allowance fits as well.
+        let mut mixer = self::mixer(vec![("m".into(), 1, AudioSettings::default())]);
+        let mut out = 0;
+        mixer.inputs[0].push(&[0.25; 48_000], 0);
+        assert!(mixer.monitor_due(at_ms(80), EPOCH, &mut out, &tx));
+        assert_eq!(sent(&rx).len(), MONITOR_BURST - 1);
+    }
+
+    #[test]
+    fn monitor_skips_full_output_but_stops_when_closed() {
+        let mut mixer = mixer(vec![("m".into(), 1, AudioSettings::default())]);
+        mixer.inputs[0].push(&[0.25; 4800], 0);
+        let (tx, rx) = sync_channel(1);
+        let mut out = 0;
+        assert!(mixer.monitor_due(at_ms(20), EPOCH, &mut out, &tx));
+        assert_eq!(sent(&rx).len(), 1);
+        assert!(mixer.monitor_due(at_ms(30), EPOCH, &mut out, &tx));
+        assert_eq!(sent(&rx)[0].0, at_ms(20));
+        drop(rx);
+        assert!(!mixer.monitor_due(at_ms(40), EPOCH, &mut out, &tx));
+    }
+
+    /// The program mix of a session with filters (lookahead, sidechain),
+    /// late and out-of-order capture and a gain change, mixed as the
+    /// recording mixer does (each block at its deadline), keeps every
+    /// sample bit for bit while an early monitor mix of the same capture
+    /// runs beside it. They share filter definitions, not filter instances
+    /// or input buffers; feeding the same immutable capture trace catches
+    /// hidden global DSP state that could otherwise couple their output.
+    #[test]
+    fn an_early_monitor_mix_leaves_the_program_mix_bit_for_bit() {
+        let live = live_filters(
+            r#"[{"id": "mic", "kind": "tone", "audio_filters": [
+                  {"kind": "gain", "gain_db": -3}, {"kind": "noise_suppression"}]},
+                {"id": "music", "kind": "tone", "audio_filters": [
+                  {"kind": "compressor", "ratio": 8, "threshold_db": -30, "attack_ms": 1,
+                   "release_ms": 20, "sidechain_source": "voice"}]},
+                {"id": "voice", "kind": "tone"}]"#,
+        );
+        let make = |meter: Arc<StereoMeter>| {
+            let (_, rx) = sync_channel(1);
+            let mut mixer: Mixer<()> = Mixer::new(
+                vec![
+                    ("mic".into(), 1, AudioSettings::default()),
+                    ("music".into(), 2, AudioSettings::default()),
+                ],
+                PanLaw::default(),
+                rx,
+                meter,
+            );
+            mixer.add_key("voice".into(), 2, AudioSettings::default());
+            mixer.set_filters(live.clone());
+            mixer
+        };
+        let (reference_meter, program_meter) = (Arc::default(), Arc::default());
+        let mut reference = make(Arc::clone(&reference_meter));
+        let mut program = make(Arc::clone(&program_meter));
+        let mut monitor = make(Arc::default());
+        // Deterministic noise, shared as capture is.
+        let mut seed = 0x2545_f491_u32;
+        let mut noise = |n: usize| -> Arc<[f32]> {
+            (0..n)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (seed >> 8) as f32 / (1 << 24) as f32 - 0.5
+                })
+                .collect()
+        };
+        // (input, session sample, samples, delivered at session sample):
+        // the mic in odd-sized chunks, the voice 30 ms late with a stretch
+        // 300 ms late (past the allowance), the music on time.
+        let mut capture = Vec::new();
+        for j in 0..150 {
+            let at = j * 336;
+            capture.push((0, at, noise(336), at + 336));
+        }
+        for j in 0..100 {
+            let at = j * 480;
+            let late = if (40..60).contains(&j) { 14_400 } else { 1440 };
+            capture.push((2, at, noise(960), at + 480 + late));
+            capture.push((1, at, noise(960), at + 480));
+        }
+        capture.sort_by_key(|(_, _, _, delivered)| *delivered);
+        let (tx, rx) = sync_channel(10_000);
+        let (mut out, mut mixed, mut early) = (0, 0, 0);
+        let (mut reference_blocks, mut program_blocks) = (Vec::new(), Vec::new());
+        let mut next = 0;
+        for now in (0..60_000).step_by(96) {
+            while capture
+                .get(next)
+                .is_some_and(|(_, _, _, delivered)| *delivered <= now)
+            {
+                let (input, at, samples, _) = &capture[next];
+                for mixer in [&mut reference, &mut program, &mut monitor] {
+                    mixer.inputs[*input].push(samples, *at);
+                }
+                next += 1;
+            }
+            if now == 24_000 {
+                for mixer in [&mut reference, &mut program, &mut monitor] {
+                    mixer.inputs[0].settings.gain_db = -10.0;
+                    mixer.law = PanLaw::Linear;
+                }
+            }
+            let time = EPOCH.add_ticks(now as u64, SAMPLE_RATE);
+            assert!(monitor.monitor_due(time, EPOCH, &mut out, &tx));
+            for (pts, _) in sent(&rx) {
+                let due = pts.add_ticks(480, SAMPLE_RATE) + MIX_DELAY;
+                early += usize::from(time < due);
+            }
+            // The recording mixer's schedule: each block at its deadline.
+            while EPOCH.add_ticks(mixed as u64 + 480, SAMPLE_RATE) + MIX_DELAY <= time {
+                reference_blocks.push(reference.mix(mixed, 480));
+                program_blocks.push(program.mix(mixed, 480));
+                program.meter.add(program_blocks.last().unwrap());
+                reference.meter.add(reference_blocks.last().unwrap());
+                mixed += 480;
+            }
+        }
+        assert!(program_blocks.len() > 100, "{}", program_blocks.len());
+        assert!(early > 50, "the monitor mixed early only {early} times");
+        let bits = |blocks: &[Vec<f32>]| -> Vec<u32> {
+            blocks
+                .iter()
+                .flatten()
+                .map(|sample| sample.to_bits())
+                .collect()
+        };
+        assert_eq!(bits(&program_blocks), bits(&reference_blocks));
+        assert!(bits(&program_blocks).iter().any(|&b| b != 0));
+        let ((peak, rms), each) = program_meter.take();
+        let ((ref_peak, ref_rms), ref_each) = reference_meter.take();
+        assert_eq!(
+            [peak, rms, each[0].0, each[0].1, each[1].0, each[1].1].map(f64::to_bits),
+            [
+                ref_peak,
+                ref_rms,
+                ref_each[0].0,
+                ref_each[0].1,
+                ref_each[1].0,
+                ref_each[1].1
+            ]
+            .map(f64::to_bits)
+        );
+        for (program, reference) in program.inputs.iter().zip(&reference.inputs) {
+            assert_eq!(
+                (program.start, program.fed),
+                (reference.start, reference.fed)
+            );
+            let frames = |input: &Input| -> Vec<u32> {
+                input.frames.iter().flatten().map(|s| s.to_bits()).collect()
+            };
+            assert_eq!(frames(program), frames(reference));
         }
     }
 

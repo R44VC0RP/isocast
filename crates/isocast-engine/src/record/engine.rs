@@ -312,6 +312,33 @@ impl<F: Clone> Drop for ProgramTap<F> {
     }
 }
 
+/// A monitor-only mix. Its raw input routes and DSP state never belong to
+/// the recording mixer, and its queues cannot backpressure those routes.
+pub(crate) struct MonitorAudio<F: Clone> {
+    pub packets: mpsc::Receiver<Packet<F>>,
+    stop: Arc<AtomicBool>,
+    routes: Arc<Mutex<Vec<MonitorRoute<F>>>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+struct MonitorRoute<F> {
+    id: String,
+    source: Arc<Routes<F>>,
+    key: u64,
+}
+
+impl<F: Clone> Drop for MonitorAudio<F> {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        for route in self.routes.lock().drain(..) {
+            route.source.remove(route.key);
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// A way to re-tap the program without keeping a route (and the compositor)
 /// active. This keeps the inner state, not the Engine: dropping the Engine
 /// still stops it, which a parked encoder can observe without a receiver.
@@ -331,8 +358,134 @@ impl<P: Platform> ProgramTapSource<P> {
         self.tap_inner(depth, missed_audio_chunks, true)
     }
 
-    pub(crate) fn tap_audio(&self, depth: usize) -> Result<ProgramTap<P::Frame>> {
-        self.tap_inner(depth, Arc::new(AtomicU64::new(0)), false)
+    pub(crate) fn monitor_audio(&self, depth: usize) -> Result<MonitorAudio<P::Frame>> {
+        let inner = &self.0;
+        let state = inner.state.read();
+        let program = state
+            .mixer
+            .as_ref()
+            .context("program audio mixer is not running")?;
+        let epoch = program.shared.epoch;
+        let from = inner.platform.now().ticks_since(epoch, SAMPLE_RATE).max(0);
+        let setup = state.setup.clone();
+        let mut revision = state.revision;
+        let inputs = program.inputs.clone();
+        let program_shared = program.shared.clone();
+        drop(state);
+
+        // Independent definitions/reports as well as independent filter instances:
+        // a monitor plugin failure must not change the recording chain's state.
+        let filters = Arc::new(crate::audio_filter::LiveAudioFilters::default());
+        filters.set(&setup);
+        let settings = |id: &str| {
+            setup
+                .source(id)
+                .map(|source| source.audio)
+                .unwrap_or_default()
+        };
+        let mixed = inputs
+            .iter()
+            .filter(|(_, _, mixed)| *mixed)
+            .map(|(id, channels, _)| (id.clone(), *channels, settings(id)))
+            .collect();
+        // Same bounded capture-burst reserve as the program mixer; this
+        // optional copy never waits on it and never changes the record queue.
+        let (input, received) = sync_channel(MIX_QUEUE_DEPTH);
+        let (output, packets) = sync_channel(depth);
+        let mut mixer = Mixer::new(mixed, setup.audio.pan_law, received, Arc::default());
+        for (id, channels, _) in inputs.iter().filter(|(_, _, mixed)| !*mixed) {
+            mixer.add_key(id.clone(), *channels, settings(id));
+        }
+        mixer.set_filters(filters.clone());
+        let missed = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut tap = MonitorAudio {
+            packets,
+            stop: stop.clone(),
+            routes: Arc::default(),
+            thread: None,
+        };
+        // Filter creation happens outside engine state. Revalidate and bind
+        // under the same read guard, so a source reopen cannot race the adds.
+        let state = inner.state.read();
+        if !state
+            .mixer
+            .as_ref()
+            .is_some_and(|mixer| Arc::ptr_eq(&mixer.shared, &program_shared))
+        {
+            bail!("program audio changed while opening monitor; reoffer");
+        }
+        for (track, (id, ..)) in inputs.iter().enumerate() {
+            let source = state
+                .sources
+                .get(id)
+                .and_then(|source| source.audio.as_ref())
+                .context("program audio source is unavailable")?
+                .routes
+                .clone();
+            let key = source.add_counted(
+                // A bounded raw-audio channel, not a file writer. This
+                // variant's is_recording() is true, but only program VIDEO
+                // routes use that test; recording_audio stays false here.
+                super::tap::Output::Recording(input.clone()),
+                track,
+                Time::from_nanos(0),
+                None,
+                Some(missed.clone()),
+                false,
+            );
+            tap.routes.lock().push(MonitorRoute {
+                id: id.clone(),
+                source,
+                key,
+            });
+        }
+        drop(state);
+        drop(input);
+        let routes = tap.routes.clone();
+        let inner = inner.clone();
+        tap.thread = Some(thread::Builder::new().name("monitor-mix".into()).spawn(move || {
+            // Deliberately not platform.audio_thread(): this optional copy must
+            // not compete at the recording mix's audio scheduling priority.
+            let mut refreshed = std::time::Instant::now();
+            let mut warned = false;
+            let alive = || {
+                if stop.load(Ordering::SeqCst) || inner.stopping.load(Ordering::SeqCst)
+                    || program_shared.end() != Time::MAX {
+                    return false;
+                }
+                if !warned && missed.load(Ordering::Relaxed) != 0 {
+                    warned = true;
+                    isocast_diagnostics::diagnostic!("warn"; "WHEP monitor input queue overflow; monitor audio may contain gaps");
+                }
+                if refreshed.elapsed() >= Duration::from_millis(100) {
+                    refreshed = std::time::Instant::now();
+                    // Never wait for a setup change while holding the monitor.
+                    let Some(state) = inner.state.try_read() else { return true };
+                    {
+                        let routes = routes.lock();
+                        if stop.load(Ordering::SeqCst) { return false; }
+                        for route in routes.iter() {
+                            let Some(audio) = state.sources.get(&route.id).and_then(|source| source.audio.as_ref()) else {
+                                return false;
+                            };
+                            if !Arc::ptr_eq(&audio.routes, &route.source) { return false; }
+                        }
+                    }
+                    let changed = (revision != state.revision).then(|| state.setup.clone());
+                    revision = state.revision;
+                    drop(state);
+                    if let Some(setup) = changed { filters.set(&setup); }
+                }
+                true
+            };
+            if let Err(message) = isocast_diagnostics::contain("WHEP monitor mix", || {
+                mixer.run_monitor(&inner.platform, epoch, from, &inner.control, output, alive);
+            }) {
+                isocast_diagnostics::diagnostic!("warn"; "WHEP monitor mix ended: {message}");
+            }
+        })?);
+        Ok(tap)
     }
 
     fn tap_inner(
@@ -1642,7 +1795,7 @@ impl<P: Platform> Engine<P> {
             .expect("the main canvas always exists")
     }
 
-    /// The program mix as shared 48 kHz stereo Opus, without retaining video surfaces.
+    /// A separate early program monitor mix as shared 48 kHz stereo Opus.
     pub fn opus(&self) -> Result<super::OpusFeed> {
         super::opus_stream::watch(&self.inner.opus_stream, self.program_tap_source())
     }
@@ -5035,6 +5188,68 @@ fn write_speed<P: Platform>(inner: &Inner<P>, folder: &Path) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_monitor_input_does_not_change_record_packets_and_drop_joins() {
+        let source: Arc<Routes<u32>> = Arc::default();
+        let (record, recorded) = sync_channel(4);
+        source.add(record, 0, Time::from_nanos(0), None);
+        let (input, received) = sync_channel(1);
+        let missed = Arc::new(AtomicU64::new(0));
+        let key = source.add_counted(
+            input.into(),
+            0,
+            Time::from_nanos(0),
+            None,
+            Some(missed.clone()),
+            false,
+        );
+        let samples: Arc<[f32]> = vec![0.125; 960].into();
+        for tick in 0..2 {
+            source.audio(&samples, Time::from_nanos(tick * 10_000_000));
+        }
+        assert_eq!(missed.load(Ordering::Relaxed), 1);
+        for tick in 0..2 {
+            let Packet::Audio {
+                samples: actual,
+                pts,
+                ..
+            } = recorded.recv().unwrap()
+            else {
+                panic!("expected audio")
+            };
+            assert_eq!(pts, Time::from_nanos(tick * 10_000_000));
+            assert!(Arc::ptr_eq(&actual, &samples));
+        }
+        let (output, packets) = sync_channel(1);
+        let joined = Arc::new(AtomicBool::new(false));
+        let finished = joined.clone();
+        let thread = thread::spawn(move || {
+            while let Ok(packet) = received.recv() {
+                let _ = output.try_send(packet);
+            }
+            finished.store(true, Ordering::Release);
+        });
+        let monitor = MonitorAudio {
+            packets,
+            stop: Arc::new(AtomicBool::new(false)),
+            routes: Arc::new(Mutex::new(vec![MonitorRoute {
+                id: "tone".into(),
+                source: source.clone(),
+                key,
+            }])),
+            thread: Some(thread),
+        };
+        drop(monitor);
+        assert!(joined.load(Ordering::Acquire));
+        assert_eq!(
+            source.list.read().len(),
+            1,
+            "only the record route survives"
+        );
+        source.audio(&samples, Time::from_nanos(20_000_000));
+        assert!(recorded.recv().is_ok());
+    }
 
     #[test]
     fn soonest_splits_fall_exactly_on_every_files_frames() {
