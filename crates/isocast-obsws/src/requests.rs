@@ -3,7 +3,7 @@
 use std::sync::atomic::Ordering;
 
 use isocast_protocol::api::{
-    ApplyParams, EngineState, Live, Method, RpcError, SnapshotParams, StartParams, Status,
+    ApplyParams, EngineState, Live, Method, RpcError, SnapshotParams, Status,
 };
 use isocast_protocol::change::Change;
 use isocast_protocol::devices::Display;
@@ -1691,12 +1691,7 @@ pub fn handle(ctx: &Ctx, request_type: &str, data: &Value) -> Answer {
                 return Err(output_state(active));
             }
             if start {
-                ctx.act(Method::Start(Box::new(StartParams {
-                    setup: None,
-                    folder: None,
-                    seconds: None,
-                    ..Default::default()
-                })))?;
+                ctx.act(Method::Start(Box::default()))?;
             } else {
                 ctx.act(Method::Stop(None))?;
             }

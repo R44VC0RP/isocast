@@ -208,10 +208,6 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// Free space and kind of the volume holding `path`.
     fn volume(&self, path: &Path) -> anyhow::Result<Volume>;
 
-    /// Whether two existing paths share the volume whose free space they use.
-    /// Exports must preserve the reserve of a recording on that volume.
-    fn same_volume(&self, left: &Path, right: &Path) -> anyhow::Result<bool>;
-
     /// CPU seconds used by this process, user and kernel time together.
     fn process_cpu_seconds(&self) -> Option<f64> {
         None
@@ -492,13 +488,6 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// Remove the secret for `service` and `account`. Returns whether there
     /// was one.
     fn delete_secret(&self, service: &str, account: &str) -> anyhow::Result<bool>;
-
-    /// Join files end to end into one (see [`JoinSpec`]), calling
-    /// `progress` as it goes. On failure nothing is left at the output.
-    fn join_files(&self, spec: &JoinSpec, progress: OnJoinProgress) -> anyhow::Result<Joined> {
-        let _ = (spec, progress);
-        anyhow::bail!("joining files isn't supported on this platform yet")
-    }
 }
 
 /// The frames a platform's encoders want drawn for them (see
@@ -662,88 +651,6 @@ pub enum MediaPart {
     Video,
     Audio,
 }
-
-/// Files to join end to end into one (a timeline's export): the video
-/// copied as it is, except the frames from a cut that isn't on a keyframe
-/// to the next keyframe, and parts whose video is in another format than
-/// the joined file's, which are decoded and encoded again; each audio
-/// track decoded and encoded again as one continuous track, cross-faded
-/// at each join, so it lines up with the video at every join.
-#[derive(Debug, Clone)]
-pub struct JoinSpec {
-    /// The files, in order. Each has one video track and the same number
-    /// of audio tracks as the first, with the same channels.
-    pub parts: Vec<JoinPart>,
-    /// Where the joined file goes; it must not exist.
-    pub output: PathBuf,
-    pub container: Container,
-    /// The joined video takes this file's codec, size and frame rate (the
-    /// program's, for an edited file); the first part's if absent.
-    pub format: Option<PathBuf>,
-    /// The joined video's picture size, if not that file's (a vertical
-    /// edited file, #94): every part is encoded again, its picture (or
-    /// crop) fitted into it.
-    pub size: Option<(u32, u32)>,
-}
-
-#[derive(Debug, Clone)]
-pub struct JoinPart {
-    pub path: PathBuf,
-    /// How long the part lasts in the joined file, as `frames` at `fps`
-    /// (its clip's length, so files at different rates join at the same
-    /// moments): a shorter file's last frame is held and its audio padded
-    /// with silence, a longer one's last frame is cut short, and frames
-    /// starting past the end are left out. The file's own video length if
-    /// absent.
-    pub length: Option<(u64, u32)>,
-    /// Where the file starts within its clip, in seconds (a file that
-    /// started after the others): held before it, as at the end.
-    pub offset_seconds: f64,
-    /// Where the part starts on its take's clock (its clip's in point), in
-    /// seconds: what the file holds from there on fills the part. The
-    /// picture at the start is the frame on screen at that moment.
-    pub in_seconds: f64,
-    /// Take the part's audio from this file of the same take instead (and
-    /// where it starts within the clip): an edited file shows an ISO
-    /// file's picture with the program's sound.
-    pub audio: Option<(PathBuf, f64)>,
-    /// The file's frame rate as recorded (its manifest's), which a file
-    /// with dropped frames can't tell; 0 if unknown (then the file's own
-    /// average, rounded).
-    pub fps: u32,
-    /// Show only this part of the file's picture (fractions of its width
-    /// and height), scaled to fit the joined file's size: the part is
-    /// decoded and encoded again whole (#87). The whole picture if absent.
-    pub crop: Option<isocast_protocol::timeline::Crop>,
-}
-
-/// What a join wrote.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Joined {
-    pub duration_seconds: f64,
-    pub frames: u64,
-    /// Each part's place in the joined file, in order.
-    pub parts: Vec<JoinedPart>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct JoinedPart {
-    pub start_seconds: f64,
-    /// Its audio is cut or padded with silence to this.
-    pub duration_seconds: f64,
-    pub frames: u64,
-    /// Frames starting past the part's length, left out.
-    pub frames_left_out: u64,
-    /// Frames decoded and encoded again; the others were copied.
-    pub reencoded: u64,
-    /// Its file is in another format than the joined file's (codec, size
-    /// or frame rate), so it was encoded again whole.
-    pub converted: bool,
-}
-
-/// Called with how far a join has got, 0 to 1, a few times a second;
-/// returning false stops it (it then fails, leaving nothing at the output).
-pub type OnJoinProgress<'a> = &'a mut dyn FnMut(f64) -> bool;
 
 /// What a media file holds.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -425,7 +425,7 @@ impl HotkeysPage {
 }
 
 /// The page's rows in OBS's groups: recording, streaming, scenes, Studio
-/// Mode, sources, timeline, then bindings that match none of them.
+/// Mode, sources, then bindings that match none of them.
 fn rows(setup: Option<&Setup>, current: &Current) -> Vec<(String, Vec<Row>)> {
     let empty = json!({});
     let mut groups: Vec<(String, Vec<Template>)> = vec![
@@ -526,19 +526,6 @@ fn rows(setup: Option<&Setup>, current: &Current) -> Vec<(String, Vec<Row>)> {
         ],
     ));
     groups.push(("Sources".into(), sources));
-    groups.push((
-        "Timeline".into(),
-        vec![
-            ("Retake".into(), "timeline.retake", empty.clone()),
-            ("New timeline".into(), "timeline.new", empty.clone()),
-            ("Close the timeline".into(), "timeline.close", empty.clone()),
-            (
-                "Export the timeline".into(),
-                "timeline.export",
-                empty.clone(),
-            ),
-        ],
-    ));
 
     // Bindings by (action, arguments); each row takes the first.
     let mut unused: Vec<(&String, &Binding)> = current.bindings.iter().collect();

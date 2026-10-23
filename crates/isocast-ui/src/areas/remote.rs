@@ -472,7 +472,6 @@ impl Area for Remote {
             } if !self.is_me(by) => {
                 let what = match cause {
                     Some(isocast_protocol::api::TakeCause::Split) => "split the recording",
-                    Some(isocast_protocol::api::TakeCause::Retake) => "started a retake",
                     _ => "started recording",
                 };
                 self.said(app, by, what);

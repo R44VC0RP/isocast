@@ -23,15 +23,6 @@ use crate::plugin::{
     PluginAction, PluginAddParams, PluginEnableParams, PluginState, PluginTarget, ProcessState,
 };
 use crate::stream::{StreamService, StreamStatus};
-use crate::timeline::{
-    ExportFile, ExportRunning, RetakeParams, TimelineAction, TimelineExportParams,
-    TimelineMoveParams, TimelineNewParams, TimelineOpenParams, TimelineRemoveParams,
-    TimelineSummary, TimelineTarget,
-};
-use crate::timeline::{
-    TimelineAngleParams, TimelineCropParams, TimelineRangeParams, TimelineRollParams,
-    TimelineSplitParams, TimelineTrimParams,
-};
 use crate::{Canvas, CanvasId, Issue, Setup};
 
 /// Every method the engine offers. Serialized as JSON-RPC `method` and
@@ -330,53 +321,6 @@ pub enum Method {
     Logs(crate::diagnostics::LogsParams),
     /// Bounded read of a file from a redacted bug-report preview.
     ReportFile(crate::diagnostics::ReportFileParams),
-    /// Make a timeline, make it current and choose it for the next
-    /// recording (`record_target`): from then on every take that
-    /// finishes (a stop or a split) is added to its end. Its params are
-    /// optional (`name`). Returns
-    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineNew(Option<TimelineNewParams>),
-    /// A timeline (the current one unless `timeline` names one) with each
-    /// clip's take, place, duration and files. Returns
-    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineGet(Option<TimelineTarget>),
-    /// Every timeline, and which is current. Returns
-    /// [`TimelineList`](crate::timeline::TimelineList).
-    TimelineList,
-    /// Make a timeline current: the one the editor shows and edits act on
-    /// (recordings go where `record_target` says). Returns
-    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineOpen(TimelineOpenParams),
-    /// Make no timeline current; if it was the record target, recordings
-    /// start new projects again. Returns [`TimelineClosed`](crate::timeline::TimelineClosed).
-    TimelineClose,
-    /// Take a clip off a timeline. Its take's files stay where they are,
-    /// listed under the timeline's `removed`. Returns
-    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineRemove(TimelineRemoveParams),
-    /// Move a clip to another place (`index`, from 0). Returns
-    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineMove(TimelineMoveParams),
-    /// Record the last take again: while not recording (or while a stop
-    /// is finishing, once it has), take the current timeline's last clip
-    /// off (its files stay) and start recording; while recording, drop the
-    /// take being recorded from the timeline (its files stay) and begin a
-    /// new take about a quarter second later (0.25 to 0.35 s with 30 and
-    /// 60 fps files), without stopping any device (`begins_at` says when). Retakes are taken one at a time;
-    /// one asked for before the new take has begun drops nothing more. Its
-    /// params are optional. Returns [`Retaken`](crate::timeline::Retaken).
-    Retake(Option<RetakeParams>),
-    /// Join a timeline's clips (the current one's unless `timeline` names
-    /// one), in order, into one program file and one file per ISO source
-    /// every clip has, each cut to the clips' in and out points, plus the
-    /// edited file when clips show other angles, and a manifest. The video
-    /// is copied as recorded except the frames around a cut that doesn't
-    /// fall on a keyframe (and parts of the edited file in another format),
-    /// which are encoded again; audio is cross-faded at every join. It
-    /// runs in the background: `export_progress` and `export_finished`
-    /// events report it. Its params are optional. Returns
-    /// [`ExportStarted`](crate::timeline::ExportStarted).
-    TimelineExport(Option<TimelineExportParams>),
     /// Current profile bindings and global registration warnings.
     HotkeysGet,
     /// Replace or patch profile bindings. Returns hotkeys::Hotkeys.
@@ -424,13 +368,13 @@ pub enum Method {
     /// [`DeveloperStatus`](crate::developer::DeveloperStatus).
     DebugSet(crate::developer::DebugSetParams),
     /// The recording projects (a folder per recording session) in the
-    /// recordings folders, newest first, each with its takes, files and
-    /// exports. Its params are optional. Returns
+    /// recordings folders, newest first, each with its takes and files.
+    /// Its params are optional. Returns
     /// [`Projects`](crate::project::Projects).
     ListProjects(Option<crate::project::ListProjectsParams>),
     /// Rename a project (by id): its folder becomes `<date> <time>
-    /// <name>`, numbered if taken. Refused while a recording or an export
-    /// writes into it. Manifests and timelines keep resolving. Returns
+    /// <name>`, numbered if taken. Refused while a recording writes into
+    /// it. Manifests keep resolving. Returns
     /// [`ProjectRenamed`](crate::project::ProjectRenamed).
     RenameProject(crate::project::RenameProjectParams),
     /// Predict, without benchmarking, whether a setup's files (the live
@@ -509,46 +453,12 @@ pub enum Method {
     RemotePairFinish,
     RemoteClients,
     RemoteRevoke(crate::remote::RemoteRevokeParams),
-    /// Move a clip's in and/or out point, on its take's clock (rounded to
-    /// its frame grid); the take's files are never touched. One revision.
-    /// Returns [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineTrim(TimelineTrimParams),
-    /// Cut the clip at a moment on the timeline in two (the second gets a
-    /// new id, and the first's angle). One revision. Returns
-    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineSplit(TimelineSplitParams),
-    /// Take a span of the timeline out, closing the gap (ripple): clips in
-    /// it are taken off, clips across its ends trimmed or split. One
-    /// revision. Returns [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineDeleteRange(TimelineRangeParams),
-    /// Choose the source the edited video shows over a span of the
-    /// timeline (`program` or an ISO source): clips across its ends are
-    /// split there and every clip in it shows `source`. One revision.
-    /// Returns [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineAngle(TimelineAngleParams),
-    /// Take back the last edit (trim, split, delete, angle, remove, move).
-    /// Returns [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineUndo(Option<TimelineTarget>),
-    /// Put back the last edit undone. Returns
-    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineRedo(Option<TimelineTarget>),
     /// Clear a canvas's staged preview: `clear_preview` for `main`, or the
     /// vertical canvas's own preview. Returns [`Switched`].
     ClearCanvasPreview {
         #[serde(default, skip_serializing_if = "CanvasId::is_main")]
         canvas: CanvasId,
     },
-    /// Choose the part of the picture the edited video shows over a span
-    /// (a rectangle in fractions of each clip's angle, a shape preset, or
-    /// the whole picture again): clips across its ends are split there.
-    /// Export encodes those clips again, scaled to the program's size. One
-    /// revision. Returns [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineCrop(TimelineCropParams),
-    /// Move the cut between a clip and the next one (a roll: the first's
-    /// out point and the second's in point together), keeping the
-    /// timeline's length. One revision. Returns
-    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineRoll(TimelineRollParams),
     /// Open a projector (G.4): the program, studio mode's preview, a
     /// scene, a video source or a multiview grid, full screen on a display
     /// or in a window. The app shows it (and opens it when it next starts
@@ -566,45 +476,12 @@ pub enum Method {
     /// whether it shows it. Returns
     /// [`Projector`](crate::projector::Projector).
     ProjectorPlace(Box<crate::projector::PlaceParams>),
-    /// Open a project file (`.isoprj`) or project folder in the editor
-    /// (#88): its timelines join the engine's (imported if it was copied
-    /// from elsewhere, with paths resolved where it is now), one becomes
-    /// the current timeline, and the app shows the editor on it
-    /// (`project_opened`). Missing takes are listed as offline, never an
-    /// error. Allowed while recording (like `timeline_open`). Returns
-    /// [`ProjectOpened`](crate::isoprj::ProjectOpened).
-    ProjectOpen(crate::isoprj::ProjectOpenParams),
-    /// Projects opened lately (File › Open Recent), newest first; with
-    /// `clear`, forget them. Its params are optional. Returns
-    /// [`RecentProjects`](crate::isoprj::RecentProjects).
-    RecentProjects(Option<crate::isoprj::RecentProjectsParams>),
-    /// Point an offline clip at where its take is now (a manifest, or the
-    /// folder holding it); the take's files are never touched. Returns
-    /// [`TimelineInfo`](crate::timeline::TimelineInfo).
-    TimelineRelink(crate::timeline::TimelineRelinkParams),
     /// Measured machine capabilities and calibration state. Returns MachineStatus.
     MachineProfile,
     /// Start a silent, idle-only calibration (at most 30 seconds). Returns MachineStatus.
     MachineCalibrate,
     /// Cancel calibration, retaining the last valid profile. Returns MachineStatus.
     MachineCancel,
-    /// Write a timeline as a project Final Cut Pro (`fcpxml`), Premiere Pro
-    /// (`xmeml`), DaVinci Resolve (`xmeml` with app `resolve`) or any
-    /// OpenTimelineIO reader (`otio`) opens (#104): every
-    /// ISO source on its own video track with the program on top, each
-    /// clip's angle the one track on there, crops as crop and transform,
-    /// markers, and each file's audio on its own tracks, all lined up from
-    /// the takes' manifests. It points at the takes' own files (nothing is
-    /// encoded, copied or changed). Returns
-    /// [`NleExported`](crate::timeline::NleExported).
-    TimelineExportNle(crate::timeline::TimelineExportNleParams),
-    /// Where the next recording goes (#114), and with `target`, choose it:
-    /// `new` (the default: each recording starts a new project folder with
-    /// its own timeline) or a timeline's id (its next take, written into
-    /// the folder of its last take). The choice is kept across restarts and
-    /// shown in `status` (`record_target`); a running recording keeps its
-    /// own. Returns [`RecordTarget`](crate::timeline::RecordTarget).
-    RecordTarget(Option<crate::timeline::RecordTargetParams>),
     /// Select/return the daemon's graphics adapter before opening a client
     /// renderer. Windows returns its DX12 LUID as [low: u32, high: i32];
     /// other platforms return null. Does not start capture or recording.
@@ -622,6 +499,14 @@ pub enum Method {
     /// or go back to the defaults. Only on this machine. Returns
     /// [`FolderRoots`](crate::roots::FolderRoots).
     FolderRootsSet(crate::roots::FolderRootsSetParams),
+    /// Write a take as a project Final Cut Pro (`fcpxml`), Premiere Pro
+    /// (`xmeml`), DaVinci Resolve (`xmeml` with app `resolve`) or any
+    /// OpenTimelineIO reader (`otio`) opens (#104): every ISO source on its
+    /// own video track with the program on top (the one track on), markers,
+    /// and each file's audio on its own tracks, all lined up from the take's
+    /// manifest. It points at the take's own files (nothing is encoded,
+    /// copied or changed). Returns [`NleExported`](crate::nle::NleExported).
+    TakeExportNle(crate::nle::TakeExportNleParams),
     /// Where an engine file picker starts: the folders other computers can
     /// use that exist, and the engine user's home folder. Returns
     /// [`FilesRoots`](crate::roots::FilesRoots).
@@ -913,16 +798,6 @@ pub struct StartParams {
     /// Stop on its own after this many seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<f64>,
-    /// Start a new project with its own timeline, whatever
-    /// `record_target` says (#114). Not with `into`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub new_project: bool,
-    /// Add this recording's takes to this timeline (an id), in the folder
-    /// of its last take, whatever `record_target` says. Not with
-    /// `new_project`. Neither: `record_target`'s choice (a new project
-    /// unless one was chosen).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub into: Option<String>,
 }
 
 /// Which recording session `stop` and `request_stop` are meant for.
@@ -1334,8 +1209,8 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<String>,
     },
-    /// A recording started writing these files, or a split (or `retake`)
-    /// began a new take's; `begins_at` is when a new take's files begin
+    /// A recording started writing these files, or a split began a new
+    /// take's; `begins_at` is when a new take's files begin
     /// (local time, RFC 3339 with milliseconds), a moment after the event.
     Started {
         files: Vec<PathBuf>,
@@ -1353,7 +1228,7 @@ pub enum Event {
         /// The project (its id) the recording writes into.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
-        /// What began the take: `start`, `split` or `retake`.
+        /// What began the take: `start` or `split`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cause: Option<TakeCause>,
         /// The recording session's id (as `stop` takes it).
@@ -1411,9 +1286,6 @@ pub enum Event {
         /// The project's folder.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         folder: Option<PathBuf>,
-        /// The timeline its takes went to (#114).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timeline: Option<crate::timeline::RecordingInto>,
         /// The recording session's id.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
@@ -1463,34 +1335,6 @@ pub enum Event {
         revision: u64,
         keys: Vec<String>,
     },
-    /// A timeline was made, opened, closed or changed (`action` says how;
-    /// `clip` is the clip concerned, if any); `current` is the current
-    /// timeline after. `timeline_get` reads it.
-    TimelineChanged {
-        timeline: String,
-        action: TimelineAction,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        clip: Option<String>,
-        clips: usize,
-        current: Option<String>,
-    },
-    /// How far an export has got (0 to 1 across all its files), at most a
-    /// few times a second, and the file it is writing.
-    ExportProgress {
-        export: String,
-        timeline: String,
-        progress: f64,
-        file: PathBuf,
-    },
-    /// An export ended: its files (each with its length and frames) and
-    /// manifest, or why it failed (files already written are kept).
-    ExportFinished {
-        export: String,
-        timeline: String,
-        manifest: PathBuf,
-        files: Vec<ExportFile>,
-        error: Option<String>,
-    },
     /// A recording crossed a pause/resume boundary; its files stay open.
     RecordingPaused {
         recording: RecordingPause,
@@ -1511,7 +1355,7 @@ pub enum Event {
     VirtualCamera {
         camera: crate::virtual_camera::VirtualCameraStatus,
     },
-    /// A take's files are finished (a stop, a split or a retake ended it,
+    /// A take's files are finished (a stop or a split ended it,
     /// or the recording failed): its manifest, every file and how it
     /// ended. Comes once per take, after its last `started`.
     TakeFinished {
@@ -1584,23 +1428,9 @@ pub enum Event {
         canvas: CanvasId,
         scene: Option<String>,
     },
-    /// A project was opened (`project_open`): its timeline is now current,
-    /// and with `editor` the app shows the editor on it.
-    ProjectOpened {
-        path: PathBuf,
-        folder: PathBuf,
-        project: String,
-        timeline: String,
-        editor: bool,
-    },
     /// Automatic-quality policy changed an effective limit or recovery state.
     GovernorChanged {
         governor: crate::governor::GovernorStatus,
-    },
-    /// Where the next recording goes changed (#114): `record_target`, a
-    /// new timeline, or the chosen timeline closed.
-    RecordTarget {
-        target: crate::timeline::RecordTarget,
     },
     /// A network caller's request was refused by the engine's policy
     /// (machine control stays on the machine, folders other computers can
@@ -1638,7 +1468,6 @@ pub enum Event {
 pub enum TakeCause {
     Start,
     Split,
-    Retake,
 }
 
 /// Whether a device appeared or went, in `device_changed` events.
@@ -1678,9 +1507,6 @@ pub enum EventKind {
     LibraryChanged,
     PluginChanged,
     DataChanged,
-    TimelineChanged,
-    ExportProgress,
-    ExportFinished,
     RecordingPaused,
     HotkeyFired,
     PreviewCleared,
@@ -1695,9 +1521,7 @@ pub enum EventKind {
     Projectors,
     CanvasSceneChanged,
     CanvasPreviewChanged,
-    ProjectOpened,
     GovernorChanged,
-    RecordTarget,
     Refused,
     RemoteClientConnected,
     RemoteClientDisconnected,
@@ -1709,7 +1533,7 @@ pub enum EventKind {
 
 impl EventKind {
     /// Every kind's name, as events and `watch` spell it, in this order.
-    pub const NAMES: [&str; 42] = [
+    pub const NAMES: [&str; 37] = [
         "setup_changed",
         "started",
         "status",
@@ -1725,9 +1549,6 @@ impl EventKind {
         "library_changed",
         "plugin_changed",
         "data_changed",
-        "timeline_changed",
-        "export_progress",
-        "export_finished",
         "recording_paused",
         "hotkey_fired",
         "preview_cleared",
@@ -1742,9 +1563,7 @@ impl EventKind {
         "projectors",
         "canvas_scene_changed",
         "canvas_preview_changed",
-        "project_opened",
         "governor_changed",
-        "record_target",
         "refused",
         "remote_client_connected",
         "remote_client_disconnected",
@@ -1778,9 +1597,6 @@ impl Event {
             Self::LibraryChanged { .. } => EventKind::LibraryChanged,
             Self::PluginChanged { .. } => EventKind::PluginChanged,
             Self::DataChanged { .. } => EventKind::DataChanged,
-            Self::TimelineChanged { .. } => EventKind::TimelineChanged,
-            Self::ExportProgress { .. } => EventKind::ExportProgress,
-            Self::ExportFinished { .. } => EventKind::ExportFinished,
             Self::RecordingPaused { .. } => EventKind::RecordingPaused,
             Self::HotkeyFired { .. } => EventKind::HotkeyFired,
             Self::PreviewCleared => EventKind::PreviewCleared,
@@ -1795,9 +1611,7 @@ impl Event {
             Self::Projectors { .. } => EventKind::Projectors,
             Self::CanvasSceneChanged { .. } => EventKind::CanvasSceneChanged,
             Self::CanvasPreviewChanged { .. } => EventKind::CanvasPreviewChanged,
-            Self::ProjectOpened { .. } => EventKind::ProjectOpened,
             Self::GovernorChanged { .. } => EventKind::GovernorChanged,
-            Self::RecordTarget { .. } => EventKind::RecordTarget,
             Self::Refused { .. } => EventKind::Refused,
             Self::RemoteClientConnected { .. } => EventKind::RemoteClientConnected,
             Self::RemoteClientDisconnected { .. } => EventKind::RemoteClientDisconnected,
@@ -1857,10 +1671,6 @@ pub struct Started {
     /// setup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
-    /// The timeline its takes go to (#114): a new project's own, or the
-    /// one chosen.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeline: Option<crate::timeline::RecordingInto>,
     /// The recording session's id: give it to `stop` and `request_stop`
     /// so they can only end this session. Absent for a split's new take
     /// (the session is the same).
@@ -1980,23 +1790,6 @@ pub struct Status {
     pub diagnostics: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interrupted: Vec<crate::manifest::InterruptedRecording>,
-    /// The current timeline, which finished takes are added to, if one is.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeline: Option<TimelineSummary>,
-    /// Where the next recording goes (#114): a new project, or a take on
-    /// a chosen timeline (`record_target`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub record_target: Option<crate::timeline::RecordTarget>,
-    /// The timeline the running recording's takes go to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recording_into: Option<crate::timeline::RecordingInto>,
-    /// Why no timeline is current although one was: its file couldn't be
-    /// read when isocastd started, so takes aren't being added to it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeline_problem: Option<String>,
-    /// The timeline export running, if one is.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub export: Option<ExportRunning>,
     /// Camera output state (installation is explicit, never automatic).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub virtual_camera: Option<crate::virtual_camera::VirtualCameraStatus>,
@@ -2158,26 +1951,6 @@ pub fn plugins_path() -> PathBuf {
         return socket.with_file_name(format!("{stem}.plugins"));
     }
     support_folder().join("plugins")
-}
-
-/// Where the daemon keeps timelines (one `<id>.timeline.json` each, and
-/// `current.json`): `$ISOCAST_TIMELINES`; else, for a daemon on a socket
-/// of its own (`$ISOCAST_SOCKET`), a folder named after the socket beside
-/// it (`/tmp/x.sock` → `/tmp/x.timelines`), so test daemons never touch
-/// the real ones; else `timelines` beside the default socket.
-pub fn timelines_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("ISOCAST_TIMELINES") {
-        return PathBuf::from(path);
-    }
-    if let Some(socket) = std::env::var_os("ISOCAST_SOCKET") {
-        let socket = PathBuf::from(socket);
-        let stem = socket
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "isocastd".into());
-        return socket.with_file_name(format!("{stem}.timelines"));
-    }
-    support_folder().join("timelines")
 }
 
 /// The user's home folder. Windows does not normally set `HOME` outside a

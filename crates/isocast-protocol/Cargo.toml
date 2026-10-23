@@ -14,10 +14,6 @@ serde_path_to_error = "0.1.20"
 thiserror = "2.0.21"
 toml = "1.1.8"
 
-[target.'cfg(not(unix))'.dependencies]
-# Timeline identities use OS randomness on Windows as well (already locked).
-getrandom = "0.4"
-
 [target.'cfg(windows)'.dependencies]
 # Known folders (profile, AppData, Videos) when variables are unset or a
 # library folder moved; already locked through the client and UI.

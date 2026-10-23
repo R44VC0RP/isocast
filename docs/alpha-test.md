@@ -39,8 +39,7 @@ While it runs, do what a normal session does, spread over the two hours:
 - switch scenes, and take one live from Studio Mode;
 - pause, then resume (Controls dock or your hotkey);
 - add a marker; split once (`isocast split`);
-- in View > Create, record two short takes, retake one, drag to reorder,
-  export;
+- export a take to your editor (`isocast project export-nle`) and open it;
 - leave it alone for a long stretch.
 
 Watch the LCD's DROPPED counter and the status bar. Both should stay at 0.

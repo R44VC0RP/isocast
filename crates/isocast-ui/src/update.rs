@@ -77,9 +77,9 @@ pub fn automatic_available() -> bool {
 }
 
 /// What keeps an update from installing now, from the engine's status:
-/// a recording (paused or not), a stream, a timeline export, the virtual
-/// camera (a call may be showing it) or the replay buffer. The engine's
-/// `shutdown_if_idle` decides the same atomically before it stops.
+/// a recording (paused or not), a stream, the virtual camera (a call may
+/// be showing it) or the replay buffer. The engine's `shutdown_if_idle`
+/// decides the same atomically before it stops.
 #[cfg(target_os = "macos")]
 fn busy_with(
     status: Option<&isocast_protocol::api::Status>,
@@ -97,8 +97,6 @@ fn busy_with(
             .is_some_and(|s| s.is_active())
     {
         Some("the stream")
-    } else if status.is_some_and(|s| s.export.is_some()) {
-        Some("the export")
     } else if camera_active
         || status
             .and_then(|s| s.virtual_camera.as_ref())

@@ -3790,7 +3790,6 @@ dependencies = [
 name = "isocast-protocol"
 version = "0.0.8"
 dependencies = [
- "getrandom 0.4.3",
  "schemars",
  "serde",
  "serde_json",

@@ -10,7 +10,27 @@ use isocast_protocol::project::{
 };
 
 use crate::Daemon;
-use crate::timeline::{failed, invalid, wrong_state};
+
+fn invalid(message: impl Into<String>) -> RpcError {
+    RpcError {
+        code: RpcError::INVALID_PARAMS,
+        message: message.into(),
+    }
+}
+
+fn wrong_state(message: impl Into<String>) -> RpcError {
+    RpcError {
+        code: RpcError::WRONG_STATE,
+        message: message.into(),
+    }
+}
+
+fn failed(message: impl Into<String>) -> RpcError {
+    RpcError {
+        code: RpcError::FAILED,
+        message: message.into(),
+    }
+}
 
 /// The project a recording writes into.
 #[derive(Debug, Clone)]
@@ -34,8 +54,8 @@ pub(crate) fn root_of(folder: &Path) -> PathBuf {
 }
 
 /// The project for a recording asked to write into `folder`: `folder`
-/// itself if it is a project's (a retake adds to its take's project),
-/// else a new project folder inside it.
+/// itself if it is a project's (the new take joins it), else a new project
+/// folder inside it.
 pub(crate) fn project_for(folder: &Path) -> Result<ProjectRef, RpcError> {
     let (made, file, created) = isocast_engine::project::begin(folder).map_err(|err| {
         failed(format!(
@@ -114,11 +134,6 @@ impl Daemon {
         found.sort_by(|a, b| (&b.1.created_at, &b.0).cmp(&(&a.1.created_at, &a.0)));
         found.dedup_by(|a, b| a.0 == b.0);
         found.truncate(params.limit.unwrap_or(DEFAULT_LIMIT) as usize);
-        for (folder, _) in &found {
-            for message in heal_exports(folder) {
-                self.publish(Event::Warning { message });
-            }
-        }
         Projects {
             projects: found
                 .iter()
@@ -160,10 +175,8 @@ impl Daemon {
         params: RenameProjectParams,
     ) -> Result<ProjectRenamed, RpcError> {
         let name = project::check_name(&params.name).map_err(|err| invalid(err.to_string()))?;
-        // A retake picks its take's folder before it starts recording into
-        // it: wait for one running. Then the lock starting a recording holds
-        // while it picks its project, so neither sees the other half done.
-        let _retaking = self.retaking.lock();
+        // The lock starting a recording holds while it picks its project,
+        // so neither sees the other half done.
         let _projects = self.projects.lock();
         let (folder, file) = self.find_project(&params.project)?;
         if self
@@ -173,13 +186,6 @@ impl Daemon {
             return Err(wrong_state(format!(
                 "project {:?} is being recorded into; rename it once the recording has stopped",
                 file.id
-            )));
-        }
-        if let Some(running) = self.export.lock().as_ref() {
-            return Err(wrong_state(format!(
-                "export {} is running and may be reading or writing this project's files; \
-                 rename it once the export has finished",
-                running.export
             )));
         }
         let old_name = project::name_of(&folder, &file);
@@ -228,31 +234,7 @@ impl Daemon {
                 root.display()
             )));
         };
-        // Timelines name their takes' manifests: move them too, or undo.
-        let moved = self
-            .timelines
-            .lock()
-            .move_folder(&folder, &target, Some(&file.id));
-        if let Err(err) = moved {
-            let undone = rename_exclusive(&target, &folder);
-            return Err(failed(format!(
-                "the timelines couldn't be updated ({}), so the folder {}",
-                err.message,
-                match undone {
-                    Ok(()) => "was renamed back".to_string(),
-                    Err(undo) => format!(
-                        "stays renamed to {} (renaming it back failed: {undo})",
-                        target.display()
-                    ),
-                }
-            )));
-        }
-        notes.extend(rewrite_exports(&target, &folder));
         self.moved_last_report(&folder, &target);
-        // Its project file follows the name (#88).
-        if let Err(message) = self.write_project_file(&target) {
-            notes.push(message);
-        }
         let project = project::describe(&target, &file, false);
         self.publish(Event::ProjectRenamed {
             project: project.clone(),
@@ -292,122 +274,4 @@ pub(crate) fn same_folder(a: &Path, b: &Path) -> bool {
             (std::fs::canonicalize(a), std::fs::canonicalize(b)),
             (Ok(a), Ok(b)) if a == b
         )
-}
-
-/// Export manifests in a renamed project name its files and takes by
-/// path: point those inside it at the new folder. Returns notes for any
-/// that couldn't be updated.
-fn rewrite_exports(folder: &Path, old: &Path) -> Vec<String> {
-    export_manifests(folder)
-        .filter_map(|(path, json)| rewrite_export(&path, json, old, folder))
-        .collect()
-}
-
-/// Export manifests in `folder` that name the folder they were written in
-/// by a path that's gone (the folder was renamed in the Finder, so
-/// `rename_project` never rewrote them): point them at `folder` (#56).
-/// Returns notes for any that couldn't be updated.
-pub(crate) fn heal_exports(folder: &Path) -> Vec<String> {
-    let mut notes = Vec::new();
-    for (path, json) in export_manifests(folder) {
-        // Still being written by the export that made it: leave it.
-        if json.get("status").and_then(|s| s.as_str()) == Some("exporting") {
-            continue;
-        }
-        // Its own files are written beside it: their folder is where it was.
-        let Some(file) = json
-            .pointer("/files/0/path")
-            .and_then(|p| p.as_str())
-            .map(PathBuf::from)
-        else {
-            continue;
-        };
-        let (Some(old), Some(name)) = (file.parent(), file.file_name()) else {
-            continue;
-        };
-        if same_folder(old, folder)
-            || old.symlink_metadata().is_ok()
-            || folder.join(name).symlink_metadata().is_err()
-        {
-            continue;
-        }
-        let old = old.to_path_buf();
-        notes.extend(rewrite_export(&path, json, &old, folder));
-    }
-    notes
-}
-
-/// The export manifests (`*.export.json`) in `folder` that can be read.
-fn export_manifests(folder: &Path) -> impl Iterator<Item = (PathBuf, serde_json::Value)> {
-    std::fs::read_dir(folder)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .ends_with(".export.json")
-        })
-        .filter_map(|entry| {
-            let path = entry.path();
-            let json = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
-            Some((path, json))
-        })
-}
-
-/// Rewrite the export manifest at `path` (`json`) with its paths inside
-/// `old` moved to `new`, if any are; a note if it couldn't be written.
-fn rewrite_export(
-    path: &Path,
-    mut json: serde_json::Value,
-    old: &Path,
-    new: &Path,
-) -> Option<String> {
-    if !move_paths(&mut json, old, new) {
-        return None;
-    }
-    let partial = path.with_extension("json.partial");
-    let written = serde_json::to_vec_pretty(&json)
-        .map_err(std::io::Error::other)
-        .and_then(|bytes| std::fs::write(&partial, bytes))
-        .and_then(|()| std::fs::rename(&partial, path));
-    let err = written.err()?;
-    let _ = std::fs::remove_file(&partial);
-    Some(format!(
-        "the export manifest {} still names files in the old folder: {err}",
-        path.display()
-    ))
-}
-
-/// Rewrite every string in `json` that is a path inside `from` to the
-/// same path inside `to`, where that is there; true if any changed. A path
-/// not found in `to` stays: the export may have been moved without the
-/// project its takes are in (#56).
-fn move_paths(json: &mut serde_json::Value, from: &Path, to: &Path) -> bool {
-    match json {
-        serde_json::Value::String(text) => match project::moved(Path::new(text), from, to) {
-            Some(new) if new.symlink_metadata().is_ok() => {
-                *text = new.to_string_lossy().into_owned();
-                true
-            }
-            _ => false,
-        },
-        // Every item, not stopping at the first that changed.
-        serde_json::Value::Array(items) => {
-            let mut any = false;
-            for item in items {
-                any |= move_paths(item, from, to);
-            }
-            any
-        }
-        serde_json::Value::Object(map) => {
-            let mut any = false;
-            for item in map.values_mut() {
-                any |= move_paths(item, from, to);
-            }
-            any
-        }
-        _ => false,
-    }
 }

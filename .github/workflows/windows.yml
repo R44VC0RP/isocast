@@ -200,7 +200,6 @@ jobs:
           New-Item -ItemType Directory -Force $work | Out-Null
           $env:ISOCAST_SOCKET = "$work/engine.sock"
           $env:ISOCAST_SETUP = "$work/setup.toml"
-          $env:ISOCAST_TIMELINES = "$work/timelines"
           $env:ISOCAST_CALIBRATION = 'off'
           $bin = (Resolve-Path target/debug).Path
           $env:ISOCAST_DAEMON = "$bin/isocastd.exe"

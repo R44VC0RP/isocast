@@ -6,13 +6,16 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 ## 1. Product status
 
 - **macOS 0.0.8 is the shipped release** (2026-10-19): Apple silicon, macOS 14+, notarized, Sparkle self-updates.
+- **The in-app editor and timelines were removed** (2026-10-22, Ryan): the client is the OBS-style app (scenes,
+  sources, mixer, Studio Mode, projectors); `.isoprj` files are no longer written or opened. NLE export is per take:
+  `take_export_nle` (`isocast project export-nle`, MCP `export_take_nle`).
 - **0.0.9** ships from main once hosted CI is green and Ryan says go (PLAN.md, "Next").
 - **Windows (#105) is native on main, unreleased and unsigned.** It records program plus ISOs (WGC, MF cameras, WASAPI,
   NVENC H.264/HEVC, MF fallback, crash-safe `isocast-mux`), previews, streams RTMP/RTMPS at matched sizes, and has a
   per-user Inno installer and WinSparkle updates (test keys only).
 - **Windows gaps:** CPU and resident RAM are still above OBS. Ryan's targets: at most half OBS's CPU, RAM below OBS,
   faster first preview, stop under 20 ms, zero drops. Missing: scaled streaming, replay buffer, media files, NLE XML
-  export (refused). Windows work is tracked in #105 and its follow-up issues.
+  export (refused; OTIO works). Windows work is tracked in #105 and its follow-up issues.
 - **Remote engines R1 is on main**: CLI/MCP only, off by default (`isocast remote enable`), TCP 47470, pinned mutual
   TLS 1.3, local-only code + SPAKE2 pairing, OS DNS-SD. Verified basebook ↔ exon-desk both ways.
 - **Desktop client on a remote server (R2) is on `agent/desktop-client`** (R2-core + R2-ui merged): pairing in the
@@ -141,7 +144,7 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 
 ## 4. Commands that matter
 
-- Isolated engine: `ISOCAST_SOCKET`, `ISOCAST_SETUP`, `ISOCAST_DEV_APP`, `ISOCAST_TIMELINES` under
+- Isolated engine: `ISOCAST_SOCKET`, `ISOCAST_SETUP`, `ISOCAST_DEV_APP` under
   `/Volumes/IsocastBuild/<lane>/scratch`. Synthetic sources only.
 - Build: `scripts/remote-build.sh build [isocastd isocast isocast-ui]` (release, copied to `$CARGO_TARGET_DIR/release`).
 - Per commit: `cargo fmt`, `scripts/remote-build.sh cargo clippy --release -p <crate> -- -D warnings`, and

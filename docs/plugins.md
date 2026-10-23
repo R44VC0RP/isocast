@@ -103,8 +103,7 @@ folder already, or a project folder in one: `start`'s `folder`, a
 `init_setup`, the recordings folder of a profile it imports with
 `library_import` or `library_import_obs`, and the path of a hotkey it
 binds or changes (with `hotkeys_set`, `apply`, or in an imported
-profile): `timeline.retake`'s and `timeline.export`'s `args.folder`, and
-the folder of `program.screenshot`'s `args.path`. A hotkey fires later,
+profile): the folder of `program.screenshot`'s `args.path`. A hotkey fires later,
 maybe when you press its keys, as your request rather than the plugin's,
 so it is checked when it is saved. Bindings it leaves as they were (yours)
 aren't checked. A hotkey a plugin fires with `hotkeys_input` counts as the
@@ -122,14 +121,12 @@ plugins too. A plugin may still switch to a profile the user made
 Every recording session writes into its own **project folder** in the
 recordings folder, `<YYYY-MM-DD HH-MM-SS> Untitled/`: every take's program
 and ISO files, their manifests (`….session.json`, listing files relative
-to themselves) and the timeline exports made from them. A hidden
+to themselves). A hidden
 `.isocast-project.json` gives it a stable id (`20261014-153012`); its name
 is the folder's name after the date and time. `list_projects` lists them;
-`rename_project` (refused while a recording or an export writes into it)
+`rename_project` (refused while a recording writes into it)
 renames the folder to `<date> <time> <name>` in one step (atomic on APFS
-and HFS+; on exFAT a check and a rename) and moves timelines' references
-(timelines also find a project renamed in the Finder by its id, and
-`list_projects` points its export manifests at the new folder), so a plugin can name a take once `take_finished`
+and HFS+; on exFAT a check and a rename), so a plugin can name a take once `take_finished`
 or `stopped` says it is done. Recordings from before project folders stay
 where they are.
 
@@ -143,8 +140,8 @@ arrives once, as `{"jsonrpc":"2.0","method":"event","params":{"type":…}}`.
 
 | Event (`type`) | When | Fields |
 |---|---|---|
-| `started` | a recording's first take began, or a split or retake began a new take | `files`, `take`, `manifest`, `folder`, `project`, `cause` (`start`, `split`, `retake`), `begins_at` (split/retake) |
-| `take_finished` | a take's files are finished (stop, split, retake, or failure) | `take`, `manifest`, `files`, `folder`, `project`, `status` (`complete`, `failed`, `interrupted`), `duration_seconds`, `errors` |
+| `started` | a recording's first take began, or a split began a new take | `files`, `take`, `manifest`, `folder`, `project`, `cause` (`start`, `split`), `begins_at` (split) |
+| `take_finished` | a take's files are finished (stop, split, or failure) | `take`, `manifest`, `files`, `folder`, `project`, `status` (`complete`, `failed`, `interrupted`), `duration_seconds`, `errors` |
 | `stopped` | a recording ended, or failed to start | `report` (every take and file), `error`, `project`, `folder` |
 | `recording_paused` | a recording paused or resumed | `recording` (`paused`, `elapsed_seconds`, `paused_seconds`), `project` |
 | `marker` | a marker was added | `label`, `take`, `time_seconds`, `project` |
@@ -153,9 +150,6 @@ arrives once, as `{"jsonrpc":"2.0","method":"event","params":{"type":…}}`.
 | `scene_changed` | a scene went on air | `scene`, `take`, `time_seconds`, `transition` |
 | `preview_changed` / `preview_cleared` | studio mode's preview changed / was cleared | `scene` |
 | `stream` | the stream connected, went live, is reconnecting, failed or stopped | `stream` (`state`, counters) |
-| `timeline_changed` | a timeline was made, opened, closed or changed | `timeline`, `action`, `clip`, `clips`, `current` |
-| `export_progress` | a timeline export moved on | `export`, `timeline`, `progress`, `file` |
-| `export_finished` | a timeline export ended | `export`, `timeline`, `manifest`, `files`, `error` |
 | `setup_changed` | a setup change was applied | `revision` (`get` reads it) |
 | `library_changed` | a scene collection or profile was made, renamed, deleted, imported or switched | `action`, `kind`, `id`, `collection`, `profile` |
 | `device_changed` | a camera, microphone, display or audio output appeared or went | `action` (`added`, `removed`), `kind`, `id`, `name` |

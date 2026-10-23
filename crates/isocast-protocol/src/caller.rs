@@ -156,7 +156,7 @@ pub fn local_only_reason(method: &Method) -> Option<&'static str> {
             "the operating system's permission prompts and settings appear on the engine's own \
              screen, for someone there to answer",
         ),
-        Method::TimelineExportNle(params) if params.replace => Some(
+        Method::TakeExportNle(params) if params.replace => Some(
             "`replace` overwrites whatever file is at the path; leave it out (an earlier Isocast \
              export is still replaced) or choose another path",
         ),
@@ -172,7 +172,7 @@ pub fn local_only_reason(method: &Method) -> Option<&'static str> {
         // without developer settings or files outside the roots.
         Method::BugReport(_)
         | Method::SpeedTest(_)
-        | Method::TimelineExportNle(_)
+        | Method::TakeExportNle(_)
         | Method::Status
         | Method::Devices
         | Method::Get(_)
@@ -223,15 +223,6 @@ pub fn local_only_reason(method: &Method) -> Option<&'static str> {
         | Method::DataDelete(_)
         | Method::Logs(_)
         | Method::ReportFile(_)
-        | Method::TimelineNew(_)
-        | Method::TimelineGet(_)
-        | Method::TimelineList
-        | Method::TimelineOpen(_)
-        | Method::TimelineClose
-        | Method::TimelineRemove(_)
-        | Method::TimelineMove(_)
-        | Method::Retake(_)
-        | Method::TimelineExport(_)
         | Method::HotkeysGet
         | Method::HotkeysSet(_)
         | Method::HotkeysActions
@@ -252,24 +243,12 @@ pub fn local_only_reason(method: &Method) -> Option<&'static str> {
         | Method::ReplaySave(_)
         | Method::ReplayStatus(_)
         | Method::WebsocketStatus
-        | Method::TimelineTrim(_)
-        | Method::TimelineSplit(_)
-        | Method::TimelineDeleteRange(_)
-        | Method::TimelineAngle(_)
-        | Method::TimelineUndo(_)
-        | Method::TimelineRedo(_)
         | Method::ClearCanvasPreview { .. }
-        | Method::TimelineCrop(_)
-        | Method::TimelineRoll(_)
         | Method::ProjectorOpen(_)
         | Method::ProjectorClose(_)
         | Method::ProjectorList
         | Method::ProjectorPlace(_)
-        | Method::ProjectOpen(_)
-        | Method::RecentProjects(_)
-        | Method::TimelineRelink(_)
         | Method::MachineProfile
-        | Method::RecordTarget(_)
         | Method::GpuAdapter
         | Method::Hello
         | Method::FolderRoots
@@ -287,7 +266,7 @@ fn method_label(method: &Method) -> String {
         .unwrap_or_else(|| "this method".into());
     match method {
         Method::BugReport(_) => format!("{name} with submit"),
-        Method::TimelineExportNle(_) => format!("{name} with replace"),
+        Method::TakeExportNle(_) => format!("{name} with replace"),
         _ => name,
     }
 }

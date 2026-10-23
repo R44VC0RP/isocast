@@ -134,10 +134,6 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         run: scripts/motion.sh --clock lockstep --no-timing --out "$RUNNER_TEMP/motion/suite"
 
-      - name: Editor suite (lockstep)
-        if: steps.changes.outputs.run == 'true'
-        run: scripts/motion.sh --suite scripts/motion/editor.toml --clock lockstep --no-timing --out "$RUNNER_TEMP/motion/editor"
-
       - name: Upload results
         if: always() && steps.changes.outputs.run == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

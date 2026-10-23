@@ -41,10 +41,10 @@ use super::{
     AUDIO_TAIL, COMMIT_TIMEOUT, CaptureReport, DiskReport, FIRST_FRAME_TIMEOUT, FilePlan,
     FolderLock, Formats, MIN_FREE_BYTES, MIN_FREE_SECONDS, MIN_TAKE, MIX_QUEUE_DEPTH, MONITOR_FPS,
     OnAir, Output, Packet, QUEUE_DEPTH, RecordOptions, Report, SPACE_CHECK_INTERVAL, SPEED_MARGIN,
-    SPLIT_LEAD, SPLIT_SOON_LEAD, STALL_AFTER, START_DELAY, STATUS_INTERVAL, SessionControl, Shared,
-    Slots, SourceFilters, SplitRefused, SplitTake, SplitTiming, Take, WriterInputs, create_writers,
-    expand_home, interrupted_note, interrupted_sessions, is_program, live_status, next_recording,
-    plan_take, sidechain_sources, take_manifest, wait_for_frame,
+    SPLIT_LEAD, STALL_AFTER, START_DELAY, STATUS_INTERVAL, SessionControl, Shared, Slots,
+    SourceFilters, SplitRefused, SplitTake, Take, WriterInputs, create_writers, expand_home,
+    interrupted_note, interrupted_sessions, is_program, live_status, next_recording, plan_take,
+    sidechain_sources, take_manifest, wait_for_frame,
 };
 use super::{AudioStopped, audio_stop_errors, file_audio_stops};
 #[cfg(not(windows))]
@@ -3671,43 +3671,22 @@ impl Drop for FinishRecording<'_> {
     }
 }
 
-/// When a split asked for at `now` begins the next take: on the frame grid
-/// of every file (files start at the session's `epoch`; their frame rates
-/// are `rates`), at least a second after the `current` take's start, and
-/// per `timing` either the next whole second at least [`SPLIT_LEAD`] away,
-/// or the next moment at least [`SPLIT_SOON_LEAD`] away that every file's
-/// frame rate and the audio's sample rate share and that is a whole number
-/// of nanoseconds from the epoch (1/10 s for 60 and 30 fps files). Frame
-/// times are nanoseconds rounded down, so only such moments fall exactly on
-/// a frame of every file (and of the program, whose frames count from the
-/// live engine's clock): at any other, a file's length would come out a
-/// frame long.
-fn split_time(epoch: Time, current: Time, rates: &[u32], timing: SplitTiming, now: Time) -> Time {
-    let (rate, lead) = match timing {
-        SplitTiming::WholeSecond => (1, SPLIT_LEAD),
-        SplitTiming::Soonest => {
-            let rate = rates
-                .iter()
-                .map(|fps| (*fps).max(1))
-                .fold(gcd(1_000_000_000, SAMPLE_RATE), gcd);
-            (rate, SPLIT_SOON_LEAD)
-        }
-    };
-    // The first tick of `rate` at or after `time`: whole ticks from `epoch`
+/// When a split asked for at `now` begins the next take: the next whole
+/// second from the session's `epoch` (files start there, so it falls on
+/// every file's frame grid) at least [`SPLIT_LEAD`] away, and at least a
+/// second after the `current` take's start.
+fn split_time(epoch: Time, current: Time, now: Time) -> Time {
+    // The first whole second at or after `time`: whole ticks from `epoch`
     // are exactly where each file's frames fall (`Time::add_ticks`).
-    let tick_after = |time: Time| {
-        let mut ticks = time.ticks_since(epoch, rate).max(0) as u64;
-        if epoch.add_ticks(ticks, rate) < time {
+    let second_after = |time: Time| {
+        let mut ticks = time.ticks_since(epoch, 1).max(0) as u64;
+        if epoch.add_ticks(ticks, 1) < time {
             ticks += 1;
         }
         ticks
     };
-    let ticks = tick_after(now + lead).max(tick_after(current + Duration::from_secs(1)));
-    epoch.add_ticks(ticks, rate)
-}
-
-fn gcd(a: u32, b: u32) -> u32 {
-    if b == 0 { a } else { gcd(b, a % b) }
+    let ticks = second_after(now + SPLIT_LEAD).max(second_after(current + Duration::from_secs(1)));
+    epoch.add_ticks(ticks, 1)
 }
 
 fn run_iso<P: Platform>(
@@ -4754,9 +4733,8 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                 }
                 // A split: the next take's files start at a moment on every
                 // file's frame grid (the next whole second on the recording's
-                // clock, or the soonest such moment: see `SplitTiming`), at least
-                // a second after the current take's start.
-                if let Some((timing, reply)) = control.take_split() {
+                // clock), at least a second after the current take's start.
+                if let Some(reply) = control.take_split() {
                     let number = takes.len() as u32 + 1;
                     let next = plan_take(setup, &formats, &folder, number)
                         .and_then(|plan| {
@@ -4772,13 +4750,7 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
                             // the start.
                             let now = platform.now();
                             let current = takes.last().expect("a take");
-                            let rates: Vec<u32> = current
-                                .plans
-                                .iter()
-                                .chain(&plan.plans)
-                                .map(|plan| plan.spec.video.fps)
-                                .collect();
-                            let at = split_time(shared.epoch, current.epoch, &rates, timing, now);
+                            let at = split_time(shared.epoch, current.epoch, now);
                             if options.stop.load(Ordering::SeqCst) || at + MIN_TAKE > shared.end() {
                                 writers.into_iter().for_each(FileWriter::cancel);
                                 return Err(SplitRefused {
@@ -5252,41 +5224,23 @@ mod tests {
     }
 
     #[test]
-    fn soonest_splits_fall_exactly_on_every_files_frames() {
+    fn splits_fall_on_whole_seconds_a_second_into_the_take() {
         // An epoch that isn't a whole number of frames from anything.
         let epoch = Time::from_nanos(123_456_789_017);
         let ms = |ms: u64| Duration::from_millis(ms);
-        let rates = [60, 30, 60];
-        // A take that began on the epoch, 2.37 s ago.
+        // A take that began on the epoch, 2.37 s ago: the next whole
+        // second at least half a second away.
         let now = epoch + ms(2_370);
-        let at = split_time(epoch, epoch, &rates, SplitTiming::Soonest, now);
-        // The next tenth of a second (every 60 and 30 fps frame grid,
-        // in whole nanoseconds) at least a quarter second away.
-        assert_eq!(at, epoch + ms(2_700));
-        for fps in [60, 30] {
+        let at = split_time(epoch, epoch, now);
+        assert_eq!(at, epoch + Duration::from_secs(3));
+        for fps in [60, 30, 24] {
             let frames = at.ticks_since(epoch, fps) as u64;
             assert_eq!(epoch.add_ticks(frames, fps), at, "{fps} fps");
-            // A take from there to a whole second is whole frames long.
-            let end = epoch + Duration::from_secs(4);
-            let length = super::super::file::file_end(at, end, fps);
-            assert_eq!(length, end, "{fps} fps");
         }
         // A take lasts at least a second: one that only just began.
-        let current = epoch + ms(2_700);
-        let again = split_time(
-            epoch,
-            current,
-            &rates,
-            SplitTiming::Soonest,
-            epoch + ms(2_800),
-        );
+        let current = epoch + Duration::from_secs(3);
+        let again = split_time(epoch, current, epoch + ms(3_100));
         assert_eq!(again, current + Duration::from_secs(1));
-        // `split` keeps whole seconds at least half a second away.
-        let whole = split_time(epoch, epoch, &rates, SplitTiming::WholeSecond, now);
-        assert_eq!(whole, epoch + Duration::from_secs(3));
-        // 24 fps: every 1/8 s.
-        let film = split_time(epoch, epoch, &[24], SplitTiming::Soonest, now);
-        assert_eq!(film, epoch + ms(2_625));
     }
 
     #[test]

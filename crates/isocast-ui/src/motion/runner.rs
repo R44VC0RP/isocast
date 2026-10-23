@@ -64,8 +64,8 @@ impl WindowAdapter for MotionWindow {
 type MakeWindow = Box<dyn Fn() -> Result<Rc<MotionWindow>, slint::PlatformError>>;
 
 /// A display whose clock moves only when the run says so. The studio's
-/// window is the first it hands out; a window made later (the editor's,
-/// #87) gets one of its own, made by `make`.
+/// window is the first it hands out; a window made later (a projector's)
+/// gets one of its own, made by `make`.
 struct MotionPlatform {
     windows: Rc<RefCell<Vec<Rc<MotionWindow>>>>,
     handed: Cell<usize>,
@@ -97,11 +97,6 @@ pub struct Calls {
     pub bytes: u64,
     pub by_method: BTreeMap<String, (u64, u64)>,
 }
-
-/// Where the editor suite's clips start in their takes, and how much
-/// longer than its clip each take is recorded (#94).
-const TAKE_IN: f64 = 0.5;
-const TAKE_SPARE: f64 = 1.0;
 
 /// How long lockstep waits on the wall clock for the engine before calling
 /// the run invalid.
@@ -153,11 +148,8 @@ enum Input {
 
 pub struct Runner {
     gpu: Gpu,
-    /// The window replayed into and drawn: the studio's, or the editor's
-    /// for `editor-…` targets.
+    /// The window replayed into and drawn: the studio's.
     window: Rc<MotionWindow>,
-    windows: Rc<RefCell<Vec<Rc<MotionWindow>>>>,
-    editor: bool,
     app: AppWindow,
     hub: Rc<App>,
     updates: Receiver<Update>,
@@ -237,7 +229,7 @@ pub fn run(run: Run, keep_images: bool, dump: &[usize], dir: &std::path::Path) -
     let now = Rc::new(Cell::new(Duration::ZERO));
     crate::clock::set_virtual(Duration::ZERO);
     slint::platform::set_platform(Box::new(MotionPlatform {
-        windows: windows.clone(),
+        windows,
         handed: Cell::new(0),
         make,
         now: now.clone(),
@@ -299,8 +291,6 @@ pub fn run(run: Run, keep_images: bool, dump: &[usize], dir: &std::path::Path) -
     let mut runner = Runner {
         gpu,
         window,
-        windows,
-        editor: false,
         app,
         hub,
         updates,
@@ -355,17 +345,10 @@ pub fn run(run: Run, keep_images: bool, dump: &[usize], dir: &std::path::Path) -
         // Let the encoders get going: their start is not what is measured.
         runner.settle(60)?;
     }
-    let editor = runner.run.target.starts_with("editor-");
-    if editor {
-        runner.editor_setup()?;
-    }
     for state in runner.run.before.clone() {
         runner
             .state(&state)
             .with_context(|| format!("before: {state}"))?;
-    }
-    if editor {
-        runner.use_editor()?;
     }
     runner.settle(20)?;
 
@@ -402,155 +385,6 @@ pub fn run(run: Run, keep_images: bool, dump: &[usize], dir: &std::path::Path) -
 }
 
 impl Runner {
-    /// For `editor-…` targets (#87): two takes of the setup's synthetic
-    /// sources on a new timeline, recorded as a person would and trimmed
-    /// to exactly 3 s and 2 s (#94: a take's length follows the wall
-    /// clock, its clip's doesn't, so every run draws the same timeline),
-    /// then the editor window opened on them with their frames, waveforms
-    /// and the picture at 1 s.
-    fn editor_setup(&mut self) -> Result<()> {
-        self.still_takes()?;
-        self.area_state(&format!("create-new:Motion {}", self.run.id()))?;
-        self.wait_until(Duration::from_secs(10), "the new timeline", |r| {
-            r.hub
-                .create
-                .timeline_name()
-                .is_some_and(|n| n.starts_with("Motion ") && n.ends_with(&r.run.id()))
-        })?;
-        for seconds in [3.0, 2.0] {
-            let clips = self.hub.create.clip_count();
-            self.area_state("record")?;
-            self.wait_until(Duration::from_secs(15), "a take to start", |r| {
-                r.recording()
-            })?;
-            // A second more than the clip, which starts half a second in.
-            let until = Instant::now() + Duration::from_secs_f64(seconds + TAKE_SPARE);
-            self.wait_until(Duration::from_secs(20), "the take's length", |_| {
-                Instant::now() >= until
-            })?;
-            self.area_state("stop-record")?;
-            self.wait_until(Duration::from_secs(20), "the take on the timeline", |r| {
-                !r.recording() && r.hub.create.clip_count() > clips
-            })
-            .with_context(|| {
-                format!(
-                    "recording: {}, clips: {} (were {clips})",
-                    self.recording(),
-                    self.hub.create.clip_count()
-                )
-            })?;
-        }
-        for (index, seconds) in [3.0, 2.0].into_iter().enumerate() {
-            let points = (TAKE_IN, TAKE_IN + seconds);
-            self.hub
-                .create
-                .trim_to(&self.hub, index, points.0, points.1);
-            self.wait_until(Duration::from_secs(10), "the clip trimmed", |r| {
-                r.hub.create.clip_points(index).is_some_and(|(a, b)| {
-                    (a - points.0).abs() < 1e-6 && (b - points.1).abs() < 1e-6
-                })
-            })?;
-        }
-        for state in [
-            "editor",
-            "create-thumbs",
-            "create-waves",
-            "create-playhead:1",
-            "create-preview",
-        ] {
-            self.area_state(state)?;
-        }
-        Ok(())
-    }
-
-    /// Takes whose pictures and sound are the same whenever they start
-    /// (#94): only the block's ISO file (the test pattern moves), without
-    /// sound, and the tone muted in the program (it beeps on the engine's
-    /// clock), so the
-    /// editor's frames and waveforms draw the same in every run. The engine
-    /// is fresh for each run (scripts/motion.sh), so nothing carries over.
-    fn still_takes(&mut self) -> Result<()> {
-        use isocast_protocol::api::{ApplyParams, Method};
-        use isocast_protocol::change::Change;
-        let (mut setup, revision) = {
-            let session = self.hub.session.borrow();
-            let setup = session
-                .setup
-                .clone()
-                .context("no setup from the engine yet")?;
-            ((*setup).clone(), session.revision)
-        };
-        setup.recording.iso.sources.retain(|id| id == "block");
-        setup.recording.iso.audio = None;
-        setup.recording.iso.source_audio.clear();
-        for source in &mut setup.sources {
-            if source.id == "tone" {
-                source.audio.muted = true;
-            }
-        }
-        let failed: Rc<RefCell<Option<String>>> = Rc::default();
-        let error = failed.clone();
-        self.hub.call(
-            Method::Apply(Box::new(ApplyParams {
-                revision,
-                change: Change::Setup(Box::new(setup)),
-                live: false,
-            })),
-            move |_, result| {
-                if let Err(e) = result {
-                    *error.borrow_mut() = Some(e.message);
-                }
-            },
-        );
-        self.wait_until(Duration::from_secs(10), "the still takes' setup", |r| {
-            failed.borrow().is_some()
-                || r.hub.session.borrow().setup.as_ref().is_some_and(|s| {
-                    s.recording.iso.sources == ["block"]
-                        && s.recording.iso.audio.is_none()
-                        && s.sources.iter().any(|x| x.id == "tone" && x.audio.muted)
-                })
-        })?;
-        if let Some(message) = failed.borrow().clone() {
-            bail!("the still takes' setup was refused: {message}");
-        }
-        Ok(())
-    }
-
-    /// Replay into and draw the editor window from now on.
-    fn use_editor(&mut self) -> Result<()> {
-        let window = self
-            .windows
-            .borrow()
-            .get(1)
-            .cloned()
-            .context("the editor window wasn't made")?;
-        let (width, height) = self.run.size;
-        window
-            .window
-            .dispatch_event(WindowEvent::ScaleFactorChanged {
-                scale_factor: self.run.scale,
-            });
-        window.window.dispatch_event(WindowEvent::Resized {
-            size: LogicalSize::new(width as f32, height as f32),
-        });
-        self.window = window;
-        self.editor = true;
-        Ok(())
-    }
-
-    /// An area's state, not held to the suite's list (the harness's own
-    /// setup).
-    fn area_state(&mut self, state: &str) -> Result<()> {
-        let (name, arg) = state.split_once(':').unwrap_or((state, ""));
-        self.hub
-            .areas()
-            .iter()
-            .find_map(|area| area.state(&self.hub, &self.app, name, arg))
-            .with_context(|| format!("no area knows the state {name:?}"))??;
-        self.hub.flush();
-        Ok(())
-    }
-
     fn recording(&self) -> bool {
         self.hub
             .session
@@ -1262,14 +1096,8 @@ impl Runner {
     /// The `n`th visible element of Slint type `type_name`, left to right
     /// (then top to bottom): its position and size in window points.
     pub fn element(&self, type_name: &str, n: usize) -> Option<[f32; 4]> {
-        let editor = self
-            .editor
-            .then(|| self.hub.create.editor_window())
-            .flatten();
-        let elements: Vec<ElementHandle> = match &editor {
-            Some(editor) => ElementHandle::find_by_element_type_name(editor, type_name).collect(),
-            None => ElementHandle::find_by_element_type_name(&self.app, type_name).collect(),
-        };
+        let elements: Vec<ElementHandle> =
+            ElementHandle::find_by_element_type_name(&self.app, type_name).collect();
         let mut found: Vec<[f32; 4]> = elements
             .into_iter()
             .filter(|e| e.is_valid())
@@ -1310,30 +1138,6 @@ impl Runner {
     pub fn theme_line(&self) -> [u8; 3] {
         let c = self.app.global::<Theme>().get_line();
         [c.red(), c.green(), c.blue()]
-    }
-
-    /// Theme colours the editor's trackers look for (#87).
-    pub fn theme_colour(&self, name: &str) -> [u8; 3] {
-        let theme = self.app.global::<Theme>();
-        let c = match name {
-            "bone" => theme.get_bone(),
-            "control" => theme.get_control(),
-            "accent" => theme.get_accent(),
-            _ => theme.get_surface_stage(),
-        };
-        [c.red(), c.green(), c.blue()]
-    }
-
-    /// The editor's crop, in fractions of its picture (#87).
-    pub fn editor_crop(&self) -> Option<[f32; 4]> {
-        let editor = self.hub.create.editor_window()?;
-        let area = editor.global::<crate::CreateArea>();
-        Some([
-            area.get_crop_x(),
-            area.get_crop_y(),
-            area.get_crop_w(),
-            area.get_crop_h(),
-        ])
     }
 }
 

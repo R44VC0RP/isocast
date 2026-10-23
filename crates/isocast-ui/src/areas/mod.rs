@@ -9,7 +9,6 @@
 //! | D settings and first run | `settings.rs` | `settings/` | `SettingsArea` |
 //! | E the canvas | `canvas.rs` (+ preview.rs, layers.rs, frames.rs, picture.rs) | `canvas/` | `CanvasArea` |
 //! | F scene collections and profiles | `library.rs` | `library/` | `LibraryArea` |
-//! | G the Create view (clip bar) | `create.rs` (+ thumbs.rs) | `create/` | `CreateArea` |
 //! | H the permissions step | `permissions.rs` (+ helper.rs) | `permissions/` | `PermissionsArea` |
 //! | I the setup wizard (OBS, optimize) | `wizard.rs` | `wizard/` | `WizardArea` |
 //! | J remote control | `remote.rs` | `remote/` | `RemoteArea` |
@@ -72,14 +71,12 @@
 
 pub mod canvas;
 pub mod controls;
-pub mod create;
 pub mod developer;
 pub mod hotkeys;
 pub mod library;
 pub mod mixer;
 pub mod permissions;
 pub mod projectors;
-pub mod projects;
 pub mod remote;
 pub mod report;
 pub mod settings;
@@ -103,12 +100,10 @@ pub const STATES: &[&[&str]] = &[
     settings::STATES,
     canvas::STATES,
     library::STATES,
-    create::STATES,
     developer::STATES,
     permissions::STATES,
     wizard::STATES,
     projectors::STATES,
-    projects::STATES,
     remote::STATES,
 ];
 

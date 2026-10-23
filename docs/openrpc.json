@@ -38,10 +38,6 @@
       "Action": {
         "properties": {
           "arguments": true,
-          "available": {
-            "description": "Reserved actions are accepted in profiles but cannot execute yet.",
-            "type": "boolean"
-          },
           "group": {
             "type": "string"
           },
@@ -53,12 +49,6 @@
           },
           "label": {
             "type": "string"
-          },
-          "unavailable_reason": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
         },
         "required": [
@@ -66,9 +56,7 @@
           "label",
           "group",
           "arguments",
-          "hold",
-          "available",
-          "unavailable_reason"
+          "hold"
         ],
         "type": "object"
       },
@@ -2352,211 +2340,6 @@
         ],
         "type": "object"
       },
-      "ClipFile": {
-        "description": "One of a take's files.",
-        "properties": {
-          "audio": {
-            "description": "Audio sources, one track each.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "audio_dropouts": {
-            "default": 0,
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "dropped_frames": {
-            "default": 0,
-            "description": "Frames the recording dropped from this file, and gaps in its audio.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "duration_seconds": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "exists": {
-            "description": "The file is where the manifest says.",
-            "type": "boolean"
-          },
-          "fps": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "frames": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "height": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "path": {
-            "type": "string"
-          },
-          "source": {
-            "description": "The video source in it (`program` for the program).",
-            "type": "string"
-          },
-          "start_offset_seconds": {
-            "description": "Where the file's first frame sits on its take's clock.",
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "width": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "path",
-          "source",
-          "width",
-          "height",
-          "fps",
-          "audio",
-          "dropped_frames",
-          "audio_dropouts",
-          "exists"
-        ],
-        "type": "object"
-      },
-      "ClipInfo": {
-        "description": "A clip and its take.",
-        "properties": {
-          "angle": {
-            "description": "The source the edited video shows (see [`Clip::angle`]); the\nprogram if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "crop": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Crop2"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "See [`Clip::crop`]."
-          },
-          "dropped_frames": {
-            "default": 0,
-            "description": "Frames its files dropped, added up (each file's are in `files`).",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "duration_seconds": {
-            "format": "double",
-            "type": "number"
-          },
-          "files": {
-            "description": "The take's files: the program and each ISO file.",
-            "items": {
-              "$ref": "#/components/schemas/ClipFile"
-            },
-            "type": "array"
-          },
-          "fps": {
-            "default": 0,
-            "description": "The take's frame rate, whose grid the clip's points sit on.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "id": {
-            "type": "string"
-          },
-          "in_seconds": {
-            "format": "double",
-            "type": "number"
-          },
-          "index": {
-            "description": "Its place on the timeline, from 0.",
-            "format": "uint",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "markers": {
-            "description": "Markers added while the take was recorded, on its own clock (those\ninside the clip show at `start_seconds + time - in_seconds`).",
-            "items": {
-              "$ref": "#/components/schemas/Marker"
-            },
-            "type": "array"
-          },
-          "out_seconds": {
-            "format": "double",
-            "type": "number"
-          },
-          "problem": {
-            "description": "Why the take can't be read (its manifest is missing or broken).",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "start_seconds": {
-            "description": "Where the clip starts on the timeline.",
-            "format": "double",
-            "type": "number"
-          },
-          "started_at": {
-            "description": "When the take started, from its manifest.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "status": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/SessionStatus"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The take's status, from its manifest."
-          },
-          "take": {
-            "description": "The take's session manifest.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "index",
-          "take",
-          "start_seconds",
-          "duration_seconds",
-          "in_seconds",
-          "out_seconds",
-          "dropped_frames",
-          "files",
-          "fps"
-        ],
-        "type": "object"
-      },
       "ClockPacingInfo": {
         "description": "Each clock measures its own wakes and inherits critical pacing when another\nclock in the process has measured stretching. No policy is inferred from\nthe process name or launch path.",
         "properties": {
@@ -3789,35 +3572,6 @@
         },
         "type": "object"
       },
-      "Crop2": {
-        "additionalProperties": false,
-        "description": "A crop: the part of a picture shown, as fractions of the picture's\nwidth and height from its top-left corner (0 to 1). Kept on the\npicture's 2-pixel grid, at least 32 pixels each way.",
-        "properties": {
-          "height": {
-            "format": "double",
-            "type": "number"
-          },
-          "width": {
-            "format": "double",
-            "type": "number"
-          },
-          "x": {
-            "format": "double",
-            "type": "number"
-          },
-          "y": {
-            "format": "double",
-            "type": "number"
-          }
-        },
-        "required": [
-          "x",
-          "y",
-          "width",
-          "height"
-        ],
-        "type": "object"
-      },
       "CropArea": {
         "description": "An area of a picture, in its pixels.",
         "properties": {
@@ -3961,31 +3715,6 @@
           "bottom"
         ],
         "type": "object"
-      },
-      "CropPreset": {
-        "description": "A crop's shape: the largest rectangle of that shape (in pixels) that\nfits, centred.",
-        "oneOf": [
-          {
-            "const": "16:9",
-            "description": "Landscape, as most programs are.",
-            "type": "string"
-          },
-          {
-            "const": "9:16",
-            "description": "Vertical video (Shorts, Reels, TikTok).",
-            "type": "string"
-          },
-          {
-            "const": "1:1",
-            "description": "Square.",
-            "type": "string"
-          },
-          {
-            "const": "4:5",
-            "description": "Portrait feed posts.",
-            "type": "string"
-          }
-        ]
       },
       "CropResult": {
         "additionalProperties": false,
@@ -5417,9 +5146,6 @@
           "library_changed",
           "plugin_changed",
           "data_changed",
-          "timeline_changed",
-          "export_progress",
-          "export_finished",
           "recording_paused",
           "hotkey_fired",
           "preview_cleared",
@@ -5434,9 +5160,7 @@
           "projectors",
           "canvas_scene_changed",
           "canvas_preview_changed",
-          "project_opened",
           "governor_changed",
-          "record_target",
           "refused",
           "remote_client_connected",
           "remote_client_disconnected",
@@ -5477,7 +5201,7 @@
             "type": "object"
           },
           {
-            "description": "A recording started writing these files, or a split (or `retake`)\nbegan a new take's; `begins_at` is when a new take's files begin\n(local time, RFC 3339 with milliseconds), a moment after the event.",
+            "description": "A recording started writing these files, or a split began a new\ntake's; `begins_at` is when a new take's files begin\n(local time, RFC 3339 with milliseconds), a moment after the event.",
             "properties": {
               "begins_at": {
                 "type": [
@@ -5501,7 +5225,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "What began the take: `start`, `split` or `retake`."
+                "description": "What began the take: `start` or `split`."
               },
               "files": {
                 "items": {
@@ -5758,17 +5482,6 @@
                   "null"
                 ]
               },
-              "timeline": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/RecordingInto"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "The timeline its takes went to (#114)."
-              },
               "type": {
                 "const": "stopped",
                 "type": "string"
@@ -5944,115 +5657,6 @@
             "type": "object"
           },
           {
-            "description": "A timeline was made, opened, closed or changed (`action` says how;\n`clip` is the clip concerned, if any); `current` is the current\ntimeline after. `timeline_get` reads it.",
-            "properties": {
-              "action": {
-                "$ref": "#/components/schemas/TimelineAction"
-              },
-              "clip": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "clips": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "current": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "timeline": {
-                "type": "string"
-              },
-              "type": {
-                "const": "timeline_changed",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "timeline",
-              "action",
-              "clips",
-              "current"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "How far an export has got (0 to 1 across all its files), at most a\nfew times a second, and the file it is writing.",
-            "properties": {
-              "export": {
-                "type": "string"
-              },
-              "file": {
-                "type": "string"
-              },
-              "progress": {
-                "format": "double",
-                "type": "number"
-              },
-              "timeline": {
-                "type": "string"
-              },
-              "type": {
-                "const": "export_progress",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "export",
-              "timeline",
-              "progress",
-              "file"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "An export ended: its files (each with its length and frames) and\nmanifest, or why it failed (files already written are kept).",
-            "properties": {
-              "error": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "export": {
-                "type": "string"
-              },
-              "files": {
-                "items": {
-                  "$ref": "#/components/schemas/ExportFile"
-                },
-                "type": "array"
-              },
-              "manifest": {
-                "type": "string"
-              },
-              "timeline": {
-                "type": "string"
-              },
-              "type": {
-                "const": "export_finished",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "export",
-              "timeline",
-              "manifest",
-              "files",
-              "error"
-            ],
-            "type": "object"
-          },
-          {
             "description": "A recording crossed a pause/resume boundary; its files stay open.",
             "properties": {
               "project": {
@@ -6142,7 +5746,7 @@
             "type": "object"
           },
           {
-            "description": "A take's files are finished (a stop, a split or a retake ended it,\nor the recording failed): its manifest, every file and how it\nended. Comes once per take, after its last `started`.",
+            "description": "A take's files are finished (a stop or a split ended it,\nor the recording failed): its manifest, every file and how it\nended. Comes once per take, after its last `started`.",
             "properties": {
               "duration_seconds": {
                 "format": "double",
@@ -6420,39 +6024,6 @@
             "type": "object"
           },
           {
-            "description": "A project was opened (`project_open`): its timeline is now current,\nand with `editor` the app shows the editor on it.",
-            "properties": {
-              "editor": {
-                "type": "boolean"
-              },
-              "folder": {
-                "type": "string"
-              },
-              "path": {
-                "type": "string"
-              },
-              "project": {
-                "type": "string"
-              },
-              "timeline": {
-                "type": "string"
-              },
-              "type": {
-                "const": "project_opened",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "path",
-              "folder",
-              "project",
-              "timeline",
-              "editor"
-            ],
-            "type": "object"
-          },
-          {
             "description": "Automatic-quality policy changed an effective limit or recovery state.",
             "properties": {
               "governor": {
@@ -6466,23 +6037,6 @@
             "required": [
               "type",
               "governor"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Where the next recording goes changed (#114): `record_target`, a\nnew timeline, or the chosen timeline closed.",
-            "properties": {
-              "target": {
-                "$ref": "#/components/schemas/RecordTarget"
-              },
-              "type": {
-                "const": "record_target",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "target"
             ],
             "type": "object"
           },
@@ -6719,222 +6273,6 @@
           "release_ms",
           "output_gain_db",
           "detection"
-        ],
-        "type": "object"
-      },
-      "ExportFile": {
-        "description": "One joined file of an export.",
-        "properties": {
-          "audio": {
-            "description": "Audio sources, one track each.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "duration_seconds": {
-            "description": "Once written: its length and frames (each its parts' added up).",
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "fps": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "frames": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "height": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "parts": {
-            "description": "Each clip's file joined into it, in order.",
-            "items": {
-              "$ref": "#/components/schemas/ExportPart"
-            },
-            "type": "array"
-          },
-          "path": {
-            "type": "string"
-          },
-          "source": {
-            "description": "The video source joined (`program` for the program, `edited` for\nthe edited file).",
-            "type": "string"
-          },
-          "width": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "path",
-          "source",
-          "width",
-          "height",
-          "fps",
-          "audio",
-          "parts"
-        ],
-        "type": "object"
-      },
-      "ExportPart": {
-        "description": "One clip's file in a joined file.",
-        "properties": {
-          "clip": {
-            "type": "string"
-          },
-          "duration_seconds": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "frames": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "frames_left_out": {
-            "description": "Frames of the take's file that start past the clip's end, left out\n(a file running longer than the program; normally none).",
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "path": {
-            "description": "The take's file joined (in the edited file, the clip's angle's).",
-            "type": "string"
-          },
-          "reencoded_frames": {
-            "description": "Frames decoded and encoded again (the partial keyframe intervals at\na cut, or the whole part when its file's format differs from the\njoined file's); the rest were copied as recorded.",
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "start_seconds": {
-            "description": "Where it starts in the joined file and how long it is there, once\nwritten.",
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "clip",
-          "path"
-        ],
-        "type": "object"
-      },
-      "ExportRunning": {
-        "description": "The export running, as `status` shows it.",
-        "properties": {
-          "export": {
-            "type": "string"
-          },
-          "progress": {
-            "description": "0 to 1 across all its files.",
-            "format": "double",
-            "type": "number"
-          },
-          "timeline": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "export",
-          "timeline",
-          "progress"
-        ],
-        "type": "object"
-      },
-      "ExportSkipped": {
-        "description": "A source left out of an export.",
-        "properties": {
-          "reason": {
-            "type": "string"
-          },
-          "source": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "source",
-          "reason"
-        ],
-        "type": "object"
-      },
-      "ExportStarted": {
-        "description": "What `timeline_export` returns once the export has started; it runs\nin the background, reporting `export_progress` and `export_finished`\nevents.",
-        "properties": {
-          "duration_seconds": {
-            "description": "The timeline's length: each file's will be its clips' added up.",
-            "format": "double",
-            "type": "number"
-          },
-          "export": {
-            "description": "The export's id, which its events carry.",
-            "type": "string"
-          },
-          "files": {
-            "description": "The files it writes: the program and each ISO source every clip has,\neach cut to the clips' in and out points, and (when a clip shows\nanother angle than the program) the edited file, source `edited`.",
-            "items": {
-              "$ref": "#/components/schemas/ExportFile"
-            },
-            "type": "array"
-          },
-          "folder": {
-            "type": "string"
-          },
-          "manifest": {
-            "description": "The export's manifest (`<name>.export.json`), written now and again\nwhen it finishes.",
-            "type": "string"
-          },
-          "notes": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "skipped": {
-            "description": "Sources it doesn't join, and why.",
-            "items": {
-              "$ref": "#/components/schemas/ExportSkipped"
-            },
-            "type": "array"
-          },
-          "timeline": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "export",
-          "timeline",
-          "folder",
-          "manifest",
-          "files",
-          "duration_seconds"
         ],
         "type": "object"
       },
@@ -12513,7 +11851,7 @@
         ]
       },
       "NleApp": {
-        "description": "The editor a project file is for. In xmeml, Premiere and Resolve count\na picture's scale differently and read audio tracks differently (see\n`timeline_export_nle`); FCPXML and OpenTimelineIO are the same for all.",
+        "description": "The editor a project file is for. In xmeml, Premiere and Resolve count\na picture's scale differently and read audio tracks differently (see\n`take_export_nle`); FCPXML and OpenTimelineIO are the same for all.",
         "oneOf": [
           {
             "const": "final_cut",
@@ -12533,13 +11871,13 @@
         ]
       },
       "NleExported": {
-        "description": "What `timeline_export_nle` wrote.",
+        "description": "What `take_export_nle` wrote.",
         "properties": {
           "app": {
             "$ref": "#/components/schemas/NleApp"
           },
           "audio_tracks": {
-            "description": "The audio tracks: the program's (on), then each ISO file's (off, as\nIsocast's edited file has the program's sound).",
+            "description": "The audio tracks: the program's (on), then each ISO file's (off).",
             "items": {
               "$ref": "#/components/schemas/NleTrack"
             },
@@ -12573,21 +11911,22 @@
             "type": "integer"
           },
           "notes": {
-            "description": "What isn't as in Isocast's own export, and why.",
+            "description": "What the editor will show differently from the take, and why.",
             "items": {
               "type": "string"
             },
             "type": "array"
           },
           "path": {
-            "description": "The project file. It points at the takes' own program and ISO files,\nwhich are never changed or copied.",
+            "description": "The project file. It points at the take's own program and ISO files,\nwhich are never changed or copied.",
             "type": "string"
           },
-          "timeline": {
+          "take": {
+            "description": "The take's manifest.",
             "type": "string"
           },
           "video_tracks": {
-            "description": "The video tracks from the bottom up: one per ISO source, then the\nprogram on top. At each clip only its angle's track is on.",
+            "description": "The video tracks from the bottom up: one per ISO source (off), then\nthe program on top (on), all lined up on the take's clock.",
             "items": {
               "$ref": "#/components/schemas/NleTrack"
             },
@@ -12600,7 +11939,7 @@
           }
         },
         "required": [
-          "timeline",
+          "take",
           "format",
           "app",
           "path",
@@ -12616,7 +11955,7 @@
         "type": "object"
       },
       "NleFormat": {
-        "description": "A project format other editors open (#104), for\n`timeline_export_nle`.",
+        "description": "A project format other editors open (#104), for\n`take_export_nle`.",
         "oneOf": [
           {
             "const": "fcpxml",
@@ -14357,8 +13696,10 @@
             "type": "number"
           },
           "open_editor": {
-            "description": "The app opens the editor when a recording stops.",
-            "type": "boolean"
+            "deprecated": true,
+            "description": "Retired with the editor (2026-10-22): read and ignored, so setups\nthat set it still load; never written.",
+            "type": "boolean",
+            "writeOnly": true
           },
           "program": {
             "$ref": "#/components/schemas/ProfileProgram"
@@ -14407,10 +13748,6 @@
             "description": "Free space, in GB, a recording never uses.",
             "format": "double",
             "type": "number"
-          },
-          "open_editor": {
-            "description": "The app opens the editor when a recording stops.",
-            "type": "boolean"
           },
           "program": {
             "$ref": "#/components/schemas/ProfileProgramResult"
@@ -14699,13 +14036,6 @@
             "description": "When it was made, local time, RFC 3339.",
             "type": "string"
           },
-          "exports": {
-            "description": "Timeline exports written into it (their `.export.json` manifests).",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
           "files": {
             "default": [],
             "description": "Every media file the manifests list (program and ISO files), in\ntake order.",
@@ -14715,7 +14045,7 @@
             "type": "array"
           },
           "folder": {
-            "description": "Its folder: every take's files, manifests and exports are in it.",
+            "description": "Its folder: every take's files and manifests are in it.",
             "type": "string"
           },
           "id": {
@@ -14745,92 +14075,6 @@
           "created_at",
           "takes",
           "files"
-        ],
-        "type": "object"
-      },
-      "ProjectOpenParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `project_open`.",
-        "properties": {
-          "editor": {
-            "description": "Ask the app to show the editor on it (true if absent).",
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "path": {
-            "description": "A `.isoprj` file, or a project folder (its `.isoprj`, or its takes\nif it has none yet).",
-            "type": "string"
-          },
-          "timeline": {
-            "description": "Which of the project's timelines to open (an id); else the current\ntimeline if it is one of them, else its newest.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "path"
-        ],
-        "type": "object"
-      },
-      "ProjectOpened": {
-        "description": "The answer to `project_open`.",
-        "properties": {
-          "folder": {
-            "description": "The project's folder.",
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "notes": {
-            "description": "What opening did that is worth knowing (timelines imported, a\nproject file that couldn't be read).",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "offline": {
-            "description": "Takes the timelines name that aren't there (offline): relink them\nwith `timeline_relink`.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "path": {
-            "description": "The project file (written soon if it didn't exist yet).",
-            "type": "string"
-          },
-          "project": {
-            "description": "The project's id.",
-            "type": "string"
-          },
-          "timeline": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/TimelineInfo"
-              }
-            ],
-            "description": "The timeline opened: now the current one."
-          },
-          "timelines": {
-            "description": "Every timeline of the project.",
-            "items": {
-              "$ref": "#/components/schemas/TimelineSummary"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "path",
-          "folder",
-          "project",
-          "name",
-          "timeline",
-          "timelines"
         ],
         "type": "object"
       },
@@ -15100,60 +14344,6 @@
         ],
         "type": "string"
       },
-      "RecentProject": {
-        "description": "A project opened lately, as `recent_projects` gives it.",
-        "properties": {
-          "exists": {
-            "description": "The file is still there.",
-            "type": "boolean"
-          },
-          "name": {
-            "type": "string"
-          },
-          "opened_at": {
-            "description": "When it was last opened, local time, RFC 3339.",
-            "type": "string"
-          },
-          "path": {
-            "description": "Its project file.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "path",
-          "name",
-          "opened_at",
-          "exists"
-        ],
-        "type": "object"
-      },
-      "RecentProjects": {
-        "description": "The answer to `recent_projects`.",
-        "properties": {
-          "projects": {
-            "description": "Newest first, at most [`RECENT_LIMIT`].",
-            "items": {
-              "$ref": "#/components/schemas/RecentProject"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "projects"
-        ],
-        "type": "object"
-      },
-      "RecentProjectsParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `recent_projects`.",
-        "properties": {
-          "clear": {
-            "description": "Forget them all (File › Open Recent › Clear Menu).",
-            "type": "boolean"
-          }
-        },
-        "type": "object"
-      },
       "Reconnect": {
         "additionalProperties": false,
         "description": "Reconnecting after the connection to the server drops.",
@@ -15209,70 +14399,6 @@
         ],
         "type": "object"
       },
-      "RecordTarget": {
-        "description": "Where the next recording goes (#114): a new project with its own\ntimeline (the default), or another take on a timeline the user chose.\n`status` (`record_target`) and `record_target` give it.",
-        "properties": {
-          "folder": {
-            "description": "The project folder its take is written into: the folder of the\ntimeline's last take (absent: a new project folder).",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "migrated": {
-            "description": "The timeline that was current before 0.0.8 and took every\nrecording, until a choice is made: no longer used unless chosen.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "name": {
-            "description": "That timeline's name.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "notes": {
-            "description": "Why the choice is what it is (a timeline that was current before\n0.0.8, or a chosen timeline that is gone).",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "take": {
-            "description": "The take the next recording becomes on it (its clips, plus one).",
-            "format": "uint",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "timeline": {
-            "description": "The timeline the next recording's takes are added to; absent: each\nrecording starts a new project folder with a timeline of its own.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
-      },
-      "RecordTargetParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `record_target`.",
-        "properties": {
-          "target": {
-            "description": "`new` (each recording starts a new project with its own timeline)\nor a timeline's id (`timeline_list` has them): its next take. Absent:\nthe choice is only read.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
-      },
       "Recording": {
         "additionalProperties": false,
         "properties": {
@@ -15306,8 +14432,10 @@
             "type": "number"
           },
           "open_editor": {
-            "description": "The app opens the editor, in its own window, on the take's project\nand timeline when a recording stops (a split doesn't). Off unless\nset: a window after every stop gets in the way of a session of many\ntakes and of recordings driven from the CLI or MCP. While a stream\nruns it opens behind the studio, never taking the keyboard.",
-            "type": "boolean"
+            "deprecated": true,
+            "description": "Retired with the editor (2026-10-22): read and ignored, so setups\nthat set it still load; never written.",
+            "type": "boolean",
+            "writeOnly": true
           },
           "program": {
             "allOf": [
@@ -15329,40 +14457,6 @@
         "required": [
           "folder",
           "program"
-        ],
-        "type": "object"
-      },
-      "RecordingInto": {
-        "description": "The timeline a recording's takes go to (#114), in `status`\n(`recording_into`) while it records and in its `stopped` event.",
-        "properties": {
-          "clips": {
-            "description": "The timeline's clips now (its last `takes` are this recording's).",
-            "format": "uint",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "name": {
-            "type": "string"
-          },
-          "new_project": {
-            "description": "The recording started a new project, and this is its timeline.",
-            "type": "boolean"
-          },
-          "takes": {
-            "description": "The recording's takes added to the timeline so far.",
-            "format": "uint",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "timeline": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "timeline",
-          "name",
-          "takes",
-          "clips"
         ],
         "type": "object"
       },
@@ -15434,10 +14528,6 @@
             "description": "Free space, in GB, a recording never uses: it won't start without\nroom for its estimated size plus this, and it stops cleanly, finishing\nevery file, when free space falls below it (or below about 10 s of\nits files, at least 64 MB, if that is more).",
             "format": "double",
             "type": "number"
-          },
-          "open_editor": {
-            "description": "The app opens the editor, in its own window, on the take's project\nand timeline when a recording stops (a split doesn't). Off unless\nset: a window after every stop gets in the way of a session of many\ntakes and of recordings driven from the CLI or MCP. While a stream\nruns it opens behind the studio, never taking the keyboard.",
-            "type": "boolean"
           },
           "program": {
             "allOf": [
@@ -15737,59 +14827,6 @@
           "address",
           "pairing_open",
           "error"
-        ],
-        "type": "object"
-      },
-      "RemovedReason": {
-        "oneOf": [
-          {
-            "const": "removed",
-            "description": "`timeline_remove`.",
-            "type": "string"
-          },
-          {
-            "const": "retaken",
-            "description": "`retake` while not recording: the last clip, recorded again.",
-            "type": "string"
-          },
-          {
-            "const": "dropped",
-            "description": "`retake` while recording: the take being recorded, never a clip.",
-            "type": "string"
-          },
-          {
-            "const": "interrupted",
-            "description": "isocastd stopped (killed or crashed) or the recording failed while\nrecording it, so it never finished: its files hold what was written\nup to about 2 s before that, and their lengths aren't known.",
-            "type": "string"
-          }
-        ]
-      },
-      "RemovedTake": {
-        "description": "A take that was on a timeline (or recorded for it) and was taken off.",
-        "properties": {
-          "at": {
-            "description": "When, local time, RFC 3339.",
-            "type": "string"
-          },
-          "clip": {
-            "description": "The clip it was, if it was on the timeline.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "reason": {
-            "$ref": "#/components/schemas/RemovedReason"
-          },
-          "take": {
-            "description": "The take's session manifest; its files are next to it, untouched.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "take",
-          "reason",
-          "at"
         ],
         "type": "object"
       },
@@ -16446,81 +15483,6 @@
           "capacity",
           "load",
           "basis"
-        ],
-        "type": "object"
-      },
-      "RetakeParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `retake`.",
-        "properties": {
-          "folder": {
-            "description": "Write the new take here; else the folder of the take it replaces\n(else the setup's `recording.folder`). Not while recording, where\nthe new take goes where the recording writes.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "seconds": {
-            "description": "Stop on its own after this many seconds (not while recording).",
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
-      },
-      "Retaken": {
-        "description": "What `retake` returns.",
-        "properties": {
-          "begins_at": {
-            "description": "When the new take begins, while recording (local time, RFC 3339\nwith milliseconds), and how long after this reply: what is recorded\nbefore then is in the dropped take.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "begins_in_seconds": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "files": {
-            "description": "The new take's files.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "notes": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "replaced": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RemovedTake"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The take that was taken off (its files stay where they are), if\nthere was one."
-          },
-          "timeline": {
-            "description": "The current timeline, which the new take is added to when it\nfinishes (unless another is made current by then); a take dropped\nwhile recording is listed under its `removed`.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "timeline",
-          "files",
-          "replaced"
         ],
         "type": "object"
       },
@@ -19500,17 +18462,6 @@
               "null"
             ]
           },
-          "into": {
-            "description": "Add this recording's takes to this timeline (an id), in the folder\nof its last take, whatever `record_target` says. Not with\n`new_project`. Neither: `record_target`'s choice (a new project\nunless one was chosen).",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "new_project": {
-            "description": "Start a new project with its own timeline, whatever\n`record_target` says (#114). Not with `into`.",
-            "type": "boolean"
-          },
           "seconds": {
             "description": "Stop on its own after this many seconds.",
             "format": "double",
@@ -19565,17 +18516,6 @@
               "string",
               "null"
             ]
-          },
-          "timeline": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RecordingInto"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The timeline its takes go to (#114): a new project's own, or the\none chosen."
           }
         },
         "required": [
@@ -19646,17 +18586,6 @@
               }
             ],
             "description": "The live engine, while it runs."
-          },
-          "export": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ExportRunning"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The timeline export running, if one is."
           },
           "files": {
             "default": [],
@@ -19762,17 +18691,6 @@
               "null"
             ]
           },
-          "record_target": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RecordTarget"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Where the next recording goes (#114): a new project, or a take on\na chosen timeline (`record_target`)."
-          },
           "recording_free_bytes": {
             "description": "Free space on the disk the live setup records to (its\n`recording.folder`, or the nearest folder above it that exists;\nwith no setup yet, `~/Movies/Isocast`'s, where a new one records),\nin bytes, as the daemon may use it: measured with each status.",
             "format": "uint64",
@@ -19781,17 +18699,6 @@
               "integer",
               "null"
             ]
-          },
-          "recording_into": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RecordingInto"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The timeline the running recording's takes go to."
           },
           "replay": {
             "anyOf": [
@@ -19849,24 +18756,6 @@
               "$ref": "#/components/schemas/StreamStatus"
             },
             "type": "array"
-          },
-          "timeline": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/TimelineSummary"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The current timeline, which finished takes are added to, if one is."
-          },
-          "timeline_problem": {
-            "description": "Why no timeline is current although one was: its file couldn't be\nread when isocastd started, so takes aren't being added to it.",
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "vertical_preview": {
             "description": "The scene staged in the vertical canvas's own preview, if any\n(while it follows the main canvas, the main preview's).",
@@ -21334,10 +20223,61 @@
         "description": "What began a take, in `started` events.",
         "enum": [
           "start",
-          "split",
-          "retake"
+          "split"
         ],
         "type": "string"
+      },
+      "TakeExportNleParams": {
+        "additionalProperties": false,
+        "description": "Parameters of `take_export_nle`.",
+        "properties": {
+          "app": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NleApp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The editor it is for: `final_cut`, `premiere` or `resolve`. With\nxmeml, `resolve` writes the scale of a picture of another size than\nthe sequence from Resolve's own fit, and each audio channel on its\nown track (Resolve reads xmeml audio a channel at a time). Absent:\n`final_cut` for fcpxml, `premiere` for xmeml, `resolve` for otio (the\nsame file for any editor). Resolve's best format\nis xmeml: it ignores FCPXML's split of picture and sound."
+          },
+          "folder": {
+            "description": "Write it in this folder (made if missing), named after the take and\nnumbered so nothing is overwritten; else the take's own folder. Not\nwith `path`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "format": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/NleFormat"
+              }
+            ],
+            "description": "`fcpxml` (Final Cut Pro), `xmeml` (Premiere Pro, or Resolve with app\n`resolve`) or `otio` (OpenTimelineIO)."
+          },
+          "path": {
+            "description": "Write exactly this file (an absolute path ending in the format's\nextension: .fcpxml, .xml or .otio). A file already there is replaced\nonly if it is an earlier Isocast export, or with `replace`.\nNot with `folder`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replace": {
+            "description": "With `path`: replace whatever file is there.",
+            "type": "boolean"
+          },
+          "take": {
+            "description": "The take: its manifest (`<date> <time>.session.json`, as `start`,\n`stop` and `take_finished` give it), or a project folder holding\nexactly one take; an absolute path.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "format",
+          "take"
+        ],
+        "type": "object"
       },
       "Target": {
         "oneOf": [
@@ -21766,642 +20706,6 @@
           "align",
           "padding",
           "line_height"
-        ],
-        "type": "object"
-      },
-      "TimelineAction": {
-        "description": "What a change to a timeline was, in `timeline_changed` events.",
-        "oneOf": [
-          {
-            "enum": [
-              "created",
-              "opened",
-              "closed",
-              "removed",
-              "moved",
-              "redone"
-            ],
-            "type": "string"
-          },
-          {
-            "const": "appended",
-            "description": "A finished take was added to the end.",
-            "type": "string"
-          },
-          {
-            "const": "retaken",
-            "description": "The last clip was taken off to be recorded again.",
-            "type": "string"
-          },
-          {
-            "const": "dropped",
-            "description": "The take being recorded was dropped by `retake`.",
-            "type": "string"
-          },
-          {
-            "const": "interrupted",
-            "description": "A take being recorded for it never finished (the recording failed).",
-            "type": "string"
-          },
-          {
-            "const": "trimmed",
-            "description": "A clip's in or out point moved (`timeline_trim`).",
-            "type": "string"
-          },
-          {
-            "const": "split",
-            "description": "A clip was cut in two (`timeline_split`).",
-            "type": "string"
-          },
-          {
-            "const": "deleted",
-            "description": "A span was taken out (`timeline_delete_range`).",
-            "type": "string"
-          },
-          {
-            "const": "angle",
-            "description": "The edited video's source changed over a span (`timeline_angle`).",
-            "type": "string"
-          },
-          {
-            "const": "undone",
-            "description": "An edit was taken back (`timeline_undo`) or put back (`timeline_redo`).",
-            "type": "string"
-          },
-          {
-            "const": "cropped",
-            "description": "The edited video's crop changed over a span (`timeline_crop`).",
-            "type": "string"
-          },
-          {
-            "const": "rolled",
-            "description": "The cut between two clips moved (`timeline_roll`).",
-            "type": "string"
-          },
-          {
-            "const": "relinked",
-            "description": "An offline clip was pointed at where its take is now\n(`timeline_relink`), or a project opened from elsewhere was taken\nin (`project_open`).",
-            "type": "string"
-          }
-        ]
-      },
-      "TimelineAngleParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_angle`.",
-        "properties": {
-          "end_seconds": {
-            "format": "double",
-            "type": "number"
-          },
-          "source": {
-            "description": "What the edited video shows over the span: `program`, or an ISO\nsource's id that every clip in the span recorded.",
-            "type": "string"
-          },
-          "start_seconds": {
-            "description": "Where the span starts and ends, in seconds on the timeline, each\nrounded to the frame grid of the clip there.",
-            "format": "double",
-            "type": "number"
-          },
-          "timeline": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "start_seconds",
-          "end_seconds",
-          "source"
-        ],
-        "type": "object"
-      },
-      "TimelineClosed": {
-        "description": "What `timeline_close` returns.",
-        "properties": {
-          "closed": {
-            "description": "The timeline that was current, if one was.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "closed"
-        ],
-        "type": "object"
-      },
-      "TimelineCropParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_crop`: what part of the picture the edited\nvideo shows over a span.",
-        "properties": {
-          "clear": {
-            "description": "Show the whole picture again over the span (no `crop` or `preset`).",
-            "type": "boolean"
-          },
-          "crop": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Crop2"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The part of each clip's picture to show (fractions of its width and\nheight, from the top-left); the whole picture if absent and a\n`preset` is given."
-          },
-          "end_seconds": {
-            "format": "double",
-            "type": "number"
-          },
-          "preset": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/CropPreset"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Make it this shape: the largest rectangle of it inside `crop` (or\nthe picture), centred: `16:9`, `9:16`, `1:1` or `4:5`."
-          },
-          "start_seconds": {
-            "description": "Where the span starts and ends, in seconds on the timeline, each\nrounded to the frame grid of the clip there.",
-            "format": "double",
-            "type": "number"
-          },
-          "timeline": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "start_seconds",
-          "end_seconds"
-        ],
-        "type": "object"
-      },
-      "TimelineExportNleParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_export_nle`.",
-        "properties": {
-          "app": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/NleApp"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The editor it is for: `final_cut`, `premiere` or `resolve`. With\nxmeml, `resolve` writes the scale of a picture of another size than\nthe sequence from Resolve's own fit, and each audio channel on its\nown track (Resolve reads xmeml audio a channel at a time). Absent:\n`final_cut` for fcpxml, `premiere` for xmeml, `resolve` for otio (the\nsame file for any editor). Resolve's best format\nis xmeml: it ignores FCPXML's split of picture and sound."
-          },
-          "folder": {
-            "description": "Write it in this folder (made if missing), named after the timeline\nand numbered so nothing is overwritten; else the first clip's take's\nfolder. Not with `path`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "format": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/NleFormat"
-              }
-            ],
-            "description": "`fcpxml` (Final Cut Pro), `xmeml` (Premiere Pro, or Resolve with app\n`resolve`) or `otio` (OpenTimelineIO)."
-          },
-          "path": {
-            "description": "Write exactly this file (an absolute path ending in the format's\nextension: .fcpxml, .xml or .otio). A file already there is replaced\nonly if it is an earlier Isocast timeline export, or with `replace`.\nNot with `folder`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "replace": {
-            "description": "With `path`: replace whatever file is there.",
-            "type": "boolean"
-          },
-          "timeline": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "format"
-        ],
-        "type": "object"
-      },
-      "TimelineExportParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_export`.",
-        "properties": {
-          "folder": {
-            "description": "Where to write the joined files (made if missing); else the folder\nof the first clip's take.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "timeline": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "vertical": {
-            "description": "Also write a vertical (9:16) edited file, `<name> VERTICAL.<ext>`:\neach clip's angle (or its crop) fitted into the program's size\nturned on its side (1920x1080 → 1080x1920), so a 9:16 crop fills\nthe frame; the program's sound. Every frame is encoded again.",
-            "type": "boolean"
-          }
-        },
-        "type": "object"
-      },
-      "TimelineInfo": {
-        "description": "A timeline with what each clip holds, as `timeline_get` and the\nmethods that change one return it.",
-        "properties": {
-          "clips": {
-            "items": {
-              "$ref": "#/components/schemas/ClipInfo"
-            },
-            "type": "array"
-          },
-          "created_at": {
-            "type": "string"
-          },
-          "current": {
-            "description": "It is the current timeline: finished takes are added to it.",
-            "type": "boolean"
-          },
-          "duration_seconds": {
-            "description": "The clips' durations added up.",
-            "format": "double",
-            "type": "number"
-          },
-          "id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "notes": {
-            "description": "What a change did that is worth knowing (where a removed take's\nfiles are).",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "path": {
-            "description": "The file it is kept in.",
-            "type": "string"
-          },
-          "redo": {
-            "default": 0,
-            "format": "uint",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "removed": {
-            "description": "Takes taken off it, whose files are where they were recorded.",
-            "items": {
-              "$ref": "#/components/schemas/RemovedTake"
-            },
-            "type": "array"
-          },
-          "revision": {
-            "default": 0,
-            "description": "See [`Timeline::revision`].",
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "undo": {
-            "default": 0,
-            "description": "Edits `timeline_undo` can take back, and `timeline_redo` put back.",
-            "format": "uint",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "current",
-          "created_at",
-          "path",
-          "duration_seconds",
-          "clips",
-          "revision",
-          "undo",
-          "redo"
-        ],
-        "type": "object"
-      },
-      "TimelineList": {
-        "description": "What `timeline_list` returns.",
-        "properties": {
-          "current": {
-            "description": "The current timeline's id, if one is current.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "folder": {
-            "description": "Where timelines are kept.",
-            "type": "string"
-          },
-          "problems": {
-            "description": "Timeline files that couldn't be read.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "timelines": {
-            "items": {
-              "$ref": "#/components/schemas/TimelineSummary"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "current",
-          "folder",
-          "timelines"
-        ],
-        "type": "object"
-      },
-      "TimelineMoveParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_move`.",
-        "properties": {
-          "clip": {
-            "description": "The clip's id, like `c3`.",
-            "type": "string"
-          },
-          "index": {
-            "description": "Where it goes, counting from 0 (the first clip) to the number of\nclips less one (the last).",
-            "format": "uint",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "timeline": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "clip",
-          "index"
-        ],
-        "type": "object"
-      },
-      "TimelineNewParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_new`.",
-        "properties": {
-          "name": {
-            "description": "Its name; \"Timeline N\" if absent. Its id is made from it.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
-      },
-      "TimelineOpenParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_open`.",
-        "properties": {
-          "timeline": {
-            "description": "The id of the timeline to make current.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "timeline"
-        ],
-        "type": "object"
-      },
-      "TimelineRangeParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_delete_range`: a span of the timeline.",
-        "properties": {
-          "end_seconds": {
-            "format": "double",
-            "type": "number"
-          },
-          "start_seconds": {
-            "description": "Where the span starts and ends, in seconds on the timeline, each\nrounded to the frame grid of the clip there.",
-            "format": "double",
-            "type": "number"
-          },
-          "timeline": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "start_seconds",
-          "end_seconds"
-        ],
-        "type": "object"
-      },
-      "TimelineRelinkParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_relink`: where an offline clip's take is now.",
-        "properties": {
-          "clip": {
-            "description": "The clip's id, like `c2`.",
-            "type": "string"
-          },
-          "path": {
-            "description": "The take's manifest (`….session.json`), or the folder holding a\nmanifest of the same name. Given a folder, every take of every\ntimeline that was in the clip's old folder is looked for there too.",
-            "type": "string"
-          },
-          "timeline": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "clip",
-          "path"
-        ],
-        "type": "object"
-      },
-      "TimelineRemoveParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_remove`.",
-        "properties": {
-          "clip": {
-            "description": "The clip's id, like `c2`.",
-            "type": "string"
-          },
-          "timeline": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "clip"
-        ],
-        "type": "object"
-      },
-      "TimelineRollParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_roll`: move the cut between a clip and the next\n(the clip's out point and the next one's in point together), so the\ntimeline keeps its length.",
-        "properties": {
-          "by_seconds": {
-            "description": "How far to move the cut, in seconds (negative: earlier), rounded to\nthe clips' frame grid. Both clips must keep a frame and stay within\ntheir takes.",
-            "format": "double",
-            "type": "number"
-          },
-          "clip": {
-            "description": "The clip before the cut, like `c2`.",
-            "type": "string"
-          },
-          "timeline": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "clip",
-          "by_seconds"
-        ],
-        "type": "object"
-      },
-      "TimelineSplitParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_split`.",
-        "properties": {
-          "at_seconds": {
-            "description": "Where to cut, in seconds on the timeline (0 is its start), rounded\nto the frame grid of the clip there.",
-            "format": "double",
-            "type": "number"
-          },
-          "timeline": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "at_seconds"
-        ],
-        "type": "object"
-      },
-      "TimelineSummary": {
-        "properties": {
-          "clips": {
-            "format": "uint",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "created_at": {
-            "type": "string"
-          },
-          "current": {
-            "type": "boolean"
-          },
-          "duration_seconds": {
-            "description": "The clips' durations added up.",
-            "format": "double",
-            "type": "number"
-          },
-          "id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "current",
-          "created_at",
-          "clips",
-          "duration_seconds"
-        ],
-        "type": "object"
-      },
-      "TimelineTarget": {
-        "additionalProperties": false,
-        "description": "Which timeline: the current one if absent.",
-        "properties": {
-          "timeline": {
-            "description": "A timeline's id (`timeline_list` has them); the current one if\nabsent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "type": "object"
-      },
-      "TimelineTrimParams": {
-        "additionalProperties": false,
-        "description": "Parameters of `timeline_trim`: a clip's new in and/or out point.",
-        "properties": {
-          "clip": {
-            "description": "The clip's id, like `c2`.",
-            "type": "string"
-          },
-          "in_seconds": {
-            "description": "Where the clip starts, in seconds on its take's own clock (0 is the\ntake's start); unchanged if absent. Rounded to the take's frame grid.",
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "out_seconds": {
-            "description": "Where the clip ends, on its take's clock, up to the take's length;\nunchanged if absent. Rounded to the take's frame grid.",
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "timeline": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "clip"
         ],
         "type": "object"
       },
@@ -24097,25 +22401,6 @@
               "string",
               "null"
             ]
-          }
-        },
-        {
-          "description": "Add this recording's takes to this timeline (an id), in the folder\nof its last take, whatever `record_target` says. Not with\n`new_project`. Neither: `record_target`'s choice (a new project\nunless one was chosen).",
-          "name": "into",
-          "schema": {
-            "description": "Add this recording's takes to this timeline (an id), in the folder\nof its last take, whatever `record_target` says. Not with\n`new_project`. Neither: `record_target`'s choice (a new project\nunless one was chosen).",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        {
-          "description": "Start a new project with its own timeline, whatever\n`record_target` says (#114). Not with `into`.",
-          "name": "new_project",
-          "schema": {
-            "description": "Start a new project with its own timeline, whatever\n`record_target` says (#114). Not with `into`.",
-            "type": "boolean"
           }
         },
         {
@@ -26983,314 +25268,6 @@
       }
     },
     {
-      "description": "Make a timeline, make it current and choose it for the next\nrecording (`record_target`): from then on every take that\nfinishes (a stop or a split) is added to its end. Its params are\noptional (`name`). Returns\n[`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_new",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "Its name; \"Timeline N\" if absent. Its id is made from it.",
-          "name": "name",
-          "schema": {
-            "description": "Its name; \"Timeline N\" if absent. Its id is made from it.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Make a timeline, make it current and choose it for the next recording (`record_target`): from then on every take that finishes (a stop or a split) is added to its end.",
-      "x-isocast-params": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/TimelineNewParams"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      }
-    },
-    {
-      "description": "A timeline (the current one unless `timeline` names one) with each\nclip's take, place, duration and files. Returns\n[`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_get",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "A timeline's id (`timeline_list` has them); the current one if\nabsent.",
-          "name": "timeline",
-          "schema": {
-            "description": "A timeline's id (`timeline_list` has them); the current one if\nabsent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "A timeline (the current one unless `timeline` names one) with each clip's take, place, duration and files.",
-      "x-isocast-params": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/TimelineTarget"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      }
-    },
-    {
-      "description": "Every timeline, and which is current. Returns\n[`TimelineList`](crate::timeline::TimelineList).",
-      "name": "timeline_list",
-      "paramStructure": "by-name",
-      "params": [],
-      "result": {
-        "name": "TimelineList",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineList"
-        }
-      },
-      "summary": "Every timeline, and which is current."
-    },
-    {
-      "description": "Make a timeline current: the one the editor shows and edits act on\n(recordings go where `record_target` says). Returns\n[`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_open",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "The id of the timeline to make current.",
-          "name": "timeline",
-          "required": true,
-          "schema": {
-            "description": "The id of the timeline to make current.",
-            "type": "string"
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Make a timeline current: the one the editor shows and edits act on (recordings go where `record_target` says).",
-      "x-isocast-params": {
-        "$ref": "#/components/schemas/TimelineOpenParams"
-      }
-    },
-    {
-      "description": "Make no timeline current; if it was the record target, recordings\nstart new projects again. Returns [`TimelineClosed`](crate::timeline::TimelineClosed).",
-      "name": "timeline_close",
-      "paramStructure": "by-name",
-      "params": [],
-      "result": {
-        "name": "TimelineClosed",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineClosed"
-        }
-      },
-      "summary": "Make no timeline current; if it was the record target, recordings start new projects again."
-    },
-    {
-      "description": "Take a clip off a timeline. Its take's files stay where they are,\nlisted under the timeline's `removed`. Returns\n[`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_remove",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "The clip's id, like `c2`.",
-          "name": "clip",
-          "required": true,
-          "schema": {
-            "description": "The clip's id, like `c2`.",
-            "type": "string"
-          }
-        },
-        {
-          "description": "The timeline's id; the current one if absent.",
-          "name": "timeline",
-          "schema": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Take a clip off a timeline.",
-      "x-isocast-params": {
-        "$ref": "#/components/schemas/TimelineRemoveParams"
-      }
-    },
-    {
-      "description": "Move a clip to another place (`index`, from 0). Returns\n[`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_move",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "The clip's id, like `c3`.",
-          "name": "clip",
-          "required": true,
-          "schema": {
-            "description": "The clip's id, like `c3`.",
-            "type": "string"
-          }
-        },
-        {
-          "description": "Where it goes, counting from 0 (the first clip) to the number of\nclips less one (the last).",
-          "name": "index",
-          "required": true,
-          "schema": {
-            "description": "Where it goes, counting from 0 (the first clip) to the number of\nclips less one (the last).",
-            "format": "uint",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        {
-          "description": "The timeline's id; the current one if absent.",
-          "name": "timeline",
-          "schema": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Move a clip to another place (`index`, from 0).",
-      "x-isocast-params": {
-        "$ref": "#/components/schemas/TimelineMoveParams"
-      }
-    },
-    {
-      "description": "Record the last take again: while not recording (or while a stop\nis finishing, once it has), take the current timeline's last clip\noff (its files stay) and start recording; while recording, drop the\ntake being recorded from the timeline (its files stay) and begin a\nnew take about a quarter second later (0.25 to 0.35 s with 30 and\n60 fps files), without stopping any device (`begins_at` says when). Retakes are taken one at a time;\none asked for before the new take has begun drops nothing more. Its\nparams are optional. Returns [`Retaken`](crate::timeline::Retaken).",
-      "name": "retake",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "Write the new take here; else the folder of the take it replaces\n(else the setup's `recording.folder`). Not while recording, where\nthe new take goes where the recording writes.",
-          "name": "folder",
-          "schema": {
-            "description": "Write the new take here; else the folder of the take it replaces\n(else the setup's `recording.folder`). Not while recording, where\nthe new take goes where the recording writes.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        {
-          "description": "Stop on its own after this many seconds (not while recording).",
-          "name": "seconds",
-          "schema": {
-            "description": "Stop on its own after this many seconds (not while recording).",
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "Retaken",
-        "schema": {
-          "$ref": "#/components/schemas/Retaken"
-        }
-      },
-      "summary": "Record the last take again: while not recording (or while a stop is finishing, once it has), take the current timeline's last clip off (its files stay) and start recording; while recording, drop the take being recorded from the timeline (its files stay) and begin a new take about a quarter second later (0.25 to 0.35 s with 30 and 60 fps files), without stopping any device (`begins_at` says when).",
-      "x-isocast-params": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/RetakeParams"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      }
-    },
-    {
-      "description": "Join a timeline's clips (the current one's unless `timeline` names\none), in order, into one program file and one file per ISO source\nevery clip has, each cut to the clips' in and out points, plus the\nedited file when clips show other angles, and a manifest. The video\nis copied as recorded except the frames around a cut that doesn't\nfall on a keyframe (and parts of the edited file in another format),\nwhich are encoded again; audio is cross-faded at every join. It\nruns in the background: `export_progress` and `export_finished`\nevents report it. Its params are optional. Returns\n[`ExportStarted`](crate::timeline::ExportStarted).",
-      "name": "timeline_export",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "Where to write the joined files (made if missing); else the folder\nof the first clip's take.",
-          "name": "folder",
-          "schema": {
-            "description": "Where to write the joined files (made if missing); else the folder\nof the first clip's take.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        {
-          "description": "The timeline's id; the current one if absent.",
-          "name": "timeline",
-          "schema": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        {
-          "description": "Also write a vertical (9:16) edited file, `<name> VERTICAL.<ext>`:\neach clip's angle (or its crop) fitted into the program's size\nturned on its side (1920x1080 → 1080x1920), so a 9:16 crop fills\nthe frame; the program's sound. Every frame is encoded again.",
-          "name": "vertical",
-          "schema": {
-            "description": "Also write a vertical (9:16) edited file, `<name> VERTICAL.<ext>`:\neach clip's angle (or its crop) fitted into the program's size\nturned on its side (1920x1080 → 1080x1920), so a 9:16 crop fills\nthe frame; the program's sound. Every frame is encoded again.",
-            "type": "boolean"
-          }
-        }
-      ],
-      "result": {
-        "name": "ExportStarted",
-        "schema": {
-          "$ref": "#/components/schemas/ExportStarted"
-        }
-      },
-      "summary": "Join a timeline's clips (the current one's unless `timeline` names one), in order, into one program file and one file per ISO source every clip has, each cut to the clips' in and out points, plus the edited file when clips show other angles, and a manifest.",
-      "x-isocast-params": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/TimelineExportParams"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      }
-    },
-    {
       "description": "Current profile bindings and global registration warnings.",
       "name": "hotkeys_get",
       "paramStructure": "by-name",
@@ -27588,7 +25565,7 @@
       }
     },
     {
-      "description": "The recording projects (a folder per recording session) in the\nrecordings folders, newest first, each with its takes, files and\nexports. Its params are optional. Returns\n[`Projects`](crate::project::Projects).",
+      "description": "The recording projects (a folder per recording session) in the\nrecordings folders, newest first, each with its takes and files.\nIts params are optional. Returns\n[`Projects`](crate::project::Projects).",
       "name": "list_projects",
       "paramStructure": "by-name",
       "params": [
@@ -27612,7 +25589,7 @@
           "$ref": "#/components/schemas/Projects"
         }
       },
-      "summary": "The recording projects (a folder per recording session) in the recordings folders, newest first, each with its takes, files and exports.",
+      "summary": "The recording projects (a folder per recording session) in the recordings folders, newest first, each with its takes and files.",
       "x-isocast-params": {
         "anyOf": [
           {
@@ -27625,7 +25602,7 @@
       }
     },
     {
-      "description": "Rename a project (by id): its folder becomes `<date> <time>\n<name>`, numbered if taken. Refused while a recording or an export\nwrites into it. Manifests and timelines keep resolving. Returns\n[`ProjectRenamed`](crate::project::ProjectRenamed).",
+      "description": "Rename a project (by id): its folder becomes `<date> <time>\n<name>`, numbered if taken. Refused while a recording writes into\nit. Manifests keep resolving. Returns\n[`ProjectRenamed`](crate::project::ProjectRenamed).",
       "name": "rename_project",
       "paramStructure": "by-name",
       "params": [
@@ -28256,276 +26233,6 @@
       }
     },
     {
-      "description": "Move a clip's in and/or out point, on its take's clock (rounded to\nits frame grid); the take's files are never touched. One revision.\nReturns [`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_trim",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "The clip's id, like `c2`.",
-          "name": "clip",
-          "required": true,
-          "schema": {
-            "description": "The clip's id, like `c2`.",
-            "type": "string"
-          }
-        },
-        {
-          "description": "Where the clip starts, in seconds on its take's own clock (0 is the\ntake's start); unchanged if absent. Rounded to the take's frame grid.",
-          "name": "in_seconds",
-          "schema": {
-            "description": "Where the clip starts, in seconds on its take's own clock (0 is the\ntake's start); unchanged if absent. Rounded to the take's frame grid.",
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          }
-        },
-        {
-          "description": "Where the clip ends, on its take's clock, up to the take's length;\nunchanged if absent. Rounded to the take's frame grid.",
-          "name": "out_seconds",
-          "schema": {
-            "description": "Where the clip ends, on its take's clock, up to the take's length;\nunchanged if absent. Rounded to the take's frame grid.",
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          }
-        },
-        {
-          "description": "The timeline's id; the current one if absent.",
-          "name": "timeline",
-          "schema": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Move a clip's in and/or out point, on its take's clock (rounded to its frame grid); the take's files are never touched.",
-      "x-isocast-params": {
-        "$ref": "#/components/schemas/TimelineTrimParams"
-      }
-    },
-    {
-      "description": "Cut the clip at a moment on the timeline in two (the second gets a\nnew id, and the first's angle). One revision. Returns\n[`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_split",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "Where to cut, in seconds on the timeline (0 is its start), rounded\nto the frame grid of the clip there.",
-          "name": "at_seconds",
-          "required": true,
-          "schema": {
-            "description": "Where to cut, in seconds on the timeline (0 is its start), rounded\nto the frame grid of the clip there.",
-            "format": "double",
-            "type": "number"
-          }
-        },
-        {
-          "description": "The timeline's id; the current one if absent.",
-          "name": "timeline",
-          "schema": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Cut the clip at a moment on the timeline in two (the second gets a new id, and the first's angle).",
-      "x-isocast-params": {
-        "$ref": "#/components/schemas/TimelineSplitParams"
-      }
-    },
-    {
-      "description": "Take a span of the timeline out, closing the gap (ripple): clips in\nit are taken off, clips across its ends trimmed or split. One\nrevision. Returns [`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_delete_range",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "name": "end_seconds",
-          "required": true,
-          "schema": {
-            "format": "double",
-            "type": "number"
-          }
-        },
-        {
-          "description": "Where the span starts and ends, in seconds on the timeline, each\nrounded to the frame grid of the clip there.",
-          "name": "start_seconds",
-          "required": true,
-          "schema": {
-            "description": "Where the span starts and ends, in seconds on the timeline, each\nrounded to the frame grid of the clip there.",
-            "format": "double",
-            "type": "number"
-          }
-        },
-        {
-          "description": "The timeline's id; the current one if absent.",
-          "name": "timeline",
-          "schema": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Take a span of the timeline out, closing the gap (ripple): clips in it are taken off, clips across its ends trimmed or split.",
-      "x-isocast-params": {
-        "$ref": "#/components/schemas/TimelineRangeParams"
-      }
-    },
-    {
-      "description": "Choose the source the edited video shows over a span of the\ntimeline (`program` or an ISO source): clips across its ends are\nsplit there and every clip in it shows `source`. One revision.\nReturns [`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_angle",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "name": "end_seconds",
-          "required": true,
-          "schema": {
-            "format": "double",
-            "type": "number"
-          }
-        },
-        {
-          "description": "What the edited video shows over the span: `program`, or an ISO\nsource's id that every clip in the span recorded.",
-          "name": "source",
-          "required": true,
-          "schema": {
-            "description": "What the edited video shows over the span: `program`, or an ISO\nsource's id that every clip in the span recorded.",
-            "type": "string"
-          }
-        },
-        {
-          "description": "Where the span starts and ends, in seconds on the timeline, each\nrounded to the frame grid of the clip there.",
-          "name": "start_seconds",
-          "required": true,
-          "schema": {
-            "description": "Where the span starts and ends, in seconds on the timeline, each\nrounded to the frame grid of the clip there.",
-            "format": "double",
-            "type": "number"
-          }
-        },
-        {
-          "description": "The timeline's id; the current one if absent.",
-          "name": "timeline",
-          "schema": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Choose the source the edited video shows over a span of the timeline (`program` or an ISO source): clips across its ends are split there and every clip in it shows `source`.",
-      "x-isocast-params": {
-        "$ref": "#/components/schemas/TimelineAngleParams"
-      }
-    },
-    {
-      "description": "Take back the last edit (trim, split, delete, angle, remove, move).\nReturns [`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_undo",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "A timeline's id (`timeline_list` has them); the current one if\nabsent.",
-          "name": "timeline",
-          "schema": {
-            "description": "A timeline's id (`timeline_list` has them); the current one if\nabsent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Take back the last edit (trim, split, delete, angle, remove, move).",
-      "x-isocast-params": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/TimelineTarget"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      }
-    },
-    {
-      "description": "Put back the last edit undone. Returns\n[`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_redo",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "A timeline's id (`timeline_list` has them); the current one if\nabsent.",
-          "name": "timeline",
-          "schema": {
-            "description": "A timeline's id (`timeline_list` has them); the current one if\nabsent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Put back the last edit undone.",
-      "x-isocast-params": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/TimelineTarget"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      }
-    },
-    {
       "description": "Clear a canvas's staged preview: `clear_preview` for `main`, or the\nvertical canvas's own preview. Returns [`Switched`].",
       "name": "clear_canvas_preview",
       "paramStructure": "by-name",
@@ -28552,137 +26259,6 @@
           }
         },
         "type": "object"
-      }
-    },
-    {
-      "description": "Choose the part of the picture the edited video shows over a span\n(a rectangle in fractions of each clip's angle, a shape preset, or\nthe whole picture again): clips across its ends are split there.\nExport encodes those clips again, scaled to the program's size. One\nrevision. Returns [`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_crop",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "Show the whole picture again over the span (no `crop` or `preset`).",
-          "name": "clear",
-          "schema": {
-            "description": "Show the whole picture again over the span (no `crop` or `preset`).",
-            "type": "boolean"
-          }
-        },
-        {
-          "description": "The part of each clip's picture to show (fractions of its width and\nheight, from the top-left); the whole picture if absent and a\n`preset` is given.",
-          "name": "crop",
-          "schema": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Crop2"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The part of each clip's picture to show (fractions of its width and\nheight, from the top-left); the whole picture if absent and a\n`preset` is given."
-          }
-        },
-        {
-          "name": "end_seconds",
-          "required": true,
-          "schema": {
-            "format": "double",
-            "type": "number"
-          }
-        },
-        {
-          "description": "Make it this shape: the largest rectangle of it inside `crop` (or\nthe picture), centred: `16:9`, `9:16`, `1:1` or `4:5`.",
-          "name": "preset",
-          "schema": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/CropPreset"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Make it this shape: the largest rectangle of it inside `crop` (or\nthe picture), centred: `16:9`, `9:16`, `1:1` or `4:5`."
-          }
-        },
-        {
-          "description": "Where the span starts and ends, in seconds on the timeline, each\nrounded to the frame grid of the clip there.",
-          "name": "start_seconds",
-          "required": true,
-          "schema": {
-            "description": "Where the span starts and ends, in seconds on the timeline, each\nrounded to the frame grid of the clip there.",
-            "format": "double",
-            "type": "number"
-          }
-        },
-        {
-          "description": "The timeline's id; the current one if absent.",
-          "name": "timeline",
-          "schema": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Choose the part of the picture the edited video shows over a span (a rectangle in fractions of each clip's angle, a shape preset, or the whole picture again): clips across its ends are split there.",
-      "x-isocast-params": {
-        "$ref": "#/components/schemas/TimelineCropParams"
-      }
-    },
-    {
-      "description": "Move the cut between a clip and the next one (a roll: the first's\nout point and the second's in point together), keeping the\ntimeline's length. One revision. Returns\n[`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_roll",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "How far to move the cut, in seconds (negative: earlier), rounded to\nthe clips' frame grid. Both clips must keep a frame and stay within\ntheir takes.",
-          "name": "by_seconds",
-          "required": true,
-          "schema": {
-            "description": "How far to move the cut, in seconds (negative: earlier), rounded to\nthe clips' frame grid. Both clips must keep a frame and stay within\ntheir takes.",
-            "format": "double",
-            "type": "number"
-          }
-        },
-        {
-          "description": "The clip before the cut, like `c2`.",
-          "name": "clip",
-          "required": true,
-          "schema": {
-            "description": "The clip before the cut, like `c2`.",
-            "type": "string"
-          }
-        },
-        {
-          "description": "The timeline's id; the current one if absent.",
-          "name": "timeline",
-          "schema": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Move the cut between a clip and the next one (a roll: the first's out point and the second's in point together), keeping the timeline's length.",
-      "x-isocast-params": {
-        "$ref": "#/components/schemas/TimelineRollParams"
       }
     },
     {
@@ -28918,132 +26494,6 @@
       }
     },
     {
-      "description": "Open a project file (`.isoprj`) or project folder in the editor\n(#88): its timelines join the engine's (imported if it was copied\nfrom elsewhere, with paths resolved where it is now), one becomes\nthe current timeline, and the app shows the editor on it\n(`project_opened`). Missing takes are listed as offline, never an\nerror. Allowed while recording (like `timeline_open`). Returns\n[`ProjectOpened`](crate::isoprj::ProjectOpened).",
-      "name": "project_open",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "Ask the app to show the editor on it (true if absent).",
-          "name": "editor",
-          "schema": {
-            "description": "Ask the app to show the editor on it (true if absent).",
-            "type": [
-              "boolean",
-              "null"
-            ]
-          }
-        },
-        {
-          "description": "A `.isoprj` file, or a project folder (its `.isoprj`, or its takes\nif it has none yet).",
-          "name": "path",
-          "required": true,
-          "schema": {
-            "description": "A `.isoprj` file, or a project folder (its `.isoprj`, or its takes\nif it has none yet).",
-            "type": "string"
-          }
-        },
-        {
-          "description": "Which of the project's timelines to open (an id); else the current\ntimeline if it is one of them, else its newest.",
-          "name": "timeline",
-          "schema": {
-            "description": "Which of the project's timelines to open (an id); else the current\ntimeline if it is one of them, else its newest.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "ProjectOpened",
-        "schema": {
-          "$ref": "#/components/schemas/ProjectOpened"
-        }
-      },
-      "summary": "Open a project file (`.isoprj`) or project folder in the editor (#88): its timelines join the engine's (imported if it was copied from elsewhere, with paths resolved where it is now), one becomes the current timeline, and the app shows the editor on it (`project_opened`).",
-      "x-isocast-params": {
-        "$ref": "#/components/schemas/ProjectOpenParams"
-      }
-    },
-    {
-      "description": "Projects opened lately (File › Open Recent), newest first; with\n`clear`, forget them. Its params are optional. Returns\n[`RecentProjects`](crate::isoprj::RecentProjects).",
-      "name": "recent_projects",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "Forget them all (File › Open Recent › Clear Menu).",
-          "name": "clear",
-          "schema": {
-            "description": "Forget them all (File › Open Recent › Clear Menu).",
-            "type": "boolean"
-          }
-        }
-      ],
-      "result": {
-        "name": "RecentProjects",
-        "schema": {
-          "$ref": "#/components/schemas/RecentProjects"
-        }
-      },
-      "summary": "Projects opened lately (File › Open Recent), newest first; with `clear`, forget them.",
-      "x-isocast-params": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/RecentProjectsParams"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      }
-    },
-    {
-      "description": "Point an offline clip at where its take is now (a manifest, or the\nfolder holding it); the take's files are never touched. Returns\n[`TimelineInfo`](crate::timeline::TimelineInfo).",
-      "name": "timeline_relink",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "The clip's id, like `c2`.",
-          "name": "clip",
-          "required": true,
-          "schema": {
-            "description": "The clip's id, like `c2`.",
-            "type": "string"
-          }
-        },
-        {
-          "description": "The take's manifest (`….session.json`), or the folder holding a\nmanifest of the same name. Given a folder, every take of every\ntimeline that was in the clip's old folder is looked for there too.",
-          "name": "path",
-          "required": true,
-          "schema": {
-            "description": "The take's manifest (`….session.json`), or the folder holding a\nmanifest of the same name. Given a folder, every take of every\ntimeline that was in the clip's old folder is looked for there too.",
-            "type": "string"
-          }
-        },
-        {
-          "description": "The timeline's id; the current one if absent.",
-          "name": "timeline",
-          "schema": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "TimelineInfo",
-        "schema": {
-          "$ref": "#/components/schemas/TimelineInfo"
-        }
-      },
-      "summary": "Point an offline clip at where its take is now (a manifest, or the folder holding it); the take's files are never touched.",
-      "x-isocast-params": {
-        "$ref": "#/components/schemas/TimelineRelinkParams"
-      }
-    },
-    {
       "description": "Measured machine capabilities and calibration state. Returns MachineStatus.",
       "name": "machine_profile",
       "paramStructure": "by-name",
@@ -29081,127 +26531,6 @@
         }
       },
       "summary": "Cancel calibration, retaining the last valid profile."
-    },
-    {
-      "description": "Write a timeline as a project Final Cut Pro (`fcpxml`), Premiere Pro\n(`xmeml`), DaVinci Resolve (`xmeml` with app `resolve`) or any\nOpenTimelineIO reader (`otio`) opens (#104): every\nISO source on its own video track with the program on top, each\nclip's angle the one track on there, crops as crop and transform,\nmarkers, and each file's audio on its own tracks, all lined up from\nthe takes' manifests. It points at the takes' own files (nothing is\nencoded, copied or changed). Returns\n[`NleExported`](crate::timeline::NleExported).",
-      "name": "timeline_export_nle",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "The editor it is for: `final_cut`, `premiere` or `resolve`. With\nxmeml, `resolve` writes the scale of a picture of another size than\nthe sequence from Resolve's own fit, and each audio channel on its\nown track (Resolve reads xmeml audio a channel at a time). Absent:\n`final_cut` for fcpxml, `premiere` for xmeml, `resolve` for otio (the\nsame file for any editor). Resolve's best format\nis xmeml: it ignores FCPXML's split of picture and sound.",
-          "name": "app",
-          "schema": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/NleApp"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The editor it is for: `final_cut`, `premiere` or `resolve`. With\nxmeml, `resolve` writes the scale of a picture of another size than\nthe sequence from Resolve's own fit, and each audio channel on its\nown track (Resolve reads xmeml audio a channel at a time). Absent:\n`final_cut` for fcpxml, `premiere` for xmeml, `resolve` for otio (the\nsame file for any editor). Resolve's best format\nis xmeml: it ignores FCPXML's split of picture and sound."
-          }
-        },
-        {
-          "description": "Write it in this folder (made if missing), named after the timeline\nand numbered so nothing is overwritten; else the first clip's take's\nfolder. Not with `path`.",
-          "name": "folder",
-          "schema": {
-            "description": "Write it in this folder (made if missing), named after the timeline\nand numbered so nothing is overwritten; else the first clip's take's\nfolder. Not with `path`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        {
-          "description": "`fcpxml` (Final Cut Pro), `xmeml` (Premiere Pro, or Resolve with app\n`resolve`) or `otio` (OpenTimelineIO).",
-          "name": "format",
-          "required": true,
-          "schema": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/NleFormat"
-              }
-            ],
-            "description": "`fcpxml` (Final Cut Pro), `xmeml` (Premiere Pro, or Resolve with app\n`resolve`) or `otio` (OpenTimelineIO)."
-          }
-        },
-        {
-          "description": "Write exactly this file (an absolute path ending in the format's\nextension: .fcpxml, .xml or .otio). A file already there is replaced\nonly if it is an earlier Isocast timeline export, or with `replace`.\nNot with `folder`.",
-          "name": "path",
-          "schema": {
-            "description": "Write exactly this file (an absolute path ending in the format's\nextension: .fcpxml, .xml or .otio). A file already there is replaced\nonly if it is an earlier Isocast timeline export, or with `replace`.\nNot with `folder`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        {
-          "description": "With `path`: replace whatever file is there.",
-          "name": "replace",
-          "schema": {
-            "description": "With `path`: replace whatever file is there.",
-            "type": "boolean"
-          }
-        },
-        {
-          "description": "The timeline's id; the current one if absent.",
-          "name": "timeline",
-          "schema": {
-            "description": "The timeline's id; the current one if absent.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "NleExported",
-        "schema": {
-          "$ref": "#/components/schemas/NleExported"
-        }
-      },
-      "summary": "Write a timeline as a project Final Cut Pro (`fcpxml`), Premiere Pro (`xmeml`), DaVinci Resolve (`xmeml` with app `resolve`) or any OpenTimelineIO reader (`otio`) opens (#104): every ISO source on its own video track with the program on top, each clip's angle the one track on there, crops as crop and transform, markers, and each file's audio on its own tracks, all lined up from the takes' manifests.",
-      "x-isocast-params": {
-        "$ref": "#/components/schemas/TimelineExportNleParams"
-      }
-    },
-    {
-      "description": "Where the next recording goes (#114), and with `target`, choose it:\n`new` (the default: each recording starts a new project folder with\nits own timeline) or a timeline's id (its next take, written into\nthe folder of its last take). The choice is kept across restarts and\nshown in `status` (`record_target`); a running recording keeps its\nown. Returns [`RecordTarget`](crate::timeline::RecordTarget).",
-      "name": "record_target",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "description": "`new` (each recording starts a new project with its own timeline)\nor a timeline's id (`timeline_list` has them): its next take. Absent:\nthe choice is only read.",
-          "name": "target",
-          "schema": {
-            "description": "`new` (each recording starts a new project with its own timeline)\nor a timeline's id (`timeline_list` has them): its next take. Absent:\nthe choice is only read.",
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      ],
-      "result": {
-        "name": "RecordTarget",
-        "schema": {
-          "$ref": "#/components/schemas/RecordTarget"
-        }
-      },
-      "summary": "Where the next recording goes (#114), and with `target`, choose it: `new` (the default: each recording starts a new project folder with its own timeline) or a timeline's id (its next take, written into the folder of its last take).",
-      "x-isocast-params": {
-        "anyOf": [
-          {
-            "$ref": "#/components/schemas/RecordTargetParams"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      }
     },
     {
       "description": "Select/return the daemon's graphics adapter before opening a client\nrenderer. Windows returns its DX12 LUID as [low: u32, high: i32];\nother platforms return null. Does not start capture or recording.",
@@ -29287,6 +26616,90 @@
       "summary": "Choose the folders other computers can use (kept across restarts), or go back to the defaults.",
       "x-isocast-params": {
         "$ref": "#/components/schemas/FolderRootsSetParams"
+      }
+    },
+    {
+      "description": "Write a take as a project Final Cut Pro (`fcpxml`), Premiere Pro\n(`xmeml`), DaVinci Resolve (`xmeml` with app `resolve`) or any\nOpenTimelineIO reader (`otio`) opens (#104): every ISO source on its\nown video track with the program on top (the one track on), markers,\nand each file's audio on its own tracks, all lined up from the take's\nmanifest. It points at the take's own files (nothing is encoded,\ncopied or changed). Returns [`NleExported`](crate::nle::NleExported).",
+      "name": "take_export_nle",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "description": "The editor it is for: `final_cut`, `premiere` or `resolve`. With\nxmeml, `resolve` writes the scale of a picture of another size than\nthe sequence from Resolve's own fit, and each audio channel on its\nown track (Resolve reads xmeml audio a channel at a time). Absent:\n`final_cut` for fcpxml, `premiere` for xmeml, `resolve` for otio (the\nsame file for any editor). Resolve's best format\nis xmeml: it ignores FCPXML's split of picture and sound.",
+          "name": "app",
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NleApp"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The editor it is for: `final_cut`, `premiere` or `resolve`. With\nxmeml, `resolve` writes the scale of a picture of another size than\nthe sequence from Resolve's own fit, and each audio channel on its\nown track (Resolve reads xmeml audio a channel at a time). Absent:\n`final_cut` for fcpxml, `premiere` for xmeml, `resolve` for otio (the\nsame file for any editor). Resolve's best format\nis xmeml: it ignores FCPXML's split of picture and sound."
+          }
+        },
+        {
+          "description": "Write it in this folder (made if missing), named after the take and\nnumbered so nothing is overwritten; else the take's own folder. Not\nwith `path`.",
+          "name": "folder",
+          "schema": {
+            "description": "Write it in this folder (made if missing), named after the take and\nnumbered so nothing is overwritten; else the take's own folder. Not\nwith `path`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "`fcpxml` (Final Cut Pro), `xmeml` (Premiere Pro, or Resolve with app\n`resolve`) or `otio` (OpenTimelineIO).",
+          "name": "format",
+          "required": true,
+          "schema": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/NleFormat"
+              }
+            ],
+            "description": "`fcpxml` (Final Cut Pro), `xmeml` (Premiere Pro, or Resolve with app\n`resolve`) or `otio` (OpenTimelineIO)."
+          }
+        },
+        {
+          "description": "Write exactly this file (an absolute path ending in the format's\nextension: .fcpxml, .xml or .otio). A file already there is replaced\nonly if it is an earlier Isocast export, or with `replace`.\nNot with `folder`.",
+          "name": "path",
+          "schema": {
+            "description": "Write exactly this file (an absolute path ending in the format's\nextension: .fcpxml, .xml or .otio). A file already there is replaced\nonly if it is an earlier Isocast export, or with `replace`.\nNot with `folder`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "description": "With `path`: replace whatever file is there.",
+          "name": "replace",
+          "schema": {
+            "description": "With `path`: replace whatever file is there.",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "The take: its manifest (`<date> <time>.session.json`, as `start`,\n`stop` and `take_finished` give it), or a project folder holding\nexactly one take; an absolute path.",
+          "name": "take",
+          "required": true,
+          "schema": {
+            "description": "The take: its manifest (`<date> <time>.session.json`, as `start`,\n`stop` and `take_finished` give it), or a project folder holding\nexactly one take; an absolute path.",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "NleExported",
+        "schema": {
+          "$ref": "#/components/schemas/NleExported"
+        }
+      },
+      "summary": "Write a take as a project Final Cut Pro (`fcpxml`), Premiere Pro (`xmeml`), DaVinci Resolve (`xmeml` with app `resolve`) or any OpenTimelineIO reader (`otio`) opens (#104): every ISO source on its own video track with the program on top (the one track on), markers, and each file's audio on its own tracks, all lined up from the take's manifest.",
+      "x-isocast-params": {
+        "$ref": "#/components/schemas/TakeExportNleParams"
       }
     },
     {

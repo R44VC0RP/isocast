@@ -331,7 +331,7 @@ One of:
 | `folder` (required) | string | Folder recordings are written to. `~` expands to the home folder. |
 | `iso` | [IsoRecording](#isorecording) | Separate recordings of individual sources. Default `{"enabled": false, "encoder": {"bit_depth": 8, "codec": "hevc", "container": "mov", "quality": "high"}, "filename": "{SOURCE}-{date} {time}", "sources": []}`. |
 | `keep_free_gb` | number | Free space, in GB, a recording never uses: it won't start without room for its estimated size plus this, and it stops cleanly, finishing every file, when free space falls below it (or below about 10 s of its files, at least 64 MB, if that is more). Default `1.0`. |
-| `open_editor` | boolean | The app opens the editor, in its own window, on the take's project and timeline when a recording stops (a split doesn't). Off unless set: a window after every stop gets in the way of a session of many takes and of recordings driven from the CLI or MCP. While a stream runs it opens behind the studio, never taking the keyboard. |
+| `open_editor` | boolean | Retired with the editor (2026-10-22): read and ignored, so setups that set it still load; never written. |
 | `program` (required) | [ProgramRecording](#programrecording) | The composited program recording. |
 | `replay` | [ReplaySettings](#replaysettings) | The replay buffer: how much of the program it keeps. |
 

@@ -213,7 +213,6 @@ mkdir "$work"
 : >"$work/.isocast-motion"
 export ISOCAST_SOCKET="$work/engine.sock"
 export ISOCAST_SETUP="$work/live.toml"
-export ISOCAST_TIMELINES="$work/timelines"
 # A dev app that doesn't exist, so the CLI starts the isocastd next to it.
 export ISOCAST_DEV_APP="$work/none.app"
 export ISOCAST_MONITOR_SILENT=1

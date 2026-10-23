@@ -1,24 +1,18 @@
 //! `isocast project …`: recording projects (7.7b), a folder per
-//! recording session. Each command is one call on the method table
-//! (`list_projects`, `rename_project`, `project_open`,
-//! `recent_projects`); `auto-open` reads and changes the setup's
-//! `recording.open_editor` with `get` and `apply`.
+//! recording session, and their takes as projects for other editors. Each
+//! command is one call on the method table (`list_projects`,
+//! `rename_project`, `take_export_nle`).
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Subcommand;
 use isocast_protocol::api::Method;
+use isocast_protocol::nle::{NleApp, NleExported, NleFormat, TakeExportNleParams};
 use isocast_protocol::project::{
     ListProjectsParams, Project, ProjectRenamed, Projects, RenameProjectParams,
 };
-
-use isocast_protocol::api::{Applied, ApplyParams, GetParams, Live};
-use isocast_protocol::change::Change;
-use isocast_protocol::isoprj::{
-    ProjectOpenParams, ProjectOpened, RecentProjects, RecentProjectsParams,
-};
-use std::path::PathBuf;
 
 use crate::client::Client;
 
@@ -34,45 +28,41 @@ pub enum ProjectCommand {
         json: bool,
     },
     /// Rename a project (by id): its folder becomes `<date> <time> <NAME>`.
-    /// Refused while a recording or an export writes into it; manifests
-    /// and timelines keep finding its files.
+    /// Refused while a recording writes into it; manifests keep finding
+    /// its files.
     Rename {
         project: String,
         name: String,
         #[arg(long)]
         json: bool,
     },
-    /// Open a project file (`.isoprj`) or project folder: its timelines
-    /// join the engine's (imported if it was copied from elsewhere), one
-    /// becomes current, and the app (if it is running) shows the editor
-    /// on it. Missing takes are listed as offline (`timeline relink`).
-    Open {
-        /// The `.isoprj` file, or the project's folder.
-        path: PathBuf,
-        /// Which of its timelines (an id); else the current one if it is
-        /// one of them, else the newest.
-        #[arg(long)]
-        timeline: Option<String>,
-        /// Don't ask the app to show the editor.
-        #[arg(long)]
-        no_editor: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// The projects opened lately (File › Open Recent), newest first.
-    Recent {
-        /// Forget them.
-        #[arg(long)]
-        clear: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Whether the app opens the editor when a recording stops (the
-    /// setup's `recording.open_editor`): `on` or `off` changes it, nothing
-    /// says it.
-    AutoOpen {
-        #[arg(value_parser = ["on", "off"])]
-        state: Option<String>,
+    /// Write a take as a project another editor opens, pointing at the
+    /// take's own files (nothing is encoded or copied): fcpxml (Final Cut
+    /// Pro), xmeml (Premiere Pro; DaVinci Resolve with --app resolve) or
+    /// otio (OpenTimelineIO). Every ISO source on its own track with the
+    /// program on top (the one on), lined up from the take's manifest.
+    ExportNle {
+        /// The take: its manifest (`….session.json`), or a project folder
+        /// holding one take.
+        take: PathBuf,
+        #[arg(long, value_name = "FORMAT", value_parser = ["fcpxml", "xmeml", "otio"])]
+        format: String,
+        /// The editor it is for: final_cut (fcpxml's default), premiere
+        /// (xmeml's) or resolve (with xmeml: Resolve's picture scale and a
+        /// track per audio channel).
+        #[arg(long, value_name = "APP", value_parser = ["final_cut", "premiere", "resolve"])]
+        app: Option<String>,
+        /// Write it in this folder (made if missing); else the take's.
+        #[arg(long, conflicts_with = "output")]
+        folder: Option<PathBuf>,
+        /// Write exactly this file (ending in .fcpxml, .xml or .otio); one
+        /// already there is replaced only if it is an earlier Isocast
+        /// export, or with --replace.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// With --output: replace whatever file is there.
+        #[arg(long, requires = "output")]
+        replace: bool,
         #[arg(long)]
         json: bool,
     },
@@ -122,92 +112,63 @@ pub fn run(command: ProjectCommand) -> Result<ExitCode> {
                 }
             }
         }
-        ProjectCommand::Open {
-            path,
-            timeline,
-            no_editor,
+        ProjectCommand::ExportNle {
+            take,
+            format,
+            app,
+            folder,
+            output,
+            replace,
             json,
         } => {
-            let opened: ProjectOpened = client.call(Method::ProjectOpen(ProjectOpenParams {
-                path: crate::timeline::absolute(path)?,
-                timeline,
-                editor: Some(!no_editor),
-            }))?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&opened)?);
-            } else {
-                println!(
-                    "Opened {:?} ({}): {}",
-                    opened.name,
-                    opened.project,
-                    opened.path.display()
-                );
-                for note in &opened.notes {
-                    println!("note: {note}");
-                }
-                crate::timeline::print_timeline(&opened.timeline);
-                if opened.timelines.len() > 1 {
-                    let others: Vec<&str> = opened
-                        .timelines
-                        .iter()
-                        .filter(|t| t.id != opened.timeline.id)
-                        .map(|t| t.id.as_str())
-                        .collect();
-                    println!("Its other timelines: {}", others.join(", "));
-                }
-                for take in &opened.offline {
-                    println!("offline: {}", take.display());
-                }
-            }
-        }
-        ProjectCommand::Recent { clear, json } => {
-            let recent: RecentProjects =
-                client.call(Method::RecentProjects(Some(RecentProjectsParams { clear })))?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&recent)?);
-            } else if recent.projects.is_empty() {
-                println!("No projects opened lately (`isocast project open PATH` opens one).");
-            } else {
-                for project in &recent.projects {
-                    println!(
-                        "{:?}  {}{}",
-                        project.name,
-                        project.path.display(),
-                        if project.exists { "" } else { "  (missing)" }
-                    );
-                }
-            }
-        }
-        ProjectCommand::AutoOpen { state, json } => {
-            let live: Live = client.call(Method::Get(Some(GetParams::default())))?;
-            let Some(setup) = live.setup else {
-                anyhow::bail!("there is no setup yet (`isocast setup init` makes one)");
+            let params = TakeExportNleParams {
+                format: NleFormat::parse(&format).expect("clap checked it"),
+                app: app.as_deref().and_then(NleApp::parse),
+                take: std::path::absolute(take)?,
+                folder: folder.map(std::path::absolute).transpose()?,
+                path: output.map(std::path::absolute).transpose()?,
+                replace,
             };
-            let mut on = setup.recording.open_editor;
-            if let Some(state) = state {
-                let want = state == "on";
-                if want != on {
-                    let _: Applied = client.call(Method::Apply(Box::new(ApplyParams {
-                        revision: live.revision,
-                        change: Change::Patch(
-                            serde_json::json!({"recording": {"open_editor": want}}),
-                        ),
-                        live: false,
-                    })))?;
-                }
-                on = want;
-            }
+            let exported: NleExported = client.call(Method::TakeExportNle(params))?;
             if json {
-                println!("{}", serde_json::json!({ "open_editor": on }));
+                println!("{}", serde_json::to_string_pretty(&exported)?);
             } else {
-                println!(
-                    "The app {} the editor when a recording stops (recording.open_editor = {on}).",
-                    if on { "opens" } else { "doesn't open" }
-                );
+                print_nle(&exported);
             }
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn print_nle(exported: &NleExported) {
+    println!(
+        "Wrote {} for {} ({}): {:.3} s at {} fps, {}x{}, {} media file{}",
+        exported.path.display(),
+        exported.app.title(),
+        exported.format.name(),
+        exported.duration_seconds,
+        exported.frame_rate,
+        exported.width,
+        exported.height,
+        exported.media,
+        if exported.media == 1 { "" } else { "s" }
+    );
+    for (kind, tracks) in [("V", &exported.video_tracks), ("A", &exported.audio_tracks)] {
+        for (n, track) in tracks.iter().enumerate() {
+            println!(
+                "  {kind}{}  {}{}",
+                n + 1,
+                track.name,
+                if track.enabled > 0 { "" } else { " (off)" }
+            );
+        }
+    }
+    if exported.markers > 0 {
+        println!("  {} marker(s)", exported.markers);
+    }
+    for note in &exported.notes {
+        println!("note: {note}");
+    }
 }
 
 fn print_project(project: &Project) {

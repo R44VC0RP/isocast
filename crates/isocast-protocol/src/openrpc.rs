@@ -349,9 +349,8 @@ fn of<T: JsonSchema>(g: &mut SchemaGenerator) -> Option<(String, Schema)> {
 /// needs an entry here (the tests fail without one).
 pub fn result(method: &str, g: &mut SchemaGenerator) -> Option<(String, Schema)> {
     use crate::{
-        data, developer, devices, diagnostics, hello, hotkeys, init, isoprj, library, machine, obs,
-        optimize, plugin, project, projector, remote, replay, roots, timeline, virtual_camera,
-        websocket,
+        data, developer, devices, diagnostics, hello, hotkeys, init, library, machine, nle, obs,
+        optimize, plugin, project, projector, remote, replay, roots, virtual_camera, websocket,
     };
     match method {
         "status" => of::<api::Status>(g),
@@ -396,26 +395,6 @@ pub fn result(method: &str, g: &mut SchemaGenerator) -> Option<(String, Schema)>
         "bug_report" => of::<diagnostics::BugReport>(g),
         "logs" => of::<diagnostics::Logs>(g),
         "report_file" => of::<diagnostics::ReportFile>(g),
-        "timeline_new"
-        | "timeline_get"
-        | "timeline_open"
-        | "timeline_remove"
-        | "timeline_move"
-        | "timeline_trim"
-        | "timeline_split"
-        | "timeline_delete_range"
-        | "timeline_angle"
-        | "timeline_undo"
-        | "timeline_redo"
-        | "timeline_crop"
-        | "timeline_roll"
-        | "timeline_relink" => of::<timeline::TimelineInfo>(g),
-        "timeline_list" => of::<timeline::TimelineList>(g),
-        "timeline_close" => of::<timeline::TimelineClosed>(g),
-        "retake" => of::<timeline::Retaken>(g),
-        "timeline_export" => of::<timeline::ExportStarted>(g),
-        "timeline_export_nle" => of::<timeline::NleExported>(g),
-        "record_target" => of::<timeline::RecordTarget>(g),
         "hotkeys_get" | "hotkeys_set" => of::<hotkeys::Hotkeys>(g),
         "hotkeys_actions" => of::<hotkeys::Catalogue>(g),
         // Built as JSON in the daemon (hotkeys_input), not a named type.
@@ -461,8 +440,7 @@ pub fn result(method: &str, g: &mut SchemaGenerator) -> Option<(String, Schema)>
         "remote_clients" | "remote_revoke" => of::<Vec<remote::RemotePeer>>(g),
         "projector_open" | "projector_place" => of::<projector::Projector>(g),
         "projector_close" | "projector_list" => of::<projector::Projectors>(g),
-        "project_open" => of::<isoprj::ProjectOpened>(g),
-        "recent_projects" => of::<isoprj::RecentProjects>(g),
+        "take_export_nle" => of::<nle::NleExported>(g),
         "machine_profile" | "machine_calibrate" | "machine_cancel" => {
             of::<machine::MachineStatus>(g)
         }

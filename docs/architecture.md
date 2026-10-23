@@ -23,7 +23,7 @@
   API) with one JSON Schema (`isocast setup schema`). Clients read it, plan
   a change and apply it at a revision, so the app, a script and an agent
   can change the same setup without overwriting each other.
-- **Ids, not names.** Sources, scenes, items and clips have stable ids.
+- **Ids, not names.** Sources, scenes and items have stable ids.
 - **One clock.** The program and every ISO file share one clock; each
   recording writes a `session.json` that says where every file starts, plus
   scene switches and markers.

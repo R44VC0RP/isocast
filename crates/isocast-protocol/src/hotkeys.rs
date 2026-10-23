@@ -7,7 +7,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use crate::timeline::{RetakeParams, TimelineNewParams, TimelineOpenParams};
 use crate::{Issue, Transition};
 
 pub type Bindings = BTreeMap<String, Binding>;
@@ -223,9 +222,6 @@ pub struct Action {
     pub group: String,
     pub arguments: Value,
     pub hold: bool,
-    /// Reserved actions are accepted in profiles but cannot execute yet.
-    pub available: bool,
-    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -292,36 +288,6 @@ pub struct TakeWithArgs {
     pub canvas: crate::CanvasId,
 }
 arguments!(IdArgs { id: String });
-/// The old reserved actions used `id`; retain that spelling as an alias while
-/// exposing the real timeline method's `clip`/`timeline` fields in the schema.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct TimelineRemoveArgs {
-    #[serde(alias = "id")]
-    pub clip: String,
-    pub timeline: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct TimelineMoveArgs {
-    #[serde(alias = "id")]
-    pub clip: String,
-    /// Zero-based position, as on timeline_move (the CLI's positions are one-based).
-    pub index: usize,
-    pub timeline: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct TimelineExportArgs {
-    #[serde(alias = "id")]
-    pub timeline: Option<String>,
-    pub folder: Option<std::path::PathBuf>,
-    /// Also the vertical (9:16) edited file, as timeline_export's.
-    #[serde(default)]
-    pub vertical: bool,
-}
 arguments!(ScreenshotArgs {
     path: std::path::PathBuf
 });
@@ -341,12 +307,6 @@ pub enum Arguments {
     Take(TakeArgs),
     TakeWith(TakeWithArgs),
     Id(IdArgs),
-    Retake(RetakeParams),
-    TimelineNew(TimelineNewParams),
-    TimelineOpen(TimelineOpenParams),
-    TimelineRemove(TimelineRemoveArgs),
-    TimelineMove(TimelineMoveArgs),
-    TimelineExport(TimelineExportArgs),
     Screenshot(ScreenshotArgs),
 }
 
@@ -380,9 +340,7 @@ impl Binding {
             | "recording.resume"
             | "recording.pause_toggle"
             | "recording.split"
-            | "studio.toggle"
-            | "timeline.close"
-            | "timeline.clear" => parse::<Empty>(&self.args).map(|_| Arguments::Empty),
+            | "studio.toggle" => parse::<Empty>(&self.args).map(|_| Arguments::Empty),
             "streaming.start" | "streaming.stop" | "streaming.toggle" => {
                 parse(&self.args).map(Arguments::Stream)
             }
@@ -392,13 +350,7 @@ impl Binding {
                 parse(&self.args).map(Arguments::Replay)
             }
             "transition.take" => parse(&self.args).map(Arguments::Take),
-            "recording.marker" | "timeline.marker" => parse(&self.args).map(Arguments::Marker),
-            "timeline.retake" => parse(&self.args).map(Arguments::Retake),
-            "timeline.new" => parse(&self.args).map(Arguments::TimelineNew),
-            "timeline.open" => parse(&self.args).map(Arguments::TimelineOpen),
-            "timeline.remove" => parse(&self.args).map(Arguments::TimelineRemove),
-            "timeline.move" => parse(&self.args).map(Arguments::TimelineMove),
-            "timeline.export" => parse(&self.args).map(Arguments::TimelineExport),
+            "recording.marker" => parse(&self.args).map(Arguments::Marker),
             "scene.switch" | "scene.preview" => parse(&self.args).map(Arguments::Scene),
             "scene.switch_index" | "scene.preview_index" => {
                 let args: IndexArgs = parse(&self.args)?;
@@ -451,19 +403,12 @@ impl Binding {
 
 pub fn catalogue() -> Catalogue {
     fn action<T: JsonSchema>(id: &str, label: &str, group: &str) -> Action {
-        let unavailable = if id == "timeline.clear" {
-            Some("no timeline_clear method yet; remove individual clips or create a new timeline")
-        } else {
-            None
-        };
         Action {
             id: id.into(),
             label: label.into(),
             group: group.into(),
             arguments: serde_json::to_value(schemars::schema_for!(T)).unwrap(),
             hold: matches!(id, "audio.push_to_talk" | "audio.push_to_mute"),
-            available: unavailable.is_none(),
-            unavailable_reason: unavailable.map(str::to_string),
         }
     }
     let mut actions = Vec::new();
@@ -523,15 +468,6 @@ pub fn catalogue() -> Catalogue {
         action::<ScreenshotArgs>("program.screenshot", "Save program screenshot", "Program"),
         action::<IdArgs>("profile.switch", "Switch profile", "Library"),
         action::<IdArgs>("collection.switch", "Switch scene collection", "Library"),
-        action::<RetakeParams>("timeline.retake", "Retake", "Timeline"),
-        action::<TimelineRemoveArgs>("timeline.remove", "Remove clip (keep files)", "Timeline"),
-        action::<TimelineMoveArgs>("timeline.move", "Reorder clip", "Timeline"),
-        action::<TimelineExportArgs>("timeline.export", "Export timeline", "Timeline"),
-        action::<TimelineNewParams>("timeline.new", "Create and select timeline", "Timeline"),
-        action::<TimelineOpenParams>("timeline.open", "Select timeline", "Timeline"),
-        action::<Empty>("timeline.close", "Close current timeline", "Timeline"),
-        action::<MarkerArgs>("timeline.marker", "Mark current recording take", "Timeline"),
-        action::<Empty>("timeline.clear", "Clear timeline", "Timeline"),
     ]);
     for (id, label) in [
         ("show", "Show item"),

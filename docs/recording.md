@@ -39,7 +39,7 @@ judges the speed:
 | `capacity` | Real time | Meaning |
 |---|---|---|
 | `fits` | 1.25× or more | Keeps up with room for a busy Mac |
-| `no_margin` | 1× to 1.25× | Keeps up; a stream, a call or an export may cost frames |
+| `no_margin` | 1× to 1.25× | Keeps up; a stream or a call may cost frames |
 | `cannot_keep_up` | under 1× | A recording drops about the share it falls short by |
 
 If the setup doesn't fit, tune tries changes closest first and stops at the

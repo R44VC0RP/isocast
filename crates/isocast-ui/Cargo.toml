@@ -87,8 +87,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 block2 = "0.6.2"
 objc2 = "0.6.5"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFBase", "CFCGTypes", "CFDictionary", "CFNumber", "CFString", "CFUUID"] }
-# CGImage and CGContext: the Create view's clip thumbnails (src/thumbs.rs).
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGColor", "CGColorSpace", "CGContext", "CGImage"] }
+# CGColor: the layers' outlines and fills (src/layers.rs).
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGColor", "CGColorSpace"] }
 objc2-io-surface = { version = "0.3.2", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "libc", "objc2-core-foundation"] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics"] }
 raw-window-handle = "0.6.2"

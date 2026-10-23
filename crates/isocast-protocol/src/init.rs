@@ -430,7 +430,7 @@ pub fn init(devices: &Devices, options: &InitOptions) -> Result<Initialized, Str
             },
             keep_free_gb: 1.0,
             replay: Default::default(),
-            open_editor: false,
+            open_editor: serde::de::IgnoredAny,
         },
     };
     let problems = setup.validate();

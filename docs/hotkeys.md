@@ -106,34 +106,11 @@ rejected, including typos inside a transition.
 | `program.screenshot` | `{"path":"/absolute/new-file.png"}` |
 | `profile.switch`, `collection.switch` | `{"id":"library-id"}` |
 
-### Timeline actions
-
-These dispatch the existing timeline methods, with the same safety checks:
-
-| Action | Arguments |
-|---|---|
-| `timeline.new` | `{}` or `{"name":"My video"}`; creates and selects it |
-| `timeline.open` | `{"timeline":"timeline-id"}` |
-| `timeline.close` | `{}`; finished takes stop appending to a timeline |
-| `timeline.retake` | `{}`; optional `folder` and `seconds` as on `retake` |
-| `timeline.marker` | `{"label":"Intro"}`; alias of `recording.marker` on the current recording take, not a standalone timeline marker |
-| `timeline.remove` | `{"clip":"c2"}`; optional `timeline`, else current |
-| `timeline.move` | `{"clip":"c3","index":0}`; optional `timeline` |
-| `timeline.export` | `{}` or `{"timeline":"timeline-id","folder":"/absolute/output","vertical":true}` |
-
-Move positions are **zero-based**, matching `timeline_move` (the separate
-`isocast timeline move` command presents one-based positions). Original
-reserved bindings' `id` argument remains an alias for `clip` on remove/move,
-and for `timeline` on export; new bindings should use the canonical names.
-Retake works both idle and during a recording, retaining replaced takes'
-files. Remove also keeps the files. Exports run asynchronously: watch
-`export_progress` / `export_finished` for completion, not just `hotkey_fired`.
-
-```sh
-isocast hotkeys set retake 'ctrl+alt+cmd+t' timeline.retake
-isocast hotkeys set new-timeline 'ctrl+alt+cmd+n' timeline.new --args '{"name":"My video"}'
-isocast hotkeys set export 'ctrl+alt+cmd+e' timeline.export
-```
+The timeline actions (`timeline.new`, `.open`, `.close`, `.retake`,
+`.marker`, `.remove`, `.move`, `.export` and `.clear`) were removed with the
+editor on 2026-10-22. A binding that still uses one loads disabled, with a
+warning, and the next hotkeys change (`hotkeys_set`, Settings › Hotkeys)
+removes it; use `recording.marker` for markers.
 
 ### Action behavior
 
@@ -188,10 +165,6 @@ while a cut is pending. Cut steps are 50 ms when every file is 60 fps,
 100 ms with a 30 fps file, and up to 1 s with odd rates. The streaming output
 is never paused. See [getting-started.md](getting-started.md) for what a
 pause does to the files.
-
-`timeline.clear` is still reserved because there is no matching method;
-remove individual clips or create a new timeline instead. Its catalogue entry
-and firing error state the reason.
 
 ## API and client integration
 

@@ -3,14 +3,14 @@
 //! Every recording session writes into its own folder inside the
 //! recordings folder (`recording.folder`, or `start`'s `folder`):
 //! `<YYYY-MM-DD HH-MM-SS> Untitled/`, holding every take's program and ISO
-//! files, their manifests and the timeline exports made from them. A
+//! files and their manifests. A
 //! hidden `.isocast-project.json` in it gives the project a stable id;
 //! its name is the folder's name after the date and time, so a project
 //! renamed in the Finder keeps its id and shows the new name.
 //!
 //! `rename_project` renames the folder (only while nothing records into
 //! it; one atomic rename on the same disk). Manifests list their files
-//! relative to themselves, so they still resolve; timelines are updated.
+//! relative to themselves, so they still resolve.
 //! Recordings made before projects stay where they are.
 
 use std::path::{Path, PathBuf};
@@ -52,7 +52,7 @@ pub struct Project {
     pub id: String,
     /// The folder's name after its date and time (`Untitled` at first).
     pub name: String,
-    /// Its folder: every take's files, manifests and exports are in it.
+    /// Its folder: every take's files and manifests are in it.
     pub folder: PathBuf,
     /// When it was made, local time, RFC 3339.
     pub created_at: String,
@@ -67,9 +67,6 @@ pub struct Project {
     /// take order.
     #[serde(default)]
     pub files: Vec<PathBuf>,
-    /// Timeline exports written into it (their `.export.json` manifests).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub exports: Vec<PathBuf>,
 }
 
 /// The answer to `list_projects`.
@@ -316,11 +313,10 @@ pub fn recording_folders(root: &Path, limit: usize) -> Vec<PathBuf> {
     folders
 }
 
-/// A project as `list_projects` shows it: its takes (manifests), their
-/// files and its exports, read from its folder.
+/// A project as `list_projects` shows it: its takes (manifests) and their
+/// files, read from its folder.
 pub fn describe(folder: &Path, file: &ProjectFile, recording: bool) -> Project {
     let mut takes = Vec::new();
-    let mut exports = Vec::new();
     for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') {
@@ -328,8 +324,6 @@ pub fn describe(folder: &Path, file: &ProjectFile, recording: bool) -> Project {
         }
         if name.ends_with(".session.json") {
             takes.push(entry.path());
-        } else if name.ends_with(".export.json") {
-            exports.push(entry.path());
         }
     }
     // Oldest first: manifests are named for when their take began.
@@ -340,7 +334,6 @@ pub fn describe(folder: &Path, file: &ProjectFile, recording: bool) -> Project {
             .and_then(|json| json["started_at"].as_str().map(str::to_string));
         (started, path.clone())
     });
-    exports.sort();
     let files = takes
         .iter()
         .filter_map(|path| {
@@ -364,7 +357,6 @@ pub fn describe(folder: &Path, file: &ProjectFile, recording: bool) -> Project {
         recording,
         takes,
         files,
-        exports,
     }
 }
 

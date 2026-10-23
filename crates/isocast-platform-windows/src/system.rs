@@ -278,21 +278,6 @@ fn query_volume<T: Default>(
     Ok(info)
 }
 
-/// Whether two existing paths' data is on the same volume (so share its
-/// free space). Local volumes compare by the mount manager's volume GUID,
-/// found from each open handle. Where either has none (network shares,
-/// some virtual disks), they compare by volume serial number, which can
-/// collide between volumes: "same" is then the cautious answer, as it keeps
-/// a recording's reserve.
-pub(crate) fn same_volume(left: &Path, right: &Path) -> Result<bool> {
-    let left_file = open_for_query(left)?;
-    let right_file = open_for_query(right)?;
-    if let (Some(a), Some(b)) = (volume_guid(&left_file), volume_guid(&right_file)) {
-        return Ok(a.eq_ignore_ascii_case(&b));
-    }
-    Ok(volume_serial(&left_file, left)? == volume_serial(&right_file, right)?)
-}
-
 /// `\\?\Volume{…}` for the volume holding an open file, if it has one.
 fn volume_guid(file: &File) -> Option<String> {
     let mut buffer = vec![0u16; 512];
@@ -327,14 +312,6 @@ fn volume_guid(file: &File) -> Option<String> {
     }
     let end = rest.find('}')?;
     Some(path[..4 + end + 1].to_owned())
-}
-
-fn volume_serial(file: &File, path: &Path) -> Result<u32> {
-    let mut serial = 0u32;
-    // SAFETY: live handle and a valid output pointer; no buffers asked for.
-    unsafe { GetVolumeInformationByHandleW(raw(file), None, Some(&mut serial), None, None, None) }
-        .with_context(|| format!("could not read the volume of {}", path.display()))?;
-    Ok(serial)
 }
 
 fn filetime_ticks(time: FILETIME) -> u64 {

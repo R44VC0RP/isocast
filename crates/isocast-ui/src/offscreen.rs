@@ -53,12 +53,12 @@ impl WindowAdapter for OffscreenWindow {
     }
 }
 
-/// The snapshot's platform: the offscreen main window (and the editor
-/// window, C.3, once opened), and a clock that only moves when the
-/// snapshot says so.
+/// The snapshot's platform: the offscreen main window (and projector
+/// windows, once opened), and a clock that only moves when the snapshot
+/// says so.
 struct OffscreenPlatform {
     window: Rc<OffscreenWindow>,
-    /// Windows after the first (the editor's), made as asked for.
+    /// Windows after the first (projectors'), made as asked for.
     others: Rc<std::cell::RefCell<Vec<Rc<OffscreenWindow>>>>,
     gpu: Gpu,
     made: Cell<bool>,
@@ -114,7 +114,7 @@ impl Platform for OffscreenPlatform {
 struct Offscreen {
     gpu: Gpu,
     window: Rc<OffscreenWindow>,
-    /// The editor window's (C.3), once opened: snapshots draw it then.
+    /// Projector windows (G.4), once opened: snapshots draw the newest.
     others: Rc<std::cell::RefCell<Vec<Rc<OffscreenWindow>>>>,
     app: AppWindow,
     hub: Rc<App>,
@@ -342,22 +342,8 @@ impl Offscreen {
             }
             "menu" => {
                 let (w, h) = (app.get_preview_width(), app.get_preview_height());
-                // The editor's own menus (`menu:create:export`) in its window.
-                match self.hub.create.editor_window() {
-                    Some(editor) if arg.starts_with("create:") && self.hub.create.editor_open() => {
-                        editor.global::<Menus>().invoke_request(
-                            arg.into(),
-                            w / 2.0,
-                            h / 2.0,
-                            0.0,
-                            0.0,
-                        )
-                    }
-                    _ => {
-                        app.global::<Menus>()
-                            .invoke_request(arg.into(), w / 2.0, h / 2.0, 0.0, 0.0)
-                    }
-                }
+                app.global::<Menus>()
+                    .invoke_request(arg.into(), w / 2.0, h / 2.0, 0.0, 0.0)
             }
             "menu-bar" => self.hub.menu(arg),
             "menu-bar-open" => self.open_menu_bar(arg)?,
@@ -537,8 +523,8 @@ impl Offscreen {
         Ok(())
     }
 
-    /// Keys and the pointer go to the window drawn (the editor's while it
-    /// is open).
+    /// Keys and the pointer go to the window drawn (a projector's while
+    /// one is open).
     fn key(&mut self, text: slint::SharedString) {
         let drawn = self.drawn();
         let window = &drawn.window;
@@ -574,12 +560,10 @@ impl Offscreen {
         self.advance(Duration::from_millis(16));
     }
 
-    /// The window snapshots draw: the editor's while it is open, else the
-    /// main window.
+    /// The window snapshots draw: the newest projector's while one is
+    /// open (G.4), else the main window.
     fn drawn(&self) -> Rc<OffscreenWindow> {
         match self.others.borrow().last() {
-            Some(editor) if self.hub.create.editor_open() => editor.clone(),
-            // A projector (G.4), the newest window made.
             Some(projector) if self.hub.projectors.any_open() => projector.clone(),
             _ => self.window.clone(),
         }

@@ -6,7 +6,7 @@ Run:   python3 scripts/soak.py --hours 5 --out soak-out
        python3 scripts/soak.py --summary soak-out/report.json   (Markdown)
 
 One isolated engine (scripts/e2e.py's Engine: its own signed background app,
-socket, setup, plugins, timelines, logs and recordings under --work; inherited
+socket, setup, plugins, logs and recordings under --work; inherited
 ISOCAST_* variables dropped; the stream key comes from the environment, never
 the Keychain) records a 720p30 program plus two ISOs of synthetic sources for
 --hours, with periodic splits, scene switches, pauses and markers, while it

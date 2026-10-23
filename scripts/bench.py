@@ -27,9 +27,7 @@ installed by that build), --tone-filters audio filters on the synthetic
 tone (`'{ kind = "gain", gain_db = -6 }'`), --camera-filters video filters on
 the synthetic camera (`'{ kind = "shape_mask", shape = "circle" }'`), and --env KEY=VALUE environment
 variables for its daemon (so one binary can be measured with a flag off and
-on); the --compare-… forms are the baseline's. --timeline opens a timeline (`timeline new`) on --daemon's runs
-before recording, so each take is added to it, and checks it was. --developer
-turns developer mode on for --daemon's runs and reports its log bytes a second.
+on); the --compare-… forms are the baseline's. --developer turns developer mode on for --daemon's runs and reports its log bytes a second.
 
 With --compare, runs alternate between the two builds (A B A B …) so load
 from the rest of the machine hits both alike; the summary gives medians.
@@ -529,10 +527,6 @@ def measure(args, daemon, label, index, cleanup):
     rev = json.loads(run([cli, "get", "--json"], env=env).stdout)["revision"]
     run([cli, "apply", "--revision", rev, setup], env=env)
     run([cli, "engine", "start"], env=env)
-    timeline = args.timeline and not base
-    if timeline:
-        # Kept beside the socket (/tmp/isocast-bench-….timelines).
-        run([cli, "timeline", "new", f"bench {label} {index}"], env=env)
     projectors = PROJECTORS.get(args.scenario, ())
     app_pid, close_app, stats = None, None, folder / "projector-stats.json"
     if projectors:
@@ -693,9 +687,6 @@ def measure(args, daemon, label, index, cleanup):
         result["env"] = list(args.env)
     if args.compare_env and base:
         result["env"] = list(args.compare_env)
-    if timeline:
-        shown = json.loads(run([cli, "timeline", "show", "--json"], env=env).stdout)
-        result["timeline_clips"] = len(shown["clips"])
     if developer:
         result["developer_log_bytes_per_s"] = round((d1 - d0) / (t1 - t0))
     if plugins:
@@ -824,11 +815,6 @@ def summary(results):
         if logged:
             print(f"  {label} developer mode: {statistics.median(logged):.0f} log bytes/s "
                   f"({statistics.median(logged) * 3600 / 1e6:.1f} MB an hour)")
-    for label, rs in by.items():
-        timed = [r["timeline_clips"] for r in rs if "timeline_clips" in r]
-        if timed:
-            print(f"  {label} timeline: {sum(1 for n in timed if n == 1)}/{len(rs)} runs added "
-                  f"their take to the open timeline")
     last = results[-1]
     for f in last["files"]:
         print(f"  {last['label']} {f['source']}: {f['size']}, {f['frames']} frames, {f['dropped']} dropped, "
@@ -1012,8 +998,6 @@ def main():
     p.add_argument("--compare-camera-filters", help="the same for --compare's runs")
     p.add_argument("--developer", action="store_true",
                    help="developer mode on for --daemon's runs (verbose logs and traces), to measure its cost")
-    p.add_argument("--timeline", action="store_true",
-                   help="open a timeline on --daemon's runs before recording (each take is added to it)")
     p.add_argument("--env", action="append", metavar="KEY=VALUE",
                    help="environment for --daemon's runs (repeatable), e.g. ISOCAST_CRASH_SAFE=1")
     p.add_argument("--compare-env", action="append", metavar="KEY=VALUE",

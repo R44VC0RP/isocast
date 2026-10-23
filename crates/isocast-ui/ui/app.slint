@@ -36,12 +36,8 @@ import { ConnectingState, RemoteLinkOverlay, Welcome } from "areas/settings/stat
 import { Onboarding } from "areas/settings/onboarding.slint";
 import { LibraryArea } from "areas/library/state.slint";
 import { LibraryDialogs } from "areas/library/dialogs.slint";
-import { CreateArea } from "areas/create/state.slint";
-import { ClipBar } from "areas/create/clip-bar.slint";
-import { EditorView } from "areas/create/editor.slint";
 import { QuitDialog, QuitPrompt } from "quit.slint";
 import { DeveloperArea } from "areas/developer/state.slint";
-import { ProjectsArea } from "areas/projects/state.slint";
 import { OverlaySize, StatsOverlay } from "areas/developer/overlay.slint";
 import { PermissionsArea } from "areas/permissions/state.slint";
 import { PermissionsSheet } from "areas/permissions/sheet.slint";
@@ -55,10 +51,8 @@ import { RemoteDialogs } from "areas/remote/dialogs.slint";
 export { Theme, Ui, ConnectionState, ExtraCanvas, Menus, Toasts, EditCommands, SettingsForms }
 export { PlatformText }
 export { CanvasArea, SourcesArea, MixerArea, ControlsArea, SettingsArea, LibraryArea }
-export { CreateArea }
 export { DeveloperArea }
 export { RemoteArea, RemotePeerRow, RemoteFolderRow, RemoteFileRow } from "areas/remote/state.slint";
-export { ProjectsArea, RecentRow } from "areas/projects/state.slint";
 export { StatRow, OutputStat } from "areas/developer/state.slint";
 export { PermissionsArea, PermissionItem } from "areas/permissions/state.slint";
 export { WizardArea, ObsCollectionRow, ChangeRow } from "areas/wizard/state.slint";
@@ -70,7 +64,6 @@ export { Strip, Level, AudioRow } from "areas/mixer/state.slint";
 export { FileRow } from "areas/controls/state.slint";
 export { DeviceChoice, HotkeyGroup, HotkeyRow, IsoChoice, IsoTrack, MicRow, ReportFileRow, ServiceChoice } from "areas/settings/state.slint";
 export { LibraryRow } from "areas/library/state.slint";
-export { ClipRow } from "areas/create/state.slint";
 
 // The preview, the control bar, the docks.
 component Workspace inherits VerticalLayout {
@@ -151,9 +144,7 @@ component Workspace inherits VerticalLayout {
 
     // The control bar's lower (black) edge is the splitter: no line of
     // its own, the 7px grab around that edge.
-    // Create (View → Create, area G) puts the clip bar where the docks
-    // are, at the same height, shown even with the docks hidden.
-    if Ui.show-docks || CreateArea.active: RowSplitter {
+    if Ui.show-docks: RowSplitter {
         height: 0px;
         size: root.docks-height;
         min-size: 120px;
@@ -249,12 +240,8 @@ component Workspace inherits VerticalLayout {
         root.mixer-width = 228px;
         Ui.layout-changed();
     }
-    if CreateArea.active: ClipBar {
-        height: max(130px, root.docks-height);
-    }
-
     docks := HorizontalLayout {
-        property <bool> shown: Ui.show-docks && !CreateArea.active;
+        property <bool> shown: Ui.show-docks;
         height: self.shown ? root.docks-height : 0px;
         visible: self.shown;
         spacing: 0;
@@ -476,19 +463,6 @@ export component AppWindow inherits Window {
         visible: root.native-menu;
         Menu {
             title: "File";
-            // Project files (#88, src/areas/projects.rs).
-            MenuItem { title: "Open…"; shortcut: @keys(Control + O); activated => { Ui.menu("open_project"); } }
-            Menu {
-                title: "Open Recent";
-                for row in ProjectsArea.recent: MenuItem {
-                    title: row.title;
-                    enabled: row.exists;
-                    activated => { ProjectsArea.open-recent(row.path); }
-                }
-                if ProjectsArea.recent.length > 0: MenuSeparator { }
-                MenuItem { title: "Clear Menu"; enabled: ProjectsArea.recent.length > 0; activated => { Ui.menu("clear_recent_projects"); } }
-            }
-            MenuSeparator { }
             MenuItem { title: "Show Recordings"; activated => { Ui.menu("show_recordings"); } }
             MenuSeparator { }
             MenuItem { title: "Add Scene"; shortcut: @keys(Control + Shift + N); activated => { Ui.menu("new_scene"); } }
@@ -547,7 +521,6 @@ export component AppWindow inherits Window {
         Menu {
             title: "View";
             MenuItem { title: "Studio Mode"; shortcut: @keys(Control + Shift + S); checkable: true; checked: Ui.studio; activated => { Ui.menu("studio_mode"); } }
-            MenuItem { title: "Create"; shortcut: @keys(Control + Shift + C); checkable: true; checked: CreateArea.active; activated => { Ui.menu("create_view"); } }
             MenuSeparator { }
             // Projectors (G.4, src/areas/projectors.rs): each in a window,
             // or full screen on a display.
@@ -661,9 +634,8 @@ export component AppWindow inherits Window {
             // again leaves full screen. F11 on Windows.
             if !PlatformText.windows: MenuItem { title: "Enter Full Screen"; shortcut: @keys(Meta + Control + F); activated => { Ui.menu("fullscreen"); } }
             if PlatformText.windows: MenuItem { title: Ui.window-fullscreen ? "Exit Full Screen" : "Full Screen"; shortcut: @keys(F11); activated => { Ui.menu("fullscreen"); } }
-            MenuSeparator { }
-            MenuItem { title: "Editor"; shortcut: @keys(Control + E); activated => { Ui.menu("editor"); } }
             // macOS only: Windows has no such command.
+            if !PlatformText.windows: MenuSeparator { }
             if !PlatformText.windows: MenuItem { title: "Bring All to Front"; activated => { Ui.menu("bring_all_to_front"); } }
         }
         Menu {
@@ -829,124 +801,4 @@ export component AppWindow inherits Window {
         height: root.test-pointer-height;
         background: #00ffff;
     }
-}
-
-// The editor (C.3, #70): its own window, "Isocast Editor — <timeline>", so
-// the studio (scenes, sources, mixer, controls) is never changed or
-// crowded by it. The timeline with every ISO track, the preview of the
-// angle at the playhead, trims, splits, ripple deletes, angles and export.
-// It has its own globals: src/areas/create.rs fills its CreateArea as it
-// does the studio's.
-export component EditorWindow inherits Window {
-    title: CreateArea.has-timeline ? "Isocast Editor — " + CreateArea.timeline-name : "Isocast Editor";
-    // Off in offscreen pictures, as the studio's (#88).
-    in property <bool> native-menu: true;
-
-    // The menu bar while the editor is the key window (macOS shows the key
-    // window's): File › Open… and Open Recent, as the studio's (#88).
-    MenuBar {
-        visible: root.native-menu;
-        Menu {
-            title: "File";
-            MenuItem { title: "Open…"; shortcut: @keys(Control + O); activated => { ProjectsArea.open-file(); } }
-            Menu {
-                title: "Open Recent";
-                for row in ProjectsArea.recent: MenuItem {
-                    title: row.title;
-                    enabled: row.exists;
-                    activated => { ProjectsArea.open-recent(row.path); }
-                }
-                if ProjectsArea.recent.length > 0: MenuSeparator { }
-                MenuItem { title: "Clear Menu"; enabled: ProjectsArea.recent.length > 0; activated => { ProjectsArea.clear-recent(); } }
-            }
-            MenuSeparator { }
-            // A project another editor opens, pointing at the takes' own
-            // files (#104).
-            Menu {
-                title: "Export";
-                MenuItem { title: "For Final Cut Pro…"; enabled: CreateArea.has-timeline; activated => { CreateArea.export-nle("final_cut"); } }
-                MenuItem { title: "For Premiere Pro…"; enabled: CreateArea.has-timeline; activated => { CreateArea.export-nle("premiere"); } }
-                MenuItem { title: "For DaVinci Resolve…"; enabled: CreateArea.has-timeline; activated => { CreateArea.export-nle("resolve"); } }
-                MenuItem { title: "OpenTimelineIO…"; enabled: CreateArea.has-timeline; activated => { CreateArea.export-nle("otio"); } }
-            }
-        }
-    }
-    preferred-width: 1280px;
-    preferred-height: 800px;
-    min-width: 900px;
-    min-height: 480px;
-    background: Theme.surface-stage;
-    default-font-size: Theme.fs;
-    default-font-family: Theme.font-ui;
-    default-font-weight: Theme.weight-regular;
-    forward-focus: keys;
-
-    // S splits, I and O mark (⇧I ⇧O go to them), Delete takes the marked
-    // span out (else the selected clip off), J K L play (Space plays and
-    // stops), arrows step a frame (⇧ ten), ↑ ↓ go to the previous and next
-    // edit point, M and ⇧M to the next and previous marker, Home and End
-    // to the ends, 1–9 choose the angle, C crops, N turns snapping on and
-    // off, ⌘+ ⌘− (= −) zoom and ⇧Z fits, Escape leaves cropping or clears
-    // the marks, ⌘Z and ⇧⌘Z undo and redo edits (Slint's Control is ⌘ on
-    // macOS).
-    keys := FocusScope {
-        key-pressed(event) => {
-            if event.modifiers.control && (event.text == "z" || event.text == "Z") {
-                if event.modifiers.shift {
-                    CreateArea.redo();
-                } else {
-                    CreateArea.undo();
-                }
-                return accept;
-            }
-            // Windows' redo, Ctrl+Y, too.
-            if PlatformText.windows && event.modifiers.control && !event.modifiers.shift && (event.text == "y" || event.text == "Y") {
-                CreateArea.redo();
-                return accept;
-            }
-            if event.modifiers.control && (event.text == "=" || event.text == "+") { view.zoom-by(0.1); return accept; }
-            if event.modifiers.control && (event.text == "-" || event.text == "_") { view.zoom-by(-0.1); return accept; }
-            if event.modifiers.control || event.modifiers.meta || event.modifiers.alt {
-                return reject;
-            }
-            if event.text == "=" || event.text == "+" { view.zoom-by(0.1); return accept; }
-            if event.text == "-" { view.zoom-by(-0.1); return accept; }
-            if event.text == "Z" { view.zoom-fit(); return accept; }
-            if event.text == "s" || event.text == "S" { CreateArea.key("s"); return accept; }
-            if event.text == "I" { CreateArea.key("go-in"); return accept; }
-            if event.text == "O" { CreateArea.key("go-out"); return accept; }
-            if event.text == "i" { CreateArea.key("i"); return accept; }
-            if event.text == "o" { CreateArea.key("o"); return accept; }
-            if event.text == "j" || event.text == "J" { CreateArea.key("j"); return accept; }
-            if event.text == "k" || event.text == "K" { CreateArea.key("k"); return accept; }
-            if event.text == "l" || event.text == "L" { CreateArea.key("l"); return accept; }
-            if event.text == " " { CreateArea.key("space"); return accept; }
-            if event.text == "m" { CreateArea.key("marker:1"); return accept; }
-            if event.text == "M" { CreateArea.key("marker:-1"); return accept; }
-            if event.text == "c" || event.text == "C" { CreateArea.key("crop"); return accept; }
-            if event.text == "n" || event.text == "N" { CreateArea.key("snap"); return accept; }
-            if event.text == Key.UpArrow { CreateArea.key("up"); return accept; }
-            if event.text == Key.DownArrow { CreateArea.key("down"); return accept; }
-            if event.text == Key.Home { CreateArea.key("home"); return accept; }
-            if event.text == Key.End { CreateArea.key("end"); return accept; }
-            if event.text == Key.LeftArrow || event.text == Key.RightArrow {
-                CreateArea.key("step:" + (event.text == Key.LeftArrow ? -1 : 1) * (event.modifiers.shift ? 10 : 1));
-                return accept;
-            }
-            if event.text >= "1" && event.text <= "9" && event.text.character-count == 1 {
-                CreateArea.key("angle:" + event.text);
-                return accept;
-            }
-            if event.text == Key.Escape { CreateArea.key("clear"); return accept; }
-            if event.text == Key.Backspace || event.text == Key.Delete { CreateArea.key("delete"); return accept; }
-            reject
-        }
-        view := EditorView {
-            width: parent.width;
-            height: parent.height;
-        }
-    }
-
-    // Its own menus (#94: Export, a clip's), over everything.
-    MenuHost { }
 }
