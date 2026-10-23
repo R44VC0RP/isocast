@@ -21,7 +21,7 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
 - **Linux headless bootstrap (2026-10-22), experimental/unreleased:** Vulkan (lavapipe works), CPU synthetic
   sources, OpenH264 H.264 and Apache-2.0 libxaac AAC-LC through `isocast-mux`. Ubuntu 24.04 arm64 VM proof:
   program + two ISOs, 720p30, 310 frames each, zero drops, 1,240 frame-oracle checks, maximum A/V skew 0.021 ms.
-  No real capture, hardware encoding, media decoding, playback, shared previews or discovery; RTMP/AAC
+  No real capture, hardware encoding, media decoding, playback or shared previews; RTMP/AAC
   streaming remains unsupported. Linux startup now finalizes retained mux fragments and persists verified
   counts through one pinned-directory recovery lease (SIGKILL + restart proved on three files, 2026-10-23).
   Drop/repeat/audio-loss counts after a crash remain unknown; empty cancelled reservations are retained.
@@ -30,6 +30,12 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   Linux waits for a fresh GPU-completed program picture before opening writers/arming the take; other
   platforms keep their startup policy. R1 by address was verified from the m2-b Mac CLI: pair, status,
   a 320×180 program + two ISO take (150 frames each), and reconnect after restart with the same pinned key.
+  Linux DNS-SD (2026-10-23) uses Avahi over the system D-Bus (zbus, no libavahi linkage).
+  Real remote-enable advertisement/browse, TXT identity, collision/withdrawal and Avahi restart recovery
+  pass inside Lima. Missing bus/Avahi fails clearly for browsing; advertisements keep retrying in the
+  background while remote status reports the failure and the server remains usable by address.
+  Linux discovery is verified inside one host only. Cross-host discovery is unverified because Lima's
+  vz network blocks multicast (the host Mac's 6-second browse did not see the VM).
   The four-vCPU hosted Linux job uses a 360p30 integrity profile and the shared `--hosted` policy;
   strict zero-drop 720p30 is qualified separately in the six-vCPU arm64 VM, not claimed for the runner.
 - **Desktop client on a remote server (R2) is on main (2026-10-23):** pairing in the app, engine picker, one window

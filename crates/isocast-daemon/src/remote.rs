@@ -88,7 +88,12 @@ impl Runtime {
                 .as_ref()
                 .map(|server| server.local_addr().to_string()),
             pairing_open: self.pairing.is_open(),
-            error: inner.error.clone(),
+            error: inner.error.clone().or_else(|| {
+                inner
+                    .advertisement
+                    .as_ref()
+                    .and_then(|advertisement| advertisement.error())
+            }),
         }
     }
     pub fn enable(
@@ -251,7 +256,7 @@ impl Runtime {
                 Ok(registration) => inner.advertisement = Some(registration),
                 Err(error) => {
                     #[cfg(target_os = "linux")]
-                    let advice = "discovery isn't supported on this engine; connect by address";
+                    let advice = "ensure avahi-daemon and the system D-Bus are running";
                     #[cfg(not(target_os = "linux"))]
                     let advice = "allow Local Network access for Isocast on this engine";
                     inner.error = Some(format!(
