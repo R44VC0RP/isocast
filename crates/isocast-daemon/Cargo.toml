@@ -55,5 +55,8 @@ isocast-platform-macos = { path = "../isocast-platform-macos" }
 [target.'cfg(windows)'.dependencies]
 isocast-platform-windows = { path = "../isocast-platform-windows" }
 
-[target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
+isocast-platform-linux = { path = "../isocast-platform-linux" }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "linux", windows)))'.dependencies]
 isocast-platform-stub = { path = "../isocast-platform-stub" }

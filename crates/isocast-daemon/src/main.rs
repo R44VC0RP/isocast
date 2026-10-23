@@ -5,6 +5,10 @@
 //! `isocast_protocol::api`). `isocast start` launches it when it isn't
 //! running.
 
+// Linux frames retain their Vulkan device for software-encoder readback;
+// proving Send/Sync through wgpu's resource graph needs a deeper trait walk.
+#![cfg_attr(target_os = "linux", recursion_limit = "256")]
+
 use isocast_ipc::{Listener as UnixListener, Stream as UnixStream};
 use parking_lot::{Condvar, Mutex};
 use std::collections::{BTreeMap, HashMap};

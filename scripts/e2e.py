@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-file engine checks on macOS; Python stdlib + ffmpeg/ffprobe only.
+"""Real-file engine checks; Python stdlib + ffmpeg/ffprobe only.
 
 Build: cargo build --release -p isocast-daemon --bins --examples
 Run:   python3 scripts/e2e.py [--only record] [--keep] [--json]
@@ -40,6 +40,12 @@ names the first wrong picture, expected vs actual, with a contact sheet.
   --pattern-oracle MOVIE --fps N
                a file of the engine's test pattern, frame by frame (any OS)
 It is strict, unconditionally: any mismatch fails with a contact sheet.
+
+Linux bootstrap: --only linux_record runs synthetic bars, tone and color at
+720p30 with the same frame oracle and strict zero-drop/A/V checks. No signing,
+capture hardware or media-file decoder is required. For hosted software Vulkan,
+--hosted --linux-profile 360p30 uses the existing hosted loss/oracle policy;
+strict 720p30 qualification remains a separate run without --hosted.
 """
 
 import argparse
@@ -84,7 +90,7 @@ SCENARIOS = ("setup", "record", "iso", "split", "scenes", "stream", "webrtc", "t
              "oracle_record", "oracle_scenes", "oracle_takes", "oracle_edit", "oracle_masks",
              "oracle_canvases", "oracle_replay", "oracle_governor",
              # The same model on the engine's test pattern (Windows has no media files yet).
-             "win_record", "win_takes", "win_scenes")
+             "win_record", "win_takes", "win_scenes") + (("linux_record", "linux_recovery") if sys.platform.startswith("linux") else ())
 FPS = 60
 RATE = 48000
 HOSTED_DROP_LIMIT = 0.25
@@ -168,6 +174,10 @@ def capabilities():
                       pending=["previews (scene feeds, snapshots)",
                                "scaled streaming / recording budget integration", "replay buffer"])
         return result
+    if LINUX:
+        result.update(cores=os.cpu_count(), gpus=[], hevc=False, h264=False,
+                      record_codec="h264", platform="linux", software_encoder="OpenH264")
+        return result
     for label, key in (("chip", "machdep.cpu.brand_string"), ("cores", "hw.logicalcpu"),
                        ("physical_cores", "hw.physicalcpu"), ("memory_bytes", "hw.memsize"),
                        ("virtual_machine", "kern.hv_vmm_present")):
@@ -235,6 +245,7 @@ def keep_under(root, work, report):
 
 
 WINDOWS = sys.platform == "win32"
+LINUX = sys.platform.startswith("linux")
 
 
 def windows_pipe(path):
@@ -346,8 +357,8 @@ class Engine:
         self.root = root
         self.webrtc_receiver = Path(daemon).parent / "examples" / ("webrtc-receive.exe" if WINDOWS else "webrtc-receive")
         self.sock = root / "d.sock"
-        if WINDOWS:
-            # No app bundle or signing; the logical socket names a pipe.
+        if WINDOWS or LINUX:
+            # No app bundle or signing; Windows uses a pipe, Linux a socket.
             root.mkdir(parents=True, exist_ok=True)
             self.app = None
             self.binary = Path(daemon)
@@ -365,6 +376,8 @@ class Engine:
         # Drop inherited Isocast overrides (including any user's stream key).
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("ISOCAST_")}
         self.env.update(ENGINE_ENV)
+        if LINUX:
+            self.env["XDG_CONFIG_HOME"] = str(root / "config")
         self.env.update(ISOCAST_CALIBRATION="off", ISOCAST_SOCKET=str(self.sock), ISOCAST_SETUP=str(root / "setup.toml"),
                         ISOCAST_PLUGINS=str(root / "plugins"),
                         ISOCAST_TIMELINES=str(root / "timelines"), ISOCAST_MONITOR_SILENT="1",
@@ -4509,6 +4522,94 @@ def scenario_win_record(e, cfg, evidence):
     evidence["t0"] = check_pattern_take(e, path, manifest, cfg, layout, evidence, vertical=vertical)
 
 
+def scenario_linux_record(e, cfg, evidence):
+    """Headless bootstrap: two synthetic ISOs and the composited program,
+    each with tone, plus a small color layer away from the oracle samples.
+    The same frame oracle and A/V checks use the invocation's loss policy."""
+    layout = win_setup(e, cfg)
+    w, h = cfg["canvas"]["width"], cfg["canvas"]["height"]
+    cfg["developer"] = {"enabled": True}
+    cfg["sources"].append({"id": "color", "name": "Color", "kind": "color", "color": "#ff0000"})
+    cfg["scenes"][0]["items"].append(item("color", (0.8, 0.05, 0.1, 0.1), (w, h)))
+    e.apply(cfg)
+    path, manifest = take(e, 5)
+    evidence["files"] = check_take(path, manifest, 5, evidence=evidence)
+    require(len(manifest["files"]) == 3, "expected program and two ISO files")
+    evidence["t0"] = check_pattern_take(e, path, manifest, cfg, layout, evidence)
+    program, _ = manifest_file(path, manifest, "program")
+    colors = ffmpeg("-i", program, "-an", "-vf",
+                    f"crop={int(w * .06)}:{int(h * .06)}:{int(w * .82)}:{int(h * .07)},scale=1:1",
+                    "-fps_mode", "passthrough", "-pix_fmt", "rgb24", "-f", "rawvideo", "-").stdout
+    require(colors and len(colors) % 3 == 0, "color layer: no decoded RGB samples")
+    require(all(r > 180 and g < 70 and b < 70 for r, g, b in zip(colors[::3], colors[1::3], colors[2::3])),
+            "color layer: program did not render the red source")
+    evidence["color_frames"] = len(colors) // 3
+
+
+def scenario_linux_recovery(e, cfg, evidence):
+    """SIGKILL with committed program/ISO fragments, then restart and verify
+    finalized indexes, real decoded counts and persisted recovery metadata."""
+    win_setup(e, cfg)
+    e.apply(cfg)
+    started = e.rpc("start", {})
+    path = Path(started["manifest"])
+
+    def committed():
+        files = (e.rpc("status").get("live") or {}).get("files", [])
+        return len(files) == 3 and all((f.get("committed_seconds") or 0) >= 2 for f in files)
+    until(committed, 30, "two committed seconds in every output")
+    e.process.kill()
+    e.process.wait(timeout=10)
+    require(e.process.returncode == -signal.SIGKILL, "daemon was not killed with SIGKILL")
+    before = read_json(path)
+    require(before["status"] == "recording", "killed take was already marked finished")
+
+    def header_kind(movie):
+        with open(movie, "rb") as file:
+            header = file.read(8)
+            require(len(header) == 8 and header[4:] == b"ftyp", "missing movie file type")
+            size = int.from_bytes(header[:4], "big")
+            require(8 <= size <= 1024, "invalid movie file type size")
+            file.seek(size + 4)
+            return file.read(4)
+    for f in before["files"]:
+        require(header_kind(path.parent / f["path"]) == b"free", "crash file was already finalized")
+
+    e.start()
+    recovered = until(lambda: (m if m["status"] == "interrupted" and
+                     all(f.get("frames") is not None for f in m["files"]) else None)
+                     if (m := read_json(path)) else None, 30, "Linux startup fragment recovery")
+    require(any(Path(r["manifest"]) == path for r in e.rpc("status").get("interrupted", [])),
+            "status did not expose the recovered take")
+    evidence["files"] = []
+    for f in recovered["files"]:
+        movie = path.parent / f["path"]
+        require(header_kind(movie) == b"mdat", "startup did not finalize the movie header")
+        info = probe(movie)
+        video = next(s for s in info["streams"] if s["codec_type"] == "video")
+        audio = next(s for s in info["streams"] if s["codec_type"] == "audio")
+        require(video["codec_name"] == "h264" and audio["codec_name"] == "aac", "wrong recovered codecs")
+        require(int(video["nb_read_frames"]) == f["frames"] and f["frames"] >= 2,
+                "recovered manifest disagrees with decoded frames")
+        require(min(float(video["duration"]), float(audio["duration"])) >= 1,
+                "committed media was lost during recovery")
+        require(abs(max(float(video["duration"]), float(audio["duration"])) - f["duration_seconds"]) < .001,
+                "recovered manifest duration disagrees with indexed media")
+        require(f.get("dropped_frames") is None and f.get("audio_dropouts") is None,
+                "recovery fabricated loss counters from incomplete checkpoints")
+        ffmpeg("-xerror", "-i", movie, "-map", "0", "-f", "null", "-")
+        evidence["files"].append({"file": movie.name, "frames": f["frames"],
+                                  "video_seconds": float(video["duration"]),
+                                  "audio_seconds": float(audio["duration"])})
+    # A second launch must not append another moov or rewrite stable facts.
+    sizes = {f["path"]: (path.parent / f["path"]).stat().st_size for f in recovered["files"]}
+    e.stop()
+    e.start()
+    require(read_json(path) == recovered, "repeated startup changed the recovered manifest")
+    require(all((path.parent / name).stat().st_size == size for name, size in sizes.items()),
+            "repeated startup rewrote an already finished movie")
+
+
 def scenario_win_takes(e, cfg, evidence):
     """A split and a pause on the test pattern: the second take starts with
     the frame after the first's last; the pause cuts out exactly its frames."""
@@ -4828,6 +4929,8 @@ def main():
     parser.add_argument("--timeout", type=float, default=180, help="hard timeout per scenario, seconds")
     parser.add_argument("--codec", choices=("hevc", "h264", "prores422"),
                         help="exercise a specific recording path (default: available hardware, else ProRes)")
+    parser.add_argument("--linux-profile", choices=("720p30", "360p30"),
+                        help="Linux synthetic profile: 720p30 by default; 360p30 for four-vCPU software-GPU CI")
     parser.add_argument("--capabilities", action="store_true", help="probe hardware and exit (JSON)")
     parser.add_argument("--quick", action="store_true",
                         help="the frame-oracle suite lanes run while they work (about 3 min on the VM "
@@ -4847,6 +4950,8 @@ def main():
     parser.add_argument("--worker", choices=SCENARIOS + ("capacity",), help=argparse.SUPPRESS)
     parser.add_argument("--worker-root", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.linux_profile and not LINUX:
+        parser.error("--linux-profile is only for Linux synthetic recording checks")
     if args.summary:
         print(summary(read_json(args.summary)), end="")
         return 0
@@ -4887,8 +4992,8 @@ def main():
                           "scenarios": list(args.only or SCENARIOS)}}
     root = None
     try:
-        require(sys.platform == "darwin" or WINDOWS, "macOS or Windows is required")
-        for tool in ("ffmpeg", "ffprobe") + (() if WINDOWS else ("codesign",)):
+        require(sys.platform == "darwin" or WINDOWS or LINUX, "macOS, Windows or Linux is required")
+        for tool in ("ffmpeg", "ffprobe") + (("codesign",) if sys.platform == "darwin" else ()):
             require(shutil.which(tool), f"missing required tool: {tool}")
         require(args.timeout > 0, "--timeout must be positive")
         scratch.mkdir(parents=True, exist_ok=True)
@@ -4911,8 +5016,10 @@ def main():
             else:
                 caps = capabilities()
                 caps["hosted"] = args.hosted
-                caps["profile"] = {"width": 1280, "height": 720, "fps": 30} if args.hosted else {
+                caps["profile"] = {"width": 1280, "height": 720, "fps": 30} if args.hosted or LINUX else {
                     "width": 1920, "height": 1080, "fps": 60}
+                if args.linux_profile == "360p30":
+                    caps["profile"] = {"width": 640, "height": 360, "fps": 30}
                 if args.codec:
                     caps["record_codec"] = args.codec
                 elif args.hosted and caps["h264"]:

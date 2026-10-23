@@ -1,0 +1,23 @@
+[package]
+name = "isocast-platform-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless Linux backend: Vulkan compositing and software recording."
+
+[target.'cfg(target_os = "linux")'.dependencies]
+anyhow = "1.0.104"
+isocast-engine = { path = "../isocast-engine" }
+isocast-protocol = { path = "../isocast-protocol" }
+isocast-platform-credentials = { path = "../isocast-platform-credentials" }
+isocast-platform-stub = { path = "../isocast-platform-stub" }
+isocast-surfaces = { path = "../isocast-surfaces" }
+isocast-mux = { path = "../isocast-mux" }
+libc = "0.2"
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+# BSD-2-Clause wrapper and bundled OpenH264; no GPL codec.
+openh264 = "=0.9.9"
+# Apache-2.0 wrapper and bundled libxaac (AAC-LC); not FDK AAC.
+xaac-rs = "=0.2.0"

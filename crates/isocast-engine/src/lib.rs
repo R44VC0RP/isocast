@@ -248,6 +248,14 @@ pub trait Platform: Clone + Send + Sync + 'static {
         EncoderFrameFormat::Ycbcr
     }
 
+    /// Finish a fresh program picture before choosing a recording's epoch.
+    /// Software GPU drivers may compile their first draw lazily; preparing
+    /// that work must not consume the first slots of an already armed take.
+    /// Native desktop backends retain their existing startup policy.
+    fn recording_needs_program_frame(&self) -> bool {
+        false
+    }
+
     /// Move a retained reference to an output's domain before queueing it or
     /// giving it to a GPU/native encoder. Refusal is local to that domain,
     /// never charged to another output's reserve.

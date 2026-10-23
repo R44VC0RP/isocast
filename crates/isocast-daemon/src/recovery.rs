@@ -147,14 +147,14 @@ impl Daemon {
         recovered.sort_by(|a, b| b.recording.started_at.cmp(&a.recording.started_at));
         recovered.truncate(20);
         for take in recovered.iter().filter(|r| r.newly_detected) {
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             self.publish(Event::Warning {
                 message: format!(
                     "recording recovery inspected {}; see the manifest and status.interrupted for each file's verified media, unknown counts and any persistence errors",
                     take.manifest.display(),
                 ),
             });
-            #[cfg(not(windows))]
+            #[cfg(not(any(windows, target_os = "linux")))]
             {
                 // Files a crash-safe writer left were finished from their
                 // fragments just now; the manifest's errors say what each holds.

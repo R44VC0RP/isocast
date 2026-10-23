@@ -6,7 +6,7 @@
 //! process-lifetime guarantees, not directory-entry/power-loss guarantees.
 
 use std::ffi::OsStr;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use std::ffi::OsString;
 use std::fs::{File, Metadata};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -120,9 +120,10 @@ impl Directory {
 
     /// Newest named manifests in the pinned folder, retaining at most `limit`
     /// names while scanning. This is not a snapshot: validate names on open.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     pub fn manifest_names(&self, limit: usize) -> Result<Vec<OsString>> {
         // Windows keeps the enumeration cursor on the shared directory handle.
+        #[cfg(windows)]
         let _enumeration = self
             .inner
             .enumeration
@@ -141,11 +142,13 @@ impl Directory {
 
     /// Publish complete metadata under either a recording or repair lease.
     /// Readers that hold the destination open can cause a sharing error; close
-    /// them before retrying. Durable mode flushes the same file before and after
-    /// its handle-relative rename, not the directory. This is no power-loss or
+    /// them before retrying. On Windows, durable mode flushes the same file
+    /// before and after its handle-relative rename, not the directory: no
     /// directory-entry durability guarantee. A post-publish flush error leaves
     /// the complete new file published and must not be treated as a rollback.
-    #[cfg(windows)]
+    /// Linux flushes the temporary before rename and the pinned directory
+    /// after publication when durable mode is requested.
+    #[cfg(any(windows, target_os = "linux"))]
     pub fn replace_metadata(&self, name: &OsStr, bytes: &[u8], durable: bool) -> Result<()> {
         validate_name(name)?;
         platform::replace_metadata(&self.inner.directory, name, bytes, durable)

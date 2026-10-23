@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use isocast_client::{Client, remote};
-use isocast_protocol::{api::Method, remote::*};
+use isocast_protocol::{api::Method, hello::EngineOs, remote::*};
 
 #[derive(Args)]
 pub struct RemoteArgs {
@@ -28,6 +28,12 @@ enum Command {
         json: bool,
     },
     /// Show/create this client's public identity; its private key never leaves the OS store.
+    #[cfg_attr(
+        target_os = "linux",
+        command(
+            about = "Show/create this client's public identity; its private key stays in an owner-only 0600 file."
+        )
+    )]
     Identity {
         #[arg(long)]
         json: bool,
@@ -62,14 +68,9 @@ enum Command {
 
 pub fn run(args: RemoteArgs) -> Result<()> {
     match args.command {
-        Command::Status { json } => output(
-            &Client::connect_or_launch()?.call::<RemoteStatus>(Method::RemoteStatus)?,
-            json,
-        ),
-        Command::Enable { port, bind, json } => output(
-            &Client::connect_or_launch()?.call::<RemoteStatus>(Method::RemoteEnable(Some(
-                RemoteEnableParams { port, bind },
-            )))?,
+        Command::Status { json } => status(Method::RemoteStatus, json),
+        Command::Enable { port, bind, json } => status(
+            Method::RemoteEnable(Some(RemoteEnableParams { port, bind })),
             json,
         ),
         Command::Disable { json } => output(
@@ -120,6 +121,27 @@ pub fn run(args: RemoteArgs) -> Result<()> {
     }
 }
 
+/// Status and enable print the engine's state; on a Linux engine the human
+/// form adds one line saying where its key lives (`--json` is unchanged).
+fn status(method: Method, json: bool) -> Result<()> {
+    let mut client = Client::connect_or_launch()?;
+    let status: RemoteStatus = client.call(method)?;
+    output(&status, json)?;
+    let os = client.hello().map_or(EngineOs::current(), |hello| hello.os);
+    if let Some(line) = key_note(os, &status, json) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn key_note(os: EngineOs, status: &RemoteStatus, json: bool) -> Option<&'static str> {
+    (!json && os == EngineOs::Linux && status.identity.is_some()).then_some(
+        "note: this Linux engine's remote key is stored in a plaintext 0600 file in \
+         $XDG_CONFIG_HOME/isocast/credentials (default ~/.config/isocast/credentials), \
+         not an encrypted keyring",
+    )
+}
+
 fn output(value: &impl serde::Serialize, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(value)?);
@@ -127,4 +149,34 @@ fn output(value: &impl serde::Serialize, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(value)?);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(identity: bool) -> RemoteStatus {
+        RemoteStatus {
+            enabled: true,
+            running: true,
+            identity: identity.then(|| RemoteIdentity {
+                id: "id".into(),
+                name: "engine".into(),
+                spki: "spki".into(),
+            }),
+            address: None,
+            pairing_open: false,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn linux_key_note_is_human_only_and_needs_a_key() {
+        let note = key_note(EngineOs::Linux, &sample(true), false).unwrap();
+        assert!(note.contains("0600 file") && !note.contains('\n'));
+        assert!(key_note(EngineOs::Linux, &sample(true), true).is_none());
+        assert!(key_note(EngineOs::Linux, &sample(false), false).is_none());
+        assert!(key_note(EngineOs::Macos, &sample(true), false).is_none());
+        assert!(key_note(EngineOs::Windows, &sample(true), false).is_none());
+    }
 }

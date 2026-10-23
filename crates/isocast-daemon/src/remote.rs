@@ -250,8 +250,12 @@ impl Runtime {
             ) {
                 Ok(registration) => inner.advertisement = Some(registration),
                 Err(error) => {
+                    #[cfg(target_os = "linux")]
+                    let advice = "discovery isn't supported on this engine; connect by address";
+                    #[cfg(not(target_os = "linux"))]
+                    let advice = "allow Local Network access for Isocast on this engine";
                     inner.error = Some(format!(
-                        "listening by address, but discovery is unavailable: {error}; allow Local Network access for Isocast on this engine"
+                        "listening by address, but discovery is unavailable: {error}; {advice}"
                     ))
                 }
             }
@@ -352,7 +356,11 @@ pub(super) fn prefixes() -> Vec<(std::net::IpAddr, u8)> {
     {
         isocast_platform_windows::network::prefixes()
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    {
+        isocast_platform_linux::network::prefixes()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         Vec::new()
     }

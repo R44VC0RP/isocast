@@ -4362,6 +4362,35 @@ fn record<P: Platform>(engine: &Engine<P>, options: &RecordOptions) -> Result<Re
             .collect(),
         false => WriterInputs::new(),
     };
+    if platform.recording_needs_program_frame() {
+        for plan in plans.iter().filter(|plan| is_program(plan)) {
+            let since = platform.now();
+            let deadline = std::time::Instant::now() + FIRST_FRAME_TIMEOUT;
+            loop {
+                if options.stop.load(Ordering::SeqCst) {
+                    bail!("the recording was stopped before it started, so nothing was recorded");
+                }
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    bail!(
+                        "{}: the program did not finish preparing a picture within {} seconds; no recording files were opened",
+                        plan.source,
+                        FIRST_FRAME_TIMEOUT.as_secs()
+                    );
+                }
+                // Refresh the ordinary monitor demand while waiting. The
+                // slot publishes only after GPU completion, not submission.
+                let slot = slot_of(inner, &plan.source, plan.spec.video.fps)
+                    .map_err(anyhow::Error::msg)?;
+                if slot
+                    .wait_from(since, left.min(Duration::from_millis(100)))
+                    .is_some()
+                {
+                    break;
+                }
+            }
+        }
+    }
     let (writers, admission_notes) = create_writers(platform, plans, &writer_inputs)?;
 
     // The recording starts on a program frame, at least a moment from now

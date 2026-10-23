@@ -42,6 +42,9 @@ wgpu = { version = "=30.0.1", default-features = false, features = ["std", "park
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { version = "=30.0.1", default-features = false, features = ["metal"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+isocast-mux = { path = "../isocast-mux" }
+
 [target.'cfg(windows)'.dependencies]
 isocast-mux = { path = "../isocast-mux" }
 isocast-surfaces = { path = "../isocast-surfaces", features = ["wgpu"] }

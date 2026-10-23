@@ -15,11 +15,23 @@ When a fact changes, replace it. Date every gotcha. Last full refresh: 2026-10-2
   export (refused). Windows work is tracked in #105 and its follow-up issues.
 - **Remote engines R1 is on main**: CLI/MCP only, off by default (`isocast remote enable`), TCP 47470, pinned mutual
   TLS 1.3, local-only code + SPAKE2 pairing, OS DNS-SD. Verified basebook ↔ exon-desk both ways.
-- **Desktop client on a remote server (R2) is on `agent/desktop-client`** (R2-core + R2-ui merged): pairing in the
-  app, engine picker, one window per engine, live H.264 program video (VideoToolbox / Media Foundation DXVA),
-  verified basebook ↔ exon-desk both ways (2026-10-22; `/Volumes/IsocastBuild/desktop-client/scratch/REPORT.md`).
-  Windows UI DirectComposition port (committed on `agent/windows-perf`, CPU target still unmet) merging after
-  pre-merge CI.
+- **Linux headless bootstrap (2026-10-22), experimental/unreleased:** Vulkan (lavapipe works), CPU synthetic
+  sources, OpenH264 H.264 and Apache-2.0 libxaac AAC-LC through `isocast-mux`. Ubuntu 24.04 arm64 VM proof:
+  program + two ISOs, 720p30, 310 frames each, zero drops, 1,240 frame-oracle checks, maximum A/V skew 0.021 ms.
+  No real capture, hardware encoding, media decoding, playback, shared previews or discovery; RTMP/AAC
+  streaming remains unsupported. Linux startup now finalizes retained mux fragments and persists verified
+  counts through one pinned-directory recovery lease (SIGKILL + restart proved on three files, 2026-10-23).
+  Drop/repeat/audio-loss counts after a crash remain unknown; empty cancelled reservations are retained.
+  Remote secrets are plaintext 0600 files in an owner-only `$XDG_CONFIG_HOME/isocast/credentials` directory
+  (`$HOME/.config` fallback), not an encrypted keyring. Same-user processes can read them.
+  Linux waits for a fresh GPU-completed program picture before opening writers/arming the take; other
+  platforms keep their startup policy. R1 by address was verified from the m2-b Mac CLI: pair, status,
+  a 320×180 program + two ISO take (150 frames each), and reconnect after restart with the same pinned key.
+  The four-vCPU hosted Linux job uses a 360p30 integrity profile and the shared `--hosted` policy;
+  strict zero-drop 720p30 is qualified separately in the six-vCPU arm64 VM, not claimed for the runner.
+- **Desktop client on a remote server (R2) is on main (2026-10-23):** pairing in the app, engine picker, one window
+  per engine, live H.264 program video (VideoToolbox / Media Foundation DXVA), verified basebook <-> exon-desk both
+  ways (`/Volumes/IsocastBuild/desktop-client/scratch/REPORT.md`).
 
 ## 2. Architecture map
 
@@ -39,7 +51,7 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
 
 - `isocast-protocol`: setup document (TOML/JSON), validation, schema, API types, caller policy, `platform_text` wording.
 - `isocast-engine`: portable engine: shared clock, wgpu compositor, audio mix, recording, governor, the `Platform` trait.
-- `isocast-daemon`: `isocastd` and its dispatcher. `platform.rs` picks the platform (macOS, Windows, else the stub);
+- `isocast-daemon`: `isocastd` and its dispatcher. `platform.rs` picks the platform (macOS, Windows, Linux, else the stub);
   also folder roots (`roots.rs`), remote serving (`remote.rs`), projects, recovery, streams.
 - `isocast-client`: connect (launching the engine), call, watch; engine selection by `--engine` / `ISOCAST_ENGINE`.
 - `isocast-cli`: the `isocast` command and `isocast mcp`.
@@ -48,13 +60,14 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
 - Platforms:
   - `isocast-platform-macos`: ScreenCaptureKit, AVFoundation, VideoToolbox, AVAssetWriter, IOSurface frames.
   - `isocast-platform-windows`: WGC via the helper `isocast-capture.exe`, MF cameras, WASAPI, NVENC/MF, DX12 import.
+  - `isocast-platform-linux`: headless synthetic sources, Vulkan upload/readback, OpenH264/libxaac software recording.
   - `-stub`: fail-closed, for other OSes. `-contracts`: dev-only contract workers (`scripts/platform-contracts.py`).
-  - `-credentials`: Keychain / Credential Manager without media dependencies.
+  - `-credentials`: Keychain / Credential Manager / Linux private XDG files without media dependencies.
 - Plumbing:
   - `isocast-ipc` (sockets, SID-namespaced pipes, local-or-TLS `Stream`) and `isocast-remote` (TLS, pairing).
   - `isocast-discovery`: Bonjour / `DnsService*`; it never opens UDP 5353 itself.
   - `isocast-surfaces`: zero-copy previews (IOSurface over Mach; DX12 shared handles on Windows).
-  - `isocast-mux`: crash-safe MOV/MP4 packet writer (Windows). `isocast-diagnostics`: bounded crash-safe JSONL logs.
+  - `isocast-mux`: crash-safe MOV/MP4 packet writer (Windows/Linux). `isocast-diagnostics`: bounded crash-safe JSONL logs.
   - `isocast-obsws`: obs-websocket v5 server. `isocast-vp8`: vendored libvpx VP8 decoder (macOS arm64).
 
 ## 3. Machines and environments
@@ -84,6 +97,10 @@ result type in `isocast-protocol/src/openrpc.rs` (coverage is enforced by the pr
 - Nothing starts below 40 GB free (m2-a had 43 GB on 2026-10-22; use `remote-build.sh prune`).
 - Exit codes: 255 unreachable, 3 disk guard, 75 lane lock, 76 hardware job, 69 no free host.
 - Same Rust 1.99, SDK 27.0 and arm64 everywhere: binaries from any host run on every Mac here.
+- Linux lane (2026-10-22): Lima/vz VM `isocast-linux` on m2-b, Ubuntu 24.04 arm64, 6 CPUs/12 GiB/60 GiB,
+  no host mounts; `limactl shell isocast-linux`, source in guest `~/isocast-linux/src`. Stop it when unused.
+  Strict software-GPU timing needs host headroom: early tests during heavy host load dropped program frames;
+  the qualified take with unchanged code had GPU completion p50 ~12 ms and no losses. Do not hide losses.
 
 **Test Macs** (`scripts/testmac.sh`, `ISOCAST_TESTMAC`). Prefer `push BIN_DIR` (~25 s) to `build`. `gui '<cmd>'` runs in
 the desktop session through an interactive launch-agent bridge (needed for windows, `open`, cua-driver).
@@ -181,6 +198,11 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 
 ## 6. Gotchas that still bite
 
+- 2026-10-23: Linux recovery uses `isocast_mux::recovery`, not the legacy `Platform::recover_file` hook
+  (which deliberately refuses a second path-based lease). It currently targets GNU/Linux with procfs and
+  glibc 2.28+ (`renameat2`). Directory/media flock support is required; unsupported FUSE/network mounts
+  fail closed. Replaced manifests retain their permissions. A failed metadata publication can leave a
+  private hidden `.isocast-*.partial`, which is never a recovery candidate or confused with media.
 - 2026-10-22: the native WebRTC prototype uses `whep_offer` / `whep_close` on a dedicated local or
   authenticated R1 connection, not an HTTP endpoint. Keep that Client alive. str0m's received H.264 is
   Annex B, unlike `frames`' avcC/AVCC records. The local desktop keeps `shared_frames`; see

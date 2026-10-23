@@ -1,0 +1,53 @@
+# Based on the published xaac-rs 0.2.0 manifest; see ISOCAST.md for the trim.
+
+[package]
+edition = "2024"
+rust-version = "1.85"
+name = "xaac-rs"
+version = "0.2.0"
+authors = ["Yehor Smoliakov <egorsmkv@gmail.com>"]
+build = false
+include = [
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-APACHE",
+    "ISOCAST.md",
+    "src/**",
+]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "High-level Rust AAC/xHE-AAC encoder and decoder bindings built on libxaac"
+documentation = "https://docs.rs/xaac-rs"
+readme = "README.md"
+keywords = [
+    "aac",
+    "xhe-aac",
+    "usac",
+    "audio",
+    "encoder",
+]
+categories = [
+    "multimedia::audio",
+    "encoding",
+    "api-bindings",
+]
+license = "Apache-2.0"
+
+[features]
+default = []
+
+[lib]
+name = "xaac_rs"
+crate-type = ["lib"]
+path = "src/lib.rs"
+
+[dependencies.libxaac-sys]
+version = "0.1.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"

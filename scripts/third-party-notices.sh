@@ -1,10 +1,12 @@
 #!/bin/bash
-# Writes THIRD_PARTY_NOTICES: every crate that ships in an Isocast build on
-# Apple silicon (normal and build dependencies of the workspace, not
+# Writes THIRD_PARTY_NOTICES: every crate that ships in an Isocast build for
+# any of its targets (Apple silicon macOS, x86_64 Linux and x86_64 Windows:
+# the union of normal and build dependencies of the workspace on each, not
 # dev-dependencies, and not the retired web app, isocast-app, which no
 # longer ships since N.3), with its licence and a link, plus the notices
-# for the things bundled outside Cargo (the app's fonts) and Slint's
-# royalty-free licence.
+# for the things bundled outside Cargo (the app's fonts, native codecs) and
+# Slint's royalty-free licence. Licence files of bundled native code are
+# read from the pinned crates' sources that Cargo metadata points at.
 #
 #   scripts/third-party-notices.sh            # rewrite THIRD_PARTY_NOTICES
 #   scripts/third-party-notices.sh --check    # fail if it is out of date
@@ -17,42 +19,57 @@ out="$here/THIRD_PARTY_NOTICES"
 check=0
 [ "${1:-}" = "--check" ] && check=1
 
-metadata="$(mktemp "${TMPDIR:-/tmp}/isocast-metadata.XXXXXX")"
-generated="$(mktemp "${TMPDIR:-/tmp}/isocast-notices.XXXXXX")"
-trap 'rm -f "${metadata:?}" "${generated:?}"' EXIT
+# Every target Isocast ships for; a dependency of any of them is listed.
+targets=(aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-msvc)
 
-cargo metadata --manifest-path "$here/Cargo.toml" --format-version 1 --locked \
-    --filter-platform aarch64-apple-darwin >"$metadata"
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/isocast-notices.XXXXXX")"
+generated="$scratch/THIRD_PARTY_NOTICES"
+trap 'rm -rf "${scratch:?}"' EXIT
 
-python3 - "$metadata" "$here" >"$generated" <<'PY'
+for target in "${targets[@]}"; do
+    cargo metadata --manifest-path "$here/Cargo.toml" --format-version 1 --locked \
+        --filter-platform "$target" >"$scratch/metadata-$target.json"
+done
+
+python3 - "$here" "$scratch"/metadata-*.json >"$generated" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-metadata = json.load(open(sys.argv[1]))
-root = Path(sys.argv[2])
-packages = {p["id"]: p for p in metadata["packages"]}
-nodes = {n["id"]: n for n in metadata["resolve"]["nodes"]}
-members = set(metadata["workspace_members"])
+root = Path(sys.argv[1])
+metadatas = [json.load(open(path)) for path in sys.argv[2:]]
+assert len(metadatas) == 3, sys.argv[2:]
+packages = {p["id"]: p for m in metadatas for p in m["packages"]}
+members = set(metadatas[0]["workspace_members"])
 # The retired web app's crate stays in the workspace until the alpha week
 # is over, but nothing of it ships.
 retired = {"isocast-app"}
 roots = {m for m in members if packages[m]["name"] not in retired}
 
-# Walk normal and build dependencies from every workspace member;
-# dev-dependencies (tests, benchmarks) never ship.
+# Walk normal and build dependencies from every workspace member, once per
+# target's resolve; dev-dependencies (tests, benchmarks) never ship.
 shipped = set()
-stack = list(roots)
-while stack:
-    node = nodes[stack.pop()]
-    for dep in node["deps"]:
-        kinds = {k["kind"] for k in dep["dep_kinds"]}
-        if kinds <= {"dev"}:
-            continue
-        if dep["pkg"] not in shipped:
-            shipped.add(dep["pkg"])
-            stack.append(dep["pkg"])
+for metadata in metadatas:
+    nodes = {n["id"]: n for n in metadata["resolve"]["nodes"]}
+    seen = set(roots)
+    stack = list(roots)
+    while stack:
+        node = nodes[stack.pop()]
+        for dep in node["deps"]:
+            kinds = {k["kind"] for k in dep["dep_kinds"]}
+            if kinds <= {"dev"}:
+                continue
+            if dep["pkg"] not in seen:
+                seen.add(dep["pkg"])
+                stack.append(dep["pkg"])
+    shipped |= seen
 shipped -= members
+
+def source(name):
+    """The source folder of the one shipped crate called name."""
+    found = [packages[i] for i in shipped if packages[i]["name"] == name]
+    assert len(found) == 1, (name, [p["version"] for p in found])
+    return found[0], Path(found[0]["manifest_path"]).parent
 
 def link(p):
     for key in ("repository", "homepage"):
@@ -138,6 +155,30 @@ section("Opus encoder")
 print("Program WebRTC audio uses libopus (https://opus-codec.org), bundled by libopus_sys.")
 opus = next(p for p in packages.values() if p["name"] == "libopus_sys")
 print((Path(opus["manifest_path"]).parent / "opus" / "COPYING").read_text().rstrip())
+
+section("H.264 encoder")
+h264, h264_dir = source("openh264-sys2")
+upstream = (h264_dir / "upstream" / "VERSION").read_text().split()
+assert len(upstream) == 2 and upstream[0].startswith("https://"), upstream
+print(f"""The Linux server encodes H.264 with Cisco's OpenH264, compiled from the
+sources bundled in openh264-sys2 {h264["version"]} ({upstream[0]}
+at commit {upstream[1]}). OpenH264 is under the BSD 2-clause licence
+below.
+""")
+print((h264_dir / "upstream" / "LICENSE").read_text().rstrip())
+
+section("AAC encoder")
+xaac_sys, xaac_dir = source("libxaac-sys")
+xaac, _ = source("xaac-rs")
+print(f"""The Linux server encodes AAC-LC with libxaac
+(https://github.com/ittiam-systems/libxaac), compiled from the sources
+bundled in libxaac-sys {xaac_sys["version"]} and used through xaac-rs {xaac["version"]}
+(vendored in vendor/xaac-rs, see its ISOCAST.md), all under the Apache
+License 2.0. libxaac's NOTICE and its copy of the licence follow.
+""")
+print((xaac_dir / "libxaac" / "NOTICE").read_text().rstrip())
+print()
+print((xaac_dir / "libxaac" / "LICENSE").read_text().rstrip())
 
 section(f"Rust crates ({len(rows)})")
 print("Crate, version, licence, link.")

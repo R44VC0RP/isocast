@@ -1831,14 +1831,14 @@ fn write_manifest_with(path: &Path, manifest: &SessionManifest, durable: bool) -
 const FOLDER_LOCK: &str = ".isocast.lock";
 
 /// What an interrupted session's manifest says about it.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 const INTERRUPTED: &str = "the recording ended without finishing: the process recording it \
                            (isocastd or `isocast record`) was stopped or crashed; only completed \
                            fragments may be playable, and a file with no completed fragment may \
                            not open. Recoverable durations and frame counts are unknown; inspect \
                            every file's video and audio tracks";
 /// The same, for files a crash-safe writer left and recovery finished.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 const INTERRUPTED_RECOVERED: &str = "the recording ended without finishing: the process recording it (isocastd or `isocast \
      record`) was stopped or crashed. Its files were finished from the fragments that had \
      reached the disk; the durations here are what was recovered, frame counts are unknown";
@@ -1906,14 +1906,14 @@ fn lock_file(folder: &Path) -> Option<std::fs::File> {
 /// Session manifests in `folder` that still say "recording" although
 /// nothing records there: their recording was killed or crashed. Empty
 /// while a recording writes in the folder (it holds the lock), or if the
-/// folder can't be read or locked. With `mark`, each is rewritten as failed,
+/// folder can't be read or locked. With `mark`, each is rewritten as interrupted,
 /// saying so.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub fn interrupted_sessions(folder: &Path, mark: bool) -> Vec<PathBuf> {
     isocast_mux::recovery::interrupted_sessions(folder, mark).unwrap_or_default()
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn interrupted_sessions(folder: &Path, mark: bool) -> Vec<PathBuf> {
     let Some(lock) = lock_file(folder) else {
         return Vec::new();
@@ -1953,7 +1953,7 @@ pub fn interrupted_sessions(folder: &Path, mark: bool) -> Vec<PathBuf> {
 
 /// What to tell the user about `interrupted` sessions (see
 /// [`interrupted_sessions`]), marked or not.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub fn interrupted_note(interrupted: &[PathBuf], marked: bool) -> Option<String> {
     if interrupted.is_empty() {
         return None;
@@ -1973,7 +1973,7 @@ pub fn interrupted_note(interrupted: &[PathBuf], marked: bool) -> Option<String>
     ))
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn interrupted_note(interrupted: &[PathBuf], marked: bool) -> Option<String> {
     let list = interrupted
         .iter()
@@ -2013,7 +2013,7 @@ pub fn interrupted_note(interrupted: &[PathBuf], marked: bool) -> Option<String>
 
 /// Both launch-time and recording-start recovery use the pause policy. An
 /// open pause stays open: the crash time cannot be reconstructed from its cut.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn annotate_interrupted_pauses(manifest: &mut SessionManifest) {
     if manifest.pauses.is_empty() {
         return;
@@ -2050,7 +2050,7 @@ fn annotate_interrupted_pauses(manifest: &mut SessionManifest) {
 
 /// Repair orphaned manifests only under the recording folder's exclusive
 /// lock. Probe durable media for duration; never infer frame/drop counts.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub fn recover_interrupted<P: Platform>(
     _platform: &P,
     folder: &Path,
@@ -2076,7 +2076,7 @@ pub fn recover_interrupted<P: Platform>(
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn recover_interrupted<P: Platform>(
     platform: &P,
     folder: &Path,
@@ -2226,7 +2226,7 @@ pub fn recover_interrupted<P: Platform>(
 
 /// A controlled emergency stop finished the media normally, but the take
 /// was interrupted by a critical-state failure, not ended by the operator.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub fn mark_interrupted(report: &Report, why: &str) {
     for path in &report.takes {
         if let Err(error) = isocast_mux::recovery::mark_interrupted(path, why) {
@@ -2235,7 +2235,7 @@ pub fn mark_interrupted(report: &Report, why: &str) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn mark_interrupted(report: &Report, why: &str) {
     for path in &report.takes {
         if let Some(mut manifest) = std::fs::read_to_string(path)

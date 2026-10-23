@@ -1,4 +1,4 @@
-//! Windows manifest recovery through one pinned, exclusively leased directory.
+//! Manifest recovery through one pinned, exclusively leased directory.
 //! Packet indexes, not accepted input counts or requested durations, are facts.
 
 use std::ffi::{OsStr, OsString};
@@ -15,7 +15,10 @@ use crate::{file::Directory, mp4};
 
 const MAX_MANIFEST: usize = 4 << 20;
 const MAX_SESSIONS: usize = 100;
+#[cfg(windows)]
 const NOTE: &str = "Windows recovery: ";
+#[cfg(target_os = "linux")]
+const NOTE: &str = "Linux recovery: ";
 
 #[derive(Default)]
 pub struct Recovery {
@@ -24,8 +27,7 @@ pub struct Recovery {
 }
 
 /// Atomic manifest replacement for live recording checkpoints. The caller's
-/// existing shared recording lease can coexist with this one; no Unix writer
-/// or manifest path is changed by this Windows-only implementation.
+/// existing shared recording lease can coexist with this one.
 pub fn write_manifest(path: &Path, manifest: &SessionManifest, durable: bool) -> Result<()> {
     let name = path
         .file_name()

@@ -60,6 +60,8 @@ pub fn run(_discover: bool, timeout: f64, json: bool) -> Result<ExitCode> {
 }
 
 /// `--discover --watch`: print engines as they appear and go away.
+// Unsupported backends never return a guard; native guards must be dropped.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(clippy::drop_non_drop))]
 pub fn watch(discover: bool, json: bool) -> Result<ExitCode> {
     if !discover {
         bail!("--watch: only with --discover");
@@ -124,6 +126,7 @@ fn to_json(engine: &Found) -> Value {
 }
 
 /// `isocast debug advertise`: hold a test advertisement until Ctrl-C.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(clippy::drop_non_drop))]
 pub fn advertise(
     name: &str,
     port: u16,

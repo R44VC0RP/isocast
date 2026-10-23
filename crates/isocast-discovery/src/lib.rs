@@ -75,6 +75,7 @@ impl Txt {
 
     /// Keep a received key's value if it is one of ours (bounded), and
     /// drop anything else.
+    #[cfg(any(target_os = "macos", windows, test))]
     pub(crate) fn set(&mut self, key: &str, value: &str) {
         let slot = match key.to_ascii_lowercase().as_str() {
             "id" => &mut self.id,
@@ -205,6 +206,9 @@ pub fn watch(on_event: OnEvent) -> Result<Watch> {
 /// operation from its callback), so shutdown takes at most about one
 /// 200 ms poll interval, assuming the OS's DNS-SD service answers its
 /// calls promptly. An error if browsing itself failed.
+// Unsupported backends never return a watch; explicit drops below release
+// native DNS-SD guards on the supported platforms.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(clippy::drop_non_drop))]
 pub fn browse(timeout: Duration) -> Result<Vec<Found>> {
     let (send, receive) = mpsc::channel();
     let watching = watch(Box::new(move |event| {
@@ -251,6 +255,7 @@ fn instance_name(name: &str) -> String {
 
 /// Untrusted text from the network: control characters dropped, cut to
 /// `max` bytes on a character boundary.
+#[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn clean(text: &str, max: usize) -> String {
     let text: String = text.chars().filter(|c| !c.is_control()).collect();
     truncate(&text, max).to_owned()
@@ -268,12 +273,14 @@ fn truncate(text: &str, max: usize) -> &str {
 }
 
 /// Sort and dedupe addresses: IPv4 first, then IPv6.
+#[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn sort_addrs(addrs: &mut Vec<SocketAddr>) {
     addrs.sort_by_key(|addr| (addr.is_ipv6(), *addr));
     addrs.dedup();
 }
 
 /// A host name without its trailing dot, bounded.
+#[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn clean_host(host: &str) -> String {
     clean(host.trim_end_matches('.'), 255)
 }

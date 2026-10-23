@@ -666,6 +666,12 @@ enum Command {
             about = "Stream the program live over RTMP or RTMPS; keep its stream key in Credential Manager."
         )
     )]
+    #[cfg_attr(
+        target_os = "linux",
+        command(
+            about = "Stream the program live over RTMP or RTMPS; keep its stream key in an owner-only 0600 file."
+        )
+    )]
     Stream {
         #[command(subcommand)]
         command: StreamCommand,
@@ -901,6 +907,12 @@ enum StreamCommand {
     #[cfg_attr(
         windows,
         command(about = "Keep or remove the stream key in Credential Manager, never in a setup.")
+    )]
+    #[cfg_attr(
+        target_os = "linux",
+        command(
+            about = "Keep or remove the stream key in an owner-only 0600 file, never in a setup."
+        )
     )]
     Key {
         #[command(subcommand)]

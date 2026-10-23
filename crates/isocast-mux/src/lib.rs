@@ -9,7 +9,7 @@
 pub mod file;
 pub mod mp4;
 mod packet;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub mod recovery;
 
 pub use packet::{
