@@ -17,6 +17,9 @@ use objc2_core_graphics::{
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
+    CVAttachmentMode, kCVImageBufferColorPrimaries_ITU_R_709_2, kCVImageBufferColorPrimariesKey,
+    kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferTransferFunctionKey,
+    kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVImageBufferYCbCrMatrixKey,
     kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
     kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
 };
@@ -318,7 +321,10 @@ define_class!(
                 && let Some((frame, at)) = complete_frame(sample)
             {
                 match crate::FramePool::copy(&mut self.ivars().frames.lock().unwrap(), &frame) {
-                    Ok(Some(frame)) => (self.ivars().sink.frame)(frame, at),
+                    Ok(Some(frame)) => {
+                        tag_screen_frame(&frame);
+                        (self.ivars().sink.frame)(frame, at);
+                    }
                     Ok(None) => {} // Counted and warned by the pool ledger.
                     Err(error) => {
                         (self.ivars().sink.stopped)(format!("capture frame isolation: {error:#}"))
@@ -335,6 +341,36 @@ define_class!(
         }
     }
 );
+
+/// The stream requests SDR Rec.709. SCK can omit the explicit YCbCr tags
+/// on x420 buffers. Make the encoder input's tags agree with that request,
+/// filling only our owned copy, never the capture's buffer.
+fn tag_screen_frame(frame: &PixelBuffer) {
+    // SAFETY: these exported constants are valid CFStrings; each value is
+    // appropriate for its colour key. The frame has not been published yet.
+    unsafe {
+        for (key, value) in [
+            (
+                kCVImageBufferColorPrimariesKey,
+                kCVImageBufferColorPrimaries_ITU_R_709_2,
+            ),
+            (
+                kCVImageBufferTransferFunctionKey,
+                kCVImageBufferTransferFunction_ITU_R_709_2,
+            ),
+            (
+                kCVImageBufferYCbCrMatrixKey,
+                kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            ),
+        ] {
+            if !frame.0.has_attachment(key) {
+                frame
+                    .0
+                    .set_attachment(key, value, CVAttachmentMode::ShouldPropagate);
+            }
+        }
+    }
+}
 
 impl StreamOutput {
     fn new(sink: VideoSink<PixelBuffer>) -> Retained<Self> {
@@ -368,4 +404,116 @@ fn complete_frame(
     let image = unsafe { sample.image_buffer() }?;
     let at = from_cm_time(unsafe { sample.presentation_time_stamp() });
     Some((image, at))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use isocast_engine::FramePool as _;
+    use objc2_core_foundation::CFString;
+    use objc2_core_graphics::CGColorSpace;
+    use objc2_core_video::{kCVImageBufferCGColorSpaceKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4};
+
+    #[test]
+    fn missing_screen_tags_are_filled_on_the_copy_and_propagate() {
+        let mut pool = crate::FramePool::ycbcr(16, 16).unwrap();
+        let source = pool.take().unwrap().unwrap();
+        source.0.remove_all_attachments();
+        // SAFETY: the colour-space key takes a CGColorSpace, and source is private.
+        unsafe {
+            let space = CGColorSpace::with_name(Some(kCGColorSpaceITUR_709)).unwrap();
+            source.0.set_attachment(
+                kCVImageBufferCGColorSpaceKey,
+                &space,
+                CVAttachmentMode::ShouldPropagate,
+            );
+        }
+        let mut copied_pool = None;
+        let copied = crate::FramePool::copy(&mut copied_pool, &source.0)
+            .unwrap()
+            .unwrap();
+        tag_screen_frame(&copied);
+        let mut next_pool = None;
+        let next = crate::FramePool::copy(&mut next_pool, &copied.0)
+            .unwrap()
+            .unwrap();
+        // SAFETY: exported keys/values are CFStrings and mode is a valid output pointer.
+        unsafe {
+            assert!(copied.0.has_attachment(kCVImageBufferCGColorSpaceKey));
+            for (key, expected) in [
+                (
+                    kCVImageBufferColorPrimariesKey,
+                    kCVImageBufferColorPrimaries_ITU_R_709_2,
+                ),
+                (
+                    kCVImageBufferTransferFunctionKey,
+                    kCVImageBufferTransferFunction_ITU_R_709_2,
+                ),
+                (
+                    kCVImageBufferYCbCrMatrixKey,
+                    kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                ),
+            ] {
+                assert!(!source.0.has_attachment(key));
+                for frame in [&copied, &next] {
+                    let mut mode = CVAttachmentMode::ShouldNotPropagate;
+                    let value = frame
+                        .0
+                        .attachment(key, &mut mode)
+                        .unwrap()
+                        .downcast::<CFString>()
+                        .unwrap();
+                    assert_eq!(value.to_string(), expected.to_string());
+                    assert_eq!(mode, CVAttachmentMode::ShouldPropagate);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn existing_screen_tags_are_preserved_and_filling_is_idempotent() {
+        let mut pool = crate::FramePool::ycbcr(16, 16).unwrap();
+        let frame = pool.take().unwrap().unwrap();
+        let before = frame
+            .0
+            .attachments(CVAttachmentMode::ShouldPropagate)
+            .unwrap()
+            .count();
+        tag_screen_frame(&frame);
+        assert_eq!(
+            frame
+                .0
+                .attachments(CVAttachmentMode::ShouldPropagate)
+                .unwrap()
+                .count(),
+            before
+        );
+        // SAFETY: valid matrix key/value; the frame has not been shared.
+        unsafe {
+            frame.0.set_attachment(
+                kCVImageBufferYCbCrMatrixKey,
+                kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+                CVAttachmentMode::ShouldPropagate,
+            );
+            tag_screen_frame(&frame);
+            let value = frame
+                .0
+                .attachment(kCVImageBufferYCbCrMatrixKey, std::ptr::null_mut())
+                .unwrap()
+                .downcast::<CFString>()
+                .unwrap();
+            assert_eq!(
+                value.to_string(),
+                kCVImageBufferYCbCrMatrix_ITU_R_601_4.to_string()
+            );
+        }
+        assert_eq!(
+            frame
+                .0
+                .attachments(CVAttachmentMode::ShouldPropagate)
+                .unwrap()
+                .count(),
+            before
+        );
+    }
 }
