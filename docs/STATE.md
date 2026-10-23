@@ -222,6 +222,9 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
 - 2026-10-18: WGC `CreateForWindow` fails with E_INVALIDARG on WS_EX_NOACTIVATE windows. `TryGetNextFrame` returns S_OK plus null when no frame is ready.
 - 2026-10-22: Windows DNS-SD answers a new browse from a cache that keeps dead engines for about 4,000 s. Treat browse results as hints until a resolve answers.
 - 2026-10-22: GPU-backed private commit is not physical RAM. Claim CPU or RAM wins only from workloads matched against OBS. `ISOCAST_SOCKET` sets the `.logs` path; `ISOCAST_LOG_DIR` is ignored.
+- 2026-10-23: The Windows AAC worker uses combined transactions with a bounded caller-ready queue;
+  packet bounds are unchanged; native MF tests run in Windows CI. Evidence:
+  `/Volumes/IsocastBuild/windows-perf/scratch/REPORT.md`.
 - 2026-10-22: Windows native previews use transactional DirectComposition surfaces beneath Slint's
   premultiplied visual (one GPU copy on the existing DX12 queue through an On12 wrapper). The monitor
   ring must be native too, below selection; a Slint ring paints over its outline and handles.

@@ -157,6 +157,13 @@ jobs:
       - name: Build native services and test binaries (do not run)
         run: cargo build --locked --all-targets -p isocast-engine -p isocast-platform-stub -p isocast-platform-windows -p isocast-ipc -p isocast-discovery -p isocast-client -p isocast-daemon -p isocast-cli -p isocast-platform-contracts
 
+      # Synchronous MF AAC transactions: serial, after the native build so
+      # the test binary is cached. Package-only features can still rebuild
+      # dependencies, so allow compilation time as well as test execution.
+      - name: Check Media Foundation AAC transactions
+        timeout-minutes: 30
+        run: cargo test --locked -j 1 -p isocast-platform-windows --lib aac::tests -- --test-threads=1
+
       # Slint compiles the whole interface into one generated Rust module;
       # rustc needs 13.6 GiB for it (15.1 GiB committed), measured on
       # exon-desk, and run 39135916369 died with `rustc-LLVM ERROR: out of
