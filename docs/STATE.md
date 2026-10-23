@@ -123,7 +123,7 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   candidate (`git archive` of HEAD's tree, or the worktree's through a temporary index, so export-ignore applies and
   is checked) as ONE commit on public main to `ci/<lane>` only, after the same scan, and waits for CI, Engine E2E and
   Windows on it; evidence under `/Volumes/IsocastBuild/ci/<lane>`. It refuses a candidate without main (unless
-  `--merge-main`) and a `.github/` that differs from public main (unless `--allow-workflow-changes`). ci, e2e and
+  `--merge-main`) and a `.github/` that differs from private main (unless `--allow-workflow-changes`). ci, e2e and
   windows run on `ci/**` pushes; a lane's newer push cancels its older run, never another lane's.
   `scripts/windows-ci.sh` is `ci.sh --lane windows --workflow Windows`. Other workflows: release, nightly-soak, visual.
 
@@ -223,8 +223,15 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   GPU waits stall up to ~143 ms, and a zero-drop qualification never predicted a zero-drop suite (every hosted run
   2026-10-17..22 dropped somewhere; worst 1.5% of the suite's slots). So `e2e.py --hosted` always allows accounted
   loss up to 25% per output and 3% over the suite (dropped + held oracle pictures, at most 3 per output and never two
-  in a row + late file starts, at most 3 slots), with every integrity, picture-oracle and audio check still strict.
-  The zero-drop bar is the test Macs' (no `--hosted`).
+  in a row + late file starts, at most 12 slots), with every integrity, picture-oracle and audio check still strict.
+  A held picture may show any frame of its source from the previous picture's expected one up to before its own (a
+  1.5x source); a flash whose slots were dropped or held may be late or missing, but every beep and every other flash
+  still pairs within one frame. The zero-drop bar is the test Macs' (no `--hosted`).
+- 2026-10-23: Of 3,300 files in hosted runs 2026-10-17..22, 99.7% started on time, 0.3% 1–3 slots late and one
+  (a cold first MP4 writer) 9 slots late. Four runs dropped 27–66% of one ISO pair (both ISOs at ~half rate, the
+  program intact, bottleneck "encoder"): VM encoder capacity beyond the 25% allowance, still a failure.
+  `/Volumes/IsocastBuild/ci-flakes/scratch/replay.py E2E_PY [--strict]` replays every kept hosted failure offline
+  (logged RPCs, real files) against a version of e2e.py's rules.
 - 2026-10-22: macOS 15 `AVAssetWriterInput appendSampleBuffer:` before `startSessionAtSourceTime:` returns YES; macOS
   26 throws. The pixel-buffer adaptor throws on both, as does any append on a writer that never started writing.
 

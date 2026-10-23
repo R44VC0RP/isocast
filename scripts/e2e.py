@@ -91,7 +91,11 @@ HOSTED_DROP_LIMIT = 0.25
 # Hosted only: held oracle pictures per output, late-starting frame slots per
 # file, and accounted losses (dropped + held + late) over the whole suite.
 HOSTED_HOLD_CAP = 3
-HOSTED_LATE_START_CAP = 3
+# From every hosted run 2026-10-17..22 (3,300 files): 99.7% started on time,
+# 0.3% 1-3 slots late, and one cold first MP4 writer 9 slots (0.3 s) late, so
+# 12 slots (0.4 s at the hosted 30 fps) covers the VM with a margin while a
+# file that misses half a second still fails.
+HOSTED_LATE_START_CAP = 12
 HOSTED_SUITE_LOSS_LIMIT = 0.03
 # The longest run folder whose scenarios' sockets all fit in sun_path.
 SHORT_ROOT = 44
@@ -530,7 +534,10 @@ def video_samples(path, graph):
     return list(zip(times, raw))
 
 
-def sync_check(path, fps=FPS):
+def sync_check(path, fps=FPS, lost=None):
+    """Every interior flash of the band has its beep within one frame, a
+    beep a second. `lost` (hosted runs): frame slots counted as accounted
+    loss (held pictures); the file's dropped slots are added here."""
     values = video_samples(path, "crop=iw:ih/4:0:ih*3/4")
     flashes = [t for i, (t, v) in enumerate(values) if v > 128 and (i == 0 or values[i - 1][1] <= 128)]
     samples = pcm(path)
@@ -542,23 +549,67 @@ def sync_check(path, fps=FPS):
             quiet = 0
         else:
             quiet += 1
+    end = values[-1][0] + 1 / fps
+    if lost is not None:
+        shown = {round(t * fps) for t, _ in values}
+        lost = set(lost) | (set(range(min(shown), max(shown) + 1)) - shown)
+    result = pulse_check(path.name, flashes, beeps, end, fps, lost)
+    return {"flashes": len(flashes), "beeps": len(beeps), **result}
+
+
+def pulse_check(name, flashes, beeps, end, fps, lost=None):
+    """Flash onsets and beep onsets (seconds) of a file `end` seconds long.
+    Strict (`lost` None): every interior flash pairs with an interior beep
+    within one frame. Hosted (`lost`: the slots that are dropped or held):
+    a flash whose slots were lost may be late (on the first slot shown) or
+    gone (`skipped`), and any other flash still needs its beep within one
+    frame; every beep is still required, a second apart."""
     # Exclude only pulses cut by either edge of the file, not missing interior pulses.
     # Put the margin between frame ticks: a flash at exactly 0.15 s and
     # its sine beep's first nonzero sample one audio sample later must not
     # land on opposite sides of the filter. Keep this off-grid at any fps.
-    end = values[-1][0] + 1 / fps
     edge = (math.floor(0.15 * fps) + 0.5) / fps
     f = [t for t in flashes if edge < t < end - edge]
     b = [t for t in beeps if edge < t < end - edge]
-    require(len(f) >= int(end) - 1 and len(f) == len(b),
-            f"{path.name}: missing pulses ({len(f)} flashes / {len(b)} beeps in {end:.3f}s)")
-    offsets = [abs(x - y) for x, y in zip(f, b)]
-    require(all(d <= 1 / fps + 1 / RATE for d in offsets),
-            f"{path.name}: beep/flash drift {max(offsets, default=0) * 1000:.2f}ms exceeds one frame")
-    require(all(abs(y - x - 1) <= 1 / fps + 1 / RATE for x, y in zip(b, b[1:])),
-            f"{path.name}: beep cadence is not one second")
-    return {"flashes": len(flashes), "beeps": len(beeps),
-            "max_sync_ms": round(max(offsets, default=0) * 1000, 3)}
+    near = 1 / fps + 1 / RATE
+    if lost is None:
+        require(len(f) >= int(end) - 1 and len(f) == len(b),
+                f"{name}: missing pulses ({len(f)} flashes / {len(b)} beeps in {end:.3f}s)")
+        offsets = [abs(x - y) for x, y in zip(f, b)]
+        require(all(d <= near for d in offsets),
+                f"{name}: beep/flash drift {max(offsets, default=0) * 1000:.2f}ms exceeds one frame")
+        require(all(abs(y - x - 1) <= near for x, y in zip(b, b[1:])),
+                f"{name}: beep cadence is not one second")
+        return {"max_sync_ms": round(max(offsets, default=0) * 1000, 3)}
+    require(len(b) >= int(end) - 1, f"{name}: missing pulses ({len(b)} beeps in {end:.3f}s)")
+    require(all(abs(y - x - 1) <= near for x, y in zip(b, b[1:])), f"{name}: beep cadence is not one second")
+    paired, offsets, late, skipped = set(), [], [], []
+    for beep in b:
+        # Edge flashes count too: a flash one frame late can cross the edge.
+        match = [x for x in flashes if abs(x - beep) <= near]
+        require(len(match) <= 1, f"{name}: {len(match)} flashes within one frame of the beep at {beep:.4f} s")
+        if match:
+            paired.add(match[0])
+            offsets.append(abs(match[0] - beep))
+            continue
+        slot = shown = round(beep * fps)
+        while shown in lost:
+            shown += 1
+        require(shown > slot, f"{name}: no flash within one frame of the beep at {beep:.4f} s "
+                              f"(slot {slot} was shown, not dropped or held)")
+        # The flash's slots were lost: it shows from the first slot shown, or
+        # it ended unseen.
+        match = [x for x in flashes if slot / fps - 1e-6 <= x <= shown / fps + near]
+        require(len(match) <= 1, f"{name}: {len(match)} flashes after the lost slots at {beep:.4f} s")
+        if match:
+            paired.add(match[0])
+            late.append(round(beep, 4))
+        else:
+            skipped.append(round(beep, 4))
+    stray = [x for x in f if x not in paired and not any(abs(x - y) <= near for y in beeps)]
+    require(not stray, f"{name}: a flash at {stray[0]:.4f} s without its beep" if stray else "")
+    return {"max_sync_ms": round(max(offsets, default=0) * 1000, 3), "late_flashes": late,
+            "skipped_flashes": skipped}
 
 
 def drop_metrics(manifest):
@@ -612,28 +663,29 @@ def check_take(path, manifest, duration=None, sync=False, expected_sources=None,
         file = path.parent / f["path"]
         expect = duration if duration is not None else f["duration_seconds"]
         late = 0
-        if duration is not None and limit:
+        if limit:
             # Hosted: a file whose encoder started late covers the take
             # from its manifest's start_offset_seconds on; those missing
             # first slots count as accounted loss (test Macs: strict).
             late = round((f.get("start_offset_seconds") or 0) * f["fps"])
-            take_slots = round(duration * f["fps"])
             require(late <= HOSTED_LATE_START_CAP,
                     f"{file.name}: started {late} frame(s) late, more than the hosted cap of "
                     f"{HOSTED_LATE_START_CAP}")
+            if late:
+                loss["late_start_slots"] = late
+        if duration is not None and limit:
+            take_slots = round(duration * f["fps"])
             require(late + loss["dropped"] <= limit * take_slots,
                     f"{file.name}: started {late} frame(s) late and dropped {loss['dropped']} of {take_slots} "
                     f"slots, more than the hosted {limit:.0%}")
             expect = duration - late / f["fps"]
-            if late:
-                loss["late_start_slots"] = late
         row = check_file(file, expect, f["fps"], (f["width"], f["height"]),
                          dropped=loss["dropped"], repeated=loss["repeated"])
         if late:
             row["late_start_slots"] = late
         require(row["frames"] == f["frames"], f"{file.name}: manifest/decoded frame counts disagree")
         if sync:
-            row.update(sync_check(file, f["fps"]))
+            row.update(sync_check(file, f["fps"], lost=set() if limit else None))
         rows.append(row)
     require(bool(rows), "manifest lists no files")
     return rows
@@ -707,7 +759,10 @@ def scenario_iso(e, cfg, evidence):
     evidence["files"] = check_take(path, manifest, 5, sync=True,
                                     expected_sources=["program", "bars", "bars2"], evidence=evidence)
     starts = [f["start_offset_seconds"] for f in manifest["files"]]
-    require(max(starts) - min(starts) <= 1 / cfg["canvas"]["fps"], f"ISO start offsets disagree: {starts}")
+    # Hosted: check_take already capped and accounted late starts; offsets
+    # are f32 (one slot at 30 fps is 0.033333334), so compare within 1 us.
+    apart = HOSTED_LATE_START_CAP / cfg["canvas"]["fps"] + 1e-6 if loss_limit(evidence) else 1 / cfg["canvas"]["fps"]
+    require(max(starts) - min(starts) <= apart, f"ISO start offsets disagree: {starts}")
 
 
 def scenario_split(e, cfg, evidence):
@@ -2725,11 +2780,14 @@ class Oracle:
         # Hosted runs (accounted losses allowed): a source frame that came
         # too late for its slot shows the region's previous picture again,
         # a held frame (the runner's wake jitter, p99 ~26 ms, passes half a
-        # frame at 30 fps). A hold must repeat exactly the previous picture's
-        # expected frame of the same source, after a picture that was right,
-        # so a run of holds is at most one long; holds count in the output's
-        # loss budget. Test Macs, and edited exports (made from files, not
-        # live), stay strict.
+        # frame at 30 fps). A hold must show the previous picture's expected
+        # frame of the same source or the one after it, and still before this
+        # picture's (exactly that frame at 1x; a 1.5x source can show the one
+        # in between; never a frame from across a pause), after a picture
+        # that was right, so a run of holds is at
+        # most one long; holds count in the output's loss budget (outputs
+        # without a take's drop row count in the suite's). Test Macs, and
+        # edited exports (made from files, not live), stay strict.
         self.hold_ok = loss_limit(evidence) > 0 if hold_ok is None else hold_ok
         self.held, self.previous = [], {}
 
@@ -2740,9 +2798,12 @@ class Oracle:
         right = got == want or got in allowed
         held = (not right and self.hold_ok and previous is not None
                 and previous[0] == index - 1 and previous[2]           # right the picture before
-                and got == previous[1]                                  # exactly its expected frame
                 and isinstance(got, tuple) and isinstance(want, tuple)
-                and got[:1] == ("id",) and got[:2] == want[:2])         # the same source
+                and got[:1] == ("id",) and got[:2] == want[:2]          # the same source
+                and (got == previous[1]                                 # exactly its expected frame,
+                     or (isinstance(previous[1], tuple) and previous[1][:2] == want[:2]
+                         and previous[1][2] <= got[2] <= previous[1][2] + 1
+                         and got[2] < want[2])))                        # or the next (a 1.5x source)
         self.previous[region] = (index, want, right)
         if right:
             return
@@ -2771,6 +2832,9 @@ class Oracle:
             dropped, slots = (loss["dropped"], loss["slots"]) if loss else (0, len(self.pictures))
             if loss:
                 loss["held"] = loss.get("held", 0) + len(held)
+            else:  # an output no take's drop row covers: its holds still count over the suite
+                self.evidence.setdefault("unrowed_holds", []).append(
+                    {"output": self.path.name, "held": len(held), "slots": slots})
             require(len(held) <= HOSTED_HOLD_CAP,
                     f"{self.label} ({self.path.name}): {len(held)} held pictures (at {held[:5]}), more than "
                     f"the hosted cap of {HOSTED_HOLD_CAP} per output")
@@ -3068,11 +3132,26 @@ def scenario_oracle_scenes(e, cfg, evidence):
     evidence["files"] = check_take(path, manifest, evidence=evidence)
     require([s["scene"] for s, _ in switches] == [p[0] for p, _ in zip(plan, switches)],
             f"switch_scene answered other scenes: {[s['scene'] for s, _ in switches]}")
-    program, _ = manifest_file(path, manifest, "program")
+    program, pf = manifest_file(path, manifest, "program")
     full = [dict(r, name="picture") for r in oracle_regions([("a", (0, 0, 1, 1))])]
     decoded = oracle_decode(program, full, fps)
+    limit = loss_limit(evidence)
+    if limit:
+        # Hosted: a program file whose encoder started late shows take slot
+        # offset + n at its picture n (as check_record_take reads it); its
+        # missing first slots are accounted loss (test Macs: strict).
+        late = round((pf.get("start_offset_seconds") or 0) * fps)
+        loss = next(row for key, row in evidence["drops"].items() if Path(key) == program)
+        require(late <= HOSTED_LATE_START_CAP,
+                f"{program.name}: started {late} frame(s) late, more than the hosted cap of {HOSTED_LATE_START_CAP}")
+        require(late + loss["dropped"] <= limit * (loss["slots"] + late),
+                f"{program.name}: started {late} frame(s) late and dropped {loss['dropped']}, more than the "
+                f"hosted {limit:.0%}")
+        if late:
+            loss["late_start_slots"] = late
+            decoded = [(slot + late, t, row) for slot, t, row in decoded]
     first_switch = switches[0][0]["time_seconds"]
-    t0 = fit_anchor([(s, t, {"a": r["picture"]}) for s, t, r in decoded if t < first_switch - 0.1], "a", count)
+    t0 = fit_anchor([(s, t, {"a": r["picture"]}) for s, t, r in decoded if s / fps < first_switch - 0.1], "a", count)
     # A switch at take time s takes effect at the first slot at or after s
     # (the requested plan's scenes, kinds and durations, the engine's times).
     spans = [(math.ceil(s["time_seconds"] * fps - 1e-6), scene, tr["kind"], round(tr.get("duration_ms", 0) * fps / 1000))
@@ -3264,8 +3343,14 @@ def scenario_oracle_edit(e, cfg, evidence):
     seconds = oracle_seconds(evidence, 3, 4)
     takes = [take(e, seconds) for _ in range(2)]
     evidence["files"] = [r for p, m in takes for r in check_take(p, m, seconds, evidence=evidence)]
-    anchors = {str(Path(p).resolve()): fit_anchor(oracle_decode(manifest_file(p, m, "program")[0],
-                                                                oracle_regions(layout), fps), "a", count)
+    # A take's anchor is its slot 0 (a program file that started late,
+    # hosted only, shows slot offset + n at its picture n; test Macs: strict).
+    hosted = loss_limit(evidence) > 0
+    late = {str(Path(p).resolve()): {f["source"]: round((f.get("start_offset_seconds") or 0) * fps) if hosted else 0
+                                     for f in m["files"]} for p, m in takes}
+    anchors = {str(Path(p).resolve()): (fit_anchor(oracle_decode(manifest_file(p, m, "program")[0],
+                                                                 oracle_regions(layout), fps), "a", count)
+                                        - late[str(Path(p).resolve())]["program"]) % count
                for p, m in takes}
     model = EditModel([Path(p).resolve() for p, _ in takes], seconds * fps)
     problem = model.compare(e.rpc("timeline_get")["clips"], fps)
@@ -3311,17 +3396,47 @@ def scenario_oracle_edit(e, cfg, evidence):
         i = max(k for k, st in enumerate(starts) if st <= slot)
         return i, segments[i]
 
-    def take_frame(i, slot):
+    # Hosted: the take slots each file holds a picture for (a dropped slot
+    # has none). An export of it plays the picture before a dropped slot, as
+    # an editor does: a re-encoded export repeats it, a copied one keeps the
+    # gap (accounted in the take's drop row). Test Macs: every slot.
+    shown = {}
+    if hosted:
+        for p, m in takes:
+            for f in m["files"]:
+                if f.get("dropped_frames"):
+                    shown[(str(Path(p).resolve()), f["source"])] = {
+                        round(t * fps) + late[str(Path(p).resolve())][f["source"]]
+                        for t in video_times(Path(p).parent / f["path"])}
+
+    def take_frame(i, slot, source=None):
         # An export slot -> its take's slot: the clip's in point plus the
-        # slots since the clip started, on the take's own frame grid.
-        return (anchors[segments[i]["take"]] + segments[i]["in"] + slot - starts[i]) % count
+        # slots since the clip started, on the take's own frame grid. Before
+        # its file of `source` started (hosted late starts), the export holds
+        # that file's first picture (export.rs short_file_notes); over a slot
+        # the file dropped, the picture before it.
+        at = segments[i]["in"] + slot - starts[i]
+        if source is not None:
+            at = max(at, late[segments[i]["take"]][source])
+            held = shown.get((segments[i]["take"], source))
+            while held is not None and at not in held and at > min(held):
+                at -= 1
+        return (anchors[segments[i]["take"]] + at) % count
+
+    def dropped(i, slot, source):
+        held = shown.get((segments[i]["take"], source))
+        at = segments[i]["in"] + slot - starts[i]
+        return held is not None and at >= late[segments[i]["take"]][source] and at not in held
+
+    def sounding(i, slot, source):
+        # Its file's sound is silent before the file started: no burst there.
+        return None if segments[i]["in"] + slot - starts[i] < late[segments[i]["take"]][source] \
+            else take_frame(i, slot)
 
     for f_ in result["files"]:
         path, kind = Path(f_["path"]), f_["source"]
         frames_at = video_times(path)
-        require(len(frames_at) == total and [round(t * fps) for t in frames_at] == list(range(total)),
-                f"{path.name}: {len(frames_at)} pictures, the edits make {total} (one per slot)")
-        regions_of = []
+        regions_of, files_of = [], []
         for seg in segments:
             if kind in ("a", "b"):
                 items, c = [(kind, (0, 0, 1, 1))], None
@@ -3330,12 +3445,22 @@ def scenario_oracle_edit(e, cfg, evidence):
             else:  # edited, vertical: the clip's angle and crop
                 items = [(seg["angle"], (0, 0, 1, 1))] if seg["angle"] else layout
                 c = seg["crop"]
+            files_of.append(kind if kind in ("a", "b") else "program" if kind == "program"
+                            else seg["angle"] or "program")
             rect = (c["x"], c["y"], c["width"], c["height"]) if c else (0, 0, 1, 1)
             place = fit_rect((rect[2] * w, rect[3] * h), (f_["width"], f_["height"])) if kind == "vertical" \
                 else (0, 0, 1, 1)
             regions = oracle_regions(items, crop=rect, place=place)
             require(regions, f"{path.name}: the oracle has nothing to read in a clip of it")
             regions_of.append(regions)
+        slots = [round(t * fps) for t in frames_at]
+        # One picture per slot; hosted, a copied export may skip exactly the
+        # slots its clip's file dropped.
+        gaps = sorted(set(range(total)) - set(slots))
+        require(slots == sorted(set(slots)) and set(slots) <= set(range(total))
+                and all(dropped(segment(j)[0], j, files_of[segment(j)[0]]) for j in gaps),
+                f"{path.name}: {len(frames_at)} pictures, the edits make {total} (one per slot"
+                f"{', but for the slots its files dropped' if hosted else ''}; missing {gaps[:8]})")
         w2, h2, frames = gray_frames(path)
         oracle = Oracle(f"export {kind}", path, e.root, evidence, hold_ok=False)
         for index, (t, pixels) in enumerate(frames):
@@ -3346,13 +3471,15 @@ def scenario_oracle_edit(e, cfg, evidence):
                 name = (f"{region['name']} (clip {i}: take {Path(seg['take']).stem} "
                         f"slot {seg['in'] + slot - starts[i]})")
                 names[name] = region
-                oracle.expect(index, t, name, ("id", region["tag"], take_frame(i, slot)),
+                oracle.expect(index, t, name, ("id", region["tag"], take_frame(i, slot, files_of[i])),
                               oracle_read(pixels, w2, h2, region))
         evidence.setdefault("exports", []).append(oracle.verdict())
         if kind in ("program", "a", "edited"):
-            oracle_markers(f"export {kind}", path, lambda j: take_frame(segment(j)[0], j), fps, evidence,
+            # The edited file's sound is the program's; a's is its own.
+            heard = "a" if kind == "a" else "program"
+            oracle_markers(f"export {kind}", path, lambda j: sounding(segment(j)[0], j, heard), fps, evidence,
                            cuts=starts[1:])
-    evidence["nle"] = oracle_nle(e, segments, starts, total, anchors, fps, count, evidence)
+    evidence["nle"] = oracle_nle(e, segments, starts, total, anchors, fps, count, evidence, late)
 
 
 def xmeml_sound_channels(path):
@@ -3371,13 +3498,17 @@ def xmeml_sound_channels(path):
     return out
 
 
-def oracle_nle(e, segments, starts, total, anchors, fps, count, evidence):
+def oracle_nle(e, segments, starts, total, anchors, fps, count, evidence, late=None):
     """Each project format against the oracle's timeline: video tracks for
     a, b and the program, each tiling the whole sequence with one item per
     clip at the clip's slots; every sequence frame showing the media frame
     the oracle expects (from the item's file, first frame and start); the
     clip's crop on every track; only the clip's angle enabled; sound with
-    its picture, on for the program only."""
+    its picture, on for the program only. `late` {take: {source: slots}}:
+    files that started late (hosted), whose items start that much into a
+    clip whose in point is before them (nle.rs: the item's lead)."""
+    def lead(seg, source):
+        return max(0, ((late or {}).get(seg["take"], {}).get(source, 0)) - seg["in"])
     files = {}
     for take_path in {s["take"] for s in segments}:
         for f in read_json(take_path)["files"]:
@@ -3403,7 +3534,7 @@ def oracle_nle(e, segments, starts, total, anchors, fps, count, evidence):
         for source, track in zip(sources, tracks):
             items = sorted(track, key=lambda i: i[0])
             bounds = [(i[0], i[1]) for i in items]
-            want_bounds = [(st, st + s["out"] - s["in"]) for st, s in zip(starts, segments)]
+            want_bounds = [(st + lead(s, source), st + s["out"] - s["in"]) for st, s in zip(starts, segments)]
             require(bounds == want_bounds, f"{name}: the {source} track's items are at {bounds}, the clips at "
                                            f"{want_bounds} (all {total} sequence frames, no gaps or overlaps)")
             for (start, end, file, first, enabled, crop), seg in zip(items, segments):
@@ -3424,7 +3555,8 @@ def oracle_nle(e, segments, starts, total, anchors, fps, count, evidence):
                         bad.append(f"{source} track, sequence frame {j}: {Path(file).name} frame {first + j - start} "
                                    f"shows media frame {shows}, the oracle expects {want} from "
                                    f"{Path(seg['take']).stem}")
-        require(compared == 3 * total, f"{name}: compared {compared} frames, expected {3 * total}")
+        leads = sum(lead(seg, source) for seg in segments for source in ("a", "b", "program"))
+        require(compared == 3 * total - leads, f"{name}: compared {compared} frames, expected {3 * total - leads}")
         # Sound (#124 re-review B3): exactly one enabled item per clip, the
         # program's sound with the program track's picture (same file, start,
         # end and first frame), tiling the sequence; any other item disabled
@@ -3462,6 +3594,8 @@ def oracle_nle(e, segments, starts, total, anchors, fps, count, evidence):
                 bad.append(f"disabled sound of {Path(file).name} at {start} isn't an angle's with its picture")
         if not bad:
             sound, cache = array.array("f", bytes(4 * round(total / fps * RATE))), {}
+            seg_at = lambda j: max(k for k, st in enumerate(starts) if st <= j)  # noqa: E731
+            silent = lambda j: j - starts[seg_at(j)] < lead(segments[seg_at(j)], "program")  # noqa: E731
             for start, end, file, first, _, _ in enabled:
                 if file not in cache:
                     cache[file] = pcm(Path(file))
@@ -3469,10 +3603,10 @@ def oracle_nle(e, segments, starts, total, anchors, fps, count, evidence):
                 piece = cache[file][a:a + n]
                 require(len(piece) == n, f"{name}: {Path(file).name} has no sound at frames {first}-{first + end - start}")
                 sound[round(start / fps * RATE):round(start / fps * RATE) + n] = piece
-            seg_at = lambda j: max(k for k, st in enumerate(starts) if st <= j)  # noqa: E731
             try:
-                oracle_markers(name, path, lambda j: (anchors[segments[seg_at(j)]["take"]] + segments[seg_at(j)]["in"]
-                                                      + j - starts[seg_at(j)]) % count,
+                oracle_markers(name, path, lambda j: None if silent(j) else
+                               (anchors[segments[seg_at(j)]["take"]] + segments[seg_at(j)]["in"]
+                                + j - starts[seg_at(j)]) % count,
                                fps, evidence, cuts=starts[1:], samples=sound)
             except Failure as exc:
                 bad.append(str(exc))
@@ -3877,16 +4011,88 @@ def oracle_rules_selftest(work):
                 evidence=hosted()), "fail"),
         "strict: one held picture": (run({100: {"a": ("id", 1, 1099)}}), "fail"),
     })
+    # A 1.5x source (c's frames step 1 or 2): a late frame between the
+    # previous picture's expected frame and this one's is a hold (R6).
+    def run15(pictures, evidence):
+        try:
+            oracle = Oracle("rules", work / "none.mov", work, evidence)
+            for i in range(120):
+                want = ("id", ORACLE_TAGS["c"], math.floor(1.5 * (i + 0.5)))
+                oracle.expect(i, i / 30, "c", want, pictures.get(i, want))
+            oracle.verdict()
+            return "pass"
+        except Failure:
+            return "fail"
+    c15 = lambda i: math.floor(1.5 * (i + 0.5))  # noqa: E731
+    step = next(i for i in range(1, 120) if c15(i) - c15(i - 1) == 2)
+    cases.update({
+        "hosted: a 1.5x source one frame late between two expected frames": (
+            run15({step: ("id", 3, c15(step) - 1)}, hosted()), "pass"),
+        "strict: a 1.5x source one frame late": (run15({step: ("id", 3, c15(step) - 1)}, {}), "fail"),
+        "hosted: a 1.5x source behind the previous picture's frame": (
+            run15({step: ("id", 3, c15(step - 1) - 1)}, hosted()), "fail"),
+        "hosted: a 1.5x late frame after a wrong picture": (
+            run15({step - 1: ("id", 3, c15(step - 1) - 1), step: ("id", 3, c15(step) - 1)}, hosted()), "fail"),
+    })
+    # Real regressions the hosted rules must still catch.
+    cases.update({
+        "hosted: a broken frame": (run({100: {"a": ("garbled",)}}, evidence=hosted()), "fail"),
+        "hosted: a frozen source": (run({i: {"b": ("id", 2, 1100)} for i in range(101, 131)},
+                                        evidence=hosted()), "fail"),
+    })
+    # Flash/beep pulses: 5 s at 30 fps, a 3-frame flash and a beep every second.
+    def pulses(flash_delay=0, drop=(), gone=(), hosted_rules=True, flicker=False):
+        beeps = [k + 0.001 / 30 for k in range(5)]
+        shown = [j for j in range(150) if j not in drop]
+        lit = {k * 30 + flash_delay + d for k in range(5) if k not in gone for d in range(3)}
+        if flicker:  # the 2 s flash lit, dark, lit: two onsets within a frame of its beep
+            lit = (lit - {60, 61, 62}) | {59, 61}
+        flashes = [j / 30 for j in shown if j in lit and (j - 1 not in lit or j - 1 not in shown)]
+        try:
+            pulse_check("rules.mov", flashes, beeps, 5.0, 30, set(drop) if hosted_rules else None)
+            return "pass"
+        except Failure:
+            return "fail"
+    cases.update({
+        "pulses as recorded": (pulses(hosted_rules=False), "pass"),
+        "hosted: a flash on dropped slots (its whole flash)": (pulses(drop=range(29, 33)), "pass"),
+        "hosted: a flash's first two slots dropped": (pulses(drop=(60, 61)), "pass"),
+        "strict: a flash's first two slots dropped": (pulses(drop=(60, 61), hosted_rules=False), "fail"),
+        "hosted: an A/V offset of 2 frames": (pulses(flash_delay=2), "fail"),
+        "hosted: an A/V offset of 2 frames with a flash dropped": (
+            pulses(flash_delay=2, drop=range(30, 35)), "fail"),
+        "hosted: a flash missing though its slots were shown": (pulses(gone=(2,)), "fail"),
+        "hosted: a flickering flash (two onsets at one beep)": (pulses(flicker=True), "fail"),
+        "strict: a flickering flash": (pulses(flicker=True, hosted_rules=False), "fail"),
+    })
+    # A take whose ISO file is missing, and a file far later than the cap.
+    def take_rows(files, sources):
+        manifest = {"status": "complete", "errors": [], "files": [
+            {"path": f"{src}.mov", "source": src, "fps": 30, "width": 1280, "height": 720,
+             "frames": 150, "dropped_frames": 0, "repeated_frames": 0, "audio_dropouts": 0,
+             "duration_seconds": 5.0 - offset, "start_offset_seconds": offset} for src, offset in files]}
+        try:
+            check_take(work / "take.session.json", manifest, 5, expected_sources=sources, evidence=hosted())
+            return "pass"
+        except Failure:
+            return "fail"
+    cases.update({
+        "hosted: a missing ISO": (take_rows([("program", 0), ("bars", 0)], ["program", "bars", "bars2"]), "fail"),
+        "hosted: a file later than the late-start cap": (
+            take_rows([("program", (HOSTED_LATE_START_CAP + 1) / 30)], ["program"]), "fail"),
+    })
     # A stale picture at a pause's resume (#124 re-review B1): 43 frames cut
     # out after slot 99; picture 100 shows a frame 20 behind for every source.
     want = lambda slot, r: ("id", ORACLE_TAGS[r], 1000 + slot + (43 if slot >= 100 else 0))  # noqa: E731
     rows = [(slot, slot / 30, {r: (("id", ORACLE_TAGS[r], 1123) if slot == 100 else want(slot, r))
                                for r in ("a", "b", "c")}) for slot in range(300)]
-    try:
-        oracle_check_rows("rules", work / "none.mov", rows, want, work, {})
-        cases["a stale picture at a pause's resume"] = ("pass", "fail")
-    except Failure:
-        cases["a stale picture at a pause's resume"] = ("fail", "fail")
+    for label, evidence in (("a stale picture at a pause's resume", {}),
+                            ("hosted: a stale picture at a pause's resume", hosted())):
+        try:
+            oracle_check_rows("rules", work / "none.mov", rows, want, work, evidence)
+            cases[label] = ("pass", "fail")
+        except Failure:
+            cases[label] = ("fail", "fail")
     model = EditModel(["/t/1", "/t/2"], 90)
     model.set(30, 60, "crop", {"x": 0.25, "y": 0.25, "width": 0.75, "height": 0.75})
     engine = [{"take": "/t/1", "in_seconds": 0, "out_seconds": 1, "angle": None},
@@ -4106,11 +4312,13 @@ def check_pattern_take(e, path, manifest, cfg, layout, evidence, t0=None, label=
         rows = pattern_rows(file, specs, (w, h), fps)
         if t0 is None:
             t0 = (pattern_fit(rows, "bars", period) - offset) % period
-        oracle_check_rows(f"{label} {source}", file, rows, expected(offset), e.root, evidence)
+        checked = oracle_check_rows(f"{label} {source}", file, rows, expected(offset), e.root, evidence)
         if f.get("audio") and source in ("program", "bars", "bars2") and not pauses:
             # The tone beeps with every flash of the band (the bottom quarter
             # of the program and ISO pictures; a pause breaks the cadence).
-            evidence.setdefault("sync", []).append(dict(sync_check(file, fps), output=file.name))
+            # Hosted: a flash on a dropped or held slot is accounted loss.
+            lost = {round(h["time"] * fps) for h in checked.get("held", [])} if loss_limit(evidence) else None
+            evidence.setdefault("sync", []).append(dict(sync_check(file, fps, lost=lost), output=file.name))
     return t0
 
 
@@ -4370,12 +4578,13 @@ def suite_losses(report):
     """Accounted video losses over every scenario's outputs (not the
     qualification): dropped slots, held oracle pictures and late-starting
     slots, against all slots."""
-    rows = [row for r in report.get("scenarios", []) if r["name"] != "capacity"
-            for row in r.get("evidence", {}).get("drops", {}).values()]
+    scenarios = [r for r in report.get("scenarios", []) if r["name"] != "capacity"]
+    rows = [row for r in scenarios for row in r.get("evidence", {}).get("drops", {}).values()]
+    unrowed = [row for r in scenarios for row in r.get("evidence", {}).get("unrowed_holds", [])]
     dropped = sum(row["dropped"] for row in rows)
-    held = sum(row.get("held", 0) for row in rows)
+    held = sum(row.get("held", 0) for row in rows + unrowed)
     late = sum(row.get("late_start_slots", 0) for row in rows)
-    slots = sum(row["slots"] for row in rows) + late
+    slots = sum(row["slots"] for row in rows + unrowed) + late
     return {"dropped": dropped, "held": held, "late_start_slots": late, "accounted": dropped + held + late,
             "slots": slots, "ratio": (dropped + held + late) / slots if slots else 0.0}
 
@@ -4494,7 +4703,11 @@ def main():
         return 1 if failed else 0
     if args.selftest:
         args.work.mkdir(parents=True, exist_ok=True)
-        print(json.dumps(oracle_selftest(args.work), indent=2))
+        try:
+            print(json.dumps(oracle_selftest(args.work), indent=2))
+        except Failure as exc:
+            print(f"FAIL selftest: {exc}")
+            return 1
         return 0
     if args.cli is None and (args.daemon.parent / "isocast").is_file():
         args.cli = args.daemon.parent / "isocast"
