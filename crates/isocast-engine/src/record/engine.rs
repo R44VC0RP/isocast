@@ -3638,6 +3638,7 @@ impl<P: Platform> IsoRunner<P> {
                 self.size,
                 self.filters.clone(),
                 self.epoch,
+                isocast_protocol::ScaleFilter::Bilinear,
             )
             .with_context(|| format!("could not prepare {:?}'s frames for its file", self.id))?;
             self.stage = Some(Box::new(stage));

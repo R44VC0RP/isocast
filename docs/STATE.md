@@ -211,7 +211,8 @@ Users `isocast` (guest admin) and `packager` (standard, for installer tests). Ch
   Annex B, unlike `frames`' avcC/AVCC records. The local desktop keeps `shared_frames`; see
   `docs/server-protocol.md` for the native media contract and unqualified areas.
 - 2026-10-23: WHEP Opus has a separate early-ready monitor mix and queried codec-lookahead compensation.
-  Recording/RTMP/replay still use the unchanged 200 ms program hold; monitor dependencies get only 40 ms.
+  Recording/RTMP/replay still use the unchanged 200 ms program hold; monitors get 40 ms capture slack plus
+  each required filter's lookahead (not a shared larger allowance for unfiltered inputs).
   Audio graph changes retap with bounded retries without replacing viewers. Desktop playout must align
   the session's program MIDs through actual RTCP SRs.
 

@@ -27,10 +27,9 @@ pub(super) const MONITOR_DELAY: Duration = Duration::from_millis(40);
 const MONITOR_DELAY_SAMPLES: i64 = MONITOR_DELAY.as_millis() as i64 * SAMPLE_RATE as i64 / 1000;
 
 /// The most blocks one pass of the monitor mix ([`Mixer::run_monitor`])
-/// sends at once: a late source holds blocks for up to [`MONITOR_DELAY`], and
-/// a stall longer than that skips ahead rather than catching up, so the
-/// backlog stays under twice that (one more for rounding). Its output
-/// channel needs this much room to avoid a monitor-only gap.
+/// sends at once: twice the capture allowance (one more for rounding).
+/// Filter lookahead can retain older blocks, but never grows a catch-up
+/// batch or its channel; the next pass handles the rest.
 pub(super) const MONITOR_BURST: usize =
     (2 * MONITOR_DELAY_SAMPLES / AUDIO_CHUNK as i64) as usize + 1;
 
@@ -275,19 +274,6 @@ fn monitor_waits_for(inputs: &[Input]) -> Vec<bool> {
     waits
 }
 
-/// Whether the monitor mix can mix the block ending before session sample
-/// `until` without missing anything: every input it depends on has that
-/// far, plus its filters' lookahead.
-fn monitor_ready(inputs: &[Input], until: i64) -> bool {
-    inputs
-        .iter()
-        .zip(monitor_waits_for(inputs))
-        .all(|(input, waits)| {
-            !waits
-                || input.start + input.frames.len() as i64 >= until + input.chain.latency() as i64
-        })
-}
-
 pub(super) struct Mixer<F> {
     inputs: Vec<Input>,
     /// How balance pans the inputs.
@@ -470,7 +456,8 @@ impl<F: Clone> Mixer<F> {
     ///
     /// A block goes out as soon as it is due and every input it depends on
     /// (sidechains and filter lookahead included) has arrived; a late one
-    /// gets only [`MONITOR_DELAY`] before missing input becomes silence.
+    /// gets [`MONITOR_DELAY`] of capture slack in addition to that input's
+    /// filter lookahead before missing input becomes silence.
     /// The recording mix retains its separate [`MIX_DELAY`]. Never waits on `output`.
     pub(super) fn run_monitor<P: Platform>(
         &mut self,
@@ -525,23 +512,38 @@ impl<F: Clone> Mixer<F> {
         output: &SyncSender<Packet<F>>,
     ) -> bool {
         let block = AUDIO_CHUNK as i64;
+        let waits = monitor_waits_for(&self.inputs);
+        let lookahead = self
+            .inputs
+            .iter()
+            .zip(&waits)
+            .filter(|(_, waits)| **waits)
+            .map(|(input, _)| input.chain.latency() as i64)
+            .max()
+            .unwrap_or(0);
         // After a stall of more than MONITOR_DELAY past the late-input
-        // allowance, skip ahead instead of sending all of it at once.
-        let behind = now.ticks_since(epoch, SAMPLE_RATE) - MONITOR_DELAY_SAMPLES;
+        // allowance AND required lookahead, skip ahead. Normal filter latency
+        // is not a stall and must not discard otherwise timely capture.
+        let behind = now.ticks_since(epoch, SAMPLE_RATE) - MONITOR_DELAY_SAMPLES - lookahead;
         if *out < behind - MONITOR_DELAY_SAMPLES {
             *out += (behind - *out) / block * block;
             for input in &mut self.inputs {
                 input.release(*out);
             }
         }
-        loop {
+        for _ in 0..MONITOR_BURST {
             let until = *out + block;
             let due = epoch.add_ticks(until as u64, SAMPLE_RATE);
             // Never mix ahead of the clock.
             if now < due {
                 return true;
             }
-            if now < due + MONITOR_DELAY && !monitor_ready(&self.inputs, until) {
+            if self.inputs.iter().zip(&waits).any(|(input, waits)| {
+                let needed = until + input.chain.latency() as i64;
+                *waits
+                    && input.start + (input.frames.len() as i64) < needed
+                    && now < epoch.add_ticks(needed as u64, SAMPLE_RATE) + MONITOR_DELAY
+            }) {
                 return true;
             }
             let samples = self.mix(*out, block as usize);
@@ -556,6 +558,7 @@ impl<F: Clone> Mixer<F> {
                 Err(TrySendError::Disconnected(_)) => return false,
             }
         }
+        true
     }
 
     /// `count` stereo frames of the mix from session sample `at`.
@@ -894,6 +897,94 @@ mod tests {
         mixer.inputs[1].push(&[0.1; 480], 480);
         assert!(mixer.monitor_due(at_ms(20), EPOCH, &mut out, &tx));
         assert_eq!(sent(&rx).len(), 1);
+    }
+
+    #[test]
+    fn monitor_keeps_lookahead_audio_with_thirty_ms_capture_delay() {
+        // One denoiser needs 20 ms; three also exercise lookahead longer
+        // than the monitor's 40 ms capture budget / original stall window.
+        for count in [1, 3] {
+            let filters = vec![r#"{"kind":"noise_suppression"}"#; count].join(",");
+            let live = live_filters(&format!(
+                r#"[{{"id":"mic","kind":"tone","audio_filters":[{filters}]}}]"#
+            ));
+            let make = || {
+                let mut mix = mixer(vec![("mic".into(), 1, AudioSettings::default())]);
+                mix.set_filters(live.clone());
+                mix
+            };
+            let (mut monitor, mut reference) = (make(), make());
+            let latency = monitor.inputs[0].chain.latency();
+            assert_eq!(latency, count * 960);
+            let mut seed = 17_u32;
+            let samples: Vec<_> = (0..57_600)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (seed >> 8) as f32 / (1 << 24) as f32 - 0.5
+                })
+                .collect();
+            reference.inputs[0].push(&samples, 0);
+            let (tx, rx) = sync_channel(MONITOR_BURST);
+            let (mut out, mut next, mut blocks, mut audible) = (0, 0, 0, false);
+            for ms in (0..=1000).step_by(5) {
+                while (next + 480) / 48 + 30 <= ms {
+                    monitor.inputs[0].push(&samples[next..next + 480], next as i64);
+                    next += 480;
+                }
+                assert!(monitor.monitor_due(at_ms(ms as u64), EPOCH, &mut out, &tx));
+                for (pts, actual) in sent(&rx) {
+                    let at = pts.ticks_since(EPOCH, SAMPLE_RATE);
+                    assert_eq!(at, blocks * 480, "no valid capture blocks skipped");
+                    assert!(
+                        at_ms(ms as u64)
+                            >= pts.add_ticks((480 + latency) as u64, SAMPLE_RATE)
+                                + Duration::from_millis(30),
+                        "lookahead was committed before capture arrived"
+                    );
+                    let expected = reference.mix(at, 480);
+                    assert_eq!(
+                        actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                    );
+                    audible |= actual.iter().any(|v| v.abs() > 1e-8);
+                    blocks += 1;
+                }
+            }
+            assert!(
+                blocks >= 90 && audible,
+                "the comparison must include real filtered audio"
+            );
+            // Longer lookahead must not overflow the fixed output queue
+            // when a worker catches up: leave remaining blocks for next pass.
+            let mut stalled = make();
+            stalled.inputs[0].push(&samples, 0);
+            let mut out = 0;
+            assert!(stalled.monitor_due(at_ms(200), EPOCH, &mut out, &tx));
+            let batch = sent(&rx);
+            assert!(!batch.is_empty() && batch.len() <= MONITOR_BURST);
+            assert_eq!(
+                out,
+                batch.last().unwrap().0.ticks_since(EPOCH, SAMPLE_RATE) + 480
+            );
+        }
+    }
+
+    #[test]
+    fn monitor_does_not_extend_plain_capture_for_another_chains_lookahead() {
+        let mut monitor = mixer(vec![
+            ("mic".into(), 1, AudioSettings::default()),
+            ("late".into(), 1, AudioSettings::default()),
+        ]);
+        monitor.set_filters(live_filters(
+            r#"[{"id":"mic","kind":"tone","audio_filters":[{"kind":"noise_suppression"}]}]"#,
+        ));
+        monitor.inputs[0].push(&[0.25; 4800], 0);
+        let (tx, rx) = sync_channel(MONITOR_BURST);
+        let mut out = 0;
+        assert!(monitor.monitor_due(at_ms(50), EPOCH, &mut out, &tx));
+        let batch = sent(&rx);
+        assert_eq!(batch.len(), 1, "unfiltered input still expires after 40 ms");
+        assert_eq!(batch[0].0, EPOCH);
     }
 
     #[test]

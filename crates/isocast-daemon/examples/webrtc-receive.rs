@@ -4,7 +4,13 @@
 //! Usage: ISOCAST_ENGINE=HOST:PORT webrtc-receive [seconds] [new-output.h264]
 //! ISOCAST_WEBRTC_AV_SYNC_TEST=1 checks synthetic flash/beep capture timestamps
 //! through RTCP sender reports; this is not a hardware playout measurement.
+//! ISOCAST_WEBRTC_CLOCK_OFFSET_MS is measured receiver-minus-sender wall time;
+//! ISOCAST_WEBRTC_CLOCK_UNCERTAINTY_MS must bound that calibration over the run.
+//! Together they enable SR-mapped capture-to-first-packet and complete-media
+//! delivery ages, not network-only transit or playout latency. No cross-host Instant subtraction.
+//! ISOCAST_WEBRTC_FFMPEG can select an ffmpeg executable (including on Windows).
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, ErrorKind, Read, Write};
 use std::net::UdpSocket;
 use std::path::Path;
@@ -16,7 +22,7 @@ use anyhow::{Context, Result, ensure};
 use isocast_protocol::api::{Method, WhepAnswer, WhepOfferParams};
 use str0m::change::SdpAnswer;
 use str0m::format::{Codec, CodecExtra};
-use str0m::media::{Direction, KeyframeRequestKind, MediaKind};
+use str0m::media::{Direction, KeyframeRequestKind, MediaData, MediaKind};
 use str0m::net::{Protocol, Receive};
 use str0m::rtp::rtcp::SenderInfo;
 use str0m::{Candidate, Event, Input, Output, RtcConfig};
@@ -30,6 +36,151 @@ fn system_delta(time: SystemTime, anchor: SystemTime) -> f64 {
     match time.duration_since(anchor) {
         Ok(delta) => delta.as_secs_f64(),
         Err(error) => -error.duration().as_secs_f64(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ClockCalibration {
+    offset_ms: f64,
+    uncertainty_ms: f64,
+}
+
+impl ClockCalibration {
+    fn parse(offset: Option<&str>, uncertainty: Option<&str>) -> Result<Option<Self>> {
+        if offset.is_none() && uncertainty.is_none() {
+            return Ok(None);
+        }
+        let offset_ms: f64 = offset
+            .context("ISOCAST_WEBRTC_CLOCK_OFFSET_MS required with clock uncertainty")?
+            .parse()
+            .context("ISOCAST_WEBRTC_CLOCK_OFFSET_MS: expected finite milliseconds")?;
+        let uncertainty_ms: f64 = uncertainty
+            .context("ISOCAST_WEBRTC_CLOCK_UNCERTAINTY_MS required with clock offset")?
+            .parse()
+            .context(
+                "ISOCAST_WEBRTC_CLOCK_UNCERTAINTY_MS: expected nonnegative finite milliseconds",
+            )?;
+        ensure!(offset_ms.is_finite(), "clock offset must be finite");
+        ensure!(
+            uncertainty_ms.is_finite() && uncertainty_ms >= 0.0,
+            "clock uncertainty must be finite and nonnegative"
+        );
+        Ok(Some(Self {
+            offset_ms,
+            uncertainty_ms,
+        }))
+    }
+
+    fn age_ms(self, clock: &SenderClock, time: u32, arrival: SystemTime) -> Result<f64> {
+        // map() is sender capture minus receiver arrival. Offset is R - S.
+        Ok(-clock.map(time, arrival)? * 1000.0 - self.offset_ms)
+    }
+}
+
+fn distribution(values: &mut [f64]) -> serde_json::Value {
+    values.sort_by(f64::total_cmp);
+    let percentile = |fraction: f64| {
+        values
+            .get((values.len().saturating_sub(1) as f64 * fraction) as usize)
+            .copied()
+    };
+    serde_json::json!({"samples": values.len(), "min": values.first(),
+        "p50": percentile(0.5), "p95": percentile(0.95), "max": values.last()})
+}
+
+// str0m SeqNo is already extended beyond 16 bits. Merge ranges so a late or
+// overlapping delivery cannot invent a gap, including across repeated wraps.
+fn sequence_gaps(ranges: &mut [(u64, u64)]) -> (u64, u64) {
+    ranges.sort_unstable();
+    let mut end = None;
+    let mut gaps = 0;
+    let mut missing = 0;
+    for &(first, last) in ranges.iter() {
+        if let Some(previous) = end {
+            let gap = first.saturating_sub(previous).saturating_sub(1);
+            gaps += u64::from(gap > 0);
+            missing += gap;
+        }
+        end = Some(end.map_or(last, |previous: u64| previous.max(last)));
+    }
+    (gaps, missing)
+}
+
+#[derive(Default)]
+struct TrackObservations {
+    clock: SenderClock,
+    ranges: Vec<(u64, u64)>,
+    noncontiguous: u64,
+    previous_time: Option<u32>,
+    nonincreasing_times: u64,
+    cadence_ms: Vec<f64>,
+    age_ms: Vec<f64>,
+    delivery_age_ms: Vec<f64>,
+    no_sender_report: u64,
+    no_arrival: u64,
+}
+
+impl TrackObservations {
+    fn observe(
+        &mut self,
+        data: &MediaData,
+        calibration: Option<ClockCalibration>,
+        arrival: Option<SystemTime>,
+    ) -> Result<()> {
+        self.ranges
+            .push((**data.seq_range.start(), **data.seq_range.end()));
+        self.noncontiguous += u64::from(!data.contiguous);
+        let time = data.time.numer() as u32;
+        if let Some(previous) = self.previous_time.replace(time) {
+            let delta = signed_rtp_delta(time, previous);
+            if delta > 0.0 {
+                self.cadence_ms
+                    .push(delta * 1000.0 / f64::from(data.time.denom()));
+            } else {
+                self.nonincreasing_times += 1;
+            }
+        }
+        if let Some(calibration) = calibration {
+            self.clock
+                .observe(data.last_sender_info, data.time.denom())?;
+            if self.clock.latest.is_none() {
+                self.no_sender_report += 1;
+            } else {
+                // The complete access unit is available to the application
+                // now, after depacketization/reordering, before decoding.
+                self.delivery_age_ms.push(calibration.age_ms(
+                    &self.clock,
+                    time,
+                    SystemTime::now(),
+                )?);
+                if let Some(arrival) = arrival {
+                    self.age_ms
+                        .push(calibration.age_ms(&self.clock, time, arrival)?);
+                } else {
+                    self.no_arrival += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn summary(&mut self) -> serde_json::Value {
+        let (gaps, missing) = sequence_gaps(&mut self.ranges);
+        serde_json::json!({
+            "delivered_units": self.ranges.len(),
+            "first_extended_sequence": self.ranges.first().map(|range| range.0),
+            "last_extended_sequence": self.ranges.iter().map(|range| range.1).max(),
+            "sequence_gap_runs": gaps, "sequences_between_delivered_ranges": missing,
+            "noncontiguous_units": self.noncontiguous,
+            "capture_interval_ms": distribution(&mut self.cadence_ms),
+            "nonincreasing_capture_times": self.nonincreasing_times,
+            "calibrated_capture_to_first_arrival_ms": distribution(&mut self.age_ms),
+            "calibrated_capture_to_media_delivery_ms": distribution(&mut self.delivery_age_ms),
+            "units_before_sender_report": self.no_sender_report,
+            "units_without_retained_arrival": self.no_arrival,
+            "sender_reports": self.clock.reports,
+            "sr_max_anchor_error_ms": self.clock.max_anchor_error * 1000.0
+        })
     }
 }
 
@@ -181,7 +332,8 @@ impl AvSync {
                 && self.audio_clock.max_anchor_error <= 0.001,
             "RTCP anchors disagree with the common engine clock by more than 1 ms"
         );
-        let decoded = Command::new("ffmpeg")
+        let ffmpeg = std::env::var_os("ISOCAST_WEBRTC_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+        let decoded = Command::new(ffmpeg)
             .args(["-v", "error", "-xerror", "-nostdin", "-f", "h264", "-i"])
             .arg(path)
             .args([
@@ -304,6 +456,10 @@ fn main() -> Result<()> {
     let seconds: u64 = first.parse()?;
     ensure!((1..=600).contains(&seconds), "seconds: expected 1..600");
     let av_sync_test = std::env::var("ISOCAST_WEBRTC_AV_SYNC_TEST").as_deref() == Ok("1");
+    let clock_offset = std::env::var("ISOCAST_WEBRTC_CLOCK_OFFSET_MS").ok();
+    let clock_uncertainty = std::env::var("ISOCAST_WEBRTC_CLOCK_UNCERTAINTY_MS").ok();
+    let calibration =
+        ClockCalibration::parse(clock_offset.as_deref(), clock_uncertainty.as_deref())?;
     let video_path = args.next();
     ensure!(
         !av_sync_test || video_path.is_some(),
@@ -367,6 +523,9 @@ fn main() -> Result<()> {
     let mut keyframes = 0;
     let mut video_age_ms = Vec::<f64>::new();
     let mut audio_age_ms = Vec::<f64>::new();
+    let mut video_observations = TrackObservations::default();
+    let mut audio_observations = TrackObservations::default();
+    let mut arrivals = BTreeMap::<Instant, SystemTime>::new();
     let mut buffer = [0u8; 2048];
     let began = Instant::now();
     let deadline = began + Duration::from_secs(seconds);
@@ -380,6 +539,11 @@ fn main() -> Result<()> {
             Output::Event(Event::MediaData(data)) => {
                 match data.params.spec().codec {
                     Codec::H264 => {
+                        video_observations.observe(
+                            &data,
+                            calibration,
+                            arrivals.get(&data.network_time).copied(),
+                        )?;
                         if let Some(sync) = &mut av_sync {
                             ensure!(
                                 data.mid == video_mid && data.time.denom() == 90_000,
@@ -416,6 +580,11 @@ fn main() -> Result<()> {
                         }
                     }
                     Codec::Opus => {
+                        audio_observations.observe(
+                            &data,
+                            calibration,
+                            arrivals.get(&data.network_time).copied(),
+                        )?;
                         audio_packets += 1;
                         #[cfg(target_os = "macos")]
                         if same_clock {
@@ -451,11 +620,24 @@ fn main() -> Result<()> {
         socket.set_read_timeout(Some(wait))?;
         match socket.recv_from(&mut buffer) {
             Ok((length, source)) => {
+                let received = Instant::now();
+                if calibration.is_some() {
+                    // Preserve actual userspace UDP arrival wall time, keyed by
+                    // the exact local Instant str0m returns as network_time.
+                    arrivals.insert(received, SystemTime::now());
+                    while arrivals.len() > 16_384
+                        || arrivals.first_key_value().is_some_and(|(time, _)| {
+                            received.duration_since(*time) > Duration::from_secs(10)
+                        })
+                    {
+                        arrivals.pop_first();
+                    }
+                }
                 let Ok(contents) = (&buffer[..length]).try_into() else {
                     continue;
                 };
                 rtc.handle_input(Input::Receive(
-                    Instant::now(),
+                    received,
                     Receive {
                         proto: Protocol::Udp,
                         source,
@@ -480,13 +662,31 @@ fn main() -> Result<()> {
             .get(((values.len().saturating_sub(1)) as f64 * fraction) as usize)
             .copied()
     };
+    let observations = serde_json::json!({
+        "elapsed_seconds": began.elapsed().as_secs_f64(),
+        "calibration": calibration.map(|value| serde_json::json!({
+            "receiver_minus_sender_ms": value.offset_ms,
+            "uncertainty_ms": value.uncertainty_ms,
+            "measurement": "SR capture to first UDP arrival and complete application media delivery; excludes decode/playout, not network-only latency",
+            "assumption": "external calibration bounds receiver wall minus sender SR clock throughout run, including drift and frozen str0m epoch"
+        })),
+        "loss_scope": "gaps between delivered extended RTP ranges, after reorder/recovery; includes received-but-discarded units, excludes run edges; not raw network packet loss",
+        "network_packets_lost": null,
+        "cadence_scope": "positive RTP capture intervals; source/governor cadence is not RTP loss",
+        "video": video_observations.summary(), "audio": audio_observations.summary()
+    });
     println!(
         "{}",
-        serde_json::json!({"video_frames":video_frames,"keyframes":keyframes,"feedback_sent":feedback_sent,"audio_packets":audio_packets,"decoded_audio_frames":audio_frames,"audio_peak":peak,"closed":closed,"packet_age_ms_p50":age(&video_age_ms,0.5),"packet_age_ms_p95":age(&video_age_ms,0.95),"audio_age_ms_p50":age(&audio_age_ms,0.5),"audio_age_ms_p95":age(&audio_age_ms,0.95)})
+        serde_json::json!({"video_frames":video_frames,"keyframes":keyframes,"feedback_sent":feedback_sent,"audio_packets":audio_packets,"decoded_audio_frames":audio_frames,"audio_peak":peak,"closed":closed,"packet_age_ms_p50":age(&video_age_ms,0.5),"packet_age_ms_p95":age(&video_age_ms,0.95),"audio_age_ms_p50":age(&audio_age_ms,0.5),"audio_age_ms_p95":age(&audio_age_ms,0.95),"receiver_observations":observations})
     );
     ensure!(
         video_frames > 0 && audio_frames > 0,
         "no playable H.264/Opus media received"
+    );
+    ensure!(
+        calibration.is_none()
+            || (!video_observations.age_ms.is_empty() && !audio_observations.age_ms.is_empty()),
+        "calibrated latency requires RTCP SRs and retained UDP arrivals for both tracks"
     );
     ensure!(
         !feedback || (feedback_sent == 2 && keyframes >= 3),
@@ -505,6 +705,69 @@ fn main() -> Result<()> {
 mod timing_tests {
     use super::*;
     use str0m::media::{Frequency, MediaTime};
+
+    #[test]
+    fn calibration_requires_a_finite_offset_and_nonnegative_uncertainty() {
+        assert!(ClockCalibration::parse(None, None).unwrap().is_none());
+        assert!(ClockCalibration::parse(Some("12"), None).is_err());
+        assert!(ClockCalibration::parse(None, Some("2")).is_err());
+        for (offset, uncertainty) in [("NaN", "2"), ("1", "inf"), ("1", "-1")] {
+            assert!(ClockCalibration::parse(Some(offset), Some(uncertainty)).is_err());
+        }
+        let calibration = ClockCalibration::parse(Some("-12.5"), Some("0.25"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(calibration.offset_ms, -12.5);
+        assert_eq!(calibration.uncertainty_ms, 0.25);
+    }
+
+    #[test]
+    fn remote_age_uses_signed_wall_offset_and_sr_across_rtp_wrap() {
+        let origin = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut clock = SenderClock::default();
+        clock
+            .observe(
+                Some(SenderInfo {
+                    ssrc: 1.into(),
+                    ntp_time: origin,
+                    rtp_time: MediaTime::new(u64::from(u32::MAX - 479), Frequency::FORTY_EIGHT_KHZ),
+                    sender_packet_count: 1,
+                    sender_octet_count: 100,
+                }),
+                48_000,
+            )
+            .unwrap();
+        // RTP zero is capture 10 ms after the anchor; actual arrival is 35 ms
+        // after capture. Receiver clock may be ahead OR behind the sender.
+        for offset_ms in [-250.0, 250.0] {
+            let calibration = ClockCalibration {
+                offset_ms,
+                uncertainty_ms: 2.0,
+            };
+            let arrival = if offset_ms < 0.0 {
+                origin - Duration::from_millis(205)
+            } else {
+                origin + Duration::from_millis(295)
+            };
+            assert!((calibration.age_ms(&clock, 0, arrival).unwrap() - 35.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn sequence_gaps_merge_late_overlaps_and_keep_multiple_wraps() {
+        let mut ranges = [
+            (65_534, 65_535),
+            (65_538, 131_073),
+            (65_536, 65_538),
+            (131_079, 196_609),
+            (65_534, 65_535),
+        ];
+        assert_eq!(sequence_gaps(&mut ranges), (1, 5));
+        assert_eq!(sequence_gaps(&mut []), (0, 0));
+        assert_eq!(sequence_gaps(&mut [(42, 42)]), (0, 0));
+        // Continuous RTP sequence numbers do not imply a fixed video cadence.
+        assert_eq!(signed_rtp_delta(5_999, u32::MAX - 3_000), 9_000.0);
+    }
 
     #[test]
     fn sender_report_mapping_handles_rtp_wrap_and_delayed_reports() {
